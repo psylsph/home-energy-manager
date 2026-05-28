@@ -145,7 +145,8 @@ export default function SettingsPage() {
         </div>
 
         <label className="flex flex-col gap-1">
-          <span className="text-text-secondary text-xs font-sans">Inverter IP / Host</span>
+          <span className="text-text-secondary text-xs font-sans">Inverter IP</span>
+          <div className="row" style={{ display: 'flex', gap: '0.5rem' }}>
           <input
             type="text"
             value={host}
@@ -153,25 +154,22 @@ export default function SettingsPage() {
             placeholder="192.168.x.x"
             className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
           />
-        </label>
-
-        <label className="flex flex-col gap-1">
-          <span className="text-text-secondary text-xs font-sans">Port</span>
           <input
             type="number"
             value={port}
             onChange={(e) => setPort(Number(e.target.value))}
             className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors w-32"
           />
+          </div>
         </label>
 
         <label className="flex flex-col gap-1">
-          <span className="text-text-secondary text-xs font-sans">Serial Number</span>
+          <span className="text-text-secondary text-xs font-sans">Serial Number <span className="opacity-50">(auto-detected)</span></span>
           <input
             type="text"
             value={serial}
             onChange={(e) => setSerial(e.target.value)}
-            placeholder="SA…"
+            placeholder="Leave blank to auto-detect"
             className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
           />
         </label>
@@ -307,11 +305,6 @@ export default function SettingsPage() {
           <span className="text-text-secondary">Version</span>
           <span className="text-text-primary font-mono">0.1.0</span>
         </div>
-
-        <p className="text-text-secondary text-xs font-sans">
-          Built with Tauri + React
-        </p>
-
         <a
           href="https://github.com/psylsph/givenergy-local"
           target="_blank"

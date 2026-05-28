@@ -1,10 +1,22 @@
 //! LAN discovery of GivEnergy inverters.
 //!
-//! Scans the local subnet for devices listening on the Modbus port (8899).
-//! Just like GivTCP, this is a simple TCP port scan — the serial number is
-//! configured separately by the user.
+//! Scans the local network for devices listening on the Modbus port (8899).
+//!
+//! ## Strategy
+//!
+//! 1. Enumerate local IPv4 interfaces via `local_ip_address` crate.
+//! 2. Collect all interfaces in **10.x.x.x** or **192.168.x.x** ranges
+//!    (typical home/office LANs) and derive the /24 gateway for each.
+//! 3. If no physical LAN interfaces are found (e.g. WSL2, Docker-only host),
+//!    probe a set of **common home subnets** directly: 192.168.{0-3}.x, 10.0.0.x.
+//! 4. **Never** scan 172.16-31.x.x — this range is exclusively used by
+//!    Docker bridges, WSL2 virtual networks, and libvirt.
+//!
+//! For each candidate subnet, all 254 host addresses are probed concurrently
+//! on port 8899 with a short connect-timeout.
 
 use std::net::TcpStream;
+use std::net::IpAddr;
 use std::time::Duration;
 
 /// The Modbus TCP port used by GivEnergy dongles.
@@ -17,12 +29,22 @@ pub struct DiscoveredInverter {
     pub port: u16,
 }
 
-/// Scan the local subnet for inverters.
+/// Common home-router subnets to try when no physical LAN interface is found.
+const FALLBACK_SUBNETS: &[&str] = &[
+    "192.168.0", // very common
+    "192.168.1", // very common
+    "192.168.2", // some ISPs
+    "192.168.3", // less common
+    "10.0.0",    // some routers
+    "10.0.1",    // Apple routers
+    "10.1.1",    // some ISPs
+];
+
+/// Scan the local network for inverters.
 ///
 /// Uses the provided gateway IP to infer the /24 subnet, then probes
 /// each address on MODBUS_PORT (8899) concurrently.
-pub async fn scan_subnet(gateway: &str) -> Vec<DiscoveredInverter> {
-    let subnet_base = infer_subnet_base(gateway);
+pub async fn scan_subnet(subnet_base: &str) -> Vec<DiscoveredInverter> {
     log::info!("Starting subnet scan on {}.x:{}", subnet_base, MODBUS_PORT);
 
     let mut tasks = Vec::new();
@@ -39,8 +61,22 @@ pub async fn scan_subnet(gateway: &str) -> Vec<DiscoveredInverter> {
         }
     }
 
-    log::info!("Subnet scan found {} inverter(s)", found.len());
+    log::info!(
+        "Subnet scan on {}.x found {} inverter(s)",
+        subnet_base,
+        found.len()
+    );
     found
+}
+
+/// Scan multiple subnets concurrently and return all discovered inverters.
+pub async fn scan_multiple_subnets(subnets: &[String]) -> Vec<DiscoveredInverter> {
+    let mut all_found = Vec::new();
+    for subnet in subnets {
+        let found = scan_subnet(subnet).await;
+        all_found.extend(found);
+    }
+    all_found
 }
 
 /// Probe a single IP:port to see if a GivEnergy dongle is listening.
@@ -67,6 +103,73 @@ async fn probe_host(ip: String) -> Option<DiscoveredInverter> {
     }
 }
 
+/// Auto-detect physical LAN subnets to scan.
+///
+/// Returns a list of /24 subnet base strings (e.g. `["192.168.1"]`).
+pub fn detect_lan_subnets() -> Vec<String> {
+    // Strategy 1: enumerate local interfaces, pick those in 10.x or 192.168.x
+    if let Ok(interfaces) = local_ip_address::list_afinet_netifas() {
+        let subnets = collect_physical_subnets(&interfaces);
+        if !subnets.is_empty() {
+            return subnets;
+        }
+    }
+
+    // Strategy 2: no physical LAN interface found (WSL2, Docker-only, etc.)
+    // Fall back to probing common home-router subnets.
+    log::info!(
+        "No 10.x or 192.168.x interfaces found — trying common home subnets"
+    );
+    FALLBACK_SUBNETS.iter().map(|s| (*s).to_string()).collect()
+}
+
+/// Given a list of (interface_name, IP) pairs, collect unique /24 subnet bases
+/// for interfaces in 10.x.x.x or 192.168.x.x ranges, excluding virtual interfaces.
+fn collect_physical_subnets(interfaces: &[(String, IpAddr)]) -> Vec<String> {
+    let mut subnets = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for (name, ip) in interfaces {
+        let IpAddr::V4(ipv4) = ip else { continue };
+        let octets = ipv4.octets();
+
+        // Skip loopback
+        if octets[0] == 127 {
+            continue;
+        }
+
+        // Skip known virtual interface name prefixes
+        let name_lower = name.to_lowercase();
+        if name_lower.starts_with("docker")
+            || name_lower.starts_with("br-")
+            || name_lower.starts_with("veth")
+            || name_lower == "virbr0"
+            || name_lower.starts_with("vmnet")
+        {
+            continue;
+        }
+
+        // Only accept 10.x.x.x and 192.168.x.x — these are home/office LANs.
+        // 172.16-31.x.x is exclusively Docker/WSL/libvirt and should never be scanned.
+        let is_physical = match octets {
+            [192, 168, ..] => true,
+            [10, ..] => true,
+            _ => false,
+        };
+
+        if !is_physical {
+            continue;
+        }
+
+        let subnet = format!("{}.{}.{}", octets[0], octets[1], octets[2]);
+        if seen.insert(subnet.clone()) {
+            subnets.push(subnet);
+        }
+    }
+
+    subnets
+}
+
 /// Given a gateway like "192.168.1.1", return "192.168.1".
 fn infer_subnet_base(gateway: &str) -> String {
     let parts: Vec<&str> = gateway.split('.').collect();
@@ -75,25 +178,6 @@ fn infer_subnet_base(gateway: &str) -> String {
     } else {
         "192.168.1".to_string()
     }
-}
-
-/// Auto-detect the local subnet gateway from system interfaces.
-pub fn detect_local_subnet() -> Option<String> {
-    if let Ok(output) = std::process::Command::new("ip")
-        .args(["route", "show", "default"])
-        .output()
-    {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            if line.starts_with("default via ") {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 3 {
-                    return Some(parts[2].to_string());
-                }
-            }
-        }
-    }
-    None
 }
 
 // ===========================================================================
@@ -117,8 +201,9 @@ mod tests {
     }
 
     #[test]
-    fn detect_local_subnet_returns_something() {
-        let _ = detect_local_subnet();
+    fn detect_lan_subnets_returns_something() {
+        let subnets = detect_lan_subnets();
+        assert!(!subnets.is_empty());
     }
 
     #[test]
@@ -130,5 +215,70 @@ mod tests {
         let json = serde_json::to_string(&inv).unwrap();
         assert!(json.contains("192.168.1.36"));
         assert!(json.contains("8899"));
+    }
+
+    #[test]
+    fn collect_physical_subnets_192_168() {
+        use std::str::FromStr;
+        let interfaces = vec![
+            ("eth0".to_string(), IpAddr::from_str("192.168.1.100").unwrap()),
+            ("docker0".to_string(), IpAddr::from_str("172.17.0.1").unwrap()),
+        ];
+        let subnets = collect_physical_subnets(&interfaces);
+        assert_eq!(subnets, vec!["192.168.1"]);
+    }
+
+    #[test]
+    fn collect_physical_subnets_10_network() {
+        use std::str::FromStr;
+        let interfaces = vec![
+            ("ens192".to_string(), IpAddr::from_str("10.0.5.100").unwrap()),
+        ];
+        let subnets = collect_physical_subnets(&interfaces);
+        assert_eq!(subnets, vec!["10.0.5"]);
+    }
+
+    #[test]
+    fn collect_physical_subnets_skips_172() {
+        use std::str::FromStr;
+        let interfaces = vec![
+            ("eth0".to_string(), IpAddr::from_str("172.22.59.58").unwrap()),
+            ("docker0".to_string(), IpAddr::from_str("172.17.0.1").unwrap()),
+        ];
+        let subnets = collect_physical_subnets(&interfaces);
+        assert!(subnets.is_empty());
+    }
+
+    #[test]
+    fn collect_physical_subnets_skips_virtual_names() {
+        use std::str::FromStr;
+        let interfaces = vec![
+            ("docker0".to_string(), IpAddr::from_str("192.168.1.1").unwrap()),
+            ("br-abc".to_string(), IpAddr::from_str("10.0.0.1").unwrap()),
+            ("veth123".to_string(), IpAddr::from_str("192.168.1.50").unwrap()),
+        ];
+        let subnets = collect_physical_subnets(&interfaces);
+        assert!(subnets.is_empty());
+    }
+
+    #[test]
+    fn collect_physical_subnets_deduplicates() {
+        use std::str::FromStr;
+        let interfaces = vec![
+            ("eth0".to_string(), IpAddr::from_str("192.168.1.100").unwrap()),
+            ("wlan0".to_string(), IpAddr::from_str("192.168.1.101").unwrap()),
+        ];
+        let subnets = collect_physical_subnets(&interfaces);
+        assert_eq!(subnets, vec!["192.168.1"]);
+    }
+
+    #[test]
+    fn collect_physical_subnets_no_loopback() {
+        use std::str::FromStr;
+        let interfaces = vec![
+            ("lo".to_string(), IpAddr::from_str("127.0.0.1").unwrap()),
+        ];
+        let subnets = collect_physical_subnets(&interfaces);
+        assert!(subnets.is_empty());
     }
 }

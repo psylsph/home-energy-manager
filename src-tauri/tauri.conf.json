@@ -13,9 +13,9 @@
     "windows": [
       {
         "title": "GivEnergy Local",
-        "width": 1024,
-        "height": 950,
-        "resizable": true,
+        "width": 960,
+        "height": 1160,
+        "resizable": false,
         "fullscreen": false
       }
     ],

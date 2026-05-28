@@ -44,6 +44,12 @@ export interface BatteryModule {
   temperature: number;
   voltage: number;
   current: number;
+  serial: string;
+  num_cycles: number;
+  num_cells: number;
+  cell_voltages: number[];
+  cell_temperatures: number[];
+  bms_firmware: number;
 }
 
 export interface ScheduleSlot {

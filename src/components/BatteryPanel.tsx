@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import type { InverterSnapshot } from '../lib/types';
 import { formatPower, formatPercent, formatTemp, formatEnergy, formatVoltage } from '../lib/format';
 
@@ -30,7 +29,6 @@ function stateColor(state: string): string {
 }
 
 export default function BatteryPanel({ snapshot: s }: Props) {
-  const [modulesOpen, setModulesOpen] = useState(false);
   const color = socColor(s.soc);
   const storedKwh = (s.soc / 100) * s.battery_capacity_kwh;
 
@@ -77,7 +75,7 @@ export default function BatteryPanel({ snapshot: s }: Props) {
         <div className="flex flex-col gap-2 flex-1 min-w-0">
           <div className="flex items-baseline justify-between">
             <span className="text-text-secondary text-xs">Power</span>
-            <span className="text-text-primary text-lg font-bold font-mono">
+            <span className="text-text-primary text-sm font-mono">
               {s.battery_state === 'discharging' ? '−' : s.battery_state === 'charging' ? '+' : ''}
               {formatPower(Math.abs(s.battery_power))}
             </span>
@@ -90,13 +88,21 @@ export default function BatteryPanel({ snapshot: s }: Props) {
             <span className="text-text-secondary text-xs">Temp</span>
             <span className="text-text-primary text-sm font-mono">{formatTemp(s.battery_temperature)}</span>
           </div>
+          <div className="flex items-baseline justify-between">
+            <span className="text-text-secondary text-xs">Charged</span>
+            <span className="text-text-primary text-sm font-mono">{formatEnergy(s.today_charge_kwh)}</span>
+           </div>
+          <div className="flex items-baseline justify-between">
+            <span className="text-text-secondary text-xs">Discharged</span>
+            <span className="text-text-primary text-sm font-mono">{formatEnergy(s.today_discharge_kwh)}</span>
+        </div>
         </div>
       </div>
 
       {/* Capacity bar */}
       <div className="space-y-1">
         <div className="flex justify-between text-xs">
-          <span className="text-text-secondary">Stored</span>
+          <span className="text-text-secondary">Capacity</span>
           <span className="text-text-primary font-mono">
             {formatEnergy(storedKwh)} <span className="text-text-secondary">/ {formatEnergy(s.battery_capacity_kwh)}</span>
           </span>
@@ -109,40 +115,6 @@ export default function BatteryPanel({ snapshot: s }: Props) {
         </div>
       </div>
 
-      {/* Collapsible modules */}
-      {s.battery_modules.length > 0 && (
-        <div>
-          <button
-            type="button"
-            className="text-xs text-text-secondary hover:text-text-primary transition-colors flex items-center gap-1.5 py-1"
-            onClick={() => setModulesOpen((v) => !v)}
-          >
-            <svg
-              className={`w-3 h-3 transition-transform ${modulesOpen ? 'rotate-90' : ''}`}
-              fill="currentColor"
-              viewBox="0 0 20 20"
-            >
-              <path d="M6 4l8 6-8 6V4z" />
-            </svg>
-            {s.battery_modules.length} module{s.battery_modules.length > 1 ? 's' : ''}
-          </button>
-          {modulesOpen && (
-            <div className="mt-2 flex flex-col gap-1">
-              {s.battery_modules.map((m) => (
-                <div
-                  key={m.index}
-                  className="bg-bg-elevated rounded-lg px-3 py-2 flex items-center justify-between text-xs font-mono"
-                >
-                  <span className="text-text-secondary w-8">#{m.index + 1}</span>
-                  <span className="text-text-primary">{formatVoltage(m.voltage)}</span>
-                  <span className="text-text-primary">{formatPercent(m.soc)}</span>
-                  <span className="text-text-secondary">{formatTemp(m.temperature)}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 }

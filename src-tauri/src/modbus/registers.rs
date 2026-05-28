@@ -166,24 +166,57 @@ pub const HR_BATTERY_PAUSE_SLOT_1_START: u16 = 319;
 pub const HR_BATTERY_PAUSE_SLOT_1_END: u16 = 320;
 
 // ===========================================================================
-// Battery module polling
+// Battery module polling (LV batteries)
 // ===========================================================================
+//
+// Per givenergy-modbus reference:
+//   Battery #1 shares the inverter's input-register bank at device address 0x32.
+//   Its BMS data (IR 60-119) is already captured by the standard poll block
+//   `input_0_59` followed by a separate IR 60-119 read on device 0x32.
+//   Additional batteries sit at device addresses 0x33, 0x34, … 0x37.
+//
+// LV Battery IR 60-119 layout (per givenergy-modbus BatteryRegisterGetter):
+//   IR(60-75):   cell voltages (milli-V, 16 cells)
+//   IR(76-79):   cell temperatures (deci-°C, groups of 4 cells)
+//   IR(80):      v_cells_sum (milli-V)
+//   IR(81):      t_bms_mosfet (deci-°C)
+//   IR(82-83):   v_out (uint32 milli-V)
+//   IR(84-85):   cap_calibrated (uint32 centi-Ah)
+//   IR(86-87):   cap_design (uint32 centi-Ah)
+//   IR(88-89):   cap_remaining (uint32 centi-Ah)
+//   IR(90-94):   status/warning packed bytes
+//   IR(96):      num_cycles
+//   IR(97):      num_cells
+//   IR(98):      bms_firmware_version
+//   IR(100):     soc (%)
+//   IR(101-102): cap_design2 (uint32 centi-Ah)
+//   IR(103):     t_max (deci-°C)
+//   IR(104):     t_min (deci-°C)
+//   IR(110-114): serial_number (5 registers = 10 Latin-1 chars)
 
-/// Slave addresses to probe for battery BMS modules.
+/// Device addresses for additional LV batteries.
 ///
-/// GivEnergy batteries typically respond at 0x01, 0x02, etc. The inverter
-/// itself is at 0x32. We probe sequentially and stop at the first failure.
-pub const BATTERY_SLAVE_ADDRESSES: &[u8] = &[0x01, 0x02, 0x03];
+/// Battery #1 lives at 0x32 (same as the inverter) and its BMS registers
+/// (IR 60-119) are already read as part of the standard poll. Addresses 0x33+
+/// are for multi-battery installations with a second (or third, etc.) battery.
+pub const LV_BATTERY_ADDRESSES: &[u8] = &[0x33, 0x34, 0x35, 0x36, 0x37];
 
-/// Blocks read from each battery BMS slave during every poll cycle.
-pub const BATTERY_POLL_BLOCKS: &[RegisterBlock] = &[
-    RegisterBlock {
-        start: 60,
-        count: 60,
-        register_type: RegisterType::Input,
-        name: "battery_input_60_119",
-    },
-];
+/// Block read for each additional LV battery BMS.
+pub const BATTERY_POLL_BLOCK: RegisterBlock = RegisterBlock {
+    start: 60,
+    count: 60,
+    register_type: RegisterType::Input,
+    name: "battery_input_60_119",
+};
+
+/// Block read for the first battery's BMS data on the inverter device (0x32).
+/// This is the same IR 60-119 block but on the inverter's device address.
+pub const BATTERY_1_POLL_BLOCK: RegisterBlock = RegisterBlock {
+    start: 60,
+    count: 60,
+    register_type: RegisterType::Input,
+    name: "battery1_input_60_119",
+};
 
 // ---------------------------------------------------------------------------
 // Write whitelist — registers that are safe to write to

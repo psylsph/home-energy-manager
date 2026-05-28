@@ -77,6 +77,9 @@ pub struct PollSettings {
     pub serial: String,
     /// Seconds between successive poll cycles.
     pub interval_secs: u64,
+    /// Monotonically increasing version — bumped by the settings API
+    /// so the poll loop can detect that a reconnect is needed.
+    pub version: u32,
 }
 
 impl Default for PollSettings {
@@ -86,6 +89,7 @@ impl Default for PollSettings {
             port: 8899,
             serial: String::new(),
             interval_secs: 60,
+            version: 0,
         }
     }
 }
@@ -131,7 +135,7 @@ impl AppState {
 ///
 /// ## Behaviour
 ///
-/// 1. If `settings.host` or `settings.serial` are empty, sleep 5 s and retry.
+/// 1. If `settings.host` is empty, sleep 5 s and retry.
 /// 2. Attempt to connect. On success, broadcast `Connected` and enter the
 ///    inner poll loop.
 /// 3. On each tick: call `read_all_standard`, decode into an
@@ -139,6 +143,10 @@ impl AppState {
 /// 4. If a poll or I/O error occurs, break out of the inner loop,
 ///    disconnect, broadcast `Reconnecting`, and attempt reconnection
 ///    with exponential back-off (5 s → 60 s cap).
+///
+/// If `settings.serial` is empty the dongle serial is auto-discovered from
+/// the first response frame header and persisted to settings — only the host
+/// IP is required to connect.
 pub async fn run_poll_loop(state: Arc<AppState>) {
     let mut backoff = Duration::from_secs(5);
 
@@ -146,9 +154,10 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
         // ---- Read current settings ----
         let settings = state.settings.lock().await.clone();
 
-        // Wait until valid settings are available.
-        if settings.host.is_empty() || settings.serial.is_empty() {
-            tracing::debug!("Poll loop: waiting for valid host/serial settings");
+        // Wait until a host is configured. Serial may be empty — it will be
+        // auto-discovered from the first response.
+        if settings.host.is_empty() {
+            tracing::debug!("Poll loop: waiting for host setting");
             tokio::time::sleep(Duration::from_secs(5)).await;
             continue;
         }
@@ -174,41 +183,180 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     host: settings.host.clone(),
                 });
 
+                // Allow the dongle time to initialise after TCP connect.
+                // The GivEnergy dongle has a slow processor and may return
+                // Modbus exception code 67 (busy/not-ready) if queried too soon.
+                tokio::time::sleep(Duration::from_millis(500)).await;
+
+                // Drain any stale data the dongle buffered from a previous
+                // session — without this, cached responses corrupt the
+                // request-response pairing for the first poll.
+                client.drain().await;
+
                 // Reset back-off on successful connection.
                 backoff = Duration::from_secs(5);
 
+                // Track consecutive poll failures within this connection.
+                // Transient errors (dongle busy, stale frames) are retried
+                // without disconnecting; only after repeated failures do we
+                // tear down the connection.
+                let mut consecutive_failures: u8 = 0;
+                const MAX_CONSECUTIVE_FAILURES: u8 = 3;
+
                 // ---- Inner poll loop ----
                 loop {
-                    match client.read_all_standard().await {
-                        Ok(blocks) => {
-                            let snapshot = decode_snapshot(&blocks);
+                    let poll_result = async {
+                        match client.read_all_standard().await {
+                            Ok(blocks) => {
+                                let mut snapshot = decode_snapshot(&blocks);
 
-                            // TODO: Battery BMS module probing disabled — the register
-                            // layout for battery slave addresses (0x01, 0x02, …) is not
-                            // yet confirmed. Probing with Input 60-119 corrupts the
-                            // data adapter connection. Re-enable once correct registers
-                            // are identified from the givenergy-modbus reference.
+                                // If the dongle serial was auto-discovered from the
+                                // response, persist it to settings so it survives restarts.
+                                if client.serial_was_discovered() {
+                                    let discovered = client.serial().to_string();
+                                    tracing::info!(serial = %discovered, "Persisting auto-discovered serial");
+                                    {
+                                        let mut ps = state.settings.lock().await;
+                                        ps.serial = discovered.clone();
+                                    }
+                                    let persist = crate::settings::Settings {
+                                        host: settings.host.clone(),
+                                        port: settings.port,
+                                        serial: discovered,
+                                        poll_interval: settings.interval_secs,
+                                        auto_connect: true,
+                                    };
+                                    if let Err(e) = persist.save() {
+                                        tracing::warn!("Failed to persist discovered serial: {e}");
+                                    }
+                                }
 
-                            // Store latest snapshot.
-                            {
-                                let mut latest = state.latest_snapshot.lock().await;
-                                *latest = Some(snapshot.clone());
+                                // --- Battery BMS module reads ---
+                                //
+                                // Per givenergy-modbus reference, LV batteries expose BMS data
+                                // on the inverter's IR 60-119 at device address 0x32 (battery #1)
+                                // and additional batteries at 0x33, 0x34, … 0x37.
+                                //
+                                // Battery #1 IR 60-119 is NOT part of the standard poll blocks
+                                // (those only read IR 0-59), so we issue a separate read here.
+                                // Additional batteries also need separate reads at their own
+                                // device addresses.
+
+                                // Read battery #1 BMS (device 0x32, IR 60-119)
+                                match client
+                                    .read_registers(
+                                        crate::modbus::framer::RegisterType::Input,
+                                        60,
+                                        60,
+                                    )
+                                    .await
+                                {
+                                    Ok(data) => {
+                                        crate::inverter::decoder::decode_battery_block_into(
+                                            &data, 0, &mut snapshot, "",
+                                        );
+                                        tracing::debug!("Battery #1 BMS read OK");
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!("Battery #1 BMS read skipped: {e}");
+                                    }
+                                }
+
+                                // Probe additional LV batteries (device addresses 0x33-0x37)
+                                for (i, &addr) in crate::modbus::registers::LV_BATTERY_ADDRESSES
+                                    .iter()
+                                    .enumerate()
+                                {
+                                    client.set_slave(addr);
+                                    match client.read_registers(
+                                        crate::modbus::framer::RegisterType::Input,
+                                        60,
+                                        60,
+                                    ).await {
+                                        Ok(data) => {
+                                            let soc = *data.get(100 - 60).unwrap_or(&0) as u8;
+                                            if soc <= 100 && soc > 0 {
+                                                crate::inverter::decoder::decode_battery_block_into(
+                                                    &data, i + 1, &mut snapshot, "",
+                                                );
+                                                tracing::debug!("Battery #{} BMS read OK (addr 0x{:02X})", i + 2, addr);
+                                            } else {
+                                                tracing::debug!("Battery addr 0x{:02X}: SOC={} — not present", addr, soc);
+                                                break;
+                                            }
+                                        }
+                                        Err(_) => {
+                                            tracing::debug!("Battery addr 0x{:02X}: no response", addr);
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                // Reset slave address back to inverter default
+                                client.set_slave(0x32);
+
+                                // Store latest snapshot.
+                                {
+                                    let mut latest = state.latest_snapshot.lock().await;
+                                    *latest = Some(snapshot.clone());
+                                }
+
+                                // Broadcast to WebSocket subscribers.
+                                let _ = state.tx.send(PollMessage::Snapshot(snapshot));
+
+                                Ok(())
                             }
+                            Err(e) => Err(e),
+                        }
+                    }.await;
 
-                            // Broadcast to WebSocket subscribers.
-                            let _ = state.tx.send(PollMessage::Snapshot(snapshot));
+                    match poll_result {
+                        Ok(()) => {
+                            consecutive_failures = 0;
                         }
                         Err(e) => {
-                            tracing::warn!("Poll read failed: {e}");
-                            // Connection likely lost — break to reconnect.
-                            break;
+                            consecutive_failures += 1;
+                            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                                tracing::warn!(
+                                    "Poll read failed ({}/{}): {e} — disconnecting",
+                                    consecutive_failures, MAX_CONSECUTIVE_FAILURES,
+                                );
+                                break; // tear down connection and reconnect
+                            }
+                            // Transient error — retry after a short pause
+                            tracing::debug!(
+                                "Poll read failed ({}/{}): {e} — retrying",
+                                consecutive_failures, MAX_CONSECUTIVE_FAILURES,
+                            );
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            continue; // stay in the inner loop
                         }
                     }
 
-                    // Sleep for the configured interval, reading the setting
-                    // each time so runtime changes take effect immediately.
+                    // Sleep for the configured interval, but wake every second
+                    // to check if settings changed (new host → reconnect).
+                    let current_version = state.settings.lock().await.version;
                     let interval_secs = state.settings.lock().await.interval_secs;
-                    tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+                    let mut slept: u64 = 0;
+                    while slept < interval_secs {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        slept += 1;
+                        let cur = state.settings.lock().await;
+                        if cur.version != current_version {
+                            tracing::info!("Settings changed (v{} → v{}) — reconnecting",
+                                current_version, cur.version);
+                            break;
+                        }
+                        // If interval changed mid-sleep, use the new value
+                        if cur.interval_secs != interval_secs {
+                            break;
+                        }
+                    }
+                    // If settings version changed, reconnect
+                    let cur = state.settings.lock().await;
+                    if cur.version != current_version {
+                        break; // exit inner loop → outer loop re-reads settings
+                    }
                 }
 
                 // ---- Disconnected (fell out of inner loop) ----

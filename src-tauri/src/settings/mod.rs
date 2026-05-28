@@ -24,9 +24,9 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            host: "192.168.1.36".to_string(),
+            host: String::new(),
             port: 8899,
-            serial: "CE2052G072".to_string(),
+            serial: String::new(),
             poll_interval: 60,
             auto_connect: true,
         }
@@ -91,9 +91,9 @@ mod tests {
     #[test]
     fn default_settings() {
         let s = Settings::default();
-        assert_eq!(s.host, "192.168.1.36");
+        assert!(s.host.is_empty());
         assert_eq!(s.port, 8899);
-        assert_eq!(s.serial, "CE2052G072");
+        assert!(s.serial.is_empty());
         assert_eq!(s.poll_interval, 60);
         assert!(s.auto_connect);
     }

@@ -129,21 +129,39 @@ impl DeviceType {
 // ---------------------------------------------------------------------------
 
 /// A single battery module within the battery assembly.
+///
+/// For LV batteries each physical battery is a "module". For HV stacks
+/// (All-in-One, HV Gen3) a module is a BMU within the BCU stack.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BatteryModule {
     /// Module index (0-based).
     pub index: usize,
     /// State of charge (%).
     pub soc: u8,
-    /// Temperature (deg C).
+    /// Temperature (deg C) — max cell temperature from BMS.
     pub temperature: f32,
-    /// Voltage (V).
+    /// Voltage (V) — total pack voltage.
     pub voltage: f32,
-    /// Current (A).
+    /// Current (A) — pack current (not available on LV BMS; 0.0).
     pub current: f32,
-    /// Battery serial number (from module holding registers).
+    /// Battery serial number (from BMS input registers IR 110-114).
     #[serde(default)]
     pub serial: String,
+    /// Number of charge cycles.
+    #[serde(default)]
+    pub num_cycles: u16,
+    /// Number of cells in this module.
+    #[serde(default)]
+    pub num_cells: u16,
+    /// Individual cell voltages in V (from BMS IR 60-75, up to 16 cells).
+    #[serde(default)]
+    pub cell_voltages: Vec<f32>,
+    /// Cell group temperatures in °C (from BMS IR 76-79, up to 4 groups).
+    #[serde(default)]
+    pub cell_temperatures: Vec<f32>,
+    /// BMS firmware version.
+    #[serde(default)]
+    pub bms_firmware: u16,
 }
 
 /// A single charge or discharge schedule slot.

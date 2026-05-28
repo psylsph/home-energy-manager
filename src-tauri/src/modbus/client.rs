@@ -74,7 +74,11 @@ pub struct ModbusClient {
     /// TCP port (typically 8899 for GivEnergy).
     port: u16,
     /// Data adapter serial number (up to 10 Latin-1 characters).
+    /// May be empty for auto-discovery — the dongle's serial is extracted
+    /// from the first response frame header (bytes 8-17).
     serial: String,
+    /// Whether the serial was auto-discovered from a response.
+    serial_discovered: bool,
     /// Modbus slave address (typically 0x32).
     slave: u8,
     /// Underlying TCP stream, `None` when disconnected.
@@ -84,17 +88,36 @@ pub struct ModbusClient {
 }
 
 impl ModbusClient {
-    /// Create a new client that will connect to `host:port` using the given
-    /// adapter `serial` number.
+    /// Create a new client that will connect to `host:port`.
+    ///
+    /// If `serial` is empty the client will auto-discover the dongle serial
+    /// from the first response frame header and use it for all subsequent
+    /// requests. This mirrors how GivTCP works — only the IP is needed.
     pub fn new(host: &str, port: u16, serial: &str) -> Self {
         Self {
             host: host.to_string(),
             port,
             serial: serial.to_string(),
+            serial_discovered: false,
             slave: 0x32, // default GivEnergy slave address
             stream: None,
             timeout: Duration::from_secs(5),
         }
+    }
+
+    /// Return the current serial (may be empty if not yet discovered).
+    pub fn serial(&self) -> &str {
+        &self.serial
+    }
+
+    /// Return whether the serial was auto-discovered from a response.
+    pub fn serial_was_discovered(&self) -> bool {
+        self.serial_discovered
+    }
+
+    /// Update the serial (e.g. after auto-discovery).
+    pub fn set_serial(&mut self, serial: String) {
+        self.serial = serial;
     }
 
     /// Set the Modbus slave address (default is `0x32`).
@@ -127,6 +150,35 @@ impl ModbusClient {
 
         self.stream = Some(stream);
         Ok(())
+    }
+
+    /// Drain any buffered data from the TCP receive buffer.
+    ///
+    /// The GivEnergy dongle caches responses from the previous session and
+    /// flushes them when a new TCP connection is established. If we don't
+    /// drain these stale frames, they corrupt the request-response pairing
+    /// for our first real poll.
+    pub async fn drain(&mut self) {
+        let stream = match self.stream.as_mut() {
+            Some(s) => s,
+            None => return,
+        };
+
+        // Set a very short read timeout so we don't block
+        let _ = stream.set_nodelay(true);
+        let mut buf = [0u8; 512];
+        let mut drained = 0usize;
+
+        loop {
+            match tokio::time::timeout(Duration::from_millis(100), stream.read(&mut buf)).await {
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break, // EOF, read error, or timeout — buffer is clear
+                Ok(Ok(n)) => drained += n,
+            }
+        }
+
+        if drained > 0 {
+            tracing::debug!("Drained {drained} bytes of stale data from dongle");
+        }
     }
 
     /// Disconnect gracefully.
@@ -188,6 +240,21 @@ impl ModbusClient {
         full.extend_from_slice(&header_buf);
         full.extend_from_slice(&rest);
 
+        // Auto-discover dongle serial from response header (bytes 8-17).
+        // The data adapter always includes its own serial in every response.
+        // If our serial was empty (auto-discovery mode), capture it now.
+        if self.serial.is_empty() && full.len() >= 18 {
+            let discovered = std::str::from_utf8(&full[8..18])
+                .unwrap_or("")
+                .trim_end()
+                .to_string();
+            if !discovered.is_empty() {
+                tracing::info!(serial = %discovered, "Auto-discovered dongle serial");
+                self.serial = discovered;
+                self.serial_discovered = true;
+            }
+        }
+
         // Decode using the framer
         let decoded =
             framer::decode_frame(&full).map_err(|e| ClientError::FrameError(e.to_string()))?;
@@ -213,6 +280,12 @@ impl ModbusClient {
     /// return fewer registers than requested if this is exceeded.
     const MAX_REGISTERS_PER_READ: u16 = 20;
 
+    /// Inter-request delay to avoid overwhelming the GivEnergy dongle.
+    /// The dongle has a very slow processor and limited frame buffer.
+    /// The givenergy-modbus reference library uses 250ms; we use 150ms
+    /// as a compromise between reliability and poll speed.
+    const INTER_REQUEST_DELAY: Duration = Duration::from_millis(150);
+
     /// Read a block of registers (input or holding).
     ///
     /// If `count` exceeds [`MAX_REGISTERS_PER_READ`], the read is split into
@@ -230,6 +303,11 @@ impl ModbusClient {
             let remaining = count - offset;
             let chunk_size = remaining.min(Self::MAX_REGISTERS_PER_READ);
             let chunk_start = start + offset;
+
+            // Pause between chunks to let the dongle catch up
+            if offset > 0 {
+                tokio::time::sleep(Self::INTER_REQUEST_DELAY).await;
+            }
 
             let chunk_values = self
                 .read_registers_raw(register_type, chunk_start, chunk_size)
@@ -259,48 +337,68 @@ impl ModbusClient {
         Ok(all_values)
     }
 
+    /// Maximum number of retries when a stale response is received.
+    const MAX_STALE_RETRIES: u8 = 4;
+
     /// Internal: read a single chunk of registers (no splitting).
     ///
     /// Tolerates the dongle returning fewer registers than requested — common
     /// on GivEnergy WiFi/Ethernet dongles with limited frame buffers.
+    ///
+    /// Also tolerates stale responses from the dongle — if the function code
+    /// doesn't match, the response is from a previous request that arrived
+    /// late. In that case we discard it and retry.
     async fn read_registers_raw(
         &mut self,
         register_type: RegisterType,
         start: u16,
         count: u16,
     ) -> Result<Vec<u16>, ClientError> {
-        // Build the request frame
-        let request =
-            framer::build_read_request(&self.serial, self.slave, register_type, start, count);
-
-        // Send and receive
-        let decoded = self.send_and_receive(&request).await?;
-
-        // Verify the function code matches
         let expected_fc = register_type.function_code();
-        if decoded.function != expected_fc {
-            return Err(ClientError::InvalidResponse(format!(
-                "function code mismatch: expected 0x{:02X}, got 0x{:02X}",
-                expected_fc, decoded.function
-            )));
+
+        for attempt in 0..=Self::MAX_STALE_RETRIES {
+            // Build the request frame
+            let request =
+                framer::build_read_request(&self.serial, self.slave, register_type, start, count);
+
+            // Send and receive
+            let decoded = self.send_and_receive(&request).await?;
+
+            // Check for stale response (function code from a previous request)
+            if decoded.function != expected_fc {
+                if attempt < Self::MAX_STALE_RETRIES {
+                    tracing::debug!(
+                        "Stale response (got 0x{:02X}, expected 0x{:02X}) — retrying ({}/{})",
+                        decoded.function, expected_fc,
+                        attempt + 1, Self::MAX_STALE_RETRIES,
+                    );
+                    // Brief pause before retry to let the dongle catch up
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+                return Err(ClientError::InvalidResponse(format!(
+                    "function code mismatch: expected 0x{:02X}, got 0x{:02X}",
+                    expected_fc, decoded.function
+                )));
+            }
+
+            // --- Valid response, parse register data ---
+            return Self::parse_register_response(&decoded, count);
         }
 
-        // Parse the transparent response inner payload.
-        // GivEnergy response format (after outer header + CRC stripped by framer):
-        //   inverter_serial_number (10 bytes)
-        //   base_register          (2 bytes, u16 BE)
-        //   register_count         (2 bytes, u16 BE)
-        //   register_values        (register_count * 2 bytes)
-        //   check                  (2 bytes)
-        //
-        // The framer strips: outer MBAP header(6) + data_adapter_serial(10) +
-        // padding(8) + CRC(2), leaving us with:
-        //   device_address(1) + transparent_function(1) + [above inner payload]
-        //
-        // decoded.payload = everything after device_address + transparent_function.
+        // Unreachable, but keeps the compiler happy
+        Err(ClientError::InvalidResponse("exhausted retries".to_string()))
+    }
+
+    /// Parse register values from a decoded read response frame.
+    fn parse_register_response(
+        decoded: &DecodedFrame,
+        count: u16,
+    ) -> Result<Vec<u16>, ClientError> {
+
         let payload = &decoded.payload;
         const INVERTER_SERIAL_LEN: usize = 10;
-        const MIN_INNER_LEN: usize = INVERTER_SERIAL_LEN + 4; // serial + base_reg + reg_count
+        const MIN_INNER_LEN: usize = INVERTER_SERIAL_LEN + 4;
 
         if payload.len() < MIN_INNER_LEN {
             return Err(ClientError::InvalidResponse(format!(
@@ -310,14 +408,10 @@ impl ModbusClient {
             )));
         }
 
-        // Skip inverter serial number (10 bytes)
         let inner = &payload[INVERTER_SERIAL_LEN..];
-
-        // Read base_register and register_count
         let _resp_base_register = u16::from_be_bytes([inner[0], inner[1]]);
         let resp_register_count = u16::from_be_bytes([inner[2], inner[3]]) as usize;
 
-        // Register values follow
         let reg_data = &inner[4..];
         let max_values = count as usize;
         let actual_count = resp_register_count.min(max_values).min(reg_data.len() / 2);
@@ -393,7 +487,12 @@ impl ModbusClient {
     pub async fn read_blocks(&mut self, blocks: &'static [RegisterBlock]) -> Result<Vec<BlockRead>, ClientError> {
         let mut results = Vec::with_capacity(blocks.len());
 
-        for block in blocks {
+        for (i, block) in blocks.iter().enumerate() {
+            // Pause between blocks to let the dongle catch up
+            if i > 0 {
+                tokio::time::sleep(Self::INTER_REQUEST_DELAY).await;
+            }
+
             let reg_type = match block.register_type {
                 super::registers::RegisterType::Input => RegisterType::Input,
                 super::registers::RegisterType::Holding => RegisterType::Holding,

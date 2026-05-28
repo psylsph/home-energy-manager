@@ -319,21 +319,67 @@ fn decode_holding_60_119(data: &[u16], snap: &mut InverterSnapshot, raw: &mut Ra
 
 /// Decode battery block data from a single data slice into a BatteryModule.
 ///
-/// Battery BMS input registers (IR 60-119):
-///   IR(60-79): cell voltages in mV (20 cells)
-///   IR(80):    SOC (%)
-///   IR(81):    temperature (0.1 °C)
-///   IR(82):    current (0.1 A, signed)
-///   IR(83):    voltage (0.1 V)
-///   IR(84+):   additional BMS data, may include serial number chars
-fn decode_battery_block(data: &[u16], index: usize, serial: &str) -> BatteryModule {
+/// LV Battery BMS input registers (IR 60-119) per givenergy-modbus reference:
+///   IR(60-75):   cell voltages in mV (up to 16 cells)
+///   IR(76-79):   cell group temperatures in 0.1 °C (groups of 4 cells)
+///   IR(80):      v_cells_sum in mV
+///   IR(81):      t_bms_mosfet in 0.1 °C
+///   IR(82-83):   v_out (uint32, mV)
+///   IR(84-85):   cap_calibrated (uint32, 0.01 Ah)
+///   IR(86-87):   cap_design (uint32, 0.01 Ah)
+///   IR(88-89):   cap_remaining (uint32, 0.01 Ah)
+///   IR(90-94):   status/warning packed bytes
+///   IR(96):      num_cycles
+///   IR(97):      num_cells
+///   IR(98):      bms_firmware_version
+///   IR(100):     soc (%)
+///   IR(103):     t_max (0.1 °C)
+///   IR(104):     t_min (0.1 °C)
+///   IR(110-114): serial_number (5 regs = 10 Latin-1 chars)
+fn decode_battery_block(data: &[u16], index: usize) -> BatteryModule {
+    // Cell voltages: IR(60-75), milli-V → V
+    let num_cells_raw = get_reg(data, 97 - 60) as usize; // IR(97): num_cells
+    let cell_count = num_cells_raw.clamp(0, 16).min(data.len());
+    let cell_voltages: Vec<f32> = (0..cell_count)
+        .map(|i| get_reg(data, i) as f32 * 0.001) // mV → V
+        .collect();
+
+    // Cell group temperatures: IR(76-79), 0.1 °C
+    let cell_temperatures: Vec<f32> = (0..4)
+        .map(|i| get_reg(data, 76 - 60 + i) as f32 * 0.1)
+        .collect();
+
+    // Total voltage: IR(82-83) uint32, mV → V
+    let voltage_raw =
+        ((get_reg(data, 82 - 60) as u32) << 16) | (get_reg(data, 83 - 60) as u32);
+    let voltage = voltage_raw as f32 * 0.001;
+
+    // SOC: IR(100)
+    let soc = (get_reg(data, 100 - 60) as u8).min(100);
+
+    // Temperature: use t_max from IR(103)
+    let temperature = get_reg(data, 103 - 60) as f32 * 0.1;
+
+    // Serial number: IR(110-114)
+    let serial = decode_serial(data, 110 - 60, 5);
+
+    // Additional info
+    let num_cycles = get_reg(data, 96 - 60);
+    let num_cells = get_reg(data, 97 - 60);
+    let bms_firmware = get_reg(data, 98 - 60);
+
     BatteryModule {
         index,
-        soc: get_reg(data, 80 - 60) as u8, // IR(80): SOC (%)
-        temperature: get_reg(data, 81 - 60) as f32 * 0.1, // IR(81): temp (0.1 °C)
-        voltage: get_reg(data, 83 - 60) as f32 * 0.1, // IR(83): voltage (0.1 V)
-        current: signed(get_reg(data, 82 - 60)) as f32 * 0.1, // IR(82): current (0.1 A)
-        serial: serial.to_string(),
+        soc,
+        temperature,
+        voltage,
+        current: 0.0, // LV BMS doesn't expose current; use inverter-level battery_current
+        serial,
+        num_cycles,
+        num_cells,
+        cell_voltages,
+        cell_temperatures,
+        bms_firmware,
     }
 }
 
@@ -343,9 +389,9 @@ pub fn decode_battery_block_into(
     data: &[u16],
     block_index: usize,
     snapshot: &mut InverterSnapshot,
-    serial: &str,
+    _serial: &str,
 ) {
-    let module = decode_battery_block(data, block_index, serial);
+    let module = decode_battery_block(data, block_index);
     snapshot.battery_modules.push(module);
 }
 

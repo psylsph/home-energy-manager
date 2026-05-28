@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useInverterStore } from '../store/useInverterStore';
 import { formatPower, formatPercent, formatVoltage, formatCurrent, formatTemp, formatEnergy } from '../lib/format';
 
@@ -35,6 +36,7 @@ const BATTERY_MODE_LABELS: Record<string, string> = {
 
 export default function BatteryPage() {
   const { snapshot } = useInverterStore();
+  const [expandedModule, setExpandedModule] = useState<number | null>(null);
 
   if (!snapshot) {
     return (
@@ -101,6 +103,10 @@ export default function BatteryPage() {
             <span className="text-text-primary font-mono text-right">{BATTERY_MODE_LABELS[s.battery_mode] ?? s.battery_mode}</span>
             <span className="text-text-secondary">Reserve</span>
             <span className="text-text-primary font-mono text-right">{formatPercent(s.battery_reserve)}</span>
+            <span className="text-text-secondary">Charged Today</span>
+            <span className="text-text-primary font-mono text-right">{formatEnergy(s.today_charge_kwh)}</span>
+            <span className="text-text-secondary">Discharged Today</span>
+            <span className="text-text-primary font-mono text-right">{formatEnergy(s.today_discharge_kwh)}</span>
           </div>
         </div>
       </section>
@@ -131,43 +137,119 @@ export default function BatteryPage() {
             Modules ({s.battery_modules.length})
           </h3>
           <div className="flex flex-col gap-2">
-            {s.battery_modules.map((m) => (
-              <div
-                key={m.index}
-                className="bg-bg-elevated rounded-xl px-4 py-3 grid grid-cols-4 gap-2 text-sm"
-              >
-                <div>
-                  <div className="text-text-secondary text-xs">Module</div>
-                  <div className="text-text-primary font-mono">#{m.index + 1}</div>
+            {s.battery_modules.map((m) => {
+              const isExpanded = expandedModule === m.index;
+              const cellCount = m.cell_voltages?.length ?? 0;
+              return (
+                <div key={m.index} className="flex flex-col">
+                  {/* Module header row */}
+                  <button
+                    type="button"
+                    onClick={() => setExpandedModule(isExpanded ? null : m.index)}
+                    className="bg-bg-elevated rounded-xl px-4 py-3 grid grid-cols-5 gap-2 text-sm text-left w-full"
+                  >
+                    <div>
+                      <div className="text-text-secondary text-xs">Module</div>
+                      <div className="text-text-primary font-mono">#{m.index + 1}</div>
+                    </div>
+                    <div>
+                      <div className="text-text-secondary text-xs">SOC</div>
+                      <div className="text-text-primary font-mono">{formatPercent(m.soc)}</div>
+                    </div>
+                    <div>
+                      <div className="text-text-secondary text-xs">Voltage</div>
+                      <div className="text-text-primary font-mono">{formatVoltage(m.voltage)}</div>
+                    </div>
+                    <div>
+                      <div className="text-text-secondary text-xs">Temp</div>
+                      <div className="text-text-primary font-mono">{formatTemp(m.temperature)}</div>
+                    </div>
+                    <div className="flex items-center justify-end">
+                      <svg
+                        className={`w-4 h-4 text-text-secondary transition-transform ${isExpanded ? 'rotate-180' : ''}`}
+                        fill="currentColor"
+                        viewBox="0 0 20 20"
+                      >
+                        <path d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" />
+                      </svg>
+                    </div>
+                  </button>
+
+                  {/* Expanded details */}
+                  {isExpanded && (
+                    <div className="bg-bg-elevated/50 rounded-b-xl px-4 pb-4 pt-2 space-y-3 border-t border-bg-elevated">
+                      {/* Module info row */}
+                      <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs">
+                        {m.serial && (
+                          <>
+                            <span className="text-text-secondary">Serial</span>
+                            <span className="text-text-primary font-mono text-right">{m.serial}</span>
+                          </>
+                        )}
+                        <span className="text-text-secondary">Cells</span>
+                        <span className="text-text-primary font-mono text-right">{m.num_cells || cellCount}</span>
+                        <span className="text-text-secondary">Cycles</span>
+                        <span className="text-text-primary font-mono text-right">{m.num_cycles ?? '—'}</span>
+                        {m.bms_firmware > 0 && (
+                          <>
+                            <span className="text-text-secondary">BMS FW</span>
+                            <span className="text-text-primary font-mono text-right">{m.bms_firmware}</span>
+                          </>
+                        )}
+                      </div>
+
+                      {/* Cell voltage chart */}
+                      {cellCount > 0 && (
+                        <div className="space-y-1">
+                          <div className="text-text-secondary text-xs">Cell Voltages</div>
+                          <div className="flex items-end gap-px h-8">
+                            {m.cell_voltages.map((v, i) => {
+                              // Typical LFP cell: 2.5V–3.65V. Scale to bar height.
+                              const pct = Math.max(0, Math.min(100, ((v - 2.5) / 1.15) * 100));
+                              return (
+                                <div key={i} className="flex-1 flex flex-col items-center">
+                                  <div
+                                    className="w-full rounded-t-sm"
+                                    style={{
+                                      height: `${pct}%`,
+                                      backgroundColor: v < 2.8 ? '#EF4444' : v < 3.0 ? '#F59E0B' : '#22C55E',
+                                      minHeight: '2px',
+                                    }}
+                                    title={`Cell ${i + 1}: ${v.toFixed(3)}V`}
+                                  />
+                                </div>
+                              );
+                            })}
+                          </div>
+                          <div className="flex justify-between text-text-secondary text-[10px] font-mono">
+                            <span>{m.cell_voltages[0]?.toFixed(2)}V</span>
+                            <span>{m.cell_voltages[cellCount - 1]?.toFixed(2)}V</span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Cell temperature groups */}
+                      {m.cell_temperatures && m.cell_temperatures.length > 0 && (
+                        <div className="space-y-1">
+                          <div className="text-text-secondary text-xs">Cell Group Temps</div>
+                          <div className="flex gap-2">
+                            {m.cell_temperatures.map((t, i) => (
+                              <div key={i} className="bg-bg-elevated rounded-lg px-2 py-1 text-xs font-mono">
+                                <span className="text-text-secondary">G{i + 1}</span>{' '}
+                                <span className="text-text-primary">{formatTemp(t)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
-                <div>
-                  <div className="text-text-secondary text-xs">SOC</div>
-                  <div className="text-text-primary font-mono">{formatPercent(m.soc)}</div>
-                </div>
-                <div>
-                  <div className="text-text-secondary text-xs">Voltage</div>
-                  <div className="text-text-primary font-mono">{formatVoltage(m.voltage)}</div>
-                </div>
-                <div>
-                  <div className="text-text-secondary text-xs">Temp</div>
-                  <div className="text-text-primary font-mono">{formatTemp(m.temperature)}</div>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </section>
       )}
-
-      {/* Today's energy */}
-      <section className="bg-bg-surface rounded-2xl p-6 space-y-3">
-        <h3 className="text-text-primary text-sm font-semibold tracking-wide">Today</h3>
-        <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm">
-          <span className="text-text-secondary">Charged</span>
-          <span className="text-text-primary font-mono text-right">{formatEnergy(s.today_charge_kwh)}</span>
-          <span className="text-text-secondary">Discharged</span>
-          <span className="text-text-primary font-mono text-right">{formatEnergy(s.today_discharge_kwh)}</span>
-        </div>
-      </section>
     </div>
   );
 }

@@ -50,17 +50,36 @@ pub async fn get_settings(State(state): State<Arc<AppState>>) -> Json<Value> {
 }
 
 /// POST /api/settings
+///
+/// Accepts a partial update — fields that are present are applied,
+/// fields that are absent are left unchanged. This lets the Connect
+/// button send `{host,port,serial}` without clobbering `interval_secs`.
 pub async fn update_settings(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Json<Value> {
-    let new_settings = match parse_settings(&body) {
+    let incoming = match parse_settings(&body) {
         Ok(s) => s,
         Err(e) => return error_response(&e),
     };
 
     let mut settings = state.settings.lock().await;
-    *settings = new_settings;
+
+    // Always overwrite host/port/serial when provided.
+    if !incoming.host.is_empty() {
+        settings.host = incoming.host.clone();
+    }
+    settings.port = if incoming.port != 0 { incoming.port } else { settings.port };
+    if !incoming.serial.is_empty() || body.get("serial").is_some() {
+        settings.serial = incoming.serial.clone();
+    }
+    // Only overwrite interval when explicitly provided (> 0).
+    if incoming.interval_secs > 0 {
+        settings.interval_secs = incoming.interval_secs;
+    }
+
+    // Bump version so the poll loop notices the change and reconnects.
+    settings.version = settings.version.wrapping_add(1);
 
     // Persist to disk
     let persist = crate::settings::Settings {
@@ -75,8 +94,8 @@ pub async fn update_settings(
     }
 
     let msg = format!(
-        "Settings updated: host={}, port={}, interval={}s",
-        settings.host, settings.port, settings.interval_secs
+        "Settings updated: host={}, port={}, serial={}, interval={}s",
+        settings.host, settings.port, settings.serial, settings.interval_secs
     );
     tracing::info!("{}", msg);
     ok_response(&msg)
@@ -86,20 +105,27 @@ fn parse_settings(body: &serde_json::Value) -> Result<PollSettings, String> {
     let host = body["host"].as_str().unwrap_or("").to_string();
     let port = body["port"].as_u64().unwrap_or(8899) as u16;
     let serial = body["serial"].as_str().unwrap_or("").to_string();
-    let interval_secs = body["interval_secs"].as_u64().unwrap_or(10);
+    // Only overwrite interval if explicitly provided; otherwise keep current value.
+    // The Connect button sends {host,port,serial} without interval_secs,
+    // so we must not clobber it with a default.
+    let interval_secs = body
+        .get("interval_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0); // 0 = "not provided"
 
     if !host.is_empty() && port == 0 {
         return Err("Invalid port".to_string());
     }
-    if interval_secs == 0 {
-        return Err("interval_secs must be > 0".to_string());
+    if interval_secs > 0 && interval_secs < 5 {
+        return Err("interval_secs must be >= 5".to_string());
     }
 
     Ok(PollSettings {
         host,
         port,
         serial,
-        interval_secs,
+        interval_secs, // caller will merge: 0 means "keep existing"
+        version: 0,    // not set by the API; caller bumps it
     })
 }
 
@@ -284,14 +310,13 @@ pub async fn pause_battery(State(_state): State<Arc<AppState>>) -> Json<Value> {
 // ---------------------------------------------------------------------------
 
 /// GET /api/discover — scan the local network for GivEnergy inverters.
-pub async fn discover(State(state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn discover(State(_state): State<Arc<AppState>>) -> Json<Value> {
     tracing::info!("Network discovery requested");
 
-    // Try to determine the local gateway and scan
-    let gateway = crate::inverter::discovery::detect_local_subnet();
-    let gateway_str = gateway.as_deref().unwrap_or("192.168.1.1");
+    let subnets = crate::inverter::discovery::detect_lan_subnets();
+    tracing::info!("Scanning subnets: {:?}", subnets);
 
-    let inverters = crate::inverter::discovery::scan_subnet(gateway_str).await;
+    let inverters = crate::inverter::discovery::scan_multiple_subnets(&subnets).await;
 
     Json(json!({
         "ok": true,
