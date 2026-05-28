@@ -35,6 +35,17 @@ pub async fn get_snapshot(State(state): State<Arc<AppState>>) -> Json<Value> {
     }
 }
 
+/// GET /api/status — current connection state
+pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let cs = state.connection_state.lock().await.clone();
+    let host = state.settings.lock().await.host.clone();
+    Json(json!({
+        "ok": true,
+        "connection": cs,
+        "host": host,
+    }))
+}
+
 /// GET /api/settings
 pub async fn get_settings(State(state): State<Arc<AppState>>) -> Json<Value> {
     let settings = state.settings.lock().await;

@@ -25,6 +25,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         // Data endpoints
         .route("/api/snapshot", get(api::get_snapshot))
+        .route("/api/status", get(api::get_status))
         .route(
             "/api/settings",
             get(api::get_settings).post(api::update_settings),

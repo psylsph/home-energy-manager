@@ -29,6 +29,17 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
     // snapshot so we don't miss any updates between the two operations.
     let mut rx = state.tx.subscribe();
 
+    // Send the current connection state immediately on connect.
+    {
+        let cs = state.connection_state.lock().await.clone();
+        let cs_str = serde_json::json!({
+            "type": "connection",
+            "state": cs,
+            "host": state.settings.lock().await.host.clone(),
+        });
+        let _ = socket.send(Message::Text(cs_str.to_string().into())).await;
+    }
+
     // Send the current snapshot immediately on connect (if available).
     if let Some(snapshot) = state.latest_snapshot.lock().await.as_ref() {
         let msg =

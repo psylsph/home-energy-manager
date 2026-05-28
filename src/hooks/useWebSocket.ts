@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback } from 'react';
-import { getWsUrl } from '../lib/api';
+import { getWsUrl, apiGet } from '../lib/api';
 import { useInverterStore } from '../store/useInverterStore';
 import type { InverterSnapshot, ConnectionState } from '../lib/types';
 
@@ -7,6 +7,19 @@ export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeout = useRef<number>(0);
   const { setSnapshot, setConnection } = useInverterStore();
+
+  // Fetch initial connection state from REST API (in case WS messages
+  // were missed before the page loaded).
+  const fetchInitialStatus = useCallback(async () => {
+    try {
+      const res = await apiGet<{ ok: boolean; connection: ConnectionState; host: string }>('/api/status');
+      if (res.ok) {
+        setConnection(res.connection, res.host);
+      }
+    } catch {
+      // Backend not reachable — stay disconnected
+    }
+  }, [setConnection]);
 
   const connect = useCallback(() => {
     const url = getWsUrl();
@@ -43,10 +56,11 @@ export function useWebSocket() {
   }, [setSnapshot, setConnection]);
 
   useEffect(() => {
+    fetchInitialStatus();
     connect();
     return () => {
       clearTimeout(reconnectTimeout.current);
       wsRef.current?.close();
     };
-  }, [connect]);
+  }, [connect, fetchInitialStatus]);
 }

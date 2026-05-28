@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "GivEnergy Local",
+        "title": "GivEnergy-Local",
         "width": 960,
         "height": 1160,
         "resizable": false,
