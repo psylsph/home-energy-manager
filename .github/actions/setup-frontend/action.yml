@@ -1,0 +1,15 @@
+name: "Setup frontend"
+description: "Install Node.js and npm dependencies"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 22
+        cache: npm
+
+    - name: Install npm dependencies
+      shell: bash
+      run: npm ci
