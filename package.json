@@ -1,7 +1,18 @@
 {
   "name": "givenergy-local",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
+  "description": "Desktop app for monitoring and controlling GivEnergy solar inverters over local Modbus TCP",
+  "author": "Stuart Harding",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/psylsph/givenergy-local.git"
+  },
+  "bugs": {
+    "url": "https://github.com/psylsph/givenergy-local/issues"
+  },
+  "homepage": "https://github.com/psylsph/givenergy-local#readme",
   "type": "module",
   "scripts": {
     "dev": "vite",
