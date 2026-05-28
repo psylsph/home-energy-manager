@@ -47,17 +47,6 @@ function FlowLine({ flow }: { flow: FlowDef }) {
   const mx = (x1 + x2) / 2;
   const my = (y1 + y2) / 2;
 
-  // Label offset: push away from the line in the requested direction
-  const labelGap = 16
-  let lx = mx;
-  let ly = my;
-  switch (flow.labelSide) {
-    case 'above': ly -= labelGap-5; break;
-    case 'below': ly += labelGap+5; break;
-    case 'left':  lx -= labelGap; break;
-    case 'right': lx += labelGap+15; break;
-  }
-
   const angle = Math.atan2(dy, dx) * 180 / Math.PI;
 
   return (
