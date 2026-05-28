@@ -263,7 +263,7 @@ export default function ControlPage() {
     setReserveSaving(true);
     try {
       await apiPost('/api/control/reserve', { soc: reserveSoc });
-    } catch {}
+    } catch { /* handled silently */ }
     setReserveSaving(false);
   };
 
@@ -271,7 +271,7 @@ export default function ControlPage() {
     setChargeRateSaving(true);
     try {
       await apiPost('/api/control/charge-rate', { limit: chargeRate });
-    } catch {}
+    } catch { /* handled silently */ }
     setChargeRateSaving(false);
   };
 
@@ -279,7 +279,7 @@ export default function ControlPage() {
     setDischargeRateSaving(true);
     try {
       await apiPost('/api/control/discharge-rate', { limit: dischargeRate });
-    } catch {}
+    } catch { /* handled silently */ }
     setDischargeRateSaving(false);
   };
 

@@ -6,6 +6,7 @@ import type { InverterSnapshot, ConnectionState } from '../lib/types';
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeout = useRef<number>(0);
+  const connectRef = useRef<() => void>(() => {});
   const { setSnapshot, setConnection } = useInverterStore();
 
   // Fetch initial connection state from REST API (in case WS messages
@@ -34,8 +35,13 @@ export function useWebSocket() {
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'snapshot') {
-          const { type, ...snapshot } = data;
-          setSnapshot(snapshot as InverterSnapshot);
+          // Destructure to separate the discriminator from the payload
+          const snapshot: InverterSnapshot = (() => {
+            const { type: _, ...rest } = data;
+            void _;
+            return rest as InverterSnapshot;
+          })();
+          setSnapshot(snapshot);
         } else if (data.type === 'connection') {
           setConnection(data.state as ConnectionState, data.host);
         }
@@ -46,7 +52,7 @@ export function useWebSocket() {
 
     ws.onclose = () => {
       console.log('WebSocket closed, reconnecting in 3s...');
-      reconnectTimeout.current = window.setTimeout(connect, 3000);
+      reconnectTimeout.current = window.setTimeout(() => connectRef.current(), 3000);
     };
 
     ws.onerror = (err) => {
@@ -54,6 +60,11 @@ export function useWebSocket() {
       ws.close();
     };
   }, [setSnapshot, setConnection]);
+
+  // Keep ref in sync so the reconnect closure always calls the latest connect
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
 
   useEffect(() => {
     fetchInitialStatus();

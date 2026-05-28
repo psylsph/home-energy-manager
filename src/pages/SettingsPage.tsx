@@ -79,8 +79,8 @@ export default function SettingsPage() {
     setDiscoverResults([]);
     try {
       const res = await apiGet<{ok: boolean, inverters: DiscoveredInverter[]}>('/api/discover');
-      const results = (res.inverters || []).map((inv: any) => ({
-        host: inv.ip || inv.host,
+      const results: DiscoveredInverter[] = (res.inverters || []).map((inv) => ({
+        host: 'ip' in inv ? (inv as Record<string, unknown>).ip as string : (inv as DiscoveredInverter).host,
         port: inv.port,
         serial: inv.serial ?? null,
         generation: inv.generation ?? null,
@@ -93,7 +93,7 @@ export default function SettingsPage() {
     setDiscovering(false);
   };
 
-  const useDiscovered = (inv: DiscoveredInverter) => {
+  const applyDiscovered = (inv: DiscoveredInverter) => {
     setHost(inv.host);
     setPort(inv.port);
     if (inv.serial) setSerial(inv.serial);
@@ -209,7 +209,7 @@ export default function SettingsPage() {
                   </span>
                 </div>
                 <button
-                  onClick={() => useDiscovered(inv)}
+                  onClick={() => applyDiscovered(inv)}
                   className="bg-flow-active/20 text-flow-active text-xs font-sans font-semibold px-3 py-1.5 rounded-md hover:bg-flow-active/30 transition-colors"
                 >
                   Use

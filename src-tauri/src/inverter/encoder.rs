@@ -3,9 +3,8 @@
 //! Translates high-level control commands into raw Modbus register writes.
 //! Only whitelisted register addresses from SAFE_WRITE_REGS are allowed.
 
-use super::model::ScheduleSlot;
 use crate::modbus::registers::{
-    encode_hhmm, HR_BATTERY_CHARGE_LIMIT, HR_BATTERY_DISCHARGE_LIMIT, HR_BATTERY_POWER_MODE,
+    HR_BATTERY_CHARGE_LIMIT, HR_BATTERY_DISCHARGE_LIMIT, HR_BATTERY_POWER_MODE,
     HR_BATTERY_SOC_RESERVE, HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_SLOT_2_END,
     HR_CHARGE_SLOT_2_START, HR_CHARGE_TARGET_SOC, HR_DISCHARGE_SLOT_1_END,
     HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END, HR_DISCHARGE_SLOT_2_START,

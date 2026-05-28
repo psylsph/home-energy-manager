@@ -171,6 +171,7 @@ fn collect_physical_subnets(interfaces: &[(String, IpAddr)]) -> Vec<String> {
 }
 
 /// Given a gateway like "192.168.1.1", return "192.168.1".
+#[cfg(test)]
 fn infer_subnet_base(gateway: &str) -> String {
     let parts: Vec<&str> = gateway.split('.').collect();
     if parts.len() == 4 {

@@ -3,7 +3,7 @@ pub mod modbus;
 pub mod server;
 pub mod settings;
 
-use inverter::poll::{run_poll_loop, AppState, PollSettings};
+use inverter::poll::{run_poll_loop, AppState};
 use server::start_server;
 use settings::Settings;
 use std::sync::Arc;

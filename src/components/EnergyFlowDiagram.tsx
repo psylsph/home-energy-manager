@@ -94,18 +94,7 @@ function FlowLine({ flow }: { flow: FlowDef }) {
             fill="#22D3EE"
             transform={`translate(${mx},${my}) rotate(${angle})`}
           />
-          {/* Power label */}
-          <text
-            x={lx}
-            y={ly}
-            textAnchor="middle"
-            fill="#F0F6FC"
-            fontSize="11.5"
-            fontFamily="var(--font-mono, monospace)"
-            fontWeight="600"
-          >
-            {formatPower(flow.power)}
-          </text>
+ 
         </>
       )}
     </g>
