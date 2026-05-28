@@ -5,8 +5,8 @@
 
 use std::sync::Arc;
 
-use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::State;
 use axum::response::IntoResponse;
 
 use crate::inverter::poll::{AppState, PollMessage};
@@ -31,8 +31,8 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
 
     // Send the current snapshot immediately on connect (if available).
     if let Some(snapshot) = state.latest_snapshot.lock().await.as_ref() {
-        let msg = serde_json::to_string(&PollMessage::Snapshot(snapshot.clone()))
-            .unwrap_or_default();
+        let msg =
+            serde_json::to_string(&PollMessage::Snapshot(snapshot.clone())).unwrap_or_default();
         if socket.send(Message::Text(msg.into())).await.is_err() {
             // Client disconnected immediately.
             return;

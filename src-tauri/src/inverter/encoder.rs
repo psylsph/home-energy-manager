@@ -1,609 +1,290 @@
-//! Model-to-register encoder.
+//! Control command encoder.
 //!
-//! Converts high-level inverter commands (e.g. set charge rate,
-//! enable discharge) into the raw Modbus holding-register values
-//! that the inverter expects, with safety validation.
+//! Translates high-level control commands into raw Modbus register writes.
+//! Only whitelisted register addresses from SAFE_WRITE_REGS are allowed.
 
+use super::model::ScheduleSlot;
 use crate::modbus::registers::{
-    charge_slot_base, discharge_slot_base, HR_BATTERY_CHARGE_RATE, HR_BATTERY_DISCHARGE_RATE,
-    HR_BATTERY_MODE, HR_BATTERY_RESERVE_SOC, HR_CLOCK_YEAR, HR_FORCE_CHARGE_ENABLE,
-    HR_FORCE_DISCHARGE_ENABLE, HR_PAUSE_BATTERY_ENABLE, HR_TARGET_SOC,
+    encode_hhmm, HR_BATTERY_CHARGE_LIMIT, HR_BATTERY_DISCHARGE_LIMIT, HR_BATTERY_POWER_MODE,
+    HR_BATTERY_SOC_RESERVE, HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_SLOT_2_END,
+    HR_CHARGE_SLOT_2_START, HR_CHARGE_TARGET_SOC, HR_DISCHARGE_SLOT_1_END,
+    HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END, HR_DISCHARGE_SLOT_2_START,
+    HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE, SAFE_WRITE_REGS,
 };
 
-use chrono::{Datelike, Timelike};
-
-use super::model::{BatteryMode, ScheduleSlot};
-
 // ---------------------------------------------------------------------------
-// Constants / limits
+// Write request
 // ---------------------------------------------------------------------------
 
-/// Maximum charge / discharge rate in watts.
-const MAX_RATE_W: u16 = 5000;
-/// Maximum duration for force-charge / force-discharge / pause commands (minutes).
-const MAX_DURATION_MINUTES: u16 = 1440; // 24 h
-
-// ---------------------------------------------------------------------------
-// Control command enum
-// ---------------------------------------------------------------------------
-
-/// Commands that can be sent to the inverter.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(tag = "type")]
-pub enum ControlCommand {
-    SetBatteryMode { mode: BatteryMode },
-    SetReserve { soc: u8 },
-    SetChargeRate { rate: u16 },
-    SetDischargeRate { rate: u16 },
-    SetTargetSoc { soc: u8 },
-    SetChargeSlot { slot: u8, config: ScheduleSlot },
-    SetDischargeSlot { slot: u8, config: ScheduleSlot },
-    ForceCharge { minutes: u16 },
-    ForceDischarge { minutes: u16 },
-    PauseBattery { minutes: u16 },
-    SyncClock,
-}
-
-// ---------------------------------------------------------------------------
-// Error type
-// ---------------------------------------------------------------------------
-
-/// Safety validation error.
-#[derive(Debug, thiserror::Error)]
-pub enum EncoderError {
-    #[error("Invalid slot index: {0}, must be 1-3 for charge or 1-2 for discharge")]
-    InvalidSlot(u8),
-    #[error("SOC out of range: {0}, must be 0-100")]
-    SocOutOfRange(u8),
-    #[error("Rate out of range: {0}W")]
-    RateOutOfRange(u16),
-    #[error("Duration out of range: {0} minutes")]
-    DurationOutOfRange(u16),
-    #[error("Invalid schedule time: {start_h}:{start_m:02} - {end_h}:{end_m:02}")]
-    InvalidScheduleTime {
-        start_h: u8,
-        start_m: u8,
-        end_h: u8,
-        end_m: u8,
-    },
-}
-
-// ---------------------------------------------------------------------------
-// Encoded write result
-// ---------------------------------------------------------------------------
-
-/// Result of encoding a command – the holding-register address and values to
-/// write via Modbus function code 0x10.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EncodedWrite {
-    /// Starting holding-register address.
+/// A single holding-register write (address, value).
+#[derive(Debug, Clone)]
+pub struct RegisterWrite {
     pub address: u16,
-    /// Register values to write (one or more consecutive registers).
-    pub values: Vec<u16>,
+    pub value: u16,
 }
 
 // ---------------------------------------------------------------------------
-// Encoder implementation
+// Control commands
 // ---------------------------------------------------------------------------
 
-/// Encode a control command into validated register writes.
-///
-/// Returns one or more [`EncodedWrite`] operations that the caller should
-/// transmit to the inverter via Modbus write-multiple-registers (FC 0x10).
-pub fn encode_command(cmd: &ControlCommand) -> Result<Vec<EncodedWrite>, EncoderError> {
-    match cmd {
-        ControlCommand::SetBatteryMode { mode } => {
-            Ok(vec![EncodedWrite {
-                address: HR_BATTERY_MODE,
-                values: vec![mode.to_register()],
-            }])
+/// High-level control commands that can be sent to the inverter.
+#[derive(Debug, Clone)]
+pub enum ControlCommand {
+    /// Set battery power mode: 0=export, 1=self-consumption.
+    SetBatteryPowerMode { mode: u16 },
+    /// Enable or disable timed discharge.
+    SetEnableDischarge { enabled: bool },
+    /// Enable or disable timed charge.
+    SetEnableCharge { enabled: bool },
+    /// Set battery SOC reserve (0-100).
+    SetBatterySocReserve { reserve: u16 },
+    /// Set charge target SOC (0-100).
+    SetChargeTargetSoc { soc: u16 },
+    /// Set charge slot 1 times (HHMM packed).
+    SetChargeSlot1 { start: u16, end: u16 },
+    /// Set charge slot 2 times (HHMM packed).
+    SetChargeSlot2 { start: u16, end: u16 },
+    /// Set discharge slot 1 times (HHMM packed).
+    SetDischargeSlot1 { start: u16, end: u16 },
+    /// Set discharge slot 2 times (HHMM packed).
+    SetDischargeSlot2 { start: u16, end: u16 },
+    /// Set battery charge limit percentage (0-50).
+    SetChargeLimit { limit: u16 },
+    /// Set battery discharge limit percentage (0-50).
+    SetDischargeLimit { limit: u16 },
+    /// Set Eco mode (self-consumption, no discharge).
+    SetEcoMode { soc_reserve: u16 },
+    /// Set Timed Demand mode (self-consumption + discharge).
+    SetTimedDemandMode { soc_reserve: u16 },
+    /// Set Timed Export mode (export + discharge).
+    SetTimedExportMode { soc_reserve: u16 },
+    /// Pause battery (set SOC reserve to 100).
+    PauseBattery,
+}
+
+impl ControlCommand {
+    /// Encode the command into one or more register writes.
+    /// Returns an error if any target register is not in the whitelist.
+    pub fn encode(&self) -> Result<Vec<RegisterWrite>, String> {
+        let writes = match self {
+            ControlCommand::SetBatteryPowerMode { mode } => {
+                vec![rw(HR_BATTERY_POWER_MODE, *mode)]
+            }
+            ControlCommand::SetEnableDischarge { enabled } => {
+                vec![rw(HR_ENABLE_DISCHARGE, if *enabled { 1 } else { 0 })]
+            }
+            ControlCommand::SetEnableCharge { enabled } => {
+                vec![rw(HR_ENABLE_CHARGE, if *enabled { 1 } else { 0 })]
+            }
+            ControlCommand::SetBatterySocReserve { reserve } => {
+                validate_range(*reserve, 0, 100, "SOC reserve")?;
+                vec![rw(HR_BATTERY_SOC_RESERVE, *reserve)]
+            }
+            ControlCommand::SetChargeTargetSoc { soc } => {
+                validate_range(*soc, 0, 100, "target SOC")?;
+                vec![
+                    rw(HR_ENABLE_CHARGE_TARGET, 1),
+                    rw(HR_CHARGE_TARGET_SOC, *soc),
+                ]
+            }
+            ControlCommand::SetChargeSlot1 { start, end } => {
+                vec![
+                    rw(HR_CHARGE_SLOT_1_START, *start),
+                    rw(HR_CHARGE_SLOT_1_END, *end),
+                ]
+            }
+            ControlCommand::SetChargeSlot2 { start, end } => {
+                vec![
+                    rw(HR_CHARGE_SLOT_2_START, *start),
+                    rw(HR_CHARGE_SLOT_2_END, *end),
+                ]
+            }
+            ControlCommand::SetDischargeSlot1 { start, end } => {
+                vec![
+                    rw(HR_DISCHARGE_SLOT_1_START, *start),
+                    rw(HR_DISCHARGE_SLOT_1_END, *end),
+                ]
+            }
+            ControlCommand::SetDischargeSlot2 { start, end } => {
+                vec![
+                    rw(HR_DISCHARGE_SLOT_2_START, *start),
+                    rw(HR_DISCHARGE_SLOT_2_END, *end),
+                ]
+            }
+            ControlCommand::SetChargeLimit { limit } => {
+                validate_range(*limit, 0, 50, "charge limit")?;
+                vec![rw(HR_BATTERY_CHARGE_LIMIT, *limit)]
+            }
+            ControlCommand::SetDischargeLimit { limit } => {
+                validate_range(*limit, 0, 50, "discharge limit")?;
+                vec![rw(HR_BATTERY_DISCHARGE_LIMIT, *limit)]
+            }
+            ControlCommand::SetEcoMode { soc_reserve } => {
+                validate_range(*soc_reserve, 0, 100, "SOC reserve")?;
+                vec![
+                    rw(HR_BATTERY_POWER_MODE, 1), // self-consumption
+                    rw(HR_ENABLE_DISCHARGE, 0),   // no timed discharge
+                    rw(HR_BATTERY_SOC_RESERVE, *soc_reserve),
+                ]
+            }
+            ControlCommand::SetTimedDemandMode { soc_reserve } => {
+                validate_range(*soc_reserve, 0, 100, "SOC reserve")?;
+                vec![
+                    rw(HR_BATTERY_POWER_MODE, 1), // self-consumption
+                    rw(HR_ENABLE_DISCHARGE, 1),   // enable timed discharge
+                    rw(HR_BATTERY_SOC_RESERVE, *soc_reserve),
+                ]
+            }
+            ControlCommand::SetTimedExportMode { soc_reserve } => {
+                validate_range(*soc_reserve, 0, 100, "SOC reserve")?;
+                vec![
+                    rw(HR_BATTERY_POWER_MODE, 0), // export mode
+                    rw(HR_ENABLE_DISCHARGE, 1),   // enable timed discharge
+                    rw(HR_BATTERY_SOC_RESERVE, *soc_reserve),
+                ]
+            }
+            ControlCommand::PauseBattery => {
+                vec![rw(HR_BATTERY_SOC_RESERVE, 100)]
+            }
+        };
+
+        // Validate all addresses are in the whitelist
+        for w in &writes {
+            if !SAFE_WRITE_REGS.contains(&w.address) {
+                return Err(format!(
+                    "register address {} not in safe write list",
+                    w.address
+                ));
+            }
         }
 
-        ControlCommand::SetReserve { soc } => {
-            validate_soc(*soc)?;
-            Ok(vec![EncodedWrite {
-                address: HR_BATTERY_RESERVE_SOC,
-                values: vec![*soc as u16],
-            }])
-        }
-
-        ControlCommand::SetChargeRate { rate } => {
-            validate_rate(*rate)?;
-            Ok(vec![EncodedWrite {
-                address: HR_BATTERY_CHARGE_RATE,
-                values: vec![*rate],
-            }])
-        }
-
-        ControlCommand::SetDischargeRate { rate } => {
-            validate_rate(*rate)?;
-            Ok(vec![EncodedWrite {
-                address: HR_BATTERY_DISCHARGE_RATE,
-                values: vec![*rate],
-            }])
-        }
-
-        ControlCommand::SetTargetSoc { soc } => {
-            validate_soc(*soc)?;
-            Ok(vec![EncodedWrite {
-                address: HR_TARGET_SOC,
-                values: vec![*soc as u16],
-            }])
-        }
-
-        ControlCommand::SetChargeSlot { slot, config } => {
-            validate_slot(*slot, /* is_charge */ true)?;
-            validate_schedule(config)?;
-            let base = charge_slot_base((*slot - 1) as u32);
-            Ok(vec![encode_slot(base, config)])
-        }
-
-        ControlCommand::SetDischargeSlot { slot, config } => {
-            validate_slot(*slot, /* is_charge */ false)?;
-            validate_schedule(config)?;
-            let base = discharge_slot_base((*slot - 1) as u32);
-            Ok(vec![encode_slot(base, config)])
-        }
-
-        ControlCommand::ForceCharge { minutes } => {
-            validate_duration(*minutes)?;
-            Ok(vec![EncodedWrite {
-                address: HR_FORCE_CHARGE_ENABLE,
-                values: vec![1, *minutes],
-            }])
-        }
-
-        ControlCommand::ForceDischarge { minutes } => {
-            validate_duration(*minutes)?;
-            Ok(vec![EncodedWrite {
-                address: HR_FORCE_DISCHARGE_ENABLE,
-                values: vec![1, *minutes],
-            }])
-        }
-
-        ControlCommand::PauseBattery { minutes } => {
-            validate_duration(*minutes)?;
-            Ok(vec![EncodedWrite {
-                address: HR_PAUSE_BATTERY_ENABLE,
-                values: vec![1, *minutes],
-            }])
-        }
-
-        ControlCommand::SyncClock => {
-            let now = chrono::Local::now();
-            Ok(vec![EncodedWrite {
-                address: HR_CLOCK_YEAR,
-                values: vec![
-                    (now.year() - 2000) as u16, // year offset from 2000
-                    now.month() as u16,
-                    now.day() as u16,
-                    now.hour() as u16,
-                    now.minute() as u16,
-                    now.second() as u16,
-                ],
-            }])
-        }
+        Ok(writes)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
+fn rw(address: u16, value: u16) -> RegisterWrite {
+    RegisterWrite { address, value }
+}
 
-fn validate_soc(soc: u8) -> Result<(), EncoderError> {
-    if soc > 100 {
-        Err(EncoderError::SocOutOfRange(soc))
+fn validate_range(val: u16, min: u16, max: u16, name: &str) -> Result<(), String> {
+    if val < min || val > max {
+        Err(format!("{} must be {}-{}, got {}", name, min, max, val))
     } else {
         Ok(())
     }
 }
 
-fn validate_rate(rate: u16) -> Result<(), EncoderError> {
-    if rate > MAX_RATE_W {
-        Err(EncoderError::RateOutOfRange(rate))
-    } else {
-        Ok(())
-    }
-}
-
-fn validate_duration(minutes: u16) -> Result<(), EncoderError> {
-    if minutes == 0 || minutes > MAX_DURATION_MINUTES {
-        Err(EncoderError::DurationOutOfRange(minutes))
-    } else {
-        Ok(())
-    }
-}
-
-fn validate_slot(slot: u8, is_charge: bool) -> Result<(), EncoderError> {
-    let max = if is_charge { 3 } else { 2 };
-    if slot < 1 || slot > max {
-        Err(EncoderError::InvalidSlot(slot))
-    } else {
-        Ok(())
-    }
-}
-
-fn validate_schedule(slot: &ScheduleSlot) -> Result<(), EncoderError> {
-    if slot.start_hour > 23
-        || slot.start_minute > 59
-        || slot.end_hour > 23
-        || slot.end_minute > 59
-    {
-        return Err(EncoderError::InvalidScheduleTime {
-            start_h: slot.start_hour,
-            start_m: slot.start_minute,
-            end_h: slot.end_hour,
-            end_m: slot.end_minute,
-        });
-    }
-    validate_soc(slot.target_soc)?;
-    Ok(())
-}
-
-fn encode_slot(base: u16, slot: &ScheduleSlot) -> EncodedWrite {
-    EncodedWrite {
-        address: base,
-        values: vec![
-            slot.start_hour as u16,
-            slot.start_minute as u16,
-            slot.end_hour as u16,
-            slot.end_minute as u16,
-            slot.target_soc as u16,
-            u16::from(slot.enabled),
-        ],
-    }
-}
-
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Tests
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Helper to build a schedule slot.
-    fn make_slot(
-        enabled: bool,
-        start_h: u8,
-        start_m: u8,
-        end_h: u8,
-        end_m: u8,
-        target_soc: u8,
-    ) -> ScheduleSlot {
-        ScheduleSlot {
-            enabled,
-            start_hour: start_h,
-            start_minute: start_m,
-            end_hour: end_h,
-            end_minute: end_m,
-            target_soc,
-        }
-    }
-
-    // -- SetBatteryMode -------------------------------------------------------
-
     #[test]
-    fn encode_set_battery_mode_eco() {
-        let cmd = ControlCommand::SetBatteryMode {
-            mode: BatteryMode::Eco,
-        };
-        let writes = encode_command(&cmd).unwrap();
+    fn set_battery_power_mode() {
+        let cmd = ControlCommand::SetBatteryPowerMode { mode: 1 };
+        let writes = cmd.encode().unwrap();
         assert_eq!(writes.len(), 1);
-        assert_eq!(writes[0].address, HR_BATTERY_MODE);
-        assert_eq!(writes[0].values, vec![1]);
+        assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
+        assert_eq!(writes[0].value, 1);
     }
 
     #[test]
-    fn encode_set_battery_mode_all_variants() {
-        for (mode, expected) in [
-            (BatteryMode::Paused, 0u16),
-            (BatteryMode::Eco, 1),
-            (BatteryMode::TimedDemand, 2),
-            (BatteryMode::TimedExport, 3),
-        ] {
-            let cmd = ControlCommand::SetBatteryMode { mode };
-            let writes = encode_command(&cmd).unwrap();
-            assert_eq!(writes[0].values, vec![expected], "failed for {mode:?}");
-        }
-    }
-
-    // -- SetReserve -----------------------------------------------------------
-
-    #[test]
-    fn encode_set_reserve_valid() {
-        let cmd = ControlCommand::SetReserve { soc: 20 };
-        let writes = encode_command(&cmd).unwrap();
-        assert_eq!(writes[0].address, HR_BATTERY_RESERVE_SOC);
-        assert_eq!(writes[0].values, vec![20]);
+    fn set_eco_mode() {
+        let cmd = ControlCommand::SetEcoMode { soc_reserve: 4 };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 3);
+        assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
+        assert_eq!(writes[0].value, 1);
+        assert_eq!(writes[1].address, HR_ENABLE_DISCHARGE);
+        assert_eq!(writes[1].value, 0);
+        assert_eq!(writes[2].address, HR_BATTERY_SOC_RESERVE);
+        assert_eq!(writes[2].value, 4);
     }
 
     #[test]
-    fn encode_set_reserve_zero_is_valid() {
-        let cmd = ControlCommand::SetReserve { soc: 0 };
-        let writes = encode_command(&cmd).unwrap();
-        assert_eq!(writes[0].values, vec![0]);
+    fn set_timed_export_mode() {
+        let cmd = ControlCommand::SetTimedExportMode { soc_reserve: 10 };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 3);
+        assert_eq!(writes[0].value, 0); // export
+        assert_eq!(writes[1].value, 1); // enable discharge
     }
 
     #[test]
-    fn encode_set_reserve_100_is_valid() {
-        let cmd = ControlCommand::SetReserve { soc: 100 };
-        let writes = encode_command(&cmd).unwrap();
-        assert_eq!(writes[0].values, vec![100]);
-    }
-
-    #[test]
-    fn encode_set_reserve_rejects_101() {
-        let cmd = ControlCommand::SetReserve { soc: 101 };
-        let err = encode_command(&cmd).unwrap_err();
-        assert!(matches!(err, EncoderError::SocOutOfRange(101)));
-    }
-
-    // -- SetChargeRate --------------------------------------------------------
-
-    #[test]
-    fn encode_set_charge_rate_valid() {
-        let cmd = ControlCommand::SetChargeRate { rate: 2500 };
-        let writes = encode_command(&cmd).unwrap();
-        assert_eq!(writes[0].address, HR_BATTERY_CHARGE_RATE);
-        assert_eq!(writes[0].values, vec![2500]);
-    }
-
-    #[test]
-    fn encode_set_charge_rate_max_boundary() {
-        let cmd = ControlCommand::SetChargeRate { rate: 5000 };
-        assert!(encode_command(&cmd).is_ok());
-    }
-
-    #[test]
-    fn encode_set_charge_rate_rejects_over_max() {
-        let cmd = ControlCommand::SetChargeRate { rate: 5001 };
-        let err = encode_command(&cmd).unwrap_err();
-        assert!(matches!(err, EncoderError::RateOutOfRange(5001)));
-    }
-
-    // -- SetDischargeRate -----------------------------------------------------
-
-    #[test]
-    fn encode_set_discharge_rate_valid() {
-        let cmd = ControlCommand::SetDischargeRate { rate: 3000 };
-        let writes = encode_command(&cmd).unwrap();
-        assert_eq!(writes[0].address, HR_BATTERY_DISCHARGE_RATE);
-        assert_eq!(writes[0].values, vec![3000]);
-    }
-
-    #[test]
-    fn encode_set_discharge_rate_rejects_over_max() {
-        let cmd = ControlCommand::SetDischargeRate { rate: 6000 };
-        let err = encode_command(&cmd).unwrap_err();
-        assert!(matches!(err, EncoderError::RateOutOfRange(6000)));
-    }
-
-    // -- SetTargetSoc ---------------------------------------------------------
-
-    #[test]
-    fn encode_set_target_soc_valid() {
-        let cmd = ControlCommand::SetTargetSoc { soc: 80 };
-        let writes = encode_command(&cmd).unwrap();
-        assert_eq!(writes[0].address, HR_TARGET_SOC);
-        assert_eq!(writes[0].values, vec![80]);
-    }
-
-    #[test]
-    fn encode_set_target_soc_rejects_over_100() {
-        let cmd = ControlCommand::SetTargetSoc { soc: 150 };
-        let err = encode_command(&cmd).unwrap_err();
-        assert!(matches!(err, EncoderError::SocOutOfRange(150)));
-    }
-
-    // -- SetChargeSlot --------------------------------------------------------
-
-    #[test]
-    fn encode_set_charge_slot_1() {
-        let slot = make_slot(true, 0, 30, 6, 0, 100);
-        let cmd = ControlCommand::SetChargeSlot { slot: 1, config: slot };
-        let writes = encode_command(&cmd).unwrap();
-        // Charge slot 1 base = charge_slot_base(0) = 5
-        assert_eq!(writes[0].address, 5);
-        assert_eq!(writes[0].values, vec![0, 30, 6, 0, 100, 1]);
-    }
-
-    #[test]
-    fn encode_set_charge_slot_2() {
-        let slot = make_slot(false, 12, 0, 14, 0, 50);
-        let cmd = ControlCommand::SetChargeSlot { slot: 2, config: slot };
-        let writes = encode_command(&cmd).unwrap();
-        // Charge slot 2 base = charge_slot_base(1) = 11
-        assert_eq!(writes[0].address, 11);
-        assert_eq!(writes[0].values, vec![12, 0, 14, 0, 50, 0]);
-    }
-
-    #[test]
-    fn encode_set_charge_slot_3() {
-        let slot = make_slot(true, 23, 59, 23, 59, 0);
-        let cmd = ControlCommand::SetChargeSlot { slot: 3, config: slot };
-        let writes = encode_command(&cmd).unwrap();
-        // Charge slot 3 base = charge_slot_base(2) = 17
-        assert_eq!(writes[0].address, 17);
-    }
-
-    #[test]
-    fn encode_set_charge_slot_rejects_slot_0() {
-        let slot = make_slot(true, 0, 0, 6, 0, 100);
-        let cmd = ControlCommand::SetChargeSlot { slot: 0, config: slot };
-        let err = encode_command(&cmd).unwrap_err();
-        assert!(matches!(err, EncoderError::InvalidSlot(0)));
-    }
-
-    #[test]
-    fn encode_set_charge_slot_rejects_slot_4() {
-        let slot = make_slot(true, 0, 0, 6, 0, 100);
-        let cmd = ControlCommand::SetChargeSlot { slot: 4, config: slot };
-        let err = encode_command(&cmd).unwrap_err();
-        assert!(matches!(err, EncoderError::InvalidSlot(4)));
-    }
-
-    #[test]
-    fn encode_set_charge_slot_rejects_bad_hour() {
-        let slot = make_slot(true, 24, 0, 6, 0, 100);
-        let cmd = ControlCommand::SetChargeSlot { slot: 1, config: slot };
-        let err = encode_command(&cmd).unwrap_err();
-        assert!(matches!(
-            err,
-            EncoderError::InvalidScheduleTime { .. }
-        ));
-    }
-
-    #[test]
-    fn encode_set_charge_slot_rejects_bad_minute() {
-        let slot = make_slot(true, 0, 60, 6, 0, 100);
-        let cmd = ControlCommand::SetChargeSlot { slot: 1, config: slot };
-        let err = encode_command(&cmd).unwrap_err();
-        assert!(matches!(
-            err,
-            EncoderError::InvalidScheduleTime { .. }
-        ));
-    }
-
-    #[test]
-    fn encode_set_charge_slot_rejects_bad_soc() {
-        let slot = make_slot(true, 0, 0, 6, 0, 101);
-        let cmd = ControlCommand::SetChargeSlot { slot: 1, config: slot };
-        let err = encode_command(&cmd).unwrap_err();
-        assert!(matches!(err, EncoderError::SocOutOfRange(101)));
-    }
-
-    // -- SetDischargeSlot -----------------------------------------------------
-
-    #[test]
-    fn encode_set_discharge_slot_1() {
-        let slot = make_slot(true, 16, 0, 19, 0, 10);
-        let cmd = ControlCommand::SetDischargeSlot { slot: 1, config: slot };
-        let writes = encode_command(&cmd).unwrap();
-        // Discharge slot 1 base = discharge_slot_base(0) = 23
-        assert_eq!(writes[0].address, 23);
-        assert_eq!(writes[0].values, vec![16, 0, 19, 0, 10, 1]);
-    }
-
-    #[test]
-    fn encode_set_discharge_slot_2() {
-        let slot = make_slot(true, 20, 0, 22, 30, 20);
-        let cmd = ControlCommand::SetDischargeSlot { slot: 2, config: slot };
-        let writes = encode_command(&cmd).unwrap();
-        // Discharge slot 2 base = discharge_slot_base(1) = 29
-        assert_eq!(writes[0].address, 29);
-    }
-
-    #[test]
-    fn encode_set_discharge_slot_rejects_slot_3() {
-        let slot = make_slot(true, 0, 0, 6, 0, 100);
-        let cmd = ControlCommand::SetDischargeSlot { slot: 3, config: slot };
-        let err = encode_command(&cmd).unwrap_err();
-        assert!(matches!(err, EncoderError::InvalidSlot(3)));
-    }
-
-    #[test]
-    fn encode_set_discharge_slot_rejects_slot_0() {
-        let slot = make_slot(true, 0, 0, 6, 0, 100);
-        let cmd = ControlCommand::SetDischargeSlot { slot: 0, config: slot };
-        let err = encode_command(&cmd).unwrap_err();
-        assert!(matches!(err, EncoderError::InvalidSlot(0)));
-    }
-
-    // -- ForceCharge ----------------------------------------------------------
-
-    #[test]
-    fn encode_force_charge() {
-        let cmd = ControlCommand::ForceCharge { minutes: 30 };
-        let writes = encode_command(&cmd).unwrap();
-        assert_eq!(writes[0].address, HR_FORCE_CHARGE_ENABLE);
-        assert_eq!(writes[0].values, vec![1, 30]);
-    }
-
-    #[test]
-    fn encode_force_charge_rejects_zero() {
-        let cmd = ControlCommand::ForceCharge { minutes: 0 };
-        let err = encode_command(&cmd).unwrap_err();
-        assert!(matches!(err, EncoderError::DurationOutOfRange(0)));
-    }
-
-    // -- ForceDischarge -------------------------------------------------------
-
-    #[test]
-    fn encode_force_discharge() {
-        let cmd = ControlCommand::ForceDischarge { minutes: 60 };
-        let writes = encode_command(&cmd).unwrap();
-        assert_eq!(writes[0].address, HR_FORCE_DISCHARGE_ENABLE);
-        assert_eq!(writes[0].values, vec![1, 60]);
-    }
-
-    #[test]
-    fn encode_force_discharge_rejects_over_24h() {
-        let cmd = ControlCommand::ForceDischarge { minutes: 1441 };
-        let err = encode_command(&cmd).unwrap_err();
-        assert!(matches!(err, EncoderError::DurationOutOfRange(1441)));
-    }
-
-    // -- PauseBattery ---------------------------------------------------------
-
-    #[test]
-    fn encode_pause_battery() {
-        let cmd = ControlCommand::PauseBattery { minutes: 45 };
-        let writes = encode_command(&cmd).unwrap();
-        assert_eq!(writes[0].address, HR_PAUSE_BATTERY_ENABLE);
-        assert_eq!(writes[0].values, vec![1, 45]);
-    }
-
-    #[test]
-    fn encode_pause_battery_rejects_zero() {
-        let cmd = ControlCommand::PauseBattery { minutes: 0 };
-        let err = encode_command(&cmd).unwrap_err();
-        assert!(matches!(err, EncoderError::DurationOutOfRange(0)));
-    }
-
-    // -- SyncClock ------------------------------------------------------------
-
-    #[test]
-    fn encode_sync_clock() {
-        let cmd = ControlCommand::SyncClock;
-        let writes = encode_command(&cmd).unwrap();
-        assert_eq!(writes.len(), 1);
-        assert_eq!(writes[0].address, HR_CLOCK_YEAR);
-        assert_eq!(writes[0].values.len(), 6);
-        // The values should be valid ranges for year-offset, month, day, hour, minute, second
-        let v = &writes[0].values;
-        assert!(v[0] <= 100, "year offset should be <= 100"); // 2000-2100 => 0-100
-        assert!(v[1] >= 1 && v[1] <= 12, "month should be 1-12");
-        assert!(v[2] >= 1 && v[2] <= 31, "day should be 1-31");
-        assert!(v[3] <= 23, "hour should be 0-23");
-        assert!(v[4] <= 59, "minute should be 0-59");
-        assert!(v[5] <= 59, "second should be 0-59");
-    }
-
-    // -- Error display --------------------------------------------------------
-
-    #[test]
-    fn encoder_error_messages() {
-        let e = EncoderError::InvalidSlot(5);
-        assert!(format!("{e}").contains("5"));
-
-        let e = EncoderError::SocOutOfRange(200);
-        assert!(format!("{e}").contains("200"));
-
-        let e = EncoderError::RateOutOfRange(9999);
-        assert!(format!("{e}").contains("9999"));
-
-        let e = EncoderError::DurationOutOfRange(0);
-        assert!(format!("{e}").contains("0"));
-
-        let e = EncoderError::InvalidScheduleTime {
-            start_h: 25,
-            start_m: 0,
-            end_h: 6,
-            end_m: 0,
+    fn set_charge_slot() {
+        let cmd = ControlCommand::SetChargeSlot1 {
+            start: 600,
+            end: 1000,
         };
-        let msg = format!("{e}");
-        assert!(msg.contains("25:00"));
-        assert!(msg.contains("6:00"));
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0].address, HR_CHARGE_SLOT_1_START);
+        assert_eq!(writes[0].value, 600);
+        assert_eq!(writes[1].address, HR_CHARGE_SLOT_1_END);
+        assert_eq!(writes[1].value, 1000);
+    }
+
+    #[test]
+    fn set_soc_reserve_validates() {
+        let cmd = ControlCommand::SetBatterySocReserve { reserve: 101 };
+        assert!(cmd.encode().is_err());
+    }
+
+    #[test]
+    fn set_charge_limit_validates() {
+        let cmd = ControlCommand::SetChargeLimit { limit: 51 };
+        assert!(cmd.encode().is_err());
+    }
+
+    #[test]
+    fn pause_battery() {
+        let cmd = ControlCommand::PauseBattery;
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes[0].address, HR_BATTERY_SOC_RESERVE);
+        assert_eq!(writes[0].value, 100);
+    }
+
+    #[test]
+    fn all_writes_are_safe() {
+        // Verify all command encodings only produce whitelisted addresses
+        let commands = vec![
+            ControlCommand::SetBatteryPowerMode { mode: 0 },
+            ControlCommand::SetBatteryPowerMode { mode: 1 },
+            ControlCommand::SetEnableDischarge { enabled: true },
+            ControlCommand::SetEnableDischarge { enabled: false },
+            ControlCommand::SetEnableCharge { enabled: true },
+            ControlCommand::SetBatterySocReserve { reserve: 50 },
+            ControlCommand::SetChargeTargetSoc { soc: 80 },
+            ControlCommand::SetChargeSlot1 {
+                start: 600,
+                end: 1000,
+            },
+            ControlCommand::SetChargeSlot2 { start: 0, end: 0 },
+            ControlCommand::SetDischargeSlot1 {
+                start: 1600,
+                end: 1900,
+            },
+            ControlCommand::SetDischargeSlot2 { start: 0, end: 0 },
+            ControlCommand::SetChargeLimit { limit: 30 },
+            ControlCommand::SetDischargeLimit { limit: 40 },
+            ControlCommand::SetEcoMode { soc_reserve: 4 },
+            ControlCommand::SetTimedDemandMode { soc_reserve: 10 },
+            ControlCommand::SetTimedExportMode { soc_reserve: 10 },
+            ControlCommand::PauseBattery,
+        ];
+        for cmd in &commands {
+            let writes = cmd.encode().unwrap();
+            for w in &writes {
+                assert!(
+                    SAFE_WRITE_REGS.contains(&w.address),
+                    "address {} not whitelisted for {:?}",
+                    w.address,
+                    cmd
+                );
+            }
+        }
     }
 }

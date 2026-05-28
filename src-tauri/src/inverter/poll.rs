@@ -85,7 +85,7 @@ impl Default for PollSettings {
             host: String::new(),
             port: 8899,
             serial: String::new(),
-            interval_secs: 10,
+            interval_secs: 60,
         }
     }
 }
@@ -220,7 +220,11 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 });
             }
             Err(e) => {
-                tracing::warn!("Connection to {}:{} failed: {e}", settings.host, settings.port);
+                tracing::warn!(
+                    "Connection to {}:{} failed: {e}",
+                    settings.host,
+                    settings.port
+                );
 
                 {
                     let mut cs = state.connection_state.lock().await;
@@ -250,7 +254,7 @@ mod tests {
         assert!(s.host.is_empty());
         assert!(s.serial.is_empty());
         assert_eq!(s.port, 8899);
-        assert_eq!(s.interval_secs, 10);
+        assert_eq!(s.interval_secs, 60);
     }
 
     #[test]
@@ -274,9 +278,7 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"snapshot\""));
         let de: PollMessage = serde_json::from_str(&json).unwrap();
-        assert!(
-            matches!(de, PollMessage::Snapshot(s) if s.timestamp == 0)
-        );
+        assert!(matches!(de, PollMessage::Snapshot(s) if s.timestamp == 0));
     }
 
     #[test]

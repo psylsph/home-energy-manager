@@ -11,7 +11,7 @@ export interface InverterSnapshot {
   soc: number;
   battery_voltage: number;
   battery_current: number;
-  battery_state: 'idle' | 'charging' | 'discharging' | 'paused';
+  battery_state: 'idle' | 'charging' | 'discharging';
   battery_temperature: number;
   battery_capacity_kwh: number;
   grid_power: number;
@@ -26,7 +26,7 @@ export interface InverterSnapshot {
   today_discharge_kwh: number;
   today_consumption_kwh: number;
   battery_modules: BatteryModule[];
-  battery_mode: 'paused' | 'eco' | 'timed_demand' | 'timed_export';
+  battery_mode: 'unknown' | 'eco' | 'eco_paused' | 'timed_demand' | 'timed_export' | 'export_paused';
   battery_reserve: number;
   charge_rate: number;
   discharge_rate: number;

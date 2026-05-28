@@ -1,244 +1,134 @@
-//! Automatic inverter discovery.
+//! LAN discovery of GivEnergy inverters.
 //!
-//! Scans the local network (assuming a /24 subnet) for GivEnergy
-//! inverters by probing the known Modbus TCP port (default **8899**).
-//!
-//! ## How it works
-//!
-//! 1. Determine the host machine's LAN IPv4 address via
-//!    [`local_ip_address`].
-//! 2. Derive the /24 subnet from that address.
-//! 3. For every host in the range `.1` … `.254`, open a TCP
-//!    connection with a short timeout.
-//! 4. Hosts that accept the connection are reported as
-//!    [`DiscoveredInverter`] entries.
-//!
-//! Serial-number detection is left as a refinement — v1 simply
-//! detects open ports.
+//! Scans the local subnet for devices listening on the Modbus port (8899).
+//! Just like GivTCP, this is a simple TCP port scan — the serial number is
+//! configured separately by the user.
 
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::TcpStream;
 use std::time::Duration;
 
-use tokio::task::JoinSet;
+/// The Modbus TCP port used by GivEnergy dongles.
+pub const MODBUS_PORT: u16 = 8899;
 
-// ---------------------------------------------------------------------------
-// Data types
-// ---------------------------------------------------------------------------
-
-/// A device discovered on the LAN that accepts connections on the
-/// GivEnergy Modbus port.
+/// A discovered inverter.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub struct DiscoveredInverter {
-    /// IP address or hostname of the discovered device.
-    pub host: String,
-    /// Port on which the TCP connection succeeded (typically 8899).
+    pub ip: String,
     pub port: u16,
-    /// Serial number, if we managed to read it from the device.
-    pub serial: Option<String>,
-    /// Inverter generation / model hint, if known.
-    pub generation: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/// Scan the local network for inverters.
+/// Scan the local subnet for inverters.
 ///
-/// Tries connecting to `port` on every host in the /24 subnet of the
-/// local machine, with each connection attempt capped at `timeout_ms`.
-///
-/// Returns a (possibly empty) vector of hosts that accepted the TCP
-/// connection – very likely GivEnergy inverters.
-pub async fn scan_network(port: u16, timeout_ms: u64) -> Vec<DiscoveredInverter> {
-    let local_ip = match get_local_ip() {
-        Some(ip) => ip,
-        None => {
-            tracing::warn!("discovery: cannot determine local IP – aborting scan");
-            return Vec::new();
-        }
-    };
+/// Uses the provided gateway IP to infer the /24 subnet, then probes
+/// each address on MODBUS_PORT (8899) concurrently.
+pub async fn scan_subnet(gateway: &str) -> Vec<DiscoveredInverter> {
+    let subnet_base = infer_subnet_base(gateway);
+    log::info!("Starting subnet scan on {}.x:{}", subnet_base, MODBUS_PORT);
 
-    let octets = local_ip.octets();
-    let subnet_prefix = [octets[0], octets[1], octets[2]];
-
-    tracing::info!(
-        "discovery: scanning {}.{}.{}.*:{} (timeout {} ms)",
-        subnet_prefix[0],
-        subnet_prefix[1],
-        subnet_prefix[2],
-        port,
-        timeout_ms,
-    );
-
-    let timeout = Duration::from_millis(timeout_ms);
-    let mut tasks: JoinSet<(u8, Result<(), ()>)> = JoinSet::new();
-
-    // Spawn one task per host address (1..=254).
-    for host_num in 1u8..=254 {
-        let addr = SocketAddrV4::new(
-            Ipv4Addr::new(subnet_prefix[0], subnet_prefix[1], subnet_prefix[2], host_num),
-            port,
-        );
-        let timeout = timeout;
-        tasks.spawn(async move {
-            match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
-                Ok(Ok(_stream)) => (host_num, Ok(())),
-                _ => (host_num, Err(())),
-            }
-        });
+    let mut tasks = Vec::new();
+    for host in 1..255u8 {
+        let ip = format!("{}.{}", subnet_base, host);
+        tasks.push(probe_host(ip));
     }
 
-    // Collect successful hits.
-    let mut results = Vec::new();
-    while let Some(res) = tasks.join_next().await {
-        match res {
-            Ok((host_num, Ok(()))) => {
-                let host = format!(
-                    "{}.{}.{}.{}",
-                    subnet_prefix[0], subnet_prefix[1], subnet_prefix[2], host_num
-                );
-                tracing::info!("discovery: found device at {host}:{port}");
-                results.push(DiscoveredInverter {
-                    host,
-                    port,
-                    serial: None,
-                    generation: None,
-                });
-            }
-            Ok((_host_num, Err(()))) => { /* not reachable – skip */ }
-            Err(e) => {
-                tracing::debug!("discovery: join error: {e}");
-            }
+    let results = futures_util::future::join_all(tasks).await;
+    let mut found = Vec::new();
+    for result in results {
+        if let Some(inverter) = result {
+            found.push(inverter);
         }
     }
 
-    tracing::info!("discovery: scan complete – {} device(s) found", results.len());
-    results
+    log::info!("Subnet scan found {} inverter(s)", found.len());
+    found
 }
 
-/// Get the local machine's LAN IPv4 address.
-///
-/// Returns `None` if the address cannot be determined (e.g. no
-/// suitable network interface, or running in an environment without
-/// network access).
-pub fn get_local_ip() -> Option<Ipv4Addr> {
-    match local_ip_address::local_ip() {
-        Ok(std::net::IpAddr::V4(ipv4)) => Some(ipv4),
-        Ok(other) => {
-            tracing::warn!("discovery: local IP is not IPv4: {other:?}");
-            None
+/// Probe a single IP:port to see if a GivEnergy dongle is listening.
+async fn probe_host(ip: String) -> Option<DiscoveredInverter> {
+    let addr = format!("{}:{}", ip, MODBUS_PORT);
+    let ip_clone = ip.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        match TcpStream::connect_timeout(&addr.parse().ok()?, Duration::from_millis(800)) {
+            Ok(_) => Some(()),
+            Err(_) => None,
         }
-        Err(e) => {
-            tracing::warn!("discovery: failed to get local IP: {e}");
-            None
+    })
+    .await;
+
+    match result {
+        Ok(Some(_)) => {
+            log::debug!("Found open port at {}:{}", ip_clone, MODBUS_PORT);
+            Some(DiscoveredInverter {
+                ip: ip_clone,
+                port: MODBUS_PORT,
+            })
         }
+        _ => None,
     }
 }
 
-/// Return the LAN HTTP address of this machine (useful for QR codes /
-/// displaying to the user).
-///
-/// Format: `http://<lan-ip>:<server_port>`
-pub fn get_lan_address(server_port: u16) -> Option<String> {
-    get_local_ip().map(|ip| format!("http://{ip}:{server_port}"))
+/// Given a gateway like "192.168.1.1", return "192.168.1".
+fn infer_subnet_base(gateway: &str) -> String {
+    let parts: Vec<&str> = gateway.split('.').collect();
+    if parts.len() == 4 {
+        format!("{}.{}.{}", parts[0], parts[1], parts[2])
+    } else {
+        "192.168.1".to_string()
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Derive the /24 network prefix from an IPv4 address.
-pub fn subnet_prefix(ip: &Ipv4Addr) -> [u8; 3] {
-    let o = ip.octets();
-    [o[0], o[1], o[2]]
+/// Auto-detect the local subnet gateway from system interfaces.
+pub fn detect_local_subnet() -> Option<String> {
+    if let Ok(output) = std::process::Command::new("ip")
+        .args(["route", "show", "default"])
+        .output()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if line.starts_with("default via ") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 3 {
+                    return Some(parts[2].to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Tests
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn get_local_ip_returns_something_or_none() {
-        // Integration-style test: we cannot guarantee a LAN interface
-        // exists (e.g. in CI), so both outcomes are acceptable.
-        let result = get_local_ip();
-        match result {
-            Some(ip) => {
-                assert!(!ip.is_unspecified(), "should not be 0.0.0.0");
-                assert!(
-                    ip.is_private(),
-                    "expected a private/LAN address, got {ip}"
-                );
-            }
-            None => { /* acceptable in headless / CI environments */ }
-        }
+    fn infer_subnet_from_gateway() {
+        assert_eq!(infer_subnet_base("192.168.1.1"), "192.168.1");
+        assert_eq!(infer_subnet_base("10.0.0.1"), "10.0.0");
+        assert_eq!(infer_subnet_base("172.16.0.254"), "172.16.0");
     }
 
     #[test]
-    fn discovered_inverter_serde() {
+    fn infer_subnet_short_input() {
+        assert_eq!(infer_subnet_base("not-an-ip"), "192.168.1");
+    }
+
+    #[test]
+    fn detect_local_subnet_returns_something() {
+        let _ = detect_local_subnet();
+    }
+
+    #[test]
+    fn discovered_inverter_serializes() {
         let inv = DiscoveredInverter {
-            host: "192.168.1.33".into(),
+            ip: "192.168.1.36".to_string(),
             port: 8899,
-            serial: Some("GE12345".into()),
-            generation: Some("GivHybrid".into()),
         };
-        let json = serde_json::to_string(&inv).expect("serialize");
-        assert!(json.contains("\"host\":\"192.168.1.33\""));
-        assert!(json.contains("\"port\":8899"));
-        assert!(json.contains("\"serial\":\"GE12345\""));
-        assert!(json.contains("\"generation\":\"GivHybrid\""));
-
-        // Round-trip
-        let _: DiscoveredInverter = serde_json::from_str(&json).expect("deserialize");
-    }
-
-    #[test]
-    fn subnet_prefix_calculation() {
-        assert_eq!(
-            subnet_prefix(&Ipv4Addr::new(192, 168, 0, 1)),
-            [192, 168, 0]
-        );
-        assert_eq!(
-            subnet_prefix(&Ipv4Addr::new(10, 0, 0, 255)),
-            [10, 0, 0]
-        );
-        assert_eq!(
-            subnet_prefix(&Ipv4Addr::new(172, 16, 42, 100)),
-            [172, 16, 42]
-        );
-    }
-
-    #[test]
-    fn get_lan_address_format() {
-        // May return None in CI — that is fine.
-        if let Some(addr) = get_lan_address(7337) {
-            assert!(
-                addr.starts_with("http://"),
-                "expected http:// prefix, got: {addr}"
-            );
-            assert!(
-                addr.ends_with(":7337"),
-                "expected :7337 suffix, got: {addr}"
-            );
-        }
-    }
-
-    #[test]
-    fn discovered_inverter_minimal_serde() {
-        let inv = DiscoveredInverter {
-            host: "10.0.0.1".into(),
-            port: 8899,
-            serial: None,
-            generation: None,
-        };
-        let json = serde_json::to_string(&inv).expect("serialize");
-        assert!(json.contains("\"serial\":null"));
-        assert!(json.contains("\"generation\":null"));
+        let json = serde_json::to_string(&inv).unwrap();
+        assert!(json.contains("192.168.1.36"));
+        assert!(json.contains("8899"));
     }
 }

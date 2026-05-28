@@ -17,7 +17,7 @@ export default function SettingsPage() {
   const [discoverError, setDiscoverError] = useState('');
 
   // Refresh interval
-  const [intervalSecs, setIntervalSecs] = useState(10);
+  const [intervalSecs, setIntervalSecs] = useState(60);
 
   // General
   const [saving, setSaving] = useState(false);
@@ -33,11 +33,12 @@ export default function SettingsPage() {
   useEffect(() => {
     (async () => {
       try {
-        const s = await apiGet<PollSettings>('/api/settings');
+        const res = await apiGet<{ok: boolean, data: PollSettings}>('/api/settings');
+        const s = res.data;
         setHost(s.host ?? '');
         setPort(s.port ?? 8899);
         setSerial(s.serial ?? '');
-        setIntervalSecs(s.interval_secs ?? 10);
+        setIntervalSecs(s.interval_secs ?? 60);
         setSettingsLoaded(true);
       } catch {
         setSettingsLoaded(true);
@@ -77,7 +78,13 @@ export default function SettingsPage() {
     setDiscoverError('');
     setDiscoverResults([]);
     try {
-      const results = await apiGet<DiscoveredInverter[]>('/api/discover');
+      const res = await apiGet<{ok: boolean, inverters: DiscoveredInverter[]}>('/api/discover');
+      const results = (res.inverters || []).map((inv: any) => ({
+        host: inv.ip || inv.host,
+        port: inv.port,
+        serial: inv.serial ?? null,
+        generation: inv.generation ?? null,
+      }));
       setDiscoverResults(results);
       if (results.length === 0) setDiscoverError('No inverters found on the network.');
     } catch {

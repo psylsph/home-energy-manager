@@ -8,10 +8,10 @@ pub mod ws;
 
 use std::sync::Arc;
 
-use axum::Router;
 use axum::routing::{get, post};
-use tower_http::cors::CorsLayer;
+use axum::Router;
 use tower_http::cors::Any;
+use tower_http::cors::CorsLayer;
 
 use crate::inverter::poll::AppState;
 
@@ -25,7 +25,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         // Data endpoints
         .route("/api/snapshot", get(api::get_snapshot))
-        .route("/api/settings", get(api::get_settings).post(api::update_settings))
+        .route(
+            "/api/settings",
+            get(api::get_settings).post(api::update_settings),
+        )
         // Control endpoints
         .route("/api/control/mode", post(api::set_mode))
         .route("/api/control/charge-slot", post(api::set_charge_slot))
@@ -33,10 +36,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/control/reserve", post(api::set_reserve))
         .route("/api/control/charge-rate", post(api::set_charge_rate))
         .route("/api/control/discharge-rate", post(api::set_discharge_rate))
-        .route("/api/control/force-charge", post(api::force_charge))
-        .route("/api/control/force-discharge", post(api::force_discharge))
         .route("/api/control/pause", post(api::pause_battery))
-        .route("/api/control/sync-clock", post(api::sync_clock))
         // Discovery
         .route("/api/discover", get(api::discover))
         // WebSocket real-time stream
@@ -53,7 +53,5 @@ pub async fn start_server(state: Arc<AppState>, bind_addr: &str, port: u16) {
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("Failed to bind HTTP server");
-    axum::serve(listener, app)
-        .await
-        .expect("HTTP server error");
+    axum::serve(listener, app).await.expect("HTTP server error");
 }

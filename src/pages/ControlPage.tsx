@@ -3,13 +3,14 @@ import { useInverterStore } from '../store/useInverterStore';
 import { apiPost } from '../lib/api';
 import type { ScheduleSlot } from '../lib/types';
 
-type BatteryMode = 'eco' | 'timed_demand' | 'timed_export' | 'paused';
+type BatteryMode = 'eco' | 'eco_paused' | 'timed_demand' | 'timed_export' | 'export_paused';
 
 const BATTERY_MODES: { key: BatteryMode; label: string }[] = [
   { key: 'eco', label: 'Eco' },
+  { key: 'eco_paused', label: 'Eco Paused' },
   { key: 'timed_demand', label: 'Timed Demand' },
   { key: 'timed_export', label: 'Timed Export' },
-  { key: 'paused', label: 'Paused' },
+  { key: 'export_paused', label: 'Export Paused' },
 ];
 
 interface ActionState {

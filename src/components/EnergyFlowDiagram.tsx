@@ -1,17 +1,25 @@
 import type { InverterSnapshot } from '../lib/types';
-import { formatPower, formatVoltage, formatPercent, formatEnergy } from '../lib/format';
+import { formatPower, formatPercent, formatEnergy, formatTemp } from '../lib/format';
 
 interface Props {
   snapshot: InverterSnapshot;
 }
 
-// Node positions in SVG viewBox (400 x 400)
+// Radial layout — Inverter hub at centre, four nodes at cardinal points.
+const W = 520;
+const H = 310;
+
 const NODES = {
-  solar:   { cx: 200, cy: 55,  color: '#F59E0B',  label: 'Solar' },
-  grid:    { cx: 55,  cy: 210, color: '#EF4444',   label: 'Grid' },
-  home:    { cx: 345, cy: 210, color: '#14B8A6',   label: 'Home' },
-  battery: { cx: 200, cy: 355, color: '#6366F1', label: 'Battery' },
+  inverter: { cx: W / 2, cy: 155, color: '#22D3EE', label: 'Inverter' },
+  solar:    { cx: W / 2, cy: 38,  color: '#F59E0B', label: 'Solar' },
+  grid:     { cx: 55,    cy: 155, color: '#EF4444', label: 'Grid' },
+  home:     { cx: W - 55, cy: 155, color: '#14B8A6', label: 'Home' },
+  battery:  { cx: W / 2, cy: 272, color: '#6366F1', label: 'Battery' },
 };
+
+// ---------------------------------------------------------------------------
+// Flow line
+// ---------------------------------------------------------------------------
 
 interface FlowDef {
   id: string;
@@ -19,6 +27,8 @@ interface FlowDef {
   to: { cx: number; cy: number };
   active: boolean;
   power: number;
+  /** Where to place the power label relative to the midpoint: 'above' | 'below' | 'left' | 'right' */
+  labelSide: 'above' | 'below' | 'left' | 'right';
 }
 
 function FlowLine({ flow }: { flow: FlowDef }) {
@@ -26,7 +36,6 @@ function FlowLine({ flow }: { flow: FlowDef }) {
   const dy = flow.to.cy - flow.from.cy;
   const len = Math.sqrt(dx * dx + dy * dy);
 
-  // Start/end offset so line starts at node edge
   const offset = 42;
   const ux = dx / len;
   const uy = dy / len;
@@ -35,29 +44,41 @@ function FlowLine({ flow }: { flow: FlowDef }) {
   const x2 = flow.to.cx - ux * offset;
   const y2 = flow.to.cy - uy * offset;
 
-  // Midpoint for power label
   const mx = (x1 + x2) / 2;
   const my = (y1 + y2) / 2;
 
+  // Label offset: push away from the line in the requested direction
+  const labelGap = 14;
+  let lx = mx;
+  let ly = my;
+  switch (flow.labelSide) {
+    case 'above': ly -= labelGap; break;
+    case 'below': ly += labelGap + 4; break;
+    case 'left':  lx -= labelGap; break;
+    case 'right': lx += labelGap; break;
+  }
+
+  const angle = Math.atan2(dy, dx) * 180 / Math.PI;
+
   return (
     <g>
-      {/* Base line (inactive) */}
+      {/* Track */}
       <line
         x1={x1} y1={y1} x2={x2} y2={y2}
         stroke="#21262D"
-        strokeWidth={3}
+        strokeWidth={2}
         strokeLinecap="round"
       />
-      {/* Active flow */}
+      {/* Animated flow */}
       {flow.active && (
         <>
           <line
             x1={x1} y1={y1} x2={x2} y2={y2}
             stroke="#22D3EE"
-            strokeWidth={3}
+            strokeWidth={2.5}
             strokeLinecap="round"
             strokeDasharray="8 6"
-            opacity={0.9}
+            opacity={0.85}
           >
             <animate
               attributeName="stroke-dashoffset"
@@ -69,17 +90,17 @@ function FlowLine({ flow }: { flow: FlowDef }) {
           </line>
           {/* Arrow at midpoint */}
           <polygon
-            points="0,-5 10,0 0,5"
+            points="0,-4.5 9,0 0,4.5"
             fill="#22D3EE"
-            transform={`translate(${mx},${my}) rotate(${Math.atan2(dy, dx) * 180 / Math.PI})`}
+            transform={`translate(${mx},${my}) rotate(${angle})`}
           />
           {/* Power label */}
           <text
-            x={mx}
-            y={my - 14}
+            x={lx}
+            y={ly}
             textAnchor="middle"
             fill="#F0F6FC"
-            fontSize="13"
+            fontSize="11.5"
             fontFamily="var(--font-mono, monospace)"
             fontWeight="600"
           >
@@ -91,121 +112,172 @@ function FlowLine({ flow }: { flow: FlowDef }) {
   );
 }
 
-function FlowNode({
-  cx, cy, color, label, primary, secondary,
-}: {
-  cx: number; cy: number; color: string; label: string;
-  primary: string; secondary: string;
-}) {
+// ---------------------------------------------------------------------------
+// Nodes
+// ---------------------------------------------------------------------------
+
+interface NodeProps {
+  cx: number;
+  cy: number;
+  color: string;
+  label: string;
+  value: string;
+  unit: string;
+  hub?: boolean;
+}
+
+function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
+  const r = hub ? 42 : 36;
   return (
     <g>
-      {/* Circle background */}
-      <circle cx={cx} cy={cy} r={38} fill="#161B22" stroke={color} strokeWidth={2.5} />
+      {/* Subtle outer glow */}
+      <circle cx={cx} cy={cy} r={r + 4} fill="none" stroke={color} strokeWidth={1} opacity={0.15} />
+      {/* Main circle */}
+      <circle cx={cx} cy={cy} r={r} fill="#0D1117" stroke={color} strokeWidth={hub ? 2.5 : 2} />
       {/* Label */}
       <text
-        x={cx} y={cy - 8}
+        x={cx} y={cy - 10}
         textAnchor="middle"
         fill={color}
-        fontSize="11"
-        fontWeight="600"
+        fontSize={hub ? 10 : 10.5}
+        fontWeight="700"
         fontFamily="var(--font-sans, sans-serif)"
+        letterSpacing="0.6"
       >
-        {label}
+        {label.toUpperCase()}
       </text>
-      {/* Primary value */}
+      {/* Value */}
       <text
-        x={cx} y={cy + 10}
+        x={cx} y={cy + 6}
         textAnchor="middle"
         fill="#F0F6FC"
         fontSize="14"
         fontWeight="700"
         fontFamily="var(--font-mono, monospace)"
       >
-        {primary}
+        {value}
       </text>
-      {/* Secondary */}
+      {/* Unit / secondary info */}
       <text
-        x={cx} y={cy + 24}
+        x={cx} y={cy + 20}
         textAnchor="middle"
         fill="#8B949E"
-        fontSize="10"
+        fontSize="9"
         fontFamily="var(--font-mono, monospace)"
       >
-        {secondary}
+        {unit}
       </text>
     </g>
   );
 }
 
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
+
 export default function EnergyFlowDiagram({ snapshot: s }: Props) {
-  const isChargingFromSolar = s.battery_state === 'charging' && s.solar_power > 0;
+  const isCharging = s.battery_state === 'charging';
   const isDischarging = s.battery_state === 'discharging';
+  const isExporting = s.grid_power > 0;
+  const isImporting = s.grid_power < 0;
 
   const flows: FlowDef[] = [
+    // Solar → Inverter (always top→centre)
     {
-      id: 'solar-home',
-      from: NODES.solar, to: NODES.home,
+      id: 'solar',
+      from: NODES.solar,
+      to: NODES.inverter,
       active: s.solar_power > 0,
       power: s.solar_power,
+      labelSide: 'right',
     },
+    // Inverter → Home (always centre→right)
     {
-      id: 'solar-battery',
-      from: NODES.solar, to: NODES.battery,
-      active: isChargingFromSolar,
+      id: 'home',
+      from: NODES.inverter,
+      to: NODES.home,
+      active: s.home_power > 0,
+      power: s.home_power,
+      labelSide: 'below',
+    },
+    // Grid → Inverter (importing, left→centre)
+    {
+      id: 'import',
+      from: NODES.grid,
+      to: NODES.inverter,
+      active: isImporting,
+      power: Math.abs(s.grid_power),
+      labelSide: 'above',
+    },
+    // Inverter → Grid (exporting, centre→left)
+    {
+      id: 'export',
+      from: NODES.inverter,
+      to: NODES.grid,
+      active: isExporting,
+      power: Math.abs(s.grid_power),
+      labelSide: 'above',
+    },
+    // Inverter → Battery (charging, centre→bottom)
+    {
+      id: 'charge',
+      from: NODES.inverter,
+      to: NODES.battery,
+      active: isCharging,
       power: Math.abs(s.battery_power),
+      labelSide: 'right',
     },
+    // Battery → Inverter (discharging, bottom→centre)
     {
-      id: 'battery-home',
-      from: NODES.battery, to: NODES.home,
+      id: 'discharge',
+      from: NODES.battery,
+      to: NODES.inverter,
       active: isDischarging,
       power: Math.abs(s.battery_power),
-    },
-    {
-      id: 'grid-home',
-      from: NODES.grid, to: NODES.home,
-      active: s.grid_power > 0,
-      power: s.grid_power,
-    },
-    {
-      id: 'solar-grid',
-      from: NODES.solar, to: NODES.grid,
-      active: s.grid_power < 0,
-      power: Math.abs(s.grid_power),
+      labelSide: 'right',
     },
   ];
 
   return (
-    <svg
-      viewBox="0 0 400 410"
-      className="w-full h-auto max-h-[500px]"
-      style={{ fontFamily: 'var(--font-sans, sans-serif)' }}
-    >
-      {/* Connection lines (rendered behind nodes) */}
-      {flows.map((f) => (
-        <FlowLine key={f.id} flow={f} />
-      ))}
+    <div className="flex justify-center">
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        className="w-full"
+        style={{ maxWidth: '560px', fontFamily: 'var(--font-sans, sans-serif)' }}
+      >
+        {/* Flow lines (drawn first, behind nodes) */}
+        {flows.map((f) => (
+          <FlowLine key={f.id} flow={f} />
+        ))}
 
-      {/* Nodes */}
-      <FlowNode
-        {...NODES.solar}
-        primary={formatPower(s.solar_power)}
-        secondary={formatVoltage(s.pv1_voltage)}
-      />
-      <FlowNode
-        {...NODES.grid}
-        primary={formatPower(s.grid_power)}
-        secondary={formatVoltage(s.grid_voltage)}
-      />
-      <FlowNode
-        {...NODES.home}
-        primary={formatPower(s.home_power)}
-        secondary={formatEnergy(s.today_consumption_kwh)}
-      />
-      <FlowNode
-        {...NODES.battery}
-        primary={formatPercent(s.soc)}
-        secondary={formatPower(s.battery_power)}
-      />
-    </svg>
+        {/* Nodes (drawn on top) */}
+        <FlowNode
+          {...NODES.solar}
+          value={formatPower(s.solar_power)}
+          unit={`${s.pv1_voltage.toFixed(0)}V · ${s.pv2_voltage.toFixed(0)}V`}
+        />
+        <FlowNode
+          {...NODES.grid}
+          value={formatPower(Math.abs(s.grid_power))}
+          unit={isImporting ? 'Import' : isExporting ? 'Export' : 'Idle'}
+        />
+        <FlowNode
+          {...NODES.home}
+          value={formatPower(s.home_power)}
+          unit={formatEnergy(s.today_consumption_kwh) + ' today'}
+        />
+        <FlowNode
+          {...NODES.battery}
+          value={formatPercent(s.soc)}
+          unit={formatPower(Math.abs(s.battery_power))}
+        />
+        <FlowNode
+          {...NODES.inverter}
+          hub
+          value={formatTemp(s.inverter_temperature)}
+          unit={s.device_type || '—'}
+        />
+      </svg>
+    </div>
   );
 }

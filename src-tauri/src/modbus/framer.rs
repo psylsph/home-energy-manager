@@ -71,7 +71,9 @@ pub enum FramerError {
     #[error("CRC mismatch: expected 0x{expected:04X}, calculated 0x{calculated:04X}")]
     CrcMismatch { expected: u16, calculated: u16 },
 
-    #[error("inner payload too short for CRC: need at least 3 bytes (slave + func + CRC), got {0}")]
+    #[error(
+        "inner payload too short for CRC: need at least 3 bytes (slave + func + CRC), got {0}"
+    )]
     InnerPayloadTooShort(usize),
 }
 
@@ -175,13 +177,13 @@ pub fn encode_frame(serial: &str, slave: u8, function: u8, payload: &[u8]) -> Ve
     // Assemble the full frame
     let mut frame = Vec::with_capacity(HEADER_SIZE + inner.len());
     frame.extend_from_slice(&TRANSACTION_ID.to_be_bytes()); // bytes 0-1
-    frame.extend_from_slice(&PROTOCOL_ID.to_be_bytes());    // bytes 2-3
-    frame.extend_from_slice(&length.to_be_bytes());          // bytes 4-5
-    frame.push(UNIT_ID);                                     // byte  6
-    frame.push(FUNCTION_ID_TRANSPARENT);                     // byte  7
-    frame.extend_from_slice(&serial_bytes);                  // bytes 8-17
-    frame.extend_from_slice(&8u64.to_be_bytes());            // bytes 18-25 (big-endian padding)
-    frame.extend_from_slice(&inner);                         // bytes 26+
+    frame.extend_from_slice(&PROTOCOL_ID.to_be_bytes()); // bytes 2-3
+    frame.extend_from_slice(&length.to_be_bytes()); // bytes 4-5
+    frame.push(UNIT_ID); // byte  6
+    frame.push(FUNCTION_ID_TRANSPARENT); // byte  7
+    frame.extend_from_slice(&serial_bytes); // bytes 8-17
+    frame.extend_from_slice(&8u64.to_be_bytes()); // bytes 18-25 (big-endian padding)
+    frame.extend_from_slice(&inner); // bytes 26+
 
     frame
 }
@@ -328,7 +330,10 @@ mod tests {
     #[test]
     fn crc_empty_input() {
         let crc = crc16_modbus(b"");
-        assert_eq!(crc, 0xFFFF, "CRC-16/Modbus of empty input should be initial value 0xFFFF");
+        assert_eq!(
+            crc, 0xFFFF,
+            "CRC-16/Modbus of empty input should be initial value 0xFFFF"
+        );
     }
 
     #[test]
@@ -404,9 +409,8 @@ mod tests {
 
         // Padding occupies bytes 18..26
         let padding = &frame[18..26];
-        let padding_value = u64::from_be_bytes(
-            padding.try_into().expect("padding should be 8 bytes"),
-        );
+        let padding_value =
+            u64::from_be_bytes(padding.try_into().expect("padding should be 8 bytes"));
         assert_eq!(padding_value, 8, "padding must be big-endian u64 value 8");
 
         // Verify the actual bytes are 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x08
@@ -470,7 +474,10 @@ mod tests {
         frame[1] = 0x00;
 
         let result = decode_frame(&frame);
-        assert!(matches!(result, Err(FramerError::InvalidTransactionId(0x0000))));
+        assert!(matches!(
+            result,
+            Err(FramerError::InvalidTransactionId(0x0000))
+        ));
     }
 
     #[test]
@@ -481,7 +488,10 @@ mod tests {
         frame[3] = 0x02;
 
         let result = decode_frame(&frame);
-        assert!(matches!(result, Err(FramerError::InvalidProtocolId(0x0002))));
+        assert!(matches!(
+            result,
+            Err(FramerError::InvalidProtocolId(0x0002))
+        ));
     }
 
     #[test]

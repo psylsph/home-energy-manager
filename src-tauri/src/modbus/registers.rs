@@ -1,8 +1,8 @@
 //! GivEnergy Modbus register address constants and block definitions.
 //!
-//! Each poll cycle reads 60-aligned blocks of registers. The standard blocks
-//! cover input registers (read-only telemetry) and holding registers (read/write
-//! configuration). Gen3 inverters expose an additional extended block.
+//! Register addresses sourced from the givenergy-modbus reference library
+//! (SinglePhaseInverterRegisterGetter.REGISTER_LUT). Each poll cycle reads
+//! aligned blocks of registers.
 
 // ---------------------------------------------------------------------------
 // Register type
@@ -47,12 +47,6 @@ pub const STANDARD_POLL_BLOCKS: &[RegisterBlock] = &[
         name: "input_0_59",
     },
     RegisterBlock {
-        start: 180,
-        count: 60,
-        register_type: RegisterType::Input,
-        name: "input_180_239",
-    },
-    RegisterBlock {
         start: 0,
         count: 60,
         register_type: RegisterType::Holding,
@@ -66,14 +60,6 @@ pub const STANDARD_POLL_BLOCKS: &[RegisterBlock] = &[
     },
 ];
 
-/// Extended block read on Gen3 inverters (in addition to the standard blocks).
-pub const GEN3_EXTENDED_BLOCK: RegisterBlock = RegisterBlock {
-    start: 240,
-    count: 120,
-    register_type: RegisterType::Holding,
-    name: "gen3_holding_240_359",
-};
-
 // ===========================================================================
 // Input Register addresses (read-only telemetry)
 // ===========================================================================
@@ -81,52 +67,52 @@ pub const GEN3_EXTENDED_BLOCK: RegisterBlock = RegisterBlock {
 // Block: Input Registers 0-59
 // -----------------------------------------------
 
-/// PV1 power in watts.
-pub const IR_PV1_POWER: u16 = 0;
-/// PV2 power in watts.
-pub const IR_PV2_POWER: u16 = 1;
-/// PV1 voltage in 0.1 V units (divide by 10 for volts).
-pub const IR_PV1_VOLTAGE: u16 = 2;
-/// PV2 voltage in 0.1 V units (divide by 10 for volts).
-pub const IR_PV2_VOLTAGE: u16 = 3;
-/// PV1 current in 0.1 A units (divide by 10 for amps).
-pub const IR_PV1_CURRENT: u16 = 4;
-/// PV2 current in 0.1 A units (divide by 10 for amps).
-pub const IR_PV2_CURRENT: u16 = 5;
-/// Battery power in watts, signed (positive = charging).
-pub const IR_BATTERY_POWER: u16 = 6;
-/// Battery state of charge as a percentage (0-100).
-pub const IR_BATTERY_SOC: u16 = 7;
-/// Battery voltage in 0.1 V units (divide by 10 for volts).
-pub const IR_BATTERY_VOLTAGE: u16 = 9;
-/// Battery current in 0.1 A units (divide by 10 for amps), signed.
-pub const IR_BATTERY_CURRENT: u16 = 10;
-/// Grid power in watts, signed (positive = importing from grid).
-pub const IR_GRID_POWER: u16 = 11;
-/// Grid voltage in 0.1 V units (divide by 10 for volts).
-pub const IR_GRID_VOLTAGE: u16 = 12;
-/// Grid frequency in 0.01 Hz units (divide by 100 for Hz).
+/// Inverter status: 0=waiting, 1=normal, 2=warning, 3=fault.
+pub const IR_STATUS: u16 = 0;
+/// PV1 voltage in 0.1 V units.
+pub const IR_PV1_VOLTAGE: u16 = 1;
+/// PV2 voltage in 0.1 V units.
+pub const IR_PV2_VOLTAGE: u16 = 2;
+/// AC grid voltage in 0.1 V units.
+pub const IR_GRID_VOLTAGE: u16 = 5;
+/// PV1 current in 0.1 A units.
+pub const IR_PV1_CURRENT: u16 = 8;
+/// PV2 current in 0.1 A units.
+pub const IR_PV2_CURRENT: u16 = 9;
+/// AC frequency in 0.01 Hz units.
 pub const IR_GRID_FREQUENCY: u16 = 13;
-/// Inverter temperature in 0.1 °C units (divide by 10 for °C).
-pub const IR_INVERTER_TEMPERATURE: u16 = 14;
-/// Battery temperature in 0.1 °C units (divide by 10 for °C).
-pub const IR_BATTERY_TEMPERATURE: u16 = 16;
-
-// Block: Input Registers 0-59 – energy totals (today)
-// -----------------------------------------------
-
-/// Total solar energy generated today in 0.1 kWh units.
-pub const IR_TODAY_SOLAR_ENERGY: u16 = 36;
-/// Total energy imported from grid today in 0.1 kWh units.
-pub const IR_TODAY_IMPORT_ENERGY: u16 = 38;
-/// Total energy exported to grid today in 0.1 kWh units.
-pub const IR_TODAY_EXPORT_ENERGY: u16 = 40;
-/// Total energy used to charge the battery today in 0.1 kWh units.
-pub const IR_TODAY_CHARGE_ENERGY: u16 = 42;
-/// Total energy discharged from the battery today in 0.1 kWh units.
-pub const IR_TODAY_DISCHARGE_ENERGY: u16 = 44;
-/// Total household consumption today in 0.1 kWh units.
-pub const IR_TODAY_CONSUMPTION: u16 = 46;
+/// PV1 energy generated today in 0.1 kWh units.
+pub const IR_PV1_ENERGY_TODAY: u16 = 17;
+/// PV1 power in watts.
+pub const IR_PV1_POWER: u16 = 18;
+/// PV2 energy generated today in 0.1 kWh units.
+pub const IR_PV2_ENERGY_TODAY: u16 = 19;
+/// PV2 power in watts.
+pub const IR_PV2_POWER: u16 = 20;
+/// Energy exported to grid today in 0.1 kWh units.
+pub const IR_TODAY_EXPORT_ENERGY: u16 = 25;
+/// Energy imported from grid today in 0.1 kWh units.
+pub const IR_TODAY_IMPORT_ENERGY: u16 = 26;
+/// Grid power in watts, signed (positive = exporting, negative = importing).
+pub const IR_GRID_POWER: u16 = 30;
+/// Household consumption today in 0.1 kWh units.
+pub const IR_TODAY_CONSUMPTION: u16 = 35;
+/// Battery charge energy today in 0.1 kWh units.
+pub const IR_TODAY_CHARGE_ENERGY: u16 = 36;
+/// Battery discharge energy today in 0.1 kWh units.
+pub const IR_TODAY_DISCHARGE_ENERGY: u16 = 37;
+/// Inverter heatsink temperature in 0.1 °C units.
+pub const IR_INVERTER_TEMPERATURE: u16 = 41;
+/// Battery voltage in 0.01 V units.
+pub const IR_BATTERY_VOLTAGE: u16 = 50;
+/// Battery current in 0.01 A units, signed.
+pub const IR_BATTERY_CURRENT: u16 = 51;
+/// Battery power in watts, signed (positive = charging).
+pub const IR_BATTERY_POWER: u16 = 52;
+/// Battery temperature in 0.1 °C units.
+pub const IR_BATTERY_TEMPERATURE: u16 = 56;
+/// Battery state-of-charge percentage (0-100).
+pub const IR_BATTERY_SOC: u16 = 59;
 
 // ===========================================================================
 // Holding Register addresses (read/write configuration)
@@ -135,213 +121,174 @@ pub const IR_TODAY_CONSUMPTION: u16 = 46;
 // Block: Holding Registers 0-59
 // -----------------------------------------------
 
-/// Device type code identifying the inverter model.
+/// Device type code (hex, e.g. 0x2001 = Gen3 Hybrid).
 pub const HR_DEVICE_TYPE: u16 = 0;
-/// Battery operating mode: 0 = paused, 1 = eco, 2 = timed demand, 3 = timed export.
-pub const HR_BATTERY_MODE: u16 = 1;
-/// Whether the charge schedule is enabled (1 = enabled, 0 = disabled).
-pub const HR_ENABLE_CHARGE_SCHEDULE: u16 = 4;
-
-/// Charge slot 1: start hour (0-23).
-pub const HR_CHARGE_SLOT_1_START_H: u16 = 5;
-/// Charge slot 1: start minute (0-59).
-pub const HR_CHARGE_SLOT_1_START_M: u16 = 6;
-/// Charge slot 1: end hour (0-23).
-pub const HR_CHARGE_SLOT_1_END_H: u16 = 7;
-/// Charge slot 1: end minute (0-59).
-pub const HR_CHARGE_SLOT_1_END_M: u16 = 8;
-/// Charge slot 1: target state-of-charge percentage (0-100).
-pub const HR_CHARGE_SLOT_1_TARGET_SOC: u16 = 9;
-/// Charge slot 1: enable flag (1 = enabled, 0 = disabled).
-pub const HR_CHARGE_SLOT_1_ENABLE: u16 = 10;
-
-/// Charge slot 2: start hour.
-pub const HR_CHARGE_SLOT_2_START_H: u16 = 11;
-/// Charge slot 2: start minute.
-pub const HR_CHARGE_SLOT_2_START_M: u16 = 12;
-/// Charge slot 2: end hour.
-pub const HR_CHARGE_SLOT_2_END_H: u16 = 13;
-/// Charge slot 2: end minute.
-pub const HR_CHARGE_SLOT_2_END_M: u16 = 14;
-/// Charge slot 2: target state-of-charge percentage.
-pub const HR_CHARGE_SLOT_2_TARGET_SOC: u16 = 15;
-/// Charge slot 2: enable flag.
-pub const HR_CHARGE_SLOT_2_ENABLE: u16 = 16;
-
-/// Charge slot 3: start hour.
-pub const HR_CHARGE_SLOT_3_START_H: u16 = 17;
-/// Charge slot 3: start minute.
-pub const HR_CHARGE_SLOT_3_START_M: u16 = 18;
-/// Charge slot 3: end hour.
-pub const HR_CHARGE_SLOT_3_END_H: u16 = 19;
-/// Charge slot 3: end minute.
-pub const HR_CHARGE_SLOT_3_END_M: u16 = 20;
-/// Charge slot 3: target state-of-charge percentage.
-pub const HR_CHARGE_SLOT_3_TARGET_SOC: u16 = 21;
-/// Charge slot 3: enable flag.
-pub const HR_CHARGE_SLOT_3_ENABLE: u16 = 22;
-
-/// Discharge slot 1: start hour.
-pub const HR_DISCHARGE_SLOT_1_START_H: u16 = 23;
-/// Discharge slot 1: start minute.
-pub const HR_DISCHARGE_SLOT_1_START_M: u16 = 24;
-/// Discharge slot 1: end hour.
-pub const HR_DISCHARGE_SLOT_1_END_H: u16 = 25;
-/// Discharge slot 1: end minute.
-pub const HR_DISCHARGE_SLOT_1_END_M: u16 = 26;
-/// Discharge slot 1: target state-of-charge percentage (0-100).
-pub const HR_DISCHARGE_SLOT_1_TARGET_SOC: u16 = 27;
-/// Discharge slot 1: enable flag (1 = enabled, 0 = disabled).
-pub const HR_DISCHARGE_SLOT_1_ENABLE: u16 = 28;
-
-/// Discharge slot 2: start hour.
-pub const HR_DISCHARGE_SLOT_2_START_H: u16 = 29;
-/// Discharge slot 2: start minute.
-pub const HR_DISCHARGE_SLOT_2_START_M: u16 = 30;
-/// Discharge slot 2: end hour.
-pub const HR_DISCHARGE_SLOT_2_END_H: u16 = 31;
-/// Discharge slot 2: end minute.
-pub const HR_DISCHARGE_SLOT_2_END_M: u16 = 32;
-/// Discharge slot 2: target state-of-charge percentage.
-pub const HR_DISCHARGE_SLOT_2_TARGET_SOC: u16 = 33;
-/// Discharge slot 2: enable flag.
-pub const HR_DISCHARGE_SLOT_2_ENABLE: u16 = 34;
-
-/// Battery reserve state-of-charge percentage (0-100).
-pub const HR_BATTERY_RESERVE_SOC: u16 = 35;
-/// Battery charge rate in watts.
-pub const HR_BATTERY_CHARGE_RATE: u16 = 36;
-/// Battery discharge rate in watts.
-pub const HR_BATTERY_DISCHARGE_RATE: u16 = 37;
-/// Battery power limit enable flag (1 = enabled, 0 = disabled).
-pub const HR_BATTERY_POWER_LIMIT_ENABLE: u16 = 59;
+/// Serial number encoded as 5 registers of latin1 chars.
+pub const HR_SERIAL_NUMBER_START: u16 = 13;
+/// Enable charge target (bool).
+pub const HR_ENABLE_CHARGE_TARGET: u16 = 20;
+/// ARM firmware version.
+pub const HR_ARM_FIRMWARE: u16 = 21;
+/// Battery power mode: 0 = export, 1 = self-consumption (eco).
+pub const HR_BATTERY_POWER_MODE: u16 = 27;
+/// Charge slot 2: start time as HHMM, end time as HHMM (2 registers).
+pub const HR_CHARGE_SLOT_2_START: u16 = 31;
+pub const HR_CHARGE_SLOT_2_END: u16 = 32;
+/// Discharge slot 2: start/end as HHMM (2 registers).
+pub const HR_DISCHARGE_SLOT_2_START: u16 = 44;
+pub const HR_DISCHARGE_SLOT_2_END: u16 = 45;
+/// Discharge slot 1: start/end as HHMM (2 registers).
+pub const HR_DISCHARGE_SLOT_1_START: u16 = 56;
+pub const HR_DISCHARGE_SLOT_1_END: u16 = 57;
+/// Enable discharge (bool).
+pub const HR_ENABLE_DISCHARGE: u16 = 59;
 
 // Block: Holding Registers 60-119
 // -----------------------------------------------
 
-/// Target state-of-charge percentage for charging (0-100).
-pub const HR_TARGET_SOC: u16 = 60;
-/// Charge cutoff state-of-charge percentage (0-100).
-pub const HR_CHARGE_CUTOFF_SOC: u16 = 61;
-/// Force charge enable flag (1 = enabled, 0 = disabled).
-pub const HR_FORCE_CHARGE_ENABLE: u16 = 64;
-/// Force discharge enable flag (1 = enabled, 0 = disabled).
-pub const HR_FORCE_DISCHARGE_ENABLE: u16 = 65;
-/// Pause battery enable flag (1 = paused, 0 = normal).
-pub const HR_PAUSE_BATTERY_ENABLE: u16 = 66;
-/// System clock – year (e.g. 2026).
-pub const HR_CLOCK_YEAR: u16 = 70;
-/// System clock – month (1–12).
-pub const HR_CLOCK_MONTH: u16 = 71;
-/// System clock – day (1–31).
-pub const HR_CLOCK_DAY: u16 = 72;
-/// System clock – hour (0–23).
-pub const HR_CLOCK_HOUR: u16 = 73;
-/// System clock – minute (0–59).
-pub const HR_CLOCK_MINUTE: u16 = 74;
-/// System clock – second (0–59).
-pub const HR_CLOCK_SECOND: u16 = 75;
+/// Charge slot 1: start/end as HHMM (2 registers).
+pub const HR_CHARGE_SLOT_1_START: u16 = 94;
+pub const HR_CHARGE_SLOT_1_END: u16 = 95;
+/// Enable charge (bool).
+pub const HR_ENABLE_CHARGE: u16 = 96;
+/// Battery SOC reserve percentage (0-100).
+pub const HR_BATTERY_SOC_RESERVE: u16 = 110;
+/// Battery charge power limit as percentage (0-50).
+pub const HR_BATTERY_CHARGE_LIMIT: u16 = 111;
+/// Battery discharge power limit as percentage (0-50).
+pub const HR_BATTERY_DISCHARGE_LIMIT: u16 = 112;
+/// Charge target SOC percentage (0-100, requires enable_charge_target).
+pub const HR_CHARGE_TARGET_SOC: u16 = 116;
 
-// Block: Holding Registers 240-359 (Gen3 only)
-// -----------------------------------------------
-
-/// Gen3 extended battery charge rate in watts.
-pub const HR_GEN3_EXTENDED_CHARGE_RATE: u16 = 256;
-/// Gen3 extended battery discharge rate in watts.
-pub const HR_GEN3_EXTENDED_DISCHARGE_RATE: u16 = 257;
-/// Gen3 battery state-of-charge target for timed discharge/export modes (0-100).
-pub const HR_GEN3_BATTERY_SOC_TARGET: u16 = 258;
+// Block: Holding Registers 300-359 (pause mode)
+pub const HR_BATTERY_PAUSE_MODE: u16 = 318;
+pub const HR_BATTERY_PAUSE_SLOT_1_START: u16 = 319;
+pub const HR_BATTERY_PAUSE_SLOT_1_END: u16 = 320;
 
 // ---------------------------------------------------------------------------
-// Slot register layout helpers
+// Write whitelist — registers that are safe to write to
 // ---------------------------------------------------------------------------
 
-/// Number of registers occupied by a single charge/discharge slot.
-pub const SLOT_REGISTER_COUNT: u16 = 6;
+/// Holding register addresses that the control encoder is allowed to write.
+/// Sourced from GivTCP safe_regs.
+pub const SAFE_WRITE_REGS: &[u16] = &[
+    20, 27, 31, 32, 44, 45, 50, 56, 57, 59, 94, 95, 96, 110, 111, 112, 116, 318, 319, 320,
+];
 
-/// Returns the base address of charge slot `index` (0-based) within holding registers.
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Decode a packed HHMM time value into (hour, minute).
+/// Returns None if the value represents an empty/disabled slot.
 ///
-/// Charge slot 0 starts at `HR_CHARGE_SLOT_1_START_H` (address 5).
-/// Each slot occupies 6 consecutive registers: start_h, start_m, end_h, end_m, target_soc, enable.
-#[inline]
-pub const fn charge_slot_base(index: u32) -> u16 {
-    HR_CHARGE_SLOT_1_START_H + (index as u16) * SLOT_REGISTER_COUNT
+/// The reference library uses 60 as the disabled sentinel (the minute
+/// component would be 60 which is invalid). All other values are valid:
+///   0   = 00:00 (midnight)
+///   30  = 00:30
+///   100 = 01:00
+///   630 = 06:30
+pub fn decode_hhmm(val: u16) -> Option<(u8, u8)> {
+    // 60 is the disabled sentinel per givenergy-modbus reference
+    if val == 60 {
+        return None;
+    }
+    let hour = (val / 100) as u8;
+    let minute = (val % 100) as u8;
+    // Guard against minute > 59 (shouldn't happen except 60 sentinel above)
+    if minute > 59 {
+        return None;
+    }
+    Some((hour.min(23), minute))
 }
 
-/// Returns the base address of discharge slot `index` (0-based) within holding registers.
-///
-/// Discharge slot 0 starts at `HR_DISCHARGE_SLOT_1_START_H` (address 23).
-/// Each slot occupies 6 consecutive registers: start_h, start_m, end_h, end_m, target_soc, enable.
-#[inline]
-pub const fn discharge_slot_base(index: u32) -> u16 {
-    HR_DISCHARGE_SLOT_1_START_H + (index as u16) * SLOT_REGISTER_COUNT
+/// Encode (hour, minute) into a packed HHMM value.
+pub fn encode_hhmm(hour: u8, minute: u8) -> u16 {
+    (hour as u16) * 100 + (minute as u16)
 }
 
-// ---------------------------------------------------------------------------
-// Unit tests
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// Tests
+// ===========================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn standard_poll_blocks_count() {
-        assert_eq!(STANDARD_POLL_BLOCKS.len(), 4);
+    fn poll_blocks_cover_needed_ranges() {
+        assert_eq!(STANDARD_POLL_BLOCKS.len(), 3);
+        // Input 0-59 covers all telemetry (IR 0-59)
+        assert_eq!(STANDARD_POLL_BLOCKS[0].start, 0);
+        assert_eq!(STANDARD_POLL_BLOCKS[0].count, 60);
+        // Holding 0-59
+        assert_eq!(STANDARD_POLL_BLOCKS[1].start, 0);
+        assert_eq!(STANDARD_POLL_BLOCKS[1].count, 60);
+        // Holding 60-119 covers charge_slot_1 (94-95), soc_reserve (110), limits (111-112)
+        assert_eq!(STANDARD_POLL_BLOCKS[2].start, 60);
+        assert_eq!(STANDARD_POLL_BLOCKS[2].count, 60);
     }
 
     #[test]
-    fn standard_poll_block_addresses_do_not_overlap() {
-        // Quick sanity: every block starts on a multiple of 60.
-        for block in STANDARD_POLL_BLOCKS {
-            assert_eq!(
-                block.start % 60,
-                0,
-                "block '{}' starts at {} which is not 60-aligned",
-                block.name,
-                block.start
-            );
+    fn decode_hhmm_valid() {
+        assert_eq!(decode_hhmm(1600), Some((16, 0)));
+        assert_eq!(decode_hhmm(630), Some((6, 30)));
+        assert_eq!(decode_hhmm(2359), Some((23, 59)));
+        assert_eq!(decode_hhmm(0), Some((0, 0)));
+    }
+
+    #[test]
+    fn decode_hhmm_disabled() {
+        // 60 is the disabled sentinel
+        assert_eq!(decode_hhmm(60), None);
+    }
+
+    #[test]
+    fn decode_hhmm_small_values_valid() {
+        // Values 1-59 are valid times (e.g. 30 = 00:30, 1 = 00:01)
+        assert_eq!(decode_hhmm(30), Some((0, 30)));
+        assert_eq!(decode_hhmm(1), Some((0, 1)));
+        assert_eq!(decode_hhmm(59), Some((0, 59)));
+    }
+
+    #[test]
+    fn encode_hhmm_roundtrip() {
+        for (h, m) in [(0, 0), (6, 30), (16, 0), (23, 59)] {
+            let encoded = encode_hhmm(h, m);
+            let decoded = decode_hhmm(encoded);
+            assert_eq!(decoded, Some((h, m)));
         }
     }
 
     #[test]
-    fn gen3_extended_block_start_is_240() {
-        assert_eq!(GEN3_EXTENDED_BLOCK.start, 240);
-        assert_eq!(GEN3_EXTENDED_BLOCK.count, 120);
+    fn safe_write_regs_contains_key_addresses() {
+        assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_POWER_MODE)); // 27
+        assert!(SAFE_WRITE_REGS.contains(&HR_ENABLE_DISCHARGE)); // 59
+        assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_SLOT_1_START)); // 94
+        assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_SOC_RESERVE)); // 110
+        assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_TARGET_SOC)); // 116
     }
 
     #[test]
-    fn charge_slot_base_addresses() {
-        assert_eq!(charge_slot_base(0), 5);
-        assert_eq!(charge_slot_base(1), 11);
-        assert_eq!(charge_slot_base(2), 17);
-    }
+    fn register_addresses_match_reference() {
+        // Input registers - spot checks against givenergy-modbus reference
+        assert_eq!(IR_PV1_POWER, 18);
+        assert_eq!(IR_PV2_POWER, 20);
+        assert_eq!(IR_BATTERY_POWER, 52);
+        assert_eq!(IR_BATTERY_SOC, 59);
+        assert_eq!(IR_GRID_POWER, 30);
+        assert_eq!(IR_GRID_VOLTAGE, 5);
+        assert_eq!(IR_BATTERY_VOLTAGE, 50);
+        assert_eq!(IR_BATTERY_CURRENT, 51);
+        assert_eq!(IR_INVERTER_TEMPERATURE, 41);
+        assert_eq!(IR_BATTERY_TEMPERATURE, 56);
 
-    #[test]
-    fn discharge_slot_base_addresses() {
-        assert_eq!(discharge_slot_base(0), 23);
-        assert_eq!(discharge_slot_base(1), 29);
-    }
-
-    #[test]
-    fn register_addresses_within_blocks() {
-        // Input register 0-59 block
-        assert!(IR_PV1_POWER < 60);
-        assert!(IR_TODAY_CONSUMPTION < 60);
-
-        // Input register 180-239 block – no addresses defined here currently;
-        // energy totals live in block 0-59 per the task spec.
-
-        // Holding register 0-59 block
-        assert!(HR_DEVICE_TYPE < 60);
-        assert!(HR_BATTERY_POWER_LIMIT_ENABLE < 60);
-
-        // Holding register 60-119 block
-        assert!(HR_TARGET_SOC >= 60);
-        assert!(HR_PAUSE_BATTERY_ENABLE < 120);
-
-        // Gen3 extended block
-        assert!(HR_GEN3_EXTENDED_CHARGE_RATE >= 240);
-        assert!(HR_GEN3_BATTERY_SOC_TARGET < 360);
+        // Holding registers
+        assert_eq!(HR_BATTERY_POWER_MODE, 27);
+        assert_eq!(HR_ENABLE_DISCHARGE, 59);
+        assert_eq!(HR_ENABLE_CHARGE, 96);
+        assert_eq!(HR_BATTERY_SOC_RESERVE, 110);
+        assert_eq!(HR_CHARGE_SLOT_1_START, 94);
+        assert_eq!(HR_DISCHARGE_SLOT_1_START, 56);
     }
 }

@@ -18,20 +18,17 @@ export default function StatusPage() {
   }
 
   return (
-    <div className="flex flex-col gap-6 max-w-5xl mx-auto px-4 py-6">
-      {/* Top: two-column on desktop, stacked on mobile */}
-      <div className="grid grid-cols-1 md:grid-cols-[1fr_320px] gap-6">
-        {/* Left: Energy flow diagram */}
-        <div className="bg-bg-surface rounded-xl p-4">
-          <EnergyFlowDiagram snapshot={snapshot} />
-        </div>
+    <div className="flex flex-col gap-6 max-w-4xl mx-auto">
+      {/* Energy flow diagram — full width card */}
+      <section className="bg-bg-surface rounded-2xl p-6">
+        <EnergyFlowDiagram snapshot={snapshot} />
+      </section>
 
-        {/* Right: Battery panel */}
+      {/* Battery + Summary side by side on md+ */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <BatteryPanel snapshot={snapshot} />
+        <SummaryTiles snapshot={snapshot} />
       </div>
-
-      {/* Bottom: Summary tiles */}
-      <SummaryTiles snapshot={snapshot} />
     </div>
   );
 }

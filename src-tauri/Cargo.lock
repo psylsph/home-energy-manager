@@ -1377,6 +1377,7 @@ dependencies = [
  "axum",
  "chrono",
  "crc",
+ "futures-util",
  "local-ip-address",
  "log",
  "serde",

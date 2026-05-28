@@ -18,47 +18,55 @@ export default function SummaryTiles({ snapshot: s }: Props) {
       label: 'Solar Today',
       value: formatEnergy(s.today_solar_kwh),
       accent: '#F59E0B',
-      icon: '☀',
+      icon: '☀️',
     },
     {
-      label: 'Home Today',
+      label: 'Consumption',
       value: formatEnergy(s.today_consumption_kwh),
       accent: '#14B8A6',
       icon: '🏠',
     },
     {
-      label: 'Import Today',
+      label: 'Import',
       value: formatEnergy(s.today_import_kwh),
       accent: '#EF4444',
-      icon: '⬇',
+      icon: '⬇️',
     },
     {
-      label: 'Export Today',
+      label: 'Export',
       value: formatEnergy(s.today_export_kwh),
       accent: '#22C55E',
-      icon: '⬆',
+      icon: '⬆️',
     },
   ];
 
   return (
-    <div className="grid grid-cols-2 gap-3">
-      {tiles.map((t) => (
-        <div
-          key={t.label}
-          className="bg-bg-surface rounded-xl p-4 flex flex-col gap-1"
-        >
-          <div className="flex items-center gap-2">
-            <span className="text-lg">{t.icon}</span>
-            <span className="text-text-secondary text-xs font-sans">{t.label}</span>
-          </div>
-          <span
-            className="text-xl font-mono font-bold"
-            style={{ color: t.accent }}
+    <div className="bg-bg-surface rounded-2xl p-6 flex flex-col gap-4">
+      <h2 className="text-text-primary text-base font-semibold tracking-wide">Today</h2>
+      <div className="grid grid-cols-2 gap-3">
+        {tiles.map((t) => (
+          <div
+            key={t.label}
+            className="bg-bg-elevated rounded-xl p-4 flex flex-col gap-2 border border-transparent hover:border-white/5 transition-colors"
           >
-            {t.value}
-          </span>
-        </div>
-      ))}
+            <div className="flex items-center gap-2">
+              <span
+                className="w-8 h-8 rounded-lg flex items-center justify-center text-sm"
+                style={{ backgroundColor: t.accent + '20' }}
+              >
+                {t.icon}
+              </span>
+              <span className="text-text-secondary text-xs font-medium">{t.label}</span>
+            </div>
+            <span
+              className="text-xl font-mono font-bold tracking-tight"
+              style={{ color: t.accent }}
+            >
+              {t.value}
+            </span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

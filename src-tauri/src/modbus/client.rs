@@ -150,10 +150,7 @@ impl ModbusClient {
     /// The response is read in a streaming fashion: we first read enough bytes
     /// to determine the length from the header, then read the remaining payload.
     async fn send_and_receive(&mut self, frame: &[u8]) -> Result<DecodedFrame, ClientError> {
-        let stream = self
-            .stream
-            .as_mut()
-            .ok_or(ClientError::NotConnected)?;
+        let stream = self.stream.as_mut().ok_or(ClientError::NotConnected)?;
 
         // --- Send ---
         tokio::time::timeout(self.timeout, stream.write_all(frame))
@@ -192,8 +189,8 @@ impl ModbusClient {
         full.extend_from_slice(&rest);
 
         // Decode using the framer
-        let decoded = framer::decode_frame(&full)
-            .map_err(|e| ClientError::FrameError(e.to_string()))?;
+        let decoded =
+            framer::decode_frame(&full).map_err(|e| ClientError::FrameError(e.to_string()))?;
 
         // Check for Modbus exception response (function code with high bit set)
         if decoded.function >= 0x80 {
@@ -211,24 +208,70 @@ impl ModbusClient {
     // Register operations
     // -----------------------------------------------------------------------
 
+    /// Maximum number of registers to request in a single Modbus read.
+    /// The GivEnergy WiFi/Ethernet dongle has a limited frame buffer and will
+    /// return fewer registers than requested if this is exceeded.
+    const MAX_REGISTERS_PER_READ: u16 = 20;
+
     /// Read a block of registers (input or holding).
     ///
-    /// Sends a Modbus read request (function code 0x03 or 0x04) and returns
-    /// the register values as a `Vec<u16>`.
+    /// If `count` exceeds [`MAX_REGISTERS_PER_READ`], the read is split into
+    /// multiple sub-requests and the results are concatenated.
     pub async fn read_registers(
         &mut self,
         register_type: RegisterType,
         start: u16,
         count: u16,
     ) -> Result<Vec<u16>, ClientError> {
+        let mut all_values = Vec::with_capacity(count as usize);
+        let mut offset: u16 = 0;
+
+        while offset < count {
+            let remaining = count - offset;
+            let chunk_size = remaining.min(Self::MAX_REGISTERS_PER_READ);
+            let chunk_start = start + offset;
+
+            let chunk_values = self
+                .read_registers_raw(register_type, chunk_start, chunk_size)
+                .await?;
+            all_values.extend_from_slice(&chunk_values);
+
+            // If the dongle returned fewer registers than requested, pad with zeros
+            let returned = chunk_values.len() as u16;
+            if returned < chunk_size {
+                tracing::debug!(
+                    "Partial read at {}+{}: got {}/{} registers, padding with zeros",
+                    start,
+                    offset,
+                    returned,
+                    chunk_size
+                );
+                for _ in 0..(chunk_size - returned) {
+                    all_values.push(0);
+                }
+            }
+
+            offset += chunk_size;
+        }
+
+        // Truncate to the originally requested count (safety)
+        all_values.truncate(count as usize);
+        Ok(all_values)
+    }
+
+    /// Internal: read a single chunk of registers (no splitting).
+    ///
+    /// Tolerates the dongle returning fewer registers than requested — common
+    /// on GivEnergy WiFi/Ethernet dongles with limited frame buffers.
+    async fn read_registers_raw(
+        &mut self,
+        register_type: RegisterType,
+        start: u16,
+        count: u16,
+    ) -> Result<Vec<u16>, ClientError> {
         // Build the request frame
-        let request = framer::build_read_request(
-            &self.serial,
-            self.slave,
-            register_type,
-            start,
-            count,
-        );
+        let request =
+            framer::build_read_request(&self.serial, self.slave, register_type, start, count);
 
         // Send and receive
         let decoded = self.send_and_receive(&request).await?;
@@ -242,36 +285,45 @@ impl ModbusClient {
             )));
         }
 
-        // Parse inner payload: byte count (1 byte) + register values (count * 2 bytes)
+        // Parse the transparent response inner payload.
+        // GivEnergy response format (after outer header + CRC stripped by framer):
+        //   inverter_serial_number (10 bytes)
+        //   base_register          (2 bytes, u16 BE)
+        //   register_count         (2 bytes, u16 BE)
+        //   register_values        (register_count * 2 bytes)
+        //   check                  (2 bytes)
+        //
+        // The framer strips: outer MBAP header(6) + data_adapter_serial(10) +
+        // padding(8) + CRC(2), leaving us with:
+        //   device_address(1) + transparent_function(1) + [above inner payload]
+        //
+        // decoded.payload = everything after device_address + transparent_function.
         let payload = &decoded.payload;
-        if payload.is_empty() {
-            return Err(ClientError::InvalidResponse(
-                "read response payload is empty".to_string(),
-            ));
-        }
+        const INVERTER_SERIAL_LEN: usize = 10;
+        const MIN_INNER_LEN: usize = INVERTER_SERIAL_LEN + 4; // serial + base_reg + reg_count
 
-        let byte_count = payload[0] as usize;
-        let expected_bytes = count as usize * 2;
-
-        if byte_count != expected_bytes {
+        if payload.len() < MIN_INNER_LEN {
             return Err(ClientError::InvalidResponse(format!(
-                "byte count mismatch: header says {}, expected {} ({} registers)",
-                byte_count, expected_bytes, count
+                "response payload too short: need at least {} bytes for inner header, got {}",
+                MIN_INNER_LEN,
+                payload.len()
             )));
         }
 
-        if payload.len() < 1 + expected_bytes {
-            return Err(ClientError::InvalidResponse(format!(
-                "payload too short: got {} bytes, need {}",
-                payload.len(),
-                1 + expected_bytes
-            )));
-        }
+        // Skip inverter serial number (10 bytes)
+        let inner = &payload[INVERTER_SERIAL_LEN..];
 
-        // Convert big-endian byte pairs to u16 values
-        let data_bytes = &payload[1..=expected_bytes];
-        let mut values = Vec::with_capacity(count as usize);
-        for chunk in data_bytes.chunks_exact(2) {
+        // Read base_register and register_count
+        let _resp_base_register = u16::from_be_bytes([inner[0], inner[1]]);
+        let resp_register_count = u16::from_be_bytes([inner[2], inner[3]]) as usize;
+
+        // Register values follow
+        let reg_data = &inner[4..];
+        let max_values = count as usize;
+        let actual_count = resp_register_count.min(max_values).min(reg_data.len() / 2);
+
+        let mut values = Vec::with_capacity(actual_count);
+        for chunk in reg_data.chunks_exact(2).take(actual_count) {
             values.push(u16::from_be_bytes([chunk[0], chunk[1]]));
         }
 
@@ -282,11 +334,7 @@ impl ModbusClient {
     ///
     /// Sends a Modbus write-multiple-registers request and verifies the
     /// acknowledgment from the device.
-    pub async fn write_registers(
-        &mut self,
-        start: u16,
-        values: &[u16],
-    ) -> Result<(), ClientError> {
+    pub async fn write_registers(&mut self, start: u16, values: &[u16]) -> Result<(), ClientError> {
         // Build the write-multiple-registers inner payload:
         //   start address (2 bytes) + quantity (2 bytes) + byte count (1) + values
         let quantity = values.len() as u16;
@@ -301,8 +349,7 @@ impl ModbusClient {
         }
 
         // Encode the full frame with function code 0x10
-        let request =
-            framer::encode_frame(&self.serial, self.slave, 0x10, &payload);
+        let request = framer::encode_frame(&self.serial, self.slave, 0x10, &payload);
 
         // Send and receive
         let decoded = self.send_and_receive(&request).await?;
@@ -315,16 +362,19 @@ impl ModbusClient {
             )));
         }
 
-        // For a write response, payload should be: start address (2) + quantity (2)
-        if decoded.payload.len() != 4 {
+        // For a write response, payload format is:
+        //   inverter_serial (10 bytes) + start address (2) + quantity (2)
+        if decoded.payload.len() < 14 {
             return Err(ClientError::InvalidResponse(format!(
-                "write response payload should be 4 bytes, got {}",
+                "write response payload too short: need at least 14 bytes, got {}",
                 decoded.payload.len()
             )));
         }
 
-        let resp_start = u16::from_be_bytes([decoded.payload[0], decoded.payload[1]]);
-        let resp_qty = u16::from_be_bytes([decoded.payload[2], decoded.payload[3]]);
+        // Skip inverter serial number (10 bytes)
+        let inner = &decoded.payload[10..];
+        let resp_start = u16::from_be_bytes([inner[0], inner[1]]);
+        let resp_qty = u16::from_be_bytes([inner[2], inner[3]]);
 
         if resp_start != start || resp_qty != quantity {
             return Err(ClientError::InvalidResponse(format!(
@@ -350,11 +400,10 @@ impl ModbusClient {
                 super::registers::RegisterType::Holding => RegisterType::Holding,
             };
 
-            let data = self.read_registers(reg_type, block.start, block.count).await?;
-            results.push(BlockRead {
-                block,
-                data,
-            });
+            let data = self
+                .read_registers(reg_type, block.start, block.count)
+                .await?;
+            results.push(BlockRead { block, data });
         }
 
         Ok(results)
@@ -542,7 +591,7 @@ mod tests {
 
     #[test]
     fn standard_poll_blocks_are_accessible() {
-        assert_eq!(STANDARD_POLL_BLOCKS.len(), 4);
+        assert_eq!(STANDARD_POLL_BLOCKS.len(), 3);
         assert_eq!(STANDARD_POLL_BLOCKS[0].name, "input_0_59");
     }
 }
