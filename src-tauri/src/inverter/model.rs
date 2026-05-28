@@ -9,6 +9,7 @@
 
 /// Battery charging/discharging state, derived from battery power sign.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum BatteryState {
     #[default]
     Idle,
@@ -109,6 +110,18 @@ impl DeviceType {
             _ => Self::Unknown(val),
         }
     }
+
+    /// Nominal battery voltage for capacity calculation.
+    ///
+    /// Per givenergy-modbus and GivTCP references, the kWh calculation uses
+    /// a fixed nominal voltage per device type, NOT the live system voltage.
+    pub fn nominal_battery_voltage(&self) -> f32 {
+        match self {
+            Self::AllInOne => 307.0,
+            Self::ThreePhase => 76.8,
+            _ => 51.2,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +141,9 @@ pub struct BatteryModule {
     pub voltage: f32,
     /// Current (A).
     pub current: f32,
+    /// Battery serial number (from module holding registers).
+    #[serde(default)]
+    pub serial: String,
 }
 
 /// A single charge or discharge schedule slot.

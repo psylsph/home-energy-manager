@@ -172,10 +172,6 @@ function ScheduleSlotEditor({
         </button>
       </div>
 
-      {!local.enabled && (
-        <p className="text-text-secondary text-sm">Disabled</p>
-      )}
-
       {local.enabled && (
         <>
           <div className="flex items-center gap-3">
@@ -208,20 +204,20 @@ function ScheduleSlotEditor({
                 step={5}
                 value={local.target_soc}
                 onChange={(e) => setLocal((l) => ({ ...l, target_soc: Number(e.target.value) }))}
-                className="w-full accent-battery"
+                className="w-full"
               />
             </div>
           )}
-
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="w-full py-2 bg-battery/20 text-battery rounded-lg text-sm font-medium hover:bg-battery/30 transition disabled:opacity-50"
-          >
-            {saving ? 'Saving...' : feedback === 'saved' ? '✓ Saved' : feedback === 'error' ? '✗ Error' : 'Save'}
-          </button>
         </>
       )}
+
+      <button
+        onClick={handleSave}
+        disabled={saving}
+        className="w-full py-2 bg-battery/20 text-battery rounded-lg text-sm font-medium hover:bg-battery/30 transition disabled:opacity-50"
+      >
+        {saving ? 'Saving...' : feedback === 'saved' ? '✓ Saved' : feedback === 'error' ? '✗ Error' : 'Save'}
+      </button>
     </div>
   );
 }
@@ -231,9 +227,9 @@ export default function ControlPage() {
   const modeAction = useAction();
 
   // Battery limits local state
-  const [reserveSoc, setReserveSoc] = useState<number>(snapshot?.battery_reserve ?? 20);
-  const [chargeRate, setChargeRate] = useState<number>(snapshot?.charge_rate ?? 3000);
-  const [dischargeRate, setDischargeRate] = useState<number>(snapshot?.discharge_rate ?? 3000);
+  const [reserveSoc, setReserveSoc] = useState<number>(snapshot?.battery_reserve ?? 4);
+  const [chargeRate, setChargeRate] = useState<number>(snapshot?.charge_rate ?? 100);
+  const [dischargeRate, setDischargeRate] = useState<number>(snapshot?.discharge_rate ?? 100);
 
   const [reserveSaving, setReserveSaving] = useState(false);
   const [chargeRateSaving, setChargeRateSaving] = useState(false);
@@ -274,7 +270,7 @@ export default function ControlPage() {
   const handleChargeRateSave = async () => {
     setChargeRateSaving(true);
     try {
-      await apiPost('/api/control/charge-rate', { watts: chargeRate });
+      await apiPost('/api/control/charge-rate', { limit: chargeRate });
     } catch {}
     setChargeRateSaving(false);
   };
@@ -282,7 +278,7 @@ export default function ControlPage() {
   const handleDischargeRateSave = async () => {
     setDischargeRateSaving(true);
     try {
-      await apiPost('/api/control/discharge-rate', { watts: dischargeRate });
+      await apiPost('/api/control/discharge-rate', { limit: dischargeRate });
     } catch {}
     setDischargeRateSaving(false);
   };
@@ -292,7 +288,7 @@ export default function ControlPage() {
       {/* Section 1: Battery Mode */}
       <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Battery Mode</h2>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
           {BATTERY_MODES.map(({ key, label }) => {
             const isActive = currentMode === key;
             return (
@@ -300,13 +296,13 @@ export default function ControlPage() {
                 key={key}
                 onClick={() => modeAction.execute('/api/control/mode', { mode: key })}
                 disabled={modeAction.loading}
-                className={`p-4 rounded-xl border text-center transition ${
+                className={`px-3 py-3 rounded-lg border text-xs font-medium transition w-full ${
                   isActive
                     ? 'bg-battery/20 border-battery text-battery'
-                    : 'bg-bg-surface border-transparent hover:border-battery/40 hover:bg-bg-elevated'
+                    : 'bg-bg-surface border-transparent hover:border-battery/40 hover:bg-bg-elevated text-text-secondary'
                 } disabled:opacity-50`}
               >
-                <span className="text-sm font-medium">{label}</span>
+                {label}
               </button>
             );
           })}
@@ -396,7 +392,7 @@ export default function ControlPage() {
                 step={5}
                 value={reserveSoc}
                 onChange={(e) => setReserveSoc(Number(e.target.value))}
-                className="flex-1 accent-battery"
+                className="flex-1"
               />
               <button
                 onClick={handleReserveSave}
@@ -409,18 +405,21 @@ export default function ControlPage() {
           </div>
 
           {/* Charge Rate */}
-          <div className="space-y-2">
-            <span className="text-text-secondary text-sm">Charge Rate</span>
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-text-secondary text-sm">Charge Rate</span>
+              <span className="font-mono text-text-primary text-sm">{chargeRate}%</span>
+            </div>
             <div className="flex items-center gap-3">
               <input
-                type="number"
+                type="range"
+                min={0}
+                max={100}
+                step={5}
                 value={chargeRate}
                 onChange={(e) => setChargeRate(Number(e.target.value))}
-                className="flex-1 bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-3 py-2 border border-transparent focus:border-battery outline-none"
-                min={0}
-                step={100}
+                className="flex-1"
               />
-              <span className="text-text-secondary text-sm">W</span>
               <button
                 onClick={handleChargeRateSave}
                 disabled={chargeRateSaving}
@@ -432,18 +431,21 @@ export default function ControlPage() {
           </div>
 
           {/* Discharge Rate */}
-          <div className="space-y-2">
-            <span className="text-text-secondary text-sm">Discharge Rate</span>
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-text-secondary text-sm">Discharge Rate</span>
+              <span className="font-mono text-text-primary text-sm">{dischargeRate}%</span>
+            </div>
             <div className="flex items-center gap-3">
               <input
-                type="number"
+                type="range"
+                min={0}
+                max={100}
+                step={5}
                 value={dischargeRate}
                 onChange={(e) => setDischargeRate(Number(e.target.value))}
-                className="flex-1 bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-3 py-2 border border-transparent focus:border-battery outline-none"
-                min={0}
-                step={100}
+                className="flex-1"
               />
-              <span className="text-text-secondary text-sm">W</span>
               <button
                 onClick={handleDischargeRateSave}
                 disabled={dischargeRateSaving}

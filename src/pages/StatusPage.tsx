@@ -18,14 +18,14 @@ export default function StatusPage() {
   }
 
   return (
-    <div className="flex flex-col gap-6 max-w-4xl mx-auto">
+    <div className="flex flex-col gap-4 max-w-4xl mx-auto">
       {/* Energy flow diagram — full width card */}
-      <section className="bg-bg-surface rounded-2xl p-6">
+      <section className="bg-bg-surface rounded-2xl p-4">
         <EnergyFlowDiagram snapshot={snapshot} />
       </section>
 
       {/* Battery + Summary side by side on md+ */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <BatteryPanel snapshot={snapshot} />
         <SummaryTiles snapshot={snapshot} />
       </div>

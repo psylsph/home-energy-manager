@@ -259,7 +259,7 @@ export default function SettingsPage() {
             step={1}
             value={intervalSecs}
             onChange={(e) => handleIntervalChange(Number(e.target.value))}
-            className="flex-1 accent-flow-active h-2 rounded-full appearance-none bg-bg-elevated [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-flow-active [&::-webkit-slider-thumb]:cursor-pointer"
+            className="flex-1"
           />
           <span className="text-text-primary text-sm font-mono w-12 text-right">{intervalSecs}s</span>
         </div>

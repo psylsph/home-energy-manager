@@ -165,6 +165,26 @@ pub const HR_BATTERY_PAUSE_MODE: u16 = 318;
 pub const HR_BATTERY_PAUSE_SLOT_1_START: u16 = 319;
 pub const HR_BATTERY_PAUSE_SLOT_1_END: u16 = 320;
 
+// ===========================================================================
+// Battery module polling
+// ===========================================================================
+
+/// Slave addresses to probe for battery BMS modules.
+///
+/// GivEnergy batteries typically respond at 0x01, 0x02, etc. The inverter
+/// itself is at 0x32. We probe sequentially and stop at the first failure.
+pub const BATTERY_SLAVE_ADDRESSES: &[u8] = &[0x01, 0x02, 0x03];
+
+/// Blocks read from each battery BMS slave during every poll cycle.
+pub const BATTERY_POLL_BLOCKS: &[RegisterBlock] = &[
+    RegisterBlock {
+        start: 60,
+        count: 60,
+        register_type: RegisterType::Input,
+        name: "battery_input_60_119",
+    },
+];
+
 // ---------------------------------------------------------------------------
 // Write whitelist — registers that are safe to write to
 // ---------------------------------------------------------------------------

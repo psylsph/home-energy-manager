@@ -45,8 +45,8 @@
 //!   HR(0):     device_type_code
 //!   HR(1-2):   module (uint32)
 //!   HR(3):     num_mppt (high byte), num_phases (low byte)
-//!   HR(5):     battery_capacity (mAh)
-//!   HR(6):     system_voltage (/100 V)
+//!   HR(5):     unused
+//!   HR(6):     system_voltage (/100 V) — live voltage, NOT used for capacity calc
 //!   HR(7):     enable_ammeter (bool)
 //!   HR(8-12):  first_battery_serial_number (10 chars)
 //!   HR(13-17): serial_number (10 chars)
@@ -72,7 +72,7 @@
 use crate::modbus::client::BlockRead;
 use crate::modbus::registers::{decode_hhmm, RegisterType};
 
-use super::model::{BatteryMode, BatteryState, DeviceType, InverterSnapshot, ScheduleSlot};
+use super::model::{BatteryMode, BatteryModule, BatteryState, DeviceType, InverterSnapshot, ScheduleSlot};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -139,6 +139,7 @@ fn block_key(block: &crate::modbus::registers::RegisterBlock) -> &'static str {
         (RegisterType::Input, 0) => "input_0_59",
         (RegisterType::Holding, 0) => "holding_0_59",
         (RegisterType::Holding, 60) => "holding_60_119",
+        (RegisterType::Input, 60) => "battery_input_60_119",
         _ => "unknown",
     }
 }
@@ -183,15 +184,11 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
     }
 
     // Compute home power.
-    // Sign conventions from the inverter (per GivTCP read.py):
+    // Internal sign conventions (after negation of raw battery values):
     //   battery_power > 0 = charging (power flowing INTO battery)
     //   grid_power > 0 = exporting (power flowing OUT to grid, "p_grid_out")
     //
-    // We keep the raw sign conventions — the front-end handles display logic.
-    //
-    // Home consumption = solar + battery_discharge + grid_import
-    //   = solar - battery_charge + grid_import
-    //   = solar - battery_power - grid_export
+    // Home consumption = solar - battery_charge - grid_export
     //   = solar - battery_power - grid_power
     snap.home_power = snap.solar_power - snap.battery_power - snap.grid_power;
 
@@ -221,10 +218,13 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.pv2_current = get_reg(data, 9) as f32 * 0.1; // IR(9):  i_pv2 (/10 A)
 
     // -- Battery --
-    snap.battery_power = signed(get_reg(data, 52)); // IR(52): p_battery (int16 W, +charging)
+    // IR(52): p_battery (int16 W) — inverter convention: positive = DISCHARGING.
+    // We negate so our model uses positive = charging throughout.
+    snap.battery_power = -signed(get_reg(data, 52));
     snap.soc = get_reg(data, 59) as u8; // IR(59): battery_soc (%)
     snap.battery_voltage = get_reg(data, 50) as f32 * 0.01; // IR(50): v_battery (/100 V)
-    snap.battery_current = signed(get_reg(data, 51)) as f32 * 0.01; // IR(51): i_battery (int16 /100 A)
+    // IR(51): i_battery — negate to match power sign convention (positive = charging current)
+    snap.battery_current = -signed(get_reg(data, 51)) as f32 * 0.01;
     snap.battery_state = BatteryState::from_power(snap.battery_power);
     snap.battery_temperature = get_reg(data, 56) as f32 * 0.1; // IR(56): t_battery (/10 °C)
 
@@ -261,10 +261,12 @@ fn decode_holding_0_59(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawC
         String::new()
     };
 
-    // Battery capacity in kWh = HR(55) * HR(6)/100 / 1000  (Ah × V / 1000 = kWh)
+    // Battery capacity in kWh = HR(55) × nominal_voltage / 1000
+    // HR(55) is per-battery Ah; nominal voltage is fixed per device type (not live voltage).
+    // Poll loop scales by detected module count for total system capacity.
     let capacity_ah = get_reg(data, 55) as f32; // HR(55): battery_capacity_ah
-    let system_voltage = get_reg(data, 6) as f32 * 0.01; // HR(6):  system_voltage (/100 V)
-    snap.battery_capacity_kwh = capacity_ah * system_voltage / 1000.0;
+    let nominal_voltage = snap.device_type.nominal_battery_voltage();
+    snap.battery_capacity_kwh = capacity_ah * nominal_voltage / 1000.0;
 
     // Battery power mode: HR(27) — 0=export, 1=eco
     raw.battery_power_mode = get_reg(data, 27);
@@ -315,6 +317,38 @@ fn decode_holding_60_119(data: &[u16], snap: &mut InverterSnapshot, raw: &mut Ra
     }
 }
 
+/// Decode battery block data from a single data slice into a BatteryModule.
+///
+/// Battery BMS input registers (IR 60-119):
+///   IR(60-79): cell voltages in mV (20 cells)
+///   IR(80):    SOC (%)
+///   IR(81):    temperature (0.1 °C)
+///   IR(82):    current (0.1 A, signed)
+///   IR(83):    voltage (0.1 V)
+///   IR(84+):   additional BMS data, may include serial number chars
+fn decode_battery_block(data: &[u16], index: usize, serial: &str) -> BatteryModule {
+    BatteryModule {
+        index,
+        soc: get_reg(data, 80 - 60) as u8, // IR(80): SOC (%)
+        temperature: get_reg(data, 81 - 60) as f32 * 0.1, // IR(81): temp (0.1 °C)
+        voltage: get_reg(data, 83 - 60) as f32 * 0.1, // IR(83): voltage (0.1 V)
+        current: signed(get_reg(data, 82 - 60)) as f32 * 0.1, // IR(82): current (0.1 A)
+        serial: serial.to_string(),
+    }
+}
+
+/// Decode battery input 60-119 into battery modules and append to snapshot.
+/// `block_index` is the battery number (0-based).
+pub fn decode_battery_block_into(
+    data: &[u16],
+    block_index: usize,
+    snapshot: &mut InverterSnapshot,
+    serial: &str,
+) {
+    let module = decode_battery_block(data, block_index, serial);
+    snapshot.battery_modules.push(module);
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -361,8 +395,8 @@ mod tests {
         input_data[37] = 25; // IR(37): discharge_today = 2.5 kWh
         input_data[41] = 425; // IR(41): inverter_temp = 42.5 °C
         input_data[50] = 5200; // IR(50): battery_voltage = 52.00 V
-        input_data[51] = 150; // IR(51): battery_current = 1.50 A
-        input_data[52] = 800; // IR(52): battery_power = +800 W (charging)
+        input_data[51] = (-150i16) as u16; // IR(51): battery_current = -1.50 A (inverter: negative = charging)
+        input_data[52] = (-800i16) as u16; // IR(52): battery_power = -800 W (inverter: negative = charging)
         input_data[56] = 310; // IR(56): battery_temp = 31.0 °C
         input_data[59] = 75; // IR(59): battery_soc = 75%
 
@@ -633,8 +667,9 @@ mod tests {
     fn battery_state_derivation() {
         let mut input_data = vec![0u16; 60];
 
-        // Battery discharging: p_battery = -500
-        input_data[52] = (-500i16) as u16;
+        // Battery discharging in inverter convention: raw p_battery = +500 (positive = discharging).
+        // After decoder negation: -500 (negative = discharging in our model).
+        input_data[52] = 500;
 
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", input_data),

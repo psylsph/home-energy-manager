@@ -386,15 +386,14 @@ impl ModbusClient {
         Ok(())
     }
 
-    /// Read all standard poll blocks, returning raw data per block.
+    /// Read a set of poll blocks, returning raw data per block.
     ///
-    /// Iterates over [`STANDARD_POLL_BLOCKS`] and issues a read request for
-    /// each one. If any block fails the entire operation fails.
-    pub async fn read_all_standard(&mut self) -> Result<Vec<BlockRead>, ClientError> {
-        let mut results = Vec::with_capacity(STANDARD_POLL_BLOCKS.len());
+    /// Iterates over the provided blocks and issues a read request for each
+    /// one. If any block fails the entire operation fails.
+    pub async fn read_blocks(&mut self, blocks: &'static [RegisterBlock]) -> Result<Vec<BlockRead>, ClientError> {
+        let mut results = Vec::with_capacity(blocks.len());
 
-        for block in STANDARD_POLL_BLOCKS {
-            // Convert registers::RegisterType to framer::RegisterType
+        for block in blocks {
             let reg_type = match block.register_type {
                 super::registers::RegisterType::Input => RegisterType::Input,
                 super::registers::RegisterType::Holding => RegisterType::Holding,
@@ -407,6 +406,14 @@ impl ModbusClient {
         }
 
         Ok(results)
+    }
+
+    /// Read all standard poll blocks, returning raw data per block.
+    ///
+    /// Iterates over [`STANDARD_POLL_BLOCKS`] and issues a read request for
+    /// each one. If any block fails the entire operation fails.
+    pub async fn read_all_standard(&mut self) -> Result<Vec<BlockRead>, ClientError> {
+        self.read_blocks(STANDARD_POLL_BLOCKS).await
     }
 }
 

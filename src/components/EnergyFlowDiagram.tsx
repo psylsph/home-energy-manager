@@ -1,5 +1,5 @@
 import type { InverterSnapshot } from '../lib/types';
-import { formatPower, formatPercent, formatEnergy, formatTemp } from '../lib/format';
+import { formatPower, formatPercent, formatCurrent, formatTemp, formatVoltage } from '../lib/format';
 
 interface Props {
   snapshot: InverterSnapshot;
@@ -7,14 +7,14 @@ interface Props {
 
 // Radial layout — Inverter hub at centre, four nodes at cardinal points.
 const W = 520;
-const H = 310;
+const H = 355;
 
 const NODES = {
-  inverter: { cx: W / 2, cy: 155, color: '#22D3EE', label: 'Inverter' },
-  solar:    { cx: W / 2, cy: 38,  color: '#F59E0B', label: 'Solar' },
-  grid:     { cx: 55,    cy: 155, color: '#EF4444', label: 'Grid' },
-  home:     { cx: W - 55, cy: 155, color: '#14B8A6', label: 'Home' },
-  battery:  { cx: W / 2, cy: 272, color: '#6366F1', label: 'Battery' },
+  inverter: { cx: W / 2, cy: 177, color: '#22D3EE', label: 'Inverter' },
+  solar:    { cx: W / 2, cy: 50,  color: '#F59E0B', label: 'Solar' },
+  grid:     { cx: 55,    cy: 177, color: '#EF4444', label: 'Grid' },
+  home:     { cx: W - 55, cy: 177, color: '#14B8A6', label: 'Home' },
+  battery:  { cx: W / 2, cy: 305, color: '#6366F1', label: 'Battery' },
 };
 
 // ---------------------------------------------------------------------------
@@ -36,7 +36,7 @@ function FlowLine({ flow }: { flow: FlowDef }) {
   const dy = flow.to.cy - flow.from.cy;
   const len = Math.sqrt(dx * dx + dy * dy);
 
-  const offset = 42;
+  const offset = 50;
   const ux = dx / len;
   const uy = dy / len;
   const x1 = flow.from.cx + ux * offset;
@@ -48,14 +48,14 @@ function FlowLine({ flow }: { flow: FlowDef }) {
   const my = (y1 + y2) / 2;
 
   // Label offset: push away from the line in the requested direction
-  const labelGap = 14;
+  const labelGap = 16
   let lx = mx;
   let ly = my;
   switch (flow.labelSide) {
-    case 'above': ly -= labelGap; break;
-    case 'below': ly += labelGap + 4; break;
+    case 'above': ly -= labelGap-5; break;
+    case 'below': ly += labelGap+5; break;
     case 'left':  lx -= labelGap; break;
-    case 'right': lx += labelGap; break;
+    case 'right': lx += labelGap+15; break;
   }
 
   const angle = Math.atan2(dy, dx) * 180 / Math.PI;
@@ -127,16 +127,16 @@ interface NodeProps {
 }
 
 function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
-  const r = hub ? 42 : 36;
+  const r = hub ? 48 : 44;
   return (
     <g>
       {/* Subtle outer glow */}
-      <circle cx={cx} cy={cy} r={r + 4} fill="none" stroke={color} strokeWidth={1} opacity={0.15} />
+      <circle cx={cx} cy={cy} r={r + 5} fill="none" stroke={color} strokeWidth={1} opacity={0.15} />
       {/* Main circle */}
       <circle cx={cx} cy={cy} r={r} fill="#0D1117" stroke={color} strokeWidth={hub ? 2.5 : 2} />
       {/* Label */}
       <text
-        x={cx} y={cy - 10}
+        x={cx} y={cy - (hub ? 12 : 11)}
         textAnchor="middle"
         fill={color}
         fontSize={hub ? 10 : 10.5}
@@ -148,10 +148,10 @@ function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
       </text>
       {/* Value */}
       <text
-        x={cx} y={cy + 6}
+        x={cx} y={cy + (hub ? 8 : 7)}
         textAnchor="middle"
         fill="#F0F6FC"
-        fontSize="14"
+        fontSize="15"
         fontWeight="700"
         fontFamily="var(--font-mono, monospace)"
       >
@@ -159,10 +159,10 @@ function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
       </text>
       {/* Unit / secondary info */}
       <text
-        x={cx} y={cy + 20}
+        x={cx} y={cy + (hub ? 23 : 22)}
         textAnchor="middle"
         fill="#8B949E"
-        fontSize="9"
+        fontSize="10"
         fontFamily="var(--font-mono, monospace)"
       >
         {unit}
@@ -254,7 +254,7 @@ export default function EnergyFlowDiagram({ snapshot: s }: Props) {
         <FlowNode
           {...NODES.solar}
           value={formatPower(s.solar_power)}
-          unit={`${s.pv1_voltage.toFixed(0)}V · ${s.pv2_voltage.toFixed(0)}V`}
+          unit={`${formatVoltage(s.pv1_voltage)}/${formatCurrent(s.pv1_current + s.pv2_current)}`}
         />
         <FlowNode
           {...NODES.grid}
@@ -264,7 +264,7 @@ export default function EnergyFlowDiagram({ snapshot: s }: Props) {
         <FlowNode
           {...NODES.home}
           value={formatPower(s.home_power)}
-          unit={formatEnergy(s.today_consumption_kwh) + ' today'}
+          unit="Consumption"
         />
         <FlowNode
           {...NODES.battery}

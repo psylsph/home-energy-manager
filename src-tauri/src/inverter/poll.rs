@@ -183,6 +183,12 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                         Ok(blocks) => {
                             let snapshot = decode_snapshot(&blocks);
 
+                            // TODO: Battery BMS module probing disabled — the register
+                            // layout for battery slave addresses (0x01, 0x02, …) is not
+                            // yet confirmed. Probing with Input 60-119 corrupts the
+                            // data adapter connection. Re-enable once correct registers
+                            // are identified from the givenergy-modbus reference.
+
                             // Store latest snapshot.
                             {
                                 let mut latest = state.latest_snapshot.lock().await;

@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useInverterStore } from './store/useInverterStore';
 import StatusPage from './pages/StatusPage';
+import BatteryPage from './pages/BatteryPage';
 import ControlPage from './pages/ControlPage';
 import SettingsPage from './pages/SettingsPage';
 import HistoryPage from './pages/HistoryPage';
@@ -25,6 +26,7 @@ function ConnectionIndicator() {
 
 const NAV_ITEMS = [
   { to: '/', label: 'Status', icon: StatusIcon },
+  { to: '/battery', label: 'Battery', icon: BatteryIcon },
   { to: '/history', label: 'History', icon: HistoryIcon },
   { to: '/control', label: 'Control', icon: ControlIcon },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
@@ -51,6 +53,16 @@ function ControlIcon() {
     <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
       <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+    </svg>
+  );
+}
+
+function BatteryIcon() {
+  return (
+    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+      <rect x="2" y="7" width="18" height="10" rx="2" />
+      <path strokeLinecap="round" d="M22 11v2" />
+      <rect x="4" y="9" width="14" height="6" rx="1" fill="currentColor" opacity="0.3" />
     </svg>
   );
 }
@@ -82,6 +94,7 @@ function Layout() {
       <main className="flex-1 overflow-auto px-4 py-6 md:px-6 md:py-8">
         <Routes>
           <Route path="/" element={<StatusPage />} />
+          <Route path="/battery" element={<BatteryPage />} />
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/control" element={<ControlPage />} />
           <Route path="/settings" element={<SettingsPage />} />
