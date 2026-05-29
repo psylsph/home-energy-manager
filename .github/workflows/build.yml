@@ -61,5 +61,5 @@ jobs:
           releaseName: "GivEnergy Local ${{ github.ref_name }}"
           releaseBody: "See [CHANGELOG.md](https://github.com/psylsph/givenergy-local/blob/master/CHANGELOG.md) for details."
           releaseDraft: false
-          prerelease: true
+          prerelease: false
           args: --target ${{ matrix.target }}
