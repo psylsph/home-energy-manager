@@ -174,9 +174,9 @@ function ScheduleSlotEditor({
 
       {local.enabled && (
         <>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="space-y-2">
             <div className="flex items-center gap-3">
-              <span className="text-text-secondary text-sm w-12">Start</span>
+              <span className="text-text-secondary text-sm w-12 shrink-0">Start</span>
               <TimePicker
                 hour={local.start_hour}
                 minute={local.start_minute}
@@ -184,7 +184,7 @@ function ScheduleSlotEditor({
               />
             </div>
             <div className="flex items-center gap-3">
-              <span className="text-text-secondary text-sm w-12">End</span>
+              <span className="text-text-secondary text-sm w-12 shrink-0">End</span>
               <TimePicker
                 hour={local.end_hour}
                 minute={local.end_minute}
