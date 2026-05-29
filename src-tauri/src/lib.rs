@@ -41,31 +41,35 @@ pub fn run() {
             }
 
             // Spawn the HTTP server on LAN interface, port 7337.
-            // In production, also serve frontend files so the Tauri window
-            // can load from http://127.0.0.1:7337 (same-origin, avoids
-            // Windows WebView2 mixed-content blocking).
             let server_state = state.clone();
             if cfg!(debug_assertions) {
+                // Dev mode: Vite serves the frontend on :5173;
+                // Axum only handles API and WebSocket endpoints.
                 tauri::async_runtime::spawn(async move {
                     start_server(server_state, "0.0.0.0", 7337).await;
                 });
             } else {
-                // dist/ is relative to src-tauri/ — goes up one level
-                let dist_dir = "../dist".to_string();
+                // Production: serve the frontend from Axum too so that
+                // the Tauri window is same-origin with the API/WebSocket.
+                // The dist files are bundled as Tauri resources and land at
+                // {resource_dir}/dist/.
+                let resource_dir = app
+                    .path()
+                    .resource_dir()
+                    .expect("failed to resolve Tauri resource directory");
+                let dist_dir = resource_dir
+                    .join("dist")
+                    .to_string_lossy()
+                    .to_string();
+                tracing::info!("Production frontend path: {}", dist_dir);
+
                 tauri::async_runtime::spawn(async move {
-                    start_server_with_frontend(server_state, "0.0.0.0", 7337, &dist_dir).await;
+                    start_server_with_frontend(server_state, "0.0.0.0", 7337, dist_dir).await;
                 });
-            }
 
-            // Spawn the Modbus polling loop
-            let poll_state = state.clone();
-            tauri::async_runtime::spawn(async move {
-                run_poll_loop(poll_state).await;
-            });
-
-            // In production, navigate the window to the Axum server
-            // (same-origin — avoids Windows WebView2 mixed-content blocking)
-            if !cfg!(debug_assertions) {
+                // Give the server a moment to bind, then navigate the
+                // Tauri window away from the asset protocol to the Axum
+                // origin (same-origin for fetch + WebSocket).
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.eval(
@@ -73,6 +77,12 @@ pub fn run() {
                     );
                 }
             }
+
+            // Spawn the Modbus polling loop
+            let poll_state = state.clone();
+            tauri::async_runtime::spawn(async move {
+                run_poll_loop(poll_state).await;
+            });
 
             Ok(())
         })

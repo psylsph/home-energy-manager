@@ -48,8 +48,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 /// Build the Axum router with API routes + frontend static file serving.
 ///
 /// In production Tauri builds, the window navigates to `http://127.0.0.1:7337`
-/// to avoid Windows WebView2 mixed-content blocking. The Axum server serves
-/// the Vite dist files as a fallback for all non-API routes.
+/// so that API/WebSocket calls are same-origin (avoids WebView2 cross-origin
+/// blocking). The bundled `dist/` resources serve the Vite output.
 pub fn create_router_with_frontend(state: Arc<AppState>, dist_dir: &str) -> Router {
     let router = create_router(state);
     router.fallback_service(
@@ -57,7 +57,7 @@ pub fn create_router_with_frontend(state: Arc<AppState>, dist_dir: &str) -> Rout
     )
 }
 
-/// Start the HTTP server on the specified bind address and port.
+/// Start the HTTP server (API + WebSocket only, no frontend serving).
 pub async fn start_server(state: Arc<AppState>, bind_addr: &str, port: u16) {
     let app = create_router(state);
     let addr = format!("{}:{}", bind_addr, port);
@@ -75,8 +75,8 @@ pub async fn start_server(state: Arc<AppState>, bind_addr: &str, port: u16) {
 }
 
 /// Start the HTTP server with frontend static file serving.
-pub async fn start_server_with_frontend(state: Arc<AppState>, bind_addr: &str, port: u16, dist_dir: &str) {
-    let app = create_router_with_frontend(state, dist_dir);
+pub async fn start_server_with_frontend(state: Arc<AppState>, bind_addr: &str, port: u16, dist_dir: String) {
+    let app = create_router_with_frontend(state, &dist_dir);
     let addr = format!("{}:{}", bind_addr, port);
     tracing::info!("HTTP server starting on {} (serving frontend from {})", addr, dist_dir);
     let listener = match tokio::net::TcpListener::bind(&addr).await {
@@ -90,3 +90,4 @@ pub async fn start_server_with_frontend(state: Arc<AppState>, bind_addr: &str, p
         tracing::error!("HTTP server error: {e}");
     }
 }
+
