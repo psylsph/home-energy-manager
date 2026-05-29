@@ -31,7 +31,30 @@ interface FlowDef {
   labelSide: 'above' | 'below' | 'left' | 'right';
 }
 
-function FlowLine({ flow }: { flow: FlowDef }) {
+function FlowTrack({ flow }: { flow: FlowDef }) {
+  const dx = flow.to.cx - flow.from.cx;
+  const dy = flow.to.cy - flow.from.cy;
+  const len = Math.sqrt(dx * dx + dy * dy);
+
+  const offset = 50;
+  const ux = dx / len;
+  const uy = dy / len;
+  const x1 = flow.from.cx + ux * offset;
+  const y1 = flow.from.cy + uy * offset;
+  const x2 = flow.to.cx - ux * offset;
+  const y2 = flow.to.cy - uy * offset;
+
+  return (
+    <line
+      x1={x1} y1={y1} x2={x2} y2={y2}
+      stroke="#21262D"
+      strokeWidth={2}
+      strokeLinecap="round"
+    />
+  );
+}
+
+function FlowAnimation({ flow }: { flow: FlowDef }) {
   const dx = flow.to.cx - flow.from.cx;
   const dy = flow.to.cy - flow.from.cy;
   const len = Math.sqrt(dx * dx + dy * dy);
@@ -49,44 +72,33 @@ function FlowLine({ flow }: { flow: FlowDef }) {
 
   const angle = Math.atan2(dy, dx) * 180 / Math.PI;
 
+  if (!flow.active) return null;
+
   return (
-    <g>
-      {/* Track */}
+    <>
       <line
         x1={x1} y1={y1} x2={x2} y2={y2}
-        stroke="#21262D"
-        strokeWidth={2}
+        stroke="#22D3EE"
+        strokeWidth={2.5}
         strokeLinecap="round"
+        strokeDasharray="8 6"
+        opacity={0.85}
+      >
+        <animate
+          attributeName="stroke-dashoffset"
+          from="0"
+          to={-28}
+          dur="0.8s"
+          repeatCount="indefinite"
+        />
+      </line>
+      {/* Arrow at midpoint */}
+      <polygon
+        points="0,-4.5 9,0 0,4.5"
+        fill="#22D3EE"
+        transform={`translate(${mx},${my}) rotate(${angle})`}
       />
-      {/* Animated flow */}
-      {flow.active && (
-        <>
-          <line
-            x1={x1} y1={y1} x2={x2} y2={y2}
-            stroke="#22D3EE"
-            strokeWidth={2.5}
-            strokeLinecap="round"
-            strokeDasharray="8 6"
-            opacity={0.85}
-          >
-            <animate
-              attributeName="stroke-dashoffset"
-              from="0"
-              to={-28}
-              dur="0.8s"
-              repeatCount="indefinite"
-            />
-          </line>
-          {/* Arrow at midpoint */}
-          <polygon
-            points="0,-4.5 9,0 0,4.5"
-            fill="#22D3EE"
-            transform={`translate(${mx},${my}) rotate(${angle})`}
-          />
- 
-        </>
-      )}
-    </g>
+    </>
   );
 }
 
@@ -223,12 +235,17 @@ export default function EnergyFlowDiagram({ snapshot: s }: Props) {
         className="w-full"
         style={{ maxWidth: '560px', fontFamily: 'var(--font-sans, sans-serif)' }}
       >
-        {/* Flow lines (drawn first, behind nodes) */}
+        {/* Layer 1: All gray tracks (behind everything) */}
         {flows.map((f) => (
-          <FlowLine key={f.id} flow={f} />
+          <FlowTrack key={`track-${f.id}`} flow={f} />
         ))}
 
-        {/* Nodes (drawn on top) */}
+        {/* Layer 2: All animated cyan flows (on top of all tracks) */}
+        {flows.map((f) => (
+          <FlowAnimation key={`anim-${f.id}`} flow={f} />
+        ))}
+
+        {/* Layer 3: Nodes (on top of everything) */}
         <FlowNode
           {...NODES.solar}
           value={formatPower(s.solar_power)}

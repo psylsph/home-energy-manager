@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] - 2026-05-29
+
+### Fixed
+
+- **Battery SOC spike to 100%**: BMS module SOC (IR 100) can return garbage values including
+  100%. Now validates BMS SOC against inverter SOC (IR 59) — only overrides when within ±30
+  points and the value is 1–99.
+- **Energy flow diagram z-order**: Cyan animated flow lines could render behind gray track
+  lines. Split into two-pass rendering: all gray tracks first, then all animated lines on top.
+- **History guard tightened**: Also rejects SOC=100 readings when battery is actively charging
+  at >500W (physically impossible).
+- **Purged 2 more garbage SOC=100 entries** from history database.
+
 ## [0.5.2] - 2026-05-29
 
 ### Fixed

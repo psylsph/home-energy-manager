@@ -313,8 +313,25 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         // Override SOC with BMS module SOC (IR 100) which is
                                         // more reliable than the inverter-level IR(59) that
                                         // intermittently returns 0.
+                                        //
+                                        // Validation: only override when the BMS value is
+                                        // plausible — not 0 (garbage) and not a wild jump
+                                        // from the inverter reading. If the inverter SOC is
+                                        // already reasonable (> 0), the BMS must be within
+                                        // ±30 points to be trusted. If inverter SOC is 0,
+                                        // accept any BMS value 1–99 (skip 100 as it's also
+                                        // a common garbage value).
                                         if let Some(bms) = snapshot.battery_modules.first() {
-                                            if bms.soc > 0 {
+                                            let inverter_soc = snapshot.soc as i16;
+                                            let bms_soc = bms.soc as i16;
+                                            let plausible = if bms_soc <= 0 || bms_soc > 99 {
+                                                false
+                                            } else if inverter_soc > 0 {
+                                                (bms_soc - inverter_soc).unsigned_abs() <= 30
+                                            } else {
+                                                true // inverter is 0, trust BMS (1-99)
+                                            };
+                                            if plausible {
                                                 snapshot.soc = bms.soc;
                                             }
                                         }
@@ -364,16 +381,19 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 let _ = state.tx.send(PollMessage::Snapshot(snapshot.clone()));
 
                                 // Persist to history database.
-                                // Skip if SOC is 0 but other telemetry is live — this
-                                // indicates a garbled register read, not an empty battery.
+                                // Skip if telemetry looks garbled:
+                                //  - SOC=0 but power flows are live (bad IR(59))
+                                //  - SOC=100 but battery is actively charging at high power
                                 {
                                     let h = state.history.lock().await;
                                     if let Some(ref db) = *h {
-                                        let appears_valid = snapshot.soc > 0
-                                            || (snapshot.solar_power == 0
-                                                && snapshot.battery_power == 0
-                                                && snapshot.grid_power == 0);
-                                        if appears_valid {
+                                        let soc_suspicious = (snapshot.soc == 0
+                                            && (snapshot.solar_power > 0
+                                                || snapshot.battery_power != 0
+                                                || snapshot.grid_power != 0))
+                                            || (snapshot.soc == 100
+                                                && snapshot.battery_power > 500);
+                                        if !soc_suspicious {
                                             db.insert_reading(&snapshot);
                                         }
                                     }
