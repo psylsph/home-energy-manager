@@ -9,6 +9,12 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 - **Modbus**: Custom Rust TCP client to GivEnergy data adapter (port **8899**)
 - **Testing**: Rust unit tests only (no frontend tests, no integration tests)
 
+## Prerequisites
+
+- **Node.js** + npm
+- **Rust** toolchain (`rustup`)
+- **Tauri CLI**: `cargo install tauri-cli`
+
 ## Commands
 
 | Command | Action |
