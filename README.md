@@ -71,7 +71,7 @@ cd src-tauri && cargo tauri dev
 ```bash
 npm install
 cargo install tauri-cli
-cd src-tauri && cargo nuild --release
+cd src-tauri && cargo build --release
 nohup ./target/release/givenergy-local --headless > givenergy-local.log 2>&1 &
 ```
 
