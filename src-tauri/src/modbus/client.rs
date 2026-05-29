@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use super::framer::{self, DecodedFrame, RegisterType};
+use super::framer::{self, crc16_modbus, DecodedFrame, RegisterType};
 use super::registers::{RegisterBlock, STANDARD_POLL_BLOCKS};
 
 // ---------------------------------------------------------------------------
@@ -197,21 +197,24 @@ impl ModbusClient {
     // Core I/O helpers
     // -----------------------------------------------------------------------
 
-    /// Send a raw frame and read back the response frame.
-    ///
-    /// The response is read in a streaming fashion: we first read enough bytes
-    /// to determine the length from the header, then read the remaining payload.
-    async fn send_and_receive(&mut self, frame: &[u8]) -> Result<DecodedFrame, ClientError> {
+    /// Send a raw frame to the dongle without waiting for a response.
+    async fn send_raw(&mut self, frame: &[u8]) -> Result<(), ClientError> {
         let stream = self.stream.as_mut().ok_or(ClientError::NotConnected)?;
-
-        // --- Send ---
         tokio::time::timeout(self.timeout, stream.write_all(frame))
             .await
             .map_err(|_| ClientError::Timeout)?
             .map_err(|e| ClientError::SendFailed(e.to_string()))?;
+        Ok(())
+    }
 
-        // --- Receive ---
-        // We need at least 6 bytes to read the length field (bytes 4-5).
+    /// Read and decode one response frame from the dongle.
+    ///
+    /// Reads the MBAP header to determine length, then reads the rest.
+    /// Does NOT check for Modbus exceptions — callers handle those.
+    async fn receive_frame(&mut self) -> Result<DecodedFrame, ClientError> {
+        let stream = self.stream.as_mut().ok_or(ClientError::NotConnected)?;
+
+        // Read the 6-byte MBAP header
         let mut header_buf = [0u8; 6];
         tokio::time::timeout(self.timeout, stream.read_exact(&mut header_buf))
             .await
@@ -241,8 +244,6 @@ impl ModbusClient {
         full.extend_from_slice(&rest);
 
         // Auto-discover dongle serial from response header (bytes 8-17).
-        // The data adapter always includes its own serial in every response.
-        // If our serial was empty (auto-discovery mode), capture it now.
         if self.serial.is_empty() && full.len() >= 18 {
             let discovered = std::str::from_utf8(&full[8..18])
                 .unwrap_or("")
@@ -256,8 +257,54 @@ impl ModbusClient {
         }
 
         // Decode using the framer
-        let decoded =
-            framer::decode_frame(&full).map_err(|e| ClientError::FrameError(e.to_string()))?;
+        framer::decode_frame(&full).map_err(|e| ClientError::FrameError(e.to_string()))
+    }
+
+    /// Drain any complete response frames buffered in the TCP socket.
+    ///
+    /// Called before write batches to flush stale read responses left over
+    /// from the previous poll cycle. Uses short timeouts so it returns
+    /// quickly once the buffer is empty.
+    pub async fn drain_stale_frames(&mut self) {
+        let stream = match self.stream.as_mut() {
+            Some(s) => s,
+            None => return,
+        };
+
+        let mut drained = 0usize;
+        loop {
+            let mut header = [0u8; 6];
+            match tokio::time::timeout(Duration::from_millis(200), stream.read_exact(&mut header))
+                .await
+            {
+                Ok(Ok(_)) => {
+                    let length = u16::from_be_bytes([header[4], header[5]]) as usize;
+                    if length > 0 && length < MAX_RESPONSE_SIZE {
+                        let mut rest = vec![0u8; length];
+                        let _ = tokio::time::timeout(
+                            Duration::from_millis(200),
+                            stream.read_exact(&mut rest),
+                        )
+                        .await;
+                    }
+                    drained += 1;
+                }
+                _ => break, // timeout or error — buffer is clear
+            }
+        }
+
+        if drained > 0 {
+            tracing::info!("Drained {drained} stale frame(s)");
+        }
+    }
+
+    /// Send a raw frame and read back one response frame.
+    ///
+    /// Convenience wrapper that sends a request and reads one response.
+    /// Checks for Modbus exception responses and returns `Err` for them.
+    async fn send_and_receive(&mut self, frame: &[u8]) -> Result<DecodedFrame, ClientError> {
+        self.send_raw(frame).await?;
+        let decoded = self.receive_frame().await?;
 
         // Check for Modbus exception response (function code with high bit set)
         if decoded.function >= 0x80 {
@@ -424,60 +471,132 @@ impl ModbusClient {
         Ok(values)
     }
 
-    /// Write multiple holding registers (function code 0x10).
+    /// Write a single holding register (transparent function code 6).
     ///
-    /// Sends a Modbus write-multiple-registers request and verifies the
-    /// acknowledgment from the device.
-    pub async fn write_registers(&mut self, start: u16, values: &[u16]) -> Result<(), ClientError> {
-        // Build the write-multiple-registers inner payload:
-        //   start address (2 bytes) + quantity (2 bytes) + byte count (1) + values
-        let quantity = values.len() as u16;
-        let byte_count = (values.len() * 2) as u8;
+    /// Per the givenergy-modbus reference library, writes use:
+    ///   - Transparent function code **6** (Write Single Register), NOT 0x10
+    ///   - Device address **0x11** (inverter setup address), NOT 0x32
+    ///   - One register per request (no batching)
+    ///
+    /// The CRC/check field is CrcModbus(function_code + register + value),
+    /// which differs from the standard Modbus CRC over the full PDU.
+    /// However, the dongle appears to ignore the CRC on incoming requests.
+    ///
+    /// Handles stale read responses and dongle-busy exceptions (code 67)
+    /// with automatic retries.
+    pub async fn write_register(&mut self, register: u16, value: u16) -> Result<(), ClientError> {
+        let inner_function: u8 = 6; // Write Single Holding Register
+        let device_address: u8 = 0x11; // Inverter setup address for writes
 
-        let mut payload = Vec::with_capacity(5 + values.len() * 2);
-        payload.extend_from_slice(&start.to_be_bytes());
-        payload.extend_from_slice(&quantity.to_be_bytes());
-        payload.push(byte_count);
-        for &val in values {
-            payload.extend_from_slice(&val.to_be_bytes());
+        // Build inner payload: register(2) + value(2)
+        let mut payload = Vec::with_capacity(4);
+        payload.extend_from_slice(&register.to_be_bytes());
+        payload.extend_from_slice(&value.to_be_bytes());
+
+        // Calculate check/CRC per givenergy-modbus convention:
+        // CrcModbus(function_code + register + value)
+        let mut check_data = Vec::with_capacity(5);
+        check_data.push(inner_function);
+        check_data.extend_from_slice(&register.to_be_bytes());
+        check_data.extend_from_slice(&value.to_be_bytes());
+        let check = crc16_modbus(&check_data);
+        payload.extend_from_slice(&check.to_le_bytes());
+
+        // Encode the full frame
+        let request = framer::encode_frame(
+            &self.serial,
+            device_address,
+            inner_function,
+            &payload,
+        );
+
+        let max_attempts = 30u8;
+        let mut need_resend = true;
+
+        for attempt in 0..max_attempts {
+            if need_resend {
+                self.send_raw(&request).await?;
+                need_resend = false;
+            }
+
+            let decoded = match self.receive_frame().await {
+                Ok(d) => d,
+                Err(e) => {
+                    if attempt + 1 < max_attempts {
+                        tracing::debug!("Write read error at {register}: {e}");
+                        need_resend = true;
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
+
+            // Exception response
+            if decoded.function >= 0x80 {
+                let code = decoded.payload.first().copied().unwrap_or(0);
+                if code == 67 && attempt + 1 < max_attempts {
+                    // Exponential backoff: 1s, 2s, 4s, 8s, ... up to 10s max.
+                    // The dongle needs increasing recovery time for adjacent writes.
+                    let delay_secs = (1u64 << attempt.min(3)).min(10);
+                    tracing::debug!(
+                        "Write at {register} got exception 67 (busy), retrying ({}/{}) after {delay_secs}s",
+                        attempt + 1, max_attempts
+                    );
+                    tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+                    need_resend = true;
+                    continue;
+                }
+                return Err(ClientError::InvalidResponse(format!(
+                    "Modbus exception: function 0x{:02X}, code {}",
+                    decoded.function, code
+                )));
+            }
+
+            // Wrong function code — stale read response, drain it
+            if decoded.function != inner_function {
+                if attempt + 1 < max_attempts {
+                    continue;
+                }
+                return Err(ClientError::InvalidResponse(format!(
+                    "function code mismatch: expected 0x{:02X}, got 0x{:02X}",
+                    inner_function, decoded.function
+                )));
+            }
+
+            // Correct function code (6) — verify it's our ack
+            // Response payload: inverter_serial(10) + register(2) + value(2) + check(2)
+            // After decode_frame strips slave+func+CRC, we have: inverter_serial(10) + register(2) + value(2)
+            if decoded.payload.len() < 14 {
+                return Err(ClientError::InvalidResponse(format!(
+                    "write response payload too short: need at least 14 bytes, got {}",
+                    decoded.payload.len()
+                )));
+            }
+
+            let inner = &decoded.payload[10..];
+            let resp_register = u16::from_be_bytes([inner[0], inner[1]]);
+            let _resp_value = u16::from_be_bytes([inner[2], inner[3]]);
+
+            if resp_register != register {
+                // Stale write ack from a previous write
+                if attempt + 1 < max_attempts {
+                    tracing::debug!(
+                        "Write at {register} got stale ack (reg {resp_register}), draining"
+                    );
+                    continue;
+                }
+                return Err(ClientError::InvalidResponse(format!(
+                    "write acknowledgment mismatch: register {} vs {}",
+                    resp_register, register
+                )));
+            }
+
+            // Success
+            tracing::debug!("Write ack: register {register} = {value} (0x{value:04X})");
+            return Ok(());
         }
 
-        // Encode the full frame with function code 0x10
-        let request = framer::encode_frame(&self.serial, self.slave, 0x10, &payload);
-
-        // Send and receive
-        let decoded = self.send_and_receive(&request).await?;
-
-        // Verify function code
-        if decoded.function != 0x10 {
-            return Err(ClientError::InvalidResponse(format!(
-                "function code mismatch: expected 0x10, got 0x{:02X}",
-                decoded.function
-            )));
-        }
-
-        // For a write response, payload format is:
-        //   inverter_serial (10 bytes) + start address (2) + quantity (2)
-        if decoded.payload.len() < 14 {
-            return Err(ClientError::InvalidResponse(format!(
-                "write response payload too short: need at least 14 bytes, got {}",
-                decoded.payload.len()
-            )));
-        }
-
-        // Skip inverter serial number (10 bytes)
-        let inner = &decoded.payload[10..];
-        let resp_start = u16::from_be_bytes([inner[0], inner[1]]);
-        let resp_qty = u16::from_be_bytes([inner[2], inner[3]]);
-
-        if resp_start != start || resp_qty != quantity {
-            return Err(ClientError::InvalidResponse(format!(
-                "write acknowledgment mismatch: start {} vs {}, quantity {} vs {}",
-                resp_start, start, resp_qty, quantity
-            )));
-        }
-
-        Ok(())
+        Err(ClientError::InvalidResponse("exhausted write retries".to_string()))
     }
 
     /// Read a set of poll blocks, returning raw data per block.

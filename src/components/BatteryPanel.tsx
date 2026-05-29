@@ -89,11 +89,11 @@ export default function BatteryPanel({ snapshot: s }: Props) {
             <span className="text-text-primary text-sm font-mono">{formatTemp(s.battery_temperature)}</span>
           </div>
           <div className="flex items-baseline justify-between">
-            <span className="text-text-secondary text-xs">Charged</span>
+            <span className="text-text-secondary text-xs">Charged Today</span>
             <span className="text-text-primary text-sm font-mono">{formatEnergy(s.today_charge_kwh)}</span>
            </div>
           <div className="flex items-baseline justify-between">
-            <span className="text-text-secondary text-xs">Discharged</span>
+            <span className="text-text-secondary text-xs">Discharged Today</span>
             <span className="text-text-primary text-sm font-mono">{formatEnergy(s.today_discharge_kwh)}</span>
         </div>
         </div>

@@ -296,34 +296,7 @@ export default function ControlPage() {
 
   return (
     <div className="flex flex-col gap-6 max-w-2xl mx-auto px-4 py-6">
-      {/* Section 1: Battery Mode */}
-      <section className="space-y-3">
-        <h2 className="text-text-primary font-semibold text-lg">Battery Mode</h2>
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-          {BATTERY_MODES.map(({ key, label }) => {
-            const isActive = currentMode === key;
-            return (
-              <button
-                key={key}
-                onClick={() => modeAction.execute('/api/control/mode', { mode: key })}
-                disabled={modeAction.loading}
-                className={`px-3 py-3 rounded-lg border text-xs font-medium transition w-full ${
-                  isActive
-                    ? 'bg-battery/20 border-battery text-battery'
-                    : 'bg-bg-surface border-transparent hover:border-battery/40 hover:bg-bg-elevated text-text-secondary'
-                } disabled:opacity-50`}
-              >
-                {label}
-              </button>
-            );
-          })}
-        </div>
-        {modeAction.error && (
-          <p className="text-red-400 text-sm">{modeAction.error}</p>
-        )}
-      </section>
-
-      {/* Section 2: Quick Actions */}
+      {/* Section 1: Quick Actions */}
       <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Quick Actions</h2>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -352,6 +325,35 @@ export default function ControlPage() {
           />
         </div>
       </section>
+
+
+      {/* Section 2: Battery Mode */}
+      <section className="space-y-3">
+        <h2 className="text-text-primary font-semibold text-lg">Battery Mode</h2>
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+          {BATTERY_MODES.map(({ key, label }) => {
+            const isActive = currentMode === key;
+            return (
+              <button
+                key={key}
+                onClick={() => modeAction.execute('/api/control/mode', { mode: key })}
+                disabled={modeAction.loading}
+                className={`px-3 py-3 rounded-lg border text-xs font-medium transition w-full ${
+                  isActive
+                    ? 'bg-battery/20 border-battery text-battery'
+                    : 'bg-bg-surface border-transparent hover:border-battery/40 hover:bg-bg-elevated text-text-secondary'
+                } disabled:opacity-50`}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+        {modeAction.error && (
+          <p className="text-red-400 text-sm">{modeAction.error}</p>
+        )}
+      </section>
+
 
       {/* Section 3: Charge Schedule */}
       <section className="space-y-3">

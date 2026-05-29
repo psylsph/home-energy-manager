@@ -27,6 +27,10 @@ async fn queue_writes(state: &Arc<AppState>, writes: Vec<RegisterWrite>) {
     let mut pw = state.pending_writes.lock().await;
     tracing::info!("Queued {} register write(s)", writes.len());
     pw.push(writes);
+    drop(pw);
+    // Wake the poll loop immediately so writes are applied without
+    // waiting for the next read cycle or sleep interval.
+    state.write_notify.notify_one();
 }
 
 // ---------------------------------------------------------------------------
@@ -189,7 +193,7 @@ pub async fn set_mode(
 /// Body: `{"slot": 1, "start_hour": 6, "start_minute": 0, "end_hour": 10, "end_minute": 0,
 ///         "enabled": true, "target_soc": 100}`
 ///
-/// If `enabled` is false, the slot times are set to the disabled sentinel (60).
+/// If `enabled` is false, the slot times are set to 0 (per givenergy-modbus reference).
 /// `target_soc` sets the global charge target SOC register.
 /// Also updates `enable_charge` based on whether any charge slot remains active.
 pub async fn set_charge_slot(
@@ -215,8 +219,8 @@ pub async fn set_charge_slot(
     let (start, end) = if enabled {
         (encode_hhmm(start_hour, start_minute), encode_hhmm(end_hour, end_minute))
     } else {
-        // Disabled: set times to the sentinel value 60
-        (60, 60)
+        // Disabled: write 0 to clear the slot (per givenergy-modbus reference library)
+        (0, 0)
     };
 
     let cmd = match slot {
@@ -281,7 +285,7 @@ pub async fn set_charge_slot(
 /// Body: `{"slot": 1, "start_hour": 16, "start_minute": 0, "end_hour": 19, "end_minute": 0,
 ///         "enabled": true}`
 ///
-/// If `enabled` is false, the slot times are set to the disabled sentinel (60).
+/// If `enabled` is false, the slot times are set to 0 (per givenergy-modbus reference).
 /// Also updates `enable_discharge` based on whether any discharge slot remains active.
 pub async fn set_discharge_slot(
     State(state): State<Arc<AppState>>,
@@ -305,7 +309,7 @@ pub async fn set_discharge_slot(
     let (start, end) = if enabled {
         (encode_hhmm(start_hour, start_minute), encode_hhmm(end_hour, end_minute))
     } else {
-        (60, 60)
+        (0, 0)
     };
 
     let cmd = match slot {

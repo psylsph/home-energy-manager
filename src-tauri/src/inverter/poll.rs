@@ -20,7 +20,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, Notify};
 
 use crate::inverter::decoder::decode_snapshot;
 use crate::inverter::encoder::RegisterWrite;
@@ -113,6 +113,8 @@ pub struct AppState {
     /// Pending register writes queued by the control API.
     /// The poll loop drains this queue and writes to the inverter.
     pub pending_writes: Arc<Mutex<Vec<Vec<RegisterWrite>>>>,
+    /// Signaled when new writes are queued so the poll loop wakes immediately.
+    pub write_notify: Arc<Notify>,
 }
 
 impl AppState {
@@ -128,6 +130,7 @@ impl AppState {
             tx,
             settings: Arc::new(Mutex::new(PollSettings::default())),
             pending_writes: Arc::new(Mutex::new(Vec::new())),
+            write_notify: Arc::new(Notify::new()),
         }
     }
 }
@@ -217,51 +220,36 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                         std::mem::take(&mut *pw)
                     };
                     if !pending.is_empty() {
-                        // Give the dongle a moment after the previous poll's
-                        // reads before we start writing.
-                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        // Flush stale read responses from the previous poll cycle
+                        client.drain_stale_frames().await;
 
                         for writes in &pending {
-                            for group in group_contiguous(writes) {
-                                let values: Vec<u16> = group.iter().map(|w| w.value).collect();
-                                let addr = group[0].address;
-                                let count = group.len();
-
-                                // Retry up to 3 times on exception 67 (dongle busy).
-                                let mut success = false;
-                                for attempt in 0..3 {
-                                    match client.write_registers(addr, &values).await {
-                                        Ok(()) => {
-                                            tracing::info!(
-                                                "Wrote {} register(s) starting at {}",
-                                                count, addr
-                                            );
-                                            success = true;
-                                            break;
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                "Write attempt {}/{} at {} failed: {e}",
-                                                attempt + 1, 3, addr
-                                            );
-                                            if attempt < 2 {
-                                                tokio::time::sleep(
-                                                    Duration::from_millis(500 * (attempt as u64 + 1))
-                                                ).await;
-                                            }
-                                        }
+                            for w in writes {
+                                match client.write_register(w.address, w.value).await {
+                                    Ok(()) => {
+                                        tracing::info!(
+                                            "Wrote register {} = {}",
+                                            w.address, w.value
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "Failed to write register {} = {}: {e}",
+                                            w.address, w.value
+                                        );
                                     }
                                 }
-                                if !success {
-                                    tracing::error!(
-                                        "All write attempts failed for {} register(s) at {}",
-                                        count, addr
-                                    );
-                                }
-                                // Pause between write groups
-                                tokio::time::sleep(Duration::from_millis(250)).await;
+                                // Pause between individual register writes
+                                // The dongle needs significant time between writes
+                                // to adjacent registers (up to 13s observed for
+                                // exception-67 recovery)
+                                tokio::time::sleep(Duration::from_millis(1500)).await;
                             }
                         }
+
+                        // Flush any stale frames left over from write responses
+                        // before starting the read cycle
+                        client.drain_stale_frames().await;
                     }
 
                     let poll_result = async {
@@ -392,21 +380,31 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                         }
                     }
 
-                    // Sleep for the configured interval, but wake every second
-                    // to check if settings changed (new host → reconnect).
+                    // Sleep for the configured interval, but wake early if:
+                    //   • settings changed (new host → reconnect)
+                    //   • new writes were queued (apply immediately)
                     let current_version = state.settings.lock().await.version;
                     let interval_secs = state.settings.lock().await.interval_secs;
-                    let mut slept: u64 = 0;
-                    while slept < interval_secs {
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        slept += 1;
+                    let sleep_deadline = tokio::time::Instant::now() + Duration::from_secs(interval_secs);
+                    loop {
+                        // Wait up to 1 second, or until writes are queued
+                        tokio::select! {
+                            _ = state.write_notify.notified() => {
+                                // Writes queued — wake immediately
+                                tracing::debug!("Write notification received, waking early");
+                                break;
+                            }
+                            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                        }
+                        if tokio::time::Instant::now() >= sleep_deadline {
+                            break;
+                        }
                         let cur = state.settings.lock().await;
                         if cur.version != current_version {
                             tracing::info!("Settings changed (v{} → v{}) — reconnecting",
                                 current_version, cur.version);
                             break;
                         }
-                        // If interval changed mid-sleep, use the new value
                         if cur.interval_secs != interval_secs {
                             break;
                         }
@@ -451,27 +449,6 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(Duration::from_secs(60));
     }
-}
-
-/// Group register writes into contiguous runs that can be sent as
-/// a single Modbus write-multiple-registers command.
-fn group_contiguous(writes: &[RegisterWrite]) -> Vec<Vec<&RegisterWrite>> {
-    if writes.is_empty() {
-        return Vec::new();
-    }
-    let mut groups: Vec<Vec<&RegisterWrite>> = Vec::new();
-    let mut current = vec![&writes[0]];
-    for w in &writes[1..] {
-        let prev = current.last().unwrap();
-        if w.address == prev.address + 1 {
-            current.push(w);
-        } else {
-            groups.push(current);
-            current = vec![w];
-        }
-    }
-    groups.push(current);
-    groups
 }
 
 // ---------------------------------------------------------------------------

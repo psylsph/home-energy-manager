@@ -91,21 +91,28 @@ fn signed(raw: u16) -> i32 {
 /// Decode a timeslot from 2 registers (start HHMM, end HHMM).
 ///
 /// Per the givenergy-modbus reference library, a value of 60 means the slot
-/// is disabled (the portal shows '--:--'). decode_hhmm handles this sentinel.
-/// A start or end value of 0 means midnight (00:00) which is valid.
+/// is disabled (the portal shows '--:--'). Value 0 means midnight (00:00)
+/// which is technically valid, but a slot of 00:00–00:00 (zero-length) is
+/// treated as disabled since the reference library writes 0 to clear slots.
 fn decode_timeslot(data: &[u16], start_idx: usize, end_idx: usize) -> ScheduleSlot {
     let start_val = get_reg(data, start_idx);
     let end_val = get_reg(data, end_idx);
 
     match (decode_hhmm(start_val), decode_hhmm(end_val)) {
-        (Some((sh, sm)), Some((eh, em))) => ScheduleSlot {
-            enabled: true,
-            start_hour: sh,
-            start_minute: sm,
-            end_hour: eh,
-            end_minute: em,
-            target_soc: 0,
-        },
+        (Some((sh, sm)), Some((eh, em))) => {
+            // A slot of 00:00–00:00 (both values 0) is treated as disabled.
+            // The reference library writes 0 to clear slots, and a zero-length
+            // window at midnight is effectively no schedule.
+            let is_midnight_zero_length = sh == 0 && sm == 0 && eh == 0 && em == 0;
+            ScheduleSlot {
+                enabled: !is_midnight_zero_length,
+                start_hour: sh,
+                start_minute: sm,
+                end_hour: eh,
+                end_minute: em,
+                target_soc: 0,
+            }
+        }
         _ => ScheduleSlot::default(),
     }
 }
@@ -674,8 +681,9 @@ mod tests {
     }
 
     #[test]
-    fn timeslot_midnight_is_valid() {
-        // Both start and end = 0 means 00:00–00:00, which IS valid (midnight)
+    fn timeslot_midnight_zero_length_is_disabled() {
+        // Both start and end = 0 means 00:00–00:00, treated as disabled
+        // (the reference library writes 0 to clear slots)
         let mut holding_data = vec![0u16; 60];
         holding_data[31] = 0; // charge_slot_2 start = 0 → 00:00
         holding_data[32] = 0; // charge_slot_2 end = 0 → 00:00
@@ -686,7 +694,7 @@ mod tests {
             make_block(RegisterType::Holding, 60, 60, "holding_60_119", vec![0; 60]),
         ];
         let snap = decode_snapshot(&blocks);
-        assert!(snap.charge_slots[1].enabled);
+        assert!(!snap.charge_slots[1].enabled); // 00:00–00:00 = disabled
         assert_eq!(snap.charge_slots[1].start_hour, 0);
         assert_eq!(snap.charge_slots[1].start_minute, 0);
         assert_eq!(snap.charge_slots[1].end_hour, 0);

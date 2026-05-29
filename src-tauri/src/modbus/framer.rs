@@ -10,7 +10,7 @@
 //! Bytes 8-17:   Data adapter serial — 10 bytes, Latin-1
 //! Bytes 18-25:  Padding             — big-endian u64 value 8 (0x0000000000000008)
 //! Byte  26:     Slave address
-//! Byte  27:     Inner function code (0x03=read holding, 0x04=read input, 0x10=write multiple)
+//! Byte  27:     Inner function code (0x03=read holding, 0x04=read input, 0x06=write single register)
 //! Bytes 28+:    Inner payload
 //! Last 2 bytes: CRC-16/Modbus over bytes 26+
 //! ```
