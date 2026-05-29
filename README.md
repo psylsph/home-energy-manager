@@ -4,6 +4,23 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
+## Screenshots
+
+<table>
+  <tr>
+    <td align="center"><b>Status Dashboard</b><br><img src=".github/screenshots/status.png" width="400"></td>
+    <td align="center"><b>Energy History</b><br><img src=".github/screenshots/history.png" width="400"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Battery Detail</b><br><img src=".github/screenshots/battery.png" width="400"></td>
+    <td align="center"><b>Control Panel</b><br><img src=".github/screenshots/control.png" width="400"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Settings</b><br><img src=".github/screenshots/settings.png" width="400"></td>
+    <td></td>
+  </tr>
+</table>
+
 ## What it does
 
 GivEnergy Local connects directly to your inverter's WiFi or Ethernet data adapter over your home network. It shows you what's happening right now and lets you change settings without needing a GivEnergy cloud account or portal login.

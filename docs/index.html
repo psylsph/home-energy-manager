@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GivEnergy Local — Monitor your solar inverter locally</title>
+  <meta name="description" content="Desktop app for monitoring and controlling GivEnergy solar inverters over your local network — no cloud account needed.">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      background: #0d1117;
+      color: #e6edf3;
+      line-height: 1.6;
+    }
+    a { color: #58a6ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .hero {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 80px 24px 40px;
+      text-align: center;
+    }
+    .hero h1 {
+      font-size: 2.8rem;
+      font-weight: 700;
+      margin-bottom: 16px;
+      background: linear-gradient(135deg, #58a6ff, #3fb950);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .hero p {
+      font-size: 1.25rem;
+      color: #8b949e;
+      margin-bottom: 32px;
+    }
+    .hero .badges {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin-bottom: 32px;
+    }
+    .hero .badges img { height: 24px; }
+    .cta {
+      display: inline-block;
+      padding: 14px 32px;
+      background: linear-gradient(135deg, #238636, #2ea043);
+      color: #fff;
+      font-size: 1.1rem;
+      font-weight: 600;
+      border-radius: 8px;
+      transition: transform 0.15s, box-shadow 0.15s;
+    }
+    .cta:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(35, 134, 54, 0.4);
+      text-decoration: none;
+    }
+
+    .features {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 40px 24px 60px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 24px;
+    }
+    .feature {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      padding: 24px;
+    }
+    .feature h3 { color: #58a6ff; margin-bottom: 8px; font-size: 1.1rem; }
+    .feature p { color: #8b949e; font-size: 0.95rem; }
+
+    .screenshots {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 40px 24px 80px;
+    }
+    .screenshots h2 {
+      text-align: center;
+      font-size: 2rem;
+      margin-bottom: 40px;
+    }
+    .gallery {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 24px;
+    }
+    .gallery .shot {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      overflow: hidden;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .gallery .shot:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 12px 32px rgba(0,0,0,0.4);
+    }
+    .gallery .shot img {
+      width: 100%;
+      display: block;
+    }
+    .gallery .shot .caption {
+      padding: 12px 16px;
+      font-size: 0.9rem;
+      color: #8b949e;
+      text-align: center;
+    }
+
+    .footer {
+      text-align: center;
+      padding: 40px 24px;
+      border-top: 1px solid #21262d;
+      color: #484f58;
+      font-size: 0.85rem;
+    }
+    .footer a { color: #58a6ff; }
+
+    @media (max-width: 640px) {
+      .hero h1 { font-size: 2rem; }
+      .hero p { font-size: 1rem; }
+      .gallery { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+  <section class="hero">
+    <h1>GivEnergy Local</h1>
+    <p>Monitor and control your GivEnergy solar inverter over your local network.<br>No cloud account needed.</p>
+    <div class="badges">
+      <img src="https://img.shields.io/github/license/psylsph/givenergy-local?style=flat-square" alt="License">
+      <img src="https://img.shields.io/github/v/release/psylsph/givenergy-local?style=flat-square" alt="Release">
+      <img src="https://img.shields.io/github/downloads/psylsph/givenergy-local/total?style=flat-square" alt="Downloads">
+    </div>
+    <a class="cta" href="https://github.com/psylsph/givenergy-local/releases/latest">Download Latest Release</a>
+  </section>
+
+  <section class="features">
+    <div class="feature">
+      <h3>Real-time Dashboard</h3>
+      <p>See solar generation, battery charge, grid import/export, and home consumption updating live.</p>
+    </div>
+    <div class="feature">
+      <h3>Energy Flow Diagram</h3>
+      <p>Visual animation showing where power is flowing — solar, battery, home, grid.</p>
+    </div>
+    <div class="feature">
+      <h3>Battery Details</h3>
+      <p>Individual cell voltages, temperatures, and health per battery module.</p>
+    </div>
+    <div class="feature">
+      <h3>Charge Schedules</h3>
+      <p>Set time slots for when your battery charges from the grid or discharges to power your home.</p>
+    </div>
+    <div class="feature">
+      <h3>Mode Switching</h3>
+      <p>Eco, Timed Demand, Timed Export, and Pause modes — one click away.</p>
+    </div>
+    <div class="feature">
+      <h3>Auto-Discovery</h3>
+      <p>Enter your inverter's IP address and the serial number is detected automatically.</p>
+    </div>
+  </section>
+
+  <section class="screenshots">
+    <h2>Screenshots</h2>
+    <div class="gallery">
+      <div class="shot">
+        <img src="screenshots/status.png" alt="Status Dashboard — real-time power monitoring">
+        <div class="caption">Status Dashboard</div>
+      </div>
+      <div class="shot">
+        <img src="screenshots/history.png" alt="Energy History — daily generation and consumption charts">
+        <div class="caption">Energy History</div>
+      </div>
+      <div class="shot">
+        <img src="screenshots/battery.png" alt="Battery Detail — cell voltages and temperatures">
+        <div class="caption">Battery Detail</div>
+      </div>
+      <div class="shot">
+        <img src="screenshots/control.png" alt="Control Panel — schedules, modes, and SOC limits">
+        <div class="caption">Control Panel</div>
+      </div>
+      <div class="shot">
+        <img src="screenshots/settings.png" alt="Settings — connection configuration">
+        <div class="caption">Settings</div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="footer">
+    <p>
+      <a href="https://github.com/psylsph/givenergy-local">GitHub</a> ·
+      <a href="https://github.com/psylsph/givenergy-local/releases">Releases</a> ·
+      <a href="https://github.com/psylsph/givenergy-local/blob/master/CHANGELOG.md">Changelog</a>
+    </p>
+    <p style="margin-top: 8px;">MIT License · Not affiliated with GivEnergy</p>
+  </footer>
+
+</body>
+</html>
