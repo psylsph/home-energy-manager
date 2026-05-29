@@ -4,7 +4,7 @@ pub mod server;
 pub mod settings;
 
 use inverter::poll::{run_poll_loop, AppState};
-use server::start_server;
+use server::{start_server, start_server_with_frontend};
 use settings::Settings;
 use std::sync::Arc;
 use tauri::Manager;
@@ -40,48 +40,21 @@ pub fn run() {
                 ps.interval_secs = app_settings.poll_interval;
             }
 
-            // Determine frontend serving strategy:
-            // - Dev mode: Vite serves frontend at localhost:5173
-            // - Production: Axum serves embedded frontend at 127.0.0.1:7337
-            //   (avoids mixed-content blocking on Windows where WebView2
-            //   uses https://tauri.localhost and blocks http:// fetches)
-            let frontend_dir = if cfg!(debug_assertions) {
-                None
-            } else {
-                // In a Tauri bundle, the dist/ dir is alongside the executable
-                // because of bundle > resources config
-                let exe = std::env::current_exe().unwrap_or_default();
-                let exe_dir = exe.parent().unwrap_or(std::path::Path::new("."));
-                let dist = exe_dir.join("dist");
-                if dist.exists() {
-                    tracing::info!("Serving frontend from: {}", dist.display());
-                    Some(dist.to_string_lossy().to_string())
-                } else {
-                    tracing::warn!("Frontend dist/ not found at {} — API-only mode", dist.display());
-                    None
-                }
-            };
-
-            // Spawn the HTTP server
+            // Spawn the HTTP server on LAN interface, port 7337.
+            // In production, also serve frontend files so the Tauri window
+            // can load from http://127.0.0.1:7337 (same-origin, avoids
+            // Windows WebView2 mixed-content blocking).
             let server_state = state.clone();
-            let server_fe_dir = frontend_dir.clone();
-            tauri::async_runtime::spawn(async move {
-                start_server(
-                    server_state,
-                    "0.0.0.0",
-                    7337,
-                    server_fe_dir.as_deref(),
-                )
-                .await;
-            });
-
-            // In production, navigate the window to the Axum server
-            // (same-origin — no mixed-content issues)
-            if !cfg!(debug_assertions) {
-                let window = app.get_webview_window("main").expect("main window not found");
-                // Small delay to let the server bind
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                let _ = window.eval("window.location.href='http://127.0.0.1:7337'");
+            if cfg!(debug_assertions) {
+                tauri::async_runtime::spawn(async move {
+                    start_server(server_state, "0.0.0.0", 7337).await;
+                });
+            } else {
+                // dist/ is relative to src-tauri/ — goes up one level
+                let dist_dir = "../dist".to_string();
+                tauri::async_runtime::spawn(async move {
+                    start_server_with_frontend(server_state, "0.0.0.0", 7337, &dist_dir).await;
+                });
             }
 
             // Spawn the Modbus polling loop
@@ -89,6 +62,17 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 run_poll_loop(poll_state).await;
             });
+
+            // In production, navigate the window to the Axum server
+            // (same-origin — avoids Windows WebView2 mixed-content blocking)
+            if !cfg!(debug_assertions) {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.eval(
+                        "window.location.replace('http://127.0.0.1:7337')",
+                    );
+                }
+            }
 
             Ok(())
         })
