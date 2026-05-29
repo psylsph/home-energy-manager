@@ -62,6 +62,7 @@ Built with [Tauri 2](https://v2.tauri.app/) (Rust + React), Axum, and TypeScript
 
 ```bash
 npm install
+cargo install tauri-cli
 cd src-tauri && cargo tauri dev
 ```
 
