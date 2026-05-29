@@ -5,7 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.0] - 2026-05-29
+## [0.5.0] - 2026-05-29
+
+### Added
+
+- History page with 5 metric tabs (Battery, Solar, Grid, Home, Cost) and time-series charts
+- SQLite-backed history storage (`~/.givenergy-local/history.db`) — one row per poll cycle
+- Aggregated history API endpoint (`GET /api/history?range=24h&fields=soc,battery_power&offset=0`)
+- 7 time range selectors (1h, 6h, 24h, 7d, 30d, 6m, 1y) with Older/Newer navigation
+- Cost charts using configurable import/export electricity tariffs (£/kWh)
+- Energy tariff settings (import/export rates) on the Settings page
+- Headless server mode for Linux (`--headless`, `--port`, `--dist` CLI flags)
+- 98 Rust unit tests (4 new history tests)
 
 ### Fixed
 
@@ -14,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `../dist` path resolved to a non-existent directory in installed apps, causing
   "127.0.0.1 page can't be found" or "Discovery failed — is the backend running?"
   errors.
+
+## [0.4.0] - 2026-05-29
 
 ## [0.3.0] - 2026-05-29
 
