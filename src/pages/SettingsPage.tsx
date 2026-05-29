@@ -119,7 +119,25 @@ export default function SettingsPage() {
   };
 
   const copyUrl = () => {
-    navigator.clipboard.writeText(lanUrl).then(() => flash('URL copied!', true));
+    const text = lanUrl;
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(() => flash('URL copied!', true));
+    } else {
+      // Fallback for non-secure contexts (LAN HTTP)
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand('copy');
+        flash('URL copied!', true);
+      } catch {
+        flash('Copy failed — please select and copy manually', false);
+      }
+      document.body.removeChild(ta);
+    }
   };
 
   if (!settingsLoaded) {
@@ -244,12 +262,12 @@ export default function SettingsPage() {
         <h2 className="text-text-primary text-lg font-semibold font-sans">Network Access</h2>
 
         <div className="flex items-center gap-3">
-          <code className="bg-bg-elevated text-flow-active rounded-lg px-4 py-2 text-sm font-mono flex-1 select-all">
+          <code className="bg-bg-elevated text-flow-active rounded-lg px-4 py-2 text-sm font-mono flex-1 min-w-0 select-all overflow-hidden text-ellipsis whitespace-nowrap">
             {lanUrl}
           </code>
           <button
             onClick={copyUrl}
-            className="bg-bg-elevated text-text-primary font-sans text-sm px-4 py-2 rounded-lg hover:bg-bg-base transition-colors"
+            className="bg-bg-elevated text-text-primary font-sans text-sm px-4 py-2 rounded-lg hover:bg-bg-base transition-colors shrink-0"
           >
             Copy
           </button>
@@ -258,10 +276,6 @@ export default function SettingsPage() {
         <p className="text-text-secondary text-xs font-sans">
           Access this dashboard from any device on your network
         </p>
-
-        <div className="bg-bg-elevated rounded-lg px-4 py-6 flex items-center justify-center">
-          <span className="text-text-secondary text-sm font-sans">QR code coming soon</span>
-        </div>
       </section>
 
       {/* ─── Section 3: Refresh Interval ─── */}

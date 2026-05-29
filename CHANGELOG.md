@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4] - 2026-05-29
+
+### Fixed
+
+- **Copy URL button**: Uses `execCommand('copy')` fallback for non-HTTPS (LAN) contexts
+  where the Clipboard API is unavailable. Button now stays within panel bounds with
+  `shrink-0` and URL text truncates with ellipsis on narrow screens.
+- **Removed "QR code coming soon" placeholder** from Settings → Network Access.
+- **History data cleanup**: Purged 8 garbled entries — impossible battery power readings
+  (20kW+), SOC=100 spikes, and zero-power readings during active charging.
+- **BMS SOC validation tightened**: Values outside 1–99 and >30 points from inverter SOC
+  are now rejected before recording to history.
+
+### Changed
+
+- **History guard**: Also rejects entries with `|battery_power| > 10000W` (physically
+  impossible for residential systems).
+
 ## [0.5.3] - 2026-05-29
 
 ### Fixed
