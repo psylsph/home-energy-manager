@@ -1,154 +1,75 @@
 # GivEnergy Local
 
-Desktop app for monitoring and controlling GivEnergy solar inverters over local Modbus TCP — no cloud required.
+**Desktop app for monitoring and controlling GivEnergy solar inverters over your local network — no cloud account needed.**
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
-## Features
+## What it does
 
-- **Real-time monitoring** — solar generation, battery state, grid import/export, home consumption
-- **Battery per-module breakdown** — individual cell voltages, temperatures, SOC, cycle count per physical battery
-- **Energy flow diagram** — live radial visualisation of power flows
-- **Schedule management** — charge/discharge time slots with SOC targets
-- **Battery mode control** — Eco, Timed Demand, Timed Export, Pause
-- **Auto-discovery** — just enter the inverter IP; serial number is detected automatically
-- **Zero cloud dependency** — all communication is over your local network via Modbus TCP
+GivEnergy Local connects directly to your inverter's WiFi or Ethernet data adapter over your home network. It shows you what's happening right now and lets you change settings without needing a GivEnergy cloud account or portal login.
 
-## Stack
+- **Real-time dashboard** — see solar generation, battery charge level, grid import/export, and home consumption updating live
+- **Energy flow diagram** — visual animation showing where power is flowing right now (solar → battery → home → grid)
+- **Battery details** — individual cell voltages, temperatures and health per battery module
+- **Charge & discharge schedules** — set time slots for when your battery charges from the grid or discharges to power your home
+- **Mode switching** — Eco, Timed Demand, Timed Export, and Pause modes
+- **SOC control** — adjust battery reserve level, charge/discharge power limits, and charge target
+- **Auto-discovery** — just enter your inverter's IP address; the serial number is detected automatically
 
-| Layer | Technology |
+## Download
+
+Download the latest release for your platform from the [Releases page](https://github.com/psylsph/givenergy-local/releases/latest):
+
+| Platform | File |
 |---|---|
-| Frontend | React 19, TypeScript, Vite 8, Tailwind CSS 4, Zustand, Recharts |
-| Desktop shell | Tauri 2 |
-| Backend | Axum HTTP + WebSocket server (embedded, port 7337) |
-| Protocol | Custom GivEnergy Modbus TCP client (port 8899) |
-| Testing | Rust unit tests (94 passing) |
+| 🪟 Windows | `GivEnergy_Local_*_x64-setup.exe` |
+| 🍎 macOS (Apple Silicon) | `GivEnergy Local_*_aarch64.dmg` |
+| 🍎 macOS (Intel) | `GivEnergy Local_*_x64.dmg` |
+| 🐧 Linux | `givenergy-local_*_amd64.deb` |
 
-## Screenshots
+> **Prerequisites**: Your GivEnergy inverter's WiFi/Ethernet data adapter must be connected to your home network. You need its IP address (find it in your router's device list).
 
-*Coming soon*
+## Quick Start
 
-## Getting Started
+1. Download and install the app for your platform
+2. Enter your inverter's IP address on the Settings page
+3. The app connects and starts showing live data
 
-### Prerequisites
+That's it. No accounts, no cloud, no internet required.
 
-- [Rust](https://rustup.rs/) (1.77+)
-- [Node.js](https://nodejs.org/) (20+)
-- A GivEnergy inverter with a WiFi/Ethernet data adapter on your local network
+## Requirements
 
-### Development
+- A GivEnergy solar inverter with a WiFi or Ethernet data adapter
+- The data adapter must be on your local network (port 8899)
+- Windows 10+, macOS 12+, or Linux (Ubuntu 22.04+)
+
+## How it works
+
+```
+┌─────────────┐                ┌──────────────┐              ┌───────────┐
+│  This app   │ ◄── network ──► │  Data adapter │ ◄── serial ──► │ Inverter  │
+│  (desktop)  │   port 7337     │  (dongle)     │   port 8899  │ + Battery │
+└─────────────┘                 └──────────────┘              └───────────┘
+```
+
+The app talks to your inverter's data adapter over your local network using the Modbus TCP protocol. It never connects to the internet or sends data anywhere else.
+
+## Tech Stack
+
+Built with [Tauri 2](https://v2.tauri.app/) (Rust + React), Axum, and TypeScript. See [DESIGN.md](./DESIGN.md) for architecture details and the register map.
+
+## Development
 
 ```bash
-# Install frontend dependencies
 npm install
-
-# Run in development mode (Tauri window + Vite HMR)
 cd src-tauri && cargo tauri dev
 ```
 
-The app starts an embedded HTTP/WebSocket server on port 7337. Open `http://localhost:7337` in a browser for the web UI, or use the Tauri desktop window.
+See [DESIGN.md](./DESIGN.md) for full build instructions, testing, and architecture documentation.
 
-### Production Build
+## Credits
 
-```bash
-npm run build          # Typecheck + bundle frontend
-cd src-tauri
-cargo tauri build      # Build native desktop app
-```
-
-### Testing
-
-```bash
-# Frontend typecheck
-npm run build
-
-# Rust unit tests
-cd src-tauri && cargo test
-```
-
-## Architecture
-
-```
-┌─────────────┐     HTTP/WS      ┌──────────────┐    Modbus TCP    ┌───────────┐
-│  React UI   │ ◄──────────────► │  Axum server │ ◄──────────────► │ Inverter  │
-│  (browser)  │    port 7337     │  (embedded)  │    port 8899     │ dongle    │
-└─────────────┘                  └──────────────┘                  └───────────┘
-```
-
-- `src/` — React frontend. Pages: **Status**, **Battery**, **History**, **Control**, **Settings**
-- `src-tauri/src/` — Rust backend
-  - `inverter/` — data model, register decode/encode, discovery, poll loop
-  - `modbus/` — TCP client, GivEnergy frame protocol, register map
-  - `server/` — Axum REST API (`/api/*`) + WebSocket (`/ws`)
-  - `settings/` — persisted config (~/.givenergy-local/settings.json)
-
-The frontend talks exclusively to the local Axum server — never directly to the inverter.
-
-## API
-
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/api/snapshot` | Latest inverter snapshot |
-| GET/POST | `/api/settings` | Read/update connection settings |
-| POST | `/api/control/mode` | Set battery operating mode |
-| POST | `/api/control/charge-slot` | Configure charge schedule |
-| POST | `/api/control/discharge-slot` | Configure discharge schedule |
-| POST | `/api/control/reserve` | Set battery SOC reserve |
-| POST | `/api/control/charge-rate` | Set charge power limit |
-| POST | `/api/control/discharge-rate` | Set discharge power limit |
-| POST | `/api/control/pause` | Pause battery |
-| GET | `/api/discover` | Scan network for inverters |
-| WS | `/ws` | Real-time snapshot + connection state stream |
-
-## Register Map
-
-GivEnergy register addresses sourced from the [givenergy-modbus](https://github.com/andrewlesakowski/givenergy-modbus) reference library. Key registers:
-
-**Input Registers** (telemetry, read-only):
-
-| Register | Scale | Description |
-|---|---|---|
-| 0 | — | Status (0=waiting, 1=normal, 2=warning, 3=fault) |
-| 1, 2 | ×0.1 V | PV1/PV2 voltage |
-| 5 | ×0.1 V | Grid voltage |
-| 8, 9 | ×0.1 A | PV1/PV2 current |
-| 13 | ×0.01 Hz | Grid frequency |
-| 18, 20 | W | PV1/PV2 power |
-| 30 | W (signed) | Grid power (+export/−import) |
-| 50 | ×0.01 V | Battery voltage |
-| 51 | ×0.01 A (signed) | Battery current |
-| 52 | W (signed) | Battery power (+charging/−discharging) |
-| 56 | ×0.1 °C | Battery temperature |
-| 59 | % | Battery SOC |
-
-**Battery BMS** (device 0x32, input registers 60-119):
-
-| Register | Scale | Description |
-|---|---|---|
-| 60-75 | mV | Cell voltages (up to 16 cells) |
-| 76-79 | ×0.1 °C | Cell group temperatures |
-| 82-83 | mV (uint32) | Total pack voltage |
-| 97 | — | Number of cells |
-| 98 | — | BMS firmware version |
-| 100 | % | SOC |
-| 103 | ×0.1 °C | Max cell temperature |
-| 110-114 | Latin-1 | Serial number |
-
-## Configuration
-
-Settings are stored in `~/.givenergy-local/settings.json`:
-
-```json
-{
-  "host": "192.168.1.36",
-  "port": 8899,
-  "serial": "",
-  "poll_interval": 60,
-  "auto_connect": true
-}
-```
-
-Leave `serial` empty to auto-discover from the dongle's first response.
+Register map and protocol details sourced from the [givenergy-modbus](https://github.com/dewet22/givenergy-modbus) and [GivTCP](https://github.com/GivTCP/givtcp) open-source projects.
 
 ## License
 

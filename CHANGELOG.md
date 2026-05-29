@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-05-29
+
+### Added
+
+- Non-technical README with download links and quick start guide
+- DESIGN.md with full architecture, protocol, and API reference
+- App version shown in Settings → About (injected at build time from package.json)
+- GitHub repo description, homepage, and topics (searchable)
+
+### Changed
+
+- README.md rewritten for end users — technical details moved to DESIGN.md
+- AGENTS.md updated to reflect current architecture (write protocol, Notify, enable flag gating)
+- Energy flow diagram: Home on left, Grid on right
+
 ## [0.2.0] - 2026-05-29
 
 ### Added

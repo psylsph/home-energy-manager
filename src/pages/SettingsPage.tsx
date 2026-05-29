@@ -303,7 +303,7 @@ export default function SettingsPage() {
 
         <div className="flex items-center gap-2 text-sm font-sans">
           <span className="text-text-secondary">Version</span>
-          <span className="text-text-primary font-mono">0.1.0</span>
+          <span className="text-text-primary font-mono">{__APP_VERSION__}</span>
         </div>
         <a
           href="https://github.com/psylsph/givenergy-local"
