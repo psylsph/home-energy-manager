@@ -7,14 +7,14 @@ interface Props {
 
 // Radial layout — Inverter hub at centre, four nodes at cardinal points.
 const W = 520;
-const H = 355;
+const H = 425;
 
 const NODES = {
-  inverter: { cx: W / 2, cy: 177, color: '#22D3EE', label: 'Inverter' },
+  inverter: { cx: W / 2, cy: 207, color: '#22D3EE', label: 'Inverter' },
   solar:    { cx: W / 2, cy: 50,  color: '#F59E0B', label: 'Solar' },
-  grid:     { cx: 55,    cy: 177, color: '#EF4444', label: 'Grid' },
-  home:     { cx: W - 55, cy: 177, color: '#14B8A6', label: 'Home' },
-  battery:  { cx: W / 2, cy: 305, color: '#6366F1', label: 'Battery' },
+  grid:     { cx: 55,    cy: 207, color: '#EF4444', label: 'Grid' },
+  home:     { cx: W - 55, cy: 207, color: '#14B8A6', label: 'Home' },
+  battery:  { cx: W / 2, cy: 365, color: '#6366F1', label: 'Battery' },
 };
 
 // ---------------------------------------------------------------------------
@@ -246,8 +246,8 @@ export default function EnergyFlowDiagram({ snapshot: s }: Props) {
         />
         <FlowNode
           {...NODES.battery}
-          value={formatPercent(s.soc)}
-          unit={formatPower(Math.abs(s.battery_power))}
+          value={formatPower(Math.abs(s.battery_power))}
+          unit={formatPercent(s.soc)}
         />
         <FlowNode
           {...NODES.inverter}
