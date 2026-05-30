@@ -46,6 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or Finder double-click, Gatekeeper silently blocks the web server from starting
   (network entitlements rejected at the LaunchServices level). The app process stays
   alive but never binds to port 7337.
+- **macOS 26.5 blocks ad-hoc signed binaries from /Applications**: Even running
+  the binary directly from terminal fails if the .app is in `/Applications`.
+  Move to Desktop or home folder instead. Updated FAQ and launch.command to
+  prefer Desktop over /Applications.
 
 ### Added
 

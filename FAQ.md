@@ -51,26 +51,34 @@ If the right-click → Open method doesn't work:
 
 This can happen for two reasons:
 
-**1. Gatekeeper blocking ad-hoc signed apps** — When you use `open` (or double-click
-the app in Finder), macOS may silently block the web server from starting while
-letting the app process appear alive. **Workaround**: Run the binary directly:
+**1. App is installed in /Applications** — macOS 26.5 blocks ad-hoc signed
+binaries from running inside `/Applications`, even when launched directly from
+terminal (not just `open`). **Fix**: Move the .app to your Desktop or home
+folder instead.
 
 ```bash
-/Applications/GivEnergy-Local.app/Contents/MacOS/givenergy-local
+mv /Applications/GivEnergy-Local.app ~/Desktop/
 ```
 
-Or use the `launch.command` convenience script from the project root:
-`./launch.command`.
+Then launch from there — it will work as long as the binary isn't in a system-
+protected directory.
 
-The app will still need approval the first time (System Settings → Open Anyway),
-but subsequent direct launches bypass Gatekeeper entirely.
+**2. Gatekeeper blocking `open`** — When you use `open` (or double-click the
+app in Finder), macOS may silently block the web server. **Workaround**: Run
+the binary directly:
 
-> Note: The old `spctl --add` command-line workaround is no longer supported on macOS 26.5.
+```bash
+~/Desktop/GivEnergy-Local.app/Contents/MacOS/givenergy-local
+```
 
-**2. Running the wrong architecture on Apple Silicon** — The **x64 (Intel) .dmg**
-crashes silently under Rosetta on macOS 26.5+ with no error output. If the
-binary hangs at the terminal prompt with no log output, you're running the
-Intel build. Reinstall using the **aarch64 .dmg** instead.
+Or use the `launch.command` convenience script from the project root.
+
+> Note: The old `spctl --add` command-line workaround is no longer supported on
+> macOS 26.5.
+
+**3. Running the wrong architecture on Apple Silicon** — The **x64 (Intel) .dmg**
+crashes silently under Rosetta on macOS 26.5+ with no error output. Reinstall
+using the **aarch64.dmg** instead.
 
 ---
 
