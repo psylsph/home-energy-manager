@@ -15,9 +15,12 @@
 //! For each candidate subnet, all 254 host addresses are probed concurrently
 //! on port 8899 with a short connect-timeout.
 
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::net::IpAddr;
 use std::time::Duration;
+
+use crate::modbus::framer;
 
 /// The Modbus TCP port used by GivEnergy dongles.
 pub const MODBUS_PORT: u16 = 8899;
@@ -79,23 +82,57 @@ pub async fn scan_multiple_subnets(subnets: &[String]) -> Vec<DiscoveredInverter
     all_found
 }
 
-/// Probe a single IP:port to see if a GivEnergy dongle is listening.
+/// Probe a single IP:port to verify it speaks the GivEnergy Modbus protocol.
+///
+/// After confirming the TCP port is open, sends a minimal Modbus read request
+/// and checks that the response contains a valid GivEnergy frame header
+/// (transaction ID 0x5959). Devices that merely have port 8899 open but don't
+/// speak the protocol will fail this check.
 async fn probe_host(ip: String) -> Option<DiscoveredInverter> {
     let addr = format!("{}:{}", ip, MODBUS_PORT);
-    let ip_clone = ip.clone();
+    let ip_for_closure = ip.clone();
+    let ip_for_result = ip.clone();
     let result = tokio::task::spawn_blocking(move || {
-        match TcpStream::connect_timeout(&addr.parse().ok()?, Duration::from_millis(800)) {
-            Ok(_) => Some(()),
-            Err(_) => None,
+        // Step 1: TCP connect
+        let mut stream = TcpStream::connect_timeout(&addr.parse().ok()?, Duration::from_millis(800)).ok()?;
+        stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+        stream.set_write_timeout(Some(Duration::from_secs(2))).ok()?;
+
+        // Step 2: Send a minimal GivEnergy Modbus read request
+        // Read 1 input register at address 0, slave 0x32, empty serial
+        let request = framer::build_read_request("", 0x32, framer::RegisterType::Input, 0, 1);
+        if stream.write_all(&request).is_err() {
+            return None;
+        }
+
+        // Step 3: Read back enough bytes to verify the GivEnergy header
+        // Minimum GivEnergy frame is 30 bytes; read up to 64.
+        let mut buf = [0u8; 64];
+        match stream.read(&mut buf) {
+            Ok(n) if n >= 6 => {
+                // Check transaction ID = 0x5959 (GivEnergy magic)
+                let txn_id = u16::from_be_bytes([buf[0], buf[1]]);
+                if txn_id == 0x5959 {
+                    return Some(());
+                }
+                // Not a GivEnergy device
+                log::debug!(
+                    "Non-GivEnergy response from {}:{} (txn=0x{:04X})",
+                    ip_for_closure, MODBUS_PORT, txn_id
+                );
+                None
+            }
+            Ok(_) => None, // too few bytes
+            Err(_) => None, // read timeout / error
         }
     })
     .await;
 
     match result {
         Ok(Some(_)) => {
-            log::debug!("Found open port at {}:{}", ip_clone, MODBUS_PORT);
+            log::debug!("Found GivEnergy device at {}:{}", ip_for_result, MODBUS_PORT);
             Some(DiscoveredInverter {
-                ip: ip_clone,
+                ip: ip_for_result,
                 port: MODBUS_PORT,
             })
         }

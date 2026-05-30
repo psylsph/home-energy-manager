@@ -1,6 +1,6 @@
 [package]
 name = "givenergy-local"
-version = "0.5.5"
+version = "0.6.0"
 description = "GivEnergy inverter local monitoring and control"
 authors = ["Stuart Harding"]
 license = "MIT"
@@ -52,3 +52,6 @@ local-ip-address = "0.6"
 
 # SQLite for history storage
 rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Efficient mutex for log ring
+parking_lot = "0.12"

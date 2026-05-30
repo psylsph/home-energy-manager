@@ -4,6 +4,7 @@
 //! HTTP API and a WebSocket real-time data stream.
 
 pub mod api;
+pub mod logs;
 pub mod ws;
 
 use std::sync::Arc;
@@ -40,6 +41,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/control/pause", post(api::pause_battery))
         // Discovery
         .route("/api/discover", get(api::discover))
+        // Developer logs
+        .route("/api/logs", get(logs::get_logs))
         // WebSocket real-time stream
         .route("/ws", get(ws::ws_handler))
         .layer(cors)

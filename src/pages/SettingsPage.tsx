@@ -4,8 +4,17 @@ import type { PollSettings, DiscoveredInverter } from '../lib/types';
 import { useInverterStore } from '../store/useInverterStore';
 import { isTauri } from '../lib/api';
 
+function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <div className="relative cursor-pointer" onClick={() => onChange(!checked)}>
+      <div className={`w-10 h-5 rounded-full transition-colors ${checked ? 'bg-flow-active/40' : 'bg-bg-elevated'}`} />
+      <div className={`absolute left-0.5 top-0.5 w-4 h-4 rounded-full transition-all ${checked ? 'translate-x-5 bg-flow-active' : 'bg-text-secondary'}`} />
+    </div>
+  );
+}
+
 export default function SettingsPage() {
-  const { connectionState, connectedHost } = useInverterStore();
+  const { connectionState, connectedHost, developerMode, setDeveloperMode } = useInverterStore();
 
   // Connection fields
   const [host, setHost] = useState('');
@@ -347,20 +356,12 @@ export default function SettingsPage() {
 
           <label className="flex items-center justify-between cursor-pointer">
             <span className="text-text-primary text-sm font-sans">Auto-start on login</span>
-            <div className="relative">
-              <input type="checkbox" className="sr-only peer" />
-              <div className="w-10 h-5 bg-bg-elevated rounded-full peer-checked:bg-flow-active/40 transition-colors" />
-              <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-text-secondary rounded-full peer-checked:translate-x-5 peer-checked:bg-flow-active transition-all" />
-            </div>
+            <Toggle checked={false} onChange={() => {}} />
           </label>
 
           <label className="flex items-center justify-between cursor-pointer">
             <span className="text-text-primary text-sm font-sans">Minimise to system tray</span>
-            <div className="relative">
-              <input type="checkbox" className="sr-only peer" />
-              <div className="w-10 h-5 bg-bg-elevated rounded-full peer-checked:bg-flow-active/40 transition-colors" />
-              <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-text-secondary rounded-full peer-checked:translate-x-5 peer-checked:bg-flow-active transition-all" />
-            </div>
+            <Toggle checked={false} onChange={() => {}} />
           </label>
 
           <p className="text-text-secondary text-xs font-sans">
@@ -369,7 +370,21 @@ export default function SettingsPage() {
         </section>
       )}
 
-      {/* ─── Section 6: About ─── */}
+      {/* ─── Section 6: Developer Mode ─── */}
+      <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-3">
+        <h2 className="text-text-primary text-lg font-semibold font-sans">Developer</h2>
+        <div className="flex items-center justify-between">
+          <div className="flex flex-col gap-0.5">
+            <span className="text-text-primary text-sm font-sans">Developer Mode</span>
+            <span className="text-text-secondary text-xs font-sans">
+              Shows the Logs page for debugging
+            </span>
+          </div>
+          <Toggle checked={developerMode} onChange={setDeveloperMode} />
+        </div>
+      </section>
+
+      {/* ─── Section 7: About ─── */}
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-2">
         <h2 className="text-text-primary text-lg font-semibold font-sans">About</h2>
 

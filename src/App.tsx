@@ -6,6 +6,7 @@ import BatteryPage from './pages/BatteryPage';
 import ControlPage from './pages/ControlPage';
 import SettingsPage from './pages/SettingsPage';
 import HistoryPage from './pages/HistoryPage';
+import LogsPage from './pages/LogsPage';
 
 function ConnectionIndicator() {
   const { connectionState, connectedHost } = useInverterStore();
@@ -75,8 +76,17 @@ function SettingsIcon() {
   );
 }
 
+function LogsIcon() {
+  return (
+    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0021 18V6a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 6v12a2.25 2.25 0 002.25 2.25z" />
+    </svg>
+  );
+}
+
 function Layout() {
   useWebSocket();
+  const { developerMode } = useInverterStore();
 
   return (
     <div className="min-h-screen bg-bg-base flex flex-col">
@@ -98,6 +108,7 @@ function Layout() {
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/control" element={<ControlPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          {developerMode && <Route path="/logs" element={<LogsPage />} />}
         </Routes>
       </main>
 
@@ -109,7 +120,7 @@ function Layout() {
             to={to}
             end={to === '/'}
             className={({ isActive }) =>
-              `flex flex-col items-center gap-0.5 px-4 py-2 rounded-xl text-xs font-medium transition-colors ${
+              `flex flex-col items-center gap-0.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
                 isActive
                   ? 'text-flow-active'
                   : 'text-text-secondary hover:text-text-primary'
@@ -120,6 +131,21 @@ function Layout() {
             <span>{label}</span>
           </NavLink>
         ))}
+        {developerMode && (
+          <NavLink
+            to="/logs"
+            className={({ isActive }) =>
+              `flex flex-col items-center gap-0.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
+                isActive
+                  ? 'text-flow-active'
+                  : 'text-text-secondary hover:text-text-primary'
+              }`
+            }
+          >
+            <LogsIcon />
+            <span>Logs</span>
+          </NavLink>
+        )}
       </nav>
     </div>
   );

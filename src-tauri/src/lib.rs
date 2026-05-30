@@ -6,6 +6,7 @@ pub mod settings;
 
 use history::HistoryDb;
 use inverter::poll::{run_poll_loop, AppState};
+use server::logs::{LogCaptureLayer, LogRing};
 use server::{start_server, start_server_with_frontend};
 use settings::Settings;
 use std::sync::Arc;
@@ -16,12 +17,28 @@ pub fn run() {
 
     tauri::Builder::default()
         .setup(|app| {
+            // Set up tracing with log capture layer for developer console
+            let log_ring = Arc::new(LogRing::new(2000));
+            {
+                use tracing_subscriber::prelude::*;
+                let capture_layer = LogCaptureLayer::new(log_ring.clone());
+                let fmt_layer = tracing_subscriber::fmt::layer()
+                    .with_target(false);
+                let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+                tracing_subscriber::registry()
+                    .with(filter)
+                    .with(fmt_layer)
+                    .with(capture_layer)
+                    .init();
+            }
+
             if cfg!(debug_assertions) {
-                app.handle().plugin(
+                let _ = app.handle().plugin(
                     tauri_plugin_log::Builder::default()
                         .level(log::LevelFilter::Info)
                         .build(),
-                )?;
+                );
             }
 
             // Load persisted settings (or use defaults)
@@ -32,8 +49,8 @@ pub fn run() {
                 app_settings.serial
             );
 
-            // Create shared app state
-            let state = Arc::new(AppState::new());
+            // Create shared app state with log ring
+            let state = Arc::new(AppState::with_log_ring(log_ring));
             {
                 // Apply saved settings to poll settings
                 let mut ps = state.settings.blocking_lock();
@@ -176,12 +193,21 @@ fn resolve_dist_dir(args: &[String]) -> Option<String> {
 ///
 /// Usage: `givenergy-local --headless [--port 7337] [--dist /path/to/dist]`
 pub fn run_headless(args: &[String]) {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // Set up tracing with log capture
+    let log_ring = Arc::new(LogRing::new(2000));
+    {
+        use tracing_subscriber::prelude::*;
+        let capture_layer = LogCaptureLayer::new(log_ring.clone());
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_target(false);
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt_layer)
+            .with(capture_layer)
+            .init();
+    }
 
     let port = parse_port(args);
     tracing::info!("GivEnergy Local starting in headless mode on port {port}");
@@ -198,8 +224,8 @@ pub fn run_headless(args: &[String]) {
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
 
     rt.block_on(async {
-        // Create shared app state
-        let state = Arc::new(AppState::new());
+        // Create shared app state with log ring
+        let state = Arc::new(AppState::with_log_ring(log_ring));
         {
             let mut ps = state.settings.lock().await;
             ps.host = app_settings.host.clone();

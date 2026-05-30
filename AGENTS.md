@@ -35,11 +35,11 @@ Order for full verification: `npm run lint` → `npm run build` (typechecks) →
 
 React app. Entrypoint: `src/main.tsx`.
 
-- **Pages**: `StatusPage` (dashboard + energy flow), `BatteryPage` (cell-level detail), `HistoryPage` (charts), `ControlPage` (schedules, modes, limits), `SettingsPage` (connection config, about)
+- **Pages**: `StatusPage` (dashboard + energy flow), `BatteryPage` (cell-level detail), `HistoryPage` (charts), `ControlPage` (schedules, modes, limits), `SettingsPage` (connection config, developer mode, about), `LogsPage` (developer console — only visible when developer mode is enabled)
 - **Components**: `EnergyFlowDiagram` (radial SVG power flow), `BatteryPanel` (per-module cell data), `SummaryTiles` (power stats)
 - **Hooks**: `useWebSocket` — connects to `/ws`, reconnects on drop, fetches initial snapshot via REST
 - **Lib**: `api.ts` (fetch helpers), `format.ts` (power/voltage/temp formatters), `types.ts` (InverterSnapshot etc.)
-- **State**: Zustand store (`useInverterStore`) holds `snapshot`, `connectionState`, `connectedHost`
+- **State**: Zustand store (`useInverterStore`) holds `snapshot`, `connectionState`, `connectedHost`, `developerMode` (persisted to localStorage)
 - **Version**: Injected at build time via `__APP_VERSION__` (defined in `vite.config.ts`, declared in `src/env.d.ts`)
 
 Frontend talks exclusively to the local Axum server — never directly to the inverter.
@@ -54,7 +54,7 @@ Frontend talks exclusively to the local Axum server — never directly to the in
   - `decoder.rs` — converts raw register blocks into `InverterSnapshot`; applies global `enable_charge`/`enable_discharge` flags to slot states
   - `encoder.rs` — translates `ControlCommand` enum into `RegisterWrite` lists (whitelist-validated)
   - `poll.rs` — main polling loop: drain pending writes → read registers → broadcast snapshot; uses `Notify` for immediate write execution
-  - `discovery.rs` — network scanning, subnet inference, serial auto-detection
+  - `discovery.rs` — network scanning with GivEnergy Modbus protocol verification (sends a read request and validates the 0x5959 magic header in the response)
 - **`modbus/`** — GivEnergy Modbus TCP protocol
   - `client.rs` — `ModbusClient`: connect, read registers, write single register (FC6), stale frame drain
   - `framer.rs` — proprietary frame encode/decode (MBAP header + transparent sub-frame + CRC); response CRC validation is lenient (logged, not rejected)
@@ -62,6 +62,7 @@ Frontend talks exclusively to the local Axum server — never directly to the in
 - **`server/`** — Axum HTTP layer
   - `api.rs` — REST endpoints for control commands; queues writes to `AppState::pending_writes` and notifies poll loop
   - `ws.rs` — WebSocket endpoint streaming `PollMessage` (snapshot or connection state)
+  - `logs.rs` — Log ring buffer (`LogRing`) + tracing capture layer + `GET /api/logs` endpoint for developer console
   - `mod.rs` — router setup, server startup (graceful bind failure, no panic)
 - **`settings/`** — persisted JSON config (`~/.givenergy-local/settings.json`)
 
@@ -75,6 +76,7 @@ Central `Arc<Mutex<…>>`-based state shared between poll loop, API handlers, an
 - `write_notify` — `Notify` that wakes the poll loop immediately when writes are queued
 - `settings` — live `PollSettings` (host, port, serial, interval)
 - `history` — `HistoryDb` for time-series storage
+- `log_ring` — `LogRing` (2000-entry ring buffer) of captured log lines for the developer console
 
 ## Modbus write protocol
 

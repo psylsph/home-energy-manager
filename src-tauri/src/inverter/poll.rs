@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{broadcast, Mutex, Notify};
+use crate::server::logs::LogRing;
 
 use crate::history::HistoryDb;
 use crate::inverter::decoder::decode_snapshot;
@@ -118,6 +119,8 @@ pub struct AppState {
     pub write_notify: Arc<Notify>,
     /// SQLite history database (set after startup).
     pub history: Arc<Mutex<Option<Arc<HistoryDb>>>>,
+    /// Ring buffer of recent log lines for the developer console.
+    pub log_ring: Arc<LogRing>,
 }
 
 impl AppState {
@@ -135,6 +138,24 @@ impl AppState {
             pending_writes: Arc::new(Mutex::new(Vec::new())),
             write_notify: Arc::new(Notify::new()),
             history: Arc::new(Mutex::new(None)),
+            log_ring: Arc::new(crate::server::logs::LogRing::new(2000)),
+        }
+    }
+
+    /// Create `AppState` with an externally-created log ring
+    /// (used when the tracing capture layer needs the ring before
+    /// the state is constructed).
+    pub fn with_log_ring(log_ring: Arc<crate::server::logs::LogRing>) -> Self {
+        let (tx, _) = broadcast::channel(32);
+        Self {
+            latest_snapshot: Arc::new(Mutex::new(None)),
+            connection_state: Arc::new(Mutex::new(ConnectionState::Disconnected)),
+            tx,
+            settings: Arc::new(Mutex::new(PollSettings::default())),
+            pending_writes: Arc::new(Mutex::new(Vec::new())),
+            write_notify: Arc::new(Notify::new()),
+            history: Arc::new(Mutex::new(None)),
+            log_ring,
         }
     }
 }

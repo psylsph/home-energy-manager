@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-05-29
+
+### Added
+
+- **Developer Mode**: New toggle on the Settings page that reveals a Logs page
+  in the navigation bar. Logs show captured stdout/stderr output from the
+  backend in a scrollable, filterable terminal-style view.
+- **Log capture layer**: A `tracing-subscriber` layer captures formatted log
+  events into a 2000-entry ring buffer, exposed via `GET /api/logs`.
+- Log viewer supports text filtering, level filtering (ERROR/WARN/INFO/DEBUG),
+  auto-scroll with manual scroll-to-bottom button, and periodic polling.
+
+### Fixed
+
+- **Network discovery protocol filtering**: The network scanner now sends a
+  minimal GivEnergy Modbus read request to each candidate device and verifies
+  the response contains the GivEnergy magic transaction ID (0x5959). Devices
+  that have port 8899 open but don't speak the GivEnergy Modbus protocol are
+  now filtered out from scan results.
+
 ## [0.5.5] - 2026-05-29
 
 ### Fixed
