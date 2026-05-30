@@ -164,7 +164,9 @@ SQLite-backed time-series storage at `~/.givenergy-local/history.db`. One row pe
 
 `GET /api/history?range=24h&fields=soc,battery_power&offset=0`
 
-Returns time-bucketed AVG values per field:
+Returns time-bucketed aggregated values per field. **Cumulative counter fields**
+(`today_*_kwh`) use MAX aggregation (preserves monotonically increasing counter
+values). All other fields use AVG.
 
 ```json
 {
@@ -188,10 +190,12 @@ Buckets are aligned to hour/day boundaries. Query parameters:
 | 6 months | 12 hours | `6m` |
 | 1 year | 24 hours | `1y` |
 
-### Cost charts (known issue)
+### Cost charts
 
-See [AGENTS.md](./AGENTS.md) — Known issues. The cost computation uses deltas of
-AVG'd `today_import_kwh` values per bucket, which is fragile with corrupted data.
+The cost charts (Import Cost, Export Income) on the History page use deltas of
+the MAX-aggregated `today_import_kwh`/`today_export_kwh` values. Each delta is
+classified as peak or off-peak based on the configured tariff time windows and
+multiplied by the appropriate rate. See AGENTS.md for full sanitization details.
 
 ## GivEnergy Modbus Protocol
 
@@ -277,7 +281,7 @@ match (eco, enable_discharge, reserve == 100) {
 
 ## Testing
 
-94 Rust unit tests across all modules. No frontend tests.
+101 Rust unit tests across all modules. No frontend tests.
 
 ```bash
 cd src-tauri && cargo test
@@ -312,6 +316,8 @@ cargo tauri build      # Build native desktop app
 GitHub Actions workflow (`.github/workflows/build.yml`):
 - Triggers on tag push (`v*`) or manual dispatch
 - Builds for: macOS (aarch64 + x86_64), Linux (x86_64), Windows (x86_64)
+- macOS DMG is customized: removes `/Applications` symlink (breaks on macOS 26.5+),
+  adds `README.txt` with install instructions
 - Creates GitHub Release with binaries and installers attached
 
 ## Configuration

@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-05-30
+
+Robust data handling release. The GivEnergy data adapter (dongle) frequently
+returns corrupted register values — this release adds multiple defense layers
+to ensure clean data reaches the charts and cost calculations.
+
+### Added
+
+- **Data sanitization framework**: Multi-layer defense against corrupted register
+  values (see AGENTS.md → Data sanitization):
+  - Absolute range checks on every reading (grid voltage 180–280V, frequency
+    45–55 Hz, daily energy 0–200 kWh, power ±10 kW, temperature bounds)
+  - Delta checks with time-based rate limits after 3-reading grace period
+  - Monotonic increase enforcement for cumulative counters
+  - Midnight rollover detection
+  - Near-zero previous baseline handling
+- **Connect sequence**: 3 warmup reads (discarded), snapshot reset, 3-reading
+  grace period before delta checks activate
+- **Database repair migration**: On startup, scans `today_*_kwh` columns for
+  corrupted values (decreases or jumps > 2 kWh) and repairs them
+- **MAX aggregation for cumulative counters**: History API uses MAX (not AVG)
+  for `today_*_kwh` fields — preserves actual counter values at bucket boundaries
+- **CI: Customized macOS DMG**: Removes misleading `/Applications` symlink
+  (breaks on macOS 26.5+), adds README.txt with install instructions
+
+### Fixed
+
+- **Cost graphs inflated ~1000×**: AVG aggregation of cumulative counters
+  understated values; deltas between averaged buckets amplified corruption
+- **Screen flashing on inverter disconnect**: `EnergyFlowDiagram`, `BatteryPanel`,
+  `SummaryTiles` wrapped with `React.memo` to prevent SVG animation restarts
+  on connection state changes
+- **Counters stuck at corrupted values**: Dongle returns garbage on first reads
+  after TCP connect (e.g. import=0.6 when real=39.0). Multiple fixes: warmup
+  reads, snapshot reset on reconnect, grace period, absolute range check
+  always active
+- **Missing Disconnected broadcast**: Backend now sends Disconnected state via
+  WebSocket when reconnect fails (was set locally but not broadcast)
+- **Grid voltage/frequency spikes**: 409V and 664V readings from corrupt
+  registers now caught and replaced with previous valid values
+
+### Changed
+
+- **Workflow restructured**: Replaced `tauri-apps/tauri-action` with manual
+  `cargo tauri build` + `softprops/action-gh-release` to allow DMG customization
+- **Removed cost chart "inaccurate" overlay**: Cost data now accurate with
+  MAX aggregation and proper sanitization
+- **Test count**: 101 tests (was 98)
+
 ## [0.8.9] - 2026-05-30
 
 ### Fixed

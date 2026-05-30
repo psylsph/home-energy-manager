@@ -23,7 +23,7 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 | `npm run build` | `tsc -b && vite build` (full typecheck + bundle) |
 | `npm run lint` | `eslint .` |
 | `npm run preview` | `vite preview` |
-| `cargo test` (in `src-tauri/`) | Run all Rust unit tests (98 tests) |
+| `cargo test` (in `src-tauri/`) | Run all Rust unit tests (101 tests) |
 | `cargo tauri dev` | Dev mode with Tauri window + Vite + hot-reload |
 | `cargo tauri build` | Production build of the desktop app |
 
@@ -48,12 +48,12 @@ Frontend talks exclusively to the local Axum server — never directly to the in
 
 - **`lib.rs`** — Tauri app setup + headless CLI entry; spawns Axum server (port 7337) + Modbus polling loop
 - **`history/`** — SQLite-backed history storage (`~/.givenergy-local/history.db`)
-  - `mod.rs` — `HistoryDb` wrapper, schema migration, `insert_reading()`, aggregated `query_history()` with time-bucket AVG
+  - `mod.rs` — `HistoryDb` wrapper, schema migration, `insert_reading()`, aggregated `query_history()` with time-bucket AVG (or MAX for cumulative fields)
 - **`inverter/`** — data model, register decode/encode, discovery, poll loop
   - `model.rs` — `InverterSnapshot`, `ScheduleSlot`, `BatteryMode`, `BatteryState`
   - `decoder.rs` — converts raw register blocks into `InverterSnapshot`; applies global `enable_charge`/`enable_discharge` flags to slot states
   - `encoder.rs` — translates `ControlCommand` enum into `RegisterWrite` lists (whitelist-validated)
-  - `poll.rs` — main polling loop: drain pending writes → read registers → broadcast snapshot; uses `Notify` for immediate write execution
+  - `poll.rs` — main polling loop: drain pending writes → read registers → sanitize → broadcast snapshot; uses `Notify` for immediate write execution; warmup reads and grace period after connect
   - `discovery.rs` — network scanning with GivEnergy Modbus protocol verification (sends a read request and validates the 0x5959 magic header in the response)
 - **`modbus/`** — GivEnergy Modbus TCP protocol
   - `client.rs` — `ModbusClient`: connect, read registers, write single register (FC6), stale frame drain
@@ -77,6 +77,60 @@ Central `Arc<Mutex<…>>`-based state shared between poll loop, API handlers, an
 - `settings` — live `PollSettings` (host, port, serial, interval)
 - `history` — `HistoryDb` for time-series storage
 - `log_ring` — `LogRing` (2000-entry ring buffer) of captured log lines for the developer console
+
+## Data sanitization (register corruption defense)
+
+The GivEnergy dongle frequently returns corrupted register values, especially
+on the first reads after TCP connect. The sanitizer in `poll.rs` defends against
+this with multiple layers:
+
+### Absolute range checks (always active)
+
+Applied on EVERY reading regardless of previous state:
+
+| Field | Range | Notes |
+|---|---|---|
+| `today_*_kwh` | 0–200 kWh | Residential daily ceiling; catches 245, 275, 879, 1010 spikes |
+| Battery power | ±10 kW | Residential battery limit |
+| Grid power | ±10 kW | UK single-phase supply limit |
+| Solar power | 0–10 kW | Residential PV limit |
+| Home power | 0–15 kW | Includes EV charging margin |
+| Grid voltage | 180–280 V | UK nominal 230V ± extended range |
+| Grid frequency | 45–55 Hz | UK nominal 50 Hz |
+| Inverter temp | -20–100 °C | Hardware damage above 100°C |
+| Battery temp | -20–80 °C | Safety limit |
+| Battery module voltage | 0–500 V | LV (~48V) to HV (~345V) |
+| SOC | 0–100 | Also rejects SOC=0 with live power, SOC=100 while fast-charging |
+
+### Delta checks (after grace period)
+
+Only active after 3 readings post-connect (grace period):
+
+- **Monotonic increase**: `today_*_kwh` must never decrease (except midnight rollover)
+- **Time-based rate limit**: `max_increase = elapsed_hours × 10 kW + 1 kWh`
+- **Midnight rollover**: decrease allowed when `raw < 5` and `prev > 5`
+- **Near-zero prev**: delta increase check skipped when `prev < 1.0` (unreliable baseline)
+
+### Connect sequence
+
+```
+Connect → 500ms delay → drain TCP → 3× warmup reads (discarded, 500ms apart)
+→ clear latest_snapshot → 3 readings with absolute check only (grace period)
+→ readings with full absolute + delta checks
+```
+
+### History aggregation
+
+The history API (`GET /api/history`) uses MAX aggregation for cumulative
+counter fields (`today_*_kwh`) instead of AVG. AVG of monotonically increasing
+counters understates the true value, causing ~1000× cost inflation when deltas
+are computed. MAX preserves the actual counter reading at each bucket boundary.
+
+### Frontend spike filtering
+
+`removeSpikes()` in `HistoryPage.tsx` applies a post-query filter: a point is
+a spike if it differs from both neighbors by more than a field-specific
+threshold while the neighbors differ by less than half the threshold.
 
 ## Modbus write protocol
 
