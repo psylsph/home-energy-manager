@@ -346,6 +346,36 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
         sanitized = true;
     }
 
+    // Grid voltage: UK single-phase is nominally 230V ±10% (207–253V).
+    // Anything outside 180–280V is clearly corrupt register data.
+    if snap.grid_voltage < 180.0 || snap.grid_voltage > 280.0 {
+        if let Some(p) = prev {
+            tracing::warn!(
+                raw = snap.grid_voltage, prev = p.grid_voltage,
+                "Grid voltage out of range — using previous"
+            );
+            snap.grid_voltage = p.grid_voltage;
+        } else {
+            snap.grid_voltage = 230.0; // nominal
+        }
+        sanitized = true;
+    }
+
+    // Grid frequency: UK is nominally 50 Hz ±1% (49.5–50.5 Hz).
+    // Anything outside 45–55 Hz is clearly corrupt.
+    if snap.grid_frequency < 45.0 || snap.grid_frequency > 55.0 {
+        if let Some(p) = prev {
+            tracing::warn!(
+                raw = snap.grid_frequency, prev = p.grid_frequency,
+                "Grid frequency out of range — using previous"
+            );
+            snap.grid_frequency = p.grid_frequency;
+        } else {
+            snap.grid_frequency = 50.0; // nominal
+        }
+        sanitized = true;
+    }
+
     // Solar power: reject impossible values (>10 kW residential)
     let max_solar_power: i32 = 10_000;
     if snap.solar_power > max_solar_power {
@@ -403,8 +433,10 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
     //   1. Value must be in [0, 1000] kWh (residential daily limit)
     //   2. Value must NOT decrease during the day (register corruption
     //      often returns a near-zero value like 39.0 → 0.6 → 39.0)
-    //   3. Value must NOT jump up by more than 2 kWh between polls
-    //      (at 60s intervals, that's 120 kW — still generous for residential)
+    //   3. Value must NOT jump up by more than the elapsed time allows:
+    //      max_increase = elapsed_hours × 10 kW + 1 kWh margin
+    //      This handles normal polls (60s → 0.27 kWh limit) and also
+    //      reconnect/restart gaps (hours → generous catch-up allowance)
     //
     // Midnight rollover: when the counter resets to ~0, the raw value
     // will legitimately drop below the previous value. We detect this
@@ -413,7 +445,12 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
     // ALLOW the rollover.
     if let Some(p) = prev {
         let max_kwh: f32 = 1000.0;
-        let max_increase_kwh: f32 = 2.0;
+
+        // Time-based increase threshold: scale with elapsed time since
+        // last reading so that reconnect/restart gaps don't trigger false
+        // rejections. 10 kW is a generous residential circuit capacity.
+        let elapsed_secs = (snap.timestamp - p.timestamp).max(0) as f32;
+        let max_increase_kwh = (elapsed_secs / 3600.0) * 10.0 + 1.0;
 
         macro_rules! check_energy_field {
             ($name:literal, $value:expr, $prev:expr) => {
@@ -443,10 +480,11 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
                     $value = prev_val;
                     sanitized = true;
                 }
-                // Rule 3: increase must be plausible
+                // Rule 3: increase must be plausible for elapsed time
                 else if raw > prev_val + max_increase_kwh {
                     tracing::warn!(
                         field = $name, raw, prev = prev_val,
+                        elapsed_secs, max_increase_kwh,
                         "Daily energy jumped too fast — using previous",
                     );
                     $value = prev_val;

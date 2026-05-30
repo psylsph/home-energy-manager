@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.6] - 2026-05-30
+
+### Fixed
+
+- **Time-based energy counter sanitization**: The fixed 2 kWh/poll increase
+  threshold rejected legitimate values after reconnect/restart gaps. The counter
+  can legitimately increase by ~10 kWh/hour, so after a 4-hour disconnect the
+  threshold needs to be ~41 kWh. Now scales with elapsed time:
+  `max_increase = elapsed_hours × 10 kW + 1 kWh margin`.
+- **Grid voltage sanitization**: Rejects values outside 180–280V (UK grid is
+  nominally 230V ±10%). Catches spikes like 409V and 664V from corrupt
+  register reads.
+- **Grid frequency sanitization**: Rejects values outside 45–55 Hz (UK nominal
+  50 Hz ±1%).
+
 ## [0.8.5] - 2026-05-30
 
 ### Fixed
