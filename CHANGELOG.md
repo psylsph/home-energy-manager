@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.8] - 2026-05-30
+
+### Fixed
+
+- **Absolute range check now runs on EVERY reading, including the first after
+  connect**: Previously ALL sanitization was gated behind `if let Some(p) = prev`,
+  meaning the first reading after every restart/reconnect had ZERO validation.
+  Corrupted values like 1010 kWh (`today_charge_kwh`), 275 kWh
+  (`today_consumption_kwh`), and 245 kWh (`today_export_kwh`) sailed through
+  and poisoned the "previous" reference, making the sanitizer reject all
+  subsequent legitimate readings. Now the absolute range check (0–200 kWh)
+  runs unconditionally, and only the delta/decrease checks require a previous
+  reading.
+
 ## [0.8.7] - 2026-05-30
 
 ### Fixed

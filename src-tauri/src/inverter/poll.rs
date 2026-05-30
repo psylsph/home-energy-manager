@@ -429,49 +429,69 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
     // Daily energy totals (`today_*_kwh`): cumulative kWh counters that
     // monotonically increase from 0 and reset to 0 at midnight.
     //
-    // Sanitization rules:
-    //   1. Value must be in [0, 1000] kWh (residential daily limit)
-    //   2. Value must NOT decrease during the day (register corruption
-    //      often returns a near-zero value like 39.0 → 0.6 → 39.0)
-    //   3. Value must NOT jump up by more than the elapsed time allows:
+    // Sanitization rules (applied ALWAYS, even on first reading):
+    //   0. Value must be in [0, 100] kWh — a residential system can't
+    //      consume/generate more than 100 kWh in a single day.
+    //      This catches the common corruption patterns (245, 275, 311, 1010).
+    //
+    // Additional rules (only when previous reading exists):
+    //   1. Counter must NOT decrease during the day (register corruption)
+    //   2. Counter must NOT jump up faster than elapsed time allows:
     //      max_increase = elapsed_hours × 10 kW + 1 kWh margin
-    //      This handles normal polls (60s → 0.27 kWh limit) and also
-    //      reconnect/restart gaps (hours → generous catch-up allowance)
     //
     // Midnight rollover: when the counter resets to ~0, the raw value
     // will legitimately drop below the previous value. We detect this
-    // by checking if raw is small (< 5 kWh) — a legitimate new-day
-    // reading after midnight — and prev is large. In this case we
-    // ALLOW the rollover.
-    if let Some(p) = prev {
-        let max_kwh: f32 = 1000.0;
+    // by checking if raw is small (< 5 kWh) and prev is large.
+    //
+    // IMPORTANT: the absolute range check (rule 0) runs REGARDLESS of
+    // whether prev exists. Previously it was gated behind `if let Some(p)
+    // = prev`, which meant the first reading after every reconnect had
+    // zero validation — corrupted values like 1010 kWh passed through
+    // and became the "previous" reference, poisoning all subsequent reads.
+    {
+        let max_daily_kwh: f32 = 200.0; // hard ceiling: 10kW × 20h theoretical max
 
+        macro_rules! check_energy_field {
+            ($name:literal, $value:expr) => {
+                let raw = $value;
+                if raw < 0.0 || raw > max_daily_kwh {
+                    tracing::warn!(
+                        field = $name, raw, max = max_daily_kwh,
+                        "Daily energy out of plausible daily range — clamping to 0",
+                    );
+                    $value = 0.0;
+                    sanitized = true;
+                }
+            };
+        }
+
+        check_energy_field!("today_solar_kwh", snap.today_solar_kwh);
+        check_energy_field!("today_import_kwh", snap.today_import_kwh);
+        check_energy_field!("today_export_kwh", snap.today_export_kwh);
+        check_energy_field!("today_charge_kwh", snap.today_charge_kwh);
+        check_energy_field!("today_discharge_kwh", snap.today_discharge_kwh);
+        check_energy_field!("today_consumption_kwh", snap.today_consumption_kwh);
+    }
+
+    // Delta checks — only when we have a previous reading to compare against
+    if let Some(p) = prev {
         // Time-based increase threshold: scale with elapsed time since
         // last reading so that reconnect/restart gaps don't trigger false
         // rejections. 10 kW is a generous residential circuit capacity.
         let elapsed_secs = (snap.timestamp - p.timestamp).max(0) as f32;
         let max_increase_kwh = (elapsed_secs / 3600.0) * 10.0 + 1.0;
 
-        macro_rules! check_energy_field {
+        macro_rules! check_energy_delta {
             ($name:literal, $value:expr, $prev:expr) => {
                 let raw = $value;
                 let prev_val = $prev;
 
-                // Rule 1: absolute range
-                if raw < 0.0 || raw > max_kwh {
-                    tracing::warn!(
-                        field = $name, raw, prev = prev_val,
-                        "Daily energy out of plausible range — using previous",
-                    );
-                    $value = prev_val;
-                    sanitized = true;
-                }
                 // Midnight rollover: counter legitimately reset to ~0.
                 // Allow if raw is small and prev was large.
-                else if raw < prev_val && raw < 5.0 && prev_val > 5.0 {
+                if raw < prev_val && raw < 5.0 && prev_val > 5.0 {
                     // Legitimate midnight reset — accept raw as-is
                 }
-                // Rule 2: counter must not decrease (register corruption)
+                // Counter must not decrease (register corruption)
                 else if raw < prev_val {
                     tracing::warn!(
                         field = $name, raw, prev = prev_val,
@@ -480,7 +500,7 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
                     $value = prev_val;
                     sanitized = true;
                 }
-                // Rule 3: increase must be plausible for elapsed time
+                // Increase must be plausible for elapsed time
                 else if raw > prev_val + max_increase_kwh {
                     tracing::warn!(
                         field = $name, raw, prev = prev_val,
@@ -493,12 +513,12 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
             };
         }
 
-        check_energy_field!("today_solar_kwh", snap.today_solar_kwh, p.today_solar_kwh);
-        check_energy_field!("today_import_kwh", snap.today_import_kwh, p.today_import_kwh);
-        check_energy_field!("today_export_kwh", snap.today_export_kwh, p.today_export_kwh);
-        check_energy_field!("today_charge_kwh", snap.today_charge_kwh, p.today_charge_kwh);
-        check_energy_field!("today_discharge_kwh", snap.today_discharge_kwh, p.today_discharge_kwh);
-        check_energy_field!("today_consumption_kwh", snap.today_consumption_kwh, p.today_consumption_kwh);
+        check_energy_delta!("today_solar_kwh", snap.today_solar_kwh, p.today_solar_kwh);
+        check_energy_delta!("today_import_kwh", snap.today_import_kwh, p.today_import_kwh);
+        check_energy_delta!("today_export_kwh", snap.today_export_kwh, p.today_export_kwh);
+        check_energy_delta!("today_charge_kwh", snap.today_charge_kwh, p.today_charge_kwh);
+        check_energy_delta!("today_discharge_kwh", snap.today_discharge_kwh, p.today_discharge_kwh);
+        check_energy_delta!("today_consumption_kwh", snap.today_consumption_kwh, p.today_consumption_kwh);
     }
 
     sanitized
