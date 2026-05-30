@@ -64,7 +64,7 @@ jobs:
       - name: Customize macOS DMG
         if: matrix.platform == 'macos-latest'
         run: |
-          DMG_PATH=$(ls "$GITHUB_WORKSPACE/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/"*.dmg")
+          DMG_PATH=$(ls "$GITHUB_WORKSPACE/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/"*.dmg)
           echo "Customizing DMG: $DMG_PATH"
           MNT=$(mktemp -d)
           hdiutil attach "$DMG_PATH" -mountpoint "$MNT" -nobrowse -quiet

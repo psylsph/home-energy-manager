@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-05-30
+
+### Fixed
+
+- **macOS DMG build: unmatched double-quote in shell script**: The `Customize macOS DMG`
+  workflow step had a trailing `"` on the `DMG_PATH=` line, creating an unmatched
+  double-quote that caused bash to scan to EOF looking for its pair. This prevented
+  the DMG from being customized (no README.txt, /Applications symlink not removed)
+  and caused the macOS release builds to fail.
+
 ## [0.9.0] - 2026-05-30
 
 Robust data handling release. The GivEnergy data adapter (dongle) frequently
