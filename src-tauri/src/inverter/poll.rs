@@ -222,8 +222,40 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
         }
     }
 
-    // Grid power: reject impossible spikes (>25 kW for a residential supply)
-    let max_grid_power: i32 = 25_000;
+    // Inverter temperature: reject physically impossible values.
+    // A heatsink >100°C means hardware damage is imminent; anything above
+    // 80°C is unusual. Raw register corruption can produce values like 239°C.
+    if snap.inverter_temperature > 100.0 || snap.inverter_temperature < -20.0 {
+        if let Some(p) = prev {
+            tracing::warn!(
+                raw = snap.inverter_temperature,
+                prev = p.inverter_temperature,
+                "Inverter temperature out of range — using previous"
+            );
+            snap.inverter_temperature = p.inverter_temperature;
+        } else {
+            snap.inverter_temperature = 0.0;
+        }
+    }
+
+    // Battery temperature: reject physically impossible values.
+    // Lithium batteries operate in -20°C to 60°C range; anything above
+    // 80°C is a safety concern and almost certainly corrupt data.
+    if snap.battery_temperature > 80.0 || snap.battery_temperature < -20.0 {
+        if let Some(p) = prev {
+            tracing::warn!(
+                raw = snap.battery_temperature,
+                prev = p.battery_temperature,
+                "Battery temperature out of range — using previous"
+            );
+            snap.battery_temperature = p.battery_temperature;
+        } else {
+            snap.battery_temperature = 0.0;
+        }
+    }
+
+    // Grid power: reject impossible values (>10 kW for a typical UK single-phase supply)
+    let max_grid_power: i32 = 10_000;
     if snap.grid_power.abs() > max_grid_power {
         if let Some(p) = prev {
             tracing::warn!(raw = snap.grid_power, prev = p.grid_power, "Grid power out of range — using previous");
@@ -233,8 +265,8 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
         }
     }
 
-    // Solar power: reject impossible spikes (>20 kW residential)
-    let max_solar_power: i32 = 20_000;
+    // Solar power: reject impossible values (>10 kW residential)
+    let max_solar_power: i32 = 10_000;
     if snap.solar_power > max_solar_power {
         if let Some(p) = prev {
             tracing::warn!(raw = snap.solar_power, prev = p.solar_power, "Solar power out of range — using previous");
@@ -244,8 +276,11 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
         }
     }
 
-    // Home power: reject impossible spikes (>25 kW)
-    if snap.home_power.abs() > max_grid_power {
+    // Home power: reject impossible values.
+    // Typical UK home peak is ~10 kW; even with EV charging rarely exceeds 15 kW.
+    // Also reject negative home power (can't have negative consumption).
+    let max_home_power: i32 = 15_000;
+    if snap.home_power.abs() > max_home_power || snap.home_power < 0 {
         if let Some(p) = prev {
             tracing::warn!(raw = snap.home_power, prev = p.home_power, "Home power out of range — using previous");
             snap.home_power = p.home_power;

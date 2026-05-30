@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-05-30
+
+### Added
+
+- **Connected clients display**: The Network Access section on the Settings page now shows
+  all connected WebSocket clients with their IP addresses. Local connections (127.0.0.1 or
+  the machine's own LAN IP) are labelled "This device".
+- **FAQ.md**: Common problems guide covering firewall settings, LAN access, macOS downloads
+  (use x64.dmg even on Apple Silicon), network scanning, and finding your inverter's IP.
+- **Firewall/connectivity hint**: The "Waiting for data" screen on the Status and Battery pages
+  now shows a secondary message suggesting to restart the app and check firewall settings,
+  with a link to the FAQ.
+
+### Fixed
+
+- **LAN access in dev mode**: The Axum dev server now serves the built frontend from `dist/`,
+  so LAN devices can access the dashboard at `http://<LAN-IP>:7337` instead of getting a 404.
+- **Network Access shows LAN IP**: The Settings page Network Access section now displays the
+  machine's actual LAN IP (e.g. `192.168.1.x:7337`) instead of `127.0.0.1:7337`. The LAN IP
+  is detected from physical network interfaces (excludes Docker, WSL, and virtual adapters).
+
 ## [0.6.0] - 2026-05-29
 
 ### Added

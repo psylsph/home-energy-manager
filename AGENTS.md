@@ -35,7 +35,7 @@ Order for full verification: `npm run lint` → `npm run build` (typechecks) →
 
 React app. Entrypoint: `src/main.tsx`.
 
-- **Pages**: `StatusPage` (dashboard + energy flow), `BatteryPage` (cell-level detail), `HistoryPage` (charts), `ControlPage` (schedules, modes, limits), `SettingsPage` (connection config, developer mode, about), `LogsPage` (developer console — only visible when developer mode is enabled)
+- **Pages**: `StatusPage` (dashboard + energy flow), `BatteryPage` (cell-level detail), `HistoryPage` (charts), `ControlPage` (schedules, modes, limits), `SettingsPage` (connection config, connected clients, developer mode, about), `LogsPage` (developer console — only visible when developer mode is enabled)
 - **Components**: `EnergyFlowDiagram` (radial SVG power flow), `BatteryPanel` (per-module cell data), `SummaryTiles` (power stats)
 - **Hooks**: `useWebSocket` — connects to `/ws`, reconnects on drop, fetches initial snapshot via REST
 - **Lib**: `api.ts` (fetch helpers), `format.ts` (power/voltage/temp formatters), `types.ts` (InverterSnapshot etc.)
