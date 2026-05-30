@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] - 2026-05-30
+
+### Fixed
+
+- **Screen flashing on inverter disconnect**: `StatusPage` re-rendered when the
+  connection state changed (Connected → Reconnecting), cascading to children
+  `EnergyFlowDiagram`, `BatteryPanel`, and `SummaryTiles`. SVG `<animate>`
+  elements in the flow diagram restarted their animation on every unnecessary
+  re-render, causing a visible "jump". All three components now wrapped with
+  `React.memo` to only re-render when the `snapshot` prop actually changes.
+- **Missing Disconnected broadcast**: When a reconnect attempt failed, the
+  backend set the connection state to `Disconnected` but never broadcast it
+  via WebSocket, leaving the frontend stuck on 'reconnecting'.
+
 ## [0.8.1] - 2026-05-30
 
 ### Fixed
