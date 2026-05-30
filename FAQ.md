@@ -47,6 +47,26 @@ If the right-click → Open method doesn't work:
 
 > ⚠️ Only do this if you are comfortable trusting the app. GivEnergy Local is open source — you can [inspect the code](https://github.com/psylsph/givenergy-local) yourself.
 
+### On macOS 26.5+, the app launches but the web UI never loads
+
+macOS 26.5 tightened Gatekeeper for ad-hoc signed apps. When you use `open` (or double-click the app in Finder), the app may appear to run but never start the web server. This is because Gatekeeper blocks the app's network entitlements at the LaunchServices level.
+
+**Workaround**: Run the binary directly instead of using `open`:
+
+```bash
+/Applications/GivEnergy-Local.app/Contents/MacOS/givenergy-local
+```
+
+Or use the `launch.command` convenience script from the project root:
+
+```bash
+./launch.command
+```
+
+The app will still need approval the first time (System Settings → Open Anyway), but subsequent launches via the direct binary path bypass the LaunchServices Gatekeeper check entirely.
+
+> Note: The old `spctl --add` command-line workaround is no longer supported on macOS 26.5.
+
 ---
 
 ### Which macOS download should I use?

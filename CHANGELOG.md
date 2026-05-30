@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.3] - 2026-05-30
+
+### Fixed
+
+- **macOS Gatekeeper blocking ad-hoc signed app on 26.5+**: When launched via `open`
+  or Finder double-click, Gatekeeper silently blocks the web server from starting
+  (network entitlements rejected at the LaunchServices level). The app process stays
+  alive but never binds to port 7337.
+
+### Added
+
+- **`launch.command`** — Convenience script that runs the app binary directly,
+  bypassing LaunchServices Gatekeeper entirely. Drop-in replacement for `open`:
+  `./launch.command` from the project root.
+- **FAQ: macOS 26.5+ Gatekeeper workaround** — Documents the `launch.command`
+  workaround and notes that `spctl --add` is no longer supported.
+
 ## [0.8.2] - 2026-05-30
 
 ### Fixed
