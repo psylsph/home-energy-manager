@@ -3,13 +3,59 @@
 //! Manages WebSocket connections that broadcast live inverter
 //! data updates to connected frontend clients.
 
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::extract::ConnectInfo;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::IntoResponse;
 
 use crate::inverter::poll::{AppState, PollMessage};
+
+// ---------------------------------------------------------------------------
+// Connected clients tracker
+// ---------------------------------------------------------------------------
+
+/// Tracks connected WebSocket clients by their peer address.
+/// Each client gets a unique incrementing ID.
+pub struct ConnectedClients {
+    next_id: u64,
+    clients: HashMap<u64, SocketAddr>,
+}
+
+impl ConnectedClients {
+    pub fn new() -> Self {
+        Self {
+            next_id: 1,
+            clients: HashMap::new(),
+        }
+    }
+
+    /// Register a new client. Returns the assigned ID.
+    pub fn add(&mut self, peer: SocketAddr) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.clients.insert(id, peer);
+        id
+    }
+
+    /// Remove a client by ID.
+    pub fn remove(&mut self, id: u64) {
+        self.clients.remove(&id);
+    }
+
+    /// Get the list of connected client addresses.
+    pub fn list(&self) -> Vec<SocketAddr> {
+        self.clients.values().copied().collect()
+    }
+
+    /// Get the count of connected clients.
+    pub fn count(&self) -> usize {
+        self.clients.len()
+    }
+}
 
 /// HTTP upgrade handler for WebSocket connections.
 ///
@@ -19,12 +65,18 @@ use crate::inverter::poll::{AppState, PollMessage};
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
+    connect_info: ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state))
+    let peer = connect_info.0;
+    ws.on_upgrade(move |socket| handle_ws(socket, state, peer))
 }
 
 /// Inner WebSocket loop — runs for the lifetime of a single connection.
-async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
+async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, peer: std::net::SocketAddr) {
+    // Register this client
+    let client_id = state.connected_clients.lock().add(peer);
+    tracing::debug!("WebSocket client connected: {}", peer);
+
     // Subscribe to the broadcast channel *before* sending the initial
     // snapshot so we don't miss any updates between the two operations.
     let mut rx = state.tx.subscribe();
@@ -46,6 +98,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
             serde_json::to_string(&PollMessage::Snapshot(snapshot.clone())).unwrap_or_default();
         if socket.send(Message::Text(msg.into())).await.is_err() {
             // Client disconnected immediately.
+            state.connected_clients.lock().remove(client_id);
             return;
         }
     }
@@ -85,5 +138,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
         }
     }
 
-    tracing::debug!("WebSocket client disconnected");
+    // Unregister this client
+    state.connected_clients.lock().remove(client_id);
+    tracing::debug!("WebSocket client disconnected: {}", peer);
 }

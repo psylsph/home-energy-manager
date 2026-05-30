@@ -38,6 +38,7 @@ export default function SettingsPage() {
   const [message, setMessage] = useState<{ text: string; ok: boolean } | null>(null);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [lanIp, setLanIp] = useState<string | null>(null);
+  const [clients, setClients] = useState<string[]>([]);
 
   const flash = useCallback((text: string, ok: boolean) => {
     setMessage({ text, ok });
@@ -62,11 +63,12 @@ export default function SettingsPage() {
       }
     })();
 
-    // Fetch LAN IP for network access display
+    // Fetch LAN IP and connected clients for network access display
     (async () => {
       try {
-        const res = await apiGet<{ ok: boolean; lan_ip: string | null }>('/api/status');
+        const res = await apiGet<{ ok: boolean; lan_ip: string | null; clients: string[]; client_count: number }>('/api/status');
         if (res.lan_ip) setLanIp(res.lan_ip);
+        if (res.clients) setClients(res.clients);
       } catch { /* ignore */ }
     })();
   }, []);
@@ -294,6 +296,26 @@ export default function SettingsPage() {
         <p className="text-text-secondary text-xs font-sans">
           Access this dashboard from any device on your network
         </p>
+
+        {clients.length > 0 && (
+          <div className="flex flex-col gap-1.5 mt-1">
+            <span className="text-text-secondary text-xs font-sans">
+              Connected clients ({clients.length})
+            </span>
+            {clients.map((addr, i) => {
+              const ip = addr.replace(/:.*$/, '');
+              const isLocal = ip === '127.0.0.1' || ip === '::1' || ip === lanIp;
+              return (
+                <div key={i} className="bg-bg-elevated rounded-lg px-3 py-2 flex items-center justify-between">
+                  <span className="text-text-primary text-sm font-mono">{addr}</span>
+                  {isLocal && (
+                    <span className="text-text-secondary text-xs font-sans">This device</span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </section>
 
       {/* ─── Section 3: Refresh Interval ─── */}

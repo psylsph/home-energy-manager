@@ -53,11 +53,17 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<Value> {
     let cs = state.connection_state.lock().await.clone();
     let host = state.settings.lock().await.host.clone();
     let lan_ip = crate::inverter::discovery::detect_lan_ip();
+    let clients = state.connected_clients.lock();
+    let client_addrs: Vec<String> = clients.list().into_iter().map(|a| a.to_string()).collect();
+    let client_count = clients.count();
+    drop(clients);
     Json(json!({
         "ok": true,
         "connection": cs,
         "host": host,
         "lan_ip": lan_ip,
+        "clients": client_addrs,
+        "client_count": client_count,
     }))
 }
 

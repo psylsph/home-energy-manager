@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use tokio::sync::{broadcast, Mutex, Notify};
 use crate::server::logs::LogRing;
+use crate::server::ws::ConnectedClients;
 
 use crate::history::HistoryDb;
 use crate::inverter::decoder::decode_snapshot;
@@ -121,6 +122,8 @@ pub struct AppState {
     pub history: Arc<Mutex<Option<Arc<HistoryDb>>>>,
     /// Ring buffer of recent log lines for the developer console.
     pub log_ring: Arc<LogRing>,
+    /// Connected WebSocket clients (for Network Access display).
+    pub connected_clients: Arc<parking_lot::Mutex<ConnectedClients>>,
 }
 
 impl AppState {
@@ -139,6 +142,7 @@ impl AppState {
             write_notify: Arc::new(Notify::new()),
             history: Arc::new(Mutex::new(None)),
             log_ring: Arc::new(crate::server::logs::LogRing::new(2000)),
+            connected_clients: Arc::new(parking_lot::Mutex::new(ConnectedClients::new())),
         }
     }
 
@@ -156,6 +160,7 @@ impl AppState {
             write_notify: Arc::new(Notify::new()),
             history: Arc::new(Mutex::new(None)),
             log_ring,
+            connected_clients: Arc::new(parking_lot::Mutex::new(ConnectedClients::new())),
         }
     }
 }
