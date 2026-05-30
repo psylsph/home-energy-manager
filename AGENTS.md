@@ -132,7 +132,59 @@ The `--dist` flag specifies the frontend static files directory. Search order: `
 
 ## Known issues
 
-_None._
+### macOS 26.5 blocks ad-hoc signed binaries
+
+**Symptom**: The app binary silently exits with no output and no port 7337 when
+the .app bundle is installed in `/Applications`. Same binary runs fine from
+Desktop, `/tmp`, or any user-level directory.
+
+**Root cause**: macOS 26.5 (Sequoia) now blocks ad-hoc signed binaries
+(`signingIdentity: "-"` in tauri.conf.json) from running inside the system
+`/Applications` directory. This is stricter than previous macOS versions —
+even running the binary directly via terminal fails, not just `open`.
+
+**Three separate issues found on macOS 26.5**:
+
+| Issue | Trigger | Status |
+|---|---|---|
+| 1. `/Applications` block | Binary launched from `/Applications` | **Fixed** (FAQ + launch.command) |
+| 2. Gatekeeper blocks `open` | `open GivEnergy-Local.app` or double-click | **Fixed** (FAQ + launch.command) |
+| 3. x86_64 binary crashes under Rosetta | macOS 26.5 + Rosetta | **Fixed** (FAQ recommends aarch64) |
+
+**CI fix needed (workflow scope required)**:
+The `.github/workflows/build.yml` needs a post-build step to customize the DMG:
+
+```yaml
+- name: Customize DMG (macOS only)
+  if: matrix.platform == 'macos-latest'
+  run: |
+    DMG_PATH=$(ls "src-tauri/target/${{ matrix.target }}/release/bundle/dmg/"*.dmg)
+    MNT=$(mktemp -d)
+    hdiutil attach "$DMG_PATH" -mountpoint "$MNT" -nobrowse
+    rm -f "$MNT/Applications"          # Remove misleading symlink
+    cat > "$MNT/README.txt" << 'EOF'  # Add install instructions
+    macOS 26.5+ blocks unsigned apps in /Applications.
+    Drag the .app to your Desktop instead.
+    EOF
+    hdiutil detach "$MNT"
+    hdiutil create -ov -srcfolder "$MNT" -format UDZO -volname "GivEnergy-Local" -fs HFS+ "${DMG_PATH}.tmp"
+    mv "${DMG_PATH}.tmp" "$DMG_PATH"
+```
+
+The commit `a9fd034` has the full implementation but failed to push due to
+workflow scope restriction. See the working branch for the complete .yml.
+
+**Workaround for end users**:
+- Download `GivEnergy-Local_aarch64.app.tar.gz` from releases (not the DMG)
+- Or install the .app on Desktop, not in /Applications
+- Run via `./launch.command` in the project root (searches Desktop first)
+
+**Known good archs**:
+- The aarch64 (ARM64) app works correctly from Desktop
+- The x86_64 (Intel) app crashes silently under Rosetta on macOS 26.5+
+- The aarch64.app.tar.gz release artifact contains the correct binary
+- The aarch64.dmg release artifact has the correct binary but misleading
+  /Applications symlink
 
 ## Release process
 
