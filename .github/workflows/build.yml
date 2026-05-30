@@ -59,7 +59,40 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "GivEnergy Local ${{ github.ref_name }}"
-          releaseBody: "See [CHANGELOG.md](https://github.com/psylsph/givenergy-local/blob/master/CHANGELOG.md) for details."
+          releaseBody: "See [CHANGELOG.md](https://github.com/psylsgh/givenergy-local/blob/master/CHANGELOG.md) for details."
           releaseDraft: false
           prerelease: false
           args: --target ${{ matrix.target }}
+
+      # Post-process DMG: remove the /Applications symlink (misleading on macOS 26.5+)
+      # and add a README telling users to keep the app on Desktop
+      - name: Customize DMG (macOS only)
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: |
+          DMG_PATH=$(ls "${{ github.workspace }}/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/"*.dmg 2>/dev/null || echo "")
+          if [ -z "$DMG_PATH" ]; then echo "No DMG found"; exit 0; fi
+          echo "Customizing: $DMG_PATH"
+          MNT=$(mktemp -d)
+          hdiutil attach "$DMG_PATH" -mountpoint "$MNT" -nobrowse
+          rm -f "$MNT/Applications"
+          printf '%s\n' \
+            'GivEnergy Local' \
+            '===============' \
+            '' \
+            'macOS 26.5+ blocks unsigned apps installed in /Applications.' \
+            'DO NOT drag the .app to /Applications - it will not run.' \
+            '' \
+            'INSTEAD: drag the .app to your Desktop and launch from there.' \
+            '' \
+            'To launch: double-click the app, or run from Terminal:' \
+            '  ~/Desktop/GivEnergy-Local.app/Contents/MacOS/givenergy-local' \
+            '' \
+            'FAQ: https://github.com/psylsgh/givenergy-local' \
+            > "$MNT/README.txt"
+          sleep 2
+          hdiutil detach "$MNT"
+          hdiutil create -ov -srcfolder "$MNT" -format UDZO -volname "GivEnergy-Local" -fs HFS+ "${DMG_PATH}.tmp"
+          mv "${DMG_PATH}.tmp" "$DMG_PATH"
+          rm -rf "$MNT"
+          echo "DMG customized OK"
