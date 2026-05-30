@@ -48,14 +48,16 @@ pub async fn get_snapshot(State(state): State<Arc<AppState>>) -> Json<Value> {
     }
 }
 
-/// GET /api/status — current connection state
+/// GET /api/status — current connection state and LAN IP
 pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<Value> {
     let cs = state.connection_state.lock().await.clone();
     let host = state.settings.lock().await.host.clone();
+    let lan_ip = crate::inverter::discovery::detect_lan_ip();
     Json(json!({
         "ok": true,
         "connection": cs,
         "host": host,
+        "lan_ip": lan_ip,
     }))
 }
 

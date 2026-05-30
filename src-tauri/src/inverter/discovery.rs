@@ -218,6 +218,43 @@ fn infer_subnet_base(gateway: &str) -> String {
     }
 }
 
+/// Detect the local machine's LAN IP address.
+///
+/// Returns the first IP address on a physical interface in the 10.x.x.x or
+/// 192.168.x.x range, excluding virtual interfaces (Docker, WSL, libvirt).
+pub fn detect_lan_ip() -> Option<String> {
+    let interfaces = local_ip_address::list_afinet_netifas().ok()?;
+
+    for (name, ip) in &interfaces {
+        let IpAddr::V4(ipv4) = ip else { continue };
+        let octets = ipv4.octets();
+
+        // Skip loopback
+        if octets[0] == 127 {
+            continue;
+        }
+
+        // Skip known virtual interface name prefixes
+        let name_lower = name.to_lowercase();
+        if name_lower.starts_with("docker")
+            || name_lower.starts_with("br-")
+            || name_lower.starts_with("veth")
+            || name_lower == "virbr0"
+            || name_lower.starts_with("vmnet")
+        {
+            continue;
+        }
+
+        // Only accept 10.x.x.x and 192.168.x.x
+        match octets {
+            [192, 168, ..] | [10, ..] => return Some(ipv4.to_string()),
+            _ => continue,
+        }
+    }
+
+    None
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================

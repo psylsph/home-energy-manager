@@ -80,10 +80,15 @@ pub fn run() {
             // Spawn the HTTP server on LAN interface, port 7337.
             let server_state = state.clone();
             if cfg!(debug_assertions) {
-                // Dev mode: Vite serves the frontend on :5173;
-                // Axum only handles API and WebSocket endpoints.
+                // Dev mode: Vite serves the frontend on :5173 for the Tauri
+                // window (hot-reload). Axum also serves the built frontend
+                // from dist/ so LAN devices can access the dashboard.
+                let dist_dir = std::path::PathBuf::from("../dist")
+                    .canonicalize()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("dist"));
+                tracing::info!("Dev frontend path: {}", dist_dir.display());
                 tauri::async_runtime::spawn(async move {
-                    start_server(server_state, "0.0.0.0", 7337).await;
+                    start_server_with_frontend(server_state, "0.0.0.0", 7337, dist_dir.to_string_lossy().to_string()).await;
                 });
             } else {
                 // Production: serve the frontend from Axum too so that

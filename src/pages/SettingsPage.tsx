@@ -37,6 +37,7 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ text: string; ok: boolean } | null>(null);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [lanIp, setLanIp] = useState<string | null>(null);
 
   const flash = useCallback((text: string, ok: boolean) => {
     setMessage({ text, ok });
@@ -60,10 +61,18 @@ export default function SettingsPage() {
         setSettingsLoaded(true);
       }
     })();
+
+    // Fetch LAN IP for network access display
+    (async () => {
+      try {
+        const res = await apiGet<{ ok: boolean; lan_ip: string | null }>('/api/status');
+        if (res.lan_ip) setLanIp(res.lan_ip);
+      } catch { /* ignore */ }
+    })();
   }, []);
 
-  // Network URL
-  const lanUrl = getApiBase().replace(/^http/, 'http');
+  // Network URL — use LAN IP if available, otherwise fall back to getApiBase()
+  const lanUrl = lanIp ? `http://${lanIp}:7337` : getApiBase();
 
   // Save connection
   const handleConnect = async () => {
