@@ -151,28 +151,14 @@ even running the binary directly via terminal fails, not just `open`.
 | 2. Gatekeeper blocks `open` | `open GivEnergy-Local.app` or double-click | **Fixed** (FAQ + launch.command) |
 | 3. x86_64 binary crashes under Rosetta | macOS 26.5 + Rosetta | **Fixed** (FAQ recommends aarch64) |
 
-**CI fix needed (workflow scope required)**:
-The `.github/workflows/build.yml` needs a post-build step to customize the DMG:
+**CI fix implemented**:
+The `.github/workflows/build.yml` now includes a `Customize macOS DMG` step that:
+1. Removes the misleading `/Applications` symlink from the DMG
+2. Adds a `README.txt` with install instructions (drag to Desktop, not /Applications)
+3. Rebuilds the DMG with these changes
 
-```yaml
-- name: Customize DMG (macOS only)
-  if: matrix.platform == 'macos-latest'
-  run: |
-    DMG_PATH=$(ls "src-tauri/target/${{ matrix.target }}/release/bundle/dmg/"*.dmg)
-    MNT=$(mktemp -d)
-    hdiutil attach "$DMG_PATH" -mountpoint "$MNT" -nobrowse
-    rm -f "$MNT/Applications"          # Remove misleading symlink
-    cat > "$MNT/README.txt" << 'EOF'  # Add install instructions
-    macOS 26.5+ blocks unsigned apps in /Applications.
-    Drag the .app to your Desktop instead.
-    EOF
-    hdiutil detach "$MNT"
-    hdiutil create -ov -srcfolder "$MNT" -format UDZO -volname "GivEnergy-Local" -fs HFS+ "${DMG_PATH}.tmp"
-    mv "${DMG_PATH}.tmp" "$DMG_PATH"
-```
-
-The commit `a9fd034` has the full implementation but failed to push due to
-workflow scope restriction. See the working branch for the complete .yml.
+The workflow uses manual `cargo tauri build` + `softprops/action-gh-release` instead
+of `tauri-action` so the DMG can be customized before upload.
 
 **Workaround for end users**:
 - Download `GivEnergy-Local_aarch64.app.tar.gz` from releases (not the DMG)

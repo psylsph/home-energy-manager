@@ -52,14 +52,61 @@ jobs:
             libgtk-3-dev \
             libayatana-appindicator3-dev
 
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked
+
+      - name: Build frontend
+        run: npm run build
+
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo tauri build --target ${{ matrix.target }}
+
+      - name: Customize macOS DMG
+        if: matrix.platform == 'macos-latest'
+        run: |
+          DMG_PATH=$(ls "$GITHUB_WORKSPACE/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/"*.dmg")
+          echo "Customizing DMG: $DMG_PATH"
+          MNT=$(mktemp -d)
+          hdiutil attach "$DMG_PATH" -mountpoint "$MNT" -nobrowse -quiet
+          # Remove misleading /Applications symlink — macOS 26.5 blocks unsigned
+          # apps in /Applications, so the symlink invites users to break the app.
+          rm -f "$MNT/Applications"
+          # Add install instructions
+          cat > "$MNT/README.txt" << 'EOF'
+          GivEnergy Local — macOS Install Notes
+          ======================================
+
+          IMPORTANT: Do NOT drag this app to /Applications.
+          macOS 26.5 (Sequoia) blocks unsigned apps in /Applications.
+
+          Instead, drag GivEnergy Local.app to your Desktop or Home folder.
+          Then double-click to run.
+
+          On first launch you may see a Gatekeeper warning:
+          1. Open System Settings → Privacy & Security
+          2. Click "Open Anyway" next to the security warning
+          3. Or right-click the app → Open → Open
+
+          For Apple Silicon (M1/M2/M3/M4) Macs, use the aarch64 release.
+          For Intel Macs, use the x86_64 release.
+          EOF
+          hdiutil detach "$MNT" -quiet
+          # Rebuild DMG with customizations
+          hdiutil create -ov -srcfolder "$MNT" -format UDZO \
+            -volname "GivEnergy Local" -fs HFS+ "${DMG_PATH}.tmp"
+          mv "${DMG_PATH}.tmp" "$DMG_PATH"
+          echo "DMG customized successfully"
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "GivEnergy Local ${{ github.ref_name }}"
-          releaseBody: "See [CHANGELOG.md](https://github.com/psylsph/givenergy-local/blob/master/CHANGELOG.md) for details."
-          releaseDraft: false
+          tag_name: ${{ github.ref_name }}
+          name: "GivEnergy Local ${{ github.ref_name }}"
+          body: "See [CHANGELOG.md](https://github.com/psylsph/givenergy-local/blob/master/CHANGELOG.md) for details."
+          draft: false
           prerelease: false
-          args: --target ${{ matrix.target }}
+          files: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
+            src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
+            src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
