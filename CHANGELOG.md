@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.9] - 2026-05-30
+
+### Fixed
+
+- **Grace period for delta checks after connect**: Even after warmup reads, the
+  dongle returns plausible-but-wrong values (e.g. `today_import_kwh = 0.6` when
+  real is 39.0) that pass the absolute range check. These become the "previous"
+  baseline and cause all subsequent real readings to be rejected. Now the first
+  3 readings after connect only have the absolute range check (0–200 kWh) —
+  delta checks are skipped until the baseline stabilizes.
+- **3 warmup reads instead of 1**: The dongle can return corrupted data for
+  multiple consecutive reads after TCP connect. Three warmup reads with 500ms
+  gaps give the dongle more time to stabilize before we start recording data.
+- **Skip delta when previous is near-zero**: If `prev < 1.0` the delta increase
+  check is skipped — a near-zero previous is unreliable (either clamped from
+  corruption or a genuine start-of-day reading).
+
 ## [0.8.8] - 2026-05-30
 
 ### Fixed

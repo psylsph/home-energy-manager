@@ -263,7 +263,7 @@ impl AppState {
 /// Compares against the previous snapshot to detect and correct garbled
 /// readings before they reach the frontend or history database.
 /// Returns `true` if any field was sanitized (fallback applied).
-fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot>) -> bool {
+fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot>, skip_delta: bool) -> bool {
     let mut sanitized = false;
     let max_battery_power: i32 = 10_000; // 10 kW — residential battery limit
 
@@ -473,7 +473,11 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
         check_energy_field!("today_consumption_kwh", snap.today_consumption_kwh);
     }
 
-    // Delta checks — only when we have a previous reading to compare against
+    // Delta checks — only when we have a previous reading AND we're past
+    // the grace period after connect. During the grace period, only the
+    // absolute range check applies — the dongle can return plausible-but-wrong
+    // values that would poison the delta baseline.
+    if !skip_delta {
     if let Some(p) = prev {
         // Time-based increase threshold: scale with elapsed time since
         // last reading so that reconnect/restart gaps don't trigger false
@@ -486,9 +490,17 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
                 let raw = $value;
                 let prev_val = $prev;
 
+                // If prev is 0 or near-zero, it was either just clamped by
+                // the absolute range check (corrupted) or is a genuine
+                // start-of-day reading. In either case we can't reliably
+                // compute a delta — accept the new value (already validated
+                // by the absolute range check above).
+                if prev_val < 1.0 {
+                    // prev is unreliable — skip delta check
+                }
                 // Midnight rollover: counter legitimately reset to ~0.
                 // Allow if raw is small and prev was large.
-                if raw < prev_val && raw < 5.0 && prev_val > 5.0 {
+                else if raw < prev_val && raw < 5.0 && prev_val > 5.0 {
                     // Legitimate midnight reset — accept raw as-is
                 }
                 // Counter must not decrease (register corruption)
@@ -520,6 +532,7 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
         check_energy_delta!("today_discharge_kwh", snap.today_discharge_kwh, p.today_discharge_kwh);
         check_energy_delta!("today_consumption_kwh", snap.today_consumption_kwh, p.today_consumption_kwh);
     }
+    } // skip_delta
 
     sanitized
 }
@@ -679,20 +692,22 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // request-response pairing for the first poll.
                 client.drain().await;
 
-                // Warmup read: discard the first register read after connect.
+                // Warmup reads: discard the first register reads after connect.
                 // The dongle's internal state can be stale after a TCP reconnect,
-                // causing the first read to return garbage values (e.g.
-                // today_import_kwh = 0.6 when the real value is 39.0). If these
-                // corrupt values become the sanitizer's "previous" reference,
-                // all subsequent legitimate readings are rejected as "jumped too
-                // fast" and the counters get stuck at the corrupted values.
-                tracing::debug!("Warmup read — discarding first register response");
-                let _ = client.read_all_standard().await;
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                // causing the first reads to return garbage values (e.g.
+                // today_import_kwh = 0.6 when the real value is 39.0). We do
+                // multiple warmup reads because a single discard isn't enough —
+                // the dongle can return corrupted data for several reads.
+                for i in 0..3 {
+                    tracing::debug!("Warmup read {}/3 — discarding", i + 1);
+                    let _ = client.read_all_standard().await;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
 
                 // Clear any previous snapshot so the next reading is accepted
-                // without sanitization. After a reconnect, the previous snapshot
-                // may contain stale or corrupted values from the old session.
+                // without delta sanitization. After a reconnect, the previous
+                // snapshot may contain stale or corrupted values from the old
+                // session. The absolute range check (0–200 kWh) still applies.
                 {
                     let mut latest = state.latest_snapshot.lock().await;
                     *latest = None;
@@ -707,6 +722,14 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // tear down the connection.
                 let mut consecutive_failures: u8 = 0;
                 const MAX_CONSECUTIVE_FAILURES: u8 = 3;
+
+                // Grace period: for the first few reads after connect, skip
+                // delta sanitization. The dongle can return plausible-but-wrong
+                // values (e.g. 0.6 kWh import when real is 39.0) that pass the
+                // absolute range check but corrupt the "previous" reference.
+                // After GRACE_READINGS the delta checks kick in.
+                let mut readings_since_connect: u8 = 0;
+                const GRACE_READINGS: u8 = 3;
 
                 // ---- Inner poll loop ----
                 loop {
@@ -863,10 +886,13 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 
                                 // Store latest snapshot.
                                 // Sanitize against physically impossible values first.
+                                // Skip delta checks during the grace period after connect.
+                                let in_grace = readings_since_connect < GRACE_READINGS;
                                 let sanitized = {
                                     let prev = state.latest_snapshot.lock().await;
-                                    sanitize_snapshot(&mut snapshot, prev.as_ref())
+                                    sanitize_snapshot(&mut snapshot, prev.as_ref(), in_grace)
                                 };
+                                readings_since_connect += 1;
 
                                 // ---- Auto winter mode ----
                                 {
