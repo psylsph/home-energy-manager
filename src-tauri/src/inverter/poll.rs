@@ -935,6 +935,10 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     let mut cs = state.connection_state.lock().await;
                     *cs = ConnectionState::Disconnected;
                 }
+                let _ = state.tx.send(PollMessage::Connection {
+                    state: ConnectionState::Disconnected,
+                    host: settings.host.clone(),
+                });
             }
         }
 

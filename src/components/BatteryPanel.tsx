@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import type { InverterSnapshot } from '../lib/types';
 import { formatPower, formatPercent, formatTemp, formatEnergy, formatVoltage } from '../lib/format';
 import ColdBatteryWarning from './ColdBatteryWarning';
@@ -29,7 +30,7 @@ function stateColor(state: string): string {
   }
 }
 
-export default function BatteryPanel({ snapshot: s }: Props) {
+function BatteryPanelInner({ snapshot: s }: Props) {
   const color = socColor(s.soc);
   const storedKwh = (s.soc / 100) * s.battery_capacity_kwh;
 
@@ -120,3 +121,6 @@ export default function BatteryPanel({ snapshot: s }: Props) {
     </div>
   );
 }
+
+const BatteryPanel = memo(BatteryPanelInner);
+export default BatteryPanel;

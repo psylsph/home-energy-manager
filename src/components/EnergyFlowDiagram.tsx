@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import type { InverterSnapshot } from '../lib/types';
 import { formatPower, formatPercent, formatCurrent, formatTemp, formatVoltage } from '../lib/format';
 
@@ -165,7 +166,7 @@ function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
 // Component
 // ---------------------------------------------------------------------------
 
-export default function EnergyFlowDiagram({ snapshot: s }: Props) {
+function EnergyFlowDiagramInner({ snapshot: s }: Props) {
   const isCharging = s.battery_state === 'charging';
   const isDischarging = s.battery_state === 'discharging';
   const isExporting = s.grid_power > 0;
@@ -276,3 +277,6 @@ export default function EnergyFlowDiagram({ snapshot: s }: Props) {
     </div>
   );
 }
+
+const EnergyFlowDiagram = memo(EnergyFlowDiagramInner);
+export default EnergyFlowDiagram;

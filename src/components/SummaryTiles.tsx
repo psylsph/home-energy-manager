@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import type { InverterSnapshot } from '../lib/types';
 import { formatEnergy } from '../lib/format';
 
@@ -12,7 +13,7 @@ interface TileDef {
   icon: string;
 }
 
-export default function SummaryTiles({ snapshot: s }: Props) {
+function SummaryTilesInner({ snapshot: s }: Props) {
   const tiles: TileDef[] = [
     {
       label: 'Solar Today',
@@ -70,3 +71,6 @@ export default function SummaryTiles({ snapshot: s }: Props) {
     </div>
   );
 }
+
+const SummaryTiles = memo(SummaryTilesInner);
+export default SummaryTiles;
