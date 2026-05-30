@@ -166,6 +166,26 @@ pub const HR_BATTERY_PAUSE_SLOT_1_START: u16 = 319;
 pub const HR_BATTERY_PAUSE_SLOT_1_END: u16 = 320;
 
 // ===========================================================================
+// System time registers (read/write for clock sync)
+// ===========================================================================
+//
+// Block: Holding Registers 35-40
+// -----------------------------------------------
+
+/// System time: year.
+pub const HR_SYSTEM_TIME_YEAR: u16 = 35;
+/// System time: month (1-12).
+pub const HR_SYSTEM_TIME_MONTH: u16 = 36;
+/// System time: day (1-31).
+pub const HR_SYSTEM_TIME_DAY: u16 = 37;
+/// System time: hour (0-23).
+pub const HR_SYSTEM_TIME_HOUR: u16 = 38;
+/// System time: minute (0-59).
+pub const HR_SYSTEM_TIME_MINUTE: u16 = 39;
+/// System time: second (0-59).
+pub const HR_SYSTEM_TIME_SECOND: u16 = 40;
+
+// ===========================================================================
 // Battery module polling (LV batteries)
 // ===========================================================================
 //
@@ -225,7 +245,8 @@ pub const BATTERY_1_POLL_BLOCK: RegisterBlock = RegisterBlock {
 /// Holding register addresses that the control encoder is allowed to write.
 /// Sourced from GivTCP safe_regs.
 pub const SAFE_WRITE_REGS: &[u16] = &[
-    20, 27, 31, 32, 44, 45, 50, 56, 57, 59, 94, 95, 96, 110, 111, 112, 116, 318, 319, 320,
+    20, 27, 31, 32, 35, 36, 37, 38, 39, 40, 44, 45, 50, 56, 57, 59, 94, 95, 96, 110, 111, 112,
+    116, 318, 319, 320,
 ];
 
 // ---------------------------------------------------------------------------
@@ -320,6 +341,15 @@ mod tests {
         assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_SLOT_1_START)); // 94
         assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_SOC_RESERVE)); // 110
         assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_TARGET_SOC)); // 116
+        assert!(SAFE_WRITE_REGS.contains(&HR_SYSTEM_TIME_YEAR)); // 35
+        assert!(SAFE_WRITE_REGS.contains(&HR_SYSTEM_TIME_MONTH)); // 36
+        assert!(SAFE_WRITE_REGS.contains(&HR_SYSTEM_TIME_DAY)); // 37
+        assert!(SAFE_WRITE_REGS.contains(&HR_SYSTEM_TIME_HOUR)); // 38
+        assert!(SAFE_WRITE_REGS.contains(&HR_SYSTEM_TIME_MINUTE)); // 39
+        assert!(SAFE_WRITE_REGS.contains(&HR_SYSTEM_TIME_SECOND)); // 40
+        assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_PAUSE_MODE)); // 318
+        assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_PAUSE_SLOT_1_START)); // 319
+        assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_PAUSE_SLOT_1_END)); // 320
     }
 
     #[test]

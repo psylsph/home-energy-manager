@@ -25,6 +25,22 @@ pub struct Settings {
     /// Export electricity tariff in £/kWh.
     #[serde(default = "default_export_tariff")]
     pub export_tariff: f64,
+
+    /// Auto winter mode enabled.
+    #[serde(default)]
+    pub auto_winter_enabled: bool,
+    /// Temperature below which winter mode activates (°C).
+    #[serde(default = "default_aw_cold_threshold")]
+    pub auto_winter_cold_threshold: f32,
+    /// Temperature above which winter mode deactivates (°C).
+    #[serde(default = "default_aw_recovery_threshold")]
+    pub auto_winter_recovery_threshold: f32,
+    /// Target SOC for winter mode charging (4-100%).
+    #[serde(default = "default_aw_target_soc")]
+    pub auto_winter_target_soc: u8,
+    /// Consecutive readings before state transitions.
+    #[serde(default = "default_aw_debounce")]
+    pub auto_winter_debounce_readings: u32,
 }
 
 fn default_import_tariff() -> f64 {
@@ -33,6 +49,19 @@ fn default_import_tariff() -> f64 {
 
 fn default_export_tariff() -> f64 {
     0.15
+}
+
+fn default_aw_cold_threshold() -> f32 {
+    8.0
+}
+fn default_aw_recovery_threshold() -> f32 {
+    12.0
+}
+fn default_aw_target_soc() -> u8 {
+    80
+}
+fn default_aw_debounce() -> u32 {
+    10
 }
 
 impl Default for Settings {
@@ -45,6 +74,11 @@ impl Default for Settings {
             auto_connect: true,
             import_tariff: default_import_tariff(),
             export_tariff: default_export_tariff(),
+            auto_winter_enabled: false,
+            auto_winter_cold_threshold: default_aw_cold_threshold(),
+            auto_winter_recovery_threshold: default_aw_recovery_threshold(),
+            auto_winter_target_soc: default_aw_target_soc(),
+            auto_winter_debounce_readings: default_aw_debounce(),
         }
     }
 }
@@ -112,6 +146,11 @@ mod tests {
         assert!(s.serial.is_empty());
         assert_eq!(s.poll_interval, 60);
         assert!(s.auto_connect);
+        assert!(!s.auto_winter_enabled);
+        assert_eq!(s.auto_winter_cold_threshold, 8.0);
+        assert_eq!(s.auto_winter_recovery_threshold, 12.0);
+        assert_eq!(s.auto_winter_target_soc, 80);
+        assert_eq!(s.auto_winter_debounce_readings, 10);
     }
 
     #[test]
@@ -124,6 +163,11 @@ mod tests {
             auto_connect: false,
             import_tariff: 0.30,
             export_tariff: 0.15,
+            auto_winter_enabled: true,
+            auto_winter_cold_threshold: 5.0,
+            auto_winter_recovery_threshold: 10.0,
+            auto_winter_target_soc: 90,
+            auto_winter_debounce_readings: 5,
         };
         let json = serde_json::to_string(&s).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
@@ -132,6 +176,11 @@ mod tests {
         assert_eq!(decoded.serial, "TEST123");
         assert_eq!(decoded.poll_interval, 10);
         assert!(!decoded.auto_connect);
+        assert!(decoded.auto_winter_enabled);
+        assert_eq!(decoded.auto_winter_cold_threshold, 5.0);
+        assert_eq!(decoded.auto_winter_recovery_threshold, 10.0);
+        assert_eq!(decoded.auto_winter_target_soc, 90);
+        assert_eq!(decoded.auto_winter_debounce_readings, 5);
     }
 
     #[test]
@@ -148,6 +197,11 @@ mod tests {
             auto_connect: true,
             import_tariff: 0.285,
             export_tariff: 0.15,
+            auto_winter_enabled: false,
+            auto_winter_cold_threshold: 8.0,
+            auto_winter_recovery_threshold: 12.0,
+            auto_winter_target_soc: 80,
+            auto_winter_debounce_readings: 10,
         };
 
         // We can't easily override the settings path for testing,

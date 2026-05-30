@@ -39,6 +39,14 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/control/charge-rate", post(api::set_charge_rate))
         .route("/api/control/discharge-rate", post(api::set_discharge_rate))
         .route("/api/control/pause", post(api::pause_battery))
+        .route("/api/control/force-charge", post(api::force_charge))
+        .route("/api/control/force-discharge", post(api::force_discharge))
+        .route("/api/control/sync-clock", post(api::sync_clock))
+        // Auto winter mode
+        .route(
+            "/api/auto-winter",
+            get(api::get_auto_winter).post(api::set_auto_winter),
+        )
         // Discovery
         .route("/api/discover", get(api::discover))
         // Developer logs

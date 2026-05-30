@@ -31,6 +31,47 @@ interface ChartDef {
 }
 
 // ---------------------------------------------------------------------------
+// Outlier filtering
+// ---------------------------------------------------------------------------
+
+/// Per-field spike detection thresholds. A point is considered a spike if its
+/// value differs from both neighbors by more than the threshold while the
+/// neighbors differ by less than half the threshold.
+const SPIKE_THRESHOLDS: Record<string, number> = {
+  soc: 15,
+  solar_power: 4000,
+  pv1_power: 4000,
+  pv2_power: 4000,
+  battery_power: 4000,
+  grid_power: 4000,
+  home_power: 4000,
+};
+
+function removeSpikes(points: TimePoint[], field: string): TimePoint[] {
+  if (points.length < 3) return points;
+  const threshold = SPIKE_THRESHOLDS[field] ?? 4000;
+  const result: TimePoint[] = [];
+  for (let i = 0; i < points.length; i++) {
+    if (i === 0 || i === points.length - 1) {
+      result.push(points[i]);
+      continue;
+    }
+    const prev = points[i - 1];
+    const cur = points[i];
+    const next = points[i + 1];
+    const dPrev = Math.abs(cur.v - prev.v);
+    const dNext = Math.abs(cur.v - next.v);
+    const dNeighbors = Math.abs(next.v - prev.v);
+    if (dPrev > threshold && dNext > threshold && dNeighbors < threshold * 0.5) {
+      result.push({ t: cur.t, v: (prev.v + next.v) / 2 });
+    } else {
+      result.push(cur);
+    }
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
@@ -188,10 +229,11 @@ function formatWindowLabel(range: HistoryRange, offset: number): string {
 // Single chart component
 // ---------------------------------------------------------------------------
 
-function ChartCard({ chart, data, range }: {
+function ChartCard({ chart, data, range, domain }: {
   chart: ChartDef;
   data: Record<string, TimePoint[]>;
   range: HistoryRange;
+  domain: [number, number];
 }) {
   const allFields = chart.fields.map((f) => f.field);
   const uniqueFields = [...new Set(allFields)];
@@ -250,7 +292,7 @@ function ChartCard({ chart, data, range }: {
           <XAxis
             dataKey="t"
             type="number"
-            domain={['dataMin', 'dataMax']}
+            domain={domain}
             tickFormatter={(v: number) => formatXAxis(v, range)}
             stroke="#8B949E"
             tick={{ fontSize: 11 }}
@@ -309,12 +351,34 @@ function ChartCard({ chart, data, range }: {
 // History Page
 // ---------------------------------------------------------------------------
 
+function useNow(): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 60000);
+    return () => clearInterval(id);
+  }, []);
+  return now;
+}
+
 export default function HistoryPage() {
   const [tab, setTab] = useState<MetricTab>('battery');
   const [range, setRange] = useState<HistoryRange>('24h');
   const [offset, setOffset] = useState(0);
   const [data, setData] = useState<Record<string, TimePoint[]>>({});
   const [loadingKey, setLoadingKey] = useState(0);
+  const now = useNow();
+  const rangeMs: Record<string, number> = {
+    '1h': 3600000,
+    '6h': 21600000,
+    '24h': 86400000,
+    '7d': 604800000,
+    '30d': 2592000000,
+    '6m': 15552000000,
+    '1y': 31536000000,
+  };
+  const windowMs = rangeMs[range] ?? 86400000;
+  const domainEnd = now - offset * windowMs;
+  const xDomain: [number, number] = [domainEnd - windowMs, domainEnd];
   const [importTariff, setImportTariff] = useState(0.285);
   const [exportTariff, setExportTariff] = useState(0.15);
 
@@ -337,7 +401,11 @@ export default function HistoryPage() {
     fetchHistory(range, allFields, offset)
       .then((result) => {
         if (!cancelled) {
-          setData(result);
+          const cleaned: Record<string, TimePoint[]> = {};
+          for (const [field, pts] of Object.entries(result)) {
+            cleaned[field] = removeSpikes(pts, field);
+          }
+          setData(cleaned);
           setLoadingKey((k) => Math.max(0, k - 1));
         }
       })
@@ -435,7 +503,7 @@ export default function HistoryPage() {
       ) : (
         <div className="flex flex-col gap-4">
           {charts.map((chart) => (
-            <ChartCard key={chart.key} chart={chart} data={data} range={range} />
+            <ChartCard key={chart.key} chart={chart} data={data} range={range} domain={xDomain} />
           ))}
         </div>
       )}

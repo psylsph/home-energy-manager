@@ -29,6 +29,7 @@ use crate::inverter::decoder::decode_snapshot;
 use crate::inverter::encoder::RegisterWrite;
 use crate::inverter::model::InverterSnapshot;
 use crate::modbus::client::ModbusClient;
+use crate::modbus::registers::{HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE_TARGET};
 
 // ---------------------------------------------------------------------------
 // Connection state
@@ -102,6 +103,66 @@ impl Default for PollSettings {
 // Shared application state
 // ---------------------------------------------------------------------------
 
+/// State machine for temperature-triggered auto winter mode.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum AutoWinterState {
+    /// Awaiting cold temperatures.
+    Idle,
+    /// Temperature below Cold Threshold, counting towards debounce.
+    ColdPending {
+        /// Consecutive polls where temp was below threshold.
+        consecutive: u32,
+    },
+    /// Winter mode is active and charging to target SOC.
+    WinterActive,
+    /// Temperature above Recovery Threshold, counting towards restore.
+    WarmPending {
+        /// Consecutive polls where temp was above Recovery Threshold.
+        consecutive: u32,
+    },
+}
+
+impl Default for AutoWinterState {
+    fn default() -> Self {
+        Self::Idle
+    }
+}
+
+/// Configuration for auto winter mode.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AutoWinterConfig {
+    /// Master toggle — must be on for automatic winter mode to function.
+    pub enabled: bool,
+    /// Temperature below which winter mode should activate (°C).
+    pub cold_threshold: f32,
+    /// Temperature above which winter mode should deactivate (°C).
+    pub recovery_threshold: f32,
+    /// Target SOC to charge to when in winter mode (4-100%).
+    pub target_soc: u8,
+    /// Number of consecutive cold/warm readings before the state transitions.
+    pub debounce_readings: u32,
+}
+
+impl Default for AutoWinterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cold_threshold: 8.0,
+            recovery_threshold: 12.0,
+            target_soc: 80,
+            debounce_readings: 10,
+        }
+    }
+}
+
+/// Register values saved just before auto-winter activates, so they can
+/// be restored when the battery warms up.
+#[derive(Debug, Clone)]
+pub struct AutoWinterSaved {
+    pub enable_charge_target: bool,
+    pub target_soc: u8,
+}
+
 /// Shared state accessible from HTTP handlers, the WebSocket endpoint, etc.
 pub struct AppState {
     /// Most recently decoded snapshot (or `None` if never polled).
@@ -124,6 +185,12 @@ pub struct AppState {
     pub log_ring: Arc<LogRing>,
     /// Connected WebSocket clients (for Network Access display).
     pub connected_clients: Arc<parking_lot::Mutex<ConnectedClients>>,
+    /// Auto winter mode configuration (volatile, can be synced to settings).
+    pub auto_winter_config: Arc<Mutex<AutoWinterConfig>>,
+    /// Auto winter mode state machine.
+    pub auto_winter_state: Arc<Mutex<AutoWinterState>>,
+    /// Saved register values to restore when winter mode deactivates.
+    pub auto_winter_saved: Arc<Mutex<Option<AutoWinterSaved>>>,
 }
 
 impl AppState {
@@ -143,6 +210,9 @@ impl AppState {
             history: Arc::new(Mutex::new(None)),
             log_ring: Arc::new(crate::server::logs::LogRing::new(2000)),
             connected_clients: Arc::new(parking_lot::Mutex::new(ConnectedClients::new())),
+            auto_winter_config: Arc::new(Mutex::new(AutoWinterConfig::default())),
+            auto_winter_state: Arc::new(Mutex::new(AutoWinterState::default())),
+            auto_winter_saved: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -161,6 +231,9 @@ impl AppState {
             history: Arc::new(Mutex::new(None)),
             log_ring,
             connected_clients: Arc::new(parking_lot::Mutex::new(ConnectedClients::new())),
+            auto_winter_config: Arc::new(Mutex::new(AutoWinterConfig::default())),
+            auto_winter_state: Arc::new(Mutex::new(AutoWinterState::default())),
+            auto_winter_saved: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -189,7 +262,9 @@ impl AppState {
 /// Sanitize a snapshot against physically impossible register values.
 /// Compares against the previous snapshot to detect and correct garbled
 /// readings before they reach the frontend or history database.
-fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot>) {
+/// Returns `true` if any field was sanitized (fallback applied).
+fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot>) -> bool {
+    let mut sanitized = false;
     let max_battery_power: i32 = 10_000; // 10 kW — residential battery limit
 
     // Battery power: reject impossible spikes (>10 kW)
@@ -204,6 +279,7 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
         } else {
             snap.battery_power = 0;
         }
+        sanitized = true;
     }
 
     // SOC: if 0 but power is flowing, clearly a garbled register
@@ -211,6 +287,7 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
         if let Some(p) = prev {
             tracing::warn!(prev_soc = p.soc, "SOC=0 with live power — using previous SOC");
             snap.soc = p.soc;
+            sanitized = true;
         }
     }
 
@@ -219,6 +296,7 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
         if let Some(p) = prev {
             tracing::warn!(prev_soc = p.soc, "SOC=100 while charging >500W — using previous SOC");
             snap.soc = p.soc;
+            sanitized = true;
         }
     }
 
@@ -236,6 +314,7 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
         } else {
             snap.inverter_temperature = 0.0;
         }
+        sanitized = true;
     }
 
     // Battery temperature: reject physically impossible values.
@@ -252,6 +331,7 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
         } else {
             snap.battery_temperature = 0.0;
         }
+        sanitized = true;
     }
 
     // Grid power: reject impossible values (>10 kW for a typical UK single-phase supply)
@@ -263,6 +343,7 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
         } else {
             snap.grid_power = 0;
         }
+        sanitized = true;
     }
 
     // Solar power: reject impossible values (>10 kW residential)
@@ -273,6 +354,31 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
             snap.solar_power = p.solar_power;
         } else {
             snap.solar_power = 0;
+        }
+        sanitized = true;
+    }
+
+    // Battery module voltage: reject impossible values.
+    // LV packs run ~48-57V, HV packs up to ~345V. Anything above 500V is
+    // clearly a register glitch (e.g. 30,000V from corrupt BMS uint32).
+    for module in &mut snap.battery_modules {
+        if module.voltage > 500.0 || module.voltage < 0.0 {
+            if let Some(p) = prev {
+                if let Some(prev_mod) = p.battery_modules.get(module.index) {
+                    tracing::warn!(
+                        raw = module.voltage,
+                        prev = prev_mod.voltage,
+                        "Battery module {} voltage out of range — using previous",
+                        module.index
+                    );
+                    module.voltage = prev_mod.voltage;
+                } else {
+                    module.voltage = 0.0;
+                }
+            } else {
+                module.voltage = 0.0;
+            }
+            sanitized = true;
         }
     }
 
@@ -287,7 +393,114 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
         } else {
             snap.home_power = 0;
         }
+        sanitized = true;
     }
+
+    sanitized
+}
+
+// ---------------------------------------------------------------------------
+// Auto winter mode
+// ---------------------------------------------------------------------------
+
+/// Evaluate the auto-winter state machine and return register writes if a
+/// state transition requires changing the inverter's configuration (enabling
+/// or disabling winter mode).
+///
+/// The state machine uses two temperature thresholds with hysteresis:
+///   * `cold_threshold` — temperature below which we start counting
+///   * `recovery_threshold` — temperature above which we start counting
+///
+/// To prevent a single corrupt temperature reading from triggering a
+/// transition, the state machine requires `debounce_readings` consecutive
+/// polls with the temperature on the same side of the threshold before
+/// acting. A single reading on the other side resets the counter.
+fn check_auto_winter(
+    snap: &InverterSnapshot,
+    config: &AutoWinterConfig,
+    state: &mut AutoWinterState,
+    saved: &mut Option<AutoWinterSaved>,
+) -> Option<Vec<RegisterWrite>> {
+    if !config.enabled {
+        *state = AutoWinterState::Idle;
+        *saved = None;
+        return None;
+    }
+
+    let temp = snap.battery_temperature;
+
+    match state {
+        AutoWinterState::Idle => {
+            if temp < config.cold_threshold {
+                tracing::info!(
+                    temp,
+                    cold = config.cold_threshold,
+                    "Auto winter: battery cold — counting",
+                );
+                *state = AutoWinterState::ColdPending { consecutive: 1 };
+            }
+        }
+        AutoWinterState::ColdPending { consecutive } => {
+            if temp < config.cold_threshold {
+                *consecutive += 1;
+                if *consecutive >= config.debounce_readings {
+                    tracing::info!(
+                        consecutive,
+                        "Auto winter: activating (HR 20=1, HR 116={})",
+                        config.target_soc,
+                    );
+                    *saved = Some(AutoWinterSaved {
+                        enable_charge_target: snap.enable_charge_target,
+                        target_soc: snap.target_soc,
+                    });
+                    *state = AutoWinterState::WinterActive;
+                    return Some(vec![
+                        RegisterWrite { address: HR_ENABLE_CHARGE_TARGET, value: 1 },
+                        RegisterWrite { address: HR_CHARGE_TARGET_SOC, value: config.target_soc as u16 },
+                    ]);
+                }
+            } else if temp >= config.recovery_threshold {
+                *state = AutoWinterState::Idle;
+            }
+        }
+        AutoWinterState::WinterActive => {
+            if temp >= config.recovery_threshold {
+                tracing::info!(
+                    temp,
+                    recovery = config.recovery_threshold,
+                    "Auto winter: battery warming — counting",
+                );
+                *state = AutoWinterState::WarmPending { consecutive: 1 };
+            }
+        }
+        AutoWinterState::WarmPending { consecutive } => {
+            if temp >= config.recovery_threshold {
+                *consecutive += 1;
+                if *consecutive >= config.debounce_readings {
+                    let saved_settings = saved.take();
+                    let (restore_target, restore_enable) = match saved_settings {
+                        Some(s) => (s.target_soc as u16, if s.enable_charge_target { 1 } else { 0 }),
+                        None => (100, 0),
+                    };
+                    tracing::info!(
+                        consecutive,
+                        "Auto winter: restoring (HR 20={}, HR 116={})",
+                        restore_enable,
+                        restore_target,
+                    );
+                    *state = AutoWinterState::Idle;
+                    return Some(vec![
+                        RegisterWrite { address: HR_ENABLE_CHARGE_TARGET, value: restore_enable },
+                        RegisterWrite { address: HR_CHARGE_TARGET_SOC, value: restore_target },
+                    ]);
+                }
+            } else if temp < config.cold_threshold {
+                *state = AutoWinterState::WinterActive;
+            }
+        }
+    }
+
+    None
 }
 
 pub async fn run_poll_loop(state: Arc<AppState>) {
@@ -387,7 +600,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                         client.drain_stale_frames().await;
                     }
 
-                    let poll_result = async {
+                    let (poll_ok, sanitized) = async {
                         match client.read_all_standard().await {
                             Ok(blocks) => {
                                 let mut snapshot = decode_snapshot(&blocks);
@@ -401,15 +614,12 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         let mut ps = state.settings.lock().await;
                                         ps.serial = discovered.clone();
                                     }
-                                    let persist = crate::settings::Settings {
-                                        host: settings.host.clone(),
-                                        port: settings.port,
-                                        serial: discovered,
-                                        poll_interval: settings.interval_secs,
-                                        auto_connect: true,
-                                        import_tariff: crate::settings::Settings::default().import_tariff,
-                                        export_tariff: crate::settings::Settings::default().export_tariff,
-                                    };
+                                    let mut persist = crate::settings::Settings::load();
+                                    persist.host = settings.host.clone();
+                                    persist.port = settings.port;
+                                    persist.serial = discovered;
+                                    persist.poll_interval = settings.interval_secs;
+                                    persist.auto_connect = true;
                                     if let Err(e) = persist.save() {
                                         tracing::warn!("Failed to persist discovered serial: {e}");
                                     }
@@ -504,9 +714,42 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 
                                 // Store latest snapshot.
                                 // Sanitize against physically impossible values first.
-                                {
+                                let sanitized = {
                                     let prev = state.latest_snapshot.lock().await;
-                                    sanitize_snapshot(&mut snapshot, prev.as_ref());
+                                    sanitize_snapshot(&mut snapshot, prev.as_ref())
+                                };
+
+                                // ---- Auto winter mode ----
+                                {
+                                    let config = state.auto_winter_config.lock().await;
+                                    let mut aw_state = state.auto_winter_state.lock().await;
+                                    let mut saved = state.auto_winter_saved.lock().await;
+                                    let writes = check_auto_winter(
+                                        &snapshot, &config, &mut aw_state, &mut saved,
+                                    );
+                                    // Tag the snapshot so the frontend knows
+                                    // whether winter mode was triggered by
+                                    // this system vs. manually.
+                                    snapshot.auto_winter_active =
+                                        matches!(*aw_state, AutoWinterState::WinterActive);
+                                    if let Some(writes) = writes {
+                                        drop(config);
+                                        drop(aw_state);
+                                        drop(saved);
+                                        for w in &writes {
+                                            match client.write_register(w.address, w.value).await {
+                                                Ok(()) => tracing::info!(
+                                                    "Auto winter: wrote reg {} = {}",
+                                                    w.address, w.value
+                                                ),
+                                                Err(e) => tracing::error!(
+                                                    "Auto winter: write reg {} failed: {e}",
+                                                    w.address
+                                                ),
+                                            }
+                                            tokio::time::sleep(Duration::from_millis(1500)).await;
+                                        }
+                                    }
                                 }
 
                                 {
@@ -529,28 +772,37 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     }
                                 }
 
-                                Ok(())
+                                (true, sanitized)
                             }
-                            Err(e) => Err(e),
+                            Err(_) => (false, false),
                         }
                     }.await;
 
-                    match poll_result {
-                        Ok(()) => {
+                    match poll_ok {
+                        true => {
                             consecutive_failures = 0;
+
+                            // Sanitization was applied — corrupted register data
+                            // detected. Re-poll immediately instead of waiting
+                            // for the next interval, so the frontend gets a
+                            // fresh reading as soon as possible.
+                            if sanitized {
+                                tracing::debug!("Corrupted data detected — re-reading immediately");
+                                continue;
+                            }
                         }
-                        Err(e) => {
+                        false => {
                             consecutive_failures += 1;
                             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
                                 tracing::warn!(
-                                    "Poll read failed ({}/{}): {e} — disconnecting",
+                                    "Poll read failed ({}/{}): — disconnecting",
                                     consecutive_failures, MAX_CONSECUTIVE_FAILURES,
                                 );
                                 break; // tear down connection and reconnect
                             }
                             // Transient error — retry after a short pause
                             tracing::debug!(
-                                "Poll read failed ({}/{}): {e} — retrying",
+                                "Poll read failed ({}/{}): — retrying",
                                 consecutive_failures, MAX_CONSECUTIVE_FAILURES,
                             );
                             tokio::time::sleep(Duration::from_secs(2)).await;

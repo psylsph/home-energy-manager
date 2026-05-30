@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useInverterStore } from '../store/useInverterStore';
 import { formatPower, formatPercent, formatVoltage, formatCurrent, formatTemp, formatEnergy } from '../lib/format';
+import ColdBatteryWarning from '../components/ColdBatteryWarning';
 
 function socColor(soc: number): string {
   if (soc < 20) return '#EF4444';
@@ -57,6 +58,7 @@ export default function BatteryPage() {
 
   return (
     <div className="flex flex-col gap-6 max-w-2xl mx-auto">
+      <ColdBatteryWarning />
       {/* SOC overview card */}
       <section className="bg-bg-surface rounded-2xl p-6 flex flex-col sm:flex-row items-center gap-6">
         <div className="relative w-32 h-32 shrink-0">
@@ -198,6 +200,24 @@ export default function BatteryPage() {
                           <>
                             <span className="text-text-secondary">BMS FW</span>
                             <span className="text-text-primary font-mono text-right">{m.bms_firmware}</span>
+                          </>
+                        )}
+                        {m.design_capacity_ah > 0 && (
+                          <>
+                            <span className="text-text-secondary">Design Capacity</span>
+                            <span className="text-text-primary font-mono text-right">{m.design_capacity_ah.toFixed(1)} Ah</span>
+                          </>
+                        )}
+                        {m.capacity_ah > 0 && (
+                          <>
+                            <span className="text-text-secondary">Capacity</span>
+                            <span className="text-text-primary font-mono text-right">{m.capacity_ah.toFixed(1)} Ah</span>
+                          </>
+                        )}
+                        {m.remaining_capacity_ah > 0 && (
+                          <>
+                            <span className="text-text-secondary">Remaining</span>
+                            <span className="text-text-primary font-mono text-right">{m.remaining_capacity_ah.toFixed(1)} Ah</span>
                           </>
                         )}
                       </div>

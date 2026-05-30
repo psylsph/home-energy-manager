@@ -159,9 +159,18 @@ pub struct BatteryModule {
     /// Cell group temperatures in °C (from BMS IR 76-79, up to 4 groups).
     #[serde(default)]
     pub cell_temperatures: Vec<f32>,
-    /// BMS firmware version.
+    /// BMS firmware version (raw register value).
     #[serde(default)]
     pub bms_firmware: u16,
+    /// Calibrated total capacity in Ah (IR 84-85, uint32 0.01 Ah).
+    #[serde(default)]
+    pub capacity_ah: f32,
+    /// Design / nameplate capacity in Ah (IR 86-87, uint32 0.01 Ah).
+    #[serde(default)]
+    pub design_capacity_ah: f32,
+    /// Remaining / available capacity in Ah (IR 88-89, uint32 0.01 Ah).
+    #[serde(default)]
+    pub remaining_capacity_ah: f32,
 }
 
 /// A single charge or discharge schedule slot.
@@ -247,7 +256,12 @@ pub struct InverterSnapshot {
     pub discharge_rate: u8,
     pub target_soc: u8,
     pub enable_charge: bool,
+    pub enable_charge_target: bool,
     pub enable_discharge: bool,
+    /// Set to true when the auto-winter state machine has activated winter
+    /// mode (distinct from `enable_charge_target` which any write can set).
+    #[serde(default)]
+    pub auto_winter_active: bool,
     pub inverter_serial: String,
     pub firmware_version: String,
 

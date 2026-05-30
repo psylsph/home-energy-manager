@@ -31,6 +31,8 @@ export interface InverterSnapshot {
   charge_rate: number;
   discharge_rate: number;
   target_soc: number;
+  enable_charge_target: boolean;
+  auto_winter_active: boolean;
   charge_slots: ScheduleSlot[];
   discharge_slots: ScheduleSlot[];
   inverter_serial: string;
@@ -50,6 +52,9 @@ export interface BatteryModule {
   cell_voltages: number[];
   cell_temperatures: number[];
   bms_firmware: number;
+  capacity_ah: number;
+  design_capacity_ah: number;
+  remaining_capacity_ah: number;
 }
 
 export interface ScheduleSlot {

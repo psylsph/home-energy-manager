@@ -13,6 +13,30 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
   );
 }
 
+function DevTools() {
+  const [forced, setForced] = useState(
+    () => localStorage.getItem('dev_force_cold_warning') === 'true'
+  );
+
+  return (
+    <div className="flex items-center justify-between pt-2 border-t border-white/5">
+      <div className="flex flex-col gap-0.5">
+        <span className="text-text-primary text-sm font-sans">Test Cold Battery Warning</span>
+        <span className="text-text-secondary text-xs font-sans">
+          Force the warning banner to show on Status / Battery pages
+        </span>
+      </div>
+      <Toggle
+        checked={forced}
+        onChange={(v) => {
+          localStorage.setItem('dev_force_cold_warning', String(v));
+          setForced(v);
+        }}
+      />
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const { connectionState, connectedHost, developerMode, setDeveloperMode } = useInverterStore();
 
@@ -413,6 +437,9 @@ export default function SettingsPage() {
           </div>
           <Toggle checked={developerMode} onChange={setDeveloperMode} />
         </div>
+        {developerMode && (
+          <DevTools />
+        )}
       </section>
 
       {/* ─── Section 7: About ─── */}

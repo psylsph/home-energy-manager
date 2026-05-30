@@ -130,15 +130,14 @@ pub async fn update_settings(
     settings.version = settings.version.wrapping_add(1);
 
     // Persist to disk
-    let persist = crate::settings::Settings {
-        host: settings.host.clone(),
-        port: settings.port,
-        serial: settings.serial.clone(),
-        poll_interval: settings.interval_secs,
-        auto_connect: true,
-        import_tariff,
-        export_tariff,
-    };
+    let mut persist = crate::settings::Settings::load();
+    persist.host = settings.host.clone();
+    persist.port = settings.port;
+    persist.serial = settings.serial.clone();
+    persist.poll_interval = settings.interval_secs;
+    persist.auto_connect = true;
+    persist.import_tariff = import_tariff;
+    persist.export_tariff = export_tariff;
     if let Err(e) = persist.save() {
         tracing::warn!("Failed to persist settings: {}", e);
     }
@@ -460,6 +459,45 @@ pub async fn pause_battery(State(state): State<Arc<AppState>>) -> Json<Value> {
     }
 }
 
+/// POST /api/control/force-charge — enable charging with target SOC.
+pub async fn force_charge(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let cmd = ControlCommand::ForceCharge;
+    match cmd.encode() {
+        Ok(writes) => {
+            tracing::info!("ForceCharge encoded: {:?}", writes);
+            queue_writes(&state, writes).await;
+            ok_response("Force charge enabled")
+        }
+        Err(e) => error_response(&format!("Validation error: {}", e)),
+    }
+}
+
+/// POST /api/control/force-discharge — enable discharge with a full-day slot.
+pub async fn force_discharge(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let cmd = ControlCommand::ForceDischarge;
+    match cmd.encode() {
+        Ok(writes) => {
+            tracing::info!("ForceDischarge encoded: {:?}", writes);
+            queue_writes(&state, writes).await;
+            ok_response("Force discharge enabled")
+        }
+        Err(e) => error_response(&format!("Validation error: {}", e)),
+    }
+}
+
+/// POST /api/control/sync-clock — sync inverter clock to system time.
+pub async fn sync_clock(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let cmd = ControlCommand::SyncClock;
+    match cmd.encode() {
+        Ok(writes) => {
+            tracing::info!("SyncClock encoded: {:?}", writes);
+            queue_writes(&state, writes).await;
+            ok_response("Clock sync queued")
+        }
+        Err(e) => error_response(&format!("Validation error: {}", e)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // History endpoint
 // ---------------------------------------------------------------------------
@@ -519,6 +557,66 @@ pub async fn get_history(
         },
         None => error_response("History database not available"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Auto winter mode endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /api/auto-winter — current config and state.
+pub async fn get_auto_winter(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let config = state.auto_winter_config.lock().await.clone();
+    let aw_state = state.auto_winter_state.lock().await.clone();
+    Json(json!({
+        "ok": true,
+        "data": {
+            "config": config,
+            "state": aw_state,
+        }
+    }))
+}
+
+/// POST /api/auto-winter — update auto winter config.
+///
+/// Body fields are optional — only provided fields are updated.
+/// Fields: `enabled`, `cold_threshold`, `recovery_threshold`, `target_soc`, `debounce_readings`.
+pub async fn set_auto_winter(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<Value> {
+    let mut config = state.auto_winter_config.lock().await;
+
+    if let Some(v) = body.get("enabled").and_then(|v| v.as_bool()) {
+        config.enabled = v;
+    }
+    if let Some(v) = body.get("cold_threshold").and_then(|v| v.as_f64()) {
+        config.cold_threshold = v as f32;
+    }
+    if let Some(v) = body.get("recovery_threshold").and_then(|v| v.as_f64()) {
+        config.recovery_threshold = v as f32;
+    }
+    if let Some(v) = body.get("target_soc").and_then(|v| v.as_u64()) {
+        config.target_soc = v.min(100).max(4) as u8;
+    }
+    if let Some(v) = body.get("debounce_readings").and_then(|v| v.as_u64()) {
+        config.debounce_readings = v.max(1) as u32;
+    }
+
+    tracing::info!("Auto winter config updated: {:?}", config);
+
+    // Persist to settings.json
+    let mut app_settings = crate::settings::Settings::load();
+    app_settings.auto_winter_enabled = config.enabled;
+    app_settings.auto_winter_cold_threshold = config.cold_threshold;
+    app_settings.auto_winter_recovery_threshold = config.recovery_threshold;
+    app_settings.auto_winter_target_soc = config.target_soc;
+    app_settings.auto_winter_debounce_readings = config.debounce_readings;
+    drop(config);
+    if let Err(e) = app_settings.save() {
+        tracing::warn!("Failed to persist auto winter config: {e}");
+    }
+
+    ok_response("Auto winter config updated")
 }
 
 // ---------------------------------------------------------------------------

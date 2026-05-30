@@ -1,5 +1,6 @@
 import type { InverterSnapshot } from '../lib/types';
 import { formatPower, formatPercent, formatTemp, formatEnergy, formatVoltage } from '../lib/format';
+import ColdBatteryWarning from './ColdBatteryWarning';
 
 interface Props {
   snapshot: InverterSnapshot;
@@ -34,6 +35,7 @@ export default function BatteryPanel({ snapshot: s }: Props) {
 
   return (
     <div className="bg-bg-surface rounded-2xl p-6 flex flex-col gap-5">
+      <ColdBatteryWarning />
       {/* Header row */}
       <div className="flex items-center justify-between">
         <h2 className="text-text-primary text-base font-semibold tracking-wide">Battery</h2>

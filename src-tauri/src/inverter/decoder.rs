@@ -206,6 +206,29 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
         raw.battery_soc_reserve,
     );
 
+    // Override: if enable_discharge is true but no discharge slots have valid
+    // (non-zero) times, treat as if discharge is disabled — a schedule that
+    // has been cleared is effectively not scheduled, so TimedDemand → Eco
+    // and TimedExport → ExportPaused.
+    let any_discharge_scheduled = snap.discharge_slots.iter().any(|s| {
+        s.start_hour != 0 || s.start_minute != 0 || s.end_hour != 0 || s.end_minute != 0
+    });
+    if !any_discharge_scheduled {
+        match snap.battery_mode {
+            BatteryMode::TimedDemand => {
+                snap.battery_mode = if raw.battery_soc_reserve == 100 {
+                    BatteryMode::EcoPaused
+                } else {
+                    BatteryMode::Eco
+                };
+            }
+            BatteryMode::TimedExport => {
+                snap.battery_mode = BatteryMode::ExportPaused;
+            }
+            _ => {}
+        }
+    }
+
     // Apply global enable flags to slot states.
     // If enable_charge is off, all charge slots show as disabled regardless
     // of their time values (which may be stale if individual register writes
@@ -292,6 +315,9 @@ fn decode_holding_0_59(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawC
 
     // Battery power mode: HR(27) — 0=export, 1=eco
     raw.battery_power_mode = get_reg(data, 27);
+
+    // Enable charge target (winter mode): HR(20) — bool
+    snap.enable_charge_target = get_reg(data, 20) != 0;
 
     // Enable discharge: HR(59) — bool
     snap.enable_discharge = get_reg(data, 59) != 0;
@@ -390,6 +416,15 @@ fn decode_battery_block(data: &[u16], index: usize) -> BatteryModule {
     let num_cells = get_reg(data, 97 - 60);
     let bms_firmware = get_reg(data, 98 - 60);
 
+    // Capacity registers: IR(84-85) cap_calibrated, IR(86-87) cap_design, IR(88-89) cap_remaining
+    // All are uint32 in 0.01 Ah units.
+    let cap_calibrated =
+        ((get_reg(data, 84 - 60) as u32) << 16) | (get_reg(data, 85 - 60) as u32);
+    let cap_design =
+        ((get_reg(data, 86 - 60) as u32) << 16) | (get_reg(data, 87 - 60) as u32);
+    let cap_remaining =
+        ((get_reg(data, 88 - 60) as u32) << 16) | (get_reg(data, 89 - 60) as u32);
+
     BatteryModule {
         index,
         soc,
@@ -402,6 +437,9 @@ fn decode_battery_block(data: &[u16], index: usize) -> BatteryModule {
         cell_voltages,
         cell_temperatures,
         bms_firmware,
+        capacity_ah: cap_calibrated as f32 * 0.01,
+        design_capacity_ah: cap_design as f32 * 0.01,
+        remaining_capacity_ah: cap_remaining as f32 * 0.01,
     }
 }
 
@@ -606,6 +644,8 @@ mod tests {
         let mut holding_data = vec![0u16; 60];
         holding_data[27] = 1; // eco mode
         holding_data[59] = 1; // discharge enabled
+        holding_data[56] = 1600; // discharge slot 1 start = 16:00
+        holding_data[57] = 1900; // discharge slot 1 end = 19:00
 
         let mut holding_60_data = vec![0u16; 60];
         holding_60_data[110 - 60] = 100;
@@ -630,6 +670,8 @@ mod tests {
         let mut holding_data = vec![0u16; 60];
         holding_data[27] = 0; // export mode
         holding_data[59] = 1; // discharge enabled
+        holding_data[56] = 1600; // discharge slot 1 start = 16:00
+        holding_data[57] = 1900; // discharge slot 1 end = 19:00
 
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),

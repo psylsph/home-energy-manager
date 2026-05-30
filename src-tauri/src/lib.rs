@@ -60,6 +60,16 @@ pub fn run() {
                 ps.interval_secs = app_settings.poll_interval;
             }
 
+            // Apply saved auto-winter config
+            {
+                let mut aw = state.auto_winter_config.blocking_lock();
+                aw.enabled = app_settings.auto_winter_enabled;
+                aw.cold_threshold = app_settings.auto_winter_cold_threshold;
+                aw.recovery_threshold = app_settings.auto_winter_recovery_threshold;
+                aw.target_soc = app_settings.auto_winter_target_soc;
+                aw.debounce_readings = app_settings.auto_winter_debounce_readings;
+            }
+
             // Open history database
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
             let db_path = std::path::PathBuf::from(home)
@@ -237,6 +247,16 @@ pub fn run_headless(args: &[String]) {
             ps.port = app_settings.port;
             ps.serial = app_settings.serial.clone();
             ps.interval_secs = app_settings.poll_interval;
+        }
+
+        // Apply saved auto-winter config
+        {
+            let mut aw = state.auto_winter_config.lock().await;
+            aw.enabled = app_settings.auto_winter_enabled;
+            aw.cold_threshold = app_settings.auto_winter_cold_threshold;
+            aw.recovery_threshold = app_settings.auto_winter_recovery_threshold;
+            aw.target_soc = app_settings.auto_winter_target_soc;
+            aw.debounce_readings = app_settings.auto_winter_debounce_readings;
         }
 
         // Open history database

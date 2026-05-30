@@ -3,12 +3,17 @@
 //! Translates high-level control commands into raw Modbus register writes.
 //! Only whitelisted register addresses from SAFE_WRITE_REGS are allowed.
 
+use chrono::{Datelike, Timelike, Utc};
+
 use crate::modbus::registers::{
     HR_BATTERY_CHARGE_LIMIT, HR_BATTERY_DISCHARGE_LIMIT, HR_BATTERY_POWER_MODE,
     HR_BATTERY_SOC_RESERVE, HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_SLOT_2_END,
     HR_CHARGE_SLOT_2_START, HR_CHARGE_TARGET_SOC, HR_DISCHARGE_SLOT_1_END,
     HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END, HR_DISCHARGE_SLOT_2_START,
-    HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE, SAFE_WRITE_REGS,
+    HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
+    HR_SYSTEM_TIME_YEAR, HR_SYSTEM_TIME_MONTH, HR_SYSTEM_TIME_DAY,
+    HR_SYSTEM_TIME_HOUR, HR_SYSTEM_TIME_MINUTE, HR_SYSTEM_TIME_SECOND,
+    SAFE_WRITE_REGS,
 };
 
 // ---------------------------------------------------------------------------
@@ -51,7 +56,7 @@ pub enum ControlCommand {
     SetChargeLimit { limit: u16 },
     /// Set battery discharge limit percentage (0-50).
     SetDischargeLimit { limit: u16 },
-    /// Set Eco mode (self-consumption, no discharge).
+    /// Set Eco mode (self-consumption, no discharge, clear discharge slots).
     SetEcoMode { soc_reserve: u16 },
     /// Set Timed Demand mode (self-consumption + discharge).
     SetTimedDemandMode { soc_reserve: u16 },
@@ -59,6 +64,12 @@ pub enum ControlCommand {
     SetTimedExportMode { soc_reserve: u16 },
     /// Pause battery (set SOC reserve to 100).
     PauseBattery,
+    /// Force charge: enable charging with target SOC and enable_charge.
+    ForceCharge,
+    /// Force discharge: enable discharge with a full-day discharge slot.
+    ForceDischarge,
+    /// Sync inverter clock to current system time.
+    SyncClock,
 }
 
 impl ControlCommand {
@@ -124,6 +135,10 @@ impl ControlCommand {
                     rw(HR_BATTERY_POWER_MODE, 1), // self-consumption
                     rw(HR_ENABLE_DISCHARGE, 0),   // no timed discharge
                     rw(HR_BATTERY_SOC_RESERVE, *soc_reserve),
+                    rw(HR_DISCHARGE_SLOT_1_START, 0), // clear discharge slot 1
+                    rw(HR_DISCHARGE_SLOT_1_END, 0),
+                    rw(HR_DISCHARGE_SLOT_2_START, 0), // clear discharge slot 2
+                    rw(HR_DISCHARGE_SLOT_2_END, 0),
                 ]
             }
             ControlCommand::SetTimedDemandMode { soc_reserve } => {
@@ -144,6 +159,31 @@ impl ControlCommand {
             }
             ControlCommand::PauseBattery => {
                 vec![rw(HR_BATTERY_SOC_RESERVE, 100)]
+            }
+            ControlCommand::ForceCharge => {
+                vec![
+                    rw(HR_ENABLE_CHARGE, 1),
+                    rw(HR_ENABLE_CHARGE_TARGET, 1),
+                    rw(HR_CHARGE_TARGET_SOC, 100),
+                ]
+            }
+            ControlCommand::ForceDischarge => {
+                vec![
+                    rw(HR_ENABLE_DISCHARGE, 1),
+                    rw(HR_DISCHARGE_SLOT_1_START, 0),   // 00:00
+                    rw(HR_DISCHARGE_SLOT_1_END, 2359),  // 23:59
+                ]
+            }
+            ControlCommand::SyncClock => {
+                let now = Utc::now();
+                vec![
+                    rw(HR_SYSTEM_TIME_YEAR, now.year() as u16),
+                    rw(HR_SYSTEM_TIME_MONTH, now.month() as u16),
+                    rw(HR_SYSTEM_TIME_DAY, now.day() as u16),
+                    rw(HR_SYSTEM_TIME_HOUR, now.hour() as u16),
+                    rw(HR_SYSTEM_TIME_MINUTE, now.minute() as u16),
+                    rw(HR_SYSTEM_TIME_SECOND, now.second() as u16),
+                ]
             }
         };
 
@@ -194,13 +234,21 @@ mod tests {
     fn set_eco_mode() {
         let cmd = ControlCommand::SetEcoMode { soc_reserve: 4 };
         let writes = cmd.encode().unwrap();
-        assert_eq!(writes.len(), 3);
+        assert_eq!(writes.len(), 7);
         assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
         assert_eq!(writes[0].value, 1);
         assert_eq!(writes[1].address, HR_ENABLE_DISCHARGE);
         assert_eq!(writes[1].value, 0);
         assert_eq!(writes[2].address, HR_BATTERY_SOC_RESERVE);
         assert_eq!(writes[2].value, 4);
+        assert_eq!(writes[3].address, HR_DISCHARGE_SLOT_1_START);
+        assert_eq!(writes[3].value, 0);
+        assert_eq!(writes[4].address, HR_DISCHARGE_SLOT_1_END);
+        assert_eq!(writes[4].value, 0);
+        assert_eq!(writes[5].address, HR_DISCHARGE_SLOT_2_START);
+        assert_eq!(writes[5].value, 0);
+        assert_eq!(writes[6].address, HR_DISCHARGE_SLOT_2_END);
+        assert_eq!(writes[6].value, 0);
     }
 
     #[test]
@@ -273,6 +321,9 @@ mod tests {
             ControlCommand::SetTimedDemandMode { soc_reserve: 10 },
             ControlCommand::SetTimedExportMode { soc_reserve: 10 },
             ControlCommand::PauseBattery,
+            ControlCommand::ForceCharge,
+            ControlCommand::ForceDischarge,
+            ControlCommand::SyncClock,
         ];
         for cmd in &commands {
             let writes = cmd.encode().unwrap();
@@ -285,5 +336,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn force_charge_encodes() {
+        let cmd = ControlCommand::ForceCharge;
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 3);
+        assert_eq!(writes[0].address, HR_ENABLE_CHARGE);
+        assert_eq!(writes[0].value, 1);
+        assert_eq!(writes[1].address, HR_ENABLE_CHARGE_TARGET);
+        assert_eq!(writes[1].value, 1);
+        assert_eq!(writes[2].address, HR_CHARGE_TARGET_SOC);
+        assert_eq!(writes[2].value, 100);
+    }
+
+    #[test]
+    fn force_discharge_encodes() {
+        let cmd = ControlCommand::ForceDischarge;
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 3);
+        assert_eq!(writes[0].address, HR_ENABLE_DISCHARGE);
+        assert_eq!(writes[0].value, 1);
+        assert_eq!(writes[1].address, HR_DISCHARGE_SLOT_1_START);
+        assert_eq!(writes[1].value, 0);
+        assert_eq!(writes[2].address, HR_DISCHARGE_SLOT_1_END);
+        assert_eq!(writes[2].value, 2359);
+    }
+
+    #[test]
+    fn sync_clock_encodes() {
+        let cmd = ControlCommand::SyncClock;
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 6);
+        // All system time registers in order
+        assert_eq!(writes[0].address, HR_SYSTEM_TIME_YEAR);
+        assert_eq!(writes[1].address, HR_SYSTEM_TIME_MONTH);
+        assert_eq!(writes[2].address, HR_SYSTEM_TIME_DAY);
+        assert_eq!(writes[3].address, HR_SYSTEM_TIME_HOUR);
+        assert_eq!(writes[4].address, HR_SYSTEM_TIME_MINUTE);
+        assert_eq!(writes[5].address, HR_SYSTEM_TIME_SECOND);
     }
 }

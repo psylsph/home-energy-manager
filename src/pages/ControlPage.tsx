@@ -1,6 +1,6 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useInverterStore } from '../store/useInverterStore';
-import { apiPost } from '../lib/api';
+import { apiPost, apiGet } from '../lib/api';
 import type { ScheduleSlot } from '../lib/types';
 
 type BatteryMode = 'eco' | 'eco_paused' | 'timed_demand' | 'timed_export' | 'export_paused';
@@ -224,6 +224,181 @@ function ScheduleSlotEditor({
   );
 }
 
+function AutoWinterSection() {
+  const { snapshot } = useInverterStore();
+  const [enabled, setEnabled] = useState(false);
+  const [coldThreshold, setColdThreshold] = useState(8);
+  const [recoveryThreshold, setRecoveryThreshold] = useState(12);
+  const [targetSoc, setTargetSoc] = useState(80);
+  const [debounce, setDebounce] = useState(10);
+  const [saving, setSaving] = useState(false);
+  const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await apiGet<{ ok: boolean; data: { config: { enabled: boolean; cold_threshold: number; recovery_threshold: number; target_soc: number; debounce_readings: number } } }>('/api/auto-winter');
+        if (res.ok) {
+          setEnabled(res.data.config.enabled);
+          setColdThreshold(Math.round(res.data.config.cold_threshold));
+          setRecoveryThreshold(Math.round(res.data.config.recovery_threshold));
+          setTargetSoc(res.data.config.target_soc);
+          setDebounce(res.data.config.debounce_readings);
+        }
+      } catch { /* use defaults */ }
+    })();
+  }, []);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setSaveFeedback(null);
+    try {
+      await apiPost('/api/auto-winter', {
+        enabled,
+        cold_threshold: coldThreshold,
+        recovery_threshold: recoveryThreshold,
+        target_soc: targetSoc,
+        debounce_readings: debounce,
+      });
+      setSaveFeedback('saved');
+    } catch {
+      setSaveFeedback('error');
+    }
+    setSaving(false);
+    setTimeout(() => setSaveFeedback(null), 2000);
+  };
+
+  const winterActive = snapshot?.auto_winter_active;
+  const batteryTemp = snapshot?.battery_temperature;
+
+  return (
+    <section className="space-y-3">
+      <h2 className="text-text-primary font-semibold text-lg">Auto Winter Mode</h2>
+      <div className="bg-bg-surface rounded-xl p-4 space-y-4">
+        {winterActive && (
+          <div className="text-xs bg-blue-900/40 text-blue-200 px-3 py-2 rounded-lg">
+            Winter mode active — battery is being charged to {snapshot?.target_soc ?? 80}%
+            {batteryTemp != null && ` (${batteryTemp.toFixed(1)}°C)`}
+          </div>
+        )}
+
+        {/* Master toggle */}
+        <div className="flex items-center justify-between">
+          <div>
+            <span className="text-text-primary text-sm font-medium">Enable</span>
+            <p className="text-text-secondary text-xs mt-0.5">
+              Automatically charge battery when cold to warm cells
+            </p>
+          </div>
+          <button
+            onClick={() => setEnabled(!enabled)}
+            className={`relative w-10 h-5 rounded-full transition ${enabled ? 'bg-battery' : 'bg-bg-elevated'}`}
+          >
+            <span
+              className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition ${enabled ? 'left-5.5' : 'left-0.5'}`}
+            />
+          </button>
+        </div>
+
+        {enabled && (
+          <>
+            {/* Cold Threshold */}
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-text-secondary text-sm">Cold Threshold</span>
+                <span className="font-mono text-text-primary text-sm">{coldThreshold}°C</span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={20}
+                step={1}
+                value={coldThreshold}
+                onChange={(e) => setColdThreshold(Number(e.target.value))}
+                className="w-full"
+              />
+              <p className="text-text-secondary text-xs">
+                Activate winter mode when battery drops below this temperature
+              </p>
+            </div>
+
+            {/* Recovery Threshold */}
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-text-secondary text-sm">Recovery Threshold</span>
+                <span className="font-mono text-text-primary text-sm">{recoveryThreshold}°C</span>
+              </div>
+              <input
+                type="range"
+                min={1}
+                max={25}
+                step={1}
+                value={recoveryThreshold}
+                onChange={(e) => setRecoveryThreshold(Number(e.target.value))}
+                className="w-full"
+              />
+              <p className="text-text-secondary text-xs">
+                Disable winter mode when battery warms above this temperature
+              </p>
+            </div>
+
+            {/* Target SOC */}
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-text-secondary text-sm">Target SOC</span>
+                <span className="font-mono text-text-primary text-sm">{targetSoc}%</span>
+              </div>
+              <input
+                type="range"
+                min={4}
+                max={100}
+                step={5}
+                value={targetSoc}
+                onChange={(e) => setTargetSoc(Number(e.target.value))}
+                className="w-full"
+              />
+            </div>
+
+            {/* Debounce */}
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-text-secondary text-sm">Debounce readings</span>
+                <span className="font-mono text-text-primary text-sm">{debounce}</span>
+              </div>
+              <input
+                type="range"
+                min={1}
+                max={30}
+                step={1}
+                value={debounce}
+                onChange={(e) => setDebounce(Number(e.target.value))}
+                className="w-full"
+              />
+              <p className="text-text-secondary text-xs">
+                Number of consecutive readings before switching (~{debounce * 60}s at 60s interval)
+              </p>
+            </div>
+
+            {/* Warning */}
+            <div className="text-xs bg-yellow-900/30 text-yellow-300 px-3 py-2 rounded-lg">
+              Winter mode charges the battery using grid power when solar is insufficient.
+              Your existing charge schedule will be restored when the battery warms up.
+            </div>
+          </>
+        )}
+
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="w-full py-2 bg-battery/20 text-battery rounded-lg text-sm font-medium hover:bg-battery/30 transition disabled:opacity-50"
+        >
+          {saving ? 'Saving...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save'}
+        </button>
+      </div>
+    </section>
+  );
+}
+
 export default function ControlPage() {
   const { snapshot } = useInverterStore();
   const modeAction = useAction();
@@ -387,7 +562,9 @@ export default function ControlPage() {
         </div>
       </section>
 
-      {/* Section 5: Battery Limits */}
+      {/* Section 5: Auto Winter Mode */}
+      <AutoWinterSection />
+      {/* Section 6: Battery Limits */}
       <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Battery Limits</h2>
         <div className="bg-bg-surface rounded-xl p-4 space-y-5">
