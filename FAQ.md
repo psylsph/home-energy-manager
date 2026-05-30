@@ -38,6 +38,15 @@ The dashboard runs a local web server on port **7337**. To access it from anothe
 2. Click **Open** again in the confirmation dialog.
 3. This only needs to be done once — macOS will remember your choice.
 
+If the right-click → Open method doesn't work:
+
+1. Open **System Settings** → **Privacy & Security**.
+2. Scroll down to the **Security** section.
+3. You should see a message saying "GivEnergy Local was blocked from opening."
+4. Click **Open Anyway**.
+
+> ⚠️ Only do this if you are comfortable trusting the app. GivEnergy Local is open source — you can [inspect the code](https://github.com/psylsph/givenergy-local) yourself.
+
 ---
 
 ### Which macOS download should I use?
