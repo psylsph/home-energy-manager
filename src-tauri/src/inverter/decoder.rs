@@ -297,8 +297,8 @@ fn decode_holding_0_59(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawC
     };
 
     // Battery capacity in kWh = HR(55) × nominal_voltage / 1000
-    // HR(55) is per-battery Ah; nominal voltage is fixed per device type (not live voltage).
-    // Poll loop scales by detected module count for total system capacity.
+    // HR(55) reports total system Ah (inverter firmware accounts for all modules).
+    // GivTCP does not scale this value either.
     let capacity_ah = get_reg(data, 55) as f32; // HR(55): battery_capacity_ah
     let nominal_voltage = snap.device_type.nominal_battery_voltage();
     snap.battery_capacity_kwh = capacity_ah * nominal_voltage / 1000.0;
