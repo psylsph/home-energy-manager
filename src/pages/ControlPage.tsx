@@ -180,7 +180,7 @@ function ScheduleSlotEditor({
 
       {local.enabled && (
         <>
-          <div className="flex items-center gap-6">
+          <div className="flex flex-col sm:flex-row items-center gap-4 sm:gap-6">
             <div className="flex items-center gap-1.5">
               <span className="text-text-secondary text-sm shrink-0">Start</span>
               <TimePicker
@@ -490,7 +490,7 @@ function CosyChargingSection({ enabled, onToggle }: { enabled: boolean; onToggle
               </div>
               {slot.enabled && (
                 <div className="space-y-2">
-                  <div className="flex items-center gap-6">
+                  <div className="flex flex-col sm:flex-row items-center gap-4 sm:gap-6">
                     <div className="flex items-center gap-1.5">
                       <span className="text-text-secondary text-sm">Start</span>
                       <TimePicker
