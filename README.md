@@ -138,6 +138,7 @@ nohup ./target/release/givenergy-local --headless > givenergy-local.log 2>&1 &
 > The frontend (`dist/`) must be built before the Rust binary, otherwise
 > the server won't have any UI files to serve. Alternatively, use `--dist`
 > to point to an existing build:
+>
 > ```bash
 > ./target/release/givenergy-local --headless --dist /path/to/dist
 > ```

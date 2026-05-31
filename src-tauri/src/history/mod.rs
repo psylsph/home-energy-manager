@@ -372,10 +372,12 @@ mod tests {
     }
 
     fn make_snapshot(ts: i64, soc: u8, solar: i32) -> InverterSnapshot {
-        let mut s = InverterSnapshot::default();
-        s.timestamp = ts;
-        s.soc = soc;
-        s.solar_power = solar;
+        let s = InverterSnapshot {
+            timestamp: ts,
+            soc,
+            solar_power: solar,
+            ..Default::default()
+        };
         s
     }
 
