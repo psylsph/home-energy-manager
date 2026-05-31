@@ -163,18 +163,18 @@ function ScheduleSlotEditor({
   };
 
   return (
-    <div className="bg-bg-elevated rounded-xl p-4 space-y-3">
+    <div className="bg-bg-surface rounded-xl p-3 space-y-2">
       <div className="flex items-center justify-between">
-        <span className="text-text-primary font-medium">Slot {slotIndex + 1}</span>
+        <span className="text-text-primary text-sm font-medium">Slot {slotIndex + 1}</span>
         <button
           onClick={() => setLocal((l) => ({ ...l, enabled: !l.enabled }))}
-          className={`relative w-10 h-5 rounded-full transition ${
-            local.enabled ? 'bg-battery' : 'bg-bg-surface'
+          className={`relative w-9 h-4 rounded-full transition ${
+            local.enabled ? 'bg-battery' : 'bg-bg-elevated'
           }`}
         >
           <span
-            className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition ${
-              local.enabled ? 'left-5.5' : 'left-0.5'
+            className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition ${
+              local.enabled ? 'left-5' : 'left-0.5'
             }`}
           />
         </button>
@@ -408,8 +408,7 @@ function AutoWinterSection() {
 }
 
 /** Cosy charging section — only shown in developer mode + Eco mode. */
-function CosyChargingSection() {
-  const [enabled, setEnabled] = useState(false);
+function CosyChargingSection({ enabled, onToggle }: { enabled: boolean; onToggle: (v: boolean) => void }) {
   const [slots, setSlots] = useState<
     { enabled: boolean; start_hour: number; start_minute: number; end_hour: number; end_minute: number; target_soc: number }[]
   >([]);
@@ -421,16 +420,30 @@ function CosyChargingSection() {
       try {
         const res = await apiGet<{ ok: boolean; enabled: boolean; slots: typeof slots }>('/api/cosy');
         if (res.ok) {
-          setEnabled(res.enabled);
+          onToggle(res.enabled);
           setSlots(res.slots.length === 3 ? res.slots : Array.from({ length: 3 }, () => ({
             enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100,
           })));
         }
       } catch { /* use defaults */ }
     })();
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleSave = async () => {
+  const toggleCosy = async () => {
+    const newEnabled = !enabled;
+    onToggle(newEnabled);
+    setSaving(true);
+    try {
+      await apiPost('/api/cosy', { enabled: newEnabled, slots });
+      setSaveFeedback('saved');
+    } catch {
+      setSaveFeedback('error');
+    }
+    setSaving(false);
+    setTimeout(() => setSaveFeedback(null), 2000);
+  };
+
+  const save = async () => {
     setSaving(true);
     setSaveFeedback(null);
     try {
@@ -448,7 +461,8 @@ function CosyChargingSection() {
       <div className="flex items-center justify-between">
         <h2 className="text-text-primary font-semibold text-lg">Cosy Charging</h2>
         <button
-          onClick={() => setEnabled(!enabled)}
+          onClick={toggleCosy}
+          disabled={saving}
           className={`relative w-10 h-5 rounded-full transition ${enabled ? 'bg-battery' : 'bg-bg-surface'}`}
         >
           <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition ${enabled ? 'left-5.5' : 'left-0.5'}`} />
@@ -526,11 +540,11 @@ function CosyChargingSection() {
             </div>
           ))}
           <button
-            onClick={handleSave}
+            onClick={save}
             disabled={saving}
             className="w-full py-2 bg-battery/20 text-battery rounded-lg text-sm font-medium hover:bg-battery/30 transition disabled:opacity-50"
           >
-            {saving ? 'Saving...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save'}
+            {saving ? 'Saving...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save slots'}
           </button>
         </div>
       )}
@@ -546,6 +560,7 @@ export default function ControlPage() {
   const [reserveSoc, setReserveSoc] = useState<number>(snapshot?.battery_reserve ?? 4);
   const [chargeRate, setChargeRate] = useState<number>(snapshot?.charge_rate ?? 100);
   const [dischargeRate, setDischargeRate] = useState<number>(snapshot?.discharge_rate ?? 100);
+  const [cosyEnabled, setCosyEnabled] = useState(false);
 
   const [reserveSaving, setReserveSaving] = useState(false);
   const [chargeRateSaving, setChargeRateSaving] = useState(false);
@@ -739,7 +754,7 @@ export default function ControlPage() {
 
 
       {/* Section 3: Charge Schedule */}
-      <section className="space-y-3">
+      {!cosyEnabled && <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Charge Schedule</h2>
         <div className="space-y-3">
           {chargeSlots.map((slot, i) => (
@@ -752,7 +767,7 @@ export default function ControlPage() {
             />
           ))}
         </div>
-      </section>
+      </section>}
 
       {/* Section 4: Discharge Schedule */}
       {modeToCategory(effectiveMode) === 'timed' && (
@@ -773,7 +788,7 @@ export default function ControlPage() {
       )}
 
       {/* Section 5: Cosy Charging (dev mode only, Eco only) */}
-      {developerMode && modeToCategory(effectiveMode) === 'eco' && <CosyChargingSection />}
+      {developerMode && modeToCategory(effectiveMode) === 'eco' && <CosyChargingSection enabled={cosyEnabled} onToggle={setCosyEnabled} />}
 
       {/* Section 5: Auto Winter Mode */}
       <AutoWinterSection />
