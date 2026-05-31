@@ -9,9 +9,6 @@ pub mod ws;
 
 use std::sync::Arc;
 
-use axum::extract::Request;
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
@@ -27,10 +24,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/snapshot", get(api::get_snapshot))
         .route("/api/status", get(api::get_status))
-        .route(
-            "/api/settings",
-            get(api::get_settings).post(api::update_settings),
-        )
+        .route("/api/settings", get(api::get_settings).post(api::update_settings))
         .route("/api/history", get(api::get_history))
         .route("/api/control/mode", post(api::set_mode))
         .route("/api/control/charge-slot", post(api::set_charge_slot))
@@ -42,14 +36,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/control/force-charge", post(api::force_charge))
         .route("/api/control/force-discharge", post(api::force_discharge))
         .route("/api/control/sync-clock", post(api::sync_clock))
-        .route(
-            "/api/auto-winter",
-            get(api::get_auto_winter).post(api::set_auto_winter),
-        )
-        .route(
-            "/api/cosy",
-            get(api::get_cosy).post(api::set_cosy),
-        )
+        .route("/api/auto-winter", get(api::get_auto_winter).post(api::set_auto_winter))
+        .route("/api/cosy", get(api::get_cosy).post(api::set_cosy))
         .route("/api/discover", get(api::discover))
         .route("/api/logs", get(logs::get_logs))
         .route("/ws", get(ws::ws_handler))
@@ -58,61 +46,13 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 }
 
 /// Build the Axum router with API routes + frontend static file serving.
-///
-/// In production Tauri builds, the window navigates to `http://127.0.0.1:7337`
-/// so that API/WebSocket calls are same-origin (avoids WebView2 cross-origin
-/// blocking). The bundled `dist/` resources serve the Vite output.
 pub fn create_router_with_frontend(state: Arc<AppState>, dist_dir: &str) -> Router {
     let router = create_router(state);
-    let dist = dist_dir.to_string();
     let index = format!("{}/index.html", dist_dir);
-
-    router.fallback(move |req: Request| {
-        let dist = dist.clone();
-        let index = index.clone();
-        async move {
-            let path = req.uri().path().trim_start_matches('/');
-            let file_path = std::path::PathBuf::from(&dist).join(path);
-
-            if file_path.exists() && file_path.is_file() {
-                // Serve the static file directly
-                let contents = match tokio::fs::read(&file_path).await {
-                    Ok(c) => c,
-                    Err(_) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
-                };
-                // Determine content type from extension
-                let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                let content_type = match ext {
-                    "js" => "application/javascript",
-                    "css" => "text/css",
-                    "html" => "text/html",
-                    "png" => "image/png",
-                    "svg" => "image/svg+xml",
-                    "ico" => "image/x-icon",
-                    "woff2" => "font/woff2",
-                    "json" => "application/json",
-                    _ => "application/octet-stream",
-                };
-                return (
-                    StatusCode::OK,
-                    [("content-type", content_type)],
-                    contents,
-                )
-                    .into_response();
-            }
-
-            // SPA fallback: serve index.html
-            match tokio::fs::read_to_string(&index).await {
-                Ok(html) => (
-                    StatusCode::OK,
-                    [("content-type", "text/html")],
-                    html,
-                )
-                    .into_response(),
-                Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
-            }
-        }
-    })
+    router.fallback_service(
+        tower_http::services::ServeDir::new(dist_dir)
+            .fallback(tower_http::services::ServeFile::new(index)),
+    )
 }
 
 /// Start the HTTP server (API + WebSocket only, no frontend serving).
