@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.9] - 2026-05-31
+
+### Added
+
+- **Battery voltage sanitization**: Rejects corrupt register readings >60V (LV)
+  or >400V (HV), falling back to previous valid value
+- **ControlPage slider sync**: Sliders now re-sync from the latest snapshot via
+  `useEffect`, fixing stale/junk values after tab switches
+- **Data accuracy warning**: Subtle disclaimer below the energy flow diagram
+  explaining that brief inaccuracies may appear between poll cycles
+
+### Fixed
+
+- **Cold battery warning on startup**: Was showing with default 0°C temperature
+  before real data arrived. Now requires temp > 0.1°C to display
+- **Charge/discharge rate clamped to 50%**: Registers can return corrupted
+  values up to 255; now clamped to the valid 0-50% range
+- **CI: Node.js 20 deprecation**: Opted into Node.js 24 via env variable across
+  all workflow files
+
 ## [0.9.8] - 2026-05-31
 
 ### Added

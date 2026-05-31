@@ -556,20 +556,14 @@ export default function ControlPage() {
   const { snapshot, developerMode } = useInverterStore();
   const modeAction = useAction();
 
-  // Battery limits local state (synced from snapshot)
-  const [reserveSoc, setReserveSoc] = useState<number>(snapshot?.battery_reserve ?? 4);
-  const [chargeRate, setChargeRate] = useState<number>(snapshot?.charge_rate ?? 100);
-  const [dischargeRate, setDischargeRate] = useState<number>(snapshot?.discharge_rate ?? 100);
+  // Battery limits: local draft state while dragging, otherwise from snapshot
+  const [draftReserve, setDraftReserve] = useState<number | null>(null);
+  const [draftCharge, setDraftCharge] = useState<number | null>(null);
+  const [draftDischarge, setDraftDischarge] = useState<number | null>(null);
+  const reserveSoc = draftReserve ?? snapshot?.battery_reserve ?? 4;
+  const chargeRate = draftCharge ?? snapshot?.charge_rate ?? 100;
+  const dischargeRate = draftDischarge ?? snapshot?.discharge_rate ?? 100;
   const [cosyEnabled, setCosyEnabled] = useState(false);
-
-  // Sync local state with the latest snapshot so sliders always reflect
-  // the actual inverter state (handles slow snapshot loading and tab switches).
-  useEffect(() => {
-    if (!snapshot) return;
-    setReserveSoc((prev) => snapshot.battery_reserve ?? prev);
-    setChargeRate((prev) => snapshot.charge_rate ?? prev);
-    setDischargeRate((prev) => snapshot.discharge_rate ?? prev);
-  }, [snapshot?.battery_reserve, snapshot?.charge_rate, snapshot?.discharge_rate]);
 
   const [reserveSaving, setReserveSaving] = useState(false);
   const [chargeRateSaving, setChargeRateSaving] = useState(false);
@@ -635,6 +629,7 @@ export default function ControlPage() {
     setReserveSaving(true);
     try {
       await apiPost('/api/control/reserve', { soc: reserveSoc });
+      setDraftReserve(null);
     } catch { /* handled silently */ }
     setReserveSaving(false);
   };
@@ -643,6 +638,7 @@ export default function ControlPage() {
     setChargeRateSaving(true);
     try {
       await apiPost('/api/control/charge-rate', { limit: chargeRate });
+      setDraftCharge(null);
     } catch { /* handled silently */ }
     setChargeRateSaving(false);
   };
@@ -651,6 +647,7 @@ export default function ControlPage() {
     setDischargeRateSaving(true);
     try {
       await apiPost('/api/control/discharge-rate', { limit: dischargeRate });
+      setDraftDischarge(null);
     } catch { /* handled silently */ }
     setDischargeRateSaving(false);
   };
@@ -818,7 +815,7 @@ export default function ControlPage() {
                 max={100}
                 step={5}
                 value={reserveSoc}
-                onChange={(e) => setReserveSoc(Number(e.target.value))}
+                onChange={(e) => setDraftReserve(Number(e.target.value))}
                 className="flex-1"
               />
               <button
@@ -844,7 +841,7 @@ export default function ControlPage() {
                 max={100}
                 step={5}
                 value={chargeRate}
-                onChange={(e) => setChargeRate(Number(e.target.value))}
+                onChange={(e) => setDraftCharge(Number(e.target.value))}
                 className="flex-1"
               />
               <button
@@ -870,7 +867,7 @@ export default function ControlPage() {
                 max={100}
                 step={5}
                 value={dischargeRate}
-                onChange={(e) => setDischargeRate(Number(e.target.value))}
+                onChange={(e) => setDraftDischarge(Number(e.target.value))}
                 className="flex-1"
               />
               <button
