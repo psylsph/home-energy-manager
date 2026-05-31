@@ -7,7 +7,7 @@ use chrono::{Datelike, Timelike, Utc};
 
 use crate::modbus::registers::{
     HR_BATTERY_CHARGE_LIMIT, HR_BATTERY_DISCHARGE_LIMIT, HR_BATTERY_POWER_MODE,
-    HR_BATTERY_SOC_RESERVE, HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_SLOT_2_END,
+    HR_BATTERY_CALIBRATION_STAGE, HR_BATTERY_SOC_RESERVE, HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_SLOT_2_END,
     HR_CHARGE_SLOT_2_START, HR_CHARGE_TARGET_SOC, HR_DISCHARGE_SLOT_1_END,
     HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END, HR_DISCHARGE_SLOT_2_START,
     HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
@@ -70,6 +70,8 @@ pub enum ControlCommand {
     ForceDischarge,
     /// Sync inverter clock to current system time.
     SyncClock,
+    /// Set battery calibration stage (0=off, 5=balance).
+    SetCalibrationStage { stage: u16 },
 }
 
 impl ControlCommand {
@@ -184,6 +186,10 @@ impl ControlCommand {
                     rw(HR_SYSTEM_TIME_MINUTE, now.minute() as u16),
                     rw(HR_SYSTEM_TIME_SECOND, now.second() as u16),
                 ]
+            }
+            ControlCommand::SetCalibrationStage { stage } => {
+                validate_range(*stage, 0, 7, "calibration stage")?;
+                vec![rw(HR_BATTERY_CALIBRATION_STAGE, *stage)]
             }
         };
 

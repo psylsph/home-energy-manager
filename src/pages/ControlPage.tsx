@@ -552,6 +552,124 @@ function CosyChargingSection({ enabled, onToggle }: { enabled: boolean; onToggle
   );
 }
 
+/** Battery calibration section — developer mode only. */
+function BatteryCalibrationSection() {
+  const { snapshot } = useInverterStore();
+  const stage = snapshot?.battery_calibration_stage ?? 0;
+  const [saving, setSaving] = useState(false);
+  const [feedback, setFeedback] = useState<'saved' | 'error' | null>(null);
+
+  const handleStartCalibration = async () => {
+    if (!confirm('⚠️  BATTERY CALIBRATION\n\nThis will cycle the battery through a full discharge and charge cycle to recalibrate the BMS. This can take several hours.\n\nOnly proceed if you understand the risks. Continue?')) return;
+    setSaving(true);
+    setFeedback(null);
+    try {
+      await apiPost('/api/control/calibration', { stage: 1 });
+      setFeedback('saved');
+    } catch {
+      setFeedback('error');
+    }
+    setSaving(false);
+    setTimeout(() => setFeedback(null), 3000);
+  };
+
+  const handleStartBalance = async () => {
+    if (!confirm('⚡  FORCE CELL BALANCING\n\nThis tells the BMS to balance the battery cells. The battery should be near full charge for best results.\n\nOnly proceed if you understand the risks. Continue?')) return;
+    setSaving(true);
+    setFeedback(null);
+    try {
+      await apiPost('/api/control/calibration', { stage: 5 });
+      setFeedback('saved');
+    } catch {
+      setFeedback('error');
+    }
+    setSaving(false);
+    setTimeout(() => setFeedback(null), 3000);
+  };
+
+  const handleStop = async () => {
+    setSaving(true);
+    try {
+      await apiPost('/api/control/calibration', { stage: 0 });
+      setFeedback('saved');
+    } catch {
+      setFeedback('error');
+    }
+    setSaving(false);
+    setTimeout(() => setFeedback(null), 2000);
+  };
+
+  const stageLabels: Record<number, string> = {
+    0: 'Off',
+    1: 'Discharging…',
+    2: 'Setting lower limit…',
+    3: 'Charging…',
+    4: 'Setting upper limit…',
+    5: 'Balancing…',
+    6: 'Setting full capacity…',
+    7: 'Finished',
+  };
+
+  const isActive = stage > 0 && stage < 7;
+
+  return (
+    <section className="space-y-3 border-t border-bg-elevated pt-4">
+      <div className="flex items-center gap-2">
+        <h2 className="text-text-primary font-semibold text-lg">Battery Calibration</h2>
+        <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded-full font-medium">DEV</span>
+      </div>
+
+      <div className="bg-amber-900/20 border border-amber-700/30 rounded-xl p-3 space-y-2">
+        <p className="text-amber-300 text-xs font-medium">⚠️  WARNING</p>
+        <p className="text-amber-200/70 text-xs">
+          Calibration cycles the battery through a full discharge and charge.
+          This can take several hours and may leave you without battery backup
+          during the process. Only use if you understand what you are doing.
+        </p>
+      </div>
+
+      <div className="bg-bg-surface rounded-xl p-3 space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-text-secondary text-sm">Current Stage</span>
+          <span className={`font-mono text-sm ${isActive ? 'text-amber-400' : 'text-text-primary'}`}>
+            {stageLabels[stage] || `Unknown (${stage})`}
+          </span>
+        </div>
+
+        <div className="flex gap-2 pt-1">
+          <button
+            onClick={handleStartCalibration}
+            disabled={saving || isActive}
+            className="flex-1 py-2 bg-amber-500/20 text-amber-400 rounded-lg text-xs font-medium hover:bg-amber-500/30 transition disabled:opacity-40 border border-amber-500/30"
+          >
+            Start Calibration
+          </button>
+          <button
+            onClick={handleStartBalance}
+            disabled={saving || isActive}
+            className="flex-1 py-2 bg-purple-500/20 text-purple-400 rounded-lg text-xs font-medium hover:bg-purple-500/30 transition disabled:opacity-40 border border-purple-500/30"
+          >
+            Balance Cells
+          </button>
+          <button
+            onClick={handleStop}
+            disabled={saving || !isActive}
+            className="flex-1 py-2 bg-red-500/20 text-red-400 rounded-lg text-xs font-medium hover:bg-red-500/30 transition disabled:opacity-40 border border-red-500/30"
+          >
+            Stop
+          </button>
+        </div>
+
+        {feedback && (
+          <p className={`text-xs ${feedback === 'saved' ? 'text-battery' : 'text-red-400'}`}>
+            {feedback === 'saved' ? 'Command sent' : 'Error sending command'}
+          </p>
+        )}
+      </div>
+    </section>
+  );
+}
+
 export default function ControlPage() {
   const { snapshot, developerMode } = useInverterStore();
   const modeAction = useAction();
@@ -794,6 +912,9 @@ export default function ControlPage() {
 
       {/* Section 5: Cosy Charging (dev mode only, Eco only) */}
       {developerMode && modeToCategory(effectiveMode) === 'eco' && <CosyChargingSection enabled={cosyEnabled} onToggle={setCosyEnabled} />}
+
+      {/* Battery Calibration (dev mode only) */}
+      {developerMode && <BatteryCalibrationSection />}
 
       {/* Section 5: Auto Winter Mode */}
       <AutoWinterSection />

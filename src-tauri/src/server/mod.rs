@@ -42,6 +42,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/control/force-charge", post(api::force_charge))
         .route("/api/control/force-discharge", post(api::force_discharge))
         .route("/api/control/sync-clock", post(api::sync_clock))
+        .route("/api/control/calibration", post(api::set_calibration))
         // Auto winter mode
         .route(
             "/api/auto-winter",

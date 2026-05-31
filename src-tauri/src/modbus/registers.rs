@@ -165,6 +165,9 @@ pub const HR_BATTERY_PAUSE_MODE: u16 = 318;
 pub const HR_BATTERY_PAUSE_SLOT_1_START: u16 = 319;
 pub const HR_BATTERY_PAUSE_SLOT_1_END: u16 = 320;
 
+/// Battery calibration stage (0=off, 5=balance).
+pub const HR_BATTERY_CALIBRATION_STAGE: u16 = 29;
+
 // ===========================================================================
 // System time registers (read/write for clock sync)
 // ===========================================================================
@@ -245,7 +248,7 @@ pub const BATTERY_1_POLL_BLOCK: RegisterBlock = RegisterBlock {
 /// Holding register addresses that the control encoder is allowed to write.
 /// Sourced from GivTCP safe_regs.
 pub const SAFE_WRITE_REGS: &[u16] = &[
-    20, 27, 31, 32, 35, 36, 37, 38, 39, 40, 44, 45, 50, 56, 57, 59, 94, 95, 96, 110, 111, 112,
+    20, 27, 29, 31, 32, 35, 36, 37, 38, 39, 40, 44, 45, 50, 56, 57, 59, 94, 95, 96, 110, 111, 112,
     116, 318, 319, 320,
 ];
 
@@ -337,6 +340,7 @@ mod tests {
     #[test]
     fn safe_write_regs_contains_key_addresses() {
         assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_POWER_MODE)); // 27
+        assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_CALIBRATION_STAGE)); // 29
         assert!(SAFE_WRITE_REGS.contains(&HR_ENABLE_DISCHARGE)); // 59
         assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_SLOT_1_START)); // 94
         assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_SOC_RESERVE)); // 110

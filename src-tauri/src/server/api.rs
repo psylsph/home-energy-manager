@@ -694,3 +694,28 @@ pub async fn set_cosy(
 
     ok_response("Cosy config updated")
 }
+
+// ---------------------------------------------------------------------------
+// Battery calibration endpoint (developer mode)
+// ---------------------------------------------------------------------------
+
+/// POST /api/control/calibration — set battery calibration stage.
+pub async fn set_calibration(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<Value> {
+    let stage: u16 = match body["stage"].as_u64() {
+        Some(s) => s as u16,
+        None => return error_response("Missing 'stage' field"),
+    };
+
+    let cmd = ControlCommand::SetCalibrationStage { stage };
+    match cmd.encode() {
+        Ok(writes) => {
+            tracing::info!("SetCalibrationStage {} encoded: {:?}", stage, writes);
+            queue_writes(&state, writes).await;
+            ok_response(&format!("Calibration stage set to {}", stage))
+        }
+        Err(e) => error_response(&format!("Validation error: {}", e)),
+    }
+}

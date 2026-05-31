@@ -306,6 +306,9 @@ fn decode_holding_0_59(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawC
     // Battery power mode: HR(27) — 0=export, 1=eco
     raw.battery_power_mode = get_reg(data, 27);
 
+    // Battery calibration stage: HR(29) — 0=off, 5=balance
+    snap.battery_calibration_stage = get_reg(data, 29) as u8;
+
     // Enable charge target (winter mode): HR(20) — bool
     snap.enable_charge_target = get_reg(data, 20) != 0;
 
