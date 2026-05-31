@@ -54,9 +54,31 @@ Download the latest release for your platform from the [Releases page](https://g
 
 ## Quick Start
 
-1. Download and install the app for your platform
-2. Enter your inverter's IP address on the Settings page
-3. The app connects and starts showing live data
+### 1. Install the app
+
+Download the latest release for your platform from the [Releases page](https://github.com/psylsph/givenergy-local/releases/latest) and install it.
+
+> **macOS users**: Do NOT drag the app to `/Applications`. macOS blocks unsigned apps there. Drag it to your **Desktop** or **Home folder** instead. On first launch, right-click the app → Open → Open to bypass Gatekeeper.
+
+### 2. Find your inverter's IP address
+
+You need the IP address of your inverter's data adapter (the small WiFi/Ethernet dongle connected to your inverter). You can find this in your router's device list — look for a device named "GivEnergy" or check the MAC address printed on the dongle.
+
+The adapter listens on **port 8899**.
+
+### 3. Connect
+
+1. Open the app and go to **Settings** (gear icon in the sidebar)
+2. Enter your inverter's IP address in the **Host** field
+3. Click **Connect**
+
+The app connects to your inverter over your local network. The serial number is detected automatically. Live data should appear on the Status page within a few seconds.
+
+### 4. (Optional) Scan for inverters
+
+If you're not sure of the IP address, click **Scan Network** on the Settings page. The app will scan your local network for GivEnergy data adapters and list any it finds. Click on one to auto-fill the IP address.
+
+> **Tip**: If the connection keeps dropping or data looks wrong, try a wired Ethernet connection between your data adapter and router. The WiFi dongles can be unreliable.
 
 That's it. No accounts, no cloud, no internet required.
 

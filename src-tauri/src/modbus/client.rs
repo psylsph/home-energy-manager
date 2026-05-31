@@ -576,6 +576,11 @@ impl ModbusClient {
             // Wrong function code — stale read response, drain it
             if decoded.function != inner_function {
                 if attempt + 1 < max_attempts {
+                    tracing::debug!(
+                        "Write at {register} got stale response (func 0x{:02X}), resending ({}/{})",
+                        decoded.function, attempt + 1, max_attempts
+                    );
+                    need_resend = true;
                     continue;
                 }
                 return Err(ClientError::InvalidResponse(format!(
