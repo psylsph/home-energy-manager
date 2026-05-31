@@ -33,60 +33,50 @@ GivEnergy Local connects directly to your inverter's WiFi or Ethernet data adapt
 - **Energy flow diagram** — visual animation showing where power is flowing right now (solar → battery → home → grid)
 - **Battery details** — individual cell voltages, temperatures and health per battery module
 - **Charge & discharge schedules** — set time slots for when your battery charges from the grid or discharges to power your home
-- **Mode switching** — Eco, Timed Demand, Timed Export, and Pause modes
+- **Mode switching** — Eco, Timed Discharge, and Pause modes
 - **SOC control** — adjust battery reserve level, charge/discharge power limits, and charge target
 - **Auto-discovery** — just enter your inverter's IP address; the serial number is detected automatically
 - **History & cost tracking** — 7 time-range charts for solar, battery, grid, and home energy, with configurable import/export tariffs (peak/off-peak)
 - **Developer console** — live log viewer for diagnostics (enable in Settings)
 
-## Download
+---
 
-Download the latest release for your platform from the [Releases page](https://github.com/psylsph/givenergy-local/releases/latest):
+## 🚀 Getting Started
+
+### 1. Download and install
+
+Download the latest release for your platform from the [**Releases page**](https://github.com/psylsph/givenergy-local/releases/latest):
 
 | Platform | File |
 |---|---|
 | 🪟 Windows | `GivEnergy_Local_*_x64-setup.exe` |
-| 🍎 macOS (Apple Silicon) | `GivEnergy Local_*_aarch64.dmg` |
+| 🍎 macOS (Apple Silicon — M1/M2/M3/M4) | `GivEnergy Local_*_aarch64.dmg` |
 | 🍎 macOS (Intel) | `GivEnergy Local_*_x64.dmg` |
 | 🐧 Linux | `givenergy-local_*_amd64.deb` |
 
-> **Prerequisites**: Your GivEnergy inverter's WiFi/Ethernet data adapter must be connected to your home network. You need its IP address (find it in your router's device list).
-
-## Quick Start
-
-### 1. Install the app
-
-Download the latest release for your platform from the [Releases page](https://github.com/psylsph/givenergy-local/releases/latest) and install it.
-
-> **macOS users**: Do NOT drag the app to `/Applications`. macOS blocks unsigned apps there. Drag it to your **Desktop** or **Home folder** instead. On first launch, right-click the app → Open → Open to bypass Gatekeeper.
+> **macOS users**: Do NOT drag the app to `/Applications` — macOS blocks unsigned apps there. Drag it to your **Desktop** or **Home folder** instead. On first launch, right-click the app → **Open** → **Open** to bypass Gatekeeper.
 
 ### 2. Find your inverter's IP address
 
-You need the IP address of your inverter's data adapter (the small WiFi/Ethernet dongle connected to your inverter). You can find this in your router's device list — look for a device named "GivEnergy" or check the MAC address printed on the dongle.
+You need the IP address of your inverter's data adapter (the small WiFi or Ethernet dongle connected to your inverter). You can find this in your router's device list — look for a device named "GivEnergy" or check the MAC address printed on the dongle.
 
 The adapter listens on **port 8899**.
 
 ### 3. Connect
 
-1. Open the app and go to **Settings** (gear icon in the sidebar)
+1. Open the app and go to **Settings** (gear icon ⚙️ in the sidebar)
 2. Enter your inverter's IP address in the **Host** field
 3. Click **Connect**
 
 The app connects to your inverter over your local network. The serial number is detected automatically. Live data should appear on the Status page within a few seconds.
 
-### 4. (Optional) Scan for inverters
+### 4. (Optional) Can't find the IP? Scan your network
 
-If you're not sure of the IP address, click **Scan Network** on the Settings page. The app will scan your local network for GivEnergy data adapters and list any it finds. Click on one to auto-fill the IP address.
+Click **Scan Network** on the Settings page. The app will scan your local network for GivEnergy data adapters and list any it finds. Click on one to auto-fill the IP address.
 
 > **Tip**: If the connection keeps dropping or data looks wrong, try a wired Ethernet connection between your data adapter and router. The WiFi dongles can be unreliable.
 
-That's it. No accounts, no cloud, no internet required.
-
-## Requirements
-
-- A GivEnergy solar inverter with a WiFi or Ethernet data adapter
-- The data adapter must be on your local network (port 8899)
-- Windows 10+, macOS 12+, or Linux (Ubuntu 22.04+)
+---
 
 ## How it works
 
