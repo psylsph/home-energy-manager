@@ -56,7 +56,7 @@ Click **Scan Network** on the Settings page. The app will scan your local networ
   </tr>
   <tr>
     <td align="center"><b>Settings</b><br><img src=".github/screenshots/settings.png" width="400"></td>
-    <td></td>
+    <td align="center"><b>Developer Console</b><br><img src=".github/screenshots/developer-mode.png" width="400"></td>
   </tr>
 </table>
 
