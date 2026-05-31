@@ -265,7 +265,14 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.inverter_temperature = get_reg(data, 41) as f32 * 0.1; // IR(41): t_inverter_heatsink (/10 °C)
 
     // -- Energy totals (all in /10 kWh) --
-    snap.today_solar_kwh = (get_reg(data, 17) as f32 + get_reg(data, 19) as f32) * 0.1; // IR(17)+IR(19): pv1+pv2 day
+    // Only include PV2's daily energy if PV2 has panels connected (voltage > 0).
+    // IR(19) can return stale or garbage data when no second PV string is present.
+    let pv2_today = if snap.pv2_voltage > 0.0 {
+        get_reg(data, 19) as f32
+    } else {
+        0.0
+    };
+    snap.today_solar_kwh = (get_reg(data, 17) as f32 + pv2_today) * 0.1; // IR(17)+IR(19): pv1+pv2 day
     snap.today_import_kwh = get_reg(data, 26) as f32 * 0.1; // IR(26): e_grid_in_day
     snap.today_export_kwh = get_reg(data, 25) as f32 * 0.1; // IR(25): e_grid_out_day
     snap.today_charge_kwh = get_reg(data, 36) as f32 * 0.1; // IR(36): e_battery_charge_day
