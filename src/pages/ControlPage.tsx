@@ -668,8 +668,8 @@ export default function ControlPage() {
 
   // Show draft while dragging; once snapshot confirms the saved value, use snapshot
   const reserveSoc = (draftReserve != null && snapshot?.battery_reserve !== draftReserve) ? draftReserve : (snapshot?.battery_reserve ?? 4);
-  const chargeRate = (draftCharge != null && snapshot?.charge_rate !== draftCharge) ? draftCharge : (snapshot?.charge_rate ?? 50);
-  const dischargeRate = (draftDischarge != null && snapshot?.discharge_rate !== draftDischarge) ? draftDischarge : (snapshot?.discharge_rate ?? 50);
+  const chargeRate = (draftCharge != null && snapshot?.charge_rate !== draftCharge) ? draftCharge : (snapshot?.charge_rate ?? 100);
+  const dischargeRate = (draftDischarge != null && snapshot?.discharge_rate !== draftDischarge) ? draftDischarge : (snapshot?.discharge_rate ?? 100);
 
   const [reserveSaving, setReserveSaving] = useState(false);
   const [chargeRateSaving, setChargeRateSaving] = useState(false);
@@ -939,7 +939,7 @@ export default function ControlPage() {
               <input
                 type="range"
                 min={0}
-                max={50}
+                max={100}
                 step={5}
                 value={chargeRate}
                 onChange={(e) => setDraftCharge(Number(e.target.value))}
@@ -965,7 +965,7 @@ export default function ControlPage() {
               <input
                 type="range"
                 min={0}
-                max={50}
+                max={100}
                 step={5}
                 value={dischargeRate}
                 onChange={(e) => setDraftDischarge(Number(e.target.value))}

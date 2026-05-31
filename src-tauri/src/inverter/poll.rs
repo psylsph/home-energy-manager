@@ -585,9 +585,8 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
     } // skip_delta
 
     // Clamp battery limits to valid ranges (registers can return corrupted values)
-    // DC charge/discharge limits are 0-50% per givenergy-modbus reference
-    snap.charge_rate = snap.charge_rate.min(50);
-    snap.discharge_rate = snap.discharge_rate.min(50);
+    snap.charge_rate = snap.charge_rate.min(100);
+    snap.discharge_rate = snap.discharge_rate.min(100);
     snap.battery_reserve = snap.battery_reserve.min(100);
 
     // Battery voltage: reject spurious readings. Nominal is 51.2V (LV) or 307V (HV).

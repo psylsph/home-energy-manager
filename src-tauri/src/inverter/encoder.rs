@@ -126,13 +126,13 @@ impl ControlCommand {
                 ]
             }
             ControlCommand::SetChargeLimit { limit } => {
-                // DC charge limit is 0-50% per givenergy-modbus reference
-                validate_range(*limit, 0, 50, "charge limit")?;
+                // Register accepts 0-100% but inverter hardware typically limits
+                // practical DC charge to ~50% (~2.6 kW for Gen1, ~3.6 kW Gen2+)
+                validate_range(*limit, 0, 100, "charge limit")?;
                 vec![rw(HR_BATTERY_CHARGE_LIMIT, *limit)]
             }
             ControlCommand::SetDischargeLimit { limit } => {
-                // DC discharge limit is 0-50% per givenergy-modbus reference
-                validate_range(*limit, 0, 50, "discharge limit")?;
+                validate_range(*limit, 0, 100, "discharge limit")?;
                 vec![rw(HR_BATTERY_DISCHARGE_LIMIT, *limit)]
             }
             ControlCommand::SetEcoMode { soc_reserve } => {
@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn set_charge_limit_validates() {
-        let cmd = ControlCommand::SetChargeLimit { limit: 51 };
+        let cmd = ControlCommand::SetChargeLimit { limit: 101 };
         assert!(cmd.encode().is_err());
     }
 

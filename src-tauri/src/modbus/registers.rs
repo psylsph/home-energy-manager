@@ -153,9 +153,9 @@ pub const HR_CHARGE_SLOT_1_END: u16 = 95;
 pub const HR_ENABLE_CHARGE: u16 = 96;
 /// Battery SOC reserve percentage (0-100).
 pub const HR_BATTERY_SOC_RESERVE: u16 = 110;
-/// Battery charge power limit as percentage (0-50).
+/// Battery charge power limit as percentage (0-100, practical max ~50%).
 pub const HR_BATTERY_CHARGE_LIMIT: u16 = 111;
-/// Battery discharge power limit as percentage (0-50).
+/// Battery discharge power limit as percentage (0-100, practical max ~50%).
 pub const HR_BATTERY_DISCHARGE_LIMIT: u16 = 112;
 /// Charge target SOC percentage (0-100, requires enable_charge_target).
 pub const HR_CHARGE_TARGET_SOC: u16 = 116;
