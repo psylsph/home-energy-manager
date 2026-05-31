@@ -30,6 +30,13 @@ export default function StatusPage() {
         <EnergyFlowDiagram snapshot={snapshot} />
       </section>
 
+      {/* Data accuracy warning */}
+      <p className="text-text-secondary/40 text-xs text-center leading-relaxed max-w-xl mx-auto">
+        Data is polled from the inverter every ~60 seconds. The app filters out
+        physically impossible values, but brief inaccuracies may appear between
+        reads — the next poll typically corrects them.
+      </p>
+
       {/* Battery + Summary side by side on md+ */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <BatteryPanel snapshot={snapshot} />
