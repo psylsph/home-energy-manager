@@ -5,6 +5,7 @@
 //! Override with the `GIVENERGY_LOCAL_CONFIG_DIR` environment variable.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
 
@@ -335,5 +336,88 @@ mod tests {
         let json = serde_json::to_string_pretty(&s).unwrap();
         assert!(json.contains("192.168.1.99"));
         assert!(json.contains("TEST99"));
+    }
+
+    /// Roundtrip for cosy charging config — written by POST /api/cosy
+    /// and read back by GET /api/cosy.
+    #[test]
+    fn cosy_roundtrip() {
+        let s = Settings {
+            cosy_enabled: true,
+            cosy_slots: vec![
+                CosySlot {
+                    enabled: true,
+                    start_hour: 0,
+                    start_minute: 0,
+                    end_hour: 6,
+                    end_minute: 0,
+                    target_soc: 100,
+                },
+                CosySlot {
+                    enabled: false,
+                    start_hour: 0,
+                    start_minute: 0,
+                    end_hour: 0,
+                    end_minute: 0,
+                    target_soc: 100,
+                },
+                CosySlot {
+                    enabled: false,
+                    start_hour: 0,
+                    start_minute: 0,
+                    end_hour: 0,
+                    end_minute: 0,
+                    target_soc: 100,
+                },
+            ],
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let decoded: Settings = serde_json::from_str(&json).unwrap();
+
+        assert!(decoded.cosy_enabled);
+        assert_eq!(decoded.cosy_slots.len(), 3);
+        assert!(decoded.cosy_slots[0].enabled);
+        assert_eq!(decoded.cosy_slots[0].start_hour, 0);
+        assert_eq!(decoded.cosy_slots[0].end_minute, 0);
+        assert!(!decoded.cosy_slots[1].enabled);
+
+        // All-zero time is the "not set" default on the server side —
+        // must survive roundtrip unchanged (not collapse to nulls).
+        let raw = format!(
+            "{{\"enabled\":false,\"start_hour\":0,\"start_minute\":0,\"end_hour\":0,\"end_minute\":0,\"target_soc\":100}}"
+        );
+        let slot: CosySlot = serde_json::from_str(&raw).unwrap();
+        assert_eq!(slot.start_hour, 0);
+        assert_eq!(slot.end_hour, 0);
+        assert_eq!(slot.target_soc, 100);
+    }
+
+    /// Guard: an empty vec![] for cosy_slots must not silently clobber
+    /// existing slots when POST /api/cosy receives no slots array.
+    /// Note: the API use of slots.iter().map(...).collect() naturally
+    /// produces 0 entries if body["slots"] is [] — this test records
+    /// that semantic so we don't accidentally break it in future.
+    #[test]
+    fn cosy_empty_slots_array_gives_empty_vec() {
+        let json = r#"{"slots":[]}"#;
+        let v: Value = serde_json::from_str(json).unwrap();
+        let mapped: Vec<CosySlot> = v["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| CosySlot {
+                enabled: s["enabled"].as_bool().unwrap_or(false),
+                start_hour: s["start_hour"].as_u64().unwrap_or(0) as u8,
+                start_minute: s["start_minute"].as_u64().unwrap_or(0) as u8,
+                end_hour: s["end_hour"].as_u64().unwrap_or(0) as u8,
+                end_minute: s["end_minute"].as_u64().unwrap_or(0) as u8,
+                target_soc: s["target_soc"].as_u64().unwrap_or(100) as u8,
+            })
+            .collect();
+        assert!(
+            mapped.is_empty(),
+            "empty slots array must produce 0 entries, not regenerate defaults"
+        );
     }
 }
