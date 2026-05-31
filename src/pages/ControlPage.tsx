@@ -560,10 +560,12 @@ export default function ControlPage() {
   const [draftReserve, setDraftReserve] = useState<number | null>(null);
   const [draftCharge, setDraftCharge] = useState<number | null>(null);
   const [draftDischarge, setDraftDischarge] = useState<number | null>(null);
-  const reserveSoc = draftReserve ?? snapshot?.battery_reserve ?? 4;
-  const chargeRate = draftCharge ?? snapshot?.charge_rate ?? 100;
-  const dischargeRate = draftDischarge ?? snapshot?.discharge_rate ?? 100;
   const [cosyEnabled, setCosyEnabled] = useState(false);
+
+  // Show draft while dragging; once snapshot confirms the saved value, use snapshot
+  const reserveSoc = (draftReserve != null && snapshot?.battery_reserve !== draftReserve) ? draftReserve : (snapshot?.battery_reserve ?? 4);
+  const chargeRate = (draftCharge != null && snapshot?.charge_rate !== draftCharge) ? draftCharge : (snapshot?.charge_rate ?? 100);
+  const dischargeRate = (draftDischarge != null && snapshot?.discharge_rate !== draftDischarge) ? draftDischarge : (snapshot?.discharge_rate ?? 100);
 
   const [reserveSaving, setReserveSaving] = useState(false);
   const [chargeRateSaving, setChargeRateSaving] = useState(false);
