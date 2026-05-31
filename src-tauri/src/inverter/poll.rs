@@ -548,6 +548,23 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
     snap.discharge_rate = snap.discharge_rate.min(50);
     snap.battery_reserve = snap.battery_reserve.min(100);
 
+    // Battery voltage: reject spurious readings. Nominal is 51.2V (LV) or 307V (HV).
+    // Anything > 60V on an LV system or > 400V on an HV system is a corrupt register.
+    let max_battery_voltage = match snap.device_type {
+        crate::inverter::model::DeviceType::AllInOne => 400.0,
+        crate::inverter::model::DeviceType::ThreePhase => 100.0,
+        _ => 60.0,
+    };
+    if snap.battery_voltage > max_battery_voltage || snap.battery_voltage < 0.0 {
+        if let Some(p) = prev {
+            tracing::warn!(raw = snap.battery_voltage, prev = p.battery_voltage, "Battery voltage out of range — using previous");
+            snap.battery_voltage = p.battery_voltage;
+        } else {
+            snap.battery_voltage = 0.0;
+        }
+        sanitized = true;
+    }
+
     sanitized
 }
 
