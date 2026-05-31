@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.6] - 2026-05-30
+
+### Added
+
+- **Battery mode selector**: Top-level Eco/Timed toggle with contextual sub-buttons
+- **Mode change feedback**: Shows "Settings are being applied — this may take up to 30 seconds"
+  while waiting for inverter confirmation, with optimistic UI updates
+- **Tooltips on battery mode buttons** explaining what each mode does
+
+### Changed
+
+- **Simplified timed modes**: Collapsed Timed Demand / Timed Export / Export Paused
+  to just **Timed Discharge** and **Paused** — the three-way distinction was confusing
+  and the practical difference was minimal
+- **Schedule slot time pickers**: Start and End now side-by-side on same row with
+  tighter label spacing; minute granularity changed from 15 to 5 minutes
+- **Charge Schedule section** now visible in both Eco and Timed modes
+
+### Fixed
+
+- **Charge slot 2 disable**: Register 32 (charge slot 2 end time) is unwritable on some
+  inverters. A slot is now disabled when start=00:00 regardless of end value, so writing
+  just the start register is sufficient
+- **Timed mode switch failing**: Removed decoder override that reverted TimedDemand→Eco
+  when no discharge slots were configured, which prevented switching to timed mode
+  before setting up a schedule
+
 ## [0.9.5] - 2026-05-30
 
 ### Changed

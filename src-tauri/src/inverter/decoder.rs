@@ -100,12 +100,13 @@ fn decode_timeslot(data: &[u16], start_idx: usize, end_idx: usize) -> ScheduleSl
 
     match (decode_hhmm(start_val), decode_hhmm(end_val)) {
         (Some((sh, sm)), Some((eh, em))) => {
-            // A slot of 00:00–00:00 (both values 0) is treated as disabled.
-            // The reference library writes 0 to clear slots, and a zero-length
-            // window at midnight is effectively no schedule.
-            let is_midnight_zero_length = sh == 0 && sm == 0 && eh == 0 && em == 0;
+            // A slot is disabled if start is 00:00. The canonical disabled
+            // state is 00:00–00:00 (both zero), but register 32 (charge
+            // slot 2 end) is unwritable on some inverters — so start=00:00
+            // with a stale end value must also be treated as disabled.
+            let disabled = sh == 0 && sm == 0;
             ScheduleSlot {
-                enabled: !is_midnight_zero_length,
+                enabled: !disabled,
                 start_hour: sh,
                 start_minute: sm,
                 end_hour: eh,
@@ -206,28 +207,11 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
         raw.battery_soc_reserve,
     );
 
-    // Override: if enable_discharge is true but no discharge slots have valid
-    // (non-zero) times, treat as if discharge is disabled — a schedule that
-    // has been cleared is effectively not scheduled, so TimedDemand → Eco
-    // and TimedExport → ExportPaused.
-    let any_discharge_scheduled = snap.discharge_slots.iter().any(|s| {
-        s.start_hour != 0 || s.start_minute != 0 || s.end_hour != 0 || s.end_minute != 0
-    });
-    if !any_discharge_scheduled {
-        match snap.battery_mode {
-            BatteryMode::TimedDemand => {
-                snap.battery_mode = if raw.battery_soc_reserve == 100 {
-                    BatteryMode::EcoPaused
-                } else {
-                    BatteryMode::Eco
-                };
-            }
-            BatteryMode::TimedExport => {
-                snap.battery_mode = BatteryMode::ExportPaused;
-            }
-            _ => {}
-        }
-    }
+    // Note: we intentionally do NOT override TimedDemand/TimedExport to
+    // Eco/ExportPaused when discharge slots are empty. Doing so prevents the
+    // user from switching to timed mode before configuring slots — the decoder
+    // would immediately override back to Eco on the next poll. The inverter
+    // simply won't discharge if there are no active slots, which is correct.
 
     // Apply global enable flags to slot states.
     // If enable_charge is off, all charge slots show as disabled regardless

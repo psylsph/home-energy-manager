@@ -3,15 +3,23 @@ import { useInverterStore } from '../store/useInverterStore';
 import { apiPost, apiGet } from '../lib/api';
 import type { ScheduleSlot } from '../lib/types';
 
-type BatteryMode = 'eco' | 'eco_paused' | 'timed_demand' | 'timed_export' | 'export_paused';
+type BatteryMode = 'unknown' | 'eco' | 'eco_paused' | 'timed_demand' | 'timed_export' | 'export_paused';
 
-const BATTERY_MODES: { key: BatteryMode; label: string }[] = [
-  { key: 'eco', label: 'Eco' },
-  { key: 'eco_paused', label: 'Eco Paused' },
-  { key: 'timed_demand', label: 'Timed Demand' },
-  { key: 'timed_export', label: 'Timed Export' },
-  { key: 'export_paused', label: 'Export Paused' },
+const ECO_MODES: { key: BatteryMode; label: string; tooltip: string }[] = [
+  { key: 'eco', label: 'Eco', tooltip: 'Automatic — charges from solar, discharges to cover home demand' },
+  { key: 'eco_paused', label: 'Eco Paused', tooltip: 'Battery stops discharging (SOC reserve set to 100%). Still charges from solar.' },
 ];
+
+const TIMED_MODES: { key: BatteryMode; label: string; tooltip: string }[] = [
+  { key: 'timed_demand', label: 'Timed Discharge', tooltip: 'Discharges battery during scheduled times to power your home' },
+  { key: 'export_paused', label: 'Paused', tooltip: 'Pauses scheduled discharge. Schedule is kept for next time.' },
+];
+
+type ModeCategory = 'eco' | 'timed';
+
+function modeToCategory(mode: BatteryMode): ModeCategory {
+  return mode === 'eco' || mode === 'eco_paused' ? 'eco' : 'timed';
+}
 
 interface ActionState {
   loading: boolean;
@@ -431,6 +439,29 @@ export default function ControlPage() {
         ];
 
   const currentMode = snapshot?.battery_mode ?? 'eco';
+  const [requestedMode, setRequestedMode] = useState<BatteryMode | null>(null);
+
+  const effectiveMode = requestedMode ?? currentMode;
+
+  // Clear requested mode once the inverter confirms the change, or after 30s timeout
+  useEffect(() => {
+    if (!requestedMode) return;
+    if (requestedMode === currentMode) {
+      setRequestedMode(null);
+      return;
+    }
+    const timeout = setTimeout(() => setRequestedMode(null), 30_000);
+    return () => clearTimeout(timeout);
+  }, [requestedMode, currentMode]);
+
+  const handleModeChange = async (mode: BatteryMode) => {
+    setRequestedMode(mode);
+    try {
+      await modeAction.execute('/api/control/mode', { mode });
+    } catch {
+      setRequestedMode(null);
+    }
+  };
 
   const handleSlotSave = async (index: number, slot: ScheduleSlot, path: string) => {
     // API expects 1-based slot number
@@ -504,26 +535,72 @@ export default function ControlPage() {
 
       {/* Section 2: Battery Mode */}
       <section className="space-y-3">
-        <h2 className="text-text-primary font-semibold text-lg">Battery Mode</h2>
-        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-          {BATTERY_MODES.map(({ key, label }) => {
-            const isActive = currentMode === key;
+        <div className="flex items-center gap-3">
+          <h2 className="text-text-primary font-semibold text-lg">Battery Mode</h2>
+          <div className="flex rounded-lg border border-bg-elevated overflow-hidden">
+            {([
+              { key: 'eco' as ModeCategory, label: 'Eco' },
+              { key: 'timed' as ModeCategory, label: 'Timed' },
+            ] as const).map(({ key, label }) => (
+              <button
+                key={key}
+                onClick={() => {
+                  if (key === 'eco') handleModeChange('eco');
+                  else handleModeChange('timed_demand');
+                }}
+                className={`px-4 py-1.5 text-xs font-medium transition flex items-center gap-1.5 ${
+                  modeToCategory(effectiveMode) === key
+                    ? 'bg-battery/20 text-battery'
+                    : 'text-text-secondary hover:bg-bg-surface'
+                }`}
+              >
+                {modeAction.loading && modeToCategory(requestedMode ?? currentMode) === key && (
+                  <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                )}
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Sub-mode buttons */}
+        <div className="grid grid-cols-2 gap-2">
+          {(modeToCategory(effectiveMode) === 'eco' ? ECO_MODES : TIMED_MODES).map(({ key, label, tooltip }) => {
+            // timed_export from inverter maps to timed_demand button
+            const displayMode = effectiveMode === 'timed_export' ? 'timed_demand' : effectiveMode;
+            const isActive = displayMode === key;
             return (
               <button
                 key={key}
-                onClick={() => modeAction.execute('/api/control/mode', { mode: key })}
+                title={tooltip}
+                onClick={() => handleModeChange(key)}
                 disabled={modeAction.loading}
-                className={`px-3 py-3 rounded-lg border text-xs font-medium transition w-full ${
+                className={`px-3 py-3 rounded-lg border text-xs font-medium transition w-full flex items-center justify-center gap-2 ${
                   isActive
                     ? 'bg-battery/20 border-battery text-battery'
                     : 'bg-bg-surface border-transparent hover:border-battery/40 hover:bg-bg-elevated text-text-secondary'
                 } disabled:opacity-50`}
               >
+                {modeAction.loading && requestedMode === key && (
+                  <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                )}
                 {label}
               </button>
             );
           })}
         </div>
+        {modeAction.loading && (
+          <p className="text-battery text-sm flex items-center gap-1.5">
+            <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
+            Sending command…
+          </p>
+        )}
+        {requestedMode && !modeAction.loading && (
+          <p className="text-amber-400 text-sm flex items-center gap-1.5">
+            <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
+            Settings are being applied — this may take up to 30 seconds
+          </p>
+        )}
         {modeAction.error && (
           <p className="text-red-400 text-sm">{modeAction.error}</p>
         )}
@@ -547,6 +624,7 @@ export default function ControlPage() {
       </section>
 
       {/* Section 4: Discharge Schedule */}
+      {modeToCategory(effectiveMode) === 'timed' && (
       <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Discharge Schedule</h2>
         <div className="space-y-3">
@@ -561,6 +639,7 @@ export default function ControlPage() {
           ))}
         </div>
       </section>
+      )}
 
       {/* Section 5: Auto Winter Mode */}
       <AutoWinterSection />
