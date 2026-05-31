@@ -12,7 +12,7 @@ use std::sync::Arc;
 use axum::routing::{get, post};
 use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 
 use crate::inverter::poll::AppState;
 
@@ -69,8 +69,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 /// blocking). The bundled `dist/` resources serve the Vite output.
 pub fn create_router_with_frontend(state: Arc<AppState>, dist_dir: &str) -> Router {
     let router = create_router(state);
+    let index_path = format!("{}/index.html", dist_dir);
     router.fallback_service(
-        ServeDir::new(dist_dir).fallback(ServeDir::new(format!("{}/index.html", dist_dir))),
+        ServeDir::new(dist_dir).fallback(ServeFile::new(index_path)),
     )
 }
 
