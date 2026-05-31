@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.5] - 2026-05-30
+
+### Changed
+
+- **Schedule slot time pickers**: Start and End times now shown side-by-side
+  on the same row with tighter label spacing and clearer visual separation
+- **Minute granularity**: Changed from 15-minute to 5-minute increments for
+  charge/discharge schedule slots
+
 ## [0.9.4] - 2026-05-30
 
 ### Added

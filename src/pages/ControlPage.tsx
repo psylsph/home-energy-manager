@@ -114,7 +114,7 @@ function TimePicker({
         onChange={(e) => onChange(hour, Number(e.target.value))}
         className="bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-2 py-1.5 border border-transparent focus:border-battery outline-none"
       >
-        {Array.from({ length: 60 }, (_, i) => i).filter((m) => m % 15 === 0).map((m) => (
+        {Array.from({ length: 60 }, (_, i) => i).filter((m) => m % 5 === 0).map((m) => (
           <option key={m} value={m}>
             {String(m).padStart(2, '0')}
           </option>
@@ -174,17 +174,17 @@ function ScheduleSlotEditor({
 
       {local.enabled && (
         <>
-          <div className="space-y-2">
-            <div className="flex items-center gap-3">
-              <span className="text-text-secondary text-sm w-12 shrink-0">Start</span>
+          <div className="flex items-center gap-6">
+            <div className="flex items-center gap-1.5">
+              <span className="text-text-secondary text-sm shrink-0">Start</span>
               <TimePicker
                 hour={local.start_hour}
                 minute={local.start_minute}
                 onChange={(h, m) => setLocal((l) => ({ ...l, start_hour: h, start_minute: m }))}
               />
             </div>
-            <div className="flex items-center gap-3">
-              <span className="text-text-secondary text-sm w-12 shrink-0">End</span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-text-secondary text-sm shrink-0">End</span>
               <TimePicker
                 hour={local.end_hour}
                 minute={local.end_minute}
