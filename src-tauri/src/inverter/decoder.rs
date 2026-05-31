@@ -283,7 +283,9 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
 /// Decode holding registers 0-59 (configuration part 1).
 fn decode_holding_0_59(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawConfig) {
     // Device type: HR(0)
-    snap.device_type = DeviceType::from_register(get_reg(data, 0));
+    let dtc_raw = get_reg(data, 0);
+    snap.device_type = DeviceType::from_register(dtc_raw);
+    snap.device_type_code = format!("{:04X}", dtc_raw);
 
     // Serial number: HR(13-17), 5 registers = 10 Latin-1 chars
     snap.inverter_serial = decode_serial(data, 13, 5);
@@ -319,11 +321,32 @@ fn decode_holding_0_59(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawC
     // Active power rate: HR(50) — inverter max output percentage (0-100)
     snap.active_power_rate = get_reg(data, 50) as u8;
 
-    // Max battery power from inverter hardware (per GivTCP model table).
-    // batmaxrate = min(inverter_max, battery_capacity_W / 2)
+    // Max battery power from inverter hardware.
+    // Per givenergy-modbus: hybrid (DTC "20xx") uses ARM FW version to determine
+    // generation; other models use a lookup table.
+    //   Hybrid Gen2/3 (FW century 3,8,9): 3600W, Gen1: 2600W
+    //   AC (30xx): 3000W, All-in-One (80xx): varies
+    snap.max_battery_power_w = {
+        let dtc = &snap.device_type_code;
+        if dtc.starts_with("20") {
+            let century = arm_fw / 100;
+            if century == 3 || century == 8 || century == 9 { 3600 } else { 2600 }
+        } else {
+            match dtc.as_str() {
+                "2201" => 5400,
+                "3001" | "3002" => 3000,
+                "8001" => 6000,
+                "8002" => 3600,
+                "8003" => 5000,
+                "8102" => 8000,
+                "8103" => 10000,
+                _ => snap.device_type.max_battery_power_w(),
+            }
+        }
+    };
+    // Cap at half battery capacity (per GivTCP formula)
     let battery_capacity_w = snap.battery_capacity_kwh * 1000.0;
-    snap.max_battery_power_w = snap.device_type.max_battery_power_w()
-        .min((battery_capacity_w / 2.0) as u32);
+    snap.max_battery_power_w = snap.max_battery_power_w.min((battery_capacity_w / 2.0) as u32);
 
     // Charge slot 2: HR(31-32)
     snap.charge_slots[1] = decode_timeslot(data, 31, 32);

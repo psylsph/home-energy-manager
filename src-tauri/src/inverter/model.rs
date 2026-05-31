@@ -253,6 +253,8 @@ pub struct InverterSnapshot {
     // -- Configuration --
     pub battery_mode: BatteryMode,
     pub device_type: DeviceType,
+    /// Raw 4-char hex device type code from HR(0) (e.g. "2001", "3001").
+    pub device_type_code: String,
     pub battery_reserve: u8,
     pub charge_rate: u8,
     pub discharge_rate: u8,
