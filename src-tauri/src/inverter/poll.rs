@@ -858,10 +858,6 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         // more reliable than the inverter-level IR(59) that
                                         // intermittently returns 0.
                                         //
-                                        // Note: for multi-battery systems, we'll recalculate
-                                        // the aggregate SOC from all modules below after
-                                        // reading additional batteries.
-                                        //
                                         // Validation: only override when the BMS value is
                                         // plausible — not 0 (garbage) and not a wild jump
                                         // from the inverter reading. If the inverter SOC is
@@ -916,35 +912,6 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             tracing::debug!("Battery addr 0x{:02X}: no response", addr);
                                             break;
                                         }
-                                    }
-                                }
-
-                                // For multi-battery systems, calculate aggregate SOC
-                                // as the capacity-weighted average of all module SOCs.
-                                // This is more accurate than using just the first module's
-                                // SOC or the inverter-level IR(59).
-                                if snapshot.battery_modules.len() > 1 {
-                                    let total_capacity: f32 = snapshot
-                                        .battery_modules
-                                        .iter()
-                                        .map(|m| m.capacity_ah)
-                                        .sum();
-                                    let total_remaining: f32 = snapshot
-                                        .battery_modules
-                                        .iter()
-                                        .map(|m| m.remaining_capacity_ah)
-                                        .sum();
-                                    if total_capacity > 0.0 {
-                                        let agg_soc =
-                                            (total_remaining / total_capacity * 100.0).round() as u8;
-                                        let agg_soc = agg_soc.min(100);
-                                        tracing::debug!(
-                                            "Aggregate SOC from {} modules: {}% (was {}%)",
-                                            snapshot.battery_modules.len(),
-                                            agg_soc,
-                                            snapshot.soc
-                                        );
-                                        snapshot.soc = agg_soc;
                                     }
                                 }
 
