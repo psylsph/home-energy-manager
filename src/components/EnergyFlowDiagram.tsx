@@ -282,7 +282,7 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
         {/* Battery mode label */}
         <text
           x={W / 2}
-          y={395}
+          y={400}
           textAnchor="middle"
           fill="#8B949E"
           style={{ fontSize: 10, fontFamily: 'sans-serif' }}
