@@ -122,6 +122,21 @@ impl DeviceType {
             _ => 51.2,
         }
     }
+
+    /// Maximum battery charge/discharge power in watts.
+    ///
+    /// Per GivTCP source code, the inverter hardware limits the DC battery
+    /// charge/discharge rate regardless of what the register says.
+    pub fn max_battery_power_w(&self) -> u32 {
+        match self {
+            Self::Gen1Hybrid => 2600,
+            Self::Gen2Hybrid | Self::Gen3Hybrid => 3600,
+            Self::ACCoupled => 5000,
+            Self::ThreePhase => 5000,
+            Self::AllInOne => 5000,
+            Self::Unknown(_) => 3600, // assume Gen2 hybrid as most common
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +258,8 @@ pub struct InverterSnapshot {
     pub discharge_rate: u8,
     /// Inverter max output active power rate (0-100%).
     pub active_power_rate: u8,
+    /// Max battery charge/discharge power in watts (per inverter model).
+    pub max_battery_power_w: u32,
     pub target_soc: u8,
     pub enable_charge: bool,
     pub enable_charge_target: bool,

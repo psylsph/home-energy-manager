@@ -676,9 +676,11 @@ export default function ControlPage() {
   const activePowerRate = (draftActivePower != null && snapshot?.active_power_rate !== draftActivePower) ? draftActivePower : snapshot?.active_power_rate;
 
   // Calculate wattage from rate% × battery capacity (per GivTCP formula)
+  // capped by the inverter's max battery power rate
+  const maxBatteryPowerW = snapshot?.max_battery_power_w ?? 0;
   const batteryCapacityW = (snapshot?.battery_capacity_kwh ?? 0) * 1000;
-  const chargeWatts = chargeRate != null ? Math.round(chargeRate / 100 * batteryCapacityW) : null;
-  const dischargeWatts = dischargeRate != null ? Math.round(dischargeRate / 100 * batteryCapacityW) : null;
+  const chargeWatts = chargeRate != null ? Math.min(Math.round(chargeRate / 100 * batteryCapacityW), maxBatteryPowerW) : null;
+  const dischargeWatts = dischargeRate != null ? Math.min(Math.round(dischargeRate / 100 * batteryCapacityW), maxBatteryPowerW) : null;
 
   const [reserveSaving, setReserveSaving] = useState(false);
   const [chargeRateSaving, setChargeRateSaving] = useState(false);

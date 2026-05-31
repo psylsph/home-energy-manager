@@ -319,6 +319,12 @@ fn decode_holding_0_59(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawC
     // Active power rate: HR(50) — inverter max output percentage (0-100)
     snap.active_power_rate = get_reg(data, 50) as u8;
 
+    // Max battery power from inverter hardware (per GivTCP model table).
+    // batmaxrate = min(inverter_max, battery_capacity_W / 2)
+    let battery_capacity_w = snap.battery_capacity_kwh * 1000.0;
+    snap.max_battery_power_w = snap.device_type.max_battery_power_w()
+        .min((battery_capacity_w / 2.0) as u32);
+
     // Charge slot 2: HR(31-32)
     snap.charge_slots[1] = decode_timeslot(data, 31, 32);
 
@@ -594,6 +600,7 @@ mod tests {
         assert_eq!(snap.charge_rate, 50);
         assert_eq!(snap.discharge_rate, 50);
         assert_eq!(snap.active_power_rate, 80);
+        assert_eq!(snap.max_battery_power_w, 2560); // min(3600, 5120/2)
         assert_eq!(snap.target_soc, 100);
         assert!(snap.enable_charge);
         assert!(!snap.enable_discharge);
