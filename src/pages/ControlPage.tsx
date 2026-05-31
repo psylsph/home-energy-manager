@@ -560,7 +560,7 @@ function BatteryCalibrationSection() {
   const [feedback, setFeedback] = useState<'saved' | 'error' | null>(null);
 
   const handleStartCalibration = async () => {
-    if (!confirm('⚠️  BATTERY CALIBRATION\n\nThis will cycle the battery through a full discharge and charge cycle to recalibrate the BMS. This can take several hours.\n\nOnly proceed if you understand the risks. Continue?')) return;
+    if (!confirm('⚠️  BATTERY CALIBRATION\n\nThis will cycle the battery through: discharge → calibrate → charge → balance → set capacity.\n\nThe balancing phase ensures all cells are equalized. The full cycle can take several hours.\n\nOnly proceed if you understand the risks. Continue?')) return;
     setSaving(true);
     setFeedback(null);
     try {
@@ -573,21 +573,7 @@ function BatteryCalibrationSection() {
     setTimeout(() => setFeedback(null), 3000);
   };
 
-  const handleStartBalance = async () => {
-    if (!confirm('⚡  FORCE CELL BALANCING\n\nThis tells the BMS to balance the battery cells. The battery should be near full charge for best results.\n\nOnly proceed if you understand the risks. Continue?')) return;
-    setSaving(true);
-    setFeedback(null);
-    try {
-      await apiPost('/api/control/calibration', { stage: 5 });
-      setFeedback('saved');
-    } catch {
-      setFeedback('error');
-    }
-    setSaving(false);
-    setTimeout(() => setFeedback(null), 3000);
-  };
-
-  const handleStop = async () => {
+  const handleCancel = async () => {
     setSaving(true);
     try {
       await apiPost('/api/control/calibration', { stage: 0 });
@@ -645,18 +631,11 @@ function BatteryCalibrationSection() {
             Start Calibration
           </button>
           <button
-            onClick={handleStartBalance}
-            disabled={saving || isActive}
-            className="flex-1 py-2 bg-purple-500/20 text-purple-400 rounded-lg text-xs font-medium hover:bg-purple-500/30 transition disabled:opacity-40 border border-purple-500/30"
-          >
-            Balance Cells
-          </button>
-          <button
-            onClick={handleStop}
+            onClick={handleCancel}
             disabled={saving || !isActive}
             className="flex-1 py-2 bg-red-500/20 text-red-400 rounded-lg text-xs font-medium hover:bg-red-500/30 transition disabled:opacity-40 border border-red-500/30"
           >
-            Stop
+            Cancel
           </button>
         </div>
 
