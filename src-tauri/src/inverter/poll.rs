@@ -29,7 +29,7 @@ use crate::server::ws::ConnectedClients;
 use crate::history::HistoryDb;
 use crate::inverter::decoder::decode_snapshot;
 use crate::inverter::encoder::{ControlCommand, RegisterWrite};
-use crate::inverter::model::InverterSnapshot;
+use crate::inverter::model::{BatteryMode, InverterSnapshot};
 use crate::modbus::client::ModbusClient;
 use crate::modbus::registers::{HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE_TARGET};
 
@@ -313,7 +313,17 @@ fn carry_forward_battery_modules_with(snap: &mut InverterSnapshot, prev_modules:
     }
 }
 
-fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot>, skip_delta: bool) -> bool {
+/// Returns `true` if any field was sanitized (fallback applied).
+///
+/// `pending_mode` tracks a mode that differs from the previous reading but
+/// hasn't yet been confirmed by a second consecutive reading. This prevents
+/// mode flicker caused by a single corrupt register read.
+fn sanitize_snapshot(
+    snap: &mut InverterSnapshot,
+    prev: Option<&InverterSnapshot>,
+    skip_delta: bool,
+    pending_mode: &mut Option<BatteryMode>,
+) -> bool {
     let mut sanitized = false;
     let max_battery_power: i32 = 10_000; // 10 kW — residential battery limit
 
@@ -607,6 +617,50 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
         sanitized = true;
     }
 
+    // Battery mode debounce: require 2 consecutive identical readings
+    // before accepting a mode change. A single corrupt register read can
+    // flip enable_discharge or battery_power_mode, causing the derived mode
+    // to flicker for one poll cycle.
+    if let Some(p) = prev {
+        if snap.battery_mode != p.battery_mode {
+            // Mode changed — is this a confirmation of a pending change?
+            if let Some(pm) = pending_mode {
+                if *pm == snap.battery_mode {
+                    // Second consecutive reading with the same new mode — accept it.
+                    *pending_mode = None;
+                    tracing::debug!(
+                        new_mode = ?snap.battery_mode,
+                        "Battery mode change confirmed after debounce"
+                    );
+                } else {
+                    // Different transient mode — still pending, revert.
+                    tracing::warn!(
+                        new_mode = ?snap.battery_mode,
+                        prev_mode = ?p.battery_mode,
+                        pending = ?pm,
+                        "Battery mode flicker (3rd different value) — keeping previous"
+                    );
+                    snap.battery_mode = p.battery_mode;
+                    sanitized = true;
+                }
+            } else {
+                // First reading with a different mode — don't accept yet, pend it.
+                tracing::debug!(
+                    new_mode = ?snap.battery_mode,
+                    prev_mode = ?p.battery_mode,
+                    "Battery mode change pending confirmation"
+                );
+                *pending_mode = Some(snap.battery_mode);
+                snap.battery_mode = p.battery_mode;
+                sanitized = true;
+            }
+        } else if pending_mode.is_some() {
+            // Mode reverted back to previous — the pending change was a glitch.
+            tracing::debug!("Battery mode reverted — pending change was a glitch");
+            *pending_mode = None;
+        }
+    }
+
     sanitized
 }
 
@@ -803,6 +857,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // After GRACE_READINGS the delta checks kick in.
                 let mut readings_since_connect: u8 = 0;
                 const GRACE_READINGS: u8 = 3;
+                let mut pending_mode: Option<BatteryMode> = None;
 
                 // ---- Inner poll loop ----
                 loop {
@@ -970,7 +1025,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 let in_grace = readings_since_connect < GRACE_READINGS;
                                 let (sanitized, prev_modules) = {
                                     let prev = state.latest_snapshot.lock().await;
-                                    let s = sanitize_snapshot(&mut snapshot, prev.as_ref(), in_grace);
+                                    let s = sanitize_snapshot(&mut snapshot, prev.as_ref(), in_grace, &mut pending_mode);
                                     let mods = prev.as_ref().map(|p| p.battery_modules.clone());
                                     (s, mods)
                                 };
