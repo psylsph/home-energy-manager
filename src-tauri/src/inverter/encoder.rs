@@ -126,11 +126,13 @@ impl ControlCommand {
                 ]
             }
             ControlCommand::SetChargeLimit { limit } => {
-                validate_range(*limit, 0, 100, "charge limit")?;
+                // DC charge limit is 0-50% per givenergy-modbus reference
+                validate_range(*limit, 0, 50, "charge limit")?;
                 vec![rw(HR_BATTERY_CHARGE_LIMIT, *limit)]
             }
             ControlCommand::SetDischargeLimit { limit } => {
-                validate_range(*limit, 0, 100, "discharge limit")?;
+                // DC discharge limit is 0-50% per givenergy-modbus reference
+                validate_range(*limit, 0, 50, "discharge limit")?;
                 vec![rw(HR_BATTERY_DISCHARGE_LIMIT, *limit)]
             }
             ControlCommand::SetEcoMode { soc_reserve } => {
@@ -293,7 +295,7 @@ mod tests {
 
     #[test]
     fn set_charge_limit_validates() {
-        let cmd = ControlCommand::SetChargeLimit { limit: 101 };
+        let cmd = ControlCommand::SetChargeLimit { limit: 51 };
         assert!(cmd.encode().is_err());
     }
 
