@@ -441,18 +441,18 @@ export default function ControlPage() {
   const currentMode = snapshot?.battery_mode ?? 'eco';
   const [requestedMode, setRequestedMode] = useState<BatteryMode | null>(null);
 
-  const effectiveMode = requestedMode ?? currentMode;
-
-  // Clear requested mode once the inverter confirms the change, or after 30s timeout
+  // Clear requested mode after 30s timeout (safety net for unconfirmed writes).
+  // The inverter confirming the change is handled by deriving effectiveMode below.
   useEffect(() => {
     if (!requestedMode) return;
-    if (requestedMode === currentMode) {
-      setRequestedMode(null);
-      return;
-    }
     const timeout = setTimeout(() => setRequestedMode(null), 30_000);
     return () => clearTimeout(timeout);
-  }, [requestedMode, currentMode]);
+  }, [requestedMode]);
+
+  // Use requested mode unless the inverter has already caught up
+  const effectiveMode = (requestedMode && requestedMode !== currentMode)
+    ? requestedMode
+    : currentMode;
 
   const handleModeChange = async (mode: BatteryMode) => {
     setRequestedMode(mode);
