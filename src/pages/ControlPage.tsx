@@ -838,7 +838,7 @@ export default function ControlPage() {
               <input
                 type="range"
                 min={0}
-                max={50}
+                max={100}
                 step={5}
                 value={chargeRate}
                 onChange={(e) => setDraftCharge(Number(e.target.value))}
@@ -864,7 +864,7 @@ export default function ControlPage() {
               <input
                 type="range"
                 min={0}
-                max={50}
+                max={100}
                 step={5}
                 value={dischargeRate}
                 onChange={(e) => setDraftDischarge(Number(e.target.value))}
