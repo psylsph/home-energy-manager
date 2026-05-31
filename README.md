@@ -8,39 +8,6 @@
 > [**GivTCP**](https://github.com/GivEnergy/giv_tcp) — the original GivEnergy Modbus integration for Home Assistant  
 > [**givenergy-modbus**](https://github.com/dewet22/givenergy-modbus) — detailed register map, protocol reference, and Python library
 
-## Screenshots
-
-<table>
-  <tr>
-    <td align="center"><b>Status Dashboard</b><br><img src=".github/screenshots/status.png" width="400"></td>
-    <td align="center"><b>Energy History</b><br><img src=".github/screenshots/history.png" width="400"></td>
-  </tr>
-  <tr>
-    <td align="center"><b>Battery Detail</b><br><img src=".github/screenshots/battery.png" width="400"></td>
-    <td align="center"><b>Control Panel</b><br><img src=".github/screenshots/control.png" width="400"></td>
-  </tr>
-  <tr>
-    <td align="center"><b>Settings</b><br><img src=".github/screenshots/settings.png" width="400"></td>
-    <td></td>
-  </tr>
-</table>
-
-## What it does
-
-GivEnergy Local connects directly to your inverter's WiFi or Ethernet data adapter over your home network. It shows you what's happening right now and lets you change settings without needing a GivEnergy cloud account or portal login.
-
-- **Real-time dashboard** — see solar generation, battery charge level, grid import/export, and home consumption updating live
-- **Energy flow diagram** — visual animation showing where power is flowing right now (solar → battery → home → grid)
-- **Battery details** — individual cell voltages, temperatures and health per battery module
-- **Charge & discharge schedules** — set time slots for when your battery charges from the grid or discharges to power your home
-- **Mode switching** — Eco, Timed Discharge, and Pause modes
-- **SOC control** — adjust battery reserve level, charge/discharge power limits, and charge target
-- **Auto-discovery** — just enter your inverter's IP address; the serial number is detected automatically
-- **History & cost tracking** — 7 time-range charts for solar, battery, grid, and home energy, with configurable import/export tariffs (peak/off-peak)
-- **Developer console** — live log viewer for diagnostics (enable in Settings)
-
----
-
 ## 🚀 Getting Started
 
 ### 1. Download and install
@@ -75,6 +42,38 @@ The app connects to your inverter over your local network. The serial number is 
 Click **Scan Network** on the Settings page. The app will scan your local network for GivEnergy data adapters and list any it finds. Click on one to auto-fill the IP address.
 
 > **Tip**: If the connection keeps dropping or data looks wrong, try a wired Ethernet connection between your data adapter and router. The WiFi dongles can be unreliable.
+
+
+## Screenshots
+
+<table>
+  <tr>
+    <td align="center"><b>Status Dashboard</b><br><img src=".github/screenshots/status.png" width="400"></td>
+    <td align="center"><b>Energy History</b><br><img src=".github/screenshots/history.png" width="400"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Battery Detail</b><br><img src=".github/screenshots/battery.png" width="400"></td>
+    <td align="center"><b>Control Panel</b><br><img src=".github/screenshots/control.png" width="400"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Settings</b><br><img src=".github/screenshots/settings.png" width="400"></td>
+    <td></td>
+  </tr>
+</table>
+
+## What it does
+
+GivEnergy Local connects directly to your inverter's WiFi or Ethernet data adapter over your home network. It shows you what's happening right now and lets you change settings without needing a GivEnergy cloud account or portal login.
+
+- **Real-time dashboard** — see solar generation, battery charge level, grid import/export, and home consumption updating live
+- **Energy flow diagram** — visual animation showing where power is flowing right now (solar → battery → home → grid)
+- **Battery details** — individual cell voltages, temperatures and health per battery module
+- **Charge & discharge schedules** — set time slots for when your battery charges from the grid or discharges to power your home
+- **Mode switching** — Eco, Timed Discharge, and Pause modes
+- **SOC control** — adjust battery reserve level, charge/discharge power limits, and charge target
+- **Auto-discovery** — just enter your inverter's IP address; the serial number is detected automatically
+- **History & cost tracking** — 7 time-range charts for solar, battery, grid, and home energy, with configurable import/export tariffs (peak/off-peak)
+- **Developer console** — live log viewer for diagnostics (enable in Settings)
 
 ---
 
