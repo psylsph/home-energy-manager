@@ -28,7 +28,8 @@ export default function ColdBatteryWarning() {
 
   if (!forceShow) {
     if (config.enabled) return null;
-    if (snapshot.battery_temperature >= config.cold_threshold) return null;
+    // Don't show on startup before real data arrives (temp would be 0)
+    if (snapshot.battery_temperature < 0.1 || snapshot.battery_temperature >= config.cold_threshold) return null;
   }
 
   const tempDisplay = forceShow
