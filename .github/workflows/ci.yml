@@ -22,7 +22,7 @@ jobs:
           node-version: 22
           cache: npm
 
-      - run: npm ci --include=optional
+      - run: npm install
       - run: npm run lint
       - run: npm run build
 
