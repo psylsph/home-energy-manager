@@ -30,6 +30,7 @@ export interface InverterSnapshot {
   battery_reserve: number;
   charge_rate: number;
   discharge_rate: number;
+  active_power_rate: number;
   target_soc: number;
   enable_charge_target: boolean;
   auto_winter_active: boolean;

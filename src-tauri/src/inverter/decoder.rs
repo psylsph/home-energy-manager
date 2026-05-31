@@ -316,6 +316,9 @@ fn decode_holding_0_59(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawC
     snap.enable_discharge = get_reg(data, 59) != 0;
     raw.enable_discharge = snap.enable_discharge;
 
+    // Active power rate: HR(50) — inverter max output percentage (0-100)
+    snap.active_power_rate = get_reg(data, 50) as u8;
+
     // Charge slot 2: HR(31-32)
     snap.charge_slots[1] = decode_timeslot(data, 31, 32);
 
@@ -513,6 +516,7 @@ mod tests {
         holding_data[17] = 0x3738; // '7'(0x37), '8'(0x38)
         holding_data[21] = 1234; // HR(21): ARM firmware version
         holding_data[27] = 1; // HR(27): eco mode
+        holding_data[50] = 80; // HR(50): active_power_rate = 80%
         holding_data[31] = 600; // HR(31): charge_slot_2 start = 06:00
         holding_data[32] = 1000; // HR(32): charge_slot_2 end = 10:00
         holding_data[44] = 1700; // HR(44): discharge_slot_2 start = 17:00
@@ -589,6 +593,7 @@ mod tests {
         assert_eq!(snap.battery_reserve, 4);
         assert_eq!(snap.charge_rate, 50);
         assert_eq!(snap.discharge_rate, 50);
+        assert_eq!(snap.active_power_rate, 80);
         assert_eq!(snap.target_soc, 100);
         assert!(snap.enable_charge);
         assert!(!snap.enable_discharge);

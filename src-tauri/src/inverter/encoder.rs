@@ -11,6 +11,7 @@ use crate::modbus::registers::{
     HR_CHARGE_SLOT_2_START, HR_CHARGE_TARGET_SOC, HR_DISCHARGE_SLOT_1_END,
     HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END, HR_DISCHARGE_SLOT_2_START,
     HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
+    HR_ACTIVE_POWER_RATE,
     HR_INVERTER_REBOOT, HR_SYSTEM_TIME_YEAR, HR_SYSTEM_TIME_MONTH, HR_SYSTEM_TIME_DAY,
     HR_SYSTEM_TIME_HOUR, HR_SYSTEM_TIME_MINUTE, HR_SYSTEM_TIME_SECOND,
     SAFE_WRITE_REGS,
@@ -54,8 +55,10 @@ pub enum ControlCommand {
     SetDischargeSlot2 { start: u16, end: u16 },
     /// Set battery charge limit percentage (0-50).
     SetChargeLimit { limit: u16 },
-    /// Set battery discharge limit percentage (0-50).
+    /// Set battery discharge limit percentage (0-100).
     SetDischargeLimit { limit: u16 },
+    /// Set inverter max output active power rate percentage (0-100).
+    SetActivePowerRate { rate: u16 },
     /// Set Eco mode (self-consumption, no discharge, clear discharge slots).
     SetEcoMode { soc_reserve: u16 },
     /// Set Timed Demand mode (self-consumption + discharge).
@@ -134,6 +137,10 @@ impl ControlCommand {
             ControlCommand::SetDischargeLimit { limit } => {
                 validate_range(*limit, 0, 100, "discharge limit")?;
                 vec![rw(HR_BATTERY_DISCHARGE_LIMIT, *limit)]
+            }
+            ControlCommand::SetActivePowerRate { rate } => {
+                validate_range(*rate, 0, 100, "active power rate")?;
+                vec![rw(HR_ACTIVE_POWER_RATE, *rate)]
             }
             ControlCommand::SetEcoMode { soc_reserve } => {
                 validate_range(*soc_reserve, 0, 100, "SOC reserve")?;

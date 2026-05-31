@@ -587,6 +587,7 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
     // Clamp battery limits to valid ranges (registers can return corrupted values)
     snap.charge_rate = snap.charge_rate.min(100);
     snap.discharge_rate = snap.discharge_rate.min(100);
+    snap.active_power_rate = snap.active_power_rate.min(100);
     snap.battery_reserve = snap.battery_reserve.min(100);
 
     // Battery voltage: reject spurious readings. Nominal is 51.2V (LV) or 307V (HV).

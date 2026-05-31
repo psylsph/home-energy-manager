@@ -466,6 +466,27 @@ pub async fn set_discharge_rate(
     }
 }
 
+/// POST /api/control/active-power-rate — set inverter max output active power rate.
+pub async fn set_active_power_rate(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<Value> {
+    let rate: u16 = match body["rate"].as_u64() {
+        Some(r) => r as u16,
+        None => return error_response("Missing 'rate' field"),
+    };
+
+    let cmd = ControlCommand::SetActivePowerRate { rate };
+    match cmd.encode() {
+        Ok(writes) => {
+            tracing::info!("SetActivePowerRate encoded: {:?}", writes);
+            queue_writes(&state, writes).await;
+            ok_response(&format!("Active power rate set to {}%", rate))
+        }
+        Err(e) => error_response(&format!("Validation error: {}", e)),
+    }
+}
+
 /// POST /api/control/pause — pause the battery.
 pub async fn pause_battery(State(state): State<Arc<AppState>>) -> Json<Value> {
     let cmd = ControlCommand::PauseBattery;

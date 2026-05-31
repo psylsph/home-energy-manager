@@ -131,6 +131,8 @@ pub const HR_ENABLE_CHARGE_TARGET: u16 = 20;
 pub const HR_ARM_FIRMWARE: u16 = 21;
 /// Battery power mode: 0 = export, 1 = self-consumption (eco).
 pub const HR_BATTERY_POWER_MODE: u16 = 27;
+/// Inverter max output active power rate percentage (0-100).
+pub const HR_ACTIVE_POWER_RATE: u16 = 50;
 /// Charge slot 2: start time as HHMM, end time as HHMM (2 registers).
 pub const HR_CHARGE_SLOT_2_START: u16 = 31;
 pub const HR_CHARGE_SLOT_2_END: u16 = 32;
@@ -344,6 +346,7 @@ mod tests {
     fn safe_write_regs_contains_key_addresses() {
         assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_POWER_MODE)); // 27
         assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_CALIBRATION_STAGE)); // 29
+        assert!(SAFE_WRITE_REGS.contains(&HR_ACTIVE_POWER_RATE)); // 50
         assert!(SAFE_WRITE_REGS.contains(&HR_ENABLE_DISCHARGE)); // 59
         assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_SLOT_1_START)); // 94
         assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_SOC_RESERVE)); // 110

@@ -241,6 +241,8 @@ pub struct InverterSnapshot {
     pub battery_reserve: u8,
     pub charge_rate: u8,
     pub discharge_rate: u8,
+    /// Inverter max output active power rate (0-100%).
+    pub active_power_rate: u8,
     pub target_soc: u8,
     pub enable_charge: bool,
     pub enable_charge_target: bool,

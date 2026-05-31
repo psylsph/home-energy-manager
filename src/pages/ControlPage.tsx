@@ -664,6 +664,7 @@ export default function ControlPage() {
   const [draftReserve, setDraftReserve] = useState<number | null>(null);
   const [draftCharge, setDraftCharge] = useState<number | null>(null);
   const [draftDischarge, setDraftDischarge] = useState<number | null>(null);
+  const [draftActivePower, setDraftActivePower] = useState<number | null>(null);
   const [cosyEnabled, setCosyEnabled] = useState(false);
 
   // Show draft while dragging; once snapshot confirms the saved value, use snapshot.
@@ -672,10 +673,17 @@ export default function ControlPage() {
   const reserveSoc = (draftReserve != null && snapshot?.battery_reserve !== draftReserve) ? draftReserve : (snapshot?.battery_reserve ?? 4);
   const chargeRate = (draftCharge != null && snapshot?.charge_rate !== draftCharge) ? draftCharge : snapshot?.charge_rate;
   const dischargeRate = (draftDischarge != null && snapshot?.discharge_rate !== draftDischarge) ? draftDischarge : snapshot?.discharge_rate;
+  const activePowerRate = (draftActivePower != null && snapshot?.active_power_rate !== draftActivePower) ? draftActivePower : snapshot?.active_power_rate;
+
+  // Calculate wattage from rate% × battery capacity (per GivTCP formula)
+  const batteryCapacityW = (snapshot?.battery_capacity_kwh ?? 0) * 1000;
+  const chargeWatts = chargeRate != null ? Math.round(chargeRate / 100 * batteryCapacityW) : null;
+  const dischargeWatts = dischargeRate != null ? Math.round(dischargeRate / 100 * batteryCapacityW) : null;
 
   const [reserveSaving, setReserveSaving] = useState(false);
   const [chargeRateSaving, setChargeRateSaving] = useState(false);
   const [dischargeRateSaving, setDischargeRateSaving] = useState(false);
+  const [activePowerSaving, setActivePowerSaving] = useState(false);
 
   // Default slots if snapshot doesn't have them
   // Only 2 charge slots are supported by the inverter registers
@@ -757,6 +765,15 @@ export default function ControlPage() {
       await apiPost('/api/control/discharge-rate', { limit: dischargeRate });
     } catch { /* handled silently */ }
     setDischargeRateSaving(false);
+  };
+
+  const handleActivePowerSave = async () => {
+    if (activePowerRate == null) return;
+    setActivePowerSaving(true);
+    try {
+      await apiPost('/api/control/active-power-rate', { rate: activePowerRate });
+    } catch { /* handled silently */ }
+    setActivePowerSaving(false);
   };
 
   return (
@@ -937,7 +954,7 @@ export default function ControlPage() {
           <div className="space-y-1">
             <div className="flex items-center justify-between">
               <span className="text-text-secondary text-sm">Charge Rate</span>
-              <span className="font-mono text-text-primary text-sm">{chargeRate ?? '—'}%</span>
+              <span className="font-mono text-text-primary text-sm">{chargeRate ?? '—'}%{chargeWatts != null && chargeWatts > 0 ? ` (${(chargeWatts / 1000).toFixed(1)} kW)` : ''}</span>
             </div>
             <div className="flex items-center gap-3">
               <input
@@ -963,7 +980,7 @@ export default function ControlPage() {
           <div className="space-y-1">
             <div className="flex items-center justify-between">
               <span className="text-text-secondary text-sm">Discharge Rate</span>
-              <span className="font-mono text-text-primary text-sm">{dischargeRate ?? '—'}%</span>
+              <span className="font-mono text-text-primary text-sm">{dischargeRate ?? '—'}%{dischargeWatts != null && dischargeWatts > 0 ? ` (${(dischargeWatts / 1000).toFixed(1)} kW)` : ''}</span>
             </div>
             <div className="flex items-center gap-3">
               <input
@@ -981,6 +998,32 @@ export default function ControlPage() {
                 className="px-3 py-1.5 bg-battery/20 text-battery rounded-lg text-xs font-medium hover:bg-battery/30 transition disabled:opacity-50"
               >
                 {dischargeRateSaving ? '...' : 'Save'}
+              </button>
+            </div>
+          </div>
+
+          {/* Inverter Max Output */}
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-text-secondary text-sm">Inverter Max Output</span>
+              <span className="font-mono text-text-primary text-sm">{activePowerRate ?? '—'}%</span>
+            </div>
+            <div className="flex items-center gap-3">
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={5}
+                value={activePowerRate ?? 100}
+                onChange={(e) => setDraftActivePower(Number(e.target.value))}
+                className="flex-1"
+              />
+              <button
+                onClick={handleActivePowerSave}
+                disabled={activePowerSaving}
+                className="px-3 py-1.5 bg-battery/20 text-battery rounded-lg text-xs font-medium hover:bg-battery/30 transition disabled:opacity-50"
+              >
+                {activePowerSaving ? '...' : 'Save'}
               </button>
             </div>
           </div>
