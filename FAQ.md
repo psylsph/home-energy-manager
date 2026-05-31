@@ -21,6 +21,25 @@ This usually means the app can't reach your inverter. Check the following:
 
 ---
 
+### The app can connect but the official GivEnergy app can't (WiFi-UART mode)
+
+If you've recently factory-reset your data adapter (the small WiFi or Ethernet
+dongle connected to your inverter), you may need to check the **WiFi-UART**
+setting on the dongle's internal web page:
+
+1. Find your inverter's IP address and enter it in a browser (you may need to
+   be on the same network with the dongle in access-point mode).
+2. Log in to the dongle's configuration page (default credentials are often
+   printed on the dongle itself).
+3. Look for a **WiFi-UART** or **Working Mode** setting.
+4. Make sure it's set to **Server** — not **Client**.
+
+When the dongle is in **Client** mode, the app (and the official app) can't
+communicate with the inverter even though the cloud portal shows it as online.
+This is a common issue after a factory reset, as the default may be Client.
+
+---
+
 ### I can't access the dashboard from my phone or tablet
 
 The dashboard runs a local web server on port **7337**. To access it from another device:
