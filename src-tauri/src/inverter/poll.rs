@@ -272,6 +272,47 @@ impl AppState {
 /// Compares against the previous snapshot to detect and correct garbled
 /// readings before they reach the frontend or history database.
 /// Returns `true` if any field was sanitized (fallback applied).
+/// Carry forward battery module data from the previous snapshot when the current
+/// poll cycle failed to read one or more BMS modules (Modbus read error or corruption).
+///
+/// Without this, a transient BMS read failure causes the frontend to show empty or
+/// missing module panels, which is jarring. Instead, we keep the last known-good data
+/// until a fresh read succeeds.
+fn carry_forward_battery_modules_with(snap: &mut InverterSnapshot, prev_modules: Option<&[super::model::BatteryModule]>) {
+    if let Some(prev) = prev_modules {
+        if !prev.is_empty() {
+            // If NO modules were read this cycle, carry forward all previous modules.
+            if snap.battery_modules.is_empty() {
+                tracing::debug!(
+                    count = prev.len(),
+                    "Battery modules empty this cycle — carrying forward from previous"
+                );
+                snap.battery_modules = prev.to_vec();
+                return;
+            }
+            // If we got fewer modules than before, fill in the gaps by index.
+            // Modules are identified by their `index` field (0-based).
+            let max_index = snap.battery_modules.iter().map(|m| m.index).max().unwrap_or(0);
+            let prev_max = prev.iter().map(|m| m.index).max().unwrap_or(0);
+            if prev_max > max_index {
+                let present: std::collections::HashSet<usize> =
+                    snap.battery_modules.iter().map(|m| m.index).collect();
+                for prev_mod in prev {
+                    if !present.contains(&prev_mod.index) {
+                        tracing::debug!(
+                            index = prev_mod.index,
+                            "Battery module missing this cycle — carrying forward"
+                        );
+                        snap.battery_modules.push(prev_mod.clone());
+                    }
+                }
+                // Re-sort by index for consistent ordering
+                snap.battery_modules.sort_by_key(|m| m.index);
+            }
+        }
+    }
+}
+
 fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot>, skip_delta: bool) -> bool {
     let mut sanitized = false;
     let max_battery_power: i32 = 10_000; // 10 kW — residential battery limit
@@ -926,10 +967,13 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 // Sanitize against physically impossible values first.
                                 // Skip delta checks during the grace period after connect.
                                 let in_grace = readings_since_connect < GRACE_READINGS;
-                                let sanitized = {
+                                let (sanitized, prev_modules) = {
                                     let prev = state.latest_snapshot.lock().await;
-                                    sanitize_snapshot(&mut snapshot, prev.as_ref(), in_grace)
+                                    let s = sanitize_snapshot(&mut snapshot, prev.as_ref(), in_grace);
+                                    let mods = prev.as_ref().map(|p| p.battery_modules.clone());
+                                    (s, mods)
                                 };
+                                carry_forward_battery_modules_with(&mut snapshot, prev_modules.as_deref());
                                 readings_since_connect += 1;
 
                                 // ---- Auto winter mode ----

@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.13] - 2026-05-31
+
+### Fixed
+
+- **Battery module data disappearing**: When a BMS Modbus read fails or returns
+  fewer modules than the previous poll cycle, the missing module data was
+  completely lost rather than preserved. Added carry-forward logic so the last
+  known-good module data (voltage, SOC, temperature, cell arrays) is kept
+  until a fresh successful read replaces it. Fixes intermittent empty or
+  partial module panels on the Battery page.
+
 ## [0.9.12] - 2026-05-31
 
 ### Added
