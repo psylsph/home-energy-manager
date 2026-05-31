@@ -168,14 +168,12 @@ function ScheduleSlotEditor({
         <span className="text-text-primary text-sm font-medium">Slot {slotIndex + 1}</span>
         <button
           onClick={() => setLocal((l) => ({ ...l, enabled: !l.enabled }))}
-          className={`relative w-9 h-4 rounded-full transition ${
-            local.enabled ? 'bg-battery' : 'bg-bg-elevated'
-          }`}
+          className={`relative w-9 h-4 rounded-full transition ${local.enabled ? 'bg-battery' : 'bg-bg-elevated'
+            }`}
         >
           <span
-            className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition ${
-              local.enabled ? 'left-5' : 'left-0.5'
-            }`}
+            className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition ${local.enabled ? 'left-5' : 'left-0.5'
+              }`}
           />
         </button>
       </div>
@@ -683,17 +681,17 @@ export default function ControlPage() {
     snapshot?.charge_slots?.length != null && snapshot.charge_slots.length >= 2
       ? snapshot.charge_slots.slice(0, 2)
       : [
-          { enabled: false, start_hour: 0, start_minute: 0, end_hour: 6, end_minute: 0, target_soc: 100 },
-          { enabled: false, start_hour: 0, start_minute: 0, end_hour: 6, end_minute: 0, target_soc: 100 },
-        ];
+        { enabled: false, start_hour: 0, start_minute: 0, end_hour: 6, end_minute: 0, target_soc: 100 },
+        { enabled: false, start_hour: 0, start_minute: 0, end_hour: 6, end_minute: 0, target_soc: 100 },
+      ];
 
   const dischargeSlots: ScheduleSlot[] =
     snapshot?.discharge_slots?.length === 2
       ? snapshot.discharge_slots
       : [
-          { enabled: false, start_hour: 16, start_minute: 0, end_hour: 19, end_minute: 0, target_soc: 0 },
-          { enabled: false, start_hour: 16, start_minute: 0, end_hour: 19, end_minute: 0, target_soc: 0 },
-        ];
+        { enabled: false, start_hour: 16, start_minute: 0, end_hour: 19, end_minute: 0, target_soc: 0 },
+        { enabled: false, start_hour: 16, start_minute: 0, end_hour: 19, end_minute: 0, target_soc: 0 },
+      ];
 
   const currentMode = snapshot?.battery_mode ?? 'eco';
   const [requestedMode, setRequestedMode] = useState<BatteryMode | null>(null);
@@ -805,11 +803,10 @@ export default function ControlPage() {
                   if (key === 'eco') handleModeChange('eco');
                   else handleModeChange('timed_demand');
                 }}
-                className={`px-4 py-1.5 text-xs font-medium transition flex items-center gap-1.5 ${
-                  modeToCategory(effectiveMode) === key
+                className={`px-4 py-1.5 text-xs font-medium transition flex items-center gap-1.5 ${modeToCategory(effectiveMode) === key
                     ? 'bg-battery/20 text-battery'
                     : 'text-text-secondary hover:bg-bg-surface'
-                }`}
+                  }`}
               >
                 {modeAction.loading && modeToCategory(requestedMode ?? currentMode) === key && (
                   <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
@@ -832,11 +829,10 @@ export default function ControlPage() {
                 title={tooltip}
                 onClick={() => handleModeChange(key)}
                 disabled={modeAction.loading}
-                className={`px-3 py-3 rounded-lg border text-xs font-medium transition w-full flex items-center justify-center gap-2 ${
-                  isActive
+                className={`px-3 py-3 rounded-lg border text-xs font-medium transition w-full flex items-center justify-center gap-2 ${isActive
                     ? 'bg-battery/20 border-battery text-battery'
                     : 'bg-bg-surface border-transparent hover:border-battery/40 hover:bg-bg-elevated text-text-secondary'
-                } disabled:opacity-50`}
+                  } disabled:opacity-50`}
               >
                 {modeAction.loading && requestedMode === key && (
                   <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
@@ -882,27 +878,24 @@ export default function ControlPage() {
 
       {/* Section 4: Discharge Schedule */}
       {modeToCategory(effectiveMode) === 'timed' && (
-      <section className="space-y-3">
-        <h2 className="text-text-primary font-semibold text-lg">Discharge Schedule</h2>
-        <div className="space-y-3">
-          {dischargeSlots.map((slot, i) => (
-            <ScheduleSlotEditor
-              key={`discharge-${i}-${slot.enabled}-${slot.start_hour}:${slot.start_minute}-${slot.end_hour}:${slot.end_minute}`}
-              slotIndex={i}
-              slot={slot}
-              onSave={handleSlotSave}
-              showTargetSoc={false}
-            />
-          ))}
-        </div>
-      </section>
+        <section className="space-y-3">
+          <h2 className="text-text-primary font-semibold text-lg">Discharge Schedule</h2>
+          <div className="space-y-3">
+            {dischargeSlots.map((slot, i) => (
+              <ScheduleSlotEditor
+                key={`discharge-${i}-${slot.enabled}-${slot.start_hour}:${slot.start_minute}-${slot.end_hour}:${slot.end_minute}`}
+                slotIndex={i}
+                slot={slot}
+                onSave={handleSlotSave}
+                showTargetSoc={false}
+              />
+            ))}
+          </div>
+        </section>
       )}
 
       {/* Section 5: Cosy Charging (dev mode only, Eco only) */}
       {developerMode && modeToCategory(effectiveMode) === 'eco' && <CosyChargingSection enabled={cosyEnabled} onToggle={setCosyEnabled} />}
-
-      {/* Battery Calibration (dev mode only) */}
-      {developerMode && <BatteryCalibrationSection />}
 
       {/* Section 5: Auto Winter Mode */}
       <AutoWinterSection />
@@ -988,6 +981,8 @@ export default function ControlPage() {
             </div>
           </div>
         </div>
+        {/* Battery Calibration (dev mode only) */}
+        {developerMode && <BatteryCalibrationSection />}
       </section>
     </div>
   );

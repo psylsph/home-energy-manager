@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.12] - 2026-05-31
+
+### Added
+
+- **Battery calibration control** (developer mode): HR(29) register for
+  triggering a BMS calibration cycle (discharge → calibrate → charge →
+  balance → set capacity). Accessible via Control page when developer mode
+  is enabled. Includes confirmation dialog and warning banner.
+- **Inverter reboot** (developer mode): HR(163) register for remotely
+  rebooting the inverter. Red danger-styled button with confirmation.
+
 ## [0.9.11] - 2026-05-31
 
 ### Added
