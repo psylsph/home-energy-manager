@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.21] - 2026-06-01
+
+### Added
+
+- **Dynamic log level control**: Developer console now has a Capture Level
+  selector (ERROR/WARN/INFO/DEBUG/TRACE) that controls what the backend
+  captures via `PUT /api/log-level`. Defaults to INFO; switch to DEBUG to
+  see detailed Modbus frame exchange diagnostics (hex dumps, timing, register
+  ranges) when debugging connect issues.
+
+- **Modbus frame hex dump**: Each request sent to the dongle is now logged
+  at DEBUG level with a hex preview of the first 30 bytes, showing the serial
+  number, slave address, and register range in the request.
+
+- **Per-read diagnostic logging**: Register reads log the slave address,
+  register type, range, serial number being used, and response timing at
+  DEBUG level. Failed requests show the full error message.
+
+### Changed
+
+- **Capture layer now independent of stdout filter**: The developer console
+  log ring buffer uses its own level check (inside `LogCaptureLayer`), no
+  longer tied to the terminal's `RUST_LOG` env filter. This means the console
+  can show DEBUG events while the terminal stays at INFO.
+
 ## [0.9.20] - 2026-06-01
 
 ### Fixed

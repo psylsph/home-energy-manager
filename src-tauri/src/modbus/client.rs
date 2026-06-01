@@ -393,18 +393,28 @@ impl ModbusClient {
         let t0 = std::time::Instant::now();
         self.send_raw(frame).await?;
         let send_elapsed = t0.elapsed();
+
+        // Log the raw request frame at debug level. This is essential for
+        // diagnosing dongles that accept TCP but never respond — we need to
+        // see the serial, slave address, and register range we sent.
+        let hex_preview: String = frame.iter().take(30).map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ");
+        tracing::debug!(
+            req_len = frame.len(),
+            send_ms = send_elapsed.as_millis() as u64,
+            "Sent request, awaiting response: [{}]",
+            hex_preview,
+        );
+
         let decoded = self.receive_frame().await?;
         let total_elapsed = t0.elapsed();
 
         // Log response timing at debug level for diagnostics.
         tracing::debug!(
-            req_len = frame.len(),
             resp_slave = decoded.slave,
             resp_func = decoded.function,
             resp_payload_len = decoded.payload.len(),
-            send_ms = send_elapsed.as_millis() as u64,
             total_ms = total_elapsed.as_millis() as u64,
-            "Frame exchange"
+            "Response received"
         );
 
         // Check for Modbus exception response (function code with high bit set)
@@ -520,11 +530,27 @@ impl ModbusClient {
         count: u16,
     ) -> Result<Vec<u16>, ClientError> {
         let expected_fc = register_type.function_code();
+        let reg_type_name = match register_type {
+            RegisterType::Input => "IR",
+            RegisterType::Holding => "HR",
+        };
 
         for attempt in 0..=Self::MAX_STALE_RETRIES {
             // Build the request frame
             let request =
                 framer::build_read_request(&self.serial, self.slave, register_type, start, count);
+
+            // Log the first attempt at info level so it's visible in the
+            // developer console even at default log level.
+            if attempt == 0 {
+                tracing::debug!(
+                    "Reading {reg_type_name} {start}..{} ({} regs) from slave 0x{:02X}, serial={:?}",
+                    start + count - 1,
+                    count,
+                    self.slave,
+                    if self.serial.is_empty() { "<auto-discover>" } else { &self.serial },
+                );
+            }
 
             // Send and receive
             let decoded = self.send_and_receive(&request).await?;

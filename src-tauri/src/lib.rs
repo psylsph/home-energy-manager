@@ -23,11 +23,12 @@ pub fn run() {
                 use tracing_subscriber::prelude::*;
                 let capture_layer = LogCaptureLayer::new(log_ring.clone());
                 let fmt_layer = tracing_subscriber::fmt::layer()
-                    .with_target(false);
-                let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+                    .with_target(false)
+                    .with_filter(
+                        tracing_subscriber::EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+                    );
                 tracing_subscriber::registry()
-                    .with(filter)
                     .with(fmt_layer)
                     .with(capture_layer)
                     .init();
@@ -252,11 +253,12 @@ pub fn run_headless(args: &[String]) {
         use tracing_subscriber::prelude::*;
         let capture_layer = LogCaptureLayer::new(log_ring.clone());
         let fmt_layer = tracing_subscriber::fmt::layer()
-            .with_target(false);
-        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+            .with_target(false)
+            .with_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+            );
         tracing_subscriber::registry()
-            .with(filter)
             .with(fmt_layer)
             .with(capture_layer)
             .init();

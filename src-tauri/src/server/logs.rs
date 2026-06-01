@@ -3,6 +3,7 @@
 //! Provides a ring buffer that stores recent log lines and a
 //! `tracing` subscriber layer that captures formatted output.
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -18,8 +19,14 @@ use serde_json::{json, Value};
 ///
 /// Thread-safe via `parking_lot::Mutex`. Old entries are
 /// evicted when the buffer is full.
+///
+/// Also holds a runtime-adjustable minimum log level that controls
+/// what severity events are actually captured into the buffer.
+/// The frontend developer console can change this via the API.
 pub struct LogRing {
     buf: Mutex<LogRingInner>,
+    /// Minimum log level to capture: 0=ERROR, 1=WARN, 2=INFO, 3=DEBUG, 4=TRACE
+    pub min_level: AtomicU8,
 }
 
 struct LogRingInner {
@@ -38,6 +45,7 @@ impl LogRing {
                 cursor: 0,
                 len: 0,
             }),
+            min_level: AtomicU8::new(2), // default: INFO
         }
     }
 
@@ -90,6 +98,65 @@ pub async fn get_logs(State(state): State<Arc<crate::inverter::poll::AppState>>)
     }))
 }
 
+/// Convert a level string to the atomic u8 value used by `LogRing::min_level`.
+fn level_str_to_u8(level: &str) -> Option<u8> {
+    match level {
+        "ERROR" => Some(0),
+        "WARN" => Some(1),
+        "INFO" => Some(2),
+        "DEBUG" => Some(3),
+        "TRACE" => Some(4),
+        _ => None,
+    }
+}
+
+/// Convert a u8 level value back to its string representation.
+fn level_u8_to_str(level: u8) -> &'static str {
+    match level {
+        0 => "ERROR",
+        1 => "WARN",
+        2 => "INFO",
+        3 => "DEBUG",
+        4 => "TRACE",
+        _ => "INFO",
+    }
+}
+
+/// GET /api/log-level — return current capture level.
+pub async fn get_log_level(State(state): State<Arc<crate::inverter::poll::AppState>>) -> Json<Value> {
+    let level = state.log_ring.min_level.load(std::sync::atomic::Ordering::Relaxed);
+    Json(json!({
+        "ok": true,
+        "level": level_u8_to_str(level),
+        "level_code": level,
+    }))
+}
+
+/// PUT /api/log-level — set the capture level.
+///
+/// Body: `{ "level": "DEBUG" }` — one of ERROR, WARN, INFO, DEBUG, TRACE.
+pub async fn set_log_level(
+    State(state): State<Arc<crate::inverter::poll::AppState>>,
+    axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
+) -> Json<Value> {
+    let level_name = body.get("level").and_then(|v| v.as_str()).unwrap_or("");
+    match level_str_to_u8(level_name) {
+        Some(level_code) => {
+            state.log_ring.min_level.store(level_code, std::sync::atomic::Ordering::Relaxed);
+            tracing::info!(%level_name, "Log capture level changed");
+            Json(json!({
+                "ok": true,
+                "level": level_name,
+                "level_code": level_code,
+            }))
+        }
+        None => Json(json!({
+            "ok": false,
+            "error": format!("Invalid level: {level_name:?}. Use ERROR, WARN, INFO, DEBUG, or TRACE."),
+        })),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tracing layer for log capture
 // ---------------------------------------------------------------------------
@@ -119,23 +186,40 @@ where
         event: &tracing::Event<'_>,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
+        // Check if this event meets the minimum capture level.
+        let event_level = event.metadata().level();
+        let event_code = if *event_level <= tracing::Level::ERROR {
+            0
+        } else if *event_level <= tracing::Level::WARN {
+            1
+        } else if *event_level <= tracing::Level::INFO {
+            2
+        } else if *event_level <= tracing::Level::DEBUG {
+            3
+        } else {
+            4
+        };
+        if event_code > self.ring.min_level.load(Ordering::Relaxed) {
+            return; // below minimum capture level — skip
+        }
+
         let mut buf = String::new();
         let now = chrono::Local::now();
         write!(buf, "{} ", now.format("%H:%M:%S%.3f")).ok();
 
         // Level
-        let level = if event.metadata().level() <= &tracing::Level::ERROR {
+        let level_str = if *event_level <= tracing::Level::ERROR {
             "ERROR"
-        } else if event.metadata().level() <= &tracing::Level::WARN {
+        } else if *event_level <= tracing::Level::WARN {
             "WARN"
-        } else if event.metadata().level() <= &tracing::Level::INFO {
+        } else if *event_level <= tracing::Level::INFO {
             "INFO"
-        } else if event.metadata().level() <= &tracing::Level::DEBUG {
+        } else if *event_level <= tracing::Level::DEBUG {
             "DEBUG"
         } else {
             "TRACE"
         };
-        write!(buf, "{level} ").ok();
+        write!(buf, "{level_str} ").ok();
 
         // Target/module path
         let target = event.metadata().target();

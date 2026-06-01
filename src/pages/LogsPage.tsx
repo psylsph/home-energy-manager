@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { apiGet } from '../lib/api';
+import { apiGet, apiPut } from '../lib/api';
 
 interface LogEntry {
   timestamp: string;
@@ -7,6 +7,8 @@ interface LogEntry {
   message: string;
   raw: string;
 }
+
+const LEVELS = ['ERROR', 'WARN', 'INFO', 'DEBUG', 'TRACE'] as const;
 
 function parseLogLine(line: string): LogEntry {
   // Format: "HH:MM:SS.mmm LEVEL [module] message"
@@ -41,10 +43,23 @@ function levelColor(level: string): string {
 export default function LogsPage() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [filter, setFilter] = useState<string>('');
-  const [levelFilter, setLevelFilter] = useState<string>('all');
+  const [captureLevel, setCaptureLevel] = useState<string>('INFO');
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const containerRef = useRef<HTMLDivElement>(null);
   const prevCountRef = useRef(0);
+
+  // Fetch the current backend capture level on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await apiGet<{ ok: boolean; level: string }>('/api/log-level');
+        if (res.ok) setCaptureLevel(res.level);
+      } catch {
+        // backend not running
+      }
+    })();
+  }, []);
 
   const fetchLogs = useCallback(async () => {
     try {
@@ -59,7 +74,6 @@ export default function LogsPage() {
   // Poll for new logs every 2 seconds
   const logsFetchedRef = useRef(false);
   useEffect(() => {
-    // Initial fetch
     if (!logsFetchedRef.current) {
       logsFetchedRef.current = true;
       fetchLogs();
@@ -76,8 +90,23 @@ export default function LogsPage() {
     prevCountRef.current = logs.length;
   }, [logs, autoScroll]);
 
+  // Change the backend capture level
+  const changeCaptureLevel = async (level: string) => {
+    try {
+      const res = await apiPut<{ ok: boolean; level: string }>('/api/log-level', { level });
+      if (res.ok) {
+        setCaptureLevel(res.level);
+        setStatusMsg(`Capture level set to ${res.level}`);
+        setTimeout(() => setStatusMsg(null), 3000);
+      }
+    } catch {
+      setStatusMsg('Failed to change capture level');
+      setTimeout(() => setStatusMsg(null), 3000);
+    }
+  };
+
+  // Text filter — client-side only, narrows what's displayed
   const filteredLogs = logs.filter((log) => {
-    if (levelFilter !== 'all' && log.level !== levelFilter) return false;
     if (filter && !log.raw.toLowerCase().includes(filter.toLowerCase())) return false;
     return true;
   });
@@ -87,11 +116,6 @@ export default function LogsPage() {
     const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
     const atBottom = scrollHeight - scrollTop - clientHeight < 50;
     setAutoScroll(atBottom);
-  };
-
-  const clearFilter = () => {
-    setFilter('');
-    setLevelFilter('all');
   };
 
   return (
@@ -112,8 +136,29 @@ export default function LogsPage() {
         </div>
       </div>
 
-      {/* Filters */}
+      {/* Controls */}
       <div className="flex items-center gap-3">
+        {/* Backend capture level selector */}
+        <div className="flex items-center gap-2">
+          <span className="text-text-secondary text-xs font-sans shrink-0">Capture:</span>
+          <div className="flex rounded-lg overflow-hidden border border-bg-elevated">
+            {LEVELS.map((level) => (
+              <button
+                key={level}
+                onClick={() => changeCaptureLevel(level)}
+                className={`px-2.5 py-1.5 text-xs font-sans transition-colors ${
+                  captureLevel === level
+                    ? 'bg-flow-active text-bg-base font-semibold'
+                    : 'bg-bg-elevated text-text-secondary hover:text-text-primary'
+                }`}
+              >
+                {level}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Text filter input */}
         <input
           type="text"
           value={filter}
@@ -121,26 +166,20 @@ export default function LogsPage() {
           placeholder="Filter logs…"
           className="flex-1 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
         />
-        <select
-          value={levelFilter}
-          onChange={(e) => setLevelFilter(e.target.value)}
-          className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-sans border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-        >
-          <option value="all">All Levels</option>
-          <option value="ERROR">ERROR</option>
-          <option value="WARN">WARN</option>
-          <option value="INFO">INFO</option>
-          <option value="DEBUG">DEBUG</option>
-        </select>
-        {(filter || levelFilter !== 'all') && (
+        {filter && (
           <button
-            onClick={clearFilter}
-            className="text-text-secondary text-xs font-sans hover:text-text-primary transition-colors"
+            onClick={() => setFilter('')}
+            className="text-text-secondary text-xs font-sans hover:text-text-primary transition-colors shrink-0"
           >
             Clear
           </button>
         )}
       </div>
+
+      {/* Status message */}
+      {statusMsg && (
+        <div className="text-xs text-flow-active font-sans text-center">{statusMsg}</div>
+      )}
 
       {/* Log output */}
       <div

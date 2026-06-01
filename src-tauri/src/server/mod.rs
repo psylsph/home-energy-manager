@@ -59,6 +59,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/discover", get(api::discover))
         // Developer logs
         .route("/api/logs", get(logs::get_logs))
+        .route("/api/log-level", get(logs::get_log_level).put(logs::set_log_level))
         // WebSocket real-time stream
         .route("/ws", get(ws::ws_handler))
         .layer(cors)
