@@ -18,6 +18,24 @@ use super::registers::{RegisterBlock, STANDARD_POLL_BLOCKS};
 /// Maximum response frame size we are willing to accept (bytes).
 const MAX_RESPONSE_SIZE: usize = 4096;
 
+/// Format raw bytes as a compact hex string for diagnostic logging.
+/// Shows up to 64 bytes; truncates with "…" if longer.
+fn dump_hex(data: &[u8]) -> String {
+    use std::fmt::Write;
+    let limit = data.len().min(64);
+    let mut s = String::with_capacity(limit * 3);
+    for (i, b) in data.iter().enumerate().take(limit) {
+        if i > 0 {
+            s.push(' ');
+        }
+        write!(s, "{b:02X}").ok();
+    }
+    if data.len() > 64 {
+        s.push_str(" …");
+    }
+    s
+}
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -330,7 +348,19 @@ impl ModbusClient {
                 .trim_end()
                 .to_string();
             if !discovered.is_empty() {
-                tracing::info!(serial = %discovered, "Auto-discovered dongle serial");
+                let serial_hex: String = full[8..18].iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ");
+                tracing::info!(
+                    serial = %discovered,
+                    serial_raw = %serial_hex,
+                    "Auto-discovered dongle serial"
+                );
+                // Validate: serial should be printable ASCII, not all spaces
+                if discovered.trim().is_empty() || discovered.chars().any(|c| !c.is_ascii_graphic() && c != ' ') {
+                    tracing::warn!(
+                        serial_raw = %serial_hex,
+                        "Auto-discovered serial looks suspicious (non-printable chars)"
+                    );
+                }
                 self.serial = discovered;
                 self.serial_discovered = true;
             }
@@ -338,9 +368,14 @@ impl ModbusClient {
 
         // Decode using the framer
         framer::decode_frame(&full).map_err(|e| {
+            // Hex dump the failed frame for diagnostic analysis.
+            // 19-byte frames suggest TCP segmentation issues or a dongle
+            // that's sending non-standard responses.
+            let hex_bytes = dump_hex(&full);
             tracing::warn!(
                 frame_len = full.len(),
                 error = %e,
+                raw_hex = %hex_bytes,
                 "Frame decode failed"
             );
             ClientError::FrameError(e.to_string())
