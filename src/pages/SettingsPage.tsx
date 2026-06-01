@@ -412,7 +412,7 @@ export default function SettingsPage() {
           />
           <button
             onClick={handleHttpPortSave}
-            className="bg-accent text-white rounded-lg px-4 py-2 text-sm font-sans hover:opacity-90"
+            className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
           >
             Save
           </button>
