@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.23] - 2026-06-01
+
+### Fixed
+
+- **u8 overflow panic in poll loop**: When the dongle returns corrupted data on
+  every poll cycle, the sanitizer re-reads immediately but the
+  `readings_since_connect` counter (u8) still incremented. After 256 consecutive
+  sanitized cycles it overflowed, causing a panic. Changed to `saturating_add(1)`.
+
+- **Suspect auto-discovered serial rejected**: Some dongle firmware versions
+  respond to requests with empty serial (10 spaces) but stop responding entirely
+  once the serial is set. Auto-discovery from a truncated frame (e.g. 19 bytes
+  when 30+ are expected) now marks the serial as suspect — it stays empty for
+  all subsequent requests and is not persisted to settings. A warning is logged
+  suggesting manual serial configuration.
+
 ## [0.9.22] - 2026-06-01
 
 ### Fixed
