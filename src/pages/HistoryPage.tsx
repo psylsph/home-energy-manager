@@ -386,14 +386,14 @@ function ChartCard({ chart, data, range, domain }: {
             domain={domain}
             tickFormatter={(v: number) => formatXAxis(v, range)}
             stroke="#8B949E"
-            tick={{ fontSize: 11 }}
+            tick={{ fontSize: 11, style: { fontWeight: 700 } }}
             tickLine={false}
             axisLine={false}
             minTickGap={40}
           />
           <YAxis
             stroke="#8B949E"
-            tick={{ fontSize: 11 }}
+            tick={{ fontSize: 11, style: { fontWeight: 700 } }}
             tickLine={false}
             axisLine={false}
             domain={chart.yDomain}
