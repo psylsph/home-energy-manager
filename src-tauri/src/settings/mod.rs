@@ -5,7 +5,6 @@
 //! Override with the `GIVENERGY_LOCAL_CONFIG_DIR` environment variable.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
 
@@ -401,7 +400,7 @@ mod tests {
     #[test]
     fn cosy_empty_slots_array_gives_empty_vec() {
         let json = r#"{"slots":[]}"#;
-        let v: Value = serde_json::from_str(json).unwrap();
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
         let mapped: Vec<CosySlot> = v["slots"]
             .as_array()
             .unwrap()
