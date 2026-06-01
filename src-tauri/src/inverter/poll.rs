@@ -983,6 +983,10 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     if let Err(e) = persist.save() {
                                         tracing::warn!("Failed to persist discovered serial: {e}");
                                     }
+                                } else if client.serial_is_suspect() {
+                                    tracing::warn!(
+                                        "Auto-discovered serial is suspect (truncated frame) — keeping empty serial for all requests. If the connection fails, try setting the serial manually in Settings."
+                                    );
                                 }
 
                                 // --- Battery BMS module reads ---

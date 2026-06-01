@@ -97,6 +97,11 @@ pub struct ModbusClient {
     serial: String,
     /// Whether the serial was auto-discovered from a response.
     serial_discovered: bool,
+    /// Whether the auto-discovered serial is suspect (extracted from a
+    /// truncated/partial frame). When true, the serial should NOT be used
+    /// for subsequent requests — some dongle firmware versions stop
+    /// responding once the serial is set.
+    serial_suspect: bool,
     /// Modbus slave address (typically 0x32).
     slave: u8,
     /// Underlying TCP stream, `None` when disconnected.
@@ -117,6 +122,7 @@ impl ModbusClient {
             port,
             serial: serial.to_string(),
             serial_discovered: false,
+            serial_suspect: false,
             slave: 0x32, // default GivEnergy slave address
             stream: None,
             timeout: Duration::from_secs(15),
@@ -131,6 +137,13 @@ impl ModbusClient {
     /// Return whether the serial was auto-discovered from a response.
     pub fn serial_was_discovered(&self) -> bool {
         self.serial_discovered
+    }
+
+    /// Return whether the auto-discovered serial is suspect (extracted from
+    /// a truncated or partial frame). When true, the serial was not set and
+    /// empty serial will be used for all requests.
+    pub fn serial_is_suspect(&self) -> bool {
+        self.serial_suspect
     }
 
     /// Update the serial (e.g. after auto-discovery).
@@ -352,7 +365,8 @@ impl ModbusClient {
                 tracing::info!(
                     serial = %discovered,
                     serial_raw = %serial_hex,
-                    "Auto-discovered dongle serial"
+                    frame_len = full.len(),
+                    "Auto-discovered dongle serial (pending decode validation)"
                 );
                 // Validate: serial should be printable ASCII, not all spaces
                 if discovered.trim().is_empty() || discovered.chars().any(|c| !c.is_ascii_graphic() && c != ' ') {
@@ -361,17 +375,44 @@ impl ModbusClient {
                         "Auto-discovered serial looks suspicious (non-printable chars)"
                     );
                 }
-                self.serial = discovered;
-                self.serial_discovered = true;
+
+                // Decode the frame to verify it's complete.
+                // We ONLY accept the discovered serial if the full frame
+                // decodes successfully. A truncated frame (like 19 bytes
+                // where the inner PDU is missing) means the serial is
+                // suspect — using it for subsequent requests causes the
+                // dongle to stop responding on some firmware versions.
+                let hex_bytes = dump_hex(&full);
+                match framer::decode_frame(&full) {
+                    Ok(decoded) => {
+                        tracing::info!(
+                            serial = %discovered,
+                            "Auto-discovered serial confirmed — frame valid"
+                        );
+                        self.serial = discovered;
+                        self.serial_discovered = true;
+                        return Ok(decoded);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            frame_len = full.len(),
+                            error = %e,
+                            raw_hex = %hex_bytes,
+                            "Auto-discovered serial REJECTED — frame truncated, keeping empty serial"
+                        );
+                        self.serial_suspect = true;
+                        // Keep serial empty for subsequent requests
+                        return Err(ClientError::FrameError(format!(
+                            "auto-discover frame truncated: {e}"
+                        )));
+                    }
+                }
             }
         }
 
-        // Decode using the framer
+        // Normal path: no auto-discovery needed or failed — just decode
+        let hex_bytes = dump_hex(&full);
         framer::decode_frame(&full).map_err(|e| {
-            // Hex dump the failed frame for diagnostic analysis.
-            // 19-byte frames suggest TCP segmentation issues or a dongle
-            // that's sending non-standard responses.
-            let hex_bytes = dump_hex(&full);
             tracing::warn!(
                 frame_len = full.len(),
                 error = %e,
