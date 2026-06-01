@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.18] - 2026-06-01
+
+### Fixed
+
+- **Bold axis labels**: History chart axis ticks now correctly render bold
+  (Recharts requires `fontWeight` inside a `style` object, not as a direct prop).
+
 ## [0.9.17] - 2026-06-01
 
 ### Added
