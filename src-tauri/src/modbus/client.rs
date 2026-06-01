@@ -101,7 +101,7 @@ impl ModbusClient {
             serial_discovered: false,
             slave: 0x32, // default GivEnergy slave address
             stream: None,
-            timeout: Duration::from_secs(5),
+            timeout: Duration::from_secs(10),
         }
     }
 
@@ -138,15 +138,34 @@ impl ModbusClient {
         }
 
         let addr = format!("{}:{}", self.host, self.port);
+        tracing::info!("Connecting to {addr} ...",);
         let stream = tokio::time::timeout(self.timeout, TcpStream::connect(&addr))
             .await
             .map_err(|_| ClientError::Timeout)?
             .map_err(|e| ClientError::ConnectionFailed(e.to_string()))?;
 
-        // Set the read/write timeout on the stream
+        // Set TCP_NODELAY to minimise latency (disable Nagle's algorithm).
         stream
             .set_nodelay(true)
             .map_err(|e| ClientError::ConnectionFailed(e.to_string()))?;
+
+        // Enable TCP keepalive so that dead connections (dongle power-cycled,
+        // network change, etc.) are detected within ~15 seconds rather than
+        // hanging until the per-read timeout expires.
+        let keepalive = socket2::SockRef::from(&stream);
+        let ka_conf = socket2::TcpKeepalive::new()
+            .with_time(std::time::Duration::from_secs(10))
+            .with_interval(std::time::Duration::from_secs(5));
+        if let Err(e) = keepalive.set_tcp_keepalive(&ka_conf) {
+            tracing::debug!("Failed to set TCP keepalive: {e} (non-fatal)");
+        }
+
+        // Log connection details for diagnostics.
+        let local = stream.local_addr().map(|a| a.to_string()).unwrap_or_default();
+        let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+        tracing::info!(
+            "TCP connected: local={local}, peer={peer}, nodelay=true, keepalive=10s"
+        );
 
         self.stream = Some(stream);
         Ok(())
@@ -216,27 +235,88 @@ impl ModbusClient {
 
         // Read the 6-byte MBAP header
         let mut header_buf = [0u8; 6];
-        tokio::time::timeout(self.timeout, stream.read_exact(&mut header_buf))
-            .await
-            .map_err(|_| ClientError::Timeout)?
-            .map_err(|e| ClientError::ReceiveFailed(e.to_string()))?;
+        let header_result = tokio::time::timeout(self.timeout, stream.read_exact(&mut header_buf)).await;
+        match &header_result {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                let kind = e.kind();
+                tracing::warn!(
+                    error = %e,
+                    ?kind,
+                    "TCP read error while reading MBAP header"
+                );
+                return Err(ClientError::ReceiveFailed(format!(
+                    "reading MBAP header: {e} (kind={kind:?})"
+                )));
+            }
+            Err(_) => {
+                tracing::warn!(
+                    timeout_secs = self.timeout.as_secs(),
+                    "Timeout waiting for MBAP header — dongle not responding"
+                );
+                return Err(ClientError::Timeout);
+            }
+        }
 
         // Parse length field (big-endian u16 at bytes 4-5).
         let length = u16::from_be_bytes([header_buf[4], header_buf[5]]) as usize;
 
+        // Sanity-check the MBAP header before committing to a large read.
+        // The GivEnergy protocol uses transaction ID 0x5959 and protocol ID 0x0001.
+        // A corrupted frame from stale TCP buffers may have garbage here.
+        let txn_id = u16::from_be_bytes([header_buf[0], header_buf[1]]);
+        let proto_id = u16::from_be_bytes([header_buf[2], header_buf[3]]);
+        if txn_id != 0x5959 || proto_id != 0x0001 {
+            tracing::warn!(
+                "Suspicious MBAP header: txn=0x{txn_id:04X} proto=0x{proto_id:04X} len={length} — likely stale/corrupted frame"
+            );
+        }
+
         if length > MAX_RESPONSE_SIZE {
+            tracing::error!(
+                length,
+                max = MAX_RESPONSE_SIZE,
+                "MBAP length field exceeds maximum — possible frame corruption or MTU issue"
+            );
             return Err(ClientError::InvalidResponse(format!(
-                "response length {} exceeds maximum {}",
-                length, MAX_RESPONSE_SIZE
+                "response length {length} exceeds maximum {MAX_RESPONSE_SIZE}"
             )));
+        }
+
+        if length < 4 {
+            // Need at least unit_id(1) + func(1) + inner_pdu(0+) + CRC(2)
+            tracing::warn!(
+                length,
+                "MBAP length field unusually small — possible frame corruption"
+            );
         }
 
         // Read the remaining `length` bytes (everything after the 6-byte MBAP header).
         let mut rest = vec![0u8; length];
-        tokio::time::timeout(self.timeout, stream.read_exact(&mut rest))
-            .await
-            .map_err(|_| ClientError::Timeout)?
-            .map_err(|e| ClientError::ReceiveFailed(e.to_string()))?;
+        let body_result = tokio::time::timeout(self.timeout, stream.read_exact(&mut rest)).await;
+        match &body_result {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                let kind = e.kind();
+                tracing::warn!(
+                    error = %e,
+                    ?kind,
+                    length,
+                    "TCP read error while reading frame body (MBAP len={length})"
+                );
+                return Err(ClientError::ReceiveFailed(format!(
+                    "reading frame body (len={length}): {e} (kind={kind:?})"
+                )));
+            }
+            Err(_) => {
+                tracing::warn!(
+                    timeout_secs = self.timeout.as_secs(),
+                    length,
+                    "Timeout reading frame body (MBAP len={length}) — partial frame from dongle"
+                );
+                return Err(ClientError::Timeout);
+            }
+        }
 
         // Reassemble the complete frame
         let mut full = Vec::with_capacity(6 + length);
@@ -257,7 +337,14 @@ impl ModbusClient {
         }
 
         // Decode using the framer
-        framer::decode_frame(&full).map_err(|e| ClientError::FrameError(e.to_string()))
+        framer::decode_frame(&full).map_err(|e| {
+            tracing::warn!(
+                frame_len = full.len(),
+                error = %e,
+                "Frame decode failed"
+            );
+            ClientError::FrameError(e.to_string())
+        })
     }
 
     /// Drain any complete response frames buffered in the TCP socket.
@@ -303,8 +390,22 @@ impl ModbusClient {
     /// Convenience wrapper that sends a request and reads one response.
     /// Checks for Modbus exception responses and returns `Err` for them.
     async fn send_and_receive(&mut self, frame: &[u8]) -> Result<DecodedFrame, ClientError> {
+        let t0 = std::time::Instant::now();
         self.send_raw(frame).await?;
+        let send_elapsed = t0.elapsed();
         let decoded = self.receive_frame().await?;
+        let total_elapsed = t0.elapsed();
+
+        // Log response timing at debug level for diagnostics.
+        tracing::debug!(
+            req_len = frame.len(),
+            resp_slave = decoded.slave,
+            resp_func = decoded.function,
+            resp_payload_len = decoded.payload.len(),
+            send_ms = send_elapsed.as_millis() as u64,
+            total_ms = total_elapsed.as_millis() as u64,
+            "Frame exchange"
+        );
 
         // Check for Modbus exception response (function code with high bit set)
         if decoded.function >= 0x80 {
@@ -641,10 +742,34 @@ impl ModbusClient {
                 super::registers::RegisterType::Holding => RegisterType::Holding,
             };
 
-            let data = self
+            let t0 = std::time::Instant::now();
+            match self
                 .read_registers(reg_type, block.start, block.count)
-                .await?;
-            results.push(BlockRead { block, data });
+                .await
+            {
+                Ok(data) => {
+                    tracing::debug!(
+                        block = block.name,
+                        start = block.start,
+                        count = block.count,
+                        received = data.len(),
+                        elapsed_ms = t0.elapsed().as_millis() as u64,
+                        "Block read OK"
+                    );
+                    results.push(BlockRead { block, data });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        block = block.name,
+                        start = block.start,
+                        count = block.count,
+                        elapsed_ms = t0.elapsed().as_millis() as u64,
+                        error = %e,
+                        "Block read FAILED"
+                    );
+                    return Err(e);
+                }
+            }
         }
 
         Ok(results)

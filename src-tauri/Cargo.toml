@@ -1,6 +1,6 @@
 [package]
 name = "givenergy-local"
-version = "0.9.19"
+version = "0.9.20"
 description = "GivEnergy inverter local monitoring and control"
 authors = ["Stuart Harding"]
 license = "MIT"
@@ -55,3 +55,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Efficient mutex for log ring
 parking_lot = "0.12"
+
+# TCP socket options (keepalive)
+socket2 = { version = "0.5", features = ["all"] }

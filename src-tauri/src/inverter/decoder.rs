@@ -122,7 +122,7 @@ fn decode_timeslot(data: &[u16], start_idx: usize, end_idx: usize) -> ScheduleSl
 ///
 /// Each register holds 2 Latin-1 characters (high byte first, low byte second).
 /// `count` is the number of registers (so 5 registers = 10 characters).
-fn decode_serial(data: &[u16], start: usize, count: usize) -> String {
+pub fn decode_serial(data: &[u16], start: usize, count: usize) -> String {
     let mut s = String::with_capacity(count * 2);
     for i in start..start + count {
         let reg = get_reg(data, i);

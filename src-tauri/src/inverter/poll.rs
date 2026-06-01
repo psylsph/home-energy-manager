@@ -773,6 +773,53 @@ fn check_auto_winter(
     None
 }
 
+/// Validate raw battery BMS register data to reject garbage from non-existent
+/// batteries on multi-battery probe addresses (0x33-0x37).
+///
+/// The dongle can return stale or corrupted data for addresses that don't have
+/// a real battery. The SOC check (`soc > 0 && soc <= 100`) isn't sufficient
+/// because garbage data can produce a non-zero SOC. This function checks:
+///
+/// 1. **Serial number** (IR 110-114, 5 regs) — must contain printable ASCII
+///    characters (not all whitespace). A non-existent battery produces empty
+///    or non-printable serials.
+///
+/// 2. **Module voltage** (IR 82-83, uint32 mV) — must be 30-65V. LV batteries
+///    typically operate at 45-58V. Garbage from non-existent batteries produces
+///    either 0V or extreme values.
+///
+/// 3. **Calibrated capacity** (IR 84-85, uint32 0.01 Ah) — must be > 0.
+///    A non-existent battery returns 0.
+fn validate_battery_bms(data: &[u16]) -> bool {
+    // 1. Serial number must be printable and non-empty
+    let serial = crate::inverter::decoder::decode_serial(data, 110 - 60, 5);
+    let trimmed = serial.trim();
+    if trimmed.is_empty() || trimmed.len() < 4 {
+        return false;
+    }
+    if !trimmed.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
+        return false;
+    }
+
+    // 2. Module voltage: IR(82-83) uint32 milli-V → V
+    let v_raw = ((data.get(82 - 60).copied().unwrap_or(0) as u32) << 16)
+        | (data.get(83 - 60).copied().unwrap_or(0) as u32);
+    let voltage = v_raw as f32 * 0.001;
+    if !(30.0..=65.0).contains(&voltage) {
+        return false;
+    }
+
+    // 3. Calibrated capacity: IR(84-85) uint32 0.01 Ah → Ah
+    let cap_raw = ((data.get(84 - 60).copied().unwrap_or(0) as u32) << 16)
+        | (data.get(85 - 60).copied().unwrap_or(0) as u32);
+    let capacity_ah = cap_raw as f32 * 0.01;
+    if capacity_ah <= 0.0 {
+        return false;
+    }
+
+    true
+}
+
 pub async fn run_poll_loop(state: Arc<AppState>) {
     let mut backoff = Duration::from_secs(5);
 
@@ -826,8 +873,21 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // multiple warmup reads because a single discard isn't enough —
                 // the dongle can return corrupted data for several reads.
                 for i in 0..3 {
-                    tracing::debug!("Warmup read {}/3 — discarding", i + 1);
-                    let _ = client.read_all_standard().await;
+                    match client.read_all_standard().await {
+                        Ok(blocks) => {
+                            tracing::debug!(
+                                "Warmup read {}/3 — OK ({} blocks)",
+                                i + 1,
+                                blocks.len()
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Warmup read {}/3 — FAILED: {e}",
+                                i + 1,
+                            );
+                        }
+                    }
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
 
@@ -983,18 +1043,27 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     ).await {
                                         Ok(data) => {
                                             let soc = *data.get(100 - 60).unwrap_or(&0) as u8;
-                                            if soc <= 100 && soc > 0 {
+                                            if soc > 0 && soc <= 100 && validate_battery_bms(&data) {
                                                 crate::inverter::decoder::decode_battery_block_into(
                                                     &data, i + 1, &mut snapshot, "",
                                                 );
-                                                tracing::debug!("Battery #{} BMS read OK (addr 0x{:02X})", i + 2, addr);
+                                                tracing::info!(
+                                                    "Battery #{} detected at addr 0x{:02X} (SOC={}%)",
+                                                    i + 2, addr, soc
+                                                );
                                             } else {
-                                                tracing::debug!("Battery addr 0x{:02X}: SOC={} — not present", addr, soc);
+                                                tracing::debug!(
+                                                    "Battery addr 0x{:02X}: SOC={} — not present",
+                                                    addr, soc
+                                                );
                                                 break;
                                             }
                                         }
-                                        Err(_) => {
-                                            tracing::debug!("Battery addr 0x{:02X}: no response", addr);
+                                        Err(e) => {
+                                            tracing::debug!(
+                                                "Battery addr 0x{:02X}: no response: {e}",
+                                                addr
+                                            );
                                             break;
                                         }
                                     }
@@ -1031,6 +1100,16 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 };
                                 carry_forward_battery_modules_with(&mut snapshot, prev_modules.as_deref());
                                 readings_since_connect += 1;
+
+                                if readings_since_connect == 1 {
+                                    tracing::info!(
+                                        soc = snapshot.soc,
+                                        solar_w = snapshot.solar_power,
+                                        battery_w = snapshot.battery_power,
+                                        grid_w = snapshot.grid_power,
+                                        "First poll read after connect — data is flowing"
+                                    );
+                                }
 
                                 // ---- Auto winter mode ----
                                 {
@@ -1175,7 +1254,15 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 
                                 (true, sanitized)
                             }
-                            Err(_) => (false, false),
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    consecutive_failures = consecutive_failures + 1,
+                                    max = MAX_CONSECUTIVE_FAILURES,
+                                    "Poll read failed"
+                                );
+                                (false, false)
+                            }
                         }
                     }.await;
 
@@ -1248,6 +1335,12 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 }
 
                 // ---- Disconnected (fell out of inner loop) ----
+                tracing::warn!(
+                    host = %settings.host,
+                    consecutive_failures,
+                    max_failures = MAX_CONSECUTIVE_FAILURES,
+                    "Disconnecting from inverter — will reconnect"
+                );
                 client.disconnect().await;
 
                 // Clear the latest snapshot so the next connection starts fresh.
@@ -1258,7 +1351,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     *latest = None;
                 }
 
-                tracing::warn!("Disconnected from inverter – will reconnect");
+                tracing::debug!("Disconnected — entering reconnect cycle");
 
                 {
                     let mut cs = state.connection_state.lock().await;

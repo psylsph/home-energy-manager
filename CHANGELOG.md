@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.20] - 2026-06-01
+
+### Fixed
+
+- **Ghost battery modules**: Battery probe loop at addresses 0x33-0x37 now
+  validates serial number (printable ASCII, ≥4 chars), module voltage (30-65V),
+  and calibrated capacity (>0 Ah) before accepting a module. Previously only
+  SOC range was checked, which allowed garbage data from non-existent batteries
+  to appear as a third phantom module with rubbish values.
+
+- **Poll error swallowing**: Failed poll reads now log the full error message
+  (timeout, frame decode, Modbus exception, etc.) instead of silently
+  incrementing a failure counter. This makes the developer console actually
+  useful for diagnosing connect-read-disconnect loops.
+
+### Changed
+
+- **TCP timeout increased from 5s to 10s**: The GivEnergy dongle has a slow
+  processor and on some networks (WiFi bridges, VPNs) 5 seconds was marginal
+  for individual frame reads. Both the TCP connect and per-read timeouts are
+  now 10 seconds.
+
+- **TCP keepalive enabled**: Connections now use TCP keepalive (10s idle, 5s
+  interval) so dead connections (dongle power-cycled, network change) are
+  detected promptly instead of hanging until the timeout expires.
+
+### Added
+
+- **Developer console diagnostics**: Warmup reads now log success/failure per
+  read. The first successful poll after connect logs SOC and power values.
+  Per-block read timing (request/response sizes, round-trip ms) is logged at
+  debug level. MBAP header anomalies (wrong transaction/protocol ID, suspicious
+  length) are logged as warnings. TCP read errors include the `io::ErrorKind`.
+
 ## [0.9.19] - 2026-06-01
 
 ### Fixed
