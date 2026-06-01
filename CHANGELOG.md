@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.22] - 2026-06-01
+
+### Fixed
+
+- **HTTP Port Save button invisible**: Button used `bg-accent` which doesn't
+  exist in this project's Tailwind theme — the button had no background colour.
+  Changed to `bg-flow-active` to match all other primary action buttons.
+
+- **Log line spacing**: Timestamp and level text had a large gap (`gap-3`)
+  making them appear disconnected. Reduced to `gap-1` and widened columns
+  for a compact, adjacent layout.
+
+- **HTTP Port input white border**: Input border used `border-border-primary`
+  which resolved to white on some themes. Changed to `border-transparent`.
+
+- **TCP timeout increased to 15s**: Diagnostics revealed the dongle
+  consistently takes ~10.3s per read. The previous 10s timeout was being
+  hit by milliseconds on every request, causing constant disconnect loops.
+  Increased to 15s to provide adequate headroom.
+
 ## [0.9.21] - 2026-06-01
 
 ### Added
