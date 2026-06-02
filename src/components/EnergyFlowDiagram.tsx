@@ -30,6 +30,12 @@ function modeLabel(mode: string): string {
   return MODE_LABELS[mode] || mode;
 }
 
+/** Battery mode label, overridden to "Cosy" when the cosy timer is active. */
+function modeDisplayLabel(mode: string, cosyActive: boolean): string {
+  if (cosyActive && (mode === 'eco' || mode === 'eco_paused')) return 'Cosy';
+  return modeLabel(mode);
+}
+
 // ---------------------------------------------------------------------------
 // Flow line
 // ---------------------------------------------------------------------------
@@ -293,7 +299,7 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
           fill="#8B949E"
           style={{ fontSize: 10, fontFamily: 'sans-serif' }}
         >
-          {modeLabel(s.battery_mode)}
+          {modeDisplayLabel(s.battery_mode, s.cosy_active)}
         </text>
         <FlowNode
           {...NODES.inverter}

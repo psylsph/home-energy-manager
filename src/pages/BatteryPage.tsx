@@ -35,6 +35,12 @@ const BATTERY_MODE_LABELS: Record<string, string> = {
   export_paused: 'Export Paused',
 };
 
+/** Override mode label when cosy timer is actively charging. */
+function modeDisplayLabel(mode: string, cosyActive: boolean): string {
+  if (cosyActive && (mode === 'eco' || mode === 'eco_paused')) return 'Cosy';
+  return BATTERY_MODE_LABELS[mode] ?? mode;
+}
+
 export default function BatteryPage() {
   const { snapshot } = useInverterStore();
   const [expandedModule, setExpandedModule] = useState<number | null>(null);
@@ -106,7 +112,7 @@ export default function BatteryPage() {
             <span className="text-text-secondary">Temperature</span>
             <span className="text-text-primary font-mono text-right">{formatTemp(s.battery_temperature)}</span>
             <span className="text-text-secondary">Mode</span>
-            <span className="text-text-primary font-mono text-right">{BATTERY_MODE_LABELS[s.battery_mode] ?? s.battery_mode}</span>
+            <span className="text-text-primary font-mono text-right">{modeDisplayLabel(s.battery_mode, s.cosy_active)}</span>
             <span className="text-text-secondary">Reserve</span>
             <span className="text-text-primary font-mono text-right">{formatPercent(s.battery_reserve)}</span>
             <span className="text-text-secondary">Charged Today</span>

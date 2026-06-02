@@ -45,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   banner explaining the inverter is locked to Eco mode. Active cosy slots
   are highlighted with a pulsing green dot and "Charging" label.
 
+- **Mode display shows "Cosy" when cosy timer is active**: Status page
+  (energy flow diagram) and Battery page now display "Cosy" instead of
+  "Eco" or "Eco Paused" when the cosy timer is actively charging. The
+  underlying inverter mode is unchanged — only the display label is
+  overridden.
+
 - **SVG crash on corrupted data (React error #31)**: When the snapshot contains
   non-string/number values due to register corruption, the `EnergyFlowDiagram`
   SVG text elements now coerce props to safe types before rendering. Prevents
