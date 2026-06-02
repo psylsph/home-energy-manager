@@ -807,8 +807,7 @@ export default function ControlPage() {
 
   return (
     <div className="flex flex-col gap-6 max-w-2xl mx-auto px-4 py-6">
-      {/* Section 1: Quick Actions — hidden when cosy mode is active */}
-      {!cosyEnabled && (
+      {/* Section 1: Quick Actions */}
       <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Quick Actions</h2>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -837,14 +836,18 @@ export default function ControlPage() {
           />
         </div>
       </section>
-      )}
 
 
-      {/* Section 2: Battery Mode — hidden when cosy mode is active */}
-      {!cosyEnabled ? (
+      {/* Section 2: Battery Mode */}
       <section className="space-y-3">
         <div className="flex items-center gap-3">
           <h2 className="text-text-primary font-semibold text-lg">Battery Mode</h2>
+          {cosyActive && (
+            <span className="text-xs text-battery font-semibold bg-battery/10 px-2 py-0.5 rounded-full flex items-center gap-1">
+              <span className="inline-block w-1.5 h-1.5 bg-battery rounded-full animate-pulse" />
+              Cosy Charging
+            </span>
+          )}
           <div className="flex rounded-lg border border-bg-elevated overflow-hidden">
             {([
               { key: 'eco' as ModeCategory, label: 'Eco' },
@@ -884,7 +887,7 @@ export default function ControlPage() {
                 disabled={modeAction.loading}
                 className={`px-3 py-3 rounded-lg border text-xs font-medium transition w-full flex items-center justify-center gap-2 ${isActive
                     ? 'bg-battery/20 border-battery text-battery'
-                    : 'bg-bg-surface border-transparent hover:border-battery/40 hover:bg-bg-elevated text-text-secondary'
+                    : 'bg-bg-surface border-transparent hover:border-battery/40 hover:bg-bg-bg-elevated text-text-secondary'
                   } disabled:opacity-50`}
               >
                 {modeAction.loading && requestedMode === key && (
@@ -911,22 +914,6 @@ export default function ControlPage() {
           <p className="text-red-400 text-sm">{modeAction.error}</p>
         )}
       </section>
-      ) : (
-        <section className="space-y-3">
-          <div className="flex items-center gap-3">
-            <h2 className="text-text-primary font-semibold text-lg">Battery Mode</h2>
-            <span className="text-xs text-battery font-semibold bg-battery/10 px-2 py-0.5 rounded-full">
-              Cosy Active
-            </span>
-          </div>
-          <div className="bg-bg-surface rounded-xl p-4 border border-battery/20">
-            <p className="text-text-secondary text-sm">
-              Cosy charging is active — the inverter is locked to Cosy mode.
-              Battery controls are managed by the Cosy timer below.
-            </p>
-          </div>
-        </section>
-      )}
 
 
       {/* Section 3: Charge Schedule */}
@@ -945,8 +932,8 @@ export default function ControlPage() {
         </div>
       </section>}
 
-      {/* Section 4: Discharge Schedule */}
-      {modeToCategory(effectiveMode) === 'timed' && (
+      {/* Section 4: Discharge Schedule — hidden when cosy mode is enabled */}
+      {!cosyEnabled && modeToCategory(effectiveMode) === 'timed' && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold text-lg">Discharge Schedule</h2>
           <div className="space-y-3">
