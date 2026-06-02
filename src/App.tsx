@@ -7,6 +7,7 @@ import ControlPage from './pages/ControlPage';
 import SettingsPage from './pages/SettingsPage';
 import HistoryPage from './pages/HistoryPage';
 import LogsPage from './pages/LogsPage';
+import SolarPage from './pages/SolarPage';
 import ErrorBoundary from './components/ErrorBoundary';
 
 function ConnectionIndicator() {
@@ -29,6 +30,7 @@ function ConnectionIndicator() {
 const NAV_ITEMS = [
   { to: '/', label: 'Status', icon: StatusIcon },
   { to: '/battery', label: 'Battery', icon: BatteryIcon },
+  { to: '/solar', label: 'Solar', icon: SolarIcon },
   { to: '/history', label: 'History', icon: HistoryIcon },
   { to: '/control', label: 'Control', icon: ControlIcon },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
@@ -77,6 +79,15 @@ function SettingsIcon() {
   );
 }
 
+function SolarIcon() {
+  return (
+    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+      <circle cx="12" cy="12" r="3" />
+      <path strokeLinecap="round" d="M12 2v2m0 16v2m-9-9H1m20 0h-2M4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M4.93 19.07l1.41-1.41m11.32-11.32l1.41-1.41" />
+    </svg>
+  );
+}
+
 function LogsIcon() {
   return (
     <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
@@ -109,6 +120,7 @@ function Layout() {
           <Route path="/history" element={<ErrorBoundary><HistoryPage /></ErrorBoundary>} />
           <Route path="/control" element={<ErrorBoundary><ControlPage /></ErrorBoundary>} />
           <Route path="/settings" element={<ErrorBoundary><SettingsPage /></ErrorBoundary>} />
+          <Route path="/solar" element={<ErrorBoundary><SolarPage /></ErrorBoundary>} />
           {developerMode && <Route path="/logs" element={<ErrorBoundary><LogsPage /></ErrorBoundary>} />}
         </Routes>
       </main>

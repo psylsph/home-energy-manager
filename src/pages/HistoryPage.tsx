@@ -439,6 +439,73 @@ function ChartCard({ chart, data, range, domain }: {
 }
 
 // ---------------------------------------------------------------------------
+// CSV Export
+// ---------------------------------------------------------------------------
+
+function exportCSV(charts: ChartDef[], data: Record<string, TimePoint[]>, range: HistoryRange, offset: number, onExported: () => void) {
+  // Collect all unique field names across all charts
+  const allFields = [...new Set(charts.flatMap((c) => [
+    ...c.fields.map((f) => f.field),
+    ...(c.requires ?? []),
+  ]))];
+
+  // Build merged time series
+  const timestamps = new Set<number>();
+  for (const field of allFields) {
+    const pts = data[field];
+    if (pts) for (const p of pts) timestamps.add(p.t);
+  }
+  const sortedTs = [...timestamps].sort((a, b) => a - b);
+
+  // Handle preprocess for cost tab
+  const costCharts = charts.filter((c) => c.preprocess);
+  let processed: Record<string, number>[] = [];
+  if (costCharts.length > 0) {
+    const rawMerged = sortedTs.map((t) => {
+      const row: Record<string, number> = { t };
+      for (const f of allFields) {
+        const pt = data[f]?.find((p) => p.t === t);
+        if (pt) row[f] = pt.v;
+      }
+      return row;
+    });
+    for (const c of costCharts) {
+      if (c.preprocess) processed = c.preprocess(rawMerged);
+    }
+  }
+
+  // Build header + rows
+  const header = ['Timestamp', ...allFields];
+  const rows = sortedTs.map((t) => {
+    const processedRow = processed.find((r) => r.t === t);
+    const iso = new Date(t).toISOString();
+    const values = allFields.map((f) => {
+      if (processedRow && f in processedRow) return processedRow[f]?.toString() ?? '';
+      const pt = data[f]?.find((p) => p.t === t);
+      return pt?.v?.toString() ?? '';
+    });
+    return [iso, ...values];
+  });
+
+  const csvContent = [header.join(','), ...rows.map((r) => r.join(','))].join('\n');
+
+  // Use data URI for maximum compatibility
+  const encoded = encodeURIComponent(csvContent);
+  const dataUri = 'data:text/csv;charset=utf-8,' + encoded;
+  const label = charts[0]?.key ?? 'export';
+  const windowLabel = formatWindowLabel(range, offset).replace(/[^\w-]+/g, '_');
+
+  const a = document.createElement('a');
+  a.href = dataUri;
+  a.download = `givenergy_${label}_${windowLabel}.csv`;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  onExported();
+}
+
+// ---------------------------------------------------------------------------
 // History Page
 // ---------------------------------------------------------------------------
 
@@ -539,6 +606,14 @@ export default function HistoryPage() {
 
   const charts = getCharts(tab, importTariffCfg, exportTariffCfg);
   const hasData = Object.values(data).some((pts) => pts.length > 0);
+  const [csvToast, setCsvToast] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (csvToast) {
+      const id = setTimeout(() => setCsvToast(null), 3000);
+      return () => clearTimeout(id);
+    }
+  }, [csvToast]);
 
   return (
     <div className="flex flex-col gap-4 max-w-4xl mx-auto">
@@ -594,7 +669,28 @@ export default function HistoryPage() {
         >
           Newer ▶
         </button>
+        <span className="w-px h-4 bg-white/10 mx-1" />
+        <button
+          onClick={() => exportCSV(charts, data, range, offset, () => setCsvToast('CSV exported — ' + formatWindowLabel(range, offset)))}
+          disabled={!hasData}
+          className="shrink-0 text-text-secondary hover:text-text-primary text-xs font-sans px-2 py-1 rounded-lg hover:bg-bg-elevated transition-colors disabled:opacity-30 flex items-center gap-1"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+          </svg>
+          CSV
+        </button>
       </div>
+
+      {/* CSV export toast */}
+      {csvToast && (
+        <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 bg-bg-surface border border-battery/30 rounded-xl px-4 py-2.5 shadow-lg text-sm text-text-primary font-sans flex items-center gap-2 animate-in fade-in slide-in-from-bottom-2 duration-200">
+          <svg className="w-4 h-4 text-battery shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          {csvToast}
+        </div>
+      )}
 
       {/* Charts */}
       {loading ? (

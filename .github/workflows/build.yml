@@ -27,6 +27,8 @@ jobs:
             target: x86_64-apple-darwin
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+          - platform: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
 
@@ -45,7 +47,7 @@ jobs:
         uses: ./.github/actions/setup-frontend
 
       - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.platform == 'ubuntu-22.04' || matrix.platform == 'ubuntu-24.04-arm'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -116,7 +118,8 @@ jobs:
             |---|---|
             | `*_aarch64.dmg` | **macOS** — Apple Silicon (M1/M2/M3/M4) |
             | `*_x64.dmg` | **macOS** — Intel |
-            | `*_amd64.deb` | **Linux** — Debian/Ubuntu (`.deb` package) |
+            | `*_amd64.deb` | **Linux** — Debian/Ubuntu x86_64 (`.deb` package) |
+            | `*_aarch64.deb` | **Linux** — Debian/Ubuntu ARM64 (`.deb` package) |
             | `*_x86_64.rpm` | **Linux** — RHEL/Fedora/openSUSE (`.rpm` package) |
             | `*_x64-setup.exe` | **Windows** — installer |
 
