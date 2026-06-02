@@ -11,7 +11,11 @@ export default function StatusPage() {
       <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
         <div className="w-10 h-10 border-4 border-flow-active border-t-transparent rounded-full animate-spin" />
         <p className="text-text-secondary text-sm font-sans">
-          Waiting for data{connectionState === 'reconnecting' ? ' — reconnecting…' : ''}
+          {connectionState === 'reconnecting'
+            ? 'Connection lost — reconnecting…'
+            : connectionState === 'disconnected'
+              ? 'Disconnected — will retry automatically'
+              : 'Waiting for data'}
         </p>
         <p className="text-text-secondary/60 text-xs font-sans text-center max-w-xs">
           If data doesn't appear, try restarting the app and check your firewall settings.

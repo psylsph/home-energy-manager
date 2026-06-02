@@ -7,7 +7,7 @@ export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeout = useRef<number>(0);
   const connectRef = useRef<() => void>(() => {});
-  const { setSnapshot, setConnection } = useInverterStore();
+  const { setSnapshot, clearSnapshot, setConnection } = useInverterStore();
 
   // Fetch initial connection state from REST API (in case WS messages
   // were missed before the page loaded).
@@ -44,6 +44,11 @@ export function useWebSocket() {
           setSnapshot(snapshot);
         } else if (data.type === 'connection') {
           setConnection(data.state as ConnectionState, data.host);
+          // Clear stale snapshot when connection drops so the UI shows
+          // "waiting for data" instead of frozen old values.
+          if (data.state !== 'connected') {
+            clearSnapshot();
+          }
         }
       } catch (e) {
         console.error('WebSocket parse error:', e);
@@ -59,7 +64,7 @@ export function useWebSocket() {
       console.error('WebSocket error:', err);
       ws.close();
     };
-  }, [setSnapshot, setConnection]);
+  }, [setSnapshot, clearSnapshot, setConnection]);
 
   // Keep ref in sync so the reconnect closure always calls the latest connect
   useEffect(() => {

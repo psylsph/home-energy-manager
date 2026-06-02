@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1am instead of midnight. Changed `alignDown` to use `setHours`/`setMinutes`
   so domain boundaries match the local timezone.
 
+- **Stale data no longer shown as live**: When the connection to the inverter
+  drops, the frontend now immediately clears the snapshot from the store.
+  Previously the last known values continued to be displayed as if they were
+  live, and the connection indicator was too subtle to notice. The StatusPage
+  now shows clear messages: "Connection lost — reconnecting…" or
+  "Disconnected — will retry automatically".
+
 - **SVG crash on corrupted data (React error #31)**: When the snapshot contains
   non-string/number values due to register corruption, the `EnergyFlowDiagram`
   SVG text elements now coerce props to safe types before rendering. Prevents

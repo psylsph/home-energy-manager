@@ -7,6 +7,7 @@ interface InverterState {
   connectedHost: string | null;
   developerMode: boolean;
   setSnapshot: (snapshot: InverterSnapshot) => void;
+  clearSnapshot: () => void;
   setConnection: (state: ConnectionState, host?: string) => void;
   setDeveloperMode: (enabled: boolean) => void;
 }
@@ -25,6 +26,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   connectedHost: null,
   developerMode: loadDeveloperMode(),
   setSnapshot: (snapshot) => set({ snapshot }),
+  clearSnapshot: () => set({ snapshot: null }),
   setConnection: (state, host) => set({ connectionState: state, connectedHost: host ?? null }),
   setDeveloperMode: (enabled) => {
     try {
