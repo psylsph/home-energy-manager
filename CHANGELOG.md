@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.25] - 2026-06-02
+
+### Fixed
+
+- **SVG crash on corrupted data (React error #31)**: When the snapshot contains
+  non-string/number values due to register corruption, the `EnergyFlowDiagram`
+  SVG text elements now coerce props to safe types before rendering. Prevents
+  the "not a valid string or number" React error that caused a white/blue screen.
+
+- **ErrorBoundary with auto-retry**: Added `ErrorBoundary` around each page
+  route so a component crash on one page doesn't take down the entire app.
+  Shows a friendly error message with a 30-second auto-retry countdown and a
+  manual "Retry now" button. The nav bar and connection indicator stay
+  functional during errors.
+
 ## [0.9.24] - 2026-06-02
 
 ### Changed
