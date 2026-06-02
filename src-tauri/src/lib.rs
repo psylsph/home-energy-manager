@@ -16,6 +16,7 @@ pub fn run() {
     use tauri::Manager;
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // Set up tracing with log capture layer for developer console
             let log_ring = Arc::new(LogRing::new(2000));
@@ -177,8 +178,40 @@ pub fn run() {
 
             Ok(())
         })
+        .invoke_handler(tauri::generate_handler![export_csv])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Tauri command: show a native save dialog and write CSV content to the
+/// chosen file path. Called from the frontend when the user clicks "CSV".
+#[tauri::command]
+async fn export_csv(app: tauri::AppHandle, content: String, suggested_name: String) -> Result<(), String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    app.dialog()
+        .file()
+        .add_filter("CSV", &["csv"])
+        .set_file_name(&suggested_name)
+        .save_file(move |path| {
+            let _ = tx.send(path);
+        });
+
+    let file_path = rx.await.map_err(|_| "Save dialog cancelled".to_string())?;
+    let file_path = file_path.ok_or_else(|| "Save cancelled".to_string())?;
+
+    let path = file_path
+        .as_path()
+        .ok_or_else(|| "Save dialog returned URL instead of file path".to_string())?;
+
+    tokio::fs::write(&path, &content)
+        .await
+        .map_err(|e| format!("Failed to write file: {e}"))?;
+
+    tracing::info!("CSV exported to {}", path.display());
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

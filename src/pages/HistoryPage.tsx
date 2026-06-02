@@ -8,7 +8,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from 'recharts';
-import { fetchHistory, apiGet } from '../lib/api';
+import { fetchHistory, apiGet, isTauri } from '../lib/api';
 import type { HistoryRange, PollSettings, TariffConfig } from '../lib/types';
 
 // ---------------------------------------------------------------------------
@@ -493,9 +493,20 @@ function exportCSV(charts: ChartDef[], data: Record<string, TimePoint[]>, range:
   const windowLabel = formatWindowLabel(range, offset).replace(/[^\w-]+/g, '_');
   const suggestedName = `givenergy_${label}_${windowLabel}.csv`;
 
-  // Use File System Access API (showSaveFilePicker) for a native Save As dialog.
-  // Falls back to data-URI download if the API is unavailable.
+  // Use Tauri's native save dialog when running in the desktop app.
+  // Falls back to File System Access API, then to data-URI download.
   const saveFile = async () => {
+    try {
+      if (isTauri && (window as any).__TAURI__?.invoke) {
+        await (window as any).__TAURI__.invoke('export_csv', {
+          content: csvContent,
+          suggestedName,
+        });
+        onExported();
+        return;
+      }
+    } catch { /* fall through to browser approach */ }
+
     try {
       // showSaveFilePicker is available in Chromium-based browsers / Tauri webview
       const handle = await (window as any).showSaveFilePicker({
