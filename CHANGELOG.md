@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **History graphs aligned to local timezone**: The chart domain was aligned to
+  UTC midnight using `setUTCHours`, while axis labels displayed local time via
+  `toLocaleTimeString`. In BST (UTC+1) this caused the 24h graph to start at
+  1am instead of midnight. Changed `alignDown` to use `setHours`/`setMinutes`
+  so domain boundaries match the local timezone.
+
 - **SVG crash on corrupted data (React error #31)**: When the snapshot contains
   non-string/number values due to register corruption, the `EnergyFlowDiagram`
   SVG text elements now coerce props to safe types before rendering. Prevents
