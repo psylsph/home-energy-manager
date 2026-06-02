@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.27] - 2026-06-02
+
+### Added
+
+- **Solar page**: New tab in the bottom navigation (between Battery and History)
+  showing PV1 and PV2 input breakdown. Includes a bar chart, per-input detail
+  cards (power, voltage, current), and total solar overview. PV2 is only shown
+  when the inverter has a second string active.
+
+- **CSV export with Save As**: History charts now have a **CSV** button in the
+  navigation bar. Downloads the current time window's data as a CSV file with
+  ISO timestamps. In the Tauri desktop app, downloads directly to the default
+  Downloads folder. In a remote browser, opens a native Save As dialog.
+  A toast notification confirms the export.
+
+- **Linux ARM64 (.deb) build**: Added `aarch64-unknown-linux-gnu` target to
+  the GitHub Actions release workflow using `ubuntu-24.04-arm` runner,
+  producing `*_aarch64.deb` alongside the existing `*_amd64.deb`.
+
 ## [0.9.26] - 2026-06-02
 
 ### Added
