@@ -684,11 +684,13 @@ pub async fn discover(State(_state): State<Arc<AppState>>) -> Json<Value> {
 // ---------------------------------------------------------------------------
 
 /// GET /api/cosy — get cosy charging config.
-pub async fn get_cosy(State(_state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn get_cosy(State(state): State<Arc<AppState>>) -> Json<Value> {
     let settings = crate::settings::Settings::load();
+    let active = *state.cosy_active.lock().await;
     Json(json!({
         "ok": true,
         "enabled": settings.cosy_enabled,
+        "active": active,
         "slots": settings.cosy_slots,
     }))
 }

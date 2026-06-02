@@ -35,6 +35,7 @@ export interface InverterSnapshot {
   target_soc: number;
   enable_charge_target: boolean;
   auto_winter_active: boolean;
+  cosy_active: boolean;
   charge_slots: ScheduleSlot[];
   discharge_slots: ScheduleSlot[];
   inverter_serial: string;

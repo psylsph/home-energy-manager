@@ -919,6 +919,36 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 const GRACE_READINGS: u8 = 3;
                 let mut pending_mode: Option<BatteryMode> = None;
 
+                // Restore cosy_active from persisted settings on restart.
+                // Without this, a client reboot during a cosy slot would leave
+                // the inverter in the previous force-charge state but the client
+                // thinking cosy is inactive, never sending the exit command.
+                {
+                    let settings = crate::settings::Settings::load();
+                    if settings.cosy_enabled {
+                        let now = chrono::Local::now();
+                        let now_minutes = now.hour() as u16 * 60 + now.minute() as u16;
+                        let mut in_slot = false;
+                        for slot in &settings.cosy_slots {
+                            if !slot.enabled { continue; }
+                            let start = slot.start_hour as u16 * 60 + slot.start_minute as u16;
+                            let end = slot.end_hour as u16 * 60 + slot.end_minute as u16;
+                            let crosses_midnight = end <= start;
+                            if crosses_midnight {
+                                if now_minutes >= start || now_minutes < end {
+                                    in_slot = true; break;
+                                }
+                            } else if now_minutes >= start && now_minutes < end {
+                                in_slot = true; break;
+                            }
+                        }
+                        if in_slot {
+                            tracing::info!("Cosy: restored active state on restart (inside slot)");
+                            *state.cosy_active.lock().await = true;
+                        }
+                    }
+                }
+
                 // ---- Inner poll loop ----
                 loop {
                     // Drain and execute any pending register writes from the
@@ -1128,6 +1158,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     // this system vs. manually.
                                     snapshot.auto_winter_active =
                                         matches!(*aw_state, AutoWinterState::WinterActive);
+                                    snapshot.cosy_active = *state.cosy_active.lock().await;
 
                                     // Persist saved values to disk so they survive a
                                     // restart. When winter mode deactivates, saved

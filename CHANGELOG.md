@@ -34,6 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepts a `target_soc` parameter. The Cosy timer passes the target SOC from
   the slot's slider instead of always using 100%.
 
+- **Cosy mode survives restart**: `cosy_active` state is restored on reconnect
+  by checking if the current time falls inside any enabled cosy slot. Added
+  `cosy_active` field to `InverterSnapshot` so the frontend knows when cosy
+  is actively charging. `GET /api/cosy` now returns `active` field.
+
+- **Cosy mode UI overhaul**: The Cosy Charging section is now shown to all
+  users (not just developer mode) when in Eco mode. When cosy is enabled,
+  the Battery Mode selector and Quick Actions are hidden, replaced with a
+  banner explaining the inverter is locked to Eco mode. Active cosy slots
+  are highlighted with a pulsing green dot and "Charging" label.
+
 - **SVG crash on corrupted data (React error #31)**: When the snapshot contains
   non-string/number values due to register corruption, the `EnergyFlowDiagram`
   SVG text elements now coerce props to safe types before rendering. Prevents

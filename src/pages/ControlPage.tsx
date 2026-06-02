@@ -405,8 +405,8 @@ function AutoWinterSection() {
   );
 }
 
-/** Cosy charging section — only shown in developer mode + Eco mode. */
-function CosyChargingSection({ enabled, onToggle }: { enabled: boolean; onToggle: (v: boolean) => void }) {
+/** Cosy charging section — shown when cosy mode is enabled. */
+function CosyChargingSection({ enabled, cosyActive, onToggle }: { enabled: boolean; cosyActive: boolean; onToggle: (v: boolean) => void }) {
   const [slots, setSlots] = useState<
     { enabled: boolean; start_hour: number; start_minute: number; end_hour: number; end_minute: number; target_soc: number }[]
   >([]);
@@ -474,16 +474,34 @@ function CosyChargingSection({ enabled, onToggle }: { enabled: boolean; onToggle
         </button>
       </div>
       <p className="text-text-secondary/60 text-xs">
-        Inverter stays in Eco mode. Charge slots are stored locally — the app
-        sends ForceCharge commands during these windows.
+        Force-charges the battery from the grid during these windows. The inverter is locked to Eco mode while Cosy is active.
       </p>
 
       {enabled && (
         <div className="space-y-4">
-          {slots.map((slot, i) => (
-            <div key={i} className="bg-bg-surface rounded-xl p-3 space-y-2">
+          {slots.map((slot, i) => {
+            const now = new Date();
+            const nowMins = now.getHours() * 60 + now.getMinutes();
+            const startMins = slot.start_hour * 60 + slot.start_minute;
+            const endMins = slot.end_hour * 60 + slot.end_minute;
+            const crossesMidnight = endMins <= startMins;
+            const slotActive = slot.enabled && cosyActive && (
+              crossesMidnight
+                ? (nowMins >= startMins || nowMins < endMins)
+                : (nowMins >= startMins && nowMins < endMins)
+            );
+            return (
+            <div key={i} className={`rounded-xl p-3 space-y-2 border ${slotActive ? 'bg-battery/10 border-battery/30' : 'bg-bg-surface border-transparent'}`}>
               <div className="flex items-center justify-between">
-                <span className="text-text-primary text-sm font-medium">Slot {i + 1}</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-text-primary text-sm font-medium">Slot {i + 1}</span>
+                  {slotActive && (
+                    <span className="flex items-center gap-1 text-xs text-battery font-semibold">
+                      <span className="inline-block w-1.5 h-1.5 rounded-full bg-battery animate-pulse" />
+                      Charging
+                    </span>
+                  )}
+                </div>
                 <button
                   onClick={() => {
                     const next = [...slots];
@@ -543,7 +561,8 @@ function CosyChargingSection({ enabled, onToggle }: { enabled: boolean; onToggle
                 </div>
               )}
             </div>
-          ))}
+          );
+          })}
           <button
             onClick={save}
             disabled={saving}
@@ -713,6 +732,7 @@ export default function ControlPage() {
       ];
 
   const currentMode = snapshot?.battery_mode ?? 'eco';
+  const cosyActive = snapshot?.cosy_active ?? false;
   const [requestedMode, setRequestedMode] = useState<BatteryMode | null>(null);
 
   // Clear requested mode after 30s timeout (safety net for unconfirmed writes).
@@ -787,7 +807,8 @@ export default function ControlPage() {
 
   return (
     <div className="flex flex-col gap-6 max-w-2xl mx-auto px-4 py-6">
-      {/* Section 1: Quick Actions */}
+      {/* Section 1: Quick Actions — hidden when cosy mode is active */}
+      {!cosyEnabled && (
       <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Quick Actions</h2>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -816,9 +837,11 @@ export default function ControlPage() {
           />
         </div>
       </section>
+      )}
 
 
-      {/* Section 2: Battery Mode */}
+      {/* Section 2: Battery Mode — hidden when cosy mode is active */}
+      {!cosyEnabled ? (
       <section className="space-y-3">
         <div className="flex items-center gap-3">
           <h2 className="text-text-primary font-semibold text-lg">Battery Mode</h2>
@@ -888,6 +911,22 @@ export default function ControlPage() {
           <p className="text-red-400 text-sm">{modeAction.error}</p>
         )}
       </section>
+      ) : (
+        <section className="space-y-3">
+          <div className="flex items-center gap-3">
+            <h2 className="text-text-primary font-semibold text-lg">Battery Mode</h2>
+            <span className="text-xs text-battery font-semibold bg-battery/10 px-2 py-0.5 rounded-full">
+              Cosy Active
+            </span>
+          </div>
+          <div className="bg-bg-surface rounded-xl p-4 border border-battery/20">
+            <p className="text-text-secondary text-sm">
+              Cosy charging is active — the inverter is locked to Eco mode.
+              Battery controls are managed by the Cosy timer below.
+            </p>
+          </div>
+        </section>
+      )}
 
 
       {/* Section 3: Charge Schedule */}
@@ -924,8 +963,8 @@ export default function ControlPage() {
         </section>
       )}
 
-      {/* Section 5: Cosy Charging (dev mode only, Eco only) */}
-      {developerMode && modeToCategory(effectiveMode) === 'eco' && <CosyChargingSection enabled={cosyEnabled} onToggle={setCosyEnabled} />}
+      {/* Section 5: Cosy Charging */}
+      {modeToCategory(effectiveMode) === 'eco' && <CosyChargingSection enabled={cosyEnabled} cosyActive={cosyActive} onToggle={setCosyEnabled} />}
 
       {/* Section 5: Auto Winter Mode */}
       <AutoWinterSection />
