@@ -8,7 +8,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from 'recharts';
-import { fetchHistory, apiGet, isTauri } from '../lib/api';
+import { fetchHistory, apiGet } from '../lib/api';
 import type { HistoryRange, PollSettings, TariffConfig } from '../lib/types';
 
 // ---------------------------------------------------------------------------
@@ -491,53 +491,22 @@ function exportCSV(charts: ChartDef[], data: Record<string, TimePoint[]>, range:
 
   const label = charts[0]?.key ?? 'export';
   const windowLabel = formatWindowLabel(range, offset).replace(/[^\w-]+/g, '_');
-  const suggestedName = `givenergy_${label}_${windowLabel}.csv`;
+  const fileName = `givenergy_${label}_${windowLabel}.csv`;
 
-  // Use Tauri's native save dialog when running in the desktop app.
-  // Falls back to File System Access API, then to data-URI download.
-  const saveFile = async () => {
-    try {
-      if (isTauri && (window as any).__TAURI__?.invoke) {
-        await (window as any).__TAURI__.invoke('export_csv', {
-          content: csvContent,
-          suggestedName,
-        });
-        onExported();
-        return;
-      }
-    } catch { /* fall through to browser approach */ }
-
-    try {
-      // showSaveFilePicker is available in Chromium-based browsers / Tauri webview
-      const handle = await (window as any).showSaveFilePicker({
-        suggestedName,
-        types: [{
-          description: 'CSV file',
-          accept: { 'text/csv': ['.csv'] },
-        }],
-      });
-      const writable = await handle.createWritable();
-      await writable.write(csvContent);
-      await writable.close();
-      onExported();
-    } catch (err: unknown) {
-      // User cancelled — silently ignore
-      if (err instanceof DOMException && err.name === 'AbortError') return;
-      // API unavailable (Firefox, Safari) — fallback to data URI download
-      const encoded = encodeURIComponent(csvContent);
-      const dataUri = 'data:text/csv;charset=utf-8,' + encoded;
-      const a = document.createElement('a');
-      a.href = dataUri;
-      a.download = suggestedName;
-      a.style.display = 'none';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      onExported();
-    }
-  };
-
-  saveFile();
+  // Synchronous download — creates a Blob, appends an <a> tag, clicks it.
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, 1000);
+  onExported();
 }
 
 // ---------------------------------------------------------------------------

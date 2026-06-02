@@ -24,7 +24,6 @@ tauri-plugin-log = "2"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-tauri-plugin-dialog = "2"
 
 # HTTP server
 axum = { version = "0.8", features = ["ws"] }
