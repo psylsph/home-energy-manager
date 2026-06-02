@@ -489,20 +489,44 @@ function exportCSV(charts: ChartDef[], data: Record<string, TimePoint[]>, range:
 
   const csvContent = [header.join(','), ...rows.map((r) => r.join(','))].join('\n');
 
-  // Use data URI for maximum compatibility
-  const encoded = encodeURIComponent(csvContent);
-  const dataUri = 'data:text/csv;charset=utf-8,' + encoded;
   const label = charts[0]?.key ?? 'export';
   const windowLabel = formatWindowLabel(range, offset).replace(/[^\w-]+/g, '_');
+  const suggestedName = `givenergy_${label}_${windowLabel}.csv`;
 
-  const a = document.createElement('a');
-  a.href = dataUri;
-  a.download = `givenergy_${label}_${windowLabel}.csv`;
-  a.style.display = 'none';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  onExported();
+  // Use File System Access API (showSaveFilePicker) for a native Save As dialog.
+  // Falls back to data-URI download if the API is unavailable.
+  const saveFile = async () => {
+    try {
+      // showSaveFilePicker is available in Chromium-based browsers / Tauri webview
+      const handle = await (window as any).showSaveFilePicker({
+        suggestedName,
+        types: [{
+          description: 'CSV file',
+          accept: { 'text/csv': ['.csv'] },
+        }],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(csvContent);
+      await writable.close();
+      onExported();
+    } catch (err: unknown) {
+      // User cancelled — silently ignore
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      // API unavailable (Firefox, Safari) — fallback to data URI download
+      const encoded = encodeURIComponent(csvContent);
+      const dataUri = 'data:text/csv;charset=utf-8,' + encoded;
+      const a = document.createElement('a');
+      a.href = dataUri;
+      a.download = suggestedName;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      onExported();
+    }
+  };
+
+  saveFile();
 }
 
 // ---------------------------------------------------------------------------
