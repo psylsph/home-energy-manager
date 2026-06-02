@@ -7,6 +7,7 @@ import ControlPage from './pages/ControlPage';
 import SettingsPage from './pages/SettingsPage';
 import HistoryPage from './pages/HistoryPage';
 import LogsPage from './pages/LogsPage';
+import ErrorBoundary from './components/ErrorBoundary';
 
 function ConnectionIndicator() {
   const { connectionState, connectedHost } = useInverterStore();
@@ -103,12 +104,12 @@ function Layout() {
       {/* Content */}
       <main className="flex-1 overflow-auto px-4 py-6 md:px-6 md:py-8">
         <Routes>
-          <Route path="/" element={<StatusPage />} />
-          <Route path="/battery" element={<BatteryPage />} />
-          <Route path="/history" element={<HistoryPage />} />
-          <Route path="/control" element={<ControlPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-          {developerMode && <Route path="/logs" element={<LogsPage />} />}
+          <Route path="/" element={<ErrorBoundary><StatusPage /></ErrorBoundary>} />
+          <Route path="/battery" element={<ErrorBoundary><BatteryPage /></ErrorBoundary>} />
+          <Route path="/history" element={<ErrorBoundary><HistoryPage /></ErrorBoundary>} />
+          <Route path="/control" element={<ErrorBoundary><ControlPage /></ErrorBoundary>} />
+          <Route path="/settings" element={<ErrorBoundary><SettingsPage /></ErrorBoundary>} />
+          {developerMode && <Route path="/logs" element={<ErrorBoundary><LogsPage /></ErrorBoundary>} />}
         </Routes>
       </main>
 
