@@ -31,7 +31,8 @@ function modeLabel(mode: string): string {
 }
 
 /** Battery mode label, overridden to "Cosy" when cosy mode is enabled in settings. */
-function modeDisplayLabel(mode: string, cosyEnabled: boolean): string {
+function modeDisplayLabel(mode: string, cosyActive: boolean, cosyEnabled: boolean): string {
+  if (cosyActive) return 'Cosy';
   if (cosyEnabled && (mode === 'eco' || mode === 'eco_paused')) return 'Cosy';
   return modeLabel(mode);
 }
@@ -299,7 +300,7 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
           fill="#8B949E"
           style={{ fontSize: 10, fontFamily: 'sans-serif' }}
         >
-          {modeDisplayLabel(s.battery_mode, s.cosy_enabled)}
+          {modeDisplayLabel(s.battery_mode, s.cosy_active, s.cosy_enabled)}
         </text>
         <FlowNode
           {...NODES.inverter}

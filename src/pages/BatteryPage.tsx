@@ -36,7 +36,8 @@ const BATTERY_MODE_LABELS: Record<string, string> = {
 };
 
 /** Override mode label when cosy mode is enabled in settings. */
-function modeDisplayLabel(mode: string, cosyEnabled: boolean): string {
+function modeDisplayLabel(mode: string, cosyActive: boolean, cosyEnabled: boolean): string {
+  if (cosyActive) return 'Cosy';
   if (cosyEnabled && (mode === 'eco' || mode === 'eco_paused')) return 'Cosy';
   return BATTERY_MODE_LABELS[mode] ?? mode;
 }
@@ -112,7 +113,7 @@ export default function BatteryPage() {
             <span className="text-text-secondary">Temperature</span>
             <span className="text-text-primary font-mono text-right">{formatTemp(s.battery_temperature)}</span>
             <span className="text-text-secondary">Mode</span>
-            <span className="text-text-primary font-mono text-right">{modeDisplayLabel(s.battery_mode, s.cosy_enabled)}</span>
+            <span className="text-text-primary font-mono text-right">{modeDisplayLabel(s.battery_mode, s.cosy_active, s.cosy_enabled)}</span>
             <span className="text-text-secondary">Reserve</span>
             <span className="text-text-primary font-mono text-right">{formatPercent(s.battery_reserve)}</span>
             <span className="text-text-secondary">Charged Today</span>
