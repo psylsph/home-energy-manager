@@ -34,6 +34,8 @@ export interface InverterSnapshot {
   max_battery_power_w: number;
   target_soc: number;
   enable_charge_target: boolean;
+  enable_charge: boolean;
+  enable_discharge: boolean;
   auto_winter_active: boolean;
   cosy_active: boolean;
   cosy_enabled: boolean;
@@ -43,6 +45,7 @@ export interface InverterSnapshot {
   firmware_version: string;
   device_type: string;
   device_type_display: string;
+  device_type_code: string;
   battery_calibration_stage: number;
 }
 

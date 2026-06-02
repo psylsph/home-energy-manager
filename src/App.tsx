@@ -8,6 +8,7 @@ import SettingsPage from './pages/SettingsPage';
 import HistoryPage from './pages/HistoryPage';
 import LogsPage from './pages/LogsPage';
 import SolarPage from './pages/SolarPage';
+import InverterPage from './pages/InverterPage';
 import ErrorBoundary from './components/ErrorBoundary';
 
 function ConnectionIndicator() {
@@ -30,6 +31,7 @@ function ConnectionIndicator() {
 const NAV_ITEMS = [
   { to: '/', label: 'Status', icon: StatusIcon },
   { to: '/battery', label: 'Battery', icon: BatteryIcon },
+  { to: '/inverter', label: 'Inverter', icon: InverterIcon },
   { to: '/solar', label: 'Solar', icon: SolarIcon },
   { to: '/history', label: 'History', icon: HistoryIcon },
   { to: '/control', label: 'Control', icon: ControlIcon },
@@ -88,6 +90,15 @@ function SolarIcon() {
   );
 }
 
+function InverterIcon() {
+  return (
+    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+      <rect x="4" y="4" width="16" height="16" rx="2" />
+      <path strokeLinecap="round" d="M8 8h8M8 12h8M8 16h5" />
+    </svg>
+  );
+}
+
 function LogsIcon() {
   return (
     <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
@@ -121,6 +132,7 @@ function Layout() {
           <Route path="/control" element={<ErrorBoundary><ControlPage /></ErrorBoundary>} />
           <Route path="/settings" element={<ErrorBoundary><SettingsPage /></ErrorBoundary>} />
           <Route path="/solar" element={<ErrorBoundary><SolarPage /></ErrorBoundary>} />
+          <Route path="/inverter" element={<ErrorBoundary><InverterPage /></ErrorBoundary>} />
           {developerMode && <Route path="/logs" element={<ErrorBoundary><LogsPage /></ErrorBoundary>} />}
         </Routes>
       </main>
