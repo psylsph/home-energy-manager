@@ -263,6 +263,7 @@ pub async fn set_charge_slot(
     let start_minute = body["start_minute"].as_u64().unwrap_or(0) as u8;
     let end_hour = body["end_hour"].as_u64().unwrap_or(0) as u8;
     let end_minute = body["end_minute"].as_u64().unwrap_or(0) as u8;
+    let target_soc = body["target_soc"].as_u64().unwrap_or(100) as u8;
 
     let (start, end) = if enabled {
         (encode_hhmm(start_hour, start_minute), encode_hhmm(end_hour, end_minute))
@@ -291,6 +292,17 @@ pub async fn set_charge_slot(
                     (ControlCommand::SetEnableCharge { enabled: true }).encode()
                 {
                     writes.extend(enable_writes);
+                }
+                // Write per-slot target SOC (Gen3 extended registers) if provided.
+                // These are independent of enable_charge_target (HR 20) and do
+                // NOT trigger immediate force charge.
+                let target_reg = match slot {
+                    1 => crate::modbus::registers::HR_CHARGE_TARGET_SOC_1,
+                    2 => crate::modbus::registers::HR_CHARGE_TARGET_SOC_2,
+                    _ => 0,
+                };
+                if target_reg != 0 && target_soc > 0 {
+                    writes.push(RegisterWrite { address: target_reg, value: target_soc as u16 });
                 }
             }
 

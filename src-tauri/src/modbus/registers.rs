@@ -162,6 +162,15 @@ pub const HR_BATTERY_DISCHARGE_LIMIT: u16 = 112;
 /// Charge target SOC percentage (0-100, requires enable_charge_target).
 pub const HR_CHARGE_TARGET_SOC: u16 = 116;
 
+// Gen3 per-slot target SOC registers (HR 242-269):
+// Each charge slot has its own target SOC, distinct from the global HR 116.
+pub const HR_CHARGE_TARGET_SOC_1: u16 = 242;
+pub const HR_CHARGE_TARGET_SOC_2: u16 = 245;
+
+// Gen3 discharge per-slot target SOC registers (HR 272-299):
+pub const HR_DISCHARGE_TARGET_SOC_1: u16 = 272;
+pub const HR_DISCHARGE_TARGET_SOC_2: u16 = 275;
+
 // Block: Holding Registers 300-359 (pause mode)
 pub const HR_BATTERY_PAUSE_MODE: u16 = 318;
 pub const HR_BATTERY_PAUSE_SLOT_1_START: u16 = 319;
@@ -254,7 +263,7 @@ pub const BATTERY_1_POLL_BLOCK: RegisterBlock = RegisterBlock {
 /// Sourced from GivTCP safe_regs.
 pub const SAFE_WRITE_REGS: &[u16] = &[
     20, 27, 29, 31, 32, 35, 36, 37, 38, 39, 40, 44, 45, 50, 56, 57, 59, 94, 95, 96, 110, 111, 112,
-    116, 163, 318, 319, 320,
+    116, 163, 242, 245, 272, 275, 318, 319, 320,
 ];
 
 // ---------------------------------------------------------------------------
@@ -364,6 +373,10 @@ mod tests {
         assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_PAUSE_MODE)); // 318
         assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_PAUSE_SLOT_1_START)); // 319
         assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_PAUSE_SLOT_1_END)); // 320
+        assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_TARGET_SOC_1)); // 242
+        assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_TARGET_SOC_2)); // 245
+        assert!(SAFE_WRITE_REGS.contains(&HR_DISCHARGE_TARGET_SOC_1)); // 272
+        assert!(SAFE_WRITE_REGS.contains(&HR_DISCHARGE_TARGET_SOC_2)); // 275
     }
 
     #[test]
