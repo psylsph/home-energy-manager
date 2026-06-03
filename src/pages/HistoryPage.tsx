@@ -166,7 +166,10 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
           key: 'pv-power',
           title: 'PV Power (W)',
           unit: 'W',
-          fields: [{ field: 'solar_power', color: '#F59E0B' }],
+          fields: [
+            { field: 'pv1_power', color: '#F59E0B', label: 'PV1' },
+            { field: 'pv2_power', color: '#3B82F6', label: 'PV2' },
+          ],
         },
         {
           key: 'pv-energy',
