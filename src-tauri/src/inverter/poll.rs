@@ -1253,7 +1253,11 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 
                                         let mut cosy_active = state.cosy_active.lock().await;
                                         if in_slot && !*cosy_active {
-                                            // Entering a cosy slot — start force charge
+                                            // Entering a cosy slot — start force charge.
+                                            // Drain stale frames first to avoid function code
+                                            // mismatches (stale read responses can be mistaken
+                                            // for write acknowledgments).
+                                            client.drain_stale_frames().await;
                                             tracing::info!("Cosy: entering slot, force-charging to {}%", slot_target_soc);
                                             *cosy_active = true;
                                             drop(cosy_active);
@@ -1268,7 +1272,9 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                 }
                                             }
                                         } else if !in_slot && *cosy_active {
-                                            // Exiting a cosy slot — restore normal Eco mode
+                                            // Exiting a cosy slot — restore normal Eco mode.
+                                            // Drain stale frames for the same reason as entry.
+                                            client.drain_stale_frames().await;
                                             tracing::info!("Cosy: exiting slot, restoring Eco mode");
                                             *cosy_active = false;
                                             drop(cosy_active);
