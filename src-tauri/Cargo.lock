@@ -1395,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "givenergy-local"
-version = "0.9.33"
+version = "0.9.35"
 dependencies = [
  "anyhow",
  "axum",

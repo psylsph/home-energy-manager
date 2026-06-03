@@ -508,29 +508,44 @@ fn sanitize_snapshot(
     // = prev`, which meant the first reading after every reconnect had
     // zero validation — corrupted values like 1010 kWh passed through
     // and became the "previous" reference, poisoning all subsequent reads.
+    //
+    // When the value is out of range, we use the previous reading's value
+    // instead of clamping to 0. Clamping to 0 poisons the delta baseline:
+    // the next reading sees prev < 1.0 and skips the delta check, allowing
+    // a corrupted value through and causing massive cost spikes.
     {
         let max_daily_kwh: f32 = 200.0; // hard ceiling: 10kW × 20h theoretical max
 
         macro_rules! check_energy_field {
-            ($name:literal, $value:expr) => {
+            ($name:literal, $value:expr, $prev_val:expr) => {
                 let raw = $value;
                 if raw < 0.0 || raw > max_daily_kwh {
-                    tracing::warn!(
-                        field = $name, raw, max = max_daily_kwh,
-                        "Daily energy out of plausible daily range — clamping to 0",
-                    );
-                    $value = 0.0;
+                    let prev_v: Option<f32> = $prev_val;
+                    if let Some(pv) = prev_v {
+                        tracing::warn!(
+                            field = $name, raw, max = max_daily_kwh, prev = pv,
+                            "Daily energy out of plausible daily range — using previous",
+                        );
+                        $value = pv;
+                    } else {
+                        tracing::warn!(
+                            field = $name, raw, max = max_daily_kwh,
+                            "Daily energy out of plausible daily range — no previous, clamping to 0",
+                        );
+                        $value = 0.0;
+                    }
                     sanitized = true;
                 }
             };
         }
 
-        check_energy_field!("today_solar_kwh", snap.today_solar_kwh);
-        check_energy_field!("today_import_kwh", snap.today_import_kwh);
-        check_energy_field!("today_export_kwh", snap.today_export_kwh);
-        check_energy_field!("today_charge_kwh", snap.today_charge_kwh);
-        check_energy_field!("today_discharge_kwh", snap.today_discharge_kwh);
-        check_energy_field!("today_consumption_kwh", snap.today_consumption_kwh);
+        check_energy_field!("today_solar_kwh", snap.today_solar_kwh, prev.map(|p| p.today_solar_kwh));
+        check_energy_field!("today_import_kwh", snap.today_import_kwh, prev.map(|p| p.today_import_kwh));
+        check_energy_field!("today_export_kwh", snap.today_export_kwh, prev.map(|p| p.today_export_kwh));
+        check_energy_field!("today_charge_kwh", snap.today_charge_kwh, prev.map(|p| p.today_charge_kwh));
+        check_energy_field!("today_discharge_kwh", snap.today_discharge_kwh, prev.map(|p| p.today_discharge_kwh));
+        check_energy_field!("today_consumption_kwh", snap.today_consumption_kwh, prev.map(|p| p.today_consumption_kwh));
+        check_energy_field!("today_ac_charge_kwh", snap.today_ac_charge_kwh, prev.map(|p| p.today_ac_charge_kwh));
     }
 
     // Delta checks — only when we have a previous reading AND we're past
@@ -550,13 +565,31 @@ fn sanitize_snapshot(
                 let raw = $value;
                 let prev_val = $prev;
 
-                // If prev is 0 or near-zero, it was either just clamped by
-                // the absolute range check (corrupted) or is a genuine
-                // start-of-day reading. In either case we can't reliably
-                // compute a delta — accept the new value (already validated
-                // by the absolute range check above).
+                // If prev is 0 or near-zero, it may have been clamped by
+                // the absolute range check (corrupted) or be a genuine
+                // start-of-day reading.
+                //
+                // Previously we skipped the delta check entirely when
+                // prev < 1.0, but this allowed corrupted values through
+                // (e.g. 42.5 after prev was clamped to 0). Instead, we now
+                // use a tighter absolute ceiling scaled by elapsed time.
+                // The absolute range check above already validates against
+                // the 200 kWh daily max, so we only need to catch jumps
+                // that are plausible daily values but implausible deltas.
                 if prev_val < 1.0 {
-                    // prev is unreliable — skip delta check
+                    // prev is unreliable — apply a tighter max-increase check.
+                    // Since prev could be a genuine start-of-day 0, accept
+                    // raw only if it's a plausible single-interval increase.
+                    if raw > max_increase_kwh {
+                        tracing::warn!(
+                            field = $name, raw, prev = prev_val,
+                            elapsed_secs, max_increase_kwh,
+                            "Daily energy jumped from near-zero baseline — clamping to max_increase",
+                        );
+                        $value = prev_val + max_increase_kwh;
+                        sanitized = true;
+                    }
+                    // Otherwise accept raw (plausible increase from 0)
                 }
                 // Midnight rollover: counter legitimately reset to ~0.
                 // Allow if raw is small and prev was large.
@@ -591,6 +624,7 @@ fn sanitize_snapshot(
         check_energy_delta!("today_charge_kwh", snap.today_charge_kwh, p.today_charge_kwh);
         check_energy_delta!("today_discharge_kwh", snap.today_discharge_kwh, p.today_discharge_kwh);
         check_energy_delta!("today_consumption_kwh", snap.today_consumption_kwh, p.today_consumption_kwh);
+        check_energy_delta!("today_ac_charge_kwh", snap.today_ac_charge_kwh, p.today_ac_charge_kwh);
     }
     } // skip_delta
 

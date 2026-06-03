@@ -48,14 +48,17 @@ const SPIKE_THRESHOLDS: Record<string, number> = {
   battery_power: 4000,
   grid_power: 4000,
   home_power: 4000,
-  // Daily energy counters (kWh) — a jump >50 kWh between buckets
-  // is impossible (would require >3000 kW sustained for the bucket duration).
-  today_solar_kwh: 50,
-  today_import_kwh: 50,
-  today_export_kwh: 50,
-  today_charge_kwh: 50,
-  today_discharge_kwh: 50,
-  today_consumption_kwh: 50,
+  // Daily energy counters (kWh) — these are cumulative monotonic counters
+  // used to derive cost via delta computation. Even a small corruption of
+  // 3-5 kWh produces a ~£1 cost spike at standard tariff rates.
+  // Threshold: 5 kWh is generous (10 kW sustained for 30 min), but tight
+  // enough to catch the 10-50 kWh corruptions common from the dongle.
+  today_solar_kwh: 5,
+  today_import_kwh: 5,
+  today_export_kwh: 5,
+  today_charge_kwh: 5,
+  today_discharge_kwh: 5,
+  today_consumption_kwh: 5,
 };
 
 function removeSpikes(points: TimePoint[], field: string): TimePoint[] {
@@ -237,6 +240,13 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
                 }
                 // else: small data glitch (counter dipped slightly),
                 // skip this delta (delta stays 0)
+
+                // Clamp delta to physically plausible maximum.
+                // 2 kWh per bucket is generous: 10 kW sustained for 12 min.
+                // Even for 1-minute buckets this is generous.
+                // This is the last line of defense against corrupted counter
+                // values that slip through the backend sanitizer.
+                if (delta > 2) delta = 0;
               }
               if (raw != null) prev = raw;
               const rate = isOffPeak(row.t, importTariffCfg.off_peak_start, importTariffCfg.off_peak_end)
@@ -264,6 +274,8 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
                 } else if (prev > 5 && raw < 5) {
                   delta = raw;
                 }
+                // Clamp delta to physically plausible maximum (same as import).
+                if (delta > 2) delta = 0;
               }
               if (raw != null) prev = raw;
               const rate = isOffPeak(row.t, exportTariffCfg.off_peak_start, exportTariffCfg.off_peak_end)

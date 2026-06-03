@@ -29,7 +29,7 @@
 //!   IR(27-28): e_inverter_in_total (uint32 /10 kWh)
 //!   IR(30):   p_grid_out (int16 W, signed, negative=import)
 //!   IR(31):   p_backup — EPS (W)
-//!   IR(35):   e_load_day — consumption today (/10 kWh)
+//!   IR(35):   e_ac_charge_day — AC charge from grid today (/10 kWh)
 //!   IR(36):   e_battery_charge_day (/10 kWh)
 //!   IR(37):   e_battery_discharge_day (/10 kWh)
 //!   IR(41):   t_inverter_heatsink (/10 °C)
@@ -202,6 +202,20 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
     //   = solar - battery_power - grid_power
     snap.home_power = snap.solar_power - snap.battery_power - snap.grid_power;
 
+    // Compute consumption today from energy balance (matching the GE app).
+    // IR(35) is AC charge today, NOT house consumption — the reference library
+    // confirmed this via sentinel cross-correlation (#174). Single-phase inverters
+    // have no native consumption register, so consumption is derived:
+    //   consumption = solar_today + import_today - export_today - ac_charge_today
+    // Battery DC charge/discharge throughput nets out and is not a term.
+    snap.today_consumption_kwh = snap.today_solar_kwh
+        + snap.today_import_kwh
+        - snap.today_export_kwh
+        - snap.today_ac_charge_kwh;
+    if snap.today_consumption_kwh < 0.0 {
+        snap.today_consumption_kwh = 0.0;
+    }
+
     // Derive battery mode from the three key holding registers.
     snap.battery_mode = BatteryMode::from_registers(
         raw.battery_power_mode,
@@ -270,7 +284,8 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.today_export_kwh = get_reg(data, 25) as f32 * 0.1; // IR(25): e_grid_out_day
     snap.today_charge_kwh = get_reg(data, 36) as f32 * 0.1; // IR(36): e_battery_charge_day
     snap.today_discharge_kwh = get_reg(data, 37) as f32 * 0.1; // IR(37): e_battery_discharge_day
-    snap.today_consumption_kwh = get_reg(data, 35) as f32 * 0.1; // IR(35): e_load_day
+    snap.today_consumption_kwh = get_reg(data, 35) as f32 * 0.1; // IR(35): e_ac_charge_today (NOT consumption)
+    snap.today_ac_charge_kwh = snap.today_consumption_kwh; // keep raw IR(35) for energy balance
 }
 
 /// Decode holding registers 0-59 (configuration part 1).
@@ -505,7 +520,7 @@ mod tests {
         input_data[25] = 30; // IR(25): export_today = 3.0 kWh
         input_data[26] = 52; // IR(26): import_today = 5.2 kWh
         input_data[30] = 100; // IR(30): grid_power = +100 W (export)
-        input_data[35] = 120; // IR(35): consumption_today = 12.0 kWh
+        input_data[35] = 120; // IR(35): ac_charge_today = 12.0 kWh
         input_data[36] = 40; // IR(36): charge_today = 4.0 kWh
         input_data[37] = 25; // IR(37): discharge_today = 2.5 kWh
         input_data[41] = 425; // IR(41): inverter_temp = 42.5 °C
@@ -600,7 +615,9 @@ mod tests {
         assert!((snap.today_export_kwh - 3.0).abs() < 0.1);
         assert!((snap.today_charge_kwh - 4.0).abs() < 0.1);
         assert!((snap.today_discharge_kwh - 2.5).abs() < 0.1);
-        assert!((snap.today_consumption_kwh - 12.0).abs() < 0.1);
+        // consumption = solar(28.0) + import(5.2) - export(3.0) - ac_charge(12.0) = 18.2
+        assert!((snap.today_consumption_kwh - 18.2).abs() < 0.1);
+        assert!((snap.today_ac_charge_kwh - 12.0).abs() < 0.1);
 
         // Config
         assert_eq!(snap.battery_reserve, 4);

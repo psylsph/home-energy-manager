@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.35] - 2026-06-03
+
+### Fixed
+
+- **Consumption always shows 0.0 kWh**: IR(35) was incorrectly treated as house
+  consumption — the reference library proved it's actually "AC charge from grid
+  today" (givenergy-modbus #174). When a user hasn't done AC charging, the
+  register is 0, so consumption appeared as zero. Consumption is now **computed**
+  from energy balance matching the GE app: `solar + import − export − ac_charge`.
+  New `today_ac_charge_kwh` field stores the raw IR(35) value. History DB
+  auto-migrates with `ALTER TABLE`. (#30)
+
+- **Import cost spikes (17p → £1.75 in 5 minutes)**: Multiple defense gaps
+  allowed corrupted `today_import_kwh` counter values to reach the cost
+  calculation:
+  - **Absolute check clamped to 0** instead of carrying forward previous value,
+    poisoning the delta baseline for the next reading
+  - **Delta check skipped entirely** when `prev < 1.0`, allowing any value through
+  - **Spike threshold too high** (50 kWh) — a 3.5 kWh corruption creates a £1 cost
+    spike but passes the filter
+  All three gaps are now closed. Cost preprocess also hard-clamps per-bucket
+  delta to 2 kWh maximum. DB repair now detects and fixes zero-clamp artifacts
+  from previous versions. (#26)
+
 ## [0.9.34] - 2026-06-03
 
 ### Fixed

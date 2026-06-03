@@ -52,6 +52,7 @@ const ALLOWED_FIELDS: &[&str] = &[
     "today_charge_kwh",
     "today_discharge_kwh",
     "today_consumption_kwh",
+    "today_ac_charge_kwh",
     "charge_rate",
     "discharge_rate",
     "battery_reserve",
@@ -72,6 +73,7 @@ const CUMULATIVE_FIELDS: &[&str] = &[
     "today_charge_kwh",
     "today_discharge_kwh",
     "today_consumption_kwh",
+    "today_ac_charge_kwh",
 ];
 
 fn is_cumulative_field(field: &str) -> bool {
@@ -109,6 +111,7 @@ CREATE TABLE IF NOT EXISTS readings (
     today_charge_kwh    REAL,
     today_discharge_kwh REAL,
     today_consumption_kwh REAL,
+    today_ac_charge_kwh REAL,
     charge_rate     INTEGER,
     discharge_rate  INTEGER,
     battery_reserve INTEGER,
@@ -140,6 +143,11 @@ impl HistoryDb {
         conn.execute_batch(SCHEMA_SQL)
             .map_err(|e| format!("Failed to create schema: {e}"))?;
 
+        // Migration: add today_ac_charge_kwh column if missing (added in v0.9.34)
+        let _ = conn.execute_batch(
+            "ALTER TABLE readings ADD COLUMN today_ac_charge_kwh REAL"
+        );
+
         // Migration: repair corrupted cumulative counter data.
         // For each today_*_kwh column, fix rows where the value decreased
         // from the previous row (counters are monotonically increasing)
@@ -152,11 +160,14 @@ impl HistoryDb {
             "today_charge_kwh",
             "today_discharge_kwh",
             "today_consumption_kwh",
+            "today_ac_charge_kwh",
         ];
         for col in &energy_cols {
-            // Build a repaired set using a window: for each row, fix only
-            // small spurious DECREASES (data glitches where the counter
-            // dips by a small amount without a midnight reset).
+            // Build a repaired set using a window: for each row, fix
+            // corrupted values including:
+            //   - Small spurious DECREASES (counter dips without midnight reset)
+            //   - Values clamped to 0 by old sanitizer versions (previous bug)
+            //     followed by a large jump back to the real value
             //
             // Midnight rollover: prev > 50 and current < 10 is a genuine
             // counter reset — keep the new value.
@@ -175,6 +186,18 @@ impl HistoryDb {
                           WHEN LAG({col}) OVER (ORDER BY timestamp) > 50.0 \
                                AND {col} < 10.0 \
                             THEN {col} \
+                          -- Zero clamp artifact: prev was 0 (old sanitizer bug) and \
+                          -- current jumped by > 5 kWh (implausible for one interval). \
+                          -- Replace with the value BEFORE the 0 to avoid cost spikes. \
+                          WHEN LAG({col}) OVER (ORDER BY timestamp) = 0.0 \
+                               AND {col} > 5.0 \
+                               AND LAG({col}, 2, 0) OVER (ORDER BY timestamp) > 0.0 \
+                            THEN LAG({col}, 2, {col}) OVER (ORDER BY timestamp) \
+                          -- Zero clamp artifact: current value IS the 0, replace with prev \
+                          WHEN {col} = 0.0 \
+                               AND LAG({col}) OVER (ORDER BY timestamp) > 1.0 \
+                               AND LEAD({col}, 1, {col}) OVER (ORDER BY timestamp) > LAG({col}) OVER (ORDER BY timestamp) \
+                            THEN LAG({col}) OVER (ORDER BY timestamp) \
                           -- Small decrease (glitch): replace with previous \
                           WHEN {col} < LAG({col}) OVER (ORDER BY timestamp) \
                             THEN LAG({col}) OVER (ORDER BY timestamp) \
@@ -241,8 +264,9 @@ impl HistoryDb {
                 grid_voltage, grid_frequency, inverter_temperature,
                 today_solar_kwh, today_import_kwh, today_export_kwh,
                 today_charge_kwh, today_discharge_kwh, today_consumption_kwh,
+                today_ac_charge_kwh,
                 charge_rate, discharge_rate, battery_reserve, target_soc
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)",
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30)",
             params![
                 snap.timestamp,
                 snap.solar_power,
@@ -269,6 +293,7 @@ impl HistoryDb {
                 snap.today_charge_kwh,
                 snap.today_discharge_kwh,
                 snap.today_consumption_kwh,
+                snap.today_ac_charge_kwh,
                 snap.charge_rate,
                 snap.discharge_rate,
                 snap.battery_reserve,

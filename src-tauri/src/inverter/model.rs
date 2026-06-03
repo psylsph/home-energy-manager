@@ -340,6 +340,9 @@ pub struct InverterSnapshot {
     pub today_charge_kwh: f32,
     pub today_discharge_kwh: f32,
     pub today_consumption_kwh: f32,
+    /// AC charge from grid today (kWh). IR(35) — NOT house consumption.
+    /// Used in the consumption formula: solar + import - export - ac_charge.
+    pub today_ac_charge_kwh: f32,
 
     // -- Configuration --
     pub battery_mode: BatteryMode,
