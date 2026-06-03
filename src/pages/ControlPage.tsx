@@ -721,23 +721,24 @@ export default function ControlPage() {
   const [dischargeRateSaving, setDischargeRateSaving] = useState(false);
   const [activePowerSaving, setActivePowerSaving] = useState(false);
 
-  // Default slots if snapshot doesn't have them
-  // Only 2 charge slots are supported by the inverter registers
+  // Limit slots shown to what the inverter model supports
+  // (e.g. AC Coupled only has 1 charge slot; Gen3 has 10).
+  const maxChargeSlots = snapshot?.max_charge_slots ?? 2;
+  const maxDischargeSlots = snapshot?.max_discharge_slots ?? 2;
+
   const chargeSlots: ScheduleSlot[] =
-    snapshot?.charge_slots?.length != null && snapshot.charge_slots.length >= 2
-      ? snapshot.charge_slots.slice(0, 2)
-      : [
-        { enabled: false, start_hour: 0, start_minute: 0, end_hour: 6, end_minute: 0, target_soc: 100 },
-        { enabled: false, start_hour: 0, start_minute: 0, end_hour: 6, end_minute: 0, target_soc: 100 },
-      ];
+    snapshot?.charge_slots?.length != null && snapshot.charge_slots.length >= maxChargeSlots
+      ? snapshot.charge_slots.slice(0, maxChargeSlots)
+      : Array.from({ length: maxChargeSlots }, () => ({
+        enabled: false, start_hour: 0, start_minute: 0, end_hour: 6, end_minute: 0, target_soc: 100,
+      } as ScheduleSlot));
 
   const dischargeSlots: ScheduleSlot[] =
-    snapshot?.discharge_slots?.length === 2
-      ? snapshot.discharge_slots
-      : [
-        { enabled: false, start_hour: 16, start_minute: 0, end_hour: 19, end_minute: 0, target_soc: 0 },
-        { enabled: false, start_hour: 16, start_minute: 0, end_hour: 19, end_minute: 0, target_soc: 0 },
-      ];
+    snapshot?.discharge_slots?.length != null && snapshot.discharge_slots.length >= maxDischargeSlots
+      ? snapshot.discharge_slots.slice(0, maxDischargeSlots)
+      : Array.from({ length: maxDischargeSlots }, () => ({
+        enabled: false, start_hour: 16, start_minute: 0, end_hour: 19, end_minute: 0, target_soc: 0,
+      } as ScheduleSlot));
 
   const [requestedMode, setRequestedMode] = useState<BatteryMode | null>(null);
 

@@ -698,6 +698,126 @@ fn sanitize_snapshot(
         }
     }
 
+    // ---- Slot data sanitization ----
+    // Charge/discharge slot times are stored in HR registers that the dongle
+    // can corrupt just as easily as telemetry registers. Apply delta checks
+    // so a single corrupted register read doesn't flip the UI.
+    //
+    // Enable_charge and enable_discharge flips are flagged for re-read but
+    // NOT reverted — intentional changes from the control API must propagate.
+    // The immediate re-read confirms the change on the next poll cycle.
+    if let Some(p) = prev {
+        if snap.enable_charge != p.enable_charge {
+            tracing::debug!(
+                raw = snap.enable_charge,
+                prev = p.enable_charge,
+                "enable_charge changed — re-reading to confirm"
+            );
+            sanitized = true;
+        }
+        if snap.enable_discharge != p.enable_discharge {
+            tracing::debug!(
+                raw = snap.enable_discharge,
+                prev = p.enable_discharge,
+                "enable_discharge changed — re-reading to confirm"
+            );
+            sanitized = true;
+        }
+
+        // Slot time delta checks: a slot's start/end times should not change
+        // by more than 12 hours between consecutive polls (one poll cycle is
+        // at most 60 seconds; no legitimate schedule change causes a 12h jump).
+        // We compare each slot against its previous counterpart.
+        const MAX_SLOT_HOUR_SHIFT: i16 = 12;
+
+        for i in 0..snap.charge_slots.len().min(p.charge_slots.len()) {
+            let cur_sh = snap.charge_slots[i].start_hour;
+            let cur_eh = snap.charge_slots[i].end_hour;
+            let cur_en = snap.charge_slots[i].enabled;
+
+            let prev_sh = p.charge_slots[i].start_hour;
+            let prev_eh = p.charge_slots[i].end_hour;
+            let prev_en = p.charge_slots[i].enabled;
+
+            if cur_en != prev_en && (cur_sh != prev_sh || cur_eh != prev_eh) {
+                tracing::warn!(
+                    slot = i, cur_enabled = cur_en, prev_enabled = prev_en,
+                    "Charge slot {i} enabled changed with different times — reverting",
+                );
+                snap.charge_slots[i].enabled = prev_en;
+                sanitized = true;
+            }
+            if cur_sh.abs_diff(prev_sh) as i16 > MAX_SLOT_HOUR_SHIFT
+                || cur_eh.abs_diff(prev_eh) as i16 > MAX_SLOT_HOUR_SHIFT
+            {
+                tracing::warn!(
+                    slot = i, cur_sh, prev_sh, cur_eh, prev_eh,
+                    "Charge slot {i} times jumped by >12h — using previous",
+                );
+                snap.charge_slots[i].start_hour = prev_sh;
+                snap.charge_slots[i].start_minute = p.charge_slots[i].start_minute;
+                snap.charge_slots[i].end_hour = prev_eh;
+                snap.charge_slots[i].end_minute = p.charge_slots[i].end_minute;
+                sanitized = true;
+            }
+        }
+
+        for i in 0..snap.discharge_slots.len().min(p.discharge_slots.len()) {
+            let cur_sh = snap.discharge_slots[i].start_hour;
+            let cur_eh = snap.discharge_slots[i].end_hour;
+            let cur_en = snap.discharge_slots[i].enabled;
+
+            let prev_sh = p.discharge_slots[i].start_hour;
+            let prev_eh = p.discharge_slots[i].end_hour;
+            let prev_en = p.discharge_slots[i].enabled;
+
+            if cur_en != prev_en && (cur_sh != prev_sh || cur_eh != prev_eh) {
+                tracing::warn!(
+                    slot = i, cur_enabled = cur_en, prev_enabled = prev_en,
+                    "Discharge slot {i} enabled changed with different times — reverting",
+                );
+                snap.discharge_slots[i].enabled = prev_en;
+                sanitized = true;
+            }
+            if cur_sh.abs_diff(prev_sh) as i16 > MAX_SLOT_HOUR_SHIFT
+                || cur_eh.abs_diff(prev_eh) as i16 > MAX_SLOT_HOUR_SHIFT
+            {
+                tracing::warn!(
+                    slot = i, cur_sh, prev_sh, cur_eh, prev_eh,
+                    "Discharge slot {i} times jumped by >12h — using previous",
+                );
+                snap.discharge_slots[i].start_hour = prev_sh;
+                snap.discharge_slots[i].start_minute = p.discharge_slots[i].start_minute;
+                snap.discharge_slots[i].end_hour = prev_eh;
+                snap.discharge_slots[i].end_minute = p.discharge_slots[i].end_minute;
+                sanitized = true;
+            }
+        }
+
+        // Target SOC (HR 116): must be 0-100 (validated on decode, but
+        // double-check here too since it drives charging behavior).
+        if snap.target_soc > 100 {
+            tracing::warn!(
+                raw = snap.target_soc,
+                prev = p.target_soc,
+                "Target SOC out of range — using previous"
+            );
+            snap.target_soc = p.target_soc;
+            sanitized = true;
+        }
+
+        // Battery reserve (HR 110): must be 0-100.
+        if snap.battery_reserve > 100 {
+            tracing::warn!(
+                raw = snap.battery_reserve,
+                prev = p.battery_reserve,
+                "Battery reserve out of range — using previous"
+            );
+            snap.battery_reserve = p.battery_reserve;
+            sanitized = true;
+        }
+    }
+
     sanitized
 }
 
@@ -955,6 +1075,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 let mut readings_since_connect: u8 = 0;
                 const GRACE_READINGS: u8 = 3;
                 let mut pending_mode: Option<BatteryMode> = None;
+                let mut known_device_type: Option<crate::inverter::model::DeviceType> = None;
 
                 // Restore cosy_active from persisted settings on restart.
                 // Without this, a client reboot during a cosy slot would leave
@@ -997,7 +1118,27 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 }
 
                 // ---- Inner poll loop ----
+                // settings_version tracks the settings version at connection start.
+                // Each iteration captures the CURRENT version before the poll and
+                // compares it against this baseline after the poll, so a version
+                // bump by the API is always detected regardless of timing.
+                let settings_version_at_connect = state.settings.lock().await.version;
                 loop {
+                    // Capture version BEFORE the poll to detect changes that
+                    // happen during the poll (API bumps version while we read).
+                    // NOTE: this is the INSTANTANEOUS version, not a stored
+                    // baseline. The baseline check happens after the sleep.
+                    let current_version = state.settings.lock().await.version;
+
+                    // If version changed since we last connected, break immediately.
+                    if current_version != settings_version_at_connect {
+                        tracing::info!(
+                            "Settings changed (v{} → v{}) — reconnecting",
+                            current_version, settings_version_at_connect
+                        );
+                        break;
+                    }
+
                     // Drain and execute any pending register writes from the
                     // control API before reading the latest state.
                     let pending: Vec<Vec<RegisterWrite>> = {
@@ -1038,9 +1179,23 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     }
 
                     let (poll_ok, sanitized) = async {
-                        match client.read_all_standard().await {
+                        match client.read_all_with_extras(known_device_type.as_ref()).await {
                             Ok(blocks) => {
                                 let mut snapshot = decode_snapshot(&blocks);
+
+                                // Cache the device type for subsequent polls.
+                                // This enables model-aware polling (extra blocks).
+                                // 'Unknown(0)' means we haven't identified the model yet.
+                                let is_new_model = known_device_type.is_none()
+                                    && !matches!(snapshot.device_type, crate::inverter::model::DeviceType::Unknown(_));
+                                if is_new_model {
+                                    tracing::info!(
+                                        device_type = ?snapshot.device_type,
+                                        extra_blocks = ?snapshot.device_type.extra_poll_blocks().iter().map(|b| b.name).collect::<Vec<_>>(),
+                                        "Device model identified — enabling model-aware polling"
+                                    );
+                                    known_device_type = Some(snapshot.device_type);
+                                }
 
                                 // If the dongle serial was auto-discovered from the
                                 // response, persist it to settings so it survives restarts.
@@ -1414,7 +1569,11 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     // Sleep for the configured interval, but wake early if:
                     //   • settings changed (new host → reconnect)
                     //   • new writes were queued (apply immediately)
-                    let current_version = state.settings.lock().await.version;
+                    //
+                    // NOTE: current_version was captured at the TOP of this
+                    // iteration (before the poll). Do NOT re-capture here —
+                    // the sleep loop compares against the PRE-POLL version
+                    // so it detects version bumps that happened during the poll.
                     let interval_secs = state.settings.lock().await.interval_secs;
                     let sleep_deadline = tokio::time::Instant::now() + Duration::from_secs(interval_secs);
                     loop {

@@ -33,6 +33,11 @@ const UNIT_ID: u8 = 0x01;
 /// Transparent-message function code used by the GivEnergy data adapter.
 const FUNCTION_ID_TRANSPARENT: u8 = 0x02;
 
+/// Heartbeat-request function code sent by the dongle every ~3 minutes.
+/// The client must respond within 5 seconds; after 3 missed heartbeats
+/// the dongle closes the TCP socket.
+const FUNCTION_ID_HEARTBEAT: u8 = 0x01;
+
 /// Length of the data-adapter serial field (Latin-1, space-padded).
 const SERIAL_LEN: usize = 10;
 
@@ -144,6 +149,27 @@ fn encode_serial(serial: &str) -> [u8; SERIAL_LEN] {
 // ---------------------------------------------------------------------------
 // Encoder
 // ---------------------------------------------------------------------------
+
+/// Check whether a raw frame is a heartbeat request from the dongle.
+///
+/// Heartbeat frames have the same 0x59590001 MBAP header but function ID
+/// 0x01 at byte 7 instead of 0x02. They are minimal — just the header.
+pub fn is_heartbeat_request(data: &[u8]) -> bool {
+    data.len() >= 8
+        && data[0] == 0x59
+        && data[1] == 0x59
+        && data[2] == 0x00
+        && data[3] == 0x01
+        && data[7] == FUNCTION_ID_HEARTBEAT
+}
+
+/// Build a heartbeat response frame by echoing the request back to the dongle.
+///
+/// The response must be sent within 5 seconds. After 3 missed heartbeats the
+/// dongle closes the TCP connection.
+pub fn build_heartbeat_response(request: &[u8]) -> Vec<u8> {
+    request.to_vec()
+}
 
 /// Build a complete GivEnergy Modbus TCP frame.
 ///
@@ -624,5 +650,37 @@ mod tests {
         assert_eq!(decoded.slave, 0x32);
         assert_eq!(decoded.function, 0x03);
         assert_eq!(decoded.payload, vec![0x04, 0x12, 0x34, 0x56, 0x78]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Heartbeat detection and response
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn heartbeat_is_detected() {
+        // Build a minimal heartbeat frame: MBAP header with fid=0x01
+        let heartbeat = vec![
+            0x59, 0x59, // transaction ID
+            0x00, 0x01, // protocol ID
+            0x00, 0x02, // length = 2 (uid + fid only)
+            0x01,       // unit ID
+            0x01,       // function ID (heartbeat)
+        ];
+        assert!(is_heartbeat_request(&heartbeat));
+    }
+
+    #[test]
+    fn heartbeat_response_echoes_request() {
+        let request = vec![
+            0x59, 0x59, 0x00, 0x01, 0x00, 0x02, 0x01, 0x01,
+        ];
+        let response = build_heartbeat_response(&request);
+        assert_eq!(response, request);
+    }
+
+    #[test]
+    fn normal_frame_is_not_heartbeat() {
+        let frame = encode_frame("SA1234", 0x01, 0x03, &[0x00, 0x01]);
+        assert!(!is_heartbeat_request(&frame));
     }
 }

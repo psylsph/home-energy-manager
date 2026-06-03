@@ -138,6 +138,10 @@ pub async fn update_settings(
 
     // Bump version so the poll loop notices the change and reconnects.
     settings.version = settings.version.wrapping_add(1);
+    // Wake the poll loop immediately so it detects the version change.
+    // The poll loop checks version at the start of each iteration and after
+    // each sleep tick; without this notification it could sleep up to 1s.
+    state.write_notify.notify_one();
 
     // Persist to disk
     let mut persist = crate::settings::Settings::load();
@@ -253,8 +257,20 @@ pub async fn set_charge_slot(
         Some(s) => s as u8,
         None => return error_response("Missing 'slot' field (1-2)"),
     };
-    if !(1..=2).contains(&slot) {
-        return error_response("Slot must be 1 or 2");
+    // AC Coupled and Gen1 Hybrid only support charge slot 1 (HR 94-95).
+    let max_slots = state.latest_snapshot.lock().await
+        .as_ref()
+        .map(|s| s.device_type.max_charge_slots())
+        .unwrap_or(2);
+    if slot > max_slots {
+        return error_response(&format!(
+            "Charge slot {} not supported on this inverter model (max {})",
+            slot, max_slots
+        ));
+    }
+
+    if !(1..=max_slots).contains(&slot) {
+        return error_response(&format!("Slot must be 1..{}, got {}", max_slots, slot));
     }
 
     let enabled = body["enabled"].as_bool().unwrap_or(true);
@@ -265,16 +281,14 @@ pub async fn set_charge_slot(
     let end_minute = body["end_minute"].as_u64().unwrap_or(0) as u8;
     let target_soc = body["target_soc"].as_u64().unwrap_or(100) as u8;
 
-    let (start, end) = if enabled {
-        (encode_hhmm(start_hour, start_minute), encode_hhmm(end_hour, end_minute))
-    } else {
-        // Disabled: write 0 to clear the slot (per givenergy-modbus reference).
-        (0, 0)
-    };
+    let (start, end) = (encode_hhmm(start_hour, start_minute), encode_hhmm(end_hour, end_minute));
 
-    let cmd = match slot {
-        1 => ControlCommand::SetChargeSlot1 { start, end },
-        2 => ControlCommand::SetChargeSlot2 { start, end },
+    let cmd = match (slot, enabled) {
+        (1, true) => ControlCommand::SetChargeSlot1 { start, end },
+        (2, true) => ControlCommand::SetChargeSlot2 { start, end },
+        // Disabling should not clear the slot times — preserve the user's
+        // schedule and only disable the master charge schedule flag.
+        (_, false) => ControlCommand::SetEnableCharge { enabled: false },
         _ => unreachable!(),
     };
 
@@ -342,8 +356,20 @@ pub async fn set_discharge_slot(
         Some(s) => s as u8,
         None => return error_response("Missing 'slot' field (1-2)"),
     };
-    if !(1..=2).contains(&slot) {
-        return error_response("Slot must be 1 or 2");
+    // Check model support — AC Coupled/Gen1 only have 1 discharge slot.
+    let max_slots = state.latest_snapshot.lock().await
+        .as_ref()
+        .map(|s| s.device_type.max_discharge_slots())
+        .unwrap_or(2);
+    if slot > max_slots {
+        return error_response(&format!(
+            "Discharge slot {} not supported on this inverter model (max {})",
+            slot, max_slots
+        ));
+    }
+
+    if !(1..=max_slots).contains(&slot) {
+        return error_response(&format!("Slot must be 1..{}, got {}", max_slots, slot));
     }
 
     let enabled = body["enabled"].as_bool().unwrap_or(true);
@@ -353,24 +379,26 @@ pub async fn set_discharge_slot(
     let end_hour = body["end_hour"].as_u64().unwrap_or(0) as u8;
     let end_minute = body["end_minute"].as_u64().unwrap_or(0) as u8;
 
-    let (start, end) = if enabled {
-        (encode_hhmm(start_hour, start_minute), encode_hhmm(end_hour, end_minute))
-    } else {
-        (0, 0)
-    };
+    let (start, end) = (encode_hhmm(start_hour, start_minute), encode_hhmm(end_hour, end_minute));
 
-    let cmd = match slot {
-        1 => ControlCommand::SetDischargeSlot1 { start, end },
-        2 => ControlCommand::SetDischargeSlot2 { start, end },
+    let cmd = match (slot, enabled) {
+        (1, true) => ControlCommand::SetDischargeSlot1 { start, end },
+        (2, true) => ControlCommand::SetDischargeSlot2 { start, end },
+        // Disabling should not clear slot times — preserve schedule and only
+        // disable the master discharge schedule flag.
+        (_, false) => ControlCommand::SetEnableDischarge { enabled: false },
         _ => unreachable!(),
     };
 
     match cmd.encode() {
-        Ok(writes) => {
-            // NOTE: we deliberately do NOT set enable_discharge here.
-            // The discharge slot defines WHEN discharge is permitted.
-            // The user controls enable_discharge separately via the
-            // Timed Demand/Timed Export mode selection or Cosy timer.
+        Ok(mut writes) => {
+            if enabled {
+                // User explicitly enabled the discharge slot; also enable the
+                // master discharge flag so the schedule becomes active again.
+                if let Ok(enable_writes) = (ControlCommand::SetEnableDischarge { enabled: true }).encode() {
+                    writes.extend(enable_writes);
+                }
+            }
 
             tracing::info!("SetDischargeSlot {} encoded: {:?}", slot, writes);
             queue_writes(&state, writes).await;

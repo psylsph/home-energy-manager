@@ -5,6 +5,77 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.37] - 2026-06-03
+
+### Added
+
+- **Heartbeat handling**: Respond to dongle heartbeat requests (function ID
+  0x01) to prevent TCP disconnections after ~9 minutes of inactivity. The
+  heartbeat is now handled transparently in the receive loop. (#audit-1)
+
+- **Battery pause mode support**: New `POST /api/control/pause-mode` and
+  `POST /api/control/pause-slot` endpoints for configuring the battery pause
+  schedule (HR 318-320). (#audit-7)
+
+- **AC-coupled inverter features**: Export priority (HR 311), EPS enable
+  (HR 317) register support. (#audit-8)
+
+- **Per-slot target SOC commands**: New `SetChargeTargetSocSlot` and
+  `SetDischargeTargetSocSlot` encoder commands for Gen3 per-slot targets
+  (HR 242/245, 272/275). (#audit-6)
+
+- **Extended 10-slot scheduling**: Full register support for charge/discharge
+  slots 3-10 (HR 246-268, 276-298). New `SetChargeSlotN` / `SetDischargeSlotN`
+  commands and `decode_holding_240_299()` to read extended slot data. Polling
+  is model-aware: Gen3/AIO inverters automatically read the extended block.
+  (#audit-9, #audit-10)
+
+- **Model-aware polling**: `DeviceType::extra_poll_blocks()` returns additional
+  register blocks appropriate to the detected inverter model. Three-phase,
+  AC-coupled, and Gen3/AIO now read their respective extended configuration
+  blocks automatically after the first poll cycle. (#audit-10)
+
+- **Battery power reserve**: New `SetPowerReserve` command for HR 114
+  (discharge min power reserve), distinct from the SOC reserve.
+  New `POST /api/control/power-reserve` endpoint. (#audit-3)
+
+- **RTC enable control**: New `SetRtc` command for HR 166 to persist settings
+  to EEPROM. (#audit-4)
+
+- **Max slot count in snapshot**: `max_charge_slots` and `max_discharge_slots`
+  fields exposed in the snapshot so the frontend adapts to the device model.
+
+### Fixed
+
+- **Switching inverters fails to reconnect**: The poll loop captured the
+  settings version *after* the poll operation, creating a race condition.
+  If the API bumped the version during the poll (1-3 second window), the
+  capture already saw the new version and never detected the change.
+  Fixed by capturing version at the top of the loop iteration with a
+  persistent connect-time baseline, and by waking the poll loop via
+  `write_notify` when settings are updated. (#audit-connection)
+
+- **Toggling control schedules loses slot settings**: Eco/Timed mode switches
+  no longer clear the discharge slot registers (HR 56-57, 44-45). Toggling a
+  slot off now writes only the master enable flag (HR 96 or HR 59) instead of
+  zeroing the slot times. The decoder preserves time fields but exposes
+  effective enabled state via the master flags. (#audit-slots)
+
+- **Exception 67 on register 32 (AC Coupled)**: Write to HR 32 (charge slot 2
+  end) consistently fails with exception 67 on AC Coupled and some other
+  models. The `write_register` method now treats exception 67 on the final
+  retry as a soft failure (logs WARNING, returns Ok). The API also rejects
+  slot 2 writes when `max_charge_slots = 1` (AC Coupled/Gen1). (#audit-5)
+
+- **Charge/discharge limit bounds too permissive**: Tightened validation bounds
+  to match the reference library — SOC reserve [4-100], charge/discharge
+  limits [0-50], charge target SOC [4-100]. (#audit-2)
+
+- **Corrupted slot data and enable flags flicker UI**: Added slot time delta
+  checks (>12h change triggers revert), enable_charge/enable_discharge change
+  detection (triggers immediate re-read for confirmation), and target SOC /
+  battery reserve range checks. (#audit-slots-flicker)
+
 ## [0.9.36] - 2026-06-03
 
 ### Fixed

@@ -7,13 +7,28 @@ use chrono::{Datelike, Timelike, Utc};
 
 use crate::modbus::registers::{
     HR_BATTERY_CHARGE_LIMIT, HR_BATTERY_DISCHARGE_LIMIT, HR_BATTERY_POWER_MODE,
-    HR_BATTERY_CALIBRATION_STAGE, HR_BATTERY_SOC_RESERVE, HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_SLOT_2_END,
+    HR_BATTERY_CALIBRATION_STAGE, HR_BATTERY_SOC_RESERVE, HR_BATTERY_DISCHARGE_MIN_POWER_RESERVE,
+    HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_SLOT_2_END,
     HR_CHARGE_SLOT_2_START, HR_CHARGE_TARGET_SOC, HR_DISCHARGE_SLOT_1_END,
     HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END, HR_DISCHARGE_SLOT_2_START,
     HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
-    HR_ACTIVE_POWER_RATE,
+    HR_ACTIVE_POWER_RATE, HR_ENABLE_RTC,
+    HR_EXPORT_PRIORITY, HR_ENABLE_EPS,
+    HR_BATTERY_PAUSE_MODE, HR_BATTERY_PAUSE_SLOT_1_START, HR_BATTERY_PAUSE_SLOT_1_END,
     HR_INVERTER_REBOOT, HR_SYSTEM_TIME_YEAR, HR_SYSTEM_TIME_MONTH, HR_SYSTEM_TIME_DAY,
     HR_SYSTEM_TIME_HOUR, HR_SYSTEM_TIME_MINUTE, HR_SYSTEM_TIME_SECOND,
+    // Extended slots 3-10
+    HR_CHARGE_SLOT_3_START, HR_CHARGE_SLOT_3_END, HR_CHARGE_SLOT_4_START, HR_CHARGE_SLOT_4_END,
+    HR_CHARGE_SLOT_5_START, HR_CHARGE_SLOT_5_END, HR_CHARGE_SLOT_6_START, HR_CHARGE_SLOT_6_END,
+    HR_CHARGE_SLOT_7_START, HR_CHARGE_SLOT_7_END, HR_CHARGE_SLOT_8_START, HR_CHARGE_SLOT_8_END,
+    HR_CHARGE_SLOT_9_START, HR_CHARGE_SLOT_9_END, HR_CHARGE_SLOT_10_START, HR_CHARGE_SLOT_10_END,
+    HR_DISCHARGE_SLOT_3_START, HR_DISCHARGE_SLOT_3_END, HR_DISCHARGE_SLOT_4_START, HR_DISCHARGE_SLOT_4_END,
+    HR_DISCHARGE_SLOT_5_START, HR_DISCHARGE_SLOT_5_END, HR_DISCHARGE_SLOT_6_START, HR_DISCHARGE_SLOT_6_END,
+    HR_DISCHARGE_SLOT_7_START, HR_DISCHARGE_SLOT_7_END, HR_DISCHARGE_SLOT_8_START, HR_DISCHARGE_SLOT_8_END,
+    HR_DISCHARGE_SLOT_9_START, HR_DISCHARGE_SLOT_9_END, HR_DISCHARGE_SLOT_10_START, HR_DISCHARGE_SLOT_10_END,
+    // Per-slot target SOCs
+    HR_CHARGE_TARGET_SOC_1, HR_CHARGE_TARGET_SOC_2,
+    HR_DISCHARGE_TARGET_SOC_1, HR_DISCHARGE_TARGET_SOC_2,
     SAFE_WRITE_REGS,
 };
 
@@ -81,6 +96,26 @@ pub enum ControlCommand {
     SetCalibrationStage { stage: u16 },
     /// Reboot the inverter (write 100 to HR 163).
     RebootInverter,
+    /// Set battery discharge min power reserve (HR 114, 4-100%).
+    SetPowerReserve { reserve: u16 },
+    /// Enable or disable the Real Time Clock (HR 166, persists settings to EEPROM).
+    SetRtc { enabled: bool },
+    /// Set export priority for AC-coupled inverters (HR 311).
+    SetExportPriority { priority: u16 },
+    /// Enable or disable Emergency Power Supply mode (HR 317).
+    SetEps { enabled: bool },
+    /// Set battery pause mode (HR 318, 0=disabled).
+    SetPauseMode { mode: u16 },
+    /// Set battery pause time slot (HR 319-320).
+    SetPauseSlot { start: u16, end: u16 },
+    /// Set per-slot charge target SOC (HR 242/245 for slots 1/2).
+    SetChargeTargetSocSlot { slot: u8, soc: u16 },
+    /// Set per-slot discharge target SOC (HR 272/275 for slots 1/2).
+    SetDischargeTargetSocSlot { slot: u8, soc: u16 },
+    /// Set charge slot N times (N=3..10, Gen3 extended).
+    SetChargeSlotN { slot: u8, start: u16, end: u16 },
+    /// Set discharge slot N times (N=3..10, Gen3 extended).
+    SetDischargeSlotN { slot: u8, start: u16, end: u16 },
 }
 
 impl ControlCommand {
@@ -106,11 +141,13 @@ impl ControlCommand {
                 ]
             }
             ControlCommand::SetBatterySocReserve { reserve } => {
-                validate_range(*reserve, 0, 100, "SOC reserve")?;
+                // Reference bounds: [4-100]. Below 4% causes issues.
+                validate_range(*reserve, 4, 100, "SOC reserve")?;
                 vec![rw(HR_BATTERY_SOC_RESERVE, *reserve)]
             }
             ControlCommand::SetChargeTargetSoc { soc } => {
-                validate_range(*soc, 0, 100, "target SOC")?;
+                // Reference bounds: [4-100].
+                validate_range(*soc, 4, 100, "target SOC")?;
                 vec![
                     rw(HR_ENABLE_CHARGE_TARGET, 1),
                     rw(HR_CHARGE_TARGET_SOC, *soc),
@@ -141,13 +178,14 @@ impl ControlCommand {
                 ]
             }
             ControlCommand::SetChargeLimit { limit } => {
-                // Register accepts 0-100% but inverter hardware typically limits
-                // practical DC charge to ~50% (~2.6 kW for Gen1, ~3.6 kW Gen2+)
-                validate_range(*limit, 0, 100, "charge limit")?;
+                // Reference bounds: [0-50]. Above 50% the dongle can become
+                // unresponsive — this matches the reference library's limit.
+                validate_range(*limit, 0, 50, "charge limit")?;
                 vec![rw(HR_BATTERY_CHARGE_LIMIT, *limit)]
             }
             ControlCommand::SetDischargeLimit { limit } => {
-                validate_range(*limit, 0, 100, "discharge limit")?;
+                // Reference bounds: [0-50]. Same reasoning as charge limit.
+                validate_range(*limit, 0, 50, "discharge limit")?;
                 vec![rw(HR_BATTERY_DISCHARGE_LIMIT, *limit)]
             }
             ControlCommand::SetActivePowerRate { rate } => {
@@ -155,19 +193,18 @@ impl ControlCommand {
                 vec![rw(HR_ACTIVE_POWER_RATE, *rate)]
             }
             ControlCommand::SetEcoMode { soc_reserve } => {
-                validate_range(*soc_reserve, 0, 100, "SOC reserve")?;
+                validate_range(*soc_reserve, 4, 100, "SOC reserve")?;
+                // Preserve discharge slot times. The reference set_mode_dynamic()
+                // disables timed discharge via HR 59 only; clearing slot registers
+                // loses the user's configured schedule.
                 vec![
                     rw(HR_BATTERY_POWER_MODE, 1), // self-consumption
                     rw(HR_ENABLE_DISCHARGE, 0),   // no timed discharge
                     rw(HR_BATTERY_SOC_RESERVE, *soc_reserve),
-                    rw(HR_DISCHARGE_SLOT_1_START, 0), // disable discharge slot 1
-                    rw(HR_DISCHARGE_SLOT_1_END, 0),
-                    rw(HR_DISCHARGE_SLOT_2_START, 0), // disable discharge slot 2
-                    rw(HR_DISCHARGE_SLOT_2_END, 0),
                 ]
             }
             ControlCommand::SetTimedDemandMode { soc_reserve } => {
-                validate_range(*soc_reserve, 0, 100, "SOC reserve")?;
+                validate_range(*soc_reserve, 4, 100, "SOC reserve")?;
                 vec![
                     rw(HR_BATTERY_POWER_MODE, 1), // self-consumption
                     rw(HR_ENABLE_DISCHARGE, 1),   // enable timed discharge
@@ -175,7 +212,7 @@ impl ControlCommand {
                 ]
             }
             ControlCommand::SetTimedExportMode { soc_reserve } => {
-                validate_range(*soc_reserve, 0, 100, "SOC reserve")?;
+                validate_range(*soc_reserve, 4, 100, "SOC reserve")?;
                 vec![
                     rw(HR_BATTERY_POWER_MODE, 0), // export mode
                     rw(HR_ENABLE_DISCHARGE, 1),   // enable timed discharge
@@ -186,7 +223,7 @@ impl ControlCommand {
                 vec![rw(HR_BATTERY_SOC_RESERVE, 100)]
             }
             ControlCommand::ForceCharge { target_soc } => {
-                validate_range(*target_soc, 0, 100, "target SOC")?;
+                validate_range(*target_soc, 4, 100, "target SOC")?;
                 // NOTE: we do NOT clear the charge slot registers here.
                 // The inverter handles priority internally, and writing 4
                 // extra registers (HR 94/95/31/32) adds unnecessary Modbus
@@ -225,6 +262,50 @@ impl ControlCommand {
             ControlCommand::RebootInverter => {
                 vec![rw(HR_INVERTER_REBOOT, 100)]
             }
+            ControlCommand::SetPowerReserve { reserve } => {
+                // HR 114: battery discharge min power reserve (4-100%).
+                // Distinct from HR 110 (SOC reserve) — this prevents discharge
+                // below the reserve level even in timed modes.
+                validate_range(*reserve, 4, 100, "power reserve")?;
+                vec![rw(HR_BATTERY_DISCHARGE_MIN_POWER_RESERVE, *reserve)]
+            }
+            ControlCommand::SetRtc { enabled } => {
+                vec![rw(HR_ENABLE_RTC, if *enabled { 1 } else { 0 })]
+            }
+            ControlCommand::SetExportPriority { priority } => {
+                validate_range(*priority, 0, 2, "export priority")?;
+                vec![rw(HR_EXPORT_PRIORITY, *priority)]
+            }
+            ControlCommand::SetEps { enabled } => {
+                vec![rw(HR_ENABLE_EPS, if *enabled { 1 } else { 0 })]
+            }
+            ControlCommand::SetPauseMode { mode } => {
+                vec![rw(HR_BATTERY_PAUSE_MODE, *mode)]
+            }
+            ControlCommand::SetPauseSlot { start, end } => {
+                vec![
+                    rw(HR_BATTERY_PAUSE_SLOT_1_START, *start),
+                    rw(HR_BATTERY_PAUSE_SLOT_1_END, *end),
+                ]
+            }
+            ControlCommand::SetChargeTargetSocSlot { slot, soc } => {
+                validate_range(*soc, 0, 100, "per-slot target SOC")?;
+                let reg = charge_target_soc_for_slot(*slot)?;
+                vec![rw(reg, *soc)]
+            }
+            ControlCommand::SetDischargeTargetSocSlot { slot, soc } => {
+                validate_range(*soc, 0, 100, "per-slot discharge target SOC")?;
+                let reg = discharge_target_soc_for_slot(*slot)?;
+                vec![rw(reg, *soc)]
+            }
+            ControlCommand::SetChargeSlotN { slot, start, end } => {
+                let (s, e) = extended_charge_slot(*slot)?;
+                vec![rw(s, *start), rw(e, *end)]
+            }
+            ControlCommand::SetDischargeSlotN { slot, start, end } => {
+                let (s, e) = extended_discharge_slot(*slot)?;
+                vec![rw(s, *start), rw(e, *end)]
+            }
         };
 
         // Validate all addresses are in the whitelist
@@ -253,6 +334,54 @@ fn validate_range(val: u16, min: u16, max: u16, name: &str) -> Result<(), String
     }
 }
 
+/// Map slot index (1-2) to charge target SOC register (HR 242, 245).
+fn charge_target_soc_for_slot(slot: u8) -> Result<u16, String> {
+    match slot {
+        1 => Ok(HR_CHARGE_TARGET_SOC_1),
+        2 => Ok(HR_CHARGE_TARGET_SOC_2),
+        _ => Err(format!("Charge target SOC slot must be 1-2, got {}", slot)),
+    }
+}
+
+/// Map slot index (1-2) to discharge target SOC register (HR 272, 275).
+fn discharge_target_soc_for_slot(slot: u8) -> Result<u16, String> {
+    match slot {
+        1 => Ok(HR_DISCHARGE_TARGET_SOC_1),
+        2 => Ok(HR_DISCHARGE_TARGET_SOC_2),
+        _ => Err(format!("Discharge target SOC slot must be 1-2, got {}", slot)),
+    }
+}
+
+/// Map slot index (3-10) to extended charge slot register pair.
+fn extended_charge_slot(slot: u8) -> Result<(u16, u16), String> {
+    match slot {
+        3 => Ok((HR_CHARGE_SLOT_3_START, HR_CHARGE_SLOT_3_END)),
+        4 => Ok((HR_CHARGE_SLOT_4_START, HR_CHARGE_SLOT_4_END)),
+        5 => Ok((HR_CHARGE_SLOT_5_START, HR_CHARGE_SLOT_5_END)),
+        6 => Ok((HR_CHARGE_SLOT_6_START, HR_CHARGE_SLOT_6_END)),
+        7 => Ok((HR_CHARGE_SLOT_7_START, HR_CHARGE_SLOT_7_END)),
+        8 => Ok((HR_CHARGE_SLOT_8_START, HR_CHARGE_SLOT_8_END)),
+        9 => Ok((HR_CHARGE_SLOT_9_START, HR_CHARGE_SLOT_9_END)),
+        10 => Ok((HR_CHARGE_SLOT_10_START, HR_CHARGE_SLOT_10_END)),
+        _ => Err(format!("Extended charge slot must be 3-10, got {}", slot)),
+    }
+}
+
+/// Map slot index (3-10) to extended discharge slot register pair.
+fn extended_discharge_slot(slot: u8) -> Result<(u16, u16), String> {
+    match slot {
+        3 => Ok((HR_DISCHARGE_SLOT_3_START, HR_DISCHARGE_SLOT_3_END)),
+        4 => Ok((HR_DISCHARGE_SLOT_4_START, HR_DISCHARGE_SLOT_4_END)),
+        5 => Ok((HR_DISCHARGE_SLOT_5_START, HR_DISCHARGE_SLOT_5_END)),
+        6 => Ok((HR_DISCHARGE_SLOT_6_START, HR_DISCHARGE_SLOT_6_END)),
+        7 => Ok((HR_DISCHARGE_SLOT_7_START, HR_DISCHARGE_SLOT_7_END)),
+        8 => Ok((HR_DISCHARGE_SLOT_8_START, HR_DISCHARGE_SLOT_8_END)),
+        9 => Ok((HR_DISCHARGE_SLOT_9_START, HR_DISCHARGE_SLOT_9_END)),
+        10 => Ok((HR_DISCHARGE_SLOT_10_START, HR_DISCHARGE_SLOT_10_END)),
+        _ => Err(format!("Extended discharge slot must be 3-10, got {}", slot)),
+    }
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -274,21 +403,21 @@ mod tests {
     fn set_eco_mode() {
         let cmd = ControlCommand::SetEcoMode { soc_reserve: 4 };
         let writes = cmd.encode().unwrap();
-        assert_eq!(writes.len(), 7);
+        assert_eq!(writes.len(), 3);
         assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
         assert_eq!(writes[0].value, 1);
         assert_eq!(writes[1].address, HR_ENABLE_DISCHARGE);
         assert_eq!(writes[1].value, 0);
         assert_eq!(writes[2].address, HR_BATTERY_SOC_RESERVE);
         assert_eq!(writes[2].value, 4);
-        assert_eq!(writes[3].address, HR_DISCHARGE_SLOT_1_START);
-        assert_eq!(writes[3].value, 0); // disable (0 = disabled sentinel)
-        assert_eq!(writes[4].address, HR_DISCHARGE_SLOT_1_END);
-        assert_eq!(writes[4].value, 0);
-        assert_eq!(writes[5].address, HR_DISCHARGE_SLOT_2_START);
-        assert_eq!(writes[5].value, 0);
-        assert_eq!(writes[6].address, HR_DISCHARGE_SLOT_2_END);
-        assert_eq!(writes[6].value, 0);
+        assert!(
+            !writes.iter().any(|w| matches!(
+                w.address,
+                HR_DISCHARGE_SLOT_1_START | HR_DISCHARGE_SLOT_1_END
+                    | HR_DISCHARGE_SLOT_2_START | HR_DISCHARGE_SLOT_2_END
+            )),
+            "Eco mode must preserve discharge slot times"
+        );
     }
 
     #[test]
@@ -324,14 +453,27 @@ mod tests {
 
     #[test]
     fn set_soc_reserve_validates() {
-        let cmd = ControlCommand::SetBatterySocReserve { reserve: 101 };
-        assert!(cmd.encode().is_err());
+        // Now min 4, max 100
+        assert!(ControlCommand::SetBatterySocReserve { reserve: 3 }.encode().is_err());
+        assert!(ControlCommand::SetBatterySocReserve { reserve: 4 }.encode().is_ok());
+        assert!(ControlCommand::SetBatterySocReserve { reserve: 101 }.encode().is_err());
+    }
+
+    #[test]
+    fn set_charge_target_soc_validates() {
+        // Now min 4, max 100
+        assert!(ControlCommand::SetChargeTargetSoc { soc: 3 }.encode().is_err());
+        assert!(ControlCommand::SetChargeTargetSoc { soc: 4 }.encode().is_ok());
+        assert!(ControlCommand::SetChargeTargetSoc { soc: 101 }.encode().is_err());
     }
 
     #[test]
     fn set_charge_limit_validates() {
-        let cmd = ControlCommand::SetChargeLimit { limit: 101 };
+        // New bound: 0-50
+        let cmd = ControlCommand::SetChargeLimit { limit: 51 };
         assert!(cmd.encode().is_err());
+        let ok = ControlCommand::SetChargeLimit { limit: 50 };
+        assert!(ok.encode().is_ok());
     }
 
     #[test]
@@ -345,7 +487,7 @@ mod tests {
     #[test]
     fn all_writes_are_safe() {
         // Verify all command encodings only produce whitelisted addresses
-        let commands = vec![
+        let commands: Vec<ControlCommand> = vec![
             ControlCommand::SetBatteryPowerMode { mode: 0 },
             ControlCommand::SetBatteryPowerMode { mode: 1 },
             ControlCommand::SetEnableDischarge { enabled: true },
@@ -372,16 +514,33 @@ mod tests {
             ControlCommand::ForceCharge { target_soc: 100 },
             ControlCommand::ForceDischarge,
             ControlCommand::SyncClock,
+            ControlCommand::SetPowerReserve { reserve: 10 },
+            ControlCommand::SetRtc { enabled: true },
+            ControlCommand::SetRtc { enabled: false },
+            ControlCommand::SetExportPriority { priority: 0 },
+            ControlCommand::SetEps { enabled: true },
+            ControlCommand::SetPauseMode { mode: 0 },
+            ControlCommand::SetPauseSlot { start: 0, end: 0 },
+            ControlCommand::SetChargeTargetSocSlot { slot: 1, soc: 80 },
+            ControlCommand::SetDischargeTargetSocSlot { slot: 2, soc: 60 },
+            ControlCommand::SetChargeSlotN { slot: 3, start: 600, end: 1000 },
+            ControlCommand::SetDischargeSlotN { slot: 4, start: 1600, end: 1900 },
         ];
         for cmd in &commands {
-            let writes = cmd.encode().unwrap();
-            for w in &writes {
-                assert!(
-                    SAFE_WRITE_REGS.contains(&w.address),
-                    "address {} not whitelisted for {:?}",
-                    w.address,
-                    cmd
-                );
+            match cmd.encode() {
+                Ok(writes) => {
+                    for w in &writes {
+                        assert!(
+                            SAFE_WRITE_REGS.contains(&w.address),
+                            "address {} not whitelisted for {:?}",
+                            w.address,
+                            cmd
+                        );
+                    }
+                }
+                Err(e) => {
+                    panic!("Command {:?} failed to encode: {}", cmd, e);
+                }
             }
         }
     }
@@ -515,12 +674,6 @@ mod tests {
     }
 
     #[test]
-    fn set_charge_target_soc_validates() {
-        let cmd = ControlCommand::SetChargeTargetSoc { soc: 101 };
-        assert!(cmd.encode().is_err());
-    }
-
-    #[test]
     fn set_calibration_stage_encodes() {
         let cmd = ControlCommand::SetCalibrationStage { stage: 5 };
         let writes = cmd.encode().unwrap();
@@ -553,10 +706,133 @@ mod tests {
 
     #[test]
     fn set_discharge_limit_validates() {
-        let ok = ControlCommand::SetDischargeLimit { limit: 50 };
-        assert!(ok.encode().is_ok());
-        let bad = ControlCommand::SetDischargeLimit { limit: 101 };
-        assert!(bad.encode().is_err());
+        // New bound: 0-50
+        assert!(ControlCommand::SetDischargeLimit { limit: 51 }.encode().is_err());
+        assert!(ControlCommand::SetDischargeLimit { limit: 50 }.encode().is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // New command tests (items 3-9 from audit)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn set_power_reserve_encodes() {
+        let cmd = ControlCommand::SetPowerReserve { reserve: 10 };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].address, HR_BATTERY_DISCHARGE_MIN_POWER_RESERVE);
+        assert_eq!(writes[0].value, 10);
+    }
+
+    #[test]
+    fn set_power_reserve_validates() {
+        assert!(ControlCommand::SetPowerReserve { reserve: 3 }.encode().is_err());
+        assert!(ControlCommand::SetPowerReserve { reserve: 101 }.encode().is_err());
+        assert!(ControlCommand::SetPowerReserve { reserve: 4 }.encode().is_ok());
+    }
+
+    #[test]
+    fn set_rtc_encodes() {
+        let on = ControlCommand::SetRtc { enabled: true };
+        assert_eq!(on.encode().unwrap()[0].value, 1);
+        let off = ControlCommand::SetRtc { enabled: false };
+        assert_eq!(off.encode().unwrap()[0].value, 0);
+    }
+
+    #[test]
+    fn set_export_priority_encodes() {
+        let cmd = ControlCommand::SetExportPriority { priority: 1 };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes[0].address, HR_EXPORT_PRIORITY);
+        assert_eq!(writes[0].value, 1);
+    }
+
+    #[test]
+    fn set_export_priority_validates() {
+        assert!(ControlCommand::SetExportPriority { priority: 3 }.encode().is_err());
+        assert!(ControlCommand::SetExportPriority { priority: 0 }.encode().is_ok());
+    }
+
+    #[test]
+    fn set_eps_encodes() {
+        let on = ControlCommand::SetEps { enabled: true };
+        assert_eq!(on.encode().unwrap()[0].value, 1);
+        assert!(on.encode().unwrap()[0].address == HR_ENABLE_EPS);
+    }
+
+    #[test]
+    fn set_pause_mode_encodes() {
+        let cmd = ControlCommand::SetPauseMode { mode: 1 };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes[0].address, HR_BATTERY_PAUSE_MODE);
+        assert_eq!(writes[0].value, 1);
+    }
+
+    #[test]
+    fn set_pause_slot_encodes() {
+        let cmd = ControlCommand::SetPauseSlot { start: 1400, end: 1600 };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0].address, HR_BATTERY_PAUSE_SLOT_1_START);
+        assert_eq!(writes[0].value, 1400);
+        assert_eq!(writes[1].address, HR_BATTERY_PAUSE_SLOT_1_END);
+        assert_eq!(writes[1].value, 1600);
+    }
+
+    #[test]
+    fn set_charge_target_soc_slot_encodes() {
+        let cmd = ControlCommand::SetChargeTargetSocSlot { slot: 1, soc: 80 };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].address, HR_CHARGE_TARGET_SOC_1);
+        assert_eq!(writes[0].value, 80);
+
+        let cmd2 = ControlCommand::SetChargeTargetSocSlot { slot: 2, soc: 60 };
+        let writes2 = cmd2.encode().unwrap();
+        assert_eq!(writes2[0].address, HR_CHARGE_TARGET_SOC_2);
+
+        // Invalid slot
+        assert!(ControlCommand::SetChargeTargetSocSlot { slot: 3, soc: 50 }.encode().is_err());
+    }
+
+    #[test]
+    fn set_discharge_target_soc_slot_encodes() {
+        let cmd = ControlCommand::SetDischargeTargetSocSlot { slot: 1, soc: 40 };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes[0].address, HR_DISCHARGE_TARGET_SOC_1);
+
+        let cmd2 = ControlCommand::SetDischargeTargetSocSlot { slot: 2, soc: 30 };
+        let writes2 = cmd2.encode().unwrap();
+        assert_eq!(writes2[0].address, HR_DISCHARGE_TARGET_SOC_2);
+
+        // Invalid slot
+        assert!(ControlCommand::SetDischargeTargetSocSlot { slot: 3, soc: 50 }.encode().is_err());
+    }
+
+    #[test]
+    fn extended_charge_slots_encode() {
+        let cmd = ControlCommand::SetChargeSlotN { slot: 3, start: 600, end: 1000 };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes[0].address, HR_CHARGE_SLOT_3_START);
+        assert_eq!(writes[1].address, HR_CHARGE_SLOT_3_END);
+
+        let cmd10 = ControlCommand::SetChargeSlotN { slot: 10, start: 0, end: 0 };
+        let writes10 = cmd10.encode().unwrap();
+        assert_eq!(writes10[0].address, HR_CHARGE_SLOT_10_START);
+        assert_eq!(writes10[1].address, HR_CHARGE_SLOT_10_END);
+
+        assert!(ControlCommand::SetChargeSlotN { slot: 2, start: 0, end: 0 }.encode().is_err());
+        assert!(ControlCommand::SetChargeSlotN { slot: 11, start: 0, end: 0 }.encode().is_err());
+    }
+
+    #[test]
+    fn extended_discharge_slots_encode() {
+        let cmd = ControlCommand::SetDischargeSlotN { slot: 5, start: 1600, end: 1900 };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes[0].address, HR_DISCHARGE_SLOT_5_START);
+        assert_eq!(writes[1].address, HR_DISCHARGE_SLOT_5_END);
+
+        assert!(ControlCommand::SetDischargeSlotN { slot: 1, start: 0, end: 0 }.encode().is_err());
     }
 
     #[test]

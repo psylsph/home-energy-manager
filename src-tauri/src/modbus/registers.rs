@@ -182,6 +182,81 @@ pub const HR_BATTERY_CALIBRATION_STAGE: u16 = 29;
 /// Inverter reboot (write 100 to reboot).
 pub const HR_INVERTER_REBOOT: u16 = 163;
 
+/// Enable Real Time Clock — persist settings to EEPROM (bool).
+pub const HR_ENABLE_RTC: u16 = 166;
+
+// ===========================================================================
+// AC-coupled configuration (HR 300-359)
+// ===========================================================================
+
+/// Export priority for AC-coupled inverters (0=battery, 1=grid, 2=load).
+pub const HR_EXPORT_PRIORITY: u16 = 311;
+/// Enable EPS (Emergency Power Supply) mode (bool).
+pub const HR_ENABLE_EPS: u16 = 317;
+
+/// Battery discharge min power reserve percentage (4-100).
+/// Distinct from HR_BATTERY_SOC_RESERVE (110) — this prevents discharge
+/// below the reserve level even in timed modes.
+pub const HR_BATTERY_DISCHARGE_MIN_POWER_RESERVE: u16 = 114;
+
+// ===========================================================================
+// Extended charge slots 3-10 (HR 246-268) — Gen3, AIO, HV Gen3
+// ===========================================================================
+
+pub const HR_CHARGE_SLOT_3_START: u16 = 246;
+pub const HR_CHARGE_SLOT_3_END: u16 = 247;
+pub const HR_CHARGE_TARGET_SOC_3: u16 = 248;
+pub const HR_CHARGE_SLOT_4_START: u16 = 249;
+pub const HR_CHARGE_SLOT_4_END: u16 = 250;
+pub const HR_CHARGE_TARGET_SOC_4: u16 = 251;
+pub const HR_CHARGE_SLOT_5_START: u16 = 252;
+pub const HR_CHARGE_SLOT_5_END: u16 = 253;
+pub const HR_CHARGE_TARGET_SOC_5: u16 = 254;
+pub const HR_CHARGE_SLOT_6_START: u16 = 255;
+pub const HR_CHARGE_SLOT_6_END: u16 = 256;
+pub const HR_CHARGE_TARGET_SOC_6: u16 = 257;
+pub const HR_CHARGE_SLOT_7_START: u16 = 258;
+pub const HR_CHARGE_SLOT_7_END: u16 = 259;
+pub const HR_CHARGE_TARGET_SOC_7: u16 = 260;
+pub const HR_CHARGE_SLOT_8_START: u16 = 261;
+pub const HR_CHARGE_SLOT_8_END: u16 = 262;
+pub const HR_CHARGE_TARGET_SOC_8: u16 = 263;
+pub const HR_CHARGE_SLOT_9_START: u16 = 264;
+pub const HR_CHARGE_SLOT_9_END: u16 = 265;
+pub const HR_CHARGE_TARGET_SOC_9: u16 = 266;
+pub const HR_CHARGE_SLOT_10_START: u16 = 267;
+pub const HR_CHARGE_SLOT_10_END: u16 = 268;
+pub const HR_CHARGE_TARGET_SOC_10: u16 = 269;
+
+// ===========================================================================
+// Extended discharge slots 3-10 (HR 276-298) — Gen3, AIO, HV Gen3
+// ===========================================================================
+
+pub const HR_DISCHARGE_SLOT_3_START: u16 = 276;
+pub const HR_DISCHARGE_SLOT_3_END: u16 = 277;
+pub const HR_DISCHARGE_TARGET_SOC_3: u16 = 278;
+pub const HR_DISCHARGE_SLOT_4_START: u16 = 279;
+pub const HR_DISCHARGE_SLOT_4_END: u16 = 280;
+pub const HR_DISCHARGE_TARGET_SOC_4: u16 = 281;
+pub const HR_DISCHARGE_SLOT_5_START: u16 = 282;
+pub const HR_DISCHARGE_SLOT_5_END: u16 = 283;
+pub const HR_DISCHARGE_TARGET_SOC_5: u16 = 284;
+pub const HR_DISCHARGE_SLOT_6_START: u16 = 285;
+pub const HR_DISCHARGE_SLOT_6_END: u16 = 286;
+pub const HR_DISCHARGE_TARGET_SOC_6: u16 = 287;
+pub const HR_DISCHARGE_SLOT_7_START: u16 = 288;
+pub const HR_DISCHARGE_SLOT_7_END: u16 = 289;
+pub const HR_DISCHARGE_TARGET_SOC_7: u16 = 290;
+pub const HR_DISCHARGE_SLOT_8_START: u16 = 291;
+pub const HR_DISCHARGE_SLOT_8_END: u16 = 292;
+pub const HR_DISCHARGE_TARGET_SOC_8: u16 = 293;
+pub const HR_DISCHARGE_SLOT_9_START: u16 = 294;
+pub const HR_DISCHARGE_SLOT_9_END: u16 = 295;
+pub const HR_DISCHARGE_TARGET_SOC_9: u16 = 296;
+pub const HR_DISCHARGE_SLOT_10_START: u16 = 297;
+pub const HR_DISCHARGE_SLOT_10_END: u16 = 298;
+pub const HR_DISCHARGE_TARGET_SOC_10: u16 = 299;
+
 // ===========================================================================
 // System time registers (read/write for clock sync)
 // ===========================================================================
@@ -260,11 +335,44 @@ pub const BATTERY_1_POLL_BLOCK: RegisterBlock = RegisterBlock {
 // ---------------------------------------------------------------------------
 
 /// Holding register addresses that the control encoder is allowed to write.
-/// Sourced from GivTCP safe_regs.
+/// Sourced from the givenergy-modbus reference library's WRITE_SAFE_REGISTERS.
 pub const SAFE_WRITE_REGS: &[u16] = &[
     20, 27, 29, 31, 32, 35, 36, 37, 38, 39, 40, 44, 45, 50, 56, 57, 59, 94, 95, 96, 110, 111, 112,
-    116, 163, 242, 245, 272, 275, 318, 319, 320,
+    114, 116, 163, 166,
+    // Charge slots 3-10 (Gen3 extended)
+    246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 267, 268, 269,
+    // Discharge slots 3-10 (Gen3 extended)
+    276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 298, 299,
+    // Per-slot charge targets (Gen3)
+    242, 245,
+    // Per-slot discharge targets (Gen3)
+    272, 275,
+    // AC-coupled features
+    311, 317,
+    // Pause mode/slot
+    318, 319, 320,
 ];
+
+// ===========================================================================
+// Model-aware poll blocks (beyond the standard set)
+// ===========================================================================
+
+/// Extended charge/discharge slots + per-slot targets for Gen3 / AIO / HV Gen3.
+/// HR 240-299 covers 10-slot scheduling and per-slot target SOCs.
+pub const EXTENDED_SLOTS_BLOCK: RegisterBlock = RegisterBlock {
+    start: 240,
+    count: 60,
+    register_type: RegisterType::Holding,
+    name: "holding_240_299",
+};
+
+/// AC configuration block — export priority, EPS, pause mode, AC limits.
+pub const AC_CONFIG_BLOCK: RegisterBlock = RegisterBlock {
+    start: 300,
+    count: 60,
+    register_type: RegisterType::Holding,
+    name: "holding_300_359",
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -362,14 +470,18 @@ mod tests {
         assert!(SAFE_WRITE_REGS.contains(&HR_ENABLE_DISCHARGE)); // 59
         assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_SLOT_1_START)); // 94
         assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_SOC_RESERVE)); // 110
+        assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_DISCHARGE_MIN_POWER_RESERVE)); // 114
         assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_TARGET_SOC)); // 116
         assert!(SAFE_WRITE_REGS.contains(&HR_INVERTER_REBOOT)); // 163
+        assert!(SAFE_WRITE_REGS.contains(&HR_ENABLE_RTC)); // 166
         assert!(SAFE_WRITE_REGS.contains(&HR_SYSTEM_TIME_YEAR)); // 35
         assert!(SAFE_WRITE_REGS.contains(&HR_SYSTEM_TIME_MONTH)); // 36
         assert!(SAFE_WRITE_REGS.contains(&HR_SYSTEM_TIME_DAY)); // 37
         assert!(SAFE_WRITE_REGS.contains(&HR_SYSTEM_TIME_HOUR)); // 38
         assert!(SAFE_WRITE_REGS.contains(&HR_SYSTEM_TIME_MINUTE)); // 39
         assert!(SAFE_WRITE_REGS.contains(&HR_SYSTEM_TIME_SECOND)); // 40
+        assert!(SAFE_WRITE_REGS.contains(&HR_EXPORT_PRIORITY)); // 311
+        assert!(SAFE_WRITE_REGS.contains(&HR_ENABLE_EPS)); // 317
         assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_PAUSE_MODE)); // 318
         assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_PAUSE_SLOT_1_START)); // 319
         assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_PAUSE_SLOT_1_END)); // 320
@@ -377,6 +489,14 @@ mod tests {
         assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_TARGET_SOC_2)); // 245
         assert!(SAFE_WRITE_REGS.contains(&HR_DISCHARGE_TARGET_SOC_1)); // 272
         assert!(SAFE_WRITE_REGS.contains(&HR_DISCHARGE_TARGET_SOC_2)); // 275
+        // Extended slots 3-10
+        assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_SLOT_3_START)); // 246
+        assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_SLOT_10_END)); // 268
+        assert!(SAFE_WRITE_REGS.contains(&HR_DISCHARGE_SLOT_3_START)); // 276
+        assert!(SAFE_WRITE_REGS.contains(&HR_DISCHARGE_SLOT_10_END)); // 298
+        // Per-slot target SOCs
+        assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_TARGET_SOC_3)); // 248
+        assert!(SAFE_WRITE_REGS.contains(&HR_DISCHARGE_TARGET_SOC_3)); // 278
     }
 
     #[test]

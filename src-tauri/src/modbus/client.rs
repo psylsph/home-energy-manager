@@ -259,168 +259,201 @@ impl ModbusClient {
 
     /// Read and decode one response frame from the dongle.
     ///
+    /// Read and decode one response frame from the dongle.
+    ///
     /// Reads the MBAP header to determine length, then reads the rest.
     /// Does NOT check for Modbus exceptions — callers handle those.
+    ///
+    /// Heartbeat requests (function ID 0x01) are handled transparently:
+    /// the response is echoed back and the method loops to read the next
+    /// frame until a non-heartbeat frame arrives.
     async fn receive_frame(&mut self) -> Result<DecodedFrame, ClientError> {
-        let stream = self.stream.as_mut().ok_or(ClientError::NotConnected)?;
+        loop {
+            let stream = self.stream.as_mut().ok_or(ClientError::NotConnected)?;
 
-        // Read the 6-byte MBAP header
-        let mut header_buf = [0u8; 6];
-        let header_result = tokio::time::timeout(self.timeout, stream.read_exact(&mut header_buf)).await;
-        match &header_result {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => {
-                let kind = e.kind();
-                tracing::warn!(
-                    error = %e,
-                    ?kind,
-                    "TCP read error while reading MBAP header"
-                );
-                return Err(ClientError::ReceiveFailed(format!(
-                    "reading MBAP header: {e} (kind={kind:?})"
-                )));
-            }
-            Err(_) => {
-                tracing::warn!(
-                    timeout_secs = self.timeout.as_secs(),
-                    "Timeout waiting for MBAP header — dongle not responding"
-                );
-                return Err(ClientError::Timeout);
-            }
-        }
-
-        // Parse length field (big-endian u16 at bytes 4-5).
-        let length = u16::from_be_bytes([header_buf[4], header_buf[5]]) as usize;
-
-        // Sanity-check the MBAP header before committing to a large read.
-        // The GivEnergy protocol uses transaction ID 0x5959 and protocol ID 0x0001.
-        // A corrupted frame from stale TCP buffers may have garbage here.
-        let txn_id = u16::from_be_bytes([header_buf[0], header_buf[1]]);
-        let proto_id = u16::from_be_bytes([header_buf[2], header_buf[3]]);
-        if txn_id != 0x5959 || proto_id != 0x0001 {
-            tracing::warn!(
-                "Suspicious MBAP header: txn=0x{txn_id:04X} proto=0x{proto_id:04X} len={length} — likely stale/corrupted frame"
-            );
-        }
-
-        if length > MAX_RESPONSE_SIZE {
-            tracing::error!(
-                length,
-                max = MAX_RESPONSE_SIZE,
-                "MBAP length field exceeds maximum — possible frame corruption or MTU issue"
-            );
-            return Err(ClientError::InvalidResponse(format!(
-                "response length {length} exceeds maximum {MAX_RESPONSE_SIZE}"
-            )));
-        }
-
-        if length < 4 {
-            // Need at least unit_id(1) + func(1) + inner_pdu(0+) + CRC(2)
-            tracing::warn!(
-                length,
-                "MBAP length field unusually small — possible frame corruption"
-            );
-        }
-
-        // Read the remaining `length` bytes (everything after the 6-byte MBAP header).
-        let mut rest = vec![0u8; length];
-        let body_result = tokio::time::timeout(self.timeout, stream.read_exact(&mut rest)).await;
-        match &body_result {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => {
-                let kind = e.kind();
-                tracing::warn!(
-                    error = %e,
-                    ?kind,
-                    length,
-                    "TCP read error while reading frame body (MBAP len={length})"
-                );
-                return Err(ClientError::ReceiveFailed(format!(
-                    "reading frame body (len={length}): {e} (kind={kind:?})"
-                )));
-            }
-            Err(_) => {
-                tracing::warn!(
-                    timeout_secs = self.timeout.as_secs(),
-                    length,
-                    "Timeout reading frame body (MBAP len={length}) — partial frame from dongle"
-                );
-                return Err(ClientError::Timeout);
-            }
-        }
-
-        // Reassemble the complete frame
-        let mut full = Vec::with_capacity(6 + length);
-        full.extend_from_slice(&header_buf);
-        full.extend_from_slice(&rest);
-
-        // Auto-discover dongle serial from response header (bytes 8-17).
-        if self.serial.is_empty() && full.len() >= 18 {
-            let discovered = std::str::from_utf8(&full[8..18])
-                .unwrap_or("")
-                .trim_end()
-                .to_string();
-            if !discovered.is_empty() {
-                let serial_hex: String = full[8..18].iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ");
-                tracing::info!(
-                    serial = %discovered,
-                    serial_raw = %serial_hex,
-                    frame_len = full.len(),
-                    "Auto-discovered dongle serial (pending decode validation)"
-                );
-                // Validate: serial should be printable ASCII, not all spaces
-                if discovered.trim().is_empty() || discovered.chars().any(|c| !c.is_ascii_graphic() && c != ' ') {
+            // Read the 6-byte MBAP header
+            let mut header_buf = [0u8; 6];
+            let header_result = tokio::time::timeout(self.timeout, stream.read_exact(&mut header_buf)).await;
+            match &header_result {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    let kind = e.kind();
                     tracing::warn!(
-                        serial_raw = %serial_hex,
-                        "Auto-discovered serial looks suspicious (non-printable chars)"
+                        error = %e,
+                        ?kind,
+                        "TCP read error while reading MBAP header"
                     );
+                    return Err(ClientError::ReceiveFailed(format!(
+                        "reading MBAP header: {e} (kind={kind:?})"
+                    )));
                 }
+                Err(_) => {
+                    tracing::warn!(
+                        timeout_secs = self.timeout.as_secs(),
+                        "Timeout waiting for MBAP header — dongle not responding"
+                    );
+                    return Err(ClientError::Timeout);
+                }
+            }
 
-                // Decode the frame to verify it's complete.
-                // We ONLY accept the discovered serial if the full frame
-                // decodes successfully. A truncated frame (like 19 bytes
-                // where the inner PDU is missing) means the serial is
-                // suspect — using it for subsequent requests causes the
-                // dongle to stop responding on some firmware versions.
-                let hex_bytes = dump_hex(&full);
-                match framer::decode_frame(&full) {
-                    Ok(decoded) => {
-                        tracing::info!(
-                            serial = %discovered,
-                            "Auto-discovered serial confirmed — frame valid"
-                        );
-                        self.serial = discovered;
-                        self.serial_discovered = true;
-                        return Ok(decoded);
-                    }
-                    Err(e) => {
+            // Parse length field (big-endian u16 at bytes 4-5).
+            let length = u16::from_be_bytes([header_buf[4], header_buf[5]]) as usize;
+
+            // Sanity-check the MBAP header before committing to a large read.
+            // The GivEnergy protocol uses transaction ID 0x5959 and protocol ID 0x0001.
+            // A corrupted frame from stale TCP buffers may have garbage here.
+            let txn_id = u16::from_be_bytes([header_buf[0], header_buf[1]]);
+            let proto_id = u16::from_be_bytes([header_buf[2], header_buf[3]]);
+            if txn_id != 0x5959 || proto_id != 0x0001 {
+                tracing::warn!(
+                    "Suspicious MBAP header: txn=0x{txn_id:04X} proto=0x{proto_id:04X} len={length} — likely stale/corrupted frame"
+                );
+            }
+
+            if length > MAX_RESPONSE_SIZE {
+                tracing::error!(
+                    length,
+                    max = MAX_RESPONSE_SIZE,
+                    "MBAP length field exceeds maximum — possible frame corruption or MTU issue"
+                );
+                return Err(ClientError::InvalidResponse(format!(
+                    "response length {length} exceeds maximum {MAX_RESPONSE_SIZE}"
+                )));
+            }
+
+            if length < 4 {
+                // Need at least unit_id(1) + func(1) + inner_pdu(0+) + CRC(2)
+                tracing::warn!(
+                    length,
+                    "MBAP length field unusually small — possible frame corruption"
+                );
+            }
+
+            // Read the remaining `length` bytes (everything after the 6-byte MBAP header).
+            let mut rest = vec![0u8; length];
+            let body_result = tokio::time::timeout(self.timeout, stream.read_exact(&mut rest)).await;
+            match &body_result {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    let kind = e.kind();
+                    tracing::warn!(
+                        error = %e,
+                        ?kind,
+                        length,
+                        "TCP read error while reading frame body (MBAP len={length})"
+                    );
+                    return Err(ClientError::ReceiveFailed(format!(
+                        "reading frame body (len={length}): {e} (kind={kind:?})"
+                    )));
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        timeout_secs = self.timeout.as_secs(),
+                        length,
+                        "Timeout reading frame body (MBAP len={length}) — partial frame from dongle"
+                    );
+                    return Err(ClientError::Timeout);
+                }
+            }
+
+            // Reassemble the complete frame
+            let mut full = Vec::with_capacity(6 + length);
+            full.extend_from_slice(&header_buf);
+            full.extend_from_slice(&rest);
+
+            // Handle heartbeat requests from the dongle.
+            // The dongle sends a heartbeat (function ID 0x01) every ~3 minutes.
+            // We must respond within 5 seconds; after 3 missed heartbeats the
+            // dongle closes the TCP connection. Silently respond and loop to
+            // read the actual response frame.
+            if super::framer::is_heartbeat_request(&full) {
+                let response = super::framer::build_heartbeat_response(&full);
+                tracing::debug!(
+                    "Heartbeat request received ({} bytes), sending response",
+                    full.len()
+                );
+                // Best-effort send — if the write fails the connection is already
+                // dead and the next read will surface it.
+                if let Some(s) = self.stream.as_mut() {
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        s.write_all(&response),
+                    )
+                    .await;
+                }
+                continue; // loop to read next frame
+            }
+
+            // Not a heartbeat — proceed with normal decode.
+
+            // Auto-discover dongle serial from response header (bytes 8-17).
+            if self.serial.is_empty() && full.len() >= 18 {
+                let discovered = std::str::from_utf8(&full[8..18])
+                    .unwrap_or("")
+                    .trim_end()
+                    .to_string();
+                if !discovered.is_empty() {
+                    let serial_hex: String = full[8..18].iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ");
+                    tracing::info!(
+                        serial = %discovered,
+                        serial_raw = %serial_hex,
+                        frame_len = full.len(),
+                        "Auto-discovered dongle serial (pending decode validation)"
+                    );
+                    // Validate: serial should be printable ASCII, not all spaces
+                    if discovered.trim().is_empty() || discovered.chars().any(|c| !c.is_ascii_graphic() && c != ' ') {
                         tracing::warn!(
-                            frame_len = full.len(),
-                            error = %e,
-                            raw_hex = %hex_bytes,
-                            "Auto-discovered serial REJECTED — frame truncated, keeping empty serial"
+                            serial_raw = %serial_hex,
+                            "Auto-discovered serial looks suspicious (non-printable chars)"
                         );
-                        self.serial_suspect = true;
-                        // Keep serial empty for subsequent requests
-                        return Err(ClientError::FrameError(format!(
-                            "auto-discover frame truncated: {e}"
-                        )));
+                    }
+
+                    // Decode the frame to verify it's complete.
+                    // We ONLY accept the discovered serial if the full frame
+                    // decodes successfully. A truncated frame (like 19 bytes
+                    // where the inner PDU is missing) means the serial is
+                    // suspect — using it for subsequent requests causes the
+                    // dongle to stop responding on some firmware versions.
+                    let hex_bytes = dump_hex(&full);
+                    match framer::decode_frame(&full) {
+                        Ok(decoded) => {
+                            tracing::info!(
+                                serial = %discovered,
+                                "Auto-discovered serial confirmed — frame valid"
+                            );
+                            self.serial = discovered;
+                            self.serial_discovered = true;
+                            return Ok(decoded);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                frame_len = full.len(),
+                                error = %e,
+                                raw_hex = %hex_bytes,
+                                "Auto-discovered serial REJECTED — frame truncated, keeping empty serial"
+                            );
+                            self.serial_suspect = true;
+                            // Keep serial empty for subsequent requests
+                            return Err(ClientError::FrameError(format!(
+                                "auto-discover frame truncated: {e}"
+                            )));
+                        }
                     }
                 }
             }
-        }
 
-        // Normal path: no auto-discovery needed or failed — just decode
-        let hex_bytes = dump_hex(&full);
-        framer::decode_frame(&full).map_err(|e| {
-            tracing::warn!(
-                frame_len = full.len(),
-                error = %e,
-                raw_hex = %hex_bytes,
-                "Frame decode failed"
-            );
-            ClientError::FrameError(e.to_string())
-        })
+            // Normal path: no auto-discovery needed or failed — just decode
+            let hex_bytes = dump_hex(&full);
+            return framer::decode_frame(&full).map_err(|e| {
+                tracing::warn!(
+                    frame_len = full.len(),
+                    error = %e,
+                    raw_hex = %hex_bytes,
+                    "Frame decode failed"
+                );
+                ClientError::FrameError(e.to_string())
+            });
+        }
     }
 
     /// Drain any complete response frames buffered in the TCP socket.
@@ -768,6 +801,16 @@ impl ModbusClient {
                     need_resend = true;
                     continue;
                 }
+                if code == 67 {
+                    // Exception 67 on final attempt: known limitation on some
+                    // registers (e.g. HR 32 on AC Coupled). Treat as soft failure
+                    // — the inverter may have still processed the write, and
+                    // the master enable flag (HR 96/59) will handle the intent.
+                    tracing::warn!(
+                        "Write at {register} got exception 67 after {max_attempts} retries — treating as acknowledged"
+                    );
+                    return Ok(());
+                }
                 return Err(ClientError::InvalidResponse(format!(
                     "Modbus exception: function 0x{:02X}, code {}",
                     decoded.function, code
@@ -883,6 +926,58 @@ impl ModbusClient {
     /// each one. If any block fails the entire operation fails.
     pub async fn read_all_standard(&mut self) -> Result<Vec<BlockRead>, ClientError> {
         self.read_blocks(STANDARD_POLL_BLOCKS).await
+    }
+
+    /// Read standard blocks plus any model-specific extended blocks.
+    ///
+    /// If `device_type` is provided, reads the extra blocks appropriate for
+    /// that inverter model (e.g. HR 240-299 for Gen3, HR 300-359 for AC).
+    /// If extra blocks fail, they're silently skipped — the standard blocks
+    /// are still returned. This is because extended blocks may not be
+    /// supported by all firmware versions of a given model.
+    pub async fn read_all_with_extras(
+        &mut self,
+        device_type: Option<&crate::inverter::model::DeviceType>,
+    ) -> Result<Vec<BlockRead>, ClientError> {
+        let mut results = self.read_blocks(STANDARD_POLL_BLOCKS).await?;
+
+        if let Some(dt) = device_type {
+            let extra_blocks = dt.extra_poll_blocks();
+            for block in extra_blocks {
+                // Pause between blocks to let the dongle catch up
+                tokio::time::sleep(Self::INTER_REQUEST_DELAY).await;
+
+                let reg_type = match block.register_type {
+                    super::registers::RegisterType::Input => RegisterType::Input,
+                    super::registers::RegisterType::Holding => RegisterType::Holding,
+                };
+
+                let t0 = std::time::Instant::now();
+                match self.read_registers(reg_type, block.start, block.count).await {
+                    Ok(data) => {
+                        tracing::debug!(
+                            block = block.name,
+                            start = block.start,
+                            count = block.count,
+                            received = data.len(),
+                            elapsed_ms = t0.elapsed().as_millis() as u64,
+                            "Extended block read OK"
+                        );
+                        results.push(BlockRead { block, data });
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            block = block.name,
+                            error = %e,
+                            "Extended block read skipped (non-fatal)"
+                        );
+                        // Continue — extended blocks are optional
+                    }
+                }
+            }
+        }
+
+        Ok(results)
     }
 }
 

@@ -150,6 +150,8 @@ fn block_key(block: &crate::modbus::registers::RegisterBlock) -> &'static str {
         (RegisterType::Input, 0) => "input_0_59",
         (RegisterType::Holding, 0) => "holding_0_59",
         (RegisterType::Holding, 60) => "holding_60_119",
+        (RegisterType::Holding, 240) => "holding_240_299",
+        (RegisterType::Holding, 300) => "holding_300_359",
         (RegisterType::Input, 60) => "battery_input_60_119",
         _ => "unknown",
     }
@@ -187,6 +189,8 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
             "input_0_59" => decode_input_0_59(data, &mut snap),
             "holding_0_59" => decode_holding_0_59(data, &mut snap, &mut raw),
             "holding_60_119" => decode_holding_60_119(data, &mut snap, &mut raw),
+            "holding_240_299" => decode_holding_240_299(data, &mut snap),
+            "holding_300_359" => decode_holding_300_359(data, &mut snap),
             _ => {
                 log::warn!("Unknown block '{}' in decode_snapshot", key);
             }
@@ -223,16 +227,30 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
         raw.battery_soc_reserve,
     );
 
+    // Expose max slot counts so the frontend adapts to the device model.
+    snap.max_charge_slots = snap.device_type.max_charge_slots();
+    snap.max_discharge_slots = snap.device_type.max_discharge_slots();
+
     // Note: we intentionally do NOT override TimedDemand/TimedExport to
     // Eco/ExportPaused when discharge slots are empty. Doing so prevents the
     // user from switching to timed mode before configuring slots — the decoder
     // would immediately override back to Eco on the next poll. The inverter
     // simply won't discharge if there are no active slots, which is correct.
 
-    // Note: the reference library (givenergy-modbus) does NOT derive slot
-    // enabled state from enable_charge/enable_discharge. Slot times and
-    // enable flags are independent — a slot with valid times is always
-    // reported as enabled regardless of the master switch state.
+    // Preserve slot time fields but expose effective enabled state to the UI.
+    // This prevents toggling schedules off/on from clearing configured times:
+    // HR 96/59 are the master enable flags, while the slot registers retain
+    // the configured windows.
+    if !snap.enable_charge {
+        for slot in &mut snap.charge_slots {
+            slot.enabled = false;
+        }
+    }
+    if !snap.enable_discharge {
+        for slot in &mut snap.discharge_slots {
+            slot.enabled = false;
+        }
+    }
 
     snap
 }
@@ -387,6 +405,114 @@ fn decode_holding_60_119(data: &[u16], snap: &mut InverterSnapshot, raw: &mut Ra
             slot.target_soc = global_target;
         }
     }
+}
+
+/// Decode holding registers 240-299 (extended 10-slot scheduling).
+///
+/// Gen3, AIO, and HV Gen3 devices map charge slots 3-10 at HR 246-268
+/// with per-slot target SOCs interleaved (e.g. HR 248 = target for slot 3).
+/// Discharge slots 3-10 are at HR 276-298 with the same pattern.
+fn decode_holding_240_299(data: &[u16], snap: &mut InverterSnapshot) {
+    // Extended charge slots 3-10 at HR 246-268, offset by 240 in this block
+    // Pattern: start, end, target_soc repeating for each slot
+    for i in 0..8u16 {
+        let base = (246 + i * 3) as usize;
+        let offset = base - 240;
+        let start_val = get_reg(data, offset);
+        let end_val = get_reg(data, offset + 1);
+        let target = get_reg(data, offset + 2) as u8;
+
+        // Disabled when start == end (zero-duration slot)
+        if start_val == end_val {
+            continue;
+        }
+
+        if let (Some((sh, sm)), Some((eh, em))) = (decode_hhmm(start_val), decode_hhmm(end_val)) {
+            let idx = (i + 3) as usize; // 0-based index 3..10
+            if idx < snap.charge_slots.len() {
+                snap.charge_slots[idx] = ScheduleSlot {
+                    enabled: true,
+                    start_hour: sh,
+                    start_minute: sm,
+                    end_hour: eh,
+                    end_minute: em,
+                    target_soc: target,
+                };
+            }
+        }
+    }
+
+    // Per-slot target SOCs for slots 1-2 (HR 242, 245) — these augment
+    // the global target_soc set in decode_holding_60_119
+    let t1 = get_reg(data, 242 - 240) as u8;
+    let t2 = get_reg(data, 245 - 240) as u8;
+    if snap.charge_slots[0].enabled && t1 > 0 {
+        snap.charge_slots[0].target_soc = t1;
+    }
+    if snap.charge_slots[1].enabled && t2 > 0 {
+        snap.charge_slots[1].target_soc = t2;
+    }
+
+    // Extended discharge slots 3-10 at HR 276-298, same pattern
+    for i in 0..8u16 {
+        let base = (276 + i * 3) as usize;
+        let offset = base - 240;
+        // Check bounds — the 60-register block may not cover all 10 slots
+        if offset + 2 >= data.len() {
+            break;
+        }
+        let start_val = get_reg(data, offset);
+        let end_val = get_reg(data, offset + 1);
+        // target_soc at offset+2 is decoded but not stored (discharge target
+        // uses HR 272/275 for slots 1-2 only)
+
+        // Disabled when start == end (zero-duration slot)
+        if start_val == end_val {
+            continue;
+        }
+
+        if let (Some((sh, sm)), Some((eh, em))) = (decode_hhmm(start_val), decode_hhmm(end_val)) {
+            let idx = (i + 3) as usize; // 0-based index 3..10
+            if idx < snap.discharge_slots.len() {
+                snap.discharge_slots[idx] = ScheduleSlot {
+                    enabled: true,
+                    start_hour: sh,
+                    start_minute: sm,
+                    end_hour: eh,
+                    end_minute: em,
+                    target_soc: 0,
+                };
+            }
+        }
+    }
+
+    // Per-slot discharge target SOCs for slots 1-2 (HR 272, 275)
+    let dt1 = get_reg(data, 272 - 240) as u8;
+    let dt2 = get_reg(data, 275 - 240) as u8;
+    if snap.discharge_slots[0].enabled && dt1 > 0 {
+        snap.discharge_slots[0].target_soc = dt1;
+    }
+    if snap.discharge_slots[1].enabled && dt2 > 0 {
+        snap.discharge_slots[1].target_soc = dt2;
+    }
+}
+
+/// Decode holding registers 300-359 (AC configuration block).
+///
+/// Contains export priority (311), EPS enable (317), pause mode (318),
+/// and pause slot times (319-320).
+fn decode_holding_300_359(data: &[u16], snap: &mut InverterSnapshot) {
+    // HR 311: export priority (0=battery, 1=grid, 2=load)
+    snap.ac_export_priority = get_reg(data, 311 - 300) as u8;
+
+    // HR 317: EPS enable (bool)
+    snap.ac_eps_enabled = get_reg(data, 317 - 300) != 0;
+
+    // HR 318: battery pause mode (0=disabled)
+    snap.battery_pause_mode = get_reg(data, 318 - 300) as u8;
+
+    // HR 319-320: battery pause slot
+    snap.battery_pause_slot = decode_timeslot(data, 319 - 300, 320 - 300);
 }
 
 /// Decode battery block data from a single data slice into a BatteryModule.
@@ -662,13 +788,15 @@ mod tests {
         // Charge slot 3: not configured → disabled
         assert!(!snap.charge_slots[2].enabled);
 
-        // Discharge slots: have valid times (16:00–19:00, 17:00–20:00)
-        // and are reported as enabled because start != end.
-        // enable_discharge=false is a separate flag, not an override.
-        assert!(snap.discharge_slots[0].enabled,
-            "Discharge slot 0 should be enabled (16:00 != 19:00)");
-        assert!(snap.discharge_slots[1].enabled,
-            "Discharge slot 1 should be enabled (17:00 != 20:00)");
+        // Discharge slots retain their configured times but show disabled
+        // because the master enable_discharge flag is false. This lets the UI
+        // toggle schedules off/on without losing the slot settings.
+        assert!(!snap.discharge_slots[0].enabled);
+        assert_eq!(snap.discharge_slots[0].start_hour, 16);
+        assert_eq!(snap.discharge_slots[0].end_hour, 19);
+        assert!(!snap.discharge_slots[1].enabled);
+        assert_eq!(snap.discharge_slots[1].start_hour, 17);
+        assert_eq!(snap.discharge_slots[1].end_hour, 20);
         assert!(!snap.enable_discharge, "enable_discharge flag is false");
     }
 

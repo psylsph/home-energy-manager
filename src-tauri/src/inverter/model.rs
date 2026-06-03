@@ -228,6 +228,64 @@ impl DeviceType {
                 | Self::AIO10kW
         )
     }
+
+    /// Maximum number of charge schedule slots this device supports.
+    ///
+    /// - AC Coupled and Gen1 Hybrid: **1** charge slot (HR 94-95)
+    /// - All other single-phase inverters: **2** slots (HR 94-95, HR 31-32)
+    /// - Gen3/AIO: up to **10** in extended blocks
+    pub fn max_charge_slots(&self) -> u8 {
+        match self {
+            // AC Coupled and Gen1 have only one charge slot (HR 94-95)
+            Self::ACCoupled | Self::ACCoupledMk2 | Self::Gen1Hybrid => 1,
+            // Gen3/AIO with extended 10-slot scheduling
+            Self::Gen3Hybrid | Self::Gen3Hybrid8kW | Self::Gen3Hybrid10kW
+            | Self::AllInOne5kW | Self::AllInOne6kW | Self::AIO8kW | Self::AIO10kW => 10,
+            // All others: 2 slots
+            _ => 2,
+        }
+    }
+
+    /// Maximum number of discharge schedule slots this device supports.
+    pub fn max_discharge_slots(&self) -> u8 {
+        match self {
+            Self::ACCoupled | Self::ACCoupledMk2 | Self::Gen1Hybrid => 1,
+            Self::Gen3Hybrid | Self::Gen3Hybrid8kW | Self::Gen3Hybrid10kW
+            | Self::AllInOne5kW | Self::AllInOne6kW | Self::AIO8kW | Self::AIO10kW => 10,
+            _ => 2,
+        }
+    }
+
+    /// Returns additional register blocks that should be polled for this device type,
+    /// beyond the standard set (IR 0-59, HR 0-59, HR 60-119).
+    pub fn extra_poll_blocks(&self) -> &'static [crate::modbus::registers::RegisterBlock] {
+        use crate::modbus::registers::{AC_CONFIG_BLOCK, EXTENDED_SLOTS_BLOCK};
+        match self {
+            // Gen3 / AIO / HV Gen3: extended 10-slot scheduling
+            Self::Gen3Hybrid | Self::Gen3Hybrid8kW | Self::Gen3Hybrid10kW
+            | Self::AllInOne5kW | Self::AllInOne6kW | Self::AIO8kW | Self::AIO10kW => {
+                &[EXTENDED_SLOTS_BLOCK]
+            }
+            // AC-coupled: extended slots + AC config block (export priority, EPS, pause)
+            Self::ACCoupled | Self::ACCoupledMk2 => {
+                &[AC_CONFIG_BLOCK, EXTENDED_SLOTS_BLOCK]
+            }
+            // Three-phase: AC config block
+            Self::ThreePhase => {
+                &[AC_CONFIG_BLOCK]
+            }
+            // Gen1/Gen2 hybrid: AC config block (pause mode available)
+            Self::Gen1Hybrid | Self::Gen2Hybrid => {
+                &[AC_CONFIG_BLOCK]
+            }
+            _ => &[],
+        }
+    }
+}
+
+/// Serde default for max slot counts (2 = safe for all models).
+fn default_max_slots() -> u8 {
+    2
 }
 
 // ---------------------------------------------------------------------------
@@ -383,8 +441,30 @@ pub struct InverterSnapshot {
     pub firmware_version: String,
 
     // -- Schedules --
-    pub charge_slots: [ScheduleSlot; 3],
-    pub discharge_slots: [ScheduleSlot; 2],
+    /// Charge slots 0-9 (10 slots for Gen3 extended; slots 3-9 unused on Gen1/2).
+    pub charge_slots: [ScheduleSlot; 10],
+    /// Discharge slots 0-9 (10 slots for Gen3 extended; slots 2-9 unused on Gen1/2).
+    pub discharge_slots: [ScheduleSlot; 10],
+    /// Maximum number of charge slots this device supports (frontend hint).
+    #[serde(default = "default_max_slots")]
+    pub max_charge_slots: u8,
+    /// Maximum number of discharge slots this device supports (frontend hint).
+    #[serde(default = "default_max_slots")]
+    pub max_discharge_slots: u8,
+
+    // -- AC-coupled / extended config (from HR 300-359) --
+    /// Export priority (0=battery, 1=grid, 2=load) — HR 311.
+    #[serde(default)]
+    pub ac_export_priority: u8,
+    /// Emergency Power Supply enabled — HR 317.
+    #[serde(default)]
+    pub ac_eps_enabled: bool,
+    /// Battery pause mode (0=disabled) — HR 318.
+    #[serde(default)]
+    pub battery_pause_mode: u8,
+    /// Battery pause time slot — HR 319-320.
+    #[serde(default)]
+    pub battery_pause_slot: ScheduleSlot,
 }
 
 // ===========================================================================
@@ -548,8 +628,8 @@ mod tests {
         let snap = InverterSnapshot::default();
         assert_eq!(snap.timestamp, 0);
         assert_eq!(snap.solar_power, 0);
-        assert_eq!(snap.charge_slots.len(), 3);
-        assert_eq!(snap.discharge_slots.len(), 2);
+        assert_eq!(snap.charge_slots.len(), 10);
+        assert_eq!(snap.discharge_slots.len(), 10);
     }
 
     // -- DeviceType: all known codes from registry -------------------------
