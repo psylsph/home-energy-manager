@@ -98,9 +98,11 @@ fn decode_timeslot(data: &[u16], start_idx: usize, end_idx: usize) -> ScheduleSl
     let start_val = get_reg(data, start_idx);
     let end_val = get_reg(data, end_idx);
 
-    // Disabled when both start and end are 0 (per givenergy-modbus reference).
-    // Note: start=0, end=non-zero is valid (e.g. 00:00-08:00).
-    if start_val == 0 && end_val == 0 {
+    // Disabled when both start and end are the same value (zero-duration slot).
+    // Per givenergy-modbus reference: writing (0, 0) clears a slot, but any
+    // equal pair (e.g. 600, 600) is also a zero-length window and effectively
+    // disabled. A valid slot always has start != end.
+    if start_val == end_val {
         return ScheduleSlot::default();
     }
 
@@ -785,6 +787,45 @@ mod tests {
         ];
         let snap = decode_snapshot(&blocks);
         assert!(!snap.charge_slots[1].enabled);
+    }
+
+    #[test]
+    fn timeslot_midnight_start_valid() {
+        // Start=0 (00:00), end=800 (08:00) is a valid slot.
+        // Also set enable_charge=1 so the global override doesn't
+        // disable the slot (HR(96) → index 36).
+        let mut holding_data = vec![0u16; 60];
+        holding_data[34] = 0;   // charge_slot_1 start = 0 → 00:00
+        holding_data[35] = 800; // charge_slot_1 end = 800 → 08:00
+        holding_data[36] = 1;   // enable_charge = 1
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_data),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert!(snap.charge_slots[0].enabled, "00:00-08:00 should be enabled");
+        assert_eq!(snap.charge_slots[0].start_hour, 0);
+        assert_eq!(snap.charge_slots[0].start_minute, 0);
+        assert_eq!(snap.charge_slots[0].end_hour, 8);
+        assert_eq!(snap.charge_slots[0].end_minute, 0);
+    }
+
+    #[test]
+    fn timeslot_non_zero_equal_values_disabled() {
+        // start == end (e.g. 600, 600) is zero-duration → disabled
+        let mut holding_data = vec![0u16; 60];
+        holding_data[34] = 1200; // 12:00
+        holding_data[35] = 1200; // 12:00 = no duration
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_data),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert!(!snap.charge_slots[0].enabled, "12:00-12:00 should be disabled");
     }
 
     #[test]
