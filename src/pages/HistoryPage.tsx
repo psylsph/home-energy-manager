@@ -228,9 +228,11 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
               if (raw != null && prev != null) {
                 if (raw >= prev) {
                   delta = raw - prev;
-                } else if (prev > 50 && raw < 10) {
-                  // Midnight rollover: prev was yesterday's final value,
-                  // raw is today's running total (small since midnight)
+                } else if (prev > 5 && raw < 5) {
+                  // Midnight rollover: counter reset to near-zero.
+                  // prev was yesterday's final value (any positive amount),
+                  // raw is today's running total since midnight.
+                  // The delta is just the new day's accumulated import.
                   delta = raw;
                 }
                 // else: small data glitch (counter dipped slightly),
@@ -259,7 +261,7 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
               if (raw != null && prev != null) {
                 if (raw >= prev) {
                   delta = raw - prev;
-                } else if (prev > 50 && raw < 10) {
+                } else if (prev > 5 && raw < 5) {
                   delta = raw;
                 }
               }
