@@ -535,4 +535,78 @@ mod tests {
         assert_eq!(snap.charge_slots.len(), 3);
         assert_eq!(snap.discharge_slots.len(), 2);
     }
+
+    // -- DeviceType: all known codes from registry -------------------------
+    #[test]
+    fn device_type_all_known_codes() {
+        let cases: &[(u16, &str, u32, u32, f32)] = &[
+            // (code, display_name, max_battery_w, max_ac_w, nominal_voltage)
+            (0x1001, "Gen 1 Hybrid", 2500, 5000, 51.2),
+            (0x2001, "Gen 3 Hybrid", 3600, 5000, 51.2), // before ARM FW refinement
+            (0x2101, "Gen 3 Hybrid 8kW", 8000, 8000, 51.2),
+            (0x2102, "Gen 3 Hybrid 10kW", 10000, 10000, 51.2),
+            (0x3001, "AC Coupled", 3000, 3000, 51.2),
+            (0x3002, "AC Coupled Mk2", 3000, 3000, 51.2),
+            (0x4001, "Three Phase", 6000, 6000, 76.8),
+            (0x8001, "All-in-One 6kW", 6000, 6000, 307.0),
+            (0x8002, "All-in-One 5kW", 5000, 5000, 307.0),
+            (0x8003, "All-in-One 5kW", 5000, 5000, 307.0),
+            (0x8102, "AIO 8kW", 8000, 8000, 307.0),
+            (0x8103, "AIO 10kW", 10000, 10000, 307.0),
+        ];
+        for (code, expected_name, expected_batt_w, expected_ac_w, expected_voltage) in cases {
+            let dt = DeviceType::from_register(*code);
+            assert_eq!(
+                dt.display_name(), *expected_name,
+                "display_name mismatch for 0x{:04X}", code
+            );
+            assert_eq!(
+                dt.max_battery_power_w(), *expected_batt_w,
+                "max_battery_power_w mismatch for 0x{:04X}", code
+            );
+            assert_eq!(
+                dt.max_ac_power_w(), *expected_ac_w,
+                "max_ac_power_w mismatch for 0x{:04X}", code
+            );
+            assert!((
+                dt.nominal_battery_voltage() - expected_voltage
+            ).abs() < 0.01,
+                "nominal_battery_voltage mismatch for 0x{:04X}: got {} expected {}",
+                code, dt.nominal_battery_voltage(), expected_voltage
+            );
+        }
+    }
+
+    #[test]
+    fn device_type_unknown_fallbacks() {
+        let dt = DeviceType::Unknown(0x9999);
+        assert_eq!(dt.display_name(), "Unknown");
+        assert_eq!(dt.max_battery_power_w(), 3600);
+        assert_eq!(dt.max_ac_power_w(), 5000);
+    }
+
+    #[test]
+    fn device_type_prefix_fallback() {
+        // Unknown codes with known prefixes should fall back to the generic variant
+        assert_eq!(DeviceType::from_register(0x1002), DeviceType::Gen1Hybrid);
+        assert_eq!(DeviceType::from_register(0x2099), DeviceType::Gen3Hybrid);
+        assert_eq!(DeviceType::from_register(0x3099), DeviceType::ACCoupled);
+        assert_eq!(DeviceType::from_register(0x4099), DeviceType::ThreePhase);
+        assert_eq!(DeviceType::from_register(0x8099), DeviceType::AllInOne6kW);
+    }
+
+    #[test]
+    fn gen2_refined_from_arm_fw_century_2() {
+        // ARM FW with century=2 (e.g. 252 → year 2025) → Gen2
+        let dt = DeviceType::from_register(0x2001).refine_with_arm_fw(252);
+        assert_eq!(dt, DeviceType::Gen2Hybrid);
+        assert_eq!(dt.max_battery_power_w(), 2600);
+    }
+
+    #[test]
+    fn gen3_stays_gen3_for_arm_fw_century_8() {
+        let dt = DeviceType::from_register(0x2001).refine_with_arm_fw(852);
+        assert_eq!(dt, DeviceType::Gen3Hybrid);
+        assert_eq!(dt.max_battery_power_w(), 3600);
+    }
 }

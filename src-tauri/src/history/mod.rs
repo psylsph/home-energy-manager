@@ -650,4 +650,136 @@ mod tests {
         assert!((delta - 30.0).abs() < 0.01,
             "Delta 5->35 should be 30, got {}", delta);
     }
+
+    #[test]
+    fn repair_sql_midnight_rollover_keeps_new_value() {
+        // Directly test the repair CASE logic: midnight rollover should
+        // keep the new small value, NOT replace with the old large value.
+        let db = test_db();
+        let base = 1700000000i64;
+
+        db.insert_reading(&make_snapshot_with_kwh(base, 150.0, 80.0));
+        db.insert_reading(&make_snapshot_with_kwh(base + 60, 5.0, 1.0));   // midnight reset
+        db.insert_reading(&make_snapshot_with_kwh(base + 120, 8.0, 2.0));
+        db.insert_reading(&make_snapshot_with_kwh(base + 180, 15.0, 5.0));
+
+        // Execute the repair SQL directly and check results
+        let conn = db.conn.lock().unwrap();
+        let repair_sql = "
+            SELECT timestamp, today_import_kwh AS orig,
+                   CASE
+                     WHEN LAG(today_import_kwh) OVER (ORDER BY timestamp) IS NULL THEN today_import_kwh
+                     WHEN LAG(today_import_kwh) OVER (ORDER BY timestamp) > 50.0
+                          AND today_import_kwh < 10.0
+                       THEN today_import_kwh
+                     WHEN today_import_kwh < LAG(today_import_kwh) OVER (ORDER BY timestamp)
+                       THEN LAG(today_import_kwh) OVER (ORDER BY timestamp)
+                     ELSE today_import_kwh
+                   END AS repaired
+            FROM readings
+            WHERE today_import_kwh IS NOT NULL
+            ORDER BY timestamp";
+        let mut stmt = conn.prepare(repair_sql).unwrap();
+        let rows: Vec<(i64, f64, f64)> = stmt
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?, row.get::<_, f64>(2)?)))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        assert_eq!(rows.len(), 4);
+        // Row 0: 150.0 → keep 150.0
+        assert!((rows[0].1 - 150.0).abs() < 0.01);
+        assert!((rows[0].2 - 150.0).abs() < 0.01);
+        // Row 1: 5.0 → midnight rollover, keep 5.0 (NOT replace with 150.0!)
+        assert!((rows[1].1 - 5.0).abs() < 0.01, "orig should be 5.0");
+        assert!((rows[1].2 - 5.0).abs() < 0.01,
+            "repaired should be 5.0 (midnight rollover kept), got {}", rows[1].2);
+        // Row 2: 8.0 → normal increase from 5.0, keep 8.0
+        assert!((rows[2].2 - 8.0).abs() < 0.01);
+        // Row 3: 15.0 → normal increase, keep 15.0
+        assert!((rows[3].2 - 15.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn repair_sql_small_glitch_is_fixed() {
+        // Directly test the repair CASE logic: small decrease should be
+        // replaced with the previous value.
+        let db = test_db();
+        let base = 1700000000i64;
+
+        db.insert_reading(&make_snapshot_with_kwh(base, 10.0, 3.0));
+        db.insert_reading(&make_snapshot_with_kwh(base + 60, 20.0, 6.0));
+        db.insert_reading(&make_snapshot_with_kwh(base + 120, 18.5, 7.0)); // glitch
+        db.insert_reading(&make_snapshot_with_kwh(base + 180, 30.0, 9.0));
+
+        let conn = db.conn.lock().unwrap();
+        let repair_sql = "
+            SELECT timestamp, today_import_kwh AS orig,
+                   CASE
+                     WHEN LAG(today_import_kwh) OVER (ORDER BY timestamp) IS NULL THEN today_import_kwh
+                     WHEN LAG(today_import_kwh) OVER (ORDER BY timestamp) > 50.0
+                          AND today_import_kwh < 10.0
+                       THEN today_import_kwh
+                     WHEN today_import_kwh < LAG(today_import_kwh) OVER (ORDER BY timestamp)
+                       THEN LAG(today_import_kwh) OVER (ORDER BY timestamp)
+                     ELSE today_import_kwh
+                   END AS repaired
+            FROM readings
+            WHERE today_import_kwh IS NOT NULL
+            ORDER BY timestamp";
+        let mut stmt = conn.prepare(repair_sql).unwrap();
+        let rows: Vec<(i64, f64, f64)> = stmt
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?, row.get::<_, f64>(2)?)))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Row 2: 18.5 < 20.0 → small glitch, repaired to 20.0
+        assert!((rows[2].1 - 18.5).abs() < 0.01, "orig should be 18.5");
+        assert!((rows[2].2 - 20.0).abs() < 0.01,
+            "repaired should be 20.0 (glitch fixed), got {}", rows[2].2);
+        // Row 3: 30.0 > 20.0 → normal increase, keep 30.0
+        assert!((rows[3].2 - 30.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn repair_sql_large_increase_kept() {
+        // Directly test that the repair does NOT suppress large increases.
+        // Old bug: increases > 2 kWh were replaced with previous value.
+        let db = test_db();
+        let base = 1700000000i64;
+
+        db.insert_reading(&make_snapshot_with_kwh(base, 5.0, 2.0));
+        db.insert_reading(&make_snapshot_with_kwh(base + 60, 25.0, 8.0)); // +20 kWh jump
+        db.insert_reading(&make_snapshot_with_kwh(base + 120, 35.0, 12.0));
+
+        let conn = db.conn.lock().unwrap();
+        let repair_sql = "
+            SELECT timestamp, today_import_kwh AS orig,
+                   CASE
+                     WHEN LAG(today_import_kwh) OVER (ORDER BY timestamp) IS NULL THEN today_import_kwh
+                     WHEN LAG(today_import_kwh) OVER (ORDER BY timestamp) > 50.0
+                          AND today_import_kwh < 10.0
+                       THEN today_import_kwh
+                     WHEN today_import_kwh < LAG(today_import_kwh) OVER (ORDER BY timestamp)
+                       THEN LAG(today_import_kwh) OVER (ORDER BY timestamp)
+                     ELSE today_import_kwh
+                   END AS repaired
+            FROM readings
+            WHERE today_import_kwh IS NOT NULL
+            ORDER BY timestamp";
+        let mut stmt = conn.prepare(repair_sql).unwrap();
+        let rows: Vec<(i64, f64, f64)> = stmt
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?, row.get::<_, f64>(2)?)))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Row 1: 25.0 > 5.0 → increase kept (not suppressed to 5.0!)
+        assert!((rows[1].1 - 25.0).abs() < 0.01, "orig should be 25.0");
+        assert!((rows[1].2 - 25.0).abs() < 0.01,
+            "repaired should be 25.0 (large increase kept), got {}", rows[1].2);
+        // Row 2: 35.0 > 25.0 → increase kept
+        assert!((rows[2].2 - 35.0).abs() < 0.01);
+    }
 }

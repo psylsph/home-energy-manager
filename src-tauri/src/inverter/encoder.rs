@@ -313,6 +313,14 @@ mod tests {
         assert_eq!(writes[0].value, 600);
         assert_eq!(writes[1].address, HR_CHARGE_SLOT_1_END);
         assert_eq!(writes[1].value, 1000);
+        // IMPORTANT: SetChargeSlot1 does NOT write enable_charge.
+        // Setting enable_charge=1 triggers immediate force charge.
+        // The slot times define WHEN charging is permitted; the
+        // enable_charge flag is managed separately.
+        assert!(
+            !writes.iter().any(|w| w.address == HR_ENABLE_CHARGE),
+            "SetChargeSlot1 must NOT include enable_charge register"
+        );
     }
 
     #[test]
@@ -427,5 +435,142 @@ mod tests {
         assert_eq!(writes[3].address, HR_SYSTEM_TIME_HOUR);
         assert_eq!(writes[4].address, HR_SYSTEM_TIME_MINUTE);
         assert_eq!(writes[5].address, HR_SYSTEM_TIME_SECOND);
+    }
+
+    #[test]
+    fn cosy_exit_encodes() {
+        let cmd = ControlCommand::CosyExit;
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 4);
+        assert_eq!(writes[0].address, HR_ENABLE_CHARGE);
+        assert_eq!(writes[0].value, 0);
+        assert_eq!(writes[1].address, HR_ENABLE_CHARGE_TARGET);
+        assert_eq!(writes[1].value, 0);
+        assert_eq!(writes[2].address, HR_BATTERY_POWER_MODE);
+        assert_eq!(writes[2].value, 1); // eco mode
+        assert_eq!(writes[3].address, HR_ENABLE_DISCHARGE);
+        assert_eq!(writes[3].value, 1);
+    }
+
+    #[test]
+    fn set_charge_slot2_encodes() {
+        let cmd = ControlCommand::SetChargeSlot2 {
+            start: 2300,
+            end: 500,
+        };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0].address, HR_CHARGE_SLOT_2_START);
+        assert_eq!(writes[0].value, 2300);
+        assert_eq!(writes[1].address, HR_CHARGE_SLOT_2_END);
+        assert_eq!(writes[1].value, 500);
+    }
+
+    #[test]
+    fn set_discharge_slot1_encodes() {
+        let cmd = ControlCommand::SetDischargeSlot1 {
+            start: 1600,
+            end: 1900,
+        };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0].address, HR_DISCHARGE_SLOT_1_START);
+        assert_eq!(writes[0].value, 1600);
+        assert_eq!(writes[1].address, HR_DISCHARGE_SLOT_1_END);
+        assert_eq!(writes[1].value, 1900);
+    }
+
+    #[test]
+    fn set_discharge_slot2_encodes() {
+        let cmd = ControlCommand::SetDischargeSlot2 {
+            start: 2000,
+            end: 2200,
+        };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0].address, HR_DISCHARGE_SLOT_2_START);
+        assert_eq!(writes[0].value, 2000);
+        assert_eq!(writes[1].address, HR_DISCHARGE_SLOT_2_END);
+        assert_eq!(writes[1].value, 2200);
+    }
+
+    #[test]
+    fn set_active_power_rate_encodes() {
+        let cmd = ControlCommand::SetActivePowerRate { rate: 75 };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].address, HR_ACTIVE_POWER_RATE);
+        assert_eq!(writes[0].value, 75);
+    }
+
+    #[test]
+    fn set_active_power_rate_validates() {
+        let cmd = ControlCommand::SetActivePowerRate { rate: 101 };
+        assert!(cmd.encode().is_err());
+    }
+
+    #[test]
+    fn set_charge_target_soc_encodes() {
+        let cmd = ControlCommand::SetChargeTargetSoc { soc: 80 };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0].address, HR_ENABLE_CHARGE_TARGET);
+        assert_eq!(writes[0].value, 1);
+        assert_eq!(writes[1].address, HR_CHARGE_TARGET_SOC);
+        assert_eq!(writes[1].value, 80);
+    }
+
+    #[test]
+    fn set_charge_target_soc_validates() {
+        let cmd = ControlCommand::SetChargeTargetSoc { soc: 101 };
+        assert!(cmd.encode().is_err());
+    }
+
+    #[test]
+    fn set_calibration_stage_encodes() {
+        let cmd = ControlCommand::SetCalibrationStage { stage: 5 };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].address, HR_BATTERY_CALIBRATION_STAGE);
+        assert_eq!(writes[0].value, 5);
+    }
+
+    #[test]
+    fn set_calibration_stage_validates() {
+        let cmd = ControlCommand::SetCalibrationStage { stage: 8 };
+        assert!(cmd.encode().is_err());
+    }
+
+    #[test]
+    fn set_enable_charge_encodes() {
+        let on = ControlCommand::SetEnableCharge { enabled: true };
+        assert_eq!(on.encode().unwrap()[0].value, 1);
+        let off = ControlCommand::SetEnableCharge { enabled: false };
+        assert_eq!(off.encode().unwrap()[0].value, 0);
+    }
+
+    #[test]
+    fn set_enable_discharge_encodes() {
+        let on = ControlCommand::SetEnableDischarge { enabled: true };
+        assert_eq!(on.encode().unwrap()[0].value, 1);
+        let off = ControlCommand::SetEnableDischarge { enabled: false };
+        assert_eq!(off.encode().unwrap()[0].value, 0);
+    }
+
+    #[test]
+    fn set_discharge_limit_validates() {
+        let ok = ControlCommand::SetDischargeLimit { limit: 50 };
+        assert!(ok.encode().is_ok());
+        let bad = ControlCommand::SetDischargeLimit { limit: 101 };
+        assert!(bad.encode().is_err());
+    }
+
+    #[test]
+    fn reboot_inverter_encodes() {
+        let cmd = ControlCommand::RebootInverter;
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].address, HR_INVERTER_REBOOT);
+        assert_eq!(writes[0].value, 100);
     }
 }
