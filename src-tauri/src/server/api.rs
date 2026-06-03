@@ -240,9 +240,10 @@ pub async fn set_mode(
 /// Body: `{"slot": 1, "start_hour": 6, "start_minute": 0, "end_hour": 10, "end_minute": 0,
 ///         "enabled": true}`
 ///
-/// If `enabled` is false, the slot times are set to sentinel 60 (disabled).
-/// Note: enable_charge and enable_charge_target are NOT set here because
-/// they trigger an immediate force charge. Use ForceCharge or Cosy mode instead.
+/// If `enabled` is false, the slot times are set to sentinel 0 (disabled).
+/// When enabling a slot, `enable_charge` (HR 96) is set to 1 to allow
+/// slot-based scheduled charging. This does NOT trigger immediate force
+/// charge — only `enable_charge_target + charge_target_soc` do.
 /// Also updates `enable_charge` based on whether any charge slot remains active.
 pub async fn set_charge_slot(
     State(state): State<Arc<AppState>>,
@@ -279,17 +280,21 @@ pub async fn set_charge_slot(
     };
 
     match cmd.encode() {
-        Ok(writes) => {
-            // NOTE: we deliberately do NOT set enable_charge or
-            // enable_charge_target here. Setting either of these to 1
-            // triggers an immediate force charge on the inverter.
-            // The user just wants to define WHEN charging is permitted
-            // and what SOC to target — not start charging now.
+        Ok(mut writes) => {
+            // When enabling a slot, also set enable_charge = 1 so the
+            // inverter allows scheduled charging. Per the givenergy-modbus
+            // reference, enable_charge alone (without enable_charge_target)
+            // enables slot-based charging — NOT immediate force charge.
             //
-            // enable_charge and enable_charge_target are managed by:
-            //   - ForceCharge button (explicit user action)
-            //   - Cosy timer (poll loop manages the on/off cycle)
-            //   - The inverter's own scheduled charge logic
+            // We do NOT set enable_charge_target or charge_target_soc here;
+            // those trigger an immediate force charge.
+            if enabled {
+                if let Ok(enable_writes) =
+                    (ControlCommand::SetEnableCharge { enabled: true }).encode()
+                {
+                    writes.extend(enable_writes);
+                }
+            }
 
             tracing::info!("SetChargeSlot {} encoded: {:?}", slot, writes);
             queue_writes(&state, writes).await;
