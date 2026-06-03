@@ -271,8 +271,10 @@ pub const SAFE_WRITE_REGS: &[u16] = &[
 ///   100 = 01:00
 ///   630 = 06:30
 pub fn decode_hhmm(val: u16) -> Option<(u8, u8)> {
-    // 60 is the disabled sentinel per givenergy-modbus reference
-    if val == 60 {
+    // 0 is the disabled sentinel per givenergy-modbus reference library
+    // (the reference writes 0, 0 to clear slots, and 00:00 is indistinguishable
+    //  from disabled in the protocol).
+    if val == 0 || val == 60 {
         return None;
     }
     let hour = (val / 100) as u8;
@@ -316,13 +318,15 @@ mod tests {
         assert_eq!(decode_hhmm(1600), Some((16, 0)));
         assert_eq!(decode_hhmm(630), Some((6, 30)));
         assert_eq!(decode_hhmm(2359), Some((23, 59)));
-        assert_eq!(decode_hhmm(0), Some((0, 0)));
+        assert_eq!(decode_hhmm(1), Some((0, 1)));
+        assert_eq!(decode_hhmm(100), Some((1, 0)));
     }
 
     #[test]
     fn decode_hhmm_disabled() {
-        // 60 is the disabled sentinel
-        assert_eq!(decode_hhmm(60), None);
+        // 0 is the disabled sentinel (per givenergy-modbus reference)
+        assert_eq!(decode_hhmm(0), None);
+        assert_eq!(decode_hhmm(60), None); // legacy sentinel
     }
 
     #[test]
@@ -335,7 +339,7 @@ mod tests {
 
     #[test]
     fn encode_hhmm_roundtrip() {
-        for (h, m) in [(0, 0), (6, 30), (16, 0), (23, 59)] {
+        for (h, m) in [(0, 1), (6, 30), (16, 0), (23, 59)] {
             let encoded = encode_hhmm(h, m);
             let decoded = decode_hhmm(encoded);
             assert_eq!(decoded, Some((h, m)));

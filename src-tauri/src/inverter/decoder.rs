@@ -100,13 +100,8 @@ fn decode_timeslot(data: &[u16], start_idx: usize, end_idx: usize) -> ScheduleSl
 
     match (decode_hhmm(start_val), decode_hhmm(end_val)) {
         (Some((sh, sm)), Some((eh, em))) => {
-            // A slot is disabled if start is 00:00. The canonical disabled
-            // state is 00:00–00:00 (both zero), but register 32 (charge
-            // slot 2 end) is unwritable on some inverters — so start=00:00
-            // with a stale end value must also be treated as disabled.
-            let disabled = sh == 0 && sm == 0;
             ScheduleSlot {
-                enabled: !disabled,
+                enabled: true,
                 start_hour: sh,
                 start_minute: sm,
                 end_hour: eh,

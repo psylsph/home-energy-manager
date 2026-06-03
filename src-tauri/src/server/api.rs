@@ -266,9 +266,10 @@ pub async fn set_charge_slot(
     let (start, end) = if enabled {
         (encode_hhmm(start_hour, start_minute), encode_hhmm(end_hour, end_minute))
     } else {
-        // Disabled: write 60 (the HHMM disabled sentinel) to both start and end.
-        // Writing 0 would set 00:00-00:00 which is a valid time window.
-        (60, 60)
+        // Disabled: write 0 to clear the slot (per givenergy-modbus reference).
+        // 0 is the disabled sentinel — 00:00 is indistinguishable from disabled
+        // in the GivEnergy protocol.
+        (0, 0)
     };
 
     let cmd = match slot {
@@ -327,7 +328,7 @@ pub async fn set_discharge_slot(
     let (start, end) = if enabled {
         (encode_hhmm(start_hour, start_minute), encode_hhmm(end_hour, end_minute))
     } else {
-        (60, 60)
+        (0, 0)
     };
 
     let cmd = match slot {

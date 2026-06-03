@@ -160,10 +160,10 @@ impl ControlCommand {
                     rw(HR_BATTERY_POWER_MODE, 1), // self-consumption
                     rw(HR_ENABLE_DISCHARGE, 0),   // no timed discharge
                     rw(HR_BATTERY_SOC_RESERVE, *soc_reserve),
-                    rw(HR_DISCHARGE_SLOT_1_START, 60), // disable discharge slot 1
-                    rw(HR_DISCHARGE_SLOT_1_END, 60),
-                    rw(HR_DISCHARGE_SLOT_2_START, 60), // disable discharge slot 2
-                    rw(HR_DISCHARGE_SLOT_2_END, 60),
+                    rw(HR_DISCHARGE_SLOT_1_START, 0), // disable discharge slot 1
+                    rw(HR_DISCHARGE_SLOT_1_END, 0),
+                    rw(HR_DISCHARGE_SLOT_2_START, 0), // disable discharge slot 2
+                    rw(HR_DISCHARGE_SLOT_2_END, 0),
                 ]
             }
             ControlCommand::SetTimedDemandMode { soc_reserve } => {
@@ -189,13 +189,13 @@ impl ControlCommand {
                 validate_range(*target_soc, 0, 100, "target SOC")?;
                 // Also clear the inverter's internal charge slot registers so
                 // they don't show as active conflicting schedules.
-                // Slot is disabled with sentinel 60 (not 0, which is valid 00:00).
+                // 0 is the disabled sentinel (00:00 = disabled in the protocol).
                 vec![
                     rw(HR_BATTERY_POWER_MODE, 1), // eco mode — required for charge to work
-                    rw(HR_CHARGE_SLOT_1_START, 60),
-                    rw(HR_CHARGE_SLOT_1_END, 60),
-                    rw(HR_CHARGE_SLOT_2_START, 60),
-                    rw(HR_CHARGE_SLOT_2_END, 60),
+                    rw(HR_CHARGE_SLOT_1_START, 0),
+                    rw(HR_CHARGE_SLOT_1_END, 0),
+                    rw(HR_CHARGE_SLOT_2_START, 0),
+                    rw(HR_CHARGE_SLOT_2_END, 0),
                     rw(HR_ENABLE_CHARGE, 1),
                     rw(HR_ENABLE_CHARGE_TARGET, 1),
                     rw(HR_CHARGE_TARGET_SOC, *target_soc),
@@ -211,7 +211,7 @@ impl ControlCommand {
             ControlCommand::SyncClock => {
                 let now = Utc::now();
                 vec![
-                    rw(HR_SYSTEM_TIME_YEAR, now.year() as u16),
+                    rw(HR_SYSTEM_TIME_YEAR, (now.year() - 2000) as u16),
                     rw(HR_SYSTEM_TIME_MONTH, now.month() as u16),
                     rw(HR_SYSTEM_TIME_DAY, now.day() as u16),
                     rw(HR_SYSTEM_TIME_HOUR, now.hour() as u16),
@@ -283,13 +283,13 @@ mod tests {
         assert_eq!(writes[2].address, HR_BATTERY_SOC_RESERVE);
         assert_eq!(writes[2].value, 4);
         assert_eq!(writes[3].address, HR_DISCHARGE_SLOT_1_START);
-        assert_eq!(writes[3].value, 60); // disable (sentinel 60, not 0)
+        assert_eq!(writes[3].value, 0); // disable (0 = disabled sentinel)
         assert_eq!(writes[4].address, HR_DISCHARGE_SLOT_1_END);
-        assert_eq!(writes[4].value, 60);
+        assert_eq!(writes[4].value, 0);
         assert_eq!(writes[5].address, HR_DISCHARGE_SLOT_2_START);
-        assert_eq!(writes[5].value, 60);
+        assert_eq!(writes[5].value, 0);
         assert_eq!(writes[6].address, HR_DISCHARGE_SLOT_2_END);
-        assert_eq!(writes[6].value, 60);
+        assert_eq!(writes[6].value, 0);
     }
 
     #[test]
@@ -395,13 +395,13 @@ mod tests {
         assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
         assert_eq!(writes[0].value, 1); // eco mode
         assert_eq!(writes[1].address, HR_CHARGE_SLOT_1_START);
-        assert_eq!(writes[1].value, 60); // disable slot 1 (sentinel 60)
+        assert_eq!(writes[1].value, 0); // disable slot 1 (0 = disabled)
         assert_eq!(writes[2].address, HR_CHARGE_SLOT_1_END);
-        assert_eq!(writes[2].value, 60);
+        assert_eq!(writes[2].value, 0);
         assert_eq!(writes[3].address, HR_CHARGE_SLOT_2_START);
-        assert_eq!(writes[3].value, 60); // disable slot 2
+        assert_eq!(writes[3].value, 0); // disable slot 2
         assert_eq!(writes[4].address, HR_CHARGE_SLOT_2_END);
-        assert_eq!(writes[4].value, 60);
+        assert_eq!(writes[4].value, 0);
         assert_eq!(writes[5].address, HR_ENABLE_CHARGE);
         assert_eq!(writes[5].value, 1);
         assert_eq!(writes[6].address, HR_ENABLE_CHARGE_TARGET);
@@ -430,8 +430,11 @@ mod tests {
         assert_eq!(writes.len(), 6);
         // All system time registers in order
         assert_eq!(writes[0].address, HR_SYSTEM_TIME_YEAR);
+        assert!(writes[0].value <= 99, "Year must be 2-digit (offset from 2000), got {}", writes[0].value);
         assert_eq!(writes[1].address, HR_SYSTEM_TIME_MONTH);
+        assert!(writes[1].value >= 1 && writes[1].value <= 12);
         assert_eq!(writes[2].address, HR_SYSTEM_TIME_DAY);
+        assert!(writes[2].value >= 1 && writes[2].value <= 31);
         assert_eq!(writes[3].address, HR_SYSTEM_TIME_HOUR);
         assert_eq!(writes[4].address, HR_SYSTEM_TIME_MINUTE);
         assert_eq!(writes[5].address, HR_SYSTEM_TIME_SECOND);
