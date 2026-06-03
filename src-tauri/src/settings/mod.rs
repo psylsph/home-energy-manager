@@ -63,6 +63,35 @@ impl Default for CosySlot {
     }
 }
 
+impl CosySlot {
+    /// Check whether a given time in minutes since midnight falls within
+    /// this slot, handling slots that cross midnight (e.g. 22:00-05:00).
+    pub fn contains_minutes(&self, now_minutes: u16) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        let start = self.start_hour as u16 * 60 + self.start_minute as u16;
+        let end = self.end_hour as u16 * 60 + self.end_minute as u16;
+        if end <= start {
+            // Crosses midnight (e.g. 22:00-05:00)
+            now_minutes >= start || now_minutes < end
+        } else {
+            now_minutes >= start && now_minutes < end
+        }
+    }
+}
+
+/// Check if the current time falls within any enabled Cosy slot.
+/// Returns the target SOC of the first matching slot, or `None` if no slot matches.
+pub fn cosy_active_slot(now_minutes: u16, slots: &[CosySlot]) -> Option<u8> {
+    for slot in slots {
+        if slot.contains_minutes(now_minutes) {
+            return Some(slot.target_soc);
+        }
+    }
+    None
+}
+
 /// Application settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -418,5 +447,163 @@ mod tests {
             mapped.is_empty(),
             "empty slots array must produce 0 entries, not regenerate defaults"
         );
+    }
+
+    // ======================================================================
+    // Cosy slot timing logic tests
+    // ======================================================================
+
+    #[test]
+    fn cosy_slot_does_not_match_when_disabled() {
+        let slot = CosySlot {
+            enabled: false,
+            start_hour: 2,
+            start_minute: 0,
+            end_hour: 5,
+            end_minute: 0,
+            target_soc: 100,
+        };
+        assert!(!slot.contains_minutes(180)); // 03:00, slot is disabled
+    }
+
+    #[test]
+    fn cosy_slot_matches_normal_range() {
+        let slot = CosySlot {
+            enabled: true,
+            start_hour: 2,
+            start_minute: 0,
+            end_hour: 5,
+            end_minute: 0,
+            target_soc: 80,
+        };
+        // Before start
+        assert!(!slot.contains_minutes(119));  // 01:59
+        // At start
+        assert!(slot.contains_minutes(120));   // 02:00
+        // Middle
+        assert!(slot.contains_minutes(180));   // 03:00
+        // Just before end
+        assert!(slot.contains_minutes(299));   // 04:59
+        // At end (end is exclusive)
+        assert!(!slot.contains_minutes(300));  // 05:00
+    }
+
+    #[test]
+    fn cosy_slot_midnight_crossing() {
+        // Slot from 22:00 to 05:30 (crosses midnight)
+        let slot = CosySlot {
+            enabled: true,
+            start_hour: 22,
+            start_minute: 0,
+            end_hour: 5,
+            end_minute: 30,
+            target_soc: 100,
+        };
+        // Before start on the first day
+        assert!(!slot.contains_minutes(21 * 60 + 59)); // 21:59
+        // After start on the first day
+        assert!(slot.contains_minutes(22 * 60));        // 22:00
+        // Middle of the night
+        assert!(slot.contains_minutes(2 * 60 + 30));    // 02:30
+        // Just before end
+        assert!(slot.contains_minutes(5 * 60 + 29));    // 05:29
+        // At end (exclusive)
+        assert!(!slot.contains_minutes(5 * 60 + 30));   // 05:30
+        // Middle of the next day (outside slot)
+        assert!(!slot.contains_minutes(14 * 60));       // 14:00
+    }
+
+    #[test]
+    fn cosy_midnight_exact_boundary() {
+        // Slot from 00:00 to 06:00 — does not cross midnight
+        let slot = CosySlot {
+            enabled: true,
+            start_hour: 0,
+            start_minute: 0,
+            end_hour: 6,
+            end_minute: 0,
+            target_soc: 90,
+        };
+        assert!(slot.contains_minutes(0));     // 00:00
+        assert!(slot.contains_minutes(359));   // 05:59
+        assert!(!slot.contains_minutes(360));  // 06:00 (end exclusive)
+    }
+
+    #[test]
+    fn cosy_active_slot_finds_first_match() {
+        let slots = vec![
+            CosySlot {
+                enabled: true,
+                start_hour: 0, start_minute: 30, end_hour: 5, end_minute: 30,
+                target_soc: 100,
+            },
+            CosySlot {
+                enabled: true,
+                start_hour: 13, start_minute: 0, end_hour: 16, end_minute: 0,
+                target_soc: 80,
+            },
+            CosySlot {
+                enabled: true,
+                start_hour: 20, start_minute: 0, end_hour: 22, end_minute: 0,
+                target_soc: 100,
+            },
+        ];
+        // First slot matches (00:30-05:30)
+        assert_eq!(cosy_active_slot(2 * 60 + 0, &slots), Some(100));
+        // Second slot matches (13:00-16:00)
+        assert_eq!(cosy_active_slot(14 * 60 + 30, &slots), Some(80));
+        // Third slot matches (20:00-22:00)
+        assert_eq!(cosy_active_slot(21 * 60 + 0, &slots), Some(100));
+        // Gap between slots
+        assert_eq!(cosy_active_slot(11 * 60 + 0, &slots), None);
+        assert_eq!(cosy_active_slot(18 * 60 + 0, &slots), None);
+    }
+
+    #[test]
+    fn cosy_active_slot_returns_none_when_no_slots() {
+        assert_eq!(cosy_active_slot(12 * 60, &[]), None);
+    }
+
+    #[test]
+    fn cosy_active_slot_skips_disabled_slots() {
+        let slots = vec![
+            CosySlot {
+                enabled: false,
+                start_hour: 2, start_minute: 0, end_hour: 5, end_minute: 0,
+                target_soc: 100,
+            },
+            CosySlot {
+                enabled: true,
+                start_hour: 6, start_minute: 0, end_hour: 8, end_minute: 0,
+                target_soc: 90,
+            },
+        ];
+        // Disabled slot at 03:00 should not match
+        assert_eq!(cosy_active_slot(3 * 60, &slots), None);
+        // Enabled slot at 07:00 should match
+        assert_eq!(cosy_active_slot(7 * 60, &slots), Some(90));
+    }
+
+    #[test]
+    fn cosy_active_slot_midnight_crossing_first_preferred() {
+        // Two midnight-crossing slots, first one should match
+        let slots = vec![
+            CosySlot {
+                enabled: true,
+                start_hour: 22, start_minute: 0, end_hour: 0, end_minute: 30,
+                target_soc: 100,
+            },
+            CosySlot {
+                enabled: true,
+                start_hour: 0, start_minute: 30, end_hour: 5, end_minute: 0,
+                target_soc: 80,
+            },
+        ];
+        // At 23:00, first slot matches
+        assert_eq!(cosy_active_slot(23 * 60, &slots), Some(100));
+        // At 00:15, first slot matches (it crosses midnight and ends at 00:30)
+        assert_eq!(cosy_active_slot(15, &slots), Some(100));
+        // At 00:45, second slot matches
+        assert_eq!(cosy_active_slot(45, &slots), Some(80));
     }
 }

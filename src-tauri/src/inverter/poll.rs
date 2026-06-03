@@ -1076,6 +1076,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 const GRACE_READINGS: u8 = 3;
                 let mut pending_mode: Option<BatteryMode> = None;
                 let mut known_device_type: Option<crate::inverter::model::DeviceType> = None;
+                let mut detected_meters: Vec<u8> = Vec::new();
 
                 // Restore cosy_active from persisted settings on restart.
                 // Without this, a client reboot during a cosy slot would leave
@@ -1086,26 +1087,8 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     if settings.cosy_enabled {
                         let now = chrono::Local::now();
                         let now_minutes = now.hour() as u16 * 60 + now.minute() as u16;
-                        let mut in_slot = false;
-                        let mut restore_target_soc: u16 = 100;
-                        for slot in &settings.cosy_slots {
-                            if !slot.enabled { continue; }
-                            let start = slot.start_hour as u16 * 60 + slot.start_minute as u16;
-                            let end = slot.end_hour as u16 * 60 + slot.end_minute as u16;
-                            let crosses_midnight = end <= start;
-                            if crosses_midnight {
-                                if now_minutes >= start || now_minutes < end {
-                                    in_slot = true;
-                                    restore_target_soc = slot.target_soc as u16;
-                                    break;
-                                }
-                            } else if now_minutes >= start && now_minutes < end {
-                                in_slot = true;
-                                restore_target_soc = slot.target_soc as u16;
-                                break;
-                            }
-                        }
-                        if in_slot {
+                        let in_slot = crate::settings::cosy_active_slot(now_minutes, &settings.cosy_slots);
+                        if let Some(restore_target_soc) = in_slot {
                             tracing::info!(
                                 "Cosy: restart detected inside slot (target SOC {}%) — force-charge will be retried after first poll",
                                 restore_target_soc
@@ -1195,6 +1178,46 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         "Device model identified — enabling model-aware polling"
                                     );
                                     known_device_type = Some(snapshot.device_type);
+
+                                    // Probe for external CT clamp meters (device addresses 0x01-0x08).
+                                    // A meter is present if V_phase_1 (IR 60) is non-zero and >100V.
+                                    tracing::info!("Probing for external CT meters...");
+                                    let mut found_meters: Vec<u8> = Vec::new();
+                                    for &addr in crate::modbus::registers::METER_ADDRESSES {
+                                        match client.read_registers_at_slave(
+                                            addr,
+                                            crate::modbus::framer::RegisterType::Input,
+                                            60,
+                                            30,
+                                        ).await {
+                                            Ok(data) => {
+                                                if crate::inverter::decoder::validate_meter_data(&data) {
+                                                    let meter = crate::inverter::decoder::decode_meter_data(&data, addr);
+                                                    tracing::info!(
+                                                        "Meter detected at addr 0x{addr:02X}: {:.1}V, {:.0}W",
+                                                        meter.v_phase_1, meter.p_active_total
+                                                    );
+                                                    found_meters.push(addr);
+                                                    snapshot.meters.push(meter);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::debug!(
+                                                    "Meter addr 0x{addr:02X}: no response: {e}",
+                                                );
+                                            }
+                                        }
+                                        tokio::time::sleep(Duration::from_millis(100)).await;
+                                    }
+                                    detected_meters = found_meters;
+                                    if detected_meters.is_empty() {
+                                        tracing::info!("No external CT meters detected");
+                                    } else {
+                                        tracing::info!(
+                                            "Detected {} meter(s) at addresses: {:02X?}",
+                                            detected_meters.len(), detected_meters
+                                        );
+                                    }
                                 }
 
                                 // If the dongle serial was auto-discovered from the
@@ -1305,6 +1328,35 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     }
                                 }
 
+                                // --- External CT meter reads ---
+                                // Read all previously detected meters on every poll cycle.
+                                // If a meter stops responding, we skip it silently.
+                                let mut fresh_meters: Vec<crate::inverter::model::MeterData> =
+                                    Vec::with_capacity(detected_meters.len());
+                                for &addr in &detected_meters {
+                                    match client.read_registers_at_slave(
+                                        addr,
+                                        crate::modbus::framer::RegisterType::Input,
+                                        60,
+                                        30,
+                                    ).await {
+                                        Ok(data) => {
+                                            fresh_meters.push(
+                                                crate::inverter::decoder::decode_meter_data(&data, addr)
+                                            );
+                                        }
+                                        Err(e) => {
+                                            tracing::debug!(
+                                                "Meter addr 0x{addr:02X}: read failed: {e}",
+                                            );
+                                        }
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(100)).await;
+                                }
+                                if !fresh_meters.is_empty() {
+                                    snapshot.meters = fresh_meters;
+                                }
+
                                 // If inverter IR(59) was 0, recalculate SOC from
                                 // capacity-weighted average of ALL battery modules
                                 // (now that additional batteries have been read).
@@ -1413,27 +1465,9 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         let now_minutes = now.hour() as u16 * 60 + now.minute() as u16;
 
                                         // Check if we're inside any enabled cosy slot
-                                        let mut in_slot = false;
-                                        let mut slot_target_soc: u8 = 100;
-                                        for slot in &settings.cosy_slots {
-                                            if !slot.enabled {
-                                                continue;
-                                            }
-                                            let start = slot.start_hour as u16 * 60 + slot.start_minute as u16;
-                                            let end = slot.end_hour as u16 * 60 + slot.end_minute as u16;
-                                            let crosses_midnight = end <= start;
-                                            if crosses_midnight {
-                                                if now_minutes >= start || now_minutes < end {
-                                                    in_slot = true;
-                                                    slot_target_soc = slot.target_soc;
-                                                    break;
-                                                }
-                                            } else if now_minutes >= start && now_minutes < end {
-                                                in_slot = true;
-                                                slot_target_soc = slot.target_soc;
-                                                break;
-                                            }
-                                        }
+                                        let slot_target_soc = crate::settings::cosy_active_slot(now_minutes, &settings.cosy_slots);
+                                        let in_slot = slot_target_soc.is_some();
+                                        let slot_target_soc = slot_target_soc.unwrap_or(100);
 
                                         let cosy_active = state.cosy_active.lock().await;
                                         if in_slot && !*cosy_active {

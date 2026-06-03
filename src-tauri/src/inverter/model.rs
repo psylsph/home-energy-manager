@@ -292,6 +292,41 @@ fn default_max_slots() -> u8 {
 // Structs
 // ---------------------------------------------------------------------------
 
+/// Data from one external CT clamp meter (device address 0x01-0x08).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MeterData {
+    /// Device address (0x01-0x08).
+    pub address: u8,
+    /// Phase 1-3 voltage in V.
+    pub v_phase_1: f32,
+    pub v_phase_2: f32,
+    pub v_phase_3: f32,
+    /// Phase 1-3 current in A.
+    pub i_phase_1: f32,
+    pub i_phase_2: f32,
+    pub i_phase_3: f32,
+    /// Total current in A.
+    pub i_total: f32,
+    /// Phase 1-3 active power in W (signed, positive = import).
+    pub p_active_phase_1: i32,
+    pub p_active_phase_2: i32,
+    pub p_active_phase_3: i32,
+    /// Total active power in W (signed).
+    pub p_active_total: i32,
+    /// Total reactive power in var (signed).
+    pub p_reactive_total: i32,
+    /// Total apparent power in VA.
+    pub p_apparent_total: i32,
+    /// Power factor (0.000-1.000).
+    pub pf_total: f32,
+    /// Frequency in Hz.
+    pub frequency: f32,
+    /// Cumulative import energy in kWh.
+    pub e_import_active_kwh: f32,
+    /// Cumulative export energy in kWh.
+    pub e_export_active_kwh: f32,
+}
+
 /// A single battery module within the battery assembly.
 ///
 /// For LV batteries each physical battery is a "module". For HV stacks
@@ -465,6 +500,11 @@ pub struct InverterSnapshot {
     /// Battery pause time slot — HR 319-320.
     #[serde(default)]
     pub battery_pause_slot: ScheduleSlot,
+
+    // -- External CT meters --
+    /// Detected external clamp meters (device addresses 0x01-0x08).
+    #[serde(default)]
+    pub meters: Vec<MeterData>,
 }
 
 // ===========================================================================

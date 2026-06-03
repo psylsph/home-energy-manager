@@ -72,7 +72,7 @@
 use crate::modbus::client::BlockRead;
 use crate::modbus::registers::{decode_hhmm, RegisterType};
 
-use super::model::{BatteryMode, BatteryModule, BatteryState, DeviceType, InverterSnapshot, ScheduleSlot};
+use super::model::{BatteryMode, BatteryModule, BatteryState, DeviceType, InverterSnapshot, MeterData, ScheduleSlot};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -513,6 +513,51 @@ fn decode_holding_300_359(data: &[u16], snap: &mut InverterSnapshot) {
 
     // HR 319-320: battery pause slot
     snap.battery_pause_slot = decode_timeslot(data, 319 - 300, 320 - 300);
+}
+
+/// Decode meter data from raw register values (IR 60-89) into a MeterData struct.
+///
+/// The register layout matches MeterRegisterGetter from the reference library:
+///   IR(60-62): v_phase_1..3 (/10 V)
+///   IR(63-67): i_phase_1..3, i_ln, i_total (/100 A)
+///   IR(68-71): p_active_phase_1..3, p_active_total (int16 W)
+///   IR(72-75): p_reactive_phase_1..3, p_reactive_total (int16 var)
+///   IR(76-79): p_apparent_phase_1..3, p_apparent_total (int16 VA)
+///   IR(80-83): pf_phase_1..3, pf_total (/1000)
+///   IR(84):    frequency (/100 Hz)
+///   IR(85-86): e_import_active, e_import_reactive (/10 kWh)
+///   IR(87-88): e_export_active, e_export_reactive (/10 kWh)
+pub fn decode_meter_data(data: &[u16], address: u8) -> MeterData {
+    let get = |idx: usize| -> u16 { data.get(idx).copied().unwrap_or(0) };
+    let signed = |idx: usize| -> i32 { get(idx) as i16 as i32 };
+
+    MeterData {
+        address,
+        v_phase_1: get(0) as f32 * 0.1,
+        v_phase_2: get(1) as f32 * 0.1,
+        v_phase_3: get(2) as f32 * 0.1,
+        i_phase_1: get(3) as f32 * 0.01,
+        i_phase_2: get(4) as f32 * 0.01,
+        i_phase_3: get(5) as f32 * 0.01,
+        i_total: get(7) as f32 * 0.01,
+        p_active_phase_1: signed(8),
+        p_active_phase_2: signed(9),
+        p_active_phase_3: signed(10),
+        p_active_total: signed(11),
+        p_reactive_total: signed(15),
+        p_apparent_total: signed(19),
+        pf_total: get(23) as f32 * 0.001,
+        frequency: get(24) as f32 * 0.01,
+        e_import_active_kwh: get(25) as f32 * 0.1,
+        e_export_active_kwh: get(27) as f32 * 0.1,
+    }
+}
+
+/// Validate that raw meter data represents a real, connected meter.
+/// A meter is valid if phase 1 voltage is non-zero and plausible (>100V).
+pub fn validate_meter_data(data: &[u16]) -> bool {
+    let v1 = data.first().copied().unwrap_or(0) as f32 * 0.1;
+    v1 > 100.0 && v1 < 300.0
 }
 
 /// Decode battery block data from a single data slice into a BatteryModule.

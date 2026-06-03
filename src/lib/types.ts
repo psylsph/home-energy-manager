@@ -44,6 +44,7 @@ export interface InverterSnapshot {
   max_discharge_slots: number;
   charge_slots: ScheduleSlot[];
   discharge_slots: ScheduleSlot[];
+  meters: MeterData[];
   inverter_serial: string;
   firmware_version: string;
   device_type: string;
@@ -116,6 +117,27 @@ export interface WsConnectionMessage {
   type: 'connection';
   state: ConnectionState;
   host: string;
+}
+
+export interface MeterData {
+  address: number;
+  v_phase_1: number;
+  v_phase_2: number;
+  v_phase_3: number;
+  i_phase_1: number;
+  i_phase_2: number;
+  i_phase_3: number;
+  i_total: number;
+  p_active_phase_1: number;
+  p_active_phase_2: number;
+  p_active_phase_3: number;
+  p_active_total: number;
+  p_reactive_total: number;
+  p_apparent_total: number;
+  pf_total: number;
+  frequency: number;
+  e_import_active_kwh: number;
+  e_export_active_kwh: number;
 }
 
 export interface TimePoint {

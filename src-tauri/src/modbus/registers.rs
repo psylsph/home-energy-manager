@@ -354,6 +354,56 @@ pub const SAFE_WRITE_REGS: &[u16] = &[
 ];
 
 // ===========================================================================
+// Meter (CT clamp) input register addresses — IR 60-89
+// ===========================================================================
+//
+// Per givenergy-modbus reference: meters live at device addresses 0x01-0x08
+// and expose data via IR 60-89 (input registers, function code 0x04).
+// Each meter is probed by reading IR 60-89 and checking if V_phase_1 is non-zero.
+//
+// Register layout (MeterRegisterGetter from reference library):
+//   IR(60):   v_phase_1 (/10 V)
+//   IR(61):   v_phase_2 (/10 V)
+//   IR(62):   v_phase_3 (/10 V)
+//   IR(63):   i_phase_1 (/100 A)
+//   IR(64):   i_phase_2 (/100 A)
+//   IR(65):   i_phase_3 (/100 A)
+//   IR(66):   i_ln (/100 A)
+//   IR(67):   i_total (/100 A)
+//   IR(68):   p_active_phase_1 (int16 W)
+//   IR(69):   p_active_phase_2 (int16 W)
+//   IR(70):   p_active_phase_3 (int16 W)
+//   IR(71):   p_active_total (int16 W)
+//   IR(72):   p_reactive_phase_1 (int16 var)
+//   IR(73):   p_reactive_phase_2 (int16 var)
+//   IR(74):   p_reactive_phase_3 (int16 var)
+//   IR(75):   p_reactive_total (int16 var)
+//   IR(76):   p_apparent_phase_1 (int16 VA)
+//   IR(77):   p_apparent_phase_2 (int16 VA)
+//   IR(78):   p_apparent_phase_3 (int16 VA)
+//   IR(79):   p_apparent_total (int16 VA)
+//   IR(80):   pf_phase_1 (/1000)
+//   IR(81):   pf_phase_2 (/1000)
+//   IR(82):   pf_phase_3 (/1000)
+//   IR(83):   pf_total (/1000)
+//   IR(84):   frequency (/100 Hz)
+//   IR(85):   e_import_active (/10 kWh)
+//   IR(86):   e_import_reactive (/10 kvarh)
+//   IR(87):   e_export_active (/10 kWh)
+//   IR(88):   e_export_reactive (/10 kvarh)
+//
+// Device addresses to scan for meters (0x01-0x08).
+pub const METER_ADDRESSES: &[u8] = &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+
+/// Block read for each external CT meter (IR 60-89, 30 registers).
+pub const METER_POLL_BLOCK: RegisterBlock = RegisterBlock {
+    start: 60,
+    count: 30,
+    register_type: RegisterType::Input,
+    name: "meter_input_60_89",
+};
+
+// ===========================================================================
 // Model-aware poll blocks (beyond the standard set)
 // ===========================================================================
 

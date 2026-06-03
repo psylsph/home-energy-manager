@@ -1,3 +1,4 @@
+import MetersPage from './pages/MetersPage';
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useInverterStore } from './store/useInverterStore';
@@ -33,6 +34,7 @@ const NAV_ITEMS = [
   { to: '/battery', label: 'Battery', icon: BatteryIcon },
   { to: '/inverter', label: 'Inverter', icon: InverterIcon },
   { to: '/solar', label: 'Solar', icon: SolarIcon },
+  { to: '/meters', label: 'Meters', icon: MeterIcon },
   { to: '/history', label: 'History', icon: HistoryIcon },
   { to: '/control', label: 'Control', icon: ControlIcon },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
@@ -99,6 +101,16 @@ function InverterIcon() {
   );
 }
 
+function MeterIcon() {
+  return (
+    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M14 2v6h6M16 13H8M16 17H8M10 9H8" />
+      <circle cx="11" cy="15" r="1" fill="currentColor" />
+    </svg>
+  );
+}
+
 function LogsIcon() {
   return (
     <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
@@ -132,6 +144,7 @@ function Layout() {
           <Route path="/control" element={<ErrorBoundary><ControlPage /></ErrorBoundary>} />
           <Route path="/settings" element={<ErrorBoundary><SettingsPage /></ErrorBoundary>} />
           <Route path="/solar" element={<ErrorBoundary><SolarPage /></ErrorBoundary>} />
+          <Route path="/meters" element={<ErrorBoundary><MetersPage /></ErrorBoundary>} />
           <Route path="/inverter" element={<ErrorBoundary><InverterPage /></ErrorBoundary>} />
           {developerMode && <Route path="/logs" element={<ErrorBoundary><LogsPage /></ErrorBoundary>} />}
         </Routes>
