@@ -16,6 +16,16 @@
 
 ## 🚀 Getting Started
 
+## System Requirements (Linux)
+
+If you're on Linux, install the WebView runtime before running the app:
+
+```bash
+sudo apt install libwebkit2gtk-4.1-0 librsvg2-2
+```
+
+These are needed by the Tauri desktop framework. The `.deb` package declares them as dependencies going forward, but on older builds you'll need to install them manually.
+
 ### 1. Download and install
 
 Download the latest release for your platform from the [**Releases page**](https://github.com/psylsph/givenergy-local/releases/latest):
