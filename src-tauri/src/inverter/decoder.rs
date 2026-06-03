@@ -215,20 +215,10 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
     // would immediately override back to Eco on the next poll. The inverter
     // simply won't discharge if there are no active slots, which is correct.
 
-    // Apply global enable flags to slot states.
-    // If enable_charge is off, all charge slots show as disabled regardless
-    // of their time values (which may be stale if individual register writes
-    // failed). Likewise for enable_discharge.
-    if !snap.enable_charge {
-        for slot in &mut snap.charge_slots {
-            slot.enabled = false;
-        }
-    }
-    if !snap.enable_discharge {
-        for slot in &mut snap.discharge_slots {
-            slot.enabled = false;
-        }
-    }
+    // Note: the reference library (givenergy-modbus) does NOT derive slot
+    // enabled state from enable_charge/enable_discharge. Slot times and
+    // enable flags are independent — a slot with valid times is always
+    // reported as enabled regardless of the master switch state.
 
     snap
 }
@@ -656,9 +646,13 @@ mod tests {
         assert!(!snap.charge_slots[2].enabled);
 
         // Discharge slots: have valid times (16:00–19:00, 17:00–20:00)
-        // but show as disabled because enable_discharge = false.
-        assert!(!snap.discharge_slots[0].enabled);
-        assert!(!snap.discharge_slots[1].enabled);
+        // and are reported as enabled because start != end.
+        // enable_discharge=false is a separate flag, not an override.
+        assert!(snap.discharge_slots[0].enabled,
+            "Discharge slot 0 should be enabled (16:00 != 19:00)");
+        assert!(snap.discharge_slots[1].enabled,
+            "Discharge slot 1 should be enabled (17:00 != 20:00)");
+        assert!(!snap.enable_discharge, "enable_discharge flag is false");
     }
 
     #[test]
