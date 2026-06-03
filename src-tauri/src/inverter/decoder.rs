@@ -98,6 +98,12 @@ fn decode_timeslot(data: &[u16], start_idx: usize, end_idx: usize) -> ScheduleSl
     let start_val = get_reg(data, start_idx);
     let end_val = get_reg(data, end_idx);
 
+    // Disabled when both start and end are 0 (per givenergy-modbus reference).
+    // Note: start=0, end=non-zero is valid (e.g. 00:00-08:00).
+    if start_val == 0 && end_val == 0 {
+        return ScheduleSlot::default();
+    }
+
     match (decode_hhmm(start_val), decode_hhmm(end_val)) {
         (Some((sh, sm)), Some((eh, em))) => {
             ScheduleSlot {
