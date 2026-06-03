@@ -154,18 +154,29 @@ impl HistoryDb {
             "today_consumption_kwh",
         ];
         for col in &energy_cols {
-            // Build a repaired set using a window: for each row, if the value
-            // decreased from the previous good value (and prev > 5, i.e. not
-            // midnight reset), or jumped up by > 2, replace with previous.
+            // Build a repaired set using a window: for each row, fix only
+            // small spurious DECREASES (data glitches where the counter
+            // dips by a small amount without a midnight reset).
+            //
+            // Midnight rollover: prev > 50 and current < 10 is a genuine
+            // counter reset — keep the new value.
+            //
+            // We do NOT suppress increases on cumulative counters because:
+            //   - MAX aggregation in the query already handles spikes
+            //   - The poll.rs sanitizer prevents register corruption
+            //   - Legitimate increases can be arbitrarily large (e.g. after
+            //     a long gap in data the counter could jump by > 2 kWh)
             let repair_sql = format!(
                 "CREATE TABLE IF NOT EXISTS _repair_{col} AS \
                  SELECT timestamp, {col} AS orig, \
                         CASE \
                           WHEN LAG({col}) OVER (ORDER BY timestamp) IS NULL THEN {col} \
-                          WHEN LAG({col}) OVER (ORDER BY timestamp) > 5.0 \
-                               AND {col} < LAG({col}) OVER (ORDER BY timestamp) \
-                            THEN LAG({col}) OVER (ORDER BY timestamp) \
-                          WHEN {col} > LAG({col}) OVER (ORDER BY timestamp) + 2.0 \
+                          -- Midnight rollover: counter reset to near-zero \
+                          WHEN LAG({col}) OVER (ORDER BY timestamp) > 50.0 \
+                               AND {col} < 10.0 \
+                            THEN {col} \
+                          -- Small decrease (glitch): replace with previous \
+                          WHEN {col} < LAG({col}) OVER (ORDER BY timestamp) \
                             THEN LAG({col}) OVER (ORDER BY timestamp) \
                           ELSE {col} \
                         END AS repaired \
@@ -527,5 +538,116 @@ mod tests {
         assert!(yesterday.is_some(), "Missing yesterday's 150.0");
         assert!(today_1.is_some(), "Missing today's 5.0");
         assert!(today_2.is_some(), "Missing today's 15.0");
+    }
+
+    #[test]
+    fn cumulative_counter_query_midnight_rollover() {
+        // Verify the query pipeline (MAX aggregation) correctly handles
+        // midnight rollover WITHOUT corrupting the data.
+        let db = test_db();
+        let day1 = 1700006400i64;
+        let day2 = day1 + 86400;
+
+        db.insert_reading(&make_snapshot_with_kwh(day1 + 82800, 150.0, 80.0));
+        db.insert_reading(&make_snapshot_with_kwh(day2 + 600, 5.0, 1.0));
+        db.insert_reading(&make_snapshot_with_kwh(day2 + 3600, 15.0, 5.0));
+        db.insert_reading(&make_snapshot_with_kwh(day2 + 7200, 25.0, 8.0));
+
+        let result = db
+            .query_history(100_000_000, 3600, 0, &["today_import_kwh".to_string()])
+            .unwrap();
+        let points: Vec<TimePoint> =
+            serde_json::from_value(result.get("today_import_kwh").cloned().unwrap()).unwrap();
+
+        // Day 1 last bucket should have 150.0
+        let d150 = points.iter().find(|p| (p.v - 150.0).abs() < 0.01);
+        assert!(d150.is_some(), "Day 1 should have 150.0");
+
+        // Day 2 buckets should have 5.0, 15.0, 25.0
+        let d5 = points.iter().find(|p| (p.v - 5.0).abs() < 0.01);
+        assert!(d5.is_some(), "Day 2 midnight bucket should be 5.0");
+        let d15 = points.iter().find(|p| (p.v - 15.0).abs() < 0.01);
+        assert!(d15.is_some(), "Day 2 bucket should be 15.0");
+        let d25 = points.iter().find(|p| (p.v - 25.0).abs() < 0.01);
+        assert!(d25.is_some(), "Day 2 bucket should be 25.0");
+
+        // Frontend-style cost calculation: across midnight, prev > 50 && raw < 10
+        // means the delta for the first post-midnight bucket is just raw (reset value)
+        let mut sorted: Vec<_> = points.clone();
+        sorted.sort_by_key(|p| p.t);
+        let ri = sorted.windows(2).position(|w| w[1].v < w[0].v).unwrap();
+        assert!(sorted[ri].v > 50.0, "Pre-rollover should be high");
+        assert!(sorted[ri + 1].v < 10.0, "Post-rollover should be low (reset)");
+    }
+
+    #[test]
+    fn cumulative_counter_query_pipeline_computes_deltas() {
+        // Verify that deltas computed from query results are sensible.
+        let db = test_db();
+        let day1 = 1700006400i64;
+        let day2 = day1 + 86400;
+
+        db.insert_reading(&make_snapshot_with_kwh(day1 + 3600, 2.0, 1.0));
+        db.insert_reading(&make_snapshot_with_kwh(day1 + 7200, 5.0, 2.0));
+        db.insert_reading(&make_snapshot_with_kwh(day1 + 64800, 120.0, 60.0));
+        db.insert_reading(&make_snapshot_with_kwh(day1 + 82800, 150.0, 80.0));
+        db.insert_reading(&make_snapshot_with_kwh(day2 + 600, 3.0, 1.0));
+        db.insert_reading(&make_snapshot_with_kwh(day2 + 3600, 7.0, 3.0));
+        db.insert_reading(&make_snapshot_with_kwh(day2 + 7200, 12.0, 5.0));
+
+        let result = db
+            .query_history(100_000_000, 3600, 0, &["today_import_kwh".to_string()])
+            .unwrap();
+        let points: Vec<TimePoint> =
+            serde_json::from_value(result.get("today_import_kwh").cloned().unwrap()).unwrap();
+
+        let mut sorted = points;
+        sorted.sort_by_key(|p| p.t);
+
+        // Find midnight rollover
+        let ri = sorted.windows(2).position(|w| w[1].v < w[0].v).unwrap();
+
+        // Day 1 deltas (positive = import)
+        let day1_deltas: Vec<f64> = sorted[..ri + 1]
+            .windows(2)
+            .map(|w| w[1].v - w[0].v)
+            .filter(|d| *d > 0.0)
+            .collect();
+        assert!(day1_deltas.iter().sum::<f64>() > 0.0, "Day 1 should have import");
+
+        // Day 2: after rollover, values increase monotonically
+        let day2_vals: Vec<f64> = sorted[ri + 1..].iter().map(|p| p.v).collect();
+        assert!(day2_vals.len() >= 2, "Day 2 should have multiple buckets");
+        assert!(day2_vals.windows(2).all(|w| w[1] >= w[0]),
+            "Day 2 values should be monotonically increasing");
+    }
+
+    #[test]
+    fn cumulative_counter_query_large_increase_preserved() {
+        // Legitimate large increases (> 2 kWh) must NOT be suppressed.
+        let db = test_db();
+        let base = 1700000000i64;
+        db.insert_reading(&make_snapshot_with_kwh(base, 5.0, 2.0));
+        db.insert_reading(&make_snapshot_with_kwh(base + 600, 25.0, 8.0));
+        db.insert_reading(&make_snapshot_with_kwh(base + 1200, 35.0, 12.0));
+
+        let result = db
+            .query_history(100_000_000, 600, 0, &["today_import_kwh".to_string()])
+            .unwrap();
+        let points: Vec<TimePoint> =
+            serde_json::from_value(result.get("today_import_kwh").cloned().unwrap()).unwrap();
+
+        let v5 = points.iter().find(|p| (p.v - 5.0).abs() < 0.01);
+        assert!(v5.is_some(), "Should have 5.0");
+        let v25 = points.iter().find(|p| (p.v - 25.0).abs() < 0.01);
+        assert!(v25.is_some(), "Should have 25.0 (large increase NOT suppressed)");
+        let v35 = points.iter().find(|p| (p.v - 35.0).abs() < 0.01);
+        assert!(v35.is_some(), "Should have 35.0");
+
+        let mut sorted = points.clone();
+        sorted.sort_by_key(|p| p.t);
+        let delta = sorted.last().unwrap().v - sorted.first().unwrap().v;
+        assert!((delta - 30.0).abs() < 0.01,
+            "Delta 5->35 should be 30, got {}", delta);
     }
 }

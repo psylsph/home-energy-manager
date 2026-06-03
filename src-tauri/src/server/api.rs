@@ -287,37 +287,15 @@ pub async fn set_charge_slot(
                 }
             }
 
-            // Determine whether enable_charge should be on or off.
-            // Read the latest snapshot to check other slots' states,
-            // then factor in the slot we're about to write.
-            let any_enabled = {
-                let snap = state.latest_snapshot.lock().await;
-                match snap.as_ref() {
-                    Some(s) => {
-                        // Check all charge slots: are any enabled (other than this one)?
-                        let mut found_enabled = false;
-                        for (i, cs) in s.charge_slots.iter().enumerate() {
-                            let slot_idx = (slot - 1) as usize;
-                            if i == slot_idx {
-                                // This is the slot we're updating — use the new state
-                                if enabled {
-                                    found_enabled = true;
-                                }
-                            } else if cs.enabled {
-                                found_enabled = true;
-                            }
-                        }
-                        found_enabled
-                    }
-                    None => enabled, // No snapshot yet — just use this slot's state
-                }
-            };
-
-            if let Ok(enable_writes) =
-                (ControlCommand::SetEnableCharge { enabled: any_enabled }).encode()
-            {
-                writes.extend(enable_writes);
-            }
+            // NOTE: we deliberately do NOT set enable_charge here.
+            // Setting enable_charge=1 triggers an immediate force charge on
+            // the inverter, which the user does NOT expect when just defining
+            // a charge schedule slot. The enable_charge flag is managed
+            // separately — by Cosy mode (poll loop), or by explicit
+            // ForceCharge / SetEnableCharge commands.
+            //
+            // The slot times alone define WHEN charging is permitted. The
+            // user or Cosy timer controls whether it's actively charging.
 
             tracing::info!("SetChargeSlot {} encoded: {:?}", slot, writes);
             queue_writes(&state, writes).await;
@@ -366,34 +344,11 @@ pub async fn set_discharge_slot(
     };
 
     match cmd.encode() {
-        Ok(mut writes) => {
-            // Determine whether enable_discharge should be on or off.
-            let any_enabled = {
-                let snap = state.latest_snapshot.lock().await;
-                match snap.as_ref() {
-                    Some(s) => {
-                        let mut found_enabled = false;
-                        for (i, ds) in s.discharge_slots.iter().enumerate() {
-                            let slot_idx = (slot - 1) as usize;
-                            if i == slot_idx {
-                                if enabled {
-                                    found_enabled = true;
-                                }
-                            } else if ds.enabled {
-                                found_enabled = true;
-                            }
-                        }
-                        found_enabled
-                    }
-                    None => enabled,
-                }
-            };
-
-            if let Ok(enable_writes) =
-                (ControlCommand::SetEnableDischarge { enabled: any_enabled }).encode()
-            {
-                writes.extend(enable_writes);
-            }
+        Ok(writes) => {
+            // NOTE: we deliberately do NOT set enable_discharge here.
+            // The discharge slot defines WHEN discharge is permitted.
+            // The user controls enable_discharge separately via the
+            // Timed Demand/Timed Export mode selection or Cosy timer.
 
             tracing::info!("SetDischargeSlot {} encoded: {:?}", slot, writes);
             queue_writes(&state, writes).await;
