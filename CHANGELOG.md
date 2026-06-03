@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.33] - 2026-06-03
+
+### Fixed
+
+- **Energy cost calculation**: History DB repair was corrupting cumulative
+  counter data (`today_import_kwh`, `today_export_kwh`, etc.). At midnight
+  rollover, the repair replaced the legitimate reset value (e.g. 5 kWh)
+  with yesterday's final value (e.g. 150 kWh), freezing the counter.
+  Fixed the repair CASE logic — values where `prev > 50 && raw < 10` are
+  now correctly kept as midnight rollover resets.
+
+- **Charge slots triggering force charge**: Setting a charge schedule slot
+  no longer auto-writes `enable_charge=1`, which was immediately starting
+  a grid force charge on the inverter. Slot times define WHEN charging is
+  permitted; the actual charge/discharge toggle is managed separately
+  (ForceCharge button, Cosy timer, or mode selection). Discharge slots
+  similarly no longer auto-toggle `enable_discharge`.
+
+- **Cumulative counter spike suppression removed**: The old repair suppressed
+  any increase > 2 kWh as a "spike", which broke legitimate large increases
+  (e.g. after data gaps). The MAX aggregation in queries and the poll.rs
+  sanitizer already handle register corruption.
+
+### Added
+
+- **3 new Rust tests**: `cumulative_counter_query_midnight_rollover`,
+  `cumulative_counter_query_pipeline_computes_deltas`,
+  `cumulative_counter_query_large_increase_preserved` (116 total).
+
 ## [0.9.32] - 2026-06-02
 
 ### Added
