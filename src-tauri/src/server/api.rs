@@ -238,10 +238,11 @@ pub async fn set_mode(
 /// POST /api/control/charge-slot — configure a charge schedule slot.
 ///
 /// Body: `{"slot": 1, "start_hour": 6, "start_minute": 0, "end_hour": 10, "end_minute": 0,
-///         "enabled": true, "target_soc": 100}`
+///         "enabled": true}`
 ///
-/// If `enabled` is false, the slot times are set to 0 (per givenergy-modbus reference).
-/// `target_soc` sets the global charge target SOC register.
+/// If `enabled` is false, the slot times are set to sentinel 60 (disabled).
+/// Note: enable_charge and enable_charge_target are NOT set here because
+/// they trigger an immediate force charge. Use ForceCharge or Cosy mode instead.
 /// Also updates `enable_charge` based on whether any charge slot remains active.
 pub async fn set_charge_slot(
     State(state): State<Arc<AppState>>,
@@ -261,7 +262,6 @@ pub async fn set_charge_slot(
     let start_minute = body["start_minute"].as_u64().unwrap_or(0) as u8;
     let end_hour = body["end_hour"].as_u64().unwrap_or(0) as u8;
     let end_minute = body["end_minute"].as_u64().unwrap_or(0) as u8;
-    let target_soc = body["target_soc"].as_u64().unwrap_or(100) as u8;
 
     let (start, end) = if enabled {
         (encode_hhmm(start_hour, start_minute), encode_hhmm(end_hour, end_minute))
@@ -278,25 +278,17 @@ pub async fn set_charge_slot(
     };
 
     match cmd.encode() {
-        Ok(mut writes) => {
-            // If enabled and target_soc provided, also set the charge target SOC
-            if enabled && target_soc > 0 {
-                if let Ok(target_writes) =
-                    (ControlCommand::SetChargeTargetSoc { soc: target_soc as u16 }).encode()
-                {
-                    writes.extend(target_writes);
-                }
-            }
-
-            // NOTE: we deliberately do NOT set enable_charge here.
-            // Setting enable_charge=1 triggers an immediate force charge on
-            // the inverter, which the user does NOT expect when just defining
-            // a charge schedule slot. The enable_charge flag is managed
-            // separately — by Cosy mode (poll loop), or by explicit
-            // ForceCharge / SetEnableCharge commands.
+        Ok(writes) => {
+            // NOTE: we deliberately do NOT set enable_charge or
+            // enable_charge_target here. Setting either of these to 1
+            // triggers an immediate force charge on the inverter.
+            // The user just wants to define WHEN charging is permitted
+            // and what SOC to target — not start charging now.
             //
-            // The slot times alone define WHEN charging is permitted. The
-            // user or Cosy timer controls whether it's actively charging.
+            // enable_charge and enable_charge_target are managed by:
+            //   - ForceCharge button (explicit user action)
+            //   - Cosy timer (poll loop manages the on/off cycle)
+            //   - The inverter's own scheduled charge logic
 
             tracing::info!("SetChargeSlot {} encoded: {:?}", slot, writes);
             queue_writes(&state, writes).await;
