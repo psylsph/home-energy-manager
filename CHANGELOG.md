@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.34] - 2026-06-03
+
+### Fixed
+
+- **Cosy ForceCharge write reduction**: The `ForceCharge` command now only writes
+  the registers that differ from the current snapshot state, reducing unnecessary
+  Modbus writes and the chance of hitting dongle busy errors (exception code 67).
+
+- **Stale frame drain after writes**: Pending write operations now drain stale
+  response frames from the TCP buffer after each write batch, preventing
+  subsequent poll reads from consuming stale data and returning corrupted values.
+
+### Added
+
+- **Per-slot target SOC for Gen3 inverters**: Charge slot writes now include
+  per-slot target SOC registers (HR 242-269) for Gen3 inverters that support
+  extended registers. Gen1/Gen2/AC inverters continue using the shared target SOC.
+
+- **E2E test scaffolding**: Playwright test framework with mock Modbus server,
+  global setup, fixtures, and control API tests.
+
 ## [0.9.33] - 2026-06-03
 
 ### Fixed

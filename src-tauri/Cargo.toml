@@ -1,6 +1,6 @@
 [package]
 name = "givenergy-local"
-version = "0.9.33"
+version = "0.9.34"
 description = "GivEnergy inverter local monitoring and control"
 authors = ["Stuart Harding"]
 license = "MIT"

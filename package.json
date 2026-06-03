@@ -1,7 +1,7 @@
 {
   "name": "givenergy-local",
   "private": true,
-  "version": "0.9.33",
+  "version": "0.9.34",
   "description": "Desktop app for monitoring and controlling GivEnergy solar inverters over local Modbus TCP",
   "author": "Stuart Harding",
   "license": "MIT",
@@ -18,10 +18,13 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "lint:md": "markdownlint . --ignore node_modules --ignore src-tauri/target"
+    "lint:md": "markdownlint . --ignore node_modules --ignore src-tauri/target",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed"
   },
   "devDependencies": {
     "@eslint/js": "^9.27.0",
+    "@playwright/test": "^1.60.0",
     "@tailwindcss/vite": "^4.1.6",
     "@types/node": "^25.9.1",
     "@types/react": "^19.2.15",

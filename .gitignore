@@ -34,3 +34,7 @@ settings.json
 Thumbs.db
 
 REVIEW_COMMENTS.md
+
+# E2E test results
+test-results/
+.playwright/

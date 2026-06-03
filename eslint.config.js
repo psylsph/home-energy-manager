@@ -9,6 +9,7 @@ export default defineConfig([
   globalIgnores(['dist', 'src-tauri/target']),
   {
     files: ['**/*.{ts,tsx}'],
+    ignores: ['e2e/**'],
     extends: [
       js.configs.recommended,
       tseslint.configs.recommended,
@@ -17,6 +18,25 @@ export default defineConfig([
     ],
     languageOptions: {
       globals: globals.browser,
+    },
+  },
+  // E2E test files — Node.js environment, no React
+  {
+    files: ['e2e/**/*.ts'],
+    extends: [
+      js.configs.recommended,
+      tseslint.configs.recommended,
+    ],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+        fetch: 'readonly',
+      },
+    },
+    rules: {
+      '@typescript-eslint/no-explicit-any': 'off',
+      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      'no-empty-pattern': 'off',
     },
   },
 ])
