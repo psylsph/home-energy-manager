@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.32] - 2026-06-02
+
+### Added
+
+- **Complete device type registry**: All known GivEnergy models are now
+  properly identified:
+  - 0x1001 → Gen 1 Hybrid (2500W battery, 5000W AC)
+  - 0x2001 → Gen3 Hybrid / Gen2 (via ARM FW detection)
+  - 0x2101 → Gen3 Hybrid 8kW, 0x2102 → Gen3 Hybrid 10kW
+  - 0x3001/3002 → AC Coupled / Mk2
+  - 0x4001 → Three Phase
+  - 0x8001-0x8103 → All-in-One / AIO variants
+
+- **Inverter Details page**: New tab between Battery and Solar showing every
+  available snapshot field — device info (type, hex code, serial, firmware,
+  battery limit, AC max output, capacity), solar inputs, grid, battery config
+  (mode, SOC, voltage, current, temp, rates, enable flags, modules), and
+  features (auto winter, cosy, calibration).
+
+- **Human-readable inverter type on status screen**: The energy flow diagram
+  now shows "Gen 1 Hybrid", "Gen 3 Hybrid 8kW", "AC Coupled Mk2" etc. instead
+  of the raw enum name. Added `DeviceType::display_name()` method and
+  `device_type_display` field.
+
+### Fixed
+
+- **Gen 1/2 hybrid misidentified as Gen 3**: `DeviceType::refine_with_arm_fw()`
+  now uses ARM firmware (HR 21) to distinguish: FW century 1–2 → Gen2Hybrid,
+  FW century 3+ → Gen3Hybrid. Also added explicit 0x1001 detection for Gen 1.
+
+- **Cost calculation improved**: Midnight rollover detection requires
+  `prev > 50 && raw < 10` (not just `raw < prev`), preventing small data
+  glitches from inflating costs.
+
+- **All-in-One renamed**: Split into AllInOne6kW, AllInOne5kW, AIO8kW, AIO10kW
+  with correct battery limits and AC output per model.
+
+### Added
+
+- **10 new Rust tests**: Device type mapping for 0x1001, 0x2101, 0x2102, 0x3002,
+  Gen2 refinement, cumulative counter MAX aggregation, two-bucket delta, and
+  midnight rollover.
+
 ## [0.9.28] - 2026-06-02
 
 ### Fixed
