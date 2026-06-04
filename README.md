@@ -127,7 +127,7 @@ aggregate value.
 
 ## Tech Stack
 
-Built with [Tauri 2](https://v2.tauri.app/) (Rust + React), Axum, and TypeScript. See [DESIGN.md](./DESIGN.md) for architecture details and the register map.
+Built with [Tauri 2](https://v2.tauri.app/) (Rust + React), Axum, and TypeScript. See [DESIGN.md](./DESIGN.md) for architecture details and the register map. Planned and under-investigation work is tracked in [ROADMAP.md](./ROADMAP.md).
 
 ## Development
 
