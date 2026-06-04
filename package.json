@@ -7,12 +7,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/psylsph/givenergy-local.git"
+    "url": "git+https://github.com/psylsph/home-energy-manager.git"
   },
   "bugs": {
-    "url": "https://github.com/psylsph/givenergy-local/issues"
+    "url": "https://github.com/psylsph/home-energy-manager/issues"
   },
-  "homepage": "https://github.com/psylsph/givenergy-local#readme",
+  "homepage": "https://github.com/psylsph/home-energy-manager#readme",
   "type": "module",
   "scripts": {
     "dev": "vite",

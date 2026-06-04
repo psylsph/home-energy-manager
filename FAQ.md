@@ -64,7 +64,7 @@ If the right-click → Open method doesn't work:
 3. You should see a message saying "Home Energy Manager was blocked from opening."
 4. Click **Open Anyway**.
 
-> ⚠️ Only do this if you are comfortable trusting the app. Home Energy Manager is open source — you can [inspect the code](https://github.com/psylsph/givenergy-local) yourself.
+> ⚠️ Only do this if you are comfortable trusting the app. Home Energy Manager is open source — you can [inspect the code](https://github.com/psylsph/home-energy-manager) yourself.
 
 ### On macOS 26.5+, the app launches but the web UI never loads
 
@@ -139,4 +139,4 @@ Alternatively, use the **Scan Network** button on the Settings page.
 
 ### Something else?
 
-Open an issue on [GitHub](https://github.com/psylsph/givenergy-local/issues) and we'll help you out.
+Open an issue on [GitHub](https://github.com/psylsph/home-energy-manager/issues) and we'll help you out.

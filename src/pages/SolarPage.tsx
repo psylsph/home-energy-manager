@@ -21,7 +21,7 @@ export default function SolarPage() {
         </p>
         <p className="text-text-secondary/60 text-xs font-sans text-center max-w-xs">
           If data doesn't appear, try restarting the app and check your firewall settings.
-          See the <a href="https://github.com/psylsph/givenergy-local/blob/master/FAQ.md" target="_blank" rel="noopener noreferrer" className="text-flow-active hover:underline">FAQ</a> for help.
+          See the <a href="https://github.com/psylsph/home-energy-manager/blob/master/FAQ.md" target="_blank" rel="noopener noreferrer" className="text-flow-active hover:underline">FAQ</a> for help.
         </p>
       </div>
     );

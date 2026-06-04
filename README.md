@@ -14,11 +14,15 @@
 
 </div>
 
+## Important Information about the GivEnergy-Local Renaming
+
+The user-facing name is changing to **Home Energy Manager**. The Linux package/launcher and macOS/Windows app names now use the new name, while the executable remains `givenergy-local` and existing settings/history stay in `~/.givenergy-local` (or `%USERPROFILE%\.givenergy-local` on Windows), so upgrades continue to use the same `settings.json` and `history.db`.
+
 ## 🚀 Getting Started
 
 ### 1. Download and install
 
-Download the latest release for your platform from the [**Releases page**](https://github.com/psylsph/givenergy-local/releases/latest):
+Download the latest release for your platform from the [**Releases page**](https://github.com/psylsph/home-energy-manager/releases/latest):
 
 | Platform | File |
 |---|---|
@@ -32,7 +36,17 @@ Download the latest release for your platform from the [**Releases page**](https
 
 **macOS users**: Do NOT drag the app to `/Applications` — macOS blocks unsigned apps there. Drag it to your **Desktop** or **Home folder** instead. On first launch, right-click the app → **Open** → **Open** to bypass Gatekeeper.
 
-**Rename note**: The user-facing name is changing to **Home Energy Manager**, but the technical package/binary name remains `givenergy-local` for compatibility. Existing settings and history stay in `~/.givenergy-local` (or `%USERPROFILE%\.givenergy-local` on Windows), so upgrades continue to use the same `settings.json` and `history.db`.
+#### System Requirements (Linux)
+
+If you're on Linux, install the WebView runtime before running the app:
+
+```bash
+sudo apt install libwebkit2gtk-4.1-0 librsvg2-2
+```
+
+These are needed by the Tauri desktop framework. The `.deb` package declares them as dependencies going forward, but on older builds you'll need to install them manually.
+
+> **Raspberry Pi**: ARM64 builds are available (`*_arm64.deb`). Requires a 64-bit OS (Raspberry Pi OS 64-bit, Ubuntu Server, etc.).
 
 ### 2. Find your inverter's IP address
 
@@ -183,7 +197,7 @@ cd /mnt/user/appdata/givenergy-local
 ### 2. Download the project
 
 ```bash
-git clone https://github.com/psylsph/givenergy-local.git .
+git clone https://github.com/psylsph/home-energy-manager.git .
 ```
 
 ### 3. Create a Dockerfile

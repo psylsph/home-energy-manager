@@ -578,12 +578,12 @@ export default function SettingsPage() {
           <span className="text-text-primary font-mono">{__APP_VERSION__}</span>
         </div>
         <a
-          href="https://github.com/psylsph/givenergy-local"
+          href="https://github.com/psylsph/home-energy-manager"
           target="_blank"
           rel="noopener noreferrer"
           className="text-flow-active text-sm font-sans hover:underline mt-1"
         >
-          github.com/psylsph/givenergy-local
+          github.com/psylsph/home-energy-manager
         </a>
       </section>
     </div>

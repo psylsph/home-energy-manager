@@ -2,7 +2,7 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability, please report it privately by opening a [GitHub Security Advisory](https://github.com/psylsph/givenergy-local/security/advisories/new).
+If you discover a security vulnerability, please report it privately by opening a [GitHub Security Advisory](https://github.com/psylsph/home-energy-manager/security/advisories/new).
 
 Do not file a public issue for security vulnerabilities.
 

@@ -206,7 +206,7 @@ jobs:
 
             ---
 
-            See [CHANGELOG.md](https://github.com/psylsph/givenergy-local/blob/master/CHANGELOG.md) for details.
+            See [CHANGELOG.md](https://github.com/psylsph/home-energy-manager/blob/master/CHANGELOG.md) for details.
           draft: false
           prerelease: false
           files: release-assets/*
