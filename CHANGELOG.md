@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   package/binary name stays `givenergy-local`, and settings/history remain in
   `~/.givenergy-local` (`%USERPROFILE%\.givenergy-local` on Windows).
 
+### Fixed
+
+- **Reserve SOC lower bound**: UI, API wording, and poll sanitisation now
+  consistently enforce the inverter-safe 4-100% range for battery reserve SOC.
+
 ## [0.9.38] - 2026-06-03
 
 ### Added

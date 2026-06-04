@@ -632,7 +632,6 @@ fn sanitize_snapshot(
     snap.charge_rate = snap.charge_rate.min(100);
     snap.discharge_rate = snap.discharge_rate.min(100);
     snap.active_power_rate = snap.active_power_rate.min(100);
-    snap.battery_reserve = snap.battery_reserve.min(100);
 
     // Battery voltage: reject spurious readings. Nominal is 51.2V (LV) or 307V (HV).
     // Anything > 60V on an LV system or > 400V on an HV system is a corrupt register.
@@ -806,16 +805,23 @@ fn sanitize_snapshot(
             sanitized = true;
         }
 
-        // Battery reserve (HR 110): must be 0-100.
-        if snap.battery_reserve > 100 {
+        // Battery reserve (HR 110): must be 4-100.
+        if !(4..=100).contains(&snap.battery_reserve) {
             tracing::warn!(
                 raw = snap.battery_reserve,
                 prev = p.battery_reserve,
                 "Battery reserve out of range — using previous"
             );
-            snap.battery_reserve = p.battery_reserve;
+            snap.battery_reserve = p.battery_reserve.clamp(4, 100);
             sanitized = true;
         }
+    } else if !(4..=100).contains(&snap.battery_reserve) {
+        tracing::warn!(
+            raw = snap.battery_reserve,
+            "Battery reserve out of range — clamping to valid range"
+        );
+        snap.battery_reserve = snap.battery_reserve.clamp(4, 100);
+        sanitized = true;
     }
 
     sanitized

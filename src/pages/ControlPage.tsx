@@ -704,7 +704,9 @@ export default function ControlPage() {
   // Show draft while dragging; once snapshot confirms the saved value, use snapshot.
   // Default to null (no data) until the first snapshot arrives to avoid showing
   // misleading 100% values that then jump to real values.
-  const reserveSoc = (draftReserve != null && snapshot?.battery_reserve !== draftReserve) ? draftReserve : (snapshot?.battery_reserve ?? 4);
+  const reserveSoc = (draftReserve != null && snapshot?.battery_reserve !== draftReserve)
+    ? Math.max(4, Math.min(100, draftReserve))
+    : Math.max(4, Math.min(100, snapshot?.battery_reserve ?? 4));
   const chargeRate = (draftCharge != null && snapshot?.charge_rate !== draftCharge) ? draftCharge : snapshot?.charge_rate;
   const dischargeRate = (draftDischarge != null && snapshot?.discharge_rate !== draftDischarge) ? draftDischarge : snapshot?.discharge_rate;
   const activePowerRate = (draftActivePower != null && snapshot?.active_power_rate !== draftActivePower) ? draftActivePower : snapshot?.active_power_rate;
@@ -975,11 +977,11 @@ export default function ControlPage() {
             <div className="flex items-center gap-3">
               <input
                 type="range"
-                min={0}
+                min={4}
                 max={100}
                 step={1}
                 value={reserveSoc}
-                onChange={(e) => setDraftReserve(Number(e.target.value))}
+                onChange={(e) => setDraftReserve(Math.max(4, Number(e.target.value)))}
                 className="flex-1"
               />
               <button

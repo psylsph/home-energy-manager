@@ -153,7 +153,7 @@ pub const HR_CHARGE_SLOT_1_START: u16 = 94;
 pub const HR_CHARGE_SLOT_1_END: u16 = 95;
 /// Enable charge (bool).
 pub const HR_ENABLE_CHARGE: u16 = 96;
-/// Battery SOC reserve percentage (0-100).
+/// Battery SOC reserve percentage (4-100).
 pub const HR_BATTERY_SOC_RESERVE: u16 = 110;
 /// Battery charge power limit as percentage (0-100, practical max ~50%).
 pub const HR_BATTERY_CHARGE_LIMIT: u16 = 111;

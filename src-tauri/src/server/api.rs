@@ -415,7 +415,7 @@ pub async fn set_reserve(
 ) -> Json<Value> {
     let soc: u16 = match body["soc"].as_u64() {
         Some(s) => s as u16,
-        None => return error_response("Missing 'soc' field (0-100)"),
+        None => return error_response("Missing 'soc' field (4-100)"),
     };
 
     let cmd = ControlCommand::SetBatterySocReserve { reserve: soc };

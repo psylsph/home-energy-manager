@@ -56,7 +56,7 @@ pub enum ControlCommand {
     SetEnableDischarge { enabled: bool },
     /// Enable or disable timed charge.
     SetEnableCharge { enabled: bool },
-    /// Set battery SOC reserve (0-100).
+    /// Set battery SOC reserve (4-100).
     SetBatterySocReserve { reserve: u16 },
     /// Set charge target SOC (0-100).
     SetChargeTargetSoc { soc: u16 },
