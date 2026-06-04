@@ -112,6 +112,76 @@ jobs:
           mv "${DMG_PATH}.new.dmg" "$DMG_PATH"
           echo "DMG customized successfully"
 
+      - name: Prepare release assets
+        env:
+          TARGET: ${{ matrix.target }}
+          PLATFORM: ${{ matrix.platform }}
+          VERSION: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then
+            PYTHON_BIN=python3
+          else
+            PYTHON_BIN=python
+          fi
+
+          "$PYTHON_BIN" << 'PY'
+          import os
+          import shutil
+          from pathlib import Path
+
+          target = os.environ["TARGET"]
+          platform = os.environ["PLATFORM"]
+          version = os.environ["VERSION"]
+          product = "Home-Energy-Manager"
+
+          bundle_dir = Path("src-tauri") / "target" / target / "release" / "bundle"
+          out_dir = Path("release-assets")
+          out_dir.mkdir(exist_ok=True)
+
+          def arch_label() -> str:
+              if "aarch64" in target:
+                  return "ARM64"
+              if "x86_64" in target:
+                  return "x86_64"
+              return target
+
+          def friendly_name(path: Path) -> str:
+              ext = path.suffix
+              ext_lower = ext.lower()
+              arch = arch_label()
+
+              if ext_lower == ".dmg":
+                  if "aarch64" in target:
+                      return f"macOS-Apple-Silicon-{product}-{version}.dmg"
+                  return f"macOS-Intel-{product}-{version}.dmg"
+              if ext_lower == ".exe":
+                  return f"Windows-Installer-{product}-{version}.exe"
+              if ext_lower == ".msi":
+                  return f"Windows-MSI-{product}-{version}.msi"
+              if ext_lower == ".deb":
+                  return f"Linux-Debian-{arch}-{product}-{version}.deb"
+              if ext_lower == ".rpm":
+                  return f"Linux-RPM-{arch}-{product}-{version}.rpm"
+              if ext_lower == ".appimage":
+                  return f"Linux-AppImage-{arch}-{product}-{version}.AppImage"
+              return f"{platform}-{arch}-{product}-{version}{ext}"
+
+          copied = []
+          for path in bundle_dir.rglob("*"):
+              if not path.is_file():
+                  continue
+              if path.suffix.lower() not in {".dmg", ".deb", ".rpm", ".msi", ".exe", ".appimage"}:
+                  continue
+              dest = out_dir / friendly_name(path)
+              shutil.copy2(path, dest)
+              copied.append(dest)
+              print(f"Prepared release asset: {dest}")
+
+          if not copied:
+              raise SystemExit(f"No release assets found under {bundle_dir}")
+          PY
+
       - name: Upload release assets
         uses: softprops/action-gh-release@v3
         with:
@@ -120,16 +190,15 @@ jobs:
           body: |
             ## Which file should I download?
 
-            | File | Platform |
+            | File prefix | Platform |
             |---|---|
-            | File suffix | Platform |
-            |---|---|
-            | `.dmg` with `aarch64` | **macOS** — Apple Silicon (M1/M2/M3/M4) |
-            | `.dmg` with `x64` / `x86_64` | **macOS** — Intel |
-            | `.deb` with `amd64` | **Linux** — Debian/Ubuntu x86_64 (`.deb` package) |
-            | `.deb` with `arm64` / `aarch64` | **Linux** — Debian/Ubuntu ARM64 (`.deb` package) |
-            | `.rpm` | **Linux** — RHEL/Fedora/openSUSE (`.rpm` package), not macOS |
-            | `.exe` / `.msi` | **Windows** — installer |
+            | `macOS-Apple-Silicon-...dmg` | **macOS** — Apple Silicon (M1/M2/M3/M4) |
+            | `macOS-Intel-...dmg` | **macOS** — Intel |
+            | `Windows-Installer-...exe` | **Windows** — standard installer |
+            | `Windows-MSI-...msi` | **Windows** — MSI package |
+            | `Linux-Debian-...deb` | **Linux** — Debian/Ubuntu |
+            | `Linux-RPM-...rpm` | **Linux** — RHEL/Fedora/openSUSE, not macOS |
+            | `Linux-AppImage-...AppImage` | **Linux** — portable AppImage |
 
             > **macOS users**: Do NOT drag the app to `/Applications`. macOS 26.5+ blocks unsigned apps there. Drag it to your **Desktop** or **Home folder** instead. See the README.txt inside the DMG for details.
 
@@ -138,9 +207,4 @@ jobs:
             See [CHANGELOG.md](https://github.com/psylsph/givenergy-local/blob/master/CHANGELOG.md) for details.
           draft: false
           prerelease: false
-          files: |
-            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
-            src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
-            src-tauri/target/${{ matrix.target }}/release/bundle/rpm/*.rpm
-            src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
-            src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
+          files: release-assets/*
