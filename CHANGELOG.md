@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-06-04
+
+### Added
+
+- **Roadmap document**: Added `ROADMAP.md` to track planned and investigative
+  work, including the current self-contained GivEnergy EVC tab plan.
+
 ### Fixed
 
 - **Gen 3 extended schedule writes**: Charge/discharge slots 3-10 now write
