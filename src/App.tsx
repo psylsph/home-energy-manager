@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import MetersPage from './pages/MetersPage';
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
 import { useWebSocket } from './hooks/useWebSocket';
@@ -11,6 +12,24 @@ import LogsPage from './pages/LogsPage';
 import SolarPage from './pages/SolarPage';
 import InverterPage from './pages/InverterPage';
 import ErrorBoundary from './components/ErrorBoundary';
+
+function ThemeToggle() {
+  const { themeMode, setThemeMode } = useInverterStore();
+  const isLight = themeMode === 'light';
+
+  return (
+    <button
+      type="button"
+      onClick={() => setThemeMode(isLight ? 'dark' : 'light')}
+      className="flex items-center gap-2 rounded-full bg-bg-elevated px-2 py-1 text-xs text-text-secondary transition hover:text-text-primary focus:outline-none focus:ring-2 focus:ring-flow-active/60"
+      aria-label={`Switch to ${isLight ? 'dark' : 'light'} mode`}
+      title={`Switch to ${isLight ? 'dark' : 'light'} mode`}
+    >
+      <span aria-hidden="true">{isLight ? '☀️' : '🌙'}</span>
+      <span className="hidden sm:inline">{isLight ? 'Light' : 'Dark'}</span>
+    </button>
+  );
+}
 
 function ConnectionIndicator() {
   const { connectionState, connectedHost } = useInverterStore();
@@ -121,7 +140,11 @@ function LogsIcon() {
 
 function Layout() {
   useWebSocket();
-  const { developerMode } = useInverterStore();
+  const { developerMode, themeMode } = useInverterStore();
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = themeMode;
+  }, [themeMode]);
 
   return (
     <div className="min-h-screen bg-bg-base flex flex-col">
@@ -135,7 +158,10 @@ function Layout() {
             For GivEnergy Solar and Battery Systems
           </p>
         </div>
-        <ConnectionIndicator />
+        <div className="flex items-center gap-3">
+          <ThemeToggle />
+          <ConnectionIndicator />
+        </div>
       </header>
 
       {/* Content */}
