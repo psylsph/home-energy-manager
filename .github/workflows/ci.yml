@@ -58,17 +58,15 @@ jobs:
             libgtk-3-dev \
             libayatana-appindicator3-dev
 
-      - name: Cache Cargo
+      - name: Cache Cargo dependencies
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            src-tauri/target
-          key: cargo-${{ runner.os }}-${{ github.workspace }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: cargo-deps-v2-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
-            cargo-${{ runner.os }}-${{ github.workspace }}-
-            cargo-${{ runner.os }}-
+            cargo-deps-v2-${{ runner.os }}-
 
       - name: Run tests
         working-directory: src-tauri
