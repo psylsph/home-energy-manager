@@ -739,6 +739,10 @@ export default function ControlPage() {
       || snapshot.device_type_code.startsWith('60')
       || snapshot.device_type_code.startsWith('81')
       || snapshot.device_type_code.startsWith('82'));
+  // Three-phase-bank models use HR1113-1121 for charge/discharge schedules.
+  // We don't write/read those schedule registers yet, so hide schedule editors
+  // rather than letting users write to ignored single-phase slot registers.
+  const schedulesUnsupported = isThreePhaseLimitModel;
   const usesDirectPowerLimit = isAcCoupled || isThreePhaseLimitModel;
   // DC-coupled hybrid registers HR111/112 are 0-50 and are displayed as 0-100%.
   // AC-coupled HR313/314 and three-phase HR1110/1108 are already 1-100%, so display directly.
@@ -989,7 +993,19 @@ export default function ControlPage() {
 
 
       {/* Section 3: Charge Schedule */}
-      {!cosyEnabled && <section className="space-y-3">
+      {!cosyEnabled && schedulesUnsupported && (
+        <section className="space-y-3">
+          <h2 className="text-text-primary font-semibold text-lg">Charge/Discharge Schedules</h2>
+          <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm text-yellow-200">
+            <div className="font-semibold mb-1">Schedules are hidden for this inverter model</div>
+            This three-phase/HV inverter uses a different schedule register map
+            (HR 1113-1121). Reading real-time data is supported, but schedule
+            editing is disabled until those registers are implemented safely.
+          </div>
+        </section>
+      )}
+
+      {!cosyEnabled && !schedulesUnsupported && <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Charge Schedule</h2>
         <p className="text-text-secondary/60 text-xs">Please Allow upto 30 Seconds for Changes to Save</p>
         <div className="space-y-3">
@@ -1041,7 +1057,7 @@ export default function ControlPage() {
       </section>}
 
       {/* Section 4: Discharge Schedule — hidden when cosy mode is enabled */}
-      {!cosyEnabled && modeToCategory(effectiveMode) === 'timed' && (
+      {!cosyEnabled && !schedulesUnsupported && modeToCategory(effectiveMode) === 'timed' && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold text-lg">Discharge Schedule</h2>
           <p className="text-text-secondary/60 text-xs">Please Allow upto 30 Seconds for Changes to Save</p>

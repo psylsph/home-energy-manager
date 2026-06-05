@@ -1570,33 +1570,43 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 
                                     // Probe for external CT clamp meters (device addresses 0x01-0x08).
                                     // A meter is present if V_phase_1 (IR 60) is non-zero and >100V.
-                                    tracing::info!("Probing for external CT meters...");
+                                    // Three-phase/HV models use the inverter's internal grid CT at
+                                    // IR 1079-1082 instead of separate external meters, so skip.
+                                    let skip_meter_probe = known_device_type
+                                        .is_some_and(|dt| dt.needs_three_phase_input_blocks());
                                     let mut found_meters: Vec<u8> = Vec::new();
-                                    for &addr in crate::modbus::registers::METER_ADDRESSES {
-                                        match client.read_registers_at_slave(
-                                            addr,
-                                            crate::modbus::framer::RegisterType::Input,
-                                            60,
-                                            30,
-                                        ).await {
-                                            Ok(data) => {
-                                                if crate::inverter::decoder::validate_meter_data(&data) {
-                                                    let meter = crate::inverter::decoder::decode_meter_data(&data, addr);
-                                                    tracing::info!(
-                                                        "Meter detected at addr 0x{addr:02X}: {:.1}V, {:.0}W",
-                                                        meter.v_phase_1, meter.p_active_total
+                                    if skip_meter_probe {
+                                        tracing::info!(
+                                            "Skipping external CT probe for three-phase model"
+                                        );
+                                    } else {
+                                        tracing::info!("Probing for external CT meters...");
+                                        for &addr in crate::modbus::registers::METER_ADDRESSES {
+                                            match client.read_registers_at_slave(
+                                                addr,
+                                                crate::modbus::framer::RegisterType::Input,
+                                                60,
+                                                30,
+                                            ).await {
+                                                Ok(data) => {
+                                                    if crate::inverter::decoder::validate_meter_data(&data) {
+                                                        let meter = crate::inverter::decoder::decode_meter_data(&data, addr);
+                                                        tracing::info!(
+                                                            "Meter detected at addr 0x{addr:02X}: {:.1}V, {:.0}W",
+                                                            meter.v_phase_1, meter.p_active_total
+                                                        );
+                                                        found_meters.push(addr);
+                                                        snapshot.meters.push(meter);
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    tracing::debug!(
+                                                        "Meter addr 0x{addr:02X}: no response: {e}",
                                                     );
-                                                    found_meters.push(addr);
-                                                    snapshot.meters.push(meter);
                                                 }
                                             }
-                                            Err(e) => {
-                                                tracing::debug!(
-                                                    "Meter addr 0x{addr:02X}: no response: {e}",
-                                                );
-                                            }
+                                            tokio::time::sleep(Duration::from_millis(100)).await;
                                         }
-                                        tokio::time::sleep(Duration::from_millis(100)).await;
                                     }
                                     detected_meters = found_meters;
                                     if detected_meters.is_empty() {

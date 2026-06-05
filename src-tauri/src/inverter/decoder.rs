@@ -90,6 +90,14 @@ fn signed(raw: u16) -> i32 {
     raw as i16 as i32
 }
 
+/// Decode a uint32 value stored across two consecutive registers (high, low).
+/// GivEnergy uses big-endian word order for its 32-bit power/energy values
+/// (high register first, then low register). See givenergy-modbus framer/PDU
+/// for `uint32` converter details.
+fn uint32(hi: u16, lo: u16) -> u32 {
+    ((hi as u32) << 16) | (lo as u32)
+}
+
 /// Decode a timeslot from 2 registers (start HHMM, end HHMM).
 ///
 /// Per the givenergy-modbus reference library, a value of 60 means the slot
@@ -154,6 +162,13 @@ fn block_key(block: &crate::modbus::registers::RegisterBlock) -> &'static str {
         (RegisterType::Holding, 300) => "holding_300_359",
         (RegisterType::Holding, 1080) => "holding_1080_1124",
         (RegisterType::Input, 60) => "battery_input_60_119",
+        (RegisterType::Input, 1000) => "input_1000_1059",
+        (RegisterType::Input, 1060) => "input_1060_1119",
+        (RegisterType::Input, 1120) => "input_1120_1179",
+        (RegisterType::Input, 1180) => "input_1180_1239",
+        (RegisterType::Input, 1240) => "input_1240_1299",
+        (RegisterType::Input, 1300) => "input_1300_1359",
+        (RegisterType::Input, 1360) => "input_1360_1413",
         _ => "unknown",
     }
 }
@@ -196,6 +211,13 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
             "holding_240_299" => decode_holding_240_299(data, &mut snap),
             "holding_300_359" => decode_holding_300_359(data, &mut snap),
             "holding_1080_1124" => decode_holding_1080_1124(data, &mut snap, &mut raw),
+            "input_1000_1059" => decode_input_1000_1059(data, &mut snap),
+            "input_1060_1119" => decode_input_1060_1119(data, &mut snap),
+            "input_1120_1179" => decode_input_1120_1179(data, &mut snap),
+            "input_1180_1239" => decode_input_1180_1239(data, &mut snap),
+            "input_1240_1299" => decode_input_1240_1299(data, &mut snap),
+            "input_1300_1359" => decode_input_1300_1359(data, &mut snap),
+            "input_1360_1413" => decode_input_1360_1413(data, &mut snap),
             _ => {
                 log::warn!("Unknown block '{}' in decode_snapshot", key);
             }
@@ -209,7 +231,11 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
     //
     // Home consumption = solar - battery_charge - grid_export
     //   = solar - battery_power - grid_power
-    snap.home_power = snap.solar_power - snap.battery_power - snap.grid_power;
+    // Three-phase models expose direct total load at IR(1089-1090); keep that
+    // authoritative value when present, otherwise fall back to the derived formula.
+    if !(snap.device_type.needs_three_phase_input_blocks() && snap.home_power > 0) {
+        snap.home_power = snap.solar_power - snap.battery_power - snap.grid_power;
+    }
 
     // Compute consumption today from energy balance (matching the GE app).
     // IR(35) is AC charge today, NOT house consumption — the reference library
@@ -217,11 +243,13 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
     // have no native consumption register, so consumption is derived:
     //   consumption = solar_today + import_today - export_today - ac_charge_today
     // Battery DC charge/discharge throughput nets out and is not a term.
-    snap.today_consumption_kwh = snap.today_solar_kwh + snap.today_import_kwh
-        - snap.today_export_kwh
-        - snap.today_ac_charge_kwh;
-    if snap.today_consumption_kwh < 0.0 {
-        snap.today_consumption_kwh = 0.0;
+    if !(snap.device_type.needs_three_phase_input_blocks() && snap.today_consumption_kwh > 0.0) {
+        snap.today_consumption_kwh = snap.today_solar_kwh + snap.today_import_kwh
+            - snap.today_export_kwh
+            - snap.today_ac_charge_kwh;
+        if snap.today_consumption_kwh < 0.0 {
+            snap.today_consumption_kwh = 0.0;
+        }
     }
 
     // Derive battery mode from the three key holding registers.
@@ -566,6 +594,197 @@ fn decode_holding_1080_1124(data: &[u16], snap: &mut InverterSnapshot, raw: &mut
     raw.enable_discharge = snap.enable_discharge;
 }
 
+// ===========================================================================
+// Three-phase input register decoders (IR 1000-1413)
+// ===========================================================================
+//
+// Three-phase and HV/commercial models expose real-time measurements in the
+// IR(1000-1414) range instead of the single-phase IR(0-59). The mappings below
+// come directly from `givenergy_modbus/model/inverter_threephase.py`.
+//
+// Convention for our snapshot:
+//   battery_power > 0 = charging
+//   grid_power    > 0 = exporting (matching single-phase IR(30) sign)
+
+/// IR 1000-1059: PV voltage, current and power.
+fn decode_input_1000_1059(data: &[u16], snap: &mut InverterSnapshot) {
+    // Offsets within this block (subtract 1000):
+    //   1 → IR(1001): v_pv1 (/10 V)
+    //   2 → IR(1002): v_pv2 (/10 V)
+    //   9 → IR(1009): i_pv1 (/10 A)
+    //  10 → IR(1010): i_pv2 (/10 A)
+    //  17 → IR(1017)+IR(1018): p_pv1 (uint32 /10 W)
+    //  19 → IR(1019)+IR(1020): p_pv2 (uint32 /10 W)
+    snap.pv1_voltage = get_reg(data, 1) as f32 * 0.1;
+    snap.pv2_voltage = get_reg(data, 2) as f32 * 0.1;
+    snap.pv1_current = get_reg(data, 9) as f32 * 0.1;
+    snap.pv2_current = get_reg(data, 10) as f32 * 0.1;
+    let p_pv1 = uint32(get_reg(data, 17), get_reg(data, 18)) as f32 * 0.1;
+    let p_pv2 = uint32(get_reg(data, 19), get_reg(data, 20)) as f32 * 0.1;
+    snap.pv1_power = p_pv1 as i32;
+    snap.pv2_power = p_pv2 as i32;
+    snap.solar_power = snap.pv1_power + snap.pv2_power;
+}
+
+/// IR 1060-1119: Grid, inverter output, load and EPS-bound measurements.
+fn decode_input_1060_1119(data: &[u16], snap: &mut InverterSnapshot) {
+    // Offsets within this block (subtract 1060):
+    //   1 → IR(1061): v_ac1 (/10 V)
+    //   2 → IR(1062): v_ac2 (/10 V)
+    //   3 → IR(1063): v_ac3 (/10 V)
+    //   4 → IR(1064): i_ac1 (/10 A)
+    //   5 → IR(1065): i_ac2 (/10 A)
+    //   6 → IR(1066): i_ac3 (/10 A)
+    //   7 → IR(1067): f_ac1 (/100 Hz)
+    //   9 → IR(1069)+IR(1070): p_inverter_out (int32 /10 W)
+    //  19 → IR(1079)+IR(1080): p_meter_import (uint32 /10 W)
+    //  21 → IR(1081)+IR(1082): p_meter_export (uint32 /10 W)
+    //  29 → IR(1089)+IR(1090): p_load_all (uint32 /10 W)
+    let v1 = get_reg(data, 1) as f32 * 0.1;
+    let v2 = get_reg(data, 2) as f32 * 0.1;
+    let v3 = get_reg(data, 3) as f32 * 0.1;
+    snap.grid_voltage = v1;
+    snap.grid_frequency = get_reg(data, 7) as f32 * 0.01;
+
+    let i1 = get_reg(data, 4) as f32 * 0.1;
+    let i2 = get_reg(data, 5) as f32 * 0.1;
+    let i3 = get_reg(data, 6) as f32 * 0.1;
+
+    // Grid power sign: positive = exporting (matches single-phase convention).
+    let p_import = uint32(get_reg(data, 19), get_reg(data, 20)) as f32 * 0.1;
+    let p_export = uint32(get_reg(data, 21), get_reg(data, 22)) as f32 * 0.1;
+    let p_grid = (p_export - p_import) as i32;
+    snap.grid_power = p_grid;
+
+    // Home/load power: total load across all three phases (uint32 /10 W).
+    snap.home_power = (uint32(get_reg(data, 29), get_reg(data, 30)) as f32 * 0.1) as i32;
+
+    // Create a synthetic meter entry from the inverter's built-in grid CT.
+    // Positive total = import (matching MeterData convention).
+    let i_total = (i1 + i2 + i3) / 3.0;
+    snap.meters.push(MeterData {
+        address: 0x00, // synthetic "built-in grid CT"
+        v_phase_1: v1,
+        v_phase_2: v2,
+        v_phase_3: v3,
+        i_phase_1: i1,
+        i_phase_2: i2,
+        i_phase_3: i3,
+        i_total,
+        p_active_phase_1: -p_grid / 3,
+        p_active_phase_2: -p_grid / 3,
+        p_active_phase_3: -p_grid / 3,
+        p_active_total: -p_grid,
+        p_reactive_total: 0,
+        p_apparent_total: (i_total * (v1 + v2 + v3) / 3.0) as i32,
+        pf_total: 1.0,
+        frequency: snap.grid_frequency,
+        e_import_active_kwh: 0.0,
+        e_export_active_kwh: 0.0,
+    });
+}
+
+/// IR 1120-1179: Battery, BMS, temperatures and battery power.
+fn decode_input_1120_1179(data: &[u16], snap: &mut InverterSnapshot) {
+    // Offsets within this block (subtract 1120):
+    //   8 → IR(1128): t_inverter (/10 °C)
+    //  11 → IR(1131): v_battery_bms (/10 V)
+    //  12 → IR(1132): battery_soc (%)
+    //  16 → IR(1136)+IR(1137): p_battery_discharge (uint32 /10 W)
+    //  18 → IR(1138)+IR(1139): p_battery_charge   (uint32 /10 W)
+    //  20 → IR(1140): i_battery (int16 /10 A)
+    snap.inverter_temperature = get_reg(data, 8) as f32 * 0.1;
+    snap.battery_voltage = get_reg(data, 11) as f32 * 0.1;
+    snap.soc = get_reg(data, 12) as u8;
+
+    let p_discharge = uint32(get_reg(data, 16), get_reg(data, 17)) as f32 * 0.1;
+    let p_charge = uint32(get_reg(data, 18), get_reg(data, 19)) as f32 * 0.1;
+    // Our convention: positive = charging.
+    snap.battery_power = (p_charge - p_discharge) as i32;
+    snap.battery_state = BatteryState::from_power(snap.battery_power);
+    snap.battery_current = signed(get_reg(data, 20)) as f32 * 0.1;
+}
+
+/// IR 1180-1239: EPS measurements (not currently captured — placeholder).
+fn decode_input_1180_1239(_data: &[u16], _snap: &mut InverterSnapshot) {
+    // EPS-specific data (v_eps_ac1..3, i_eps_ac1..3, p_eps_ac1..3) lives here.
+    // Not yet exposed in InverterSnapshot; reserved for future use.
+}
+
+/// IR 1240-1299: Additional power meters (export, secondary meter).
+fn decode_input_1240_1299(data: &[u16], snap: &mut InverterSnapshot) {
+    // IR(1240-1241): p_export (uint32 /10 W) — alternative address for export
+    // IR(1244-1245): p_meter2 (uint32 /10 W) — second CT meter if installed
+    let p_meter2 = uint32(get_reg(data, 4), get_reg(data, 5)) as f32 * 0.1;
+    if p_meter2 > 0.0 {
+        snap.meters.push(MeterData {
+            address: 0x09, // second external CT
+            v_phase_1: snap.grid_voltage,
+            v_phase_2: 0.0,
+            v_phase_3: 0.0,
+            i_phase_1: 0.0,
+            i_phase_2: 0.0,
+            i_phase_3: 0.0,
+            i_total: 0.0,
+            p_active_phase_1: p_meter2 as i32,
+            p_active_phase_2: 0,
+            p_active_phase_3: 0,
+            p_active_total: -p_meter2 as i32, // positive = import
+            p_reactive_total: 0,
+            p_apparent_total: (p_meter2 * 10.0) as i32, // rough: apparent ≈ active for resistive loads
+            pf_total: 1.0,
+            frequency: snap.grid_frequency,
+            e_import_active_kwh: 0.0,
+            e_export_active_kwh: 0.0,
+        });
+    }
+}
+
+/// IR 1300-1359: Fault codes and firmware identification.
+fn decode_input_1300_1359(data: &[u16], snap: &mut InverterSnapshot) {
+    // Offsets within this block (subtract 1300):
+    //  17 → IR(1317)-IR(1319): software version string (3 registers = 6 chars)
+    //  20 → IR(1320)-IR(1324): firmware version string (5 registers = 10 chars)
+    //  25 → IR(1325): ac_dsp_firmware_version
+    //  26 → IR(1326): dc_dsp_firmware_version
+    //  27 → IR(1327): tph_arm_firmware_version
+    //
+    // We only capture the numeric ARM firmware version for downstream use
+    // (model refinement, max battery power, etc). The string fields are
+    // available for future diagnostic display.
+    let arm_fw = get_reg(data, 27);
+    if arm_fw > 0 {
+        snap.firmware_version = format!("{}", arm_fw);
+    }
+    let ac_dsp = get_reg(data, 25);
+    if ac_dsp > 0 {
+        snap.dsp_firmware_version = format!("{}", ac_dsp);
+    }
+}
+
+/// IR 1360-1413: Daily and total energy counters.
+fn decode_input_1360_1413(data: &[u16], snap: &mut InverterSnapshot) {
+    // Offsets within this block (subtract 1360):
+    //  0+1 → IR(1360)+IR(1361): e_inverter_out_today (uint32 /10 kWh)
+    //  6+7 → IR(1366)+IR(1367): e_pv1_today        (uint32 /10 kWh)
+    //  8+9 → IR(1368)+IR(1369): e_pv1_total        (uint32 /10 kWh)
+    // 10+11 → IR(1370)+IR(1371): e_pv2_today       (uint32 /10 kWh)
+    // 14+15 → IR(1374)+IR(1375): e_pv_total        (uint32 /10 kWh)
+    // 16+17 → IR(1376)+IR(1377): e_ac_charge_today (uint32 /10 kWh)
+    // 20+21 → IR(1380)+IR(1381): e_import_today    (uint32 /10 kWh)
+    // 24+25 → IR(1384)+IR(1385): e_export_today    (uint32 /10 kWh)
+    // 28+29 → IR(1388)+IR(1389): e_battery_discharge_today (uint32 /10 kWh)
+    // 32+33 → IR(1392)+IR(1393): e_battery_charge_today    (uint32 /10 kWh)
+    // 36+37 → IR(1396)+IR(1397): e_load_today              (uint32 /10 kWh)
+    snap.today_solar_kwh = uint32(get_reg(data, 14), get_reg(data, 15)) as f32 * 0.1;
+    snap.today_import_kwh = uint32(get_reg(data, 20), get_reg(data, 21)) as f32 * 0.1;
+    snap.today_export_kwh = uint32(get_reg(data, 24), get_reg(data, 25)) as f32 * 0.1;
+    snap.today_charge_kwh = uint32(get_reg(data, 32), get_reg(data, 33)) as f32 * 0.1;
+    snap.today_discharge_kwh = uint32(get_reg(data, 28), get_reg(data, 29)) as f32 * 0.1;
+    snap.today_consumption_kwh = uint32(get_reg(data, 36), get_reg(data, 37)) as f32 * 0.1;
+    snap.today_ac_charge_kwh = uint32(get_reg(data, 16), get_reg(data, 17)) as f32 * 0.1;
+}
+
 /// Decode meter data from raw register values (IR 60-89) into a MeterData struct.
 ///
 /// The register layout matches MeterRegisterGetter from the reference library:
@@ -892,6 +1111,87 @@ mod tests {
         assert_eq!(snap.discharge_slots[1].start_hour, 17);
         assert_eq!(snap.discharge_slots[1].end_hour, 20);
         assert!(!snap.enable_discharge, "enable_discharge flag is false");
+    }
+
+    #[test]
+    fn three_phase_input_blocks_populate_dashboard_fields() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x4004; // Three Phase 11kW
+
+        let mut ir1000 = vec![0u16; 60];
+        ir1000[1001 - 1000] = 6500; // PV1 voltage 650.0V
+        ir1000[1002 - 1000] = 6400; // PV2 voltage 640.0V
+        ir1000[1009 - 1000] = 12; // PV1 current 1.2A
+        ir1000[1010 - 1000] = 34; // PV2 current 3.4A
+        ir1000[1017 - 1000] = 0;
+        ir1000[1018 - 1000] = 25_000; // PV1 power 2500.0W
+        ir1000[1019 - 1000] = 0;
+        ir1000[1020 - 1000] = 15_000; // PV2 power 1500.0W
+
+        let mut ir1060 = vec![0u16; 60];
+        ir1060[1061 - 1060] = 2310; // grid voltage 231.0V
+        ir1060[1067 - 1060] = 5000; // grid frequency 50.00Hz
+        ir1060[1079 - 1060] = 0;
+        ir1060[1080 - 1060] = 3000; // import 300W
+        ir1060[1081 - 1060] = 0;
+        ir1060[1082 - 1060] = 9000; // export 900W => grid_power +600W
+        ir1060[1089 - 1060] = 0;
+        ir1060[1090 - 1060] = 22_000; // load 2200W
+
+        let mut ir1120 = vec![0u16; 60];
+        ir1120[1128 - 1120] = 355; // inverter temp 35.5C
+        ir1120[1131 - 1120] = 520; // battery voltage 52.0V
+        ir1120[1132 - 1120] = 67; // SOC 67%
+        ir1120[1136 - 1120] = 0;
+        ir1120[1137 - 1120] = 2000; // discharge 200W
+        ir1120[1138 - 1120] = 0;
+        ir1120[1139 - 1120] = 7000; // charge 700W => battery_power +500W
+        ir1120[1140 - 1120] = 25; // battery current 2.5A
+
+        let mut ir1360 = vec![0u16; 54];
+        ir1360[1374 - 1360] = 0;
+        ir1360[1375 - 1360] = 123; // solar today 12.3kWh
+        ir1360[1380 - 1360] = 0;
+        ir1360[1381 - 1360] = 45; // import today 4.5kWh
+        ir1360[1384 - 1360] = 0;
+        ir1360[1385 - 1360] = 67; // export today 6.7kWh
+        ir1360[1388 - 1360] = 0;
+        ir1360[1389 - 1360] = 89; // discharge today 8.9kWh
+        ir1360[1392 - 1360] = 0;
+        ir1360[1393 - 1360] = 101; // charge today 10.1kWh
+        ir1360[1396 - 1360] = 0;
+        ir1360[1397 - 1360] = 111; // load today 11.1kWh
+
+        let blocks = vec![
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Input, 1000, 60, "input_1000_1059", ir1000),
+            make_block(RegisterType::Input, 1060, 60, "input_1060_1119", ir1060),
+            make_block(RegisterType::Input, 1120, 60, "input_1120_1179", ir1120),
+            make_block(RegisterType::Input, 1360, 54, "input_1360_1413", ir1360),
+        ];
+
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.device_type, DeviceType::ThreePhase);
+        assert_eq!(snap.max_ac_power_w, 11_000);
+        assert_eq!(snap.solar_power, 4_000);
+        assert_eq!(snap.grid_power, 600);
+        assert_eq!(snap.battery_power, 500);
+        assert_eq!(snap.home_power, 2_200);
+        assert_eq!(snap.soc, 67);
+        assert!((snap.grid_voltage - 231.0).abs() < 0.1);
+        assert!((snap.grid_frequency - 50.0).abs() < 0.01);
+        assert!((snap.today_solar_kwh - 12.3).abs() < 0.1);
+        assert!((snap.today_import_kwh - 4.5).abs() < 0.1);
+        assert!((snap.today_export_kwh - 6.7).abs() < 0.1);
+        assert!((snap.today_charge_kwh - 10.1).abs() < 0.1);
+        assert!((snap.today_discharge_kwh - 8.9).abs() < 0.1);
+        assert!((snap.today_consumption_kwh - 11.1).abs() < 0.1);
+
+        // Verify synthetic built-in CT meter was created
+        assert_eq!(snap.meters.len(), 1, "Should have 1 synthetic meter from 3-phase CT");
+        assert_eq!(snap.meters[0].address, 0x00);
+        assert_eq!(snap.meters[0].p_active_total, -600, "Meter total = -grid_power (positive = import)");
+        assert!((snap.meters[0].frequency - 50.0).abs() < 0.01);
     }
 
     #[test]

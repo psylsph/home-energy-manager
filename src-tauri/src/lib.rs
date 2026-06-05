@@ -19,7 +19,7 @@ fn show_startup_error(window: &tauri::WebviewWindow, message: &str) {
 <h1 style="margin: 0 0 12px; font-size: 22px;">Home Energy Manager could not start its local server</h1>
 <p style="line-height: 1.5; max-width: 720px; color: #cbd5e1;">The app could not bind a local HTTP port, so it has not connected to any existing server. This avoids accidentally showing an older installed version.</p>
 <pre style="white-space: pre-wrap; background: #1e293b; color: #e2e8f0; padding: 16px; border-radius: 12px; max-width: 720px;">{}</pre>
-<p style="line-height: 1.5; max-width: 720px; color: #cbd5e1;">Quit any other Home Energy Manager / givenergy-local processes and reopen the app.</p>
+<p style="line-height: 1.5; max-width: 720px; color: #cbd5e1;">Quit any other Home Energy Manager processes and reopen the app.</p>
 </main>"#,
         html_escape(message)
     );

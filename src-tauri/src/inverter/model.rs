@@ -350,6 +350,29 @@ impl DeviceType {
         }
     }
 
+    /// Whether this device is a three-phase model that needs the IR(1000-1414)
+    /// measurement blocks polled. These models store all real-time PV/grid/battery
+    /// measurements in the 1000+ range instead of IR 0-59.
+    pub fn needs_three_phase_input_blocks(&self) -> bool {
+        matches!(
+            self,
+            Self::ThreePhase
+                | Self::ACThreePhase
+                | Self::AioCommercial
+                | Self::HybridHvGen3
+                | Self::AllInOneHybrid
+        )
+    }
+
+    /// Whether schedule (charge/discharge slot) writes/reads are supported for
+    /// this device. Three-phase models use a different register layout
+    /// (HR 1113-1121 instead of HR 31-32/44-45/56-57/94-95) that we don't yet
+    /// read or write. Until that's implemented, hide the schedule UI for these
+    /// models to avoid silently writing to ignored registers.
+    pub fn supports_schedule_slots(&self) -> bool {
+        !self.needs_three_phase_input_blocks()
+    }
+
     /// Preferred Modbus slave address for operational inverter register reads.
     ///
     /// Matches givenergy-modbus/GivTCP: `0x11` is canonical for detection and

@@ -1071,6 +1071,39 @@ impl ModbusClient {
                     }
                 }
             }
+
+            // Three-phase models store all real-time measurements (PV, grid,
+            // battery, energy totals) in IR(1000-1414). Without these blocks
+            // the dashboard shows zeros. See givenergy-modbus client.py.
+            if dt.needs_three_phase_input_blocks() {
+                for block in super::registers::THREE_PHASE_INPUT_BLOCKS {
+                    tokio::time::sleep(Self::INTER_REQUEST_DELAY).await;
+                    let t0 = std::time::Instant::now();
+                    match self
+                        .read_registers(RegisterType::Input, block.start, block.count)
+                        .await
+                    {
+                        Ok(data) => {
+                            tracing::debug!(
+                                block = block.name,
+                                start = block.start,
+                                count = block.count,
+                                received = data.len(),
+                                elapsed_ms = t0.elapsed().as_millis() as u64,
+                                "Three-phase input block read OK"
+                            );
+                            results.push(BlockRead { block, data });
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                block = block.name,
+                                error = %e,
+                                "Three-phase input block skipped (non-fatal)"
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         Ok(results)

@@ -354,10 +354,14 @@ impl HistoryDb {
 
     /// Query aggregated history data for the given fields and time range.
     ///
-    /// - `range_secs`: total time window in seconds (e.g. 3600 for 1h)
+    /// - `range_secs`: total time window in seconds (e.g. 3600 for 1h). Ignored
+    ///   when `explicit_window` is provided.
     /// - `bucket_secs`: aggregation bucket size in seconds (e.g. 300 for 5m)
-    /// - `offset`: number of windows to go back (0 = most recent)
+    /// - `offset`: number of windows to go back (0 = most recent). Ignored
+    ///   when `explicit_window` is provided.
     /// - `fields`: comma-separated list of field names
+    /// - `explicit_window`: optional (start_ts, end_ts) in UTC epoch seconds.
+    ///   When provided, `range_secs` and `offset` are ignored entirely.
     ///
     /// Returns a map from field name to Vec<TimePoint>.
     pub fn query_history(
@@ -366,21 +370,26 @@ impl HistoryDb {
         bucket_secs: i64,
         offset: i64,
         fields: &[String],
+        explicit_window: Option<(i64, i64)>,
     ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| format!("History DB lock poisoned: {e}"))?;
 
-        let now = chrono::Utc::now().timestamp();
-        let raw_end = now - (offset * range_secs);
-        let aligned_end = match range_secs {
-            3600 => ((raw_end / 3600) * 3600) + 3600,
-            21600 => ((raw_end / 21600) * 21600) + 21600,
-            _ => ((raw_end / 86400) * 86400) + 86400,
+        let (start_ts, end_ts) = match explicit_window {
+            Some((s, e)) => (s, e),
+            None => {
+                let now = chrono::Utc::now().timestamp();
+                let raw_end = now - (offset * range_secs);
+                let aligned_end = match range_secs {
+                    3600 => ((raw_end / 3600) * 3600) + 3600,
+                    21600 => ((raw_end / 21600) * 21600) + 21600,
+                    _ => ((raw_end / 86400) * 86400) + 86400,
+                };
+                (aligned_end - range_secs, aligned_end)
+            }
         };
-        let start_ts = aligned_end - range_secs;
-        let end_ts = aligned_end;
 
         let mut result = serde_json::Map::new();
 
@@ -507,6 +516,7 @@ mod tests {
                 60,
                 0,
                 &["soc".to_string(), "solar_power".to_string()],
+                None,
             )
             .unwrap();
 
@@ -531,7 +541,7 @@ mod tests {
     fn rejects_unknown_fields() {
         let db = test_db();
         let result = db
-            .query_history(600, 60, 0, &["DROP TABLE readings".to_string()])
+            .query_history(600, 60, 0, &["DROP TABLE readings".to_string()], None)
             .unwrap();
         assert!(result.is_empty());
     }
@@ -597,7 +607,7 @@ mod tests {
         db.insert_reading(&make_snapshot_with_kwh(base + 180, 6.0, 0.0));
 
         let result = db
-            .query_history(100_000_000, 60, 0, &["today_import_kwh".to_string()])
+            .query_history(100_000_000, 60, 0, &["today_import_kwh".to_string()], None)
             .unwrap();
         let points: Vec<TimePoint> =
             serde_json::from_value(result.get("today_import_kwh").cloned().unwrap()).unwrap();
@@ -624,6 +634,7 @@ mod tests {
                     "today_import_kwh".to_string(),
                     "today_export_kwh".to_string(),
                 ],
+                None,
             )
             .unwrap();
 
@@ -657,7 +668,7 @@ mod tests {
         db.insert_reading(&make_snapshot_with_kwh(base + 75, 22.0, 11.0));
 
         let result = db
-            .query_history(100_000_000, 60, 0, &["today_import_kwh".to_string()])
+            .query_history(100_000_000, 60, 0, &["today_import_kwh".to_string()], None)
             .unwrap();
 
         let import_points: Vec<TimePoint> =
@@ -706,7 +717,7 @@ mod tests {
         db.insert_reading(&make_snapshot_with_kwh(day2 + 7200, 15.0, 8.0)); // 02:00 UTC day2
 
         let result = db
-            .query_history(100_000_000, 3600, 0, &["today_import_kwh".to_string()])
+            .query_history(100_000_000, 3600, 0, &["today_import_kwh".to_string()], None)
             .unwrap();
 
         let import_points: Vec<TimePoint> =
@@ -735,7 +746,7 @@ mod tests {
         db.insert_reading(&make_snapshot_with_kwh(day2 + 7200, 25.0, 8.0));
 
         let result = db
-            .query_history(100_000_000, 3600, 0, &["today_import_kwh".to_string()])
+            .query_history(100_000_000, 3600, 0, &["today_import_kwh".to_string()], None)
             .unwrap();
         let points: Vec<TimePoint> =
             serde_json::from_value(result.get("today_import_kwh").cloned().unwrap()).unwrap();
@@ -780,7 +791,7 @@ mod tests {
         db.insert_reading(&make_snapshot_with_kwh(day2 + 7200, 12.0, 5.0));
 
         let result = db
-            .query_history(100_000_000, 3600, 0, &["today_import_kwh".to_string()])
+            .query_history(100_000_000, 3600, 0, &["today_import_kwh".to_string()], None)
             .unwrap();
         let points: Vec<TimePoint> =
             serde_json::from_value(result.get("today_import_kwh").cloned().unwrap()).unwrap();
@@ -821,7 +832,7 @@ mod tests {
         db.insert_reading(&make_snapshot_with_kwh(base + 1200, 35.0, 12.0));
 
         let result = db
-            .query_history(100_000_000, 600, 0, &["today_import_kwh".to_string()])
+            .query_history(100_000_000, 600, 0, &["today_import_kwh".to_string()], None)
             .unwrap();
         let points: Vec<TimePoint> =
             serde_json::from_value(result.get("today_import_kwh").cloned().unwrap()).unwrap();

@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-06-05
+
+### Added
+
+- **Calendar month view for history charts**: New "Month" range button in the
+  history page alongside 1h/6h/24h/7d/30d/6m/1y. Shows data bucketed by hour
+  for the current calendar month (1st to last day). Navigation arrows page
+  through previous months. Backend uses local-time month boundaries with
+  explicit start/end timestamps.
+
+- **Three-phase inverter full data support**: Seven new input register blocks
+  (IR 1000-1413) are now polled on three-phase, AC three-phase, AIO commercial,
+  HV Gen3, and All-in-One Hybrid models to provide real-time PV, grid, battery,
+  and energy-accumulated readings. Dashboard fields (solar, grid, battery power;
+  grid voltage; SOC; daily energy totals) are now populated for these models
+  instead of showing zeros. Internal grid CT meter is synthesised from
+  IR 1060-1119.
+
+- **Three-phase model-aware schedule hiding**: Charge/discharge schedule UI is
+  hidden with an explanatory notice for three-phase/HV models, since they use
+  a different schedule register map (HR 1113-1121) not yet implemented.
+
+- **Three-phase external meter probe skip**: External CT clamp meter probing
+  is skipped for three-phase models — they use internal grid CT measurements
+  at IR 1079-1082 instead.
+
+- **Backend `explicit_window` query support**: `HistoryDb::query_history()`
+  now accepts an optional `(start_ts, end_ts)` explicit window for custom
+  time ranges (used by the calendar month view).
+
+### Changed
+
+- **History chart x-axis ticks**: All time ranges now use explicit evenly-spaced
+  tick values instead of relying on Recharts auto-calculation. Intra-day ranges
+  (1h/6h/24h) show ticks every 10min/1h/3h. Multi-day ranges show ticks every
+  ~5 days. Multi-month ranges show ticks every ~1-2 months. This fixes "weird
+  spacing" issues where labels were sparse or uneven.
+
+- **App title**: HTML title and error messages updated to "Home Energy Manager"
+  (was "givenergy-local").
+
+### Fixed
+
+- **Three-phase input decoder test**: Home power and consumption fields now
+  preserve three-phase direct-register values instead of being overwritten by
+  the single-phase derived formula. The derived formula (= solar - battery -
+  grid) is only applied when no three-phase measurement exists.
+
 ## [0.12.4] - 2026-06-05
 
 ### Added

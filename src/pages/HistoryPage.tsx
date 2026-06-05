@@ -95,6 +95,7 @@ const RANGES: { key: HistoryRange; label: string }[] = [
   { key: '24h', label: '24h' },
   { key: '7d', label: '7d' },
   { key: '30d', label: '30d' },
+  { key: 'month', label: 'Month' },
   { key: '6m', label: '6m' },
   { key: '1y', label: '1y' },
 ];
@@ -118,6 +119,31 @@ function alignDown(ts: number, range: HistoryRange): number {
     d.setHours(0, 0, 0, 0);
   }
   return d.getTime();
+}
+
+/** Return [startOfMonthMs, endOfMonthMs] for the given month offset (0 = current). */
+function getMonthBoundaryMs(offset: number): [number, number] {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth(); // 0-11
+  // Go back `offset` months
+  let targetMonth = month - offset;
+  let targetYear = year;
+  while (targetMonth < 0) {
+    targetMonth += 12;
+    targetYear -= 1;
+  }
+  // Start of target month (local midnight of the 1st)
+  const start = new Date(targetYear, targetMonth, 1, 0, 0, 0, 0).getTime();
+  // End = start of next month
+  let nextMonth = targetMonth + 1;
+  let nextYear = targetYear;
+  if (nextMonth > 11) {
+    nextMonth = 0;
+    nextYear += 1;
+  }
+  const end = new Date(nextYear, nextMonth, 1, 0, 0, 0, 0).getTime();
+  return [start, end];
 }
 
 function isOffPeak(ts: number, start: string, end: string): boolean {
@@ -301,10 +327,26 @@ function formatXAxis(ts: number, range: HistoryRange): string {
   if (range === '7d' || range === '30d') {
     return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
   }
+  if (range === 'month') {
+    return String(d.getDate());
+  }
   return d.toLocaleDateString([], { month: 'short', year: 'numeric' });
 }
 
 function formatWindowLabel(range: HistoryRange, offset: number): string {
+  if (range === 'month') {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = now.getMonth();
+    let targetMonth = month - offset;
+    let targetYear = year;
+    while (targetMonth < 0) {
+      targetMonth += 12;
+      targetYear -= 1;
+    }
+    const d = new Date(targetYear, targetMonth, 1);
+    return d.toLocaleDateString([], { month: 'long', year: 'numeric' });
+  }
   if (offset === 0) return 'Now';
   const rangeMs: Record<string, number> = {
     '1h': 3600000,
@@ -329,11 +371,90 @@ function formatWindowLabel(range: HistoryRange, offset: number): string {
 // Single chart component
 // ---------------------------------------------------------------------------
 
-function ChartCard({ chart, data, range, domain }: {
+/** Generate clean evenly-spaced x-axis tick timestamps for any range.
+ *
+ * Returns `undefined` for ranges shorter than 7d (Recharts' auto-ticks
+ * work well for intra-day views).
+ */
+function getXAxisTicks(range: HistoryRange, domain: [number, number]): number[] | undefined {
+  const startMs = domain[0];
+  const endMs = domain[1];
+  const spanMs = endMs - startMs;
+  const startDate = new Date(startMs);
+
+  // --- Intra-day ranges: explicit hour/minute ticks ---
+  if (range === '1h') {
+    const ticks: number[] = [];
+    const cursor = new Date(startDate);
+    cursor.setMinutes(0, 0, 0); // align to minute 0
+    while (cursor.getTime() < endMs) {
+      ticks.push(cursor.getTime());
+      cursor.setMinutes(cursor.getMinutes() + 10); // every 10 min
+    }
+    return ticks;
+  }
+
+  if (range === '6h') {
+    const ticks: number[] = [];
+    const cursor = new Date(startDate);
+    cursor.setMinutes(0, 0, 0); // align to top of hour
+    while (cursor.getTime() < endMs) {
+      ticks.push(cursor.getTime());
+      cursor.setHours(cursor.getHours() + 1); // every 1 hour
+    }
+    return ticks;
+  }
+
+  if (range === '24h') {
+    const ticks: number[] = [];
+    const cursor = new Date(startDate);
+    cursor.setMinutes(0, 0, 0);
+    while (cursor.getTime() < endMs) {
+      ticks.push(cursor.getTime());
+      cursor.setHours(cursor.getHours() + 3); // every 3 hours
+    }
+    return ticks;
+  }
+
+  // --- 6m / 1y: month-level ticks ---
+  if (range === '6m' || range === '1y') {
+    const endDate = new Date(endMs);
+    const totalMonths = (endDate.getFullYear() - startDate.getFullYear()) * 12
+      + (endDate.getMonth() - startDate.getMonth());
+    const stepMonths = Math.max(1, Math.floor(totalMonths / 6));
+    const ticks: number[] = [];
+    for (let i = 0; i <= totalMonths; i += stepMonths) {
+      const m = startDate.getMonth() + i;
+      const y = startDate.getFullYear() + Math.floor(m / 12);
+      const t = new Date(y, m % 12, 1);
+      ticks.push(t.getTime());
+    }
+    return ticks;
+  }
+
+  // --- 7d / 30d / month: day-level ticks every ~5 days + last day ---
+  const totalDays = spanMs / 86400000;
+  const numDays = Math.round(totalDays);
+  const step = Math.max(1, Math.floor(numDays / 6));
+  const daysTicks: number[] = [];
+  for (let i = 0; i < numDays; i += step) {
+    const t = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate() + i);
+    daysTicks.push(t.getTime());
+  }
+  // Always include the last day
+  const lastDayTs = endMs - 86400000;
+  if (daysTicks.length === 0 || Math.abs(daysTicks[daysTicks.length - 1] - lastDayTs) > 3600000) {
+    daysTicks.push(lastDayTs);
+  }
+  return daysTicks;
+}
+
+function ChartCard({ chart, data, range, domain, ticks }: {
   chart: ChartDef;
   data: Record<string, TimePoint[]>;
   range: HistoryRange;
   domain: [number, number];
+  ticks?: number[];
 }) {
   const allFields = [...chart.fields.map((f) => f.field), ...(chart.requires ?? [])];
   const uniqueFields = [...new Set(allFields)];
@@ -412,12 +533,13 @@ function ChartCard({ chart, data, range, domain }: {
             dataKey="t"
             type="number"
             domain={domain}
+            ticks={ticks}
             tickFormatter={(v: number) => formatXAxis(v, range)}
             stroke="#8B949E"
             tick={{ fontSize: 11, style: { fontWeight: 700 } }}
             tickLine={false}
             axisLine={false}
-            minTickGap={40}
+            minTickGap={range === '1h' || range === '6h' || range === '24h' ? 30 : 40}
           />
           <YAxis
             stroke="#8B949E"
@@ -608,10 +730,19 @@ export default function HistoryPage() {
     '6m': 15552000000,
     '1y': 31536000000,
   };
-  const windowMs = rangeMs[range] ?? 86400000;
-  const domainEnd = now - offset * windowMs;
-  const alignedEnd = alignDown(domainEnd, range) + windowMs;
-  const xDomain: [number, number] = [alignedEnd - windowMs, alignedEnd];
+
+  // For calendar month view, use exact month boundaries as the domain.
+  // This ensures the x-axis always spans the full 1st to last day of the
+  // month regardless of data availability.
+  const monthBoundary = range === 'month' ? getMonthBoundaryMs(offset) : null;
+  const xDomain: [number, number] = range === 'month' && monthBoundary
+    ? monthBoundary
+    : (() => {
+        const windowMs = rangeMs[range] ?? 86400000;
+        const domainEnd = now - offset * windowMs;
+        const alignedEnd = alignDown(domainEnd, range) + windowMs;
+        return [alignedEnd - windowMs, alignedEnd];
+      })();
   const [importTariffCfg, setImportTariffCfg] = useState<TariffConfig>({
     peak_rate: 0.285, off_peak_rate: 0.09, off_peak_start: '00:30', off_peak_end: '05:30',
   });
@@ -782,7 +913,14 @@ export default function HistoryPage() {
       ) : (
         <div className="flex flex-col gap-4">
           {charts.map((chart) => (
-            <ChartCard key={chart.key} chart={chart} data={data} range={range} domain={xDomain} />
+            <ChartCard
+              key={chart.key}
+              chart={chart}
+              data={data}
+              range={range}
+              domain={xDomain}
+              ticks={getXAxisTicks(range, xDomain)}
+            />
           ))}
         </div>
       )}

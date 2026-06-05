@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use chrono::{Datelike, TimeZone};
 use axum::extract::{Query, State};
 use axum::response::Json;
 use serde::Deserialize;
@@ -673,7 +674,49 @@ pub async fn get_history(
         "30d" => (86400 * 30, 7200),
         "6m" => (86400 * 180, 43200),
         "1y" => (86400 * 365, 86400),
-        _ => return error_response("Invalid range. Use: 1h, 6h, 24h, 7d, 30d, 6m, 1y"),
+        "month" => (0, 3600), // calendar month — uses explicit window
+        _ => return error_response("Invalid range. Use: 1h, 6h, 24h, 7d, 30d, 6m, 1y, month"),
+    };
+
+    let explicit_window: Option<(i64, i64)> = if range_str == "month" {
+        // Compute calendar month boundaries in local time.
+        let now = chrono::Local::now();
+        // Apply offset (month offset, since month windows have variable length)
+        let total_months = now.year() * 12 + (now.month() as i32) - 1 - offset as i32;
+        let target_year = total_months.div_euclid(12);
+        let target_month = (total_months.rem_euclid(12) + 1) as u32;
+
+        // Start of target month (local midnight of the 1st)
+        let start_local = chrono::NaiveDate::from_ymd_opt(target_year, target_month, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let start_local_dt = chrono::Local
+            .from_local_datetime(&start_local)
+            .earliest()
+            .unwrap();
+
+        // End of target month = start of next month
+        let (next_year, next_month) = if target_month == 12 {
+            (target_year + 1, 1u32)
+        } else {
+            (target_year, target_month + 1)
+        };
+        let end_local = chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let end_local_dt = chrono::Local
+            .from_local_datetime(&end_local)
+            .earliest()
+            .unwrap();
+
+        let start_ts = start_local_dt.timestamp();
+        let end_ts = end_local_dt.timestamp();
+
+        Some((start_ts, end_ts))
+    } else {
+        None
     };
 
     let fields: Vec<String> = fields_str
@@ -688,7 +731,7 @@ pub async fn get_history(
 
     let history = state.history.lock().await;
     match history.as_ref() {
-        Some(db) => match db.query_history(range_secs, bucket_secs, offset, &fields) {
+        Some(db) => match db.query_history(range_secs, bucket_secs, offset, &fields, explicit_window) {
             Ok(data) => {
                 let map: HashMap<String, Value> = data.into_iter().collect();
                 Json(json!({ "ok": true, "data": map }))

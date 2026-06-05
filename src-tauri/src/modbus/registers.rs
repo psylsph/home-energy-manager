@@ -454,6 +454,65 @@ pub const THREE_PHASE_CONFIG_BLOCK: RegisterBlock = RegisterBlock {
     name: "holding_1080_1124",
 };
 
+/// Three-phase input register measurement blocks.
+/// Per givenergy-modbus reference library, three-phase inverters expose their
+/// real-time measurements (PV, AC grid, battery, energy totals) in the
+/// IR(1000-1414) range, split into 60-register chunks. Without these blocks the
+/// dashboard shows zero for solar/grid/battery power and all daily energy totals.
+pub const THREE_PHASE_INPUT_BLOCK_1: RegisterBlock = RegisterBlock {
+    start: 1000,
+    count: 60,
+    register_type: RegisterType::Input,
+    name: "input_1000_1059",
+};
+pub const THREE_PHASE_INPUT_BLOCK_2: RegisterBlock = RegisterBlock {
+    start: 1060,
+    count: 60,
+    register_type: RegisterType::Input,
+    name: "input_1060_1119",
+};
+pub const THREE_PHASE_INPUT_BLOCK_3: RegisterBlock = RegisterBlock {
+    start: 1120,
+    count: 60,
+    register_type: RegisterType::Input,
+    name: "input_1120_1179",
+};
+pub const THREE_PHASE_INPUT_BLOCK_4: RegisterBlock = RegisterBlock {
+    start: 1180,
+    count: 60,
+    register_type: RegisterType::Input,
+    name: "input_1180_1239",
+};
+pub const THREE_PHASE_INPUT_BLOCK_5: RegisterBlock = RegisterBlock {
+    start: 1240,
+    count: 60,
+    register_type: RegisterType::Input,
+    name: "input_1240_1299",
+};
+pub const THREE_PHASE_INPUT_BLOCK_6: RegisterBlock = RegisterBlock {
+    start: 1300,
+    count: 60,
+    register_type: RegisterType::Input,
+    name: "input_1300_1359",
+};
+pub const THREE_PHASE_INPUT_BLOCK_7: RegisterBlock = RegisterBlock {
+    start: 1360,
+    count: 54,
+    register_type: RegisterType::Input,
+    name: "input_1360_1413",
+};
+
+/// All seven three-phase input register blocks, in poll order.
+pub const THREE_PHASE_INPUT_BLOCKS: &[RegisterBlock] = &[
+    THREE_PHASE_INPUT_BLOCK_1,
+    THREE_PHASE_INPUT_BLOCK_2,
+    THREE_PHASE_INPUT_BLOCK_3,
+    THREE_PHASE_INPUT_BLOCK_4,
+    THREE_PHASE_INPUT_BLOCK_5,
+    THREE_PHASE_INPUT_BLOCK_6,
+    THREE_PHASE_INPUT_BLOCK_7,
+];
+
 /// Extra blocks for models that need both AC config and three-phase config.
 pub const AC_AND_THREE_PHASE_BLOCKS: &[RegisterBlock] =
     &[AC_CONFIG_BLOCK, THREE_PHASE_CONFIG_BLOCK];
