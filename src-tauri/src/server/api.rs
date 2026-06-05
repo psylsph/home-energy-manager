@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use chrono::{Datelike, TimeZone};
 use axum::extract::{Query, State};
 use axum::response::Json;
+use chrono::{Datelike, TimeZone};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -44,17 +44,48 @@ async fn is_three_phase_limit_snapshot(state: &Arc<AppState>) -> bool {
     let snapshot = state.latest_snapshot.lock().await;
     snapshot
         .as_ref()
-        .map(|s| {
-            matches!(
-                s.device_type,
-                DeviceType::ThreePhase
-                    | DeviceType::ACThreePhase
-                    | DeviceType::AioCommercial
-                    | DeviceType::HybridHvGen3
-                    | DeviceType::AllInOneHybrid
-            )
-        })
+        .map(|s| s.device_type.uses_three_phase_schedule_slots())
         .unwrap_or(false)
+}
+
+fn charge_slot_command_for_device(
+    device_type: DeviceType,
+    slot: u8,
+    enabled: bool,
+    start: u16,
+    end: u16,
+) -> Result<ControlCommand, String> {
+    let (start, end) = if enabled { (start, end) } else { (0, 0) };
+    match (device_type.uses_three_phase_schedule_slots(), slot, enabled) {
+        (true, 1, _) => Ok(ControlCommand::SetThreePhaseChargeSlot1 { start, end }),
+        (true, 2, _) => Ok(ControlCommand::SetThreePhaseChargeSlot2 { start, end }),
+        (true, 3..=10, _) => Ok(ControlCommand::SetChargeSlotN { slot, start, end }),
+        (false, _, false) => Ok(ControlCommand::SetEnableCharge { enabled: false }),
+        (false, 1, true) => Ok(ControlCommand::SetChargeSlot1 { start, end }),
+        (false, 2, true) => Ok(ControlCommand::SetChargeSlot2 { start, end }),
+        (false, 3..=10, true) => Ok(ControlCommand::SetChargeSlotN { slot, start, end }),
+        (_, _, _) => Err(format!("Unsupported charge slot {}", slot)),
+    }
+}
+
+fn discharge_slot_command_for_device(
+    device_type: DeviceType,
+    slot: u8,
+    enabled: bool,
+    start: u16,
+    end: u16,
+) -> Result<ControlCommand, String> {
+    let (start, end) = if enabled { (start, end) } else { (0, 0) };
+    match (device_type.uses_three_phase_schedule_slots(), slot, enabled) {
+        (true, 1, _) => Ok(ControlCommand::SetThreePhaseDischargeSlot1 { start, end }),
+        (true, 2, _) => Ok(ControlCommand::SetThreePhaseDischargeSlot2 { start, end }),
+        (true, 3..=10, _) => Ok(ControlCommand::SetDischargeSlotN { slot, start, end }),
+        (false, _, false) => Ok(ControlCommand::SetEnableDischarge { enabled: false }),
+        (false, 1, true) => Ok(ControlCommand::SetDischargeSlot1 { start, end }),
+        (false, 2, true) => Ok(ControlCommand::SetDischargeSlot2 { start, end }),
+        (false, 3..=10, true) => Ok(ControlCommand::SetDischargeSlotN { slot, start, end }),
+        (_, _, _) => Err(format!("Unsupported discharge slot {}", slot)),
+    }
 }
 
 /// Queue register writes for execution by the poll loop.
@@ -299,14 +330,15 @@ pub async fn set_charge_slot(
         Some(s) => s as u8,
         None => return error_response("Missing 'slot' field (1-2)"),
     };
-    // AC Coupled and Gen1 Hybrid only support charge slot 1 (HR 94-95).
-    let max_slots = state
+    let device_type = state
         .latest_snapshot
         .lock()
         .await
         .as_ref()
-        .map(|s| s.device_type.max_charge_slots())
-        .unwrap_or(2);
+        .map(|s| s.device_type)
+        .unwrap_or(DeviceType::Gen2Hybrid);
+    // AC Coupled and Gen1 Hybrid only support charge slot 1 (HR 94-95).
+    let max_slots = device_type.max_charge_slots();
     if slot > max_slots {
         return error_response(&format!(
             "Charge slot {} not supported on this inverter model (max {})",
@@ -331,14 +363,9 @@ pub async fn set_charge_slot(
         encode_hhmm(end_hour, end_minute),
     );
 
-    let cmd = match (slot, enabled) {
-        (1, true) => ControlCommand::SetChargeSlot1 { start, end },
-        (2, true) => ControlCommand::SetChargeSlot2 { start, end },
-        (3..=10, true) => ControlCommand::SetChargeSlotN { slot, start, end },
-        // Disabling should not clear the slot times — preserve the user's
-        // schedule and only disable the master charge schedule flag.
-        (_, false) => ControlCommand::SetEnableCharge { enabled: false },
-        _ => unreachable!(),
+    let cmd = match charge_slot_command_for_device(device_type, slot, enabled, start, end) {
+        Ok(cmd) => cmd,
+        Err(e) => return error_response(&e),
     };
 
     match cmd.encode() {
@@ -351,36 +378,23 @@ pub async fn set_charge_slot(
             // We do NOT set enable_charge_target or charge_target_soc here;
             // those trigger an immediate force charge.
             if enabled {
-                if let Ok(enable_writes) =
-                    (ControlCommand::SetEnableCharge { enabled: true }).encode()
-                {
-                    writes.extend(enable_writes);
+                if !device_type.uses_three_phase_schedule_slots() {
+                    if let Ok(enable_writes) =
+                        (ControlCommand::SetEnableCharge { enabled: true }).encode()
+                    {
+                        writes.extend(enable_writes);
+                    }
                 }
-                // Write per-slot target SOC (Gen3 extended registers HR 242+) if:
-                //   a) target_soc provided,
-                //   b) the inverter is Gen3 (per latest snapshot).
-                // These registers are independent of enable_charge_target (HR 20)
-                // and do NOT trigger immediate force charge.
-                //
-                // Per GivTCP: Gen1/Gen2 and AC Coupled don't have per-slot target
-                // registers — writes to HR 242+ are silently ignored or may error.
-                if target_soc > 0 {
-                    let is_gen3 = state
-                        .latest_snapshot
-                        .lock()
-                        .await
-                        .as_ref()
-                        .map(|s| s.device_type.supports_gen3_extended())
-                        .unwrap_or(false);
-                    if is_gen3 {
-                        if let Ok(target_writes) = (ControlCommand::SetChargeTargetSocSlot {
-                            slot,
-                            soc: target_soc as u16,
-                        })
-                        .encode()
-                        {
-                            writes.extend(target_writes);
-                        }
+                // Write per-slot target SOC (extended registers HR 242+) when the
+                // inverter supports the HR240-299 schedule/target block.
+                if target_soc > 0 && device_type.uses_extended_schedule_slots() {
+                    if let Ok(target_writes) = (ControlCommand::SetChargeTargetSocSlot {
+                        slot,
+                        soc: target_soc as u16,
+                    })
+                    .encode()
+                    {
+                        writes.extend(target_writes);
                     }
                 }
             }
@@ -408,14 +422,15 @@ pub async fn set_discharge_slot(
         Some(s) => s as u8,
         None => return error_response("Missing 'slot' field (1-2)"),
     };
-    // Check model support — AC Coupled/Gen1 only have 1 discharge slot.
-    let max_slots = state
+    let device_type = state
         .latest_snapshot
         .lock()
         .await
         .as_ref()
-        .map(|s| s.device_type.max_discharge_slots())
-        .unwrap_or(2);
+        .map(|s| s.device_type)
+        .unwrap_or(DeviceType::Gen2Hybrid);
+    // Check model support — AC Coupled/Gen1 only have 1 discharge slot.
+    let max_slots = device_type.max_discharge_slots();
     if slot > max_slots {
         return error_response(&format!(
             "Discharge slot {} not supported on this inverter model (max {})",
@@ -439,21 +454,16 @@ pub async fn set_discharge_slot(
         encode_hhmm(end_hour, end_minute),
     );
 
-    let cmd = match (slot, enabled) {
-        (1, true) => ControlCommand::SetDischargeSlot1 { start, end },
-        (2, true) => ControlCommand::SetDischargeSlot2 { start, end },
-        (3..=10, true) => ControlCommand::SetDischargeSlotN { slot, start, end },
-        // Disabling should not clear slot times — preserve schedule and only
-        // disable the master discharge schedule flag.
-        (_, false) => ControlCommand::SetEnableDischarge { enabled: false },
-        _ => unreachable!(),
+    let cmd = match discharge_slot_command_for_device(device_type, slot, enabled, start, end) {
+        Ok(cmd) => cmd,
+        Err(e) => return error_response(&e),
     };
 
     match cmd.encode() {
         Ok(mut writes) => {
-            if enabled {
+            if enabled && !device_type.uses_three_phase_schedule_slots() {
                 // User explicitly enabled the discharge slot; also enable the
-                // master discharge flag so the schedule becomes active again.
+                // single-phase master discharge flag so the schedule becomes active again.
                 if let Ok(enable_writes) =
                     (ControlCommand::SetEnableDischarge { enabled: true }).encode()
                 {
@@ -731,13 +741,15 @@ pub async fn get_history(
 
     let history = state.history.lock().await;
     match history.as_ref() {
-        Some(db) => match db.query_history(range_secs, bucket_secs, offset, &fields, explicit_window) {
-            Ok(data) => {
-                let map: HashMap<String, Value> = data.into_iter().collect();
-                Json(json!({ "ok": true, "data": map }))
+        Some(db) => {
+            match db.query_history(range_secs, bucket_secs, offset, &fields, explicit_window) {
+                Ok(data) => {
+                    let map: HashMap<String, Value> = data.into_iter().collect();
+                    Json(json!({ "ok": true, "data": map }))
+                }
+                Err(e) => error_response(&e),
             }
-            Err(e) => error_response(&e),
-        },
+        }
         None => error_response("History database not available"),
     }
 }
@@ -904,5 +916,101 @@ pub async fn reboot_inverter(State(state): State<Arc<AppState>>) -> Json<Value> 
             ok_response("Reboot command sent")
         }
         Err(e) => error_response(&format!("Error: {}", e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn three_phase_slot_selection_uses_three_phase_register_commands() {
+        assert!(matches!(
+            charge_slot_command_for_device(DeviceType::ThreePhase, 1, true, 130, 530).unwrap(),
+            ControlCommand::SetThreePhaseChargeSlot1 {
+                start: 130,
+                end: 530
+            }
+        ));
+        assert!(matches!(
+            charge_slot_command_for_device(DeviceType::AioCommercial, 2, true, 600, 900).unwrap(),
+            ControlCommand::SetThreePhaseChargeSlot2 {
+                start: 600,
+                end: 900
+            }
+        ));
+        assert!(matches!(
+            discharge_slot_command_for_device(DeviceType::ACThreePhase, 1, true, 1600, 1900)
+                .unwrap(),
+            ControlCommand::SetThreePhaseDischargeSlot1 {
+                start: 1600,
+                end: 1900
+            }
+        ));
+        assert!(matches!(
+            discharge_slot_command_for_device(DeviceType::HybridHvGen3, 2, true, 2000, 2230)
+                .unwrap(),
+            ControlCommand::SetThreePhaseDischargeSlot2 {
+                start: 2000,
+                end: 2230
+            }
+        ));
+    }
+
+    #[test]
+    fn three_phase_slot_disable_clears_specific_slot_not_global_flag() {
+        assert!(matches!(
+            charge_slot_command_for_device(DeviceType::ThreePhase, 1, false, 130, 530).unwrap(),
+            ControlCommand::SetThreePhaseChargeSlot1 { start: 0, end: 0 }
+        ));
+        assert!(matches!(
+            discharge_slot_command_for_device(DeviceType::AllInOneHybrid, 2, false, 2000, 2230)
+                .unwrap(),
+            ControlCommand::SetThreePhaseDischargeSlot2 { start: 0, end: 0 }
+        ));
+        assert!(matches!(
+            charge_slot_command_for_device(DeviceType::Gen3Hybrid, 1, false, 130, 530).unwrap(),
+            ControlCommand::SetEnableCharge { enabled: false }
+        ));
+        assert!(matches!(
+            discharge_slot_command_for_device(DeviceType::Gen3Hybrid, 1, false, 1600, 1900)
+                .unwrap(),
+            ControlCommand::SetEnableDischarge { enabled: false }
+        ));
+    }
+
+    #[test]
+    fn slot_selection_keeps_existing_single_phase_and_extended_behaviour() {
+        assert!(matches!(
+            charge_slot_command_for_device(DeviceType::Gen3Hybrid, 1, true, 100, 500).unwrap(),
+            ControlCommand::SetChargeSlot1 {
+                start: 100,
+                end: 500
+            }
+        ));
+        assert!(matches!(
+            charge_slot_command_for_device(DeviceType::Gen3Hybrid, 3, true, 2300, 30).unwrap(),
+            ControlCommand::SetChargeSlotN {
+                slot: 3,
+                start: 2300,
+                end: 30
+            }
+        ));
+        assert!(matches!(
+            discharge_slot_command_for_device(DeviceType::Gen3Hybrid, 2, true, 1600, 1900).unwrap(),
+            ControlCommand::SetDischargeSlot2 {
+                start: 1600,
+                end: 1900
+            }
+        ));
+        assert!(matches!(
+            discharge_slot_command_for_device(DeviceType::Gen3Hybrid, 10, true, 2000, 2230)
+                .unwrap(),
+            ControlCommand::SetDischargeSlotN {
+                slot: 10,
+                start: 2000,
+                end: 2230
+            }
+        ));
     }
 }

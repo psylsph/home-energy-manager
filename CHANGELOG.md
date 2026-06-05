@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.3] - 2026-06-05
+
+### Added
+
+- **Three-phase charge/discharge schedule editing**: Three-phase, commercial,
+  and HV models now read and write their native schedule timer registers
+  (HR 1113-1121 for slots 1-2, plus HR 240-299 for slots 3-10). The Control
+  page schedule editors are enabled again for these models, with model-aware
+  write routing and safe-write whitelist coverage.
+
+### Fixed
+
+- **AC-coupled external CT detection**: AC-coupled inverters now run the
+  external CT meter probe after the model-aware re-poll, so systems with
+  separate grid/PV CT clamps populate the Meters page reliably.
+- **AC-coupled daily solar and consumption totals**: Solar Today no longer uses
+  the lifetime PV counter as a daily value. Single-phase/AC-coupled daily solar
+  now uses the verified daily generation register and the consumption total is
+  computed from the daily energy balance.
+- **Three-phase daily solar totals**: Three-phase models now use the verified
+  IR 1412-1413 daily PV generation counter instead of the lifetime PV total.
+- **Three-phase poll robustness**: Dashboard-critical three-phase input blocks
+  are read before optional config/schedule blocks so Status-page power and daily
+  energy values are less likely to be starved by optional block timeouts.
+
 ## [0.13.2] - 2026-06-05
 
 ### Fixed

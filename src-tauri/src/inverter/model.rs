@@ -311,15 +311,35 @@ impl DeviceType {
         )
     }
 
+    /// Whether this device uses the three-phase schedule register map.
+    ///
+    /// Slots 1-2 live in HR1113-1121; slots 3-10 reuse the extended
+    /// HR240-299 schedule block.
+    pub fn uses_three_phase_schedule_slots(&self) -> bool {
+        matches!(
+            self,
+            Self::ThreePhase
+                | Self::ACThreePhase
+                | Self::AioCommercial
+                | Self::HybridHvGen3
+                | Self::AllInOneHybrid
+        )
+    }
+
+    /// Whether this device uses the extended HR240-299 slot/target block.
+    pub fn uses_extended_schedule_slots(&self) -> bool {
+        self.supports_gen3_extended() || self.uses_three_phase_schedule_slots()
+    }
+
     /// Maximum number of charge schedule slots this device supports.
     ///
     /// - AC Coupled and Gen1 Hybrid: **1** charge slot (HR 94-95)
-    /// - Gen3/AIO/HV/Gen4 families: up to **10** slots in extended blocks
+    /// - Gen3/AIO/HV/Gen4 and three-phase families: up to **10** slots
     /// - Other single-phase inverters: **2** slots
     pub fn max_charge_slots(&self) -> u8 {
         match self {
             Self::ACCoupled | Self::ACCoupledMk2 | Self::Gen1Hybrid => 1,
-            dt if dt.supports_gen3_extended() => 10,
+            dt if dt.uses_extended_schedule_slots() => 10,
             _ => 2,
         }
     }
@@ -328,7 +348,7 @@ impl DeviceType {
     pub fn max_discharge_slots(&self) -> u8 {
         match self {
             Self::ACCoupled | Self::ACCoupledMk2 | Self::Gen1Hybrid => 1,
-            dt if dt.supports_gen3_extended() => 10,
+            dt if dt.uses_extended_schedule_slots() => 10,
             _ => 2,
         }
     }
@@ -337,13 +357,14 @@ impl DeviceType {
     /// beyond the standard set (IR 0-59, HR 0-59, HR 60-119).
     pub fn extra_poll_blocks(&self) -> &'static [crate::modbus::registers::RegisterBlock] {
         use crate::modbus::registers::{
-            AC_AND_THREE_PHASE_BLOCKS, AC_CONFIG_BLOCK, EXTENDED_AND_THREE_PHASE_BLOCKS,
-            EXTENDED_SLOTS_BLOCK, THREE_PHASE_CONFIG_BLOCK,
+            AC_CONFIG_BLOCK, AC_EXTENDED_AND_THREE_PHASE_BLOCKS, EXTENDED_AND_THREE_PHASE_BLOCKS,
+            EXTENDED_SLOTS_BLOCK,
         };
         match self {
-            Self::HybridHvGen3 | Self::AllInOneHybrid => EXTENDED_AND_THREE_PHASE_BLOCKS,
-            Self::ACThreePhase => AC_AND_THREE_PHASE_BLOCKS,
-            Self::ThreePhase | Self::AioCommercial => &[THREE_PHASE_CONFIG_BLOCK],
+            Self::ACThreePhase => AC_EXTENDED_AND_THREE_PHASE_BLOCKS,
+            Self::HybridHvGen3 | Self::AllInOneHybrid | Self::ThreePhase | Self::AioCommercial => {
+                EXTENDED_AND_THREE_PHASE_BLOCKS
+            }
             dt if dt.supports_gen3_extended() => &[EXTENDED_SLOTS_BLOCK],
             Self::ACCoupled | Self::ACCoupledMk2 => &[AC_CONFIG_BLOCK],
             _ => &[],
@@ -364,13 +385,12 @@ impl DeviceType {
         )
     }
 
-    /// Whether schedule (charge/discharge slot) writes/reads are supported for
-    /// this device. Three-phase models use a different register layout
-    /// (HR 1113-1121 instead of HR 31-32/44-45/56-57/94-95) that we don't yet
-    /// read or write. Until that's implemented, hide the schedule UI for these
-    /// models to avoid silently writing to ignored registers.
+    /// Whether schedule (charge/discharge slot) writes/reads are supported for this device.
     pub fn supports_schedule_slots(&self) -> bool {
-        !self.needs_three_phase_input_blocks()
+        !matches!(
+            self,
+            Self::Ems | Self::EmsCommercial | Self::Gateway | Self::PvInverter
+        )
     }
 
     /// Preferred Modbus slave address for operational inverter register reads.
@@ -926,6 +946,42 @@ mod tests {
         assert_eq!(DeviceType::from_register(0x4099), DeviceType::ThreePhase);
         assert_eq!(DeviceType::from_register(0x8099), DeviceType::AllInOne6kW);
         assert_eq!(DeviceType::from_register(0x8199), DeviceType::HybridHvGen3);
+    }
+
+    #[test]
+    fn three_phase_schedule_models_expose_10_slots_and_required_blocks() {
+        use crate::modbus::registers::{EXTENDED_SLOTS_BLOCK, THREE_PHASE_CONFIG_BLOCK};
+
+        for dt in [
+            DeviceType::ThreePhase,
+            DeviceType::AioCommercial,
+            DeviceType::ACThreePhase,
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOneHybrid,
+        ] {
+            assert!(
+                dt.supports_schedule_slots(),
+                "{dt:?} should expose schedules"
+            );
+            assert!(
+                dt.uses_three_phase_schedule_slots(),
+                "{dt:?} should use the three-phase HR1113+ slot map"
+            );
+            assert_eq!(dt.max_charge_slots(), 10, "{dt:?} charge slot count");
+            assert_eq!(dt.max_discharge_slots(), 10, "{dt:?} discharge slot count");
+
+            let extras = dt.extra_poll_blocks();
+            assert!(
+                extras
+                    .iter()
+                    .any(|b| b.start == THREE_PHASE_CONFIG_BLOCK.start),
+                "{dt:?} should poll HR1080-1124"
+            );
+            assert!(
+                extras.iter().any(|b| b.start == EXTENDED_SLOTS_BLOCK.start),
+                "{dt:?} should poll HR240-299 for slots 3-10"
+            );
+        }
     }
 
     #[test]

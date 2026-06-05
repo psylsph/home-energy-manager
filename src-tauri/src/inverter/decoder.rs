@@ -281,14 +281,16 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
     // This prevents toggling schedules off/on from clearing configured times:
     // HR 96/59 are the master enable flags, while the slot registers retain
     // the configured windows.
-    if !snap.enable_charge {
-        for slot in &mut snap.charge_slots {
-            slot.enabled = false;
+    if !snap.device_type.uses_three_phase_schedule_slots() {
+        if !snap.enable_charge {
+            for slot in &mut snap.charge_slots {
+                slot.enabled = false;
+            }
         }
-    }
-    if !snap.enable_discharge {
-        for slot in &mut snap.discharge_slots {
-            slot.enabled = false;
+        if !snap.enable_discharge {
+            for slot in &mut snap.discharge_slots {
+                slot.enabled = false;
+            }
         }
     }
 
@@ -330,13 +332,12 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.inverter_temperature = get_reg(data, 41) as f32 * 0.1; // IR(41): t_inverter_heatsink (/10 °C)
 
     // -- Energy totals (all in /10 kWh) --
-    // Prefer e_pv_total at IR(11-12) which is a single uint32 combining both PV
-    // strings — more stable than summing two separate uint16 registers (IR(17)+IR(19))
-    // that can each be independently corrupted by the dongle.
-    // Falls back to the per-string sum when the uint32 register is unavailable (0).
-    let pv_total_u32 = uint32(get_reg(data, 11), get_reg(data, 12)); // IR(11-12): e_pv_total
-    if pv_total_u32 > 0 {
-        snap.today_solar_kwh = pv_total_u32 as f32 * 0.1;
+    // IR(11-12) is lifetime PV total, NOT a daily value. Daily PV generation is
+    // IR(44) per givenergy-modbus sentinel cross-correlation; fall back to the
+    // older per-string daily registers when IR(44) is unavailable/zero.
+    let pv_generation_today = get_reg(data, 44); // IR(44): e_pv_generation_today
+    if pv_generation_today > 0 {
+        snap.today_solar_kwh = pv_generation_today as f32 * 0.1;
     } else {
         // Fallback: only include PV2's daily energy if PV2 has panels connected.
         // IR(19) can return stale or garbage data when no second PV string is present.
@@ -492,7 +493,7 @@ fn decode_holding_240_299(data: &[u16], snap: &mut InverterSnapshot) {
         }
 
         if let (Some((sh, sm)), Some((eh, em))) = (decode_hhmm(start_val), decode_hhmm(end_val)) {
-            let idx = (i + 3) as usize; // 0-based index 3..10
+            let idx = (i + 2) as usize; // 0-based index 2..9 (slots 3..10)
             if idx < snap.charge_slots.len() {
                 snap.charge_slots[idx] = ScheduleSlot {
                     enabled: true,
@@ -527,8 +528,7 @@ fn decode_holding_240_299(data: &[u16], snap: &mut InverterSnapshot) {
         }
         let start_val = get_reg(data, offset);
         let end_val = get_reg(data, offset + 1);
-        // target_soc at offset+2 is decoded but not stored (discharge target
-        // uses HR 272/275 for slots 1-2 only)
+        let target = get_reg(data, offset + 2) as u8;
 
         // Disabled when start == end (zero-duration slot)
         if start_val == end_val {
@@ -536,7 +536,7 @@ fn decode_holding_240_299(data: &[u16], snap: &mut InverterSnapshot) {
         }
 
         if let (Some((sh, sm)), Some((eh, em))) = (decode_hhmm(start_val), decode_hhmm(end_val)) {
-            let idx = (i + 3) as usize; // 0-based index 3..10
+            let idx = (i + 2) as usize; // 0-based index 2..9 (slots 3..10)
             if idx < snap.discharge_slots.len() {
                 snap.discharge_slots[idx] = ScheduleSlot {
                     enabled: true,
@@ -544,7 +544,7 @@ fn decode_holding_240_299(data: &[u16], snap: &mut InverterSnapshot) {
                     start_minute: sm,
                     end_hour: eh,
                     end_minute: em,
-                    target_soc: 0,
+                    target_soc: target,
                 };
             }
         }
@@ -603,6 +603,13 @@ fn decode_holding_1080_1124(data: &[u16], snap: &mut InverterSnapshot, raw: &mut
     raw.battery_soc_reserve = snap.battery_reserve as u16;
     snap.charge_rate = get_reg(data, 1110 - 1080) as u8;
     snap.target_soc = get_reg(data, 1111 - 1080) as u8;
+
+    // Three-phase schedule slots 1-2 live in this block rather than the
+    // single-phase HR31/32, HR44/45, HR56/57 and HR94/95 locations.
+    snap.charge_slots[0] = decode_timeslot(data, 1113 - 1080, 1114 - 1080);
+    snap.charge_slots[1] = decode_timeslot(data, 1115 - 1080, 1116 - 1080);
+    snap.discharge_slots[0] = decode_timeslot(data, 1118 - 1080, 1119 - 1080);
+    snap.discharge_slots[1] = decode_timeslot(data, 1120 - 1080, 1121 - 1080);
 
     // These are distinct from the single-phase HR96/59 flags but represent
     // the equivalent three-phase force/AC-charge state.
@@ -769,8 +776,9 @@ fn decode_input_1300_1359(data: &[u16], snap: &mut InverterSnapshot) {
     // Decode the 5-register firmware string (IR 1320-1324) as the display version,
     // matching GivTCP which uses GEInv.tph_firmware_version for the firmware label.
     let fw_string = decode_serial(data, 20, 5);
-    if !fw_string.is_empty() && fw_string.trim_matches(char::MIN).len() > 0 {
-        snap.firmware_version = fw_string.trim_matches(char::MIN).to_string();
+    let fw_string = fw_string.trim_matches('\0');
+    if !fw_string.is_empty() {
+        snap.firmware_version = fw_string.to_string();
     }
 
     // AC-side DSP: IR(1325) as uint16
@@ -793,14 +801,22 @@ fn decode_input_1360_1413(data: &[u16], snap: &mut InverterSnapshot) {
     //  6+7 → IR(1366)+IR(1367): e_pv1_today        (uint32 /10 kWh)
     //  8+9 → IR(1368)+IR(1369): e_pv1_total        (uint32 /10 kWh)
     // 10+11 → IR(1370)+IR(1371): e_pv2_today       (uint32 /10 kWh)
-    // 14+15 → IR(1374)+IR(1375): e_pv_total        (uint32 /10 kWh)
+    // 14+15 → IR(1374)+IR(1375): e_pv_total        (uint32 /10 kWh, lifetime)
     // 16+17 → IR(1376)+IR(1377): e_ac_charge_today (uint32 /10 kWh)
     // 20+21 → IR(1380)+IR(1381): e_import_today    (uint32 /10 kWh)
     // 24+25 → IR(1384)+IR(1385): e_export_today    (uint32 /10 kWh)
     // 28+29 → IR(1388)+IR(1389): e_battery_discharge_today (uint32 /10 kWh)
     // 32+33 → IR(1392)+IR(1393): e_battery_charge_today    (uint32 /10 kWh)
     // 36+37 → IR(1396)+IR(1397): e_load_today              (uint32 /10 kWh)
-    snap.today_solar_kwh = uint32(get_reg(data, 14), get_reg(data, 15)) as f32 * 0.1;
+    // 52+53 → IR(1412)+IR(1413): e_pv_today                (uint32 /10 kWh)
+    let pv_today = uint32(get_reg(data, 52), get_reg(data, 53));
+    snap.today_solar_kwh = if pv_today > 0 {
+        pv_today as f32 * 0.1
+    } else {
+        (uint32(get_reg(data, 6), get_reg(data, 7)) + uint32(get_reg(data, 10), get_reg(data, 11)))
+            as f32
+            * 0.1
+    };
     snap.today_import_kwh = uint32(get_reg(data, 20), get_reg(data, 21)) as f32 * 0.1;
     snap.today_export_kwh = uint32(get_reg(data, 24), get_reg(data, 25)) as f32 * 0.1;
     snap.today_charge_kwh = uint32(get_reg(data, 32), get_reg(data, 33)) as f32 * 0.1;
@@ -1173,8 +1189,8 @@ mod tests {
         ir1120[1140 - 1120] = 25; // battery current 2.5A
 
         let mut ir1360 = vec![0u16; 54];
-        ir1360[1374 - 1360] = 0;
-        ir1360[1375 - 1360] = 123; // solar today 12.3kWh
+        ir1360[1374 - 1360] = 3;
+        ir1360[1375 - 1360] = 4641; // lifetime PV total 20124.9kWh; not a daily value
         ir1360[1380 - 1360] = 0;
         ir1360[1381 - 1360] = 45; // import today 4.5kWh
         ir1360[1384 - 1360] = 0;
@@ -1185,6 +1201,8 @@ mod tests {
         ir1360[1393 - 1360] = 101; // charge today 10.1kWh
         ir1360[1396 - 1360] = 0;
         ir1360[1397 - 1360] = 111; // load today 11.1kWh
+        ir1360[1412 - 1360] = 0;
+        ir1360[1413 - 1360] = 123; // PV generation today 12.3kWh
 
         let blocks = vec![
             make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
@@ -1212,9 +1230,16 @@ mod tests {
         assert!((snap.today_consumption_kwh - 11.1).abs() < 0.1);
 
         // Verify synthetic built-in CT meter was created
-        assert_eq!(snap.meters.len(), 1, "Should have 1 synthetic meter from 3-phase CT");
+        assert_eq!(
+            snap.meters.len(),
+            1,
+            "Should have 1 synthetic meter from 3-phase CT"
+        );
         assert_eq!(snap.meters[0].address, 0x00);
-        assert_eq!(snap.meters[0].p_active_total, -600, "Meter total = -grid_power (positive = import)");
+        assert_eq!(
+            snap.meters[0].p_active_total, -600,
+            "Meter total = -grid_power (positive = import)"
+        );
         assert!((snap.meters[0].frequency - 50.0).abs() < 0.01);
     }
 
@@ -1263,6 +1288,126 @@ mod tests {
         assert_eq!(snap.target_soc, 95);
         assert!(snap.enable_charge);
         assert!(snap.enable_discharge);
+    }
+
+    #[test]
+    fn three_phase_decodes_schedule_slots_from_three_phase_map() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x4001; // Three Phase
+                                  // Bogus single-phase slot values must be ignored/overridden for three-phase models.
+        holding_data[31] = 101;
+        holding_data[32] = 202;
+        holding_data[44] = 303;
+        holding_data[45] = 404;
+        holding_data[56] = 505;
+        holding_data[57] = 606;
+
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[94 - 60] = 707;
+        holding_60_data[95 - 60] = 808;
+
+        let mut three_phase = vec![0u16; 45];
+        three_phase[1109 - 1080] = 20;
+        three_phase[1113 - 1080] = 130;
+        three_phase[1114 - 1080] = 530;
+        three_phase[1115 - 1080] = 600;
+        three_phase[1116 - 1080] = 900;
+        three_phase[1118 - 1080] = 1600;
+        three_phase[1119 - 1080] = 1900;
+        three_phase[1120 - 1080] = 2000;
+        three_phase[1121 - 1080] = 2230;
+        // Force/ac-charge flags deliberately remain false: they are not schedule master flags.
+
+        let mut extended = vec![0u16; 60];
+        extended[246 - 240] = 2300;
+        extended[247 - 240] = 30;
+        extended[248 - 240] = 85;
+        extended[276 - 240] = 1000;
+        extended[277 - 240] = 1200;
+        extended[278 - 240] = 40;
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+            make_block(
+                RegisterType::Holding,
+                1080,
+                45,
+                "holding_1080_1124",
+                three_phase,
+            ),
+            make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
+        ];
+
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.device_type, DeviceType::ThreePhase);
+        assert_eq!(snap.max_charge_slots, 10);
+        assert_eq!(snap.max_discharge_slots, 10);
+
+        assert!(snap.charge_slots[0].enabled);
+        assert_eq!(snap.charge_slots[0].start_hour, 1);
+        assert_eq!(snap.charge_slots[0].start_minute, 30);
+        assert_eq!(snap.charge_slots[0].end_hour, 5);
+        assert_eq!(snap.charge_slots[0].end_minute, 30);
+
+        assert!(snap.charge_slots[1].enabled);
+        assert_eq!(snap.charge_slots[1].start_hour, 6);
+        assert_eq!(snap.charge_slots[1].end_hour, 9);
+
+        assert!(snap.discharge_slots[0].enabled);
+        assert_eq!(snap.discharge_slots[0].start_hour, 16);
+        assert_eq!(snap.discharge_slots[0].end_hour, 19);
+
+        assert!(snap.discharge_slots[1].enabled);
+        assert_eq!(snap.discharge_slots[1].start_hour, 20);
+        assert_eq!(snap.discharge_slots[1].end_hour, 22);
+        assert_eq!(snap.discharge_slots[1].end_minute, 30);
+
+        assert!(snap.charge_slots[2].enabled);
+        assert_eq!(snap.charge_slots[2].start_hour, 23);
+        assert_eq!(snap.charge_slots[2].end_hour, 0);
+        assert_eq!(snap.charge_slots[2].end_minute, 30);
+        assert_eq!(snap.charge_slots[2].target_soc, 85);
+
+        assert!(snap.discharge_slots[2].enabled);
+        assert_eq!(snap.discharge_slots[2].start_hour, 10);
+        assert_eq!(snap.discharge_slots[2].end_hour, 12);
+        assert_eq!(snap.discharge_slots[2].target_soc, 40);
+    }
+
+    #[test]
+    fn single_phase_daily_solar_uses_ir44_not_lifetime_pv_total() {
+        let mut input_data = vec![0u16; 60];
+        input_data[11] = 3;
+        input_data[12] = 4641; // lifetime PV total = 201249 * 0.1 = 20124.9 kWh; not a daily value
+        input_data[17] = 0;
+        input_data[19] = 0;
+        input_data[25] = 10; // export today 1.0 kWh
+        input_data[26] = 20; // import today 2.0 kWh
+        input_data[35] = 5; // AC charge today 0.5 kWh
+        input_data[44] = 37; // PV generation today 3.7 kWh
+
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x3001; // AC Coupled
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", input_data),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", vec![0; 60]),
+        ];
+        let snap = decode_snapshot(&blocks);
+
+        assert_eq!(snap.device_type, DeviceType::ACCoupled);
+        assert!((snap.today_solar_kwh - 3.7).abs() < 0.01);
+        // GE app formula for single-phase consumption: PV generation + import - export - AC charge.
+        assert!((snap.today_consumption_kwh - 4.2).abs() < 0.01);
     }
 
     #[test]

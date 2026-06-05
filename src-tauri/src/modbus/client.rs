@@ -82,6 +82,26 @@ pub struct BlockRead {
 }
 
 // ---------------------------------------------------------------------------
+// Model-aware poll ordering
+// ---------------------------------------------------------------------------
+
+fn model_specific_blocks_in_poll_order(
+    device_type: &crate::inverter::model::DeviceType,
+) -> Vec<&'static RegisterBlock> {
+    let mut blocks = Vec::new();
+
+    // Three-phase telemetry/daily counters are dashboard-critical. Read them
+    // before optional holding-register config/schedule blocks so an unsupported
+    // or slow optional block cannot starve Status-page data for this cycle.
+    if device_type.needs_three_phase_input_blocks() {
+        blocks.extend(super::registers::THREE_PHASE_INPUT_BLOCKS.iter());
+    }
+
+    blocks.extend(device_type.extra_poll_blocks().iter());
+    blocks
+}
+
+// ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
 
@@ -1035,9 +1055,8 @@ impl ModbusClient {
         let mut results = self.read_blocks(STANDARD_POLL_BLOCKS).await?;
 
         if let Some(dt) = device_type {
-            let extra_blocks = dt.extra_poll_blocks();
-            for block in extra_blocks {
-                // Pause between blocks to let the dongle catch up
+            for block in model_specific_blocks_in_poll_order(dt) {
+                // Pause between blocks to let the dongle catch up.
                 tokio::time::sleep(Self::INTER_REQUEST_DELAY).await;
 
                 let reg_type = match block.register_type {
@@ -1057,7 +1076,7 @@ impl ModbusClient {
                             count = block.count,
                             received = data.len(),
                             elapsed_ms = t0.elapsed().as_millis() as u64,
-                            "Extended block read OK"
+                            "Model-specific block read OK"
                         );
                         results.push(BlockRead { block, data });
                     }
@@ -1065,42 +1084,9 @@ impl ModbusClient {
                         tracing::debug!(
                             block = block.name,
                             error = %e,
-                            "Extended block read skipped (non-fatal)"
+                            "Model-specific block read skipped (non-fatal)"
                         );
-                        // Continue — extended blocks are optional
-                    }
-                }
-            }
-
-            // Three-phase models store all real-time measurements (PV, grid,
-            // battery, energy totals) in IR(1000-1414). Without these blocks
-            // the dashboard shows zeros. See givenergy-modbus client.py.
-            if dt.needs_three_phase_input_blocks() {
-                for block in super::registers::THREE_PHASE_INPUT_BLOCKS {
-                    tokio::time::sleep(Self::INTER_REQUEST_DELAY).await;
-                    let t0 = std::time::Instant::now();
-                    match self
-                        .read_registers(RegisterType::Input, block.start, block.count)
-                        .await
-                    {
-                        Ok(data) => {
-                            tracing::debug!(
-                                block = block.name,
-                                start = block.start,
-                                count = block.count,
-                                received = data.len(),
-                                elapsed_ms = t0.elapsed().as_millis() as u64,
-                                "Three-phase input block read OK"
-                            );
-                            results.push(BlockRead { block, data });
-                        }
-                        Err(e) => {
-                            tracing::debug!(
-                                block = block.name,
-                                error = %e,
-                                "Three-phase input block skipped (non-fatal)"
-                            );
-                        }
+                        // Continue — model-specific blocks are optional.
                     }
                 }
             }
@@ -1324,5 +1310,35 @@ mod tests {
     fn standard_poll_blocks_are_accessible() {
         assert_eq!(STANDARD_POLL_BLOCKS.len(), 3);
         assert_eq!(STANDARD_POLL_BLOCKS[0].name, "input_0_59");
+    }
+
+    #[test]
+    fn three_phase_model_specific_poll_order_reads_dashboard_inputs_first() {
+        use crate::inverter::model::DeviceType;
+
+        let blocks = model_specific_blocks_in_poll_order(&DeviceType::ThreePhase);
+        let names: Vec<&str> = blocks.iter().map(|b| b.name).collect();
+
+        assert!(names.starts_with(&[
+            "input_1000_1059",
+            "input_1060_1119",
+            "input_1120_1179",
+            "input_1180_1239",
+            "input_1240_1299",
+            "input_1300_1359",
+            "input_1360_1413",
+        ]));
+        assert!(names.iter().any(|name| *name == "holding_240_299"));
+        assert!(names.iter().any(|name| *name == "holding_1080_1124"));
+    }
+
+    #[test]
+    fn ac_coupled_model_specific_poll_order_still_reads_ac_config() {
+        use crate::inverter::model::DeviceType;
+
+        let blocks = model_specific_blocks_in_poll_order(&DeviceType::ACCoupled);
+        let names: Vec<&str> = blocks.iter().map(|b| b.name).collect();
+
+        assert_eq!(names, vec!["holding_300_359"]);
     }
 }

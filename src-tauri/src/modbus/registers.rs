@@ -275,6 +275,18 @@ pub const HR_3PH_BATTERY_CHARGE_LIMIT: u16 = 1110;
 pub const HR_3PH_CHARGE_TARGET_SOC: u16 = 1111;
 /// Three-phase AC charge enable (HR 1112).
 pub const HR_3PH_AC_CHARGE_ENABLE: u16 = 1112;
+/// Three-phase charge slot 1 start/end (HR 1113-1114).
+pub const HR_3PH_CHARGE_SLOT_1_START: u16 = 1113;
+pub const HR_3PH_CHARGE_SLOT_1_END: u16 = 1114;
+/// Three-phase charge slot 2 start/end (HR 1115-1116).
+pub const HR_3PH_CHARGE_SLOT_2_START: u16 = 1115;
+pub const HR_3PH_CHARGE_SLOT_2_END: u16 = 1116;
+/// Three-phase discharge slot 1 start/end (HR 1118-1119).
+pub const HR_3PH_DISCHARGE_SLOT_1_START: u16 = 1118;
+pub const HR_3PH_DISCHARGE_SLOT_1_END: u16 = 1119;
+/// Three-phase discharge slot 2 start/end (HR 1120-1121).
+pub const HR_3PH_DISCHARGE_SLOT_2_START: u16 = 1120;
+pub const HR_3PH_DISCHARGE_SLOT_2_END: u16 = 1121;
 /// Three-phase force discharge enable (HR 1122).
 pub const HR_3PH_FORCE_DISCHARGE_ENABLE: u16 = 1122;
 /// Three-phase force charge enable (HR 1123).
@@ -370,7 +382,8 @@ pub const SAFE_WRITE_REGS: &[u16] = &[
     272, 275, // AC-coupled features
     311, 313, 314, 317, // Pause mode/slot
     318, 319, 320, // Three-phase controls
-    1108, 1109, 1110, 1111, 1112, 1122, 1123, // EMS plant-level control / discharge slots
+    1108, 1109, 1110, 1111, 1112, 1113, 1114, 1115, 1116, 1118, 1119, 1120, 1121, 1122, 1123,
+    // EMS plant-level control / discharge slots
     2040, 2044, 2045, 2046, 2047, 2048, 2049, 2050, 2051, 2052,
 ];
 
@@ -517,9 +530,16 @@ pub const THREE_PHASE_INPUT_BLOCKS: &[RegisterBlock] = &[
 pub const AC_AND_THREE_PHASE_BLOCKS: &[RegisterBlock] =
     &[AC_CONFIG_BLOCK, THREE_PHASE_CONFIG_BLOCK];
 
-/// Extra blocks for HV three-phase models that also use extended schedules.
+/// Extra blocks for HV/three-phase models that also use extended schedules.
 pub const EXTENDED_AND_THREE_PHASE_BLOCKS: &[RegisterBlock] =
     &[EXTENDED_SLOTS_BLOCK, THREE_PHASE_CONFIG_BLOCK];
+
+/// Extra blocks for AC three-phase models: AC config plus full three-phase schedule/config.
+pub const AC_EXTENDED_AND_THREE_PHASE_BLOCKS: &[RegisterBlock] = &[
+    AC_CONFIG_BLOCK,
+    EXTENDED_SLOTS_BLOCK,
+    THREE_PHASE_CONFIG_BLOCK,
+];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -638,6 +658,14 @@ mod tests {
         assert!(SAFE_WRITE_REGS.contains(&HR_3PH_BATTERY_SOC_RESERVE)); // 1109
         assert!(SAFE_WRITE_REGS.contains(&HR_3PH_BATTERY_CHARGE_LIMIT)); // 1110
         assert!(SAFE_WRITE_REGS.contains(&HR_3PH_CHARGE_TARGET_SOC)); // 1111
+        assert!(SAFE_WRITE_REGS.contains(&HR_3PH_CHARGE_SLOT_1_START)); // 1113
+        assert!(SAFE_WRITE_REGS.contains(&HR_3PH_CHARGE_SLOT_1_END)); // 1114
+        assert!(SAFE_WRITE_REGS.contains(&HR_3PH_CHARGE_SLOT_2_START)); // 1115
+        assert!(SAFE_WRITE_REGS.contains(&HR_3PH_CHARGE_SLOT_2_END)); // 1116
+        assert!(SAFE_WRITE_REGS.contains(&HR_3PH_DISCHARGE_SLOT_1_START)); // 1118
+        assert!(SAFE_WRITE_REGS.contains(&HR_3PH_DISCHARGE_SLOT_1_END)); // 1119
+        assert!(SAFE_WRITE_REGS.contains(&HR_3PH_DISCHARGE_SLOT_2_START)); // 1120
+        assert!(SAFE_WRITE_REGS.contains(&HR_3PH_DISCHARGE_SLOT_2_END)); // 1121
         assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_TARGET_SOC_1)); // 242
         assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_TARGET_SOC_2)); // 245
         assert!(SAFE_WRITE_REGS.contains(&HR_DISCHARGE_TARGET_SOC_1)); // 272

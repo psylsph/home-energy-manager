@@ -326,6 +326,15 @@ fn should_repoll_after_model_detection(device_type: DeviceType, current_slave: u
         || !device_type.extra_poll_blocks().is_empty()
 }
 
+fn should_probe_external_meters(
+    known_device_type: Option<DeviceType>,
+    meter_probe_done: bool,
+) -> bool {
+    known_device_type
+        .map(|dt| !meter_probe_done && !dt.needs_three_phase_input_blocks())
+        .unwrap_or(false)
+}
+
 fn carry_forward_optional_block_values(
     snap: &mut InverterSnapshot,
     prev: Option<&InverterSnapshot>,
@@ -411,12 +420,13 @@ fn carry_forward_optional_block_values(
         changed = true;
     }
 
-    // Gen3/AIO/HV extended schedules are read from optional HR(240-299). If the
-    // block is missed, preserve values that only exist there: per-slot targets
-    // for slots 1/2 and extended slots 3-10. Standard slot times for slots 1/2
-    // are still decoded from HR(31/32/44/45/56/57/94/95), so avoid replacing them.
+    // Gen3/AIO/HV/three-phase extended schedules are read from optional HR(240-299).
+    // If the block is missed, preserve values that only exist there: per-slot
+    // targets for slots 1/2 and extended slots 3-10. Slot times for slots 1/2
+    // are decoded from either the standard single-phase map or the three-phase
+    // HR(1113-1121) config block, so avoid replacing them here.
     if !has_extended_slots_block
-        && snap.device_type.supports_gen3_extended()
+        && snap.device_type.uses_extended_schedule_slots()
         && snap.device_type == prev.device_type
     {
         for idx in 0..2 {
@@ -1399,6 +1409,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 let mut pending_mode: Option<BatteryMode> = None;
                 let mut known_device_type: Option<crate::inverter::model::DeviceType> = None;
                 let mut detected_meters: Vec<u8> = Vec::new();
+                let mut meter_probe_done = false;
 
                 // Restore cosy_active from persisted settings on restart.
                 // Without this, a client reboot during a cosy slot would leave
@@ -1568,47 +1579,53 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         return (true, true);
                                     }
 
+                                }
+
+                                if should_probe_external_meters(known_device_type, meter_probe_done)
+                                {
                                     // Probe for external CT clamp meters (device addresses 0x01-0x08).
                                     // A meter is present if V_phase_1 (IR 60) is non-zero and >100V.
                                     // Three-phase/HV models use the inverter's internal grid CT at
                                     // IR 1079-1082 instead of separate external meters, so skip.
-                                    let skip_meter_probe = known_device_type
-                                        .is_some_and(|dt| dt.needs_three_phase_input_blocks());
+                                    tracing::info!("Probing for external CT meters...");
                                     let mut found_meters: Vec<u8> = Vec::new();
-                                    if skip_meter_probe {
-                                        tracing::info!(
-                                            "Skipping external CT probe for three-phase model"
-                                        );
-                                    } else {
-                                        tracing::info!("Probing for external CT meters...");
-                                        for &addr in crate::modbus::registers::METER_ADDRESSES {
-                                            match client.read_registers_at_slave(
+                                    for &addr in crate::modbus::registers::METER_ADDRESSES {
+                                        match client
+                                            .read_registers_at_slave(
                                                 addr,
                                                 crate::modbus::framer::RegisterType::Input,
                                                 60,
                                                 30,
-                                            ).await {
-                                                Ok(data) => {
-                                                    if crate::inverter::decoder::validate_meter_data(&data) {
-                                                        let meter = crate::inverter::decoder::decode_meter_data(&data, addr);
-                                                        tracing::info!(
-                                                            "Meter detected at addr 0x{addr:02X}: {:.1}V, {:.0}W",
-                                                            meter.v_phase_1, meter.p_active_total
+                                            )
+                                            .await
+                                        {
+                                            Ok(data) => {
+                                                if crate::inverter::decoder::validate_meter_data(
+                                                    &data,
+                                                ) {
+                                                    let meter =
+                                                        crate::inverter::decoder::decode_meter_data(
+                                                            &data, addr,
                                                         );
-                                                        found_meters.push(addr);
-                                                        snapshot.meters.push(meter);
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    tracing::debug!(
-                                                        "Meter addr 0x{addr:02X}: no response: {e}",
+                                                    tracing::info!(
+                                                        "Meter detected at addr 0x{addr:02X}: {:.1}V, {:.0}W",
+                                                        meter.v_phase_1,
+                                                        meter.p_active_total
                                                     );
+                                                    found_meters.push(addr);
+                                                    snapshot.meters.push(meter);
                                                 }
                                             }
-                                            tokio::time::sleep(Duration::from_millis(100)).await;
+                                            Err(e) => {
+                                                tracing::debug!(
+                                                    "Meter addr 0x{addr:02X}: no response: {e}",
+                                                );
+                                            }
                                         }
+                                        tokio::time::sleep(Duration::from_millis(100)).await;
                                     }
                                     detected_meters = found_meters;
+                                    meter_probe_done = true;
                                     if detected_meters.is_empty() {
                                         tracing::info!("No external CT meters detected");
                                     } else {
@@ -2181,6 +2198,34 @@ mod tests {
             DeviceType::Gen2Hybrid,
             0x11
         ));
+    }
+
+    #[test]
+    fn external_meter_probe_runs_after_ac_model_repoll() {
+        // AC-coupled models trigger an immediate model-aware re-poll after detection.
+        // The CT meter scan must therefore be allowed on the following poll, once
+        // known_device_type is set but no meter probe has completed yet.
+        assert!(should_probe_external_meters(
+            Some(DeviceType::ACCoupled),
+            false
+        ));
+        assert!(should_probe_external_meters(
+            Some(DeviceType::ACCoupledMk2),
+            false
+        ));
+    }
+
+    #[test]
+    fn external_meter_probe_is_single_shot_and_skips_three_phase() {
+        assert!(!should_probe_external_meters(
+            Some(DeviceType::ACCoupled),
+            true
+        ));
+        assert!(!should_probe_external_meters(
+            Some(DeviceType::ThreePhase),
+            false
+        ));
+        assert!(!should_probe_external_meters(None, false));
     }
 
     #[test]

@@ -739,10 +739,9 @@ export default function ControlPage() {
       || snapshot.device_type_code.startsWith('60')
       || snapshot.device_type_code.startsWith('81')
       || snapshot.device_type_code.startsWith('82'));
-  // Three-phase-bank models use HR1113-1121 for charge/discharge schedules.
-  // We don't write/read those schedule registers yet, so hide schedule editors
-  // rather than letting users write to ignored single-phase slot registers.
-  const schedulesUnsupported = isThreePhaseLimitModel;
+  // Three-phase-bank models use HR1113-1121 for charge/discharge schedules;
+  // the backend now selects that register map automatically.
+  const schedulesUnsupported = false;
   const usesDirectPowerLimit = isAcCoupled || isThreePhaseLimitModel;
   // DC-coupled hybrid registers HR111/112 are 0-50 and are displayed as 0-100%.
   // AC-coupled HR313/314 and three-phase HR1110/1108 are already 1-100%, so display directly.

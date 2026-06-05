@@ -9,7 +9,15 @@ use crate::modbus::registers::{
     HR_3PH_BATTERY_CHARGE_LIMIT,
     HR_3PH_BATTERY_DISCHARGE_LIMIT,
     HR_3PH_BATTERY_SOC_RESERVE,
+    HR_3PH_CHARGE_SLOT_1_END,
+    HR_3PH_CHARGE_SLOT_1_START,
+    HR_3PH_CHARGE_SLOT_2_END,
+    HR_3PH_CHARGE_SLOT_2_START,
     HR_3PH_CHARGE_TARGET_SOC,
+    HR_3PH_DISCHARGE_SLOT_1_END,
+    HR_3PH_DISCHARGE_SLOT_1_START,
+    HR_3PH_DISCHARGE_SLOT_2_END,
+    HR_3PH_DISCHARGE_SLOT_2_START,
     HR_ACTIVE_POWER_RATE,
     HR_AC_BATTERY_CHARGE_LIMIT,
     HR_AC_BATTERY_DISCHARGE_LIMIT,
@@ -157,6 +165,14 @@ pub enum ControlCommand {
     SetThreePhaseBatterySocReserve { reserve: u16 },
     /// Set three-phase charge target SOC (4-100, HR 1111).
     SetThreePhaseChargeTargetSoc { soc: u16 },
+    /// Set three-phase charge slot 1 times (HR 1113-1114).
+    SetThreePhaseChargeSlot1 { start: u16, end: u16 },
+    /// Set three-phase charge slot 2 times (HR 1115-1116).
+    SetThreePhaseChargeSlot2 { start: u16, end: u16 },
+    /// Set three-phase discharge slot 1 times (HR 1118-1119).
+    SetThreePhaseDischargeSlot1 { start: u16, end: u16 },
+    /// Set three-phase discharge slot 2 times (HR 1120-1121).
+    SetThreePhaseDischargeSlot2 { start: u16, end: u16 },
     /// Set inverter max output active power rate percentage (0-100).
     SetActivePowerRate { rate: u16 },
     /// Set Eco mode (self-consumption, no discharge, clear discharge slots).
@@ -295,6 +311,22 @@ impl ControlCommand {
                 validate_range(*soc, 4, 100, "three-phase target SOC")?;
                 vec![rw(HR_3PH_CHARGE_TARGET_SOC, *soc)]
             }
+            ControlCommand::SetThreePhaseChargeSlot1 { start, end } => vec![
+                rw(HR_3PH_CHARGE_SLOT_1_START, *start),
+                rw(HR_3PH_CHARGE_SLOT_1_END, *end),
+            ],
+            ControlCommand::SetThreePhaseChargeSlot2 { start, end } => vec![
+                rw(HR_3PH_CHARGE_SLOT_2_START, *start),
+                rw(HR_3PH_CHARGE_SLOT_2_END, *end),
+            ],
+            ControlCommand::SetThreePhaseDischargeSlot1 { start, end } => vec![
+                rw(HR_3PH_DISCHARGE_SLOT_1_START, *start),
+                rw(HR_3PH_DISCHARGE_SLOT_1_END, *end),
+            ],
+            ControlCommand::SetThreePhaseDischargeSlot2 { start, end } => vec![
+                rw(HR_3PH_DISCHARGE_SLOT_2_START, *start),
+                rw(HR_3PH_DISCHARGE_SLOT_2_END, *end),
+            ],
             ControlCommand::SetActivePowerRate { rate } => {
                 validate_range(*rate, 0, 100, "active power rate")?;
                 vec![rw(HR_ACTIVE_POWER_RATE, *rate)]
@@ -705,6 +737,22 @@ mod tests {
                 end: 1900,
             },
             ControlCommand::SetDischargeSlot2 { start: 0, end: 0 },
+            ControlCommand::SetThreePhaseChargeSlot1 {
+                start: 100,
+                end: 500,
+            },
+            ControlCommand::SetThreePhaseChargeSlot2 {
+                start: 600,
+                end: 900,
+            },
+            ControlCommand::SetThreePhaseDischargeSlot1 {
+                start: 1600,
+                end: 1900,
+            },
+            ControlCommand::SetThreePhaseDischargeSlot2 {
+                start: 2000,
+                end: 2230,
+            },
             ControlCommand::SetChargeLimit { limit: 30 },
             ControlCommand::SetDischargeLimit { limit: 40 },
             ControlCommand::SetEcoMode { soc_reserve: 4 },
@@ -857,6 +905,47 @@ mod tests {
         assert_eq!(writes[0].value, 2000);
         assert_eq!(writes[1].address, HR_DISCHARGE_SLOT_2_END);
         assert_eq!(writes[1].value, 2200);
+    }
+
+    #[test]
+    fn set_three_phase_schedule_slots_use_three_phase_registers() {
+        let writes = ControlCommand::SetThreePhaseChargeSlot1 {
+            start: 130,
+            end: 530,
+        }
+        .encode()
+        .unwrap();
+        assert_eq!(writes[0].address, HR_3PH_CHARGE_SLOT_1_START);
+        assert_eq!(writes[0].value, 130);
+        assert_eq!(writes[1].address, HR_3PH_CHARGE_SLOT_1_END);
+        assert_eq!(writes[1].value, 530);
+
+        let writes = ControlCommand::SetThreePhaseChargeSlot2 {
+            start: 600,
+            end: 900,
+        }
+        .encode()
+        .unwrap();
+        assert_eq!(writes[0].address, HR_3PH_CHARGE_SLOT_2_START);
+        assert_eq!(writes[1].address, HR_3PH_CHARGE_SLOT_2_END);
+
+        let writes = ControlCommand::SetThreePhaseDischargeSlot1 {
+            start: 1600,
+            end: 1900,
+        }
+        .encode()
+        .unwrap();
+        assert_eq!(writes[0].address, HR_3PH_DISCHARGE_SLOT_1_START);
+        assert_eq!(writes[1].address, HR_3PH_DISCHARGE_SLOT_1_END);
+
+        let writes = ControlCommand::SetThreePhaseDischargeSlot2 {
+            start: 2000,
+            end: 2230,
+        }
+        .encode()
+        .unwrap();
+        assert_eq!(writes[0].address, HR_3PH_DISCHARGE_SLOT_2_START);
+        assert_eq!(writes[1].address, HR_3PH_DISCHARGE_SLOT_2_END);
     }
 
     #[test]

@@ -717,7 +717,13 @@ mod tests {
         db.insert_reading(&make_snapshot_with_kwh(day2 + 7200, 15.0, 8.0)); // 02:00 UTC day2
 
         let result = db
-            .query_history(100_000_000, 3600, 0, &["today_import_kwh".to_string()], None)
+            .query_history(
+                100_000_000,
+                3600,
+                0,
+                &["today_import_kwh".to_string()],
+                None,
+            )
             .unwrap();
 
         let import_points: Vec<TimePoint> =
@@ -746,7 +752,13 @@ mod tests {
         db.insert_reading(&make_snapshot_with_kwh(day2 + 7200, 25.0, 8.0));
 
         let result = db
-            .query_history(100_000_000, 3600, 0, &["today_import_kwh".to_string()], None)
+            .query_history(
+                100_000_000,
+                3600,
+                0,
+                &["today_import_kwh".to_string()],
+                None,
+            )
             .unwrap();
         let points: Vec<TimePoint> =
             serde_json::from_value(result.get("today_import_kwh").cloned().unwrap()).unwrap();
@@ -791,7 +803,13 @@ mod tests {
         db.insert_reading(&make_snapshot_with_kwh(day2 + 7200, 12.0, 5.0));
 
         let result = db
-            .query_history(100_000_000, 3600, 0, &["today_import_kwh".to_string()], None)
+            .query_history(
+                100_000_000,
+                3600,
+                0,
+                &["today_import_kwh".to_string()],
+                None,
+            )
             .unwrap();
         let points: Vec<TimePoint> =
             serde_json::from_value(result.get("today_import_kwh").cloned().unwrap()).unwrap();

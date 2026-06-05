@@ -6,32 +6,21 @@ user reports improve.
 
 ## Three-phase charge/discharge schedule support
 
-**Status**: Reading implemented; schedule slots not yet wired.
+**Status**: Implemented.
 
 Three-phase and HV/commercial models (DTC families `40`/`41`/`60`/`81`/`82`)
 store their charge and discharge schedule times at different register addresses
-than single-phase models. The single-phase schedule registers (HR 31-32,
-HR 44-45, HR 56-57, HR 94-95) are not used by these inverters.
+than single-phase models. The app now reads and writes the three-phase slot map:
 
-### Remaining work
+| Slot range | Charge registers | Discharge registers |
+|---|---:|---:|
+| Slots 1-2 | HR 1113-1116 | HR 1118-1121 |
+| Slots 3-10 | HR 246-268 | HR 276-298 |
 
-| Area | What |
-|---|---|
-| **Read** | Decode schedule times from HR 1113-1114 (charge slot 1), HR 1115-1116 (charge slot 2), HR 1118-1119 (discharge slot 1), HR 1120-1121 (discharge slot 2), plus extended slots 3-10 from HR 246-268 / HR 276-298 |
-| **Write** | Add HR 1113-1121 and per-slot target SOC registers to `SAFE_WRITE_REGS`, wire `SetChargeSlot1`/`SetChargeSlot2`/`SetDischargeSlot1`/`SetDischargeSlot2` to write the three-phase addresses when the device type requires it |
-| **Frontend** | Remove the "Schedules hidden" warning on ControlPage for three-phase models and re-enable the charge/discharge schedule editors |
-| **Reference** | Three-phase slot map in givenergy-modbus: `THREE_PHASE_SLOTS` in `model/slot_map.py`; safe-write registers in `pdu/write_registers.py` lines 161-168 (`1113..1121`) |
-
-### Current workaround
-
-Real-time monitoring (PV, grid, battery power, daily totals) is fully
-functional. Charge/discharge limit sliders and SOC reserve work correctly
-(they use HR 1108-1111 which we do read and write). Schedule editing is
-hidden with an explanatory warning until the registers above are implemented.
-
-Unless you have a very specific time-of-use schedule you need the inverter to
-follow autonomously, you can still achieve timed charging via Developer Mode's
-Cosy Charging feature, which sends force-charge commands on a timer.
+The Control page schedule editors are enabled for these models; the backend
+selects the correct register map from the detected device type. Reference:
+`THREE_PHASE_SLOTS` in `givenergy-modbus/model/slot_map.py` and safe-write
+registers in `givenergy-modbus/pdu/write_registers.py`.
 
 ## Near-term candidates
 
