@@ -58,12 +58,23 @@ Home Energy Manager runs a local web server on port **7337**; if the old app
 still owns that port, a newly opened app window can show the old app's frontend
 and version number.
 
-Fix:
+**Fix**:
 
 1. Close Home Energy Manager / GivEnergy Local.
-2. Check Task Manager, Activity Monitor, or `ps` for any remaining
-   `givenergy-local` process and stop it.
+2. Check Activity Monitor or `ps` for any remaining `givenergy-local` process and stop it.
 3. Reopen the app. If unsure, reboot and then open the app again.
+
+If the version still shows as old after the above:
+
+4. **Hard refresh** the app window with `Cmd+Shift+R`.
+5. Or clear the Tauri webview cache:
+   ```bash
+   rm -rf ~/Library/Caches/com.givenergy.local/
+   ```
+   Then reopen the app.
+
+This last step removes any stale Service Worker from a previous version
+that may be intercepting requests and serving cached old JS.
 
 ---
 

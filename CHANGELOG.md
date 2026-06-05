@@ -5,7 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.12.3] - 2026-06-05
+
+### Fixed
+
+- **Stale Service Worker causing old UI on update**: Added Service Worker
+  unregistration at app startup. Old Service Workers from previous versions
+  persist in Tauri's webview cache and intercept fetch requests, serving
+  stale JS even when the server has been updated. The app now cleans up any
+  lingering Service Workers before mounting. Affected users may need to
+  hard-refresh (`Cmd+Shift+R`) once after upgrading to clear the cached
+  Service Worker.
 
 ## [0.12.1] - 2026-06-05
 
