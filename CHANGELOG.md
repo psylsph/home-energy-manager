@@ -17,6 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hard-refresh (`Cmd+Shift+R`) once after upgrading to clear the cached
   Service Worker.
 
+## [0.12.2] - 2026-06-05
+
+### Fixed
+
+- **macOS release packaging**: Made DMG customization retry-safe after
+  detaching the source image, fixing intermittent Apple Silicon release
+  failures from `hdiutil: create failed - Resource busy`.
+- **Release asset verification**: macOS release jobs now mount the prepared
+  DMG and verify the app bundle version, bundled frontend version, and the
+  responsive bottom-navigation marker before uploading assets. This prevents
+  old frontend bundles being published unnoticed.
+
 ## [0.12.1] - 2026-06-05
 
 ### Fixed
