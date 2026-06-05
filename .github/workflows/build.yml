@@ -76,18 +76,40 @@ jobs:
       - name: Customize macOS DMG
         if: matrix.platform == 'macos-latest'
         run: |
-          DMG_PATH=$(ls "$GITHUB_WORKSPACE/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/"*.dmg)
+          set -euo pipefail
+
+          DMG_PATH=$(find "$GITHUB_WORKSPACE/src-tauri/target/${{ matrix.target }}/release/bundle/dmg" -maxdepth 1 -name '*.dmg' -print -quit)
+          if [ -z "$DMG_PATH" ]; then
+            echo "No DMG found"
+            exit 1
+          fi
           echo "Customizing DMG: $DMG_PATH"
-          # Mount original DMG (read-only) and copy contents to a writable staging dir
+
           MNT=$(mktemp -d)
           STAGE=$(mktemp -d)
-          hdiutil attach "$DMG_PATH" -mountpoint "$MNT" -nobrowse -quiet
-          cp -R "$MNT/"* "$STAGE/"
-          hdiutil detach "$MNT" -quiet
+          NEW_DMG="$RUNNER_TEMP/customized-${{ matrix.target }}.dmg"
+
+          cleanup() {
+            hdiutil detach "$MNT" -quiet >/dev/null 2>&1 || hdiutil detach "$MNT" -force >/dev/null 2>&1 || true
+            rm -rf "$MNT" "$STAGE" "$NEW_DMG"
+          }
+          trap cleanup EXIT
+
+          # Mount original DMG read-only and copy contents to a writable staging dir.
+          hdiutil attach "$DMG_PATH" -mountpoint "$MNT" -nobrowse -readonly -quiet
+          ditto "$MNT" "$STAGE"
+          hdiutil detach "$MNT" -quiet >/dev/null 2>&1 || hdiutil detach "$MNT" -force
+
+          # Give macOS a moment to fully release the mounted image before
+          # creating a replacement. This avoids intermittent
+          # "hdiutil: create failed - Resource busy" on Apple Silicon jobs.
+          sleep 2
+
           # Remove misleading /Applications symlink — macOS 26.5 blocks unsigned
           # apps in /Applications, so the symlink invites users to break the app.
           rm -f "$STAGE/Applications"
-          # Add install instructions
+
+          # Add install instructions.
           cat > "$STAGE/README.txt" << 'EOF'
           Home Energy Manager — macOS Install Notes
           ======================================
@@ -106,10 +128,24 @@ jobs:
           For Apple Silicon (M1/M2/M3/M4) Macs, use the aarch64 release.
           For Intel Macs, use the x86_64 release.
           EOF
-          # Rebuild DMG from staging directory
-          hdiutil create -ov -srcfolder "$STAGE" -format UDZO \
-            -volname "Home Energy Manager" -fs HFS+ "${DMG_PATH}.new"
-          mv "${DMG_PATH}.new.dmg" "$DMG_PATH"
+
+          # Rebuild DMG from staging directory. Write to RUNNER_TEMP first so
+          # we never create the new image beside a recently-detached source DMG.
+          for attempt in 1 2 3 4 5; do
+            if hdiutil create -ov -srcfolder "$STAGE" -format UDZO \
+              -volname "Home Energy Manager" -fs HFS+ "$NEW_DMG"; then
+              break
+            fi
+            echo "hdiutil create failed on attempt $attempt; retrying..."
+            sleep 3
+          done
+
+          if [ ! -f "$NEW_DMG" ]; then
+            echo "Failed to create customized DMG"
+            exit 1
+          fi
+
+          mv "$NEW_DMG" "$DMG_PATH"
           echo "DMG customized successfully"
 
       - name: Prepare release assets
@@ -183,6 +219,58 @@ jobs:
           if not copied:
               raise SystemExit(f"No release assets found under {bundle_dir}")
           PY
+
+      - name: Verify release assets
+        env:
+          TARGET: ${{ matrix.target }}
+          PLATFORM: ${{ matrix.platform }}
+          VERSION: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_version="${VERSION#v}"
+
+          if [ "$PLATFORM" = "macos-latest" ]; then
+            dmg=$(find release-assets -maxdepth 1 -name '*.dmg' -print -quit)
+            if [ -z "$dmg" ]; then
+              echo "No macOS DMG prepared"
+              exit 1
+            fi
+
+            mnt=$(mktemp -d)
+            cleanup() {
+              hdiutil detach "$mnt" -quiet >/dev/null 2>&1 || hdiutil detach "$mnt" -force >/dev/null 2>&1 || true
+              rm -rf "$mnt"
+            }
+            trap cleanup EXIT
+
+            hdiutil attach "$dmg" -mountpoint "$mnt" -nobrowse -readonly -quiet
+            app=$(find "$mnt" -maxdepth 2 -name '*.app' -print -quit)
+            if [ -z "$app" ]; then
+              echo "No .app found inside DMG"
+              exit 1
+            fi
+
+            plist_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")
+            if [ "$plist_version" != "$expected_version" ]; then
+              echo "DMG app version mismatch: expected $expected_version, got $plist_version"
+              exit 1
+            fi
+
+            if ! grep -R "$expected_version" "$app/Contents/Resources/dist" >/dev/null; then
+              echo "Bundled frontend does not contain expected version $expected_version"
+              exit 1
+            fi
+
+            # This marker comes from the responsive bottom-nav fix and catches
+            # accidental packaging of the older frontend bundle.
+            if ! grep -R "min-w-0 flex-1" "$app/Contents/Resources/dist" >/dev/null; then
+              echo "Bundled frontend is missing the responsive bottom-nav fix"
+              exit 1
+            fi
+
+            echo "Verified macOS DMG contains app/frontend version $expected_version"
+          fi
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v3
