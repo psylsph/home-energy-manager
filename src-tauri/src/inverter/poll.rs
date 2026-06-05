@@ -29,7 +29,7 @@ use tokio::sync::{broadcast, Mutex, Notify};
 use crate::history::HistoryDb;
 use crate::inverter::decoder::decode_snapshot;
 use crate::inverter::encoder::{ControlCommand, RegisterWrite};
-use crate::inverter::model::{BatteryMode, InverterSnapshot};
+use crate::inverter::model::{BatteryMode, DeviceType, InverterSnapshot};
 use crate::modbus::client::ModbusClient;
 use crate::modbus::registers::{HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE_TARGET};
 
@@ -267,6 +267,49 @@ impl AppState {
 /// If `settings.serial` is empty the dongle serial is auto-discovered from
 /// the first response frame header and persisted to settings — only the host
 /// IP is required to connect.
+/// Check whether raw register data matches the known GivEnergy dongle memory-leak
+/// corruption fingerprint (ported from givenergy-modbus `read_registers.py:is_suspicious()`).
+///
+/// The GivEnergy data adapter sometimes returns its own internal memory buffer
+/// (TCP/IP stack, DHCP lease data, network interface names) instead of actual
+/// inverter register values. This manifests as specific hex values at characteristic
+/// offsets within a 60-register block (e.g. `0xC0A8` = `192.168` at offset 41/43
+/// — the dongle's IP address leaking into register space).
+///
+/// The fingerprint was established empirically from the givenergy-modbus reference
+/// library. If more than 5 of the known-leaked values appear at their characteristic
+/// positions, the block is almost certainly corrupted and should trigger a re-poll.
+fn is_block_suspicious(data: &[u16]) -> bool {
+    if data.len() != 60 {
+        return false;
+    }
+    // Count matches against the known 60-register corruption pattern.
+    let count = [
+        data[28] == 0x4C32,
+        data[30] == 0xA119,
+        data[31] == 0x34EA,
+        data[32] == 0xE77F,
+        data[33] == 0xD475,
+        data[35] == 0x4500,
+        data[40] == 0xE4F9 || data[40] == 0xB619,
+        data[41] == 0xC0A8,
+        data[43] == 0xC0A8,
+        data[46] == 0xC5E9,
+        data[50] == 0x60EF || data[50] == 0x503C,
+        data[51] == 0x8018,
+        data[52] == 0x43E0,
+        data[53] == 0xF6CE,
+        data[56] == 0x080A,
+        data[58] == 0xFCC1,
+        data[59] == 0x661E,
+    ]
+    .into_iter()
+    .filter(|&b| b)
+    .count();
+
+    count > 5
+}
+
 ///
 /// Sanitize a snapshot against physically impossible register values.
 /// Compares against the previous snapshot to detect and correct garbled
@@ -278,6 +321,126 @@ impl AppState {
 /// Without this, a transient BMS read failure causes the frontend to show empty or
 /// missing module panels, which is jarring. Instead, we keep the last known-good data
 /// until a fresh read succeeds.
+fn should_repoll_after_model_detection(device_type: DeviceType, current_slave: u8) -> bool {
+    device_type.preferred_read_slave_address() != current_slave
+        || !device_type.extra_poll_blocks().is_empty()
+}
+
+fn carry_forward_optional_block_values(
+    snap: &mut InverterSnapshot,
+    prev: Option<&InverterSnapshot>,
+    has_ac_config_block: bool,
+    has_extended_slots_block: bool,
+    has_three_phase_config_block: bool,
+) -> bool {
+    let Some(prev) = prev else { return false };
+    let mut changed = false;
+
+    // AC-coupled config is read from optional HR(300-359). If that optional
+    // block is skipped for one poll, keep the previous AC config values rather
+    // than flashing defaults/zeros in the UI.
+    if !has_ac_config_block
+        && matches!(snap.device_type, DeviceType::ACCoupled | DeviceType::ACCoupledMk2 | DeviceType::ACThreePhase)
+        && snap.device_type == prev.device_type
+    {
+        if snap.charge_rate != prev.charge_rate || snap.discharge_rate != prev.discharge_rate {
+            tracing::warn!(
+                charge_prev = prev.charge_rate,
+                discharge_prev = prev.discharge_rate,
+                "AC config block missing — carrying forward AC charge/discharge limits"
+            );
+            snap.charge_rate = prev.charge_rate;
+            snap.discharge_rate = prev.discharge_rate;
+            changed = true;
+        }
+        if snap.ac_export_priority != prev.ac_export_priority {
+            snap.ac_export_priority = prev.ac_export_priority;
+            changed = true;
+        }
+        if snap.ac_eps_enabled != prev.ac_eps_enabled {
+            snap.ac_eps_enabled = prev.ac_eps_enabled;
+            changed = true;
+        }
+        if snap.battery_pause_mode != prev.battery_pause_mode {
+            snap.battery_pause_mode = prev.battery_pause_mode;
+            changed = true;
+        }
+        if snap.battery_pause_slot.enabled != prev.battery_pause_slot.enabled
+            || snap.battery_pause_slot.start_hour != prev.battery_pause_slot.start_hour
+            || snap.battery_pause_slot.start_minute != prev.battery_pause_slot.start_minute
+            || snap.battery_pause_slot.end_hour != prev.battery_pause_slot.end_hour
+            || snap.battery_pause_slot.end_minute != prev.battery_pause_slot.end_minute
+        {
+            snap.battery_pause_slot = prev.battery_pause_slot.clone();
+            changed = true;
+        }
+    }
+
+    // Three-phase/commercial/HV models get limit/reserve values from optional
+    // HR(1080-1124). If that optional block is skipped for one poll, keep the
+    // previous values rather than flashing defaults/zeros in the UI.
+    if !has_three_phase_config_block
+        && matches!(
+            snap.device_type,
+            DeviceType::ThreePhase
+                | DeviceType::ACThreePhase
+                | DeviceType::AioCommercial
+                | DeviceType::HybridHvGen3
+                | DeviceType::AllInOneHybrid
+        )
+        && snap.device_type == prev.device_type
+        && (snap.charge_rate != prev.charge_rate
+            || snap.discharge_rate != prev.discharge_rate
+            || snap.battery_reserve != prev.battery_reserve
+            || snap.target_soc != prev.target_soc)
+    {
+        tracing::warn!(
+            charge_prev = prev.charge_rate,
+            discharge_prev = prev.discharge_rate,
+            reserve_prev = prev.battery_reserve,
+            target_prev = prev.target_soc,
+            "Three-phase config block missing — carrying forward previous limits/reserve"
+        );
+        snap.charge_rate = prev.charge_rate;
+        snap.discharge_rate = prev.discharge_rate;
+        snap.battery_reserve = prev.battery_reserve;
+        snap.target_soc = prev.target_soc;
+        changed = true;
+    }
+
+    // Gen3/AIO/HV extended schedules are read from optional HR(240-299). If the
+    // block is missed, preserve values that only exist there: per-slot targets
+    // for slots 1/2 and extended slots 3-10. Standard slot times for slots 1/2
+    // are still decoded from HR(31/32/44/45/56/57/94/95), so avoid replacing them.
+    if !has_extended_slots_block && snap.device_type.supports_gen3_extended() && snap.device_type == prev.device_type {
+        for idx in 0..2 {
+            if snap.charge_slots[idx].target_soc == 0 && prev.charge_slots[idx].target_soc > 0 {
+                snap.charge_slots[idx].target_soc = prev.charge_slots[idx].target_soc;
+                changed = true;
+            }
+            if snap.discharge_slots[idx].target_soc == 0 && prev.discharge_slots[idx].target_soc > 0 {
+                snap.discharge_slots[idx].target_soc = prev.discharge_slots[idx].target_soc;
+                changed = true;
+            }
+        }
+        for idx in 2..snap.charge_slots.len() {
+            if !snap.charge_slots[idx].enabled && prev.charge_slots[idx].enabled {
+                snap.charge_slots[idx] = prev.charge_slots[idx].clone();
+                changed = true;
+            }
+            if !snap.discharge_slots[idx].enabled && prev.discharge_slots[idx].enabled {
+                snap.discharge_slots[idx] = prev.discharge_slots[idx].clone();
+                changed = true;
+            }
+        }
+        if changed {
+            tracing::warn!("Extended schedule block missing — carrying forward previous extended slot data");
+        }
+    }
+
+    changed
+}
+
 fn carry_forward_battery_modules_with(
     snap: &mut InverterSnapshot,
     prev_modules: Option<&[super::model::BatteryModule]>,
@@ -707,6 +870,33 @@ fn sanitize_snapshot(
             );
         }
     } // skip_delta
+
+    // AC-coupled inverters get charge/discharge limits from optional AC config
+    // registers HR(313/314). If that optional block is skipped or times out for
+    // one poll, the values can decode as 0. Since AC bounds are 1-100, carry
+    // forward the last known-good values rather than showing a transient 0%.
+    if matches!(snap.device_type, DeviceType::ACCoupled | DeviceType::ACCoupledMk2) {
+        if let Some(p) = prev {
+            if matches!(p.device_type, DeviceType::ACCoupled | DeviceType::ACCoupledMk2) {
+                if snap.charge_rate == 0 && p.charge_rate > 0 {
+                    tracing::warn!(
+                        prev = p.charge_rate,
+                        "AC charge limit missing/zero — carrying forward previous value"
+                    );
+                    snap.charge_rate = p.charge_rate;
+                    sanitized = true;
+                }
+                if snap.discharge_rate == 0 && p.discharge_rate > 0 {
+                    tracing::warn!(
+                        prev = p.discharge_rate,
+                        "AC discharge limit missing/zero — carrying forward previous value"
+                    );
+                    snap.discharge_rate = p.discharge_rate;
+                    sanitized = true;
+                }
+            }
+        }
+    }
 
     // Clamp battery limits to valid ranges (registers can return corrupted values)
     snap.charge_rate = snap.charge_rate.min(100);
@@ -1287,6 +1477,40 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                             Ok(blocks) => {
                                 let mut snapshot = decode_snapshot(&blocks);
 
+                                // Check all 60-register blocks against the known dongle
+                                // memory-leak corruption fingerprint. If the dongle serves
+                                // its own TCP/IP memory instead of register values, the
+                                // entire poll cycle is suspect — trigger a re-poll.
+                                let block_suspicious = blocks
+                                    .iter()
+                                    .any(|b| b.block.start % 60 == 0 && b.block.count == 60 && is_block_suspicious(&b.data));
+                                if block_suspicious {
+                                    for br in &blocks {
+                                        if br.block.start % 60 == 0 && br.block.count == 60 && is_block_suspicious(&br.data) {
+                                            tracing::warn!(
+                                                block = br.block.name,
+                                                start = br.block.start,
+                                                "Block matched dongle memory-leak fingerprint — re-polling",
+                                            );
+                                        }
+                                    }
+                                }
+                                let has_ac_config_block = blocks.iter().any(|b| {
+                                    b.block.register_type == crate::modbus::registers::RegisterType::Holding
+                                        && b.block.start == 300
+                                        && b.block.count == 60
+                                });
+                                let has_extended_slots_block = blocks.iter().any(|b| {
+                                    b.block.register_type == crate::modbus::registers::RegisterType::Holding
+                                        && b.block.start == 240
+                                        && b.block.count == 60
+                                });
+                                let has_three_phase_config_block = blocks.iter().any(|b| {
+                                    b.block.register_type == crate::modbus::registers::RegisterType::Holding
+                                        && b.block.start == 1080
+                                        && b.block.count == 45
+                                });
+
                                 // Cache the device type for subsequent polls.
                                 // This enables model-aware polling (extra blocks).
                                 // 'Unknown(0)' means we haven't identified the model yet.
@@ -1298,7 +1522,36 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         extra_blocks = ?snapshot.device_type.extra_poll_blocks().iter().map(|b| b.name).collect::<Vec<_>>(),
                                         "Device model identified — enabling model-aware polling"
                                     );
+                                    let preferred_slave = snapshot.device_type.preferred_read_slave_address();
+                                    let slave_changed = preferred_slave != client.slave_address();
+                                    let should_repoll = should_repoll_after_model_detection(
+                                        snapshot.device_type,
+                                        client.slave_address(),
+                                    );
+                                    if slave_changed {
+                                        tracing::info!(
+                                            from = client.slave_address(),
+                                            to = preferred_slave,
+                                            "Switching operational read slave address for detected model"
+                                        );
+                                        client.set_slave(preferred_slave);
+                                    }
+                                    let has_extra_blocks = !snapshot.device_type.extra_poll_blocks().is_empty();
                                     known_device_type = Some(snapshot.device_type);
+
+                                    // The first detection poll is intentionally minimal: it discovers
+                                    // the model, then immediately re-polls with the model-specific
+                                    // slave address and optional blocks (AC HR300-359, Gen3 HR240-299).
+                                    // Without this, AC-coupled HR313/314 limits can take a full poll
+                                    // interval to appear after startup.
+                                    if should_repoll {
+                                        tracing::info!(
+                                            slave_changed,
+                                            has_extra_blocks,
+                                            "Model-specific poll enabled — re-reading immediately"
+                                        );
+                                        return (true, true);
+                                    }
 
                                     // Probe for external CT clamp meters (device addresses 0x01-0x08).
                                     // A meter is present if V_phase_1 (IR 60) is non-zero and >100V.
@@ -1376,9 +1629,13 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 // Additional batteries also need separate reads at their own
                                 // device addresses.
 
-                                // Read battery #1 BMS (device 0x32, IR 60-119)
+                                // Read battery #1 BMS (device 0x32, IR 60-119).
+                                // Do not use the model-specific operational read address here:
+                                // AC/Gen1 switch to 0x31 and newer models use 0x11, while the
+                                // first LV battery BMS cache remains exposed at 0x32.
                                 match client
-                                    .read_registers(
+                                    .read_registers_at_slave(
+                                        0x32,
                                         crate::modbus::framer::RegisterType::Input,
                                         60,
                                         60,
@@ -1503,7 +1760,16 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 let in_grace = readings_since_connect < GRACE_READINGS;
                                 let (sanitized, prev_modules) = {
                                     let prev = state.latest_snapshot.lock().await;
-                                    let s = sanitize_snapshot(&mut snapshot, prev.as_ref(), in_grace, &mut pending_mode);
+                                    let mut s = sanitize_snapshot(&mut snapshot, prev.as_ref(), in_grace, &mut pending_mode);
+                                    if carry_forward_optional_block_values(
+                                        &mut snapshot,
+                                        prev.as_ref(),
+                                        has_ac_config_block,
+                                        has_extended_slots_block,
+                                        has_three_phase_config_block,
+                                    ) {
+                                        s = true;
+                                    }
                                     let mods = prev.as_ref().map(|p| p.battery_modules.clone());
                                     (s, mods)
                                 };
@@ -1675,7 +1941,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     }
                                 }
 
-                                (true, sanitized)
+                                (true, sanitized || block_suspicious)
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -1842,6 +2108,202 @@ mod tests {
         let state = AppState::new();
         // Can obtain a receiver from the broadcast channel.
         let _rx = state.tx.subscribe();
+    }
+
+    #[test]
+    fn model_detection_repolls_for_ac_coupled_address_switch_and_extra_block() {
+        assert!(should_repoll_after_model_detection(DeviceType::ACCoupled, 0x11));
+        // Even once already on 0x31, AC still needs an immediate model-aware
+        // re-poll so the optional HR300-359 block is requested.
+        assert!(should_repoll_after_model_detection(DeviceType::ACCoupled, 0x31));
+    }
+
+    #[test]
+    fn model_detection_repolls_for_models_with_extra_blocks() {
+        // Gen3 uses the extended HR240-299 block, so it should re-poll after
+        // detection even when the slave address is already correct.
+        assert!(should_repoll_after_model_detection(DeviceType::Gen3Hybrid, 0x11));
+        // Three-phase models use the HR1080-1124 block.
+        assert!(should_repoll_after_model_detection(DeviceType::ThreePhase, 0x11));
+    }
+
+    #[test]
+    fn model_detection_does_not_repoll_for_plain_gen2_on_0x11() {
+        assert!(!should_repoll_after_model_detection(DeviceType::Gen2Hybrid, 0x11));
+    }
+
+    #[test]
+    fn optional_ac_config_carries_forward_when_block_missing() {
+        let mut prev = InverterSnapshot {
+            device_type: DeviceType::ACCoupled,
+            charge_rate: 80,
+            discharge_rate: 70,
+            ac_export_priority: 2,
+            ac_eps_enabled: true,
+            battery_pause_mode: 1,
+            ..Default::default()
+        };
+        prev.battery_pause_slot.enabled = true;
+        prev.battery_pause_slot.start_hour = 1;
+        prev.battery_pause_slot.end_hour = 2;
+
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::ACCoupled,
+            ..Default::default()
+        };
+
+        let changed = carry_forward_optional_block_values(&mut snap, Some(&prev), false, true, true);
+        assert!(changed);
+        assert_eq!(snap.charge_rate, 80);
+        assert_eq!(snap.discharge_rate, 70);
+        assert_eq!(snap.ac_export_priority, 2);
+        assert!(snap.ac_eps_enabled);
+        assert_eq!(snap.battery_pause_mode, 1);
+        assert!(snap.battery_pause_slot.enabled);
+        assert_eq!(snap.battery_pause_slot.start_hour, 1);
+        assert_eq!(snap.battery_pause_slot.end_hour, 2);
+    }
+
+    #[test]
+    fn optional_ac_config_does_not_carry_forward_when_block_present() {
+        let prev = InverterSnapshot {
+            device_type: DeviceType::ACCoupled,
+            charge_rate: 80,
+            discharge_rate: 70,
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::ACCoupled,
+            charge_rate: 20,
+            discharge_rate: 30,
+            ..Default::default()
+        };
+
+        let changed = carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, true);
+        assert!(!changed);
+        assert_eq!(snap.charge_rate, 20);
+        assert_eq!(snap.discharge_rate, 30);
+    }
+
+    #[test]
+    fn optional_extended_slots_carry_forward_when_block_missing() {
+        let mut prev = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        };
+        prev.charge_slots[0].target_soc = 80;
+        prev.discharge_slots[1].target_soc = 40;
+        prev.charge_slots[2].enabled = true;
+        prev.charge_slots[2].start_hour = 3;
+        prev.charge_slots[2].end_hour = 4;
+        prev.charge_slots[2].target_soc = 90;
+        prev.discharge_slots[2].enabled = true;
+        prev.discharge_slots[2].start_hour = 17;
+        prev.discharge_slots[2].end_hour = 18;
+
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        };
+
+        let changed = carry_forward_optional_block_values(&mut snap, Some(&prev), true, false, true);
+        assert!(changed);
+        assert_eq!(snap.charge_slots[0].target_soc, 80);
+        assert_eq!(snap.discharge_slots[1].target_soc, 40);
+        assert!(snap.charge_slots[2].enabled);
+        assert_eq!(snap.charge_slots[2].start_hour, 3);
+        assert_eq!(snap.charge_slots[2].end_hour, 4);
+        assert_eq!(snap.charge_slots[2].target_soc, 90);
+        assert!(snap.discharge_slots[2].enabled);
+        assert_eq!(snap.discharge_slots[2].start_hour, 17);
+    }
+
+    #[test]
+    fn optional_extended_slots_do_not_carry_forward_when_block_present() {
+        let mut prev = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        };
+        prev.charge_slots[2].enabled = true;
+
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        };
+
+        let changed = carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, true);
+        assert!(!changed);
+        assert!(!snap.charge_slots[2].enabled);
+    }
+
+    #[test]
+    fn optional_three_phase_config_carries_forward_when_block_missing() {
+        let prev = InverterSnapshot {
+            device_type: DeviceType::ThreePhase,
+            charge_rate: 81,
+            discharge_rate: 72,
+            battery_reserve: 15,
+            target_soc: 95,
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::ThreePhase,
+            ..Default::default()
+        };
+
+        let changed = carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, false);
+        assert!(changed);
+        assert_eq!(snap.charge_rate, 81);
+        assert_eq!(snap.discharge_rate, 72);
+        assert_eq!(snap.battery_reserve, 15);
+        assert_eq!(snap.target_soc, 95);
+    }
+
+    #[test]
+    fn is_block_suspicious_rejects_known_corruption() {
+        // Build a 60-register block matching the dongle memory-leak fingerprint.
+        let mut data = [0u16; 60];
+        data[28] = 0x4C32;
+        data[30] = 0xA119;
+        data[31] = 0x34EA;
+        data[32] = 0xE77F;
+        data[33] = 0xD475;
+        data[35] = 0x4500;
+        data[40] = 0xE4F9;
+        data[41] = 0xC0A8;
+        data[43] = 0xC0A8;
+        data[46] = 0xC5E9;
+        data[50] = 0x60EF;
+        data[51] = 0x8018;
+        data[52] = 0x43E0;
+        data[53] = 0xF6CE;
+        data[56] = 0x080A;
+        data[58] = 0xFCC1;
+        data[59] = 0x661E;
+        assert!(is_block_suspicious(&data), "fingerprint should match");
+    }
+
+    #[test]
+    fn is_block_suspicious_accepts_clean_data() {
+        // All zeros should not match the fingerprint (need >5 hits).
+        let data = [0u16; 60];
+        assert!(!is_block_suspicious(&data), "clean data should not match");
+    }
+
+    #[test]
+    fn is_block_suspicious_requires_60_registers() {
+        let data = vec![0u16; 30];
+        assert!(!is_block_suspicious(&data), "short block should not match");
+    }
+
+    #[test]
+    fn is_block_suspicious_sub_threshold_is_not_suspicious() {
+        // 3 hits is below the threshold of >5.
+        let mut data = [0u16; 60];
+        data[28] = 0x4C32;
+        data[41] = 0xC0A8;
+        data[43] = 0xC0A8;
+        assert!(!is_block_suspicious(&data), "3hits should be below threshold");
     }
 
     #[test]

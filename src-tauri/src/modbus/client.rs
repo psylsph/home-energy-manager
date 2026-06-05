@@ -102,7 +102,11 @@ pub struct ModbusClient {
     /// for subsequent requests — some dongle firmware versions stop
     /// responding once the serial is set.
     serial_suspect: bool,
-    /// Modbus slave address (typically 0x32).
+    /// Modbus slave address used for operational inverter reads.
+    ///
+    /// GivTCP/givenergy-modbus use 0x11 for initial detection/canonical reads,
+    /// switching to 0x31 for AC-coupled and Gen1 Hybrid models. Battery BMS
+    /// reads still explicitly target 0x32/0x33+ via `read_registers_at_slave`.
     slave: u8,
     /// Underlying TCP stream, `None` when disconnected.
     stream: Option<TcpStream>,
@@ -123,7 +127,7 @@ impl ModbusClient {
             serial: serial.to_string(),
             serial_discovered: false,
             serial_suspect: false,
-            slave: 0x32, // default GivEnergy slave address
+            slave: 0x11, // canonical GivEnergy inverter address for detection
             stream: None,
             timeout: Duration::from_secs(15),
         }
@@ -151,9 +155,14 @@ impl ModbusClient {
         self.serial = serial;
     }
 
-    /// Set the Modbus slave address (default is `0x32`).
+    /// Set the Modbus slave address used for operational inverter reads.
     pub fn set_slave(&mut self, slave: u8) {
         self.slave = slave;
+    }
+
+    /// Return the current Modbus slave address used for operational reads.
+    pub fn slave_address(&self) -> u8 {
+        self.slave
     }
 
     /// Set the I/O timeout for individual read/write operations.
@@ -624,7 +633,7 @@ impl ModbusClient {
     /// Read registers at a specific slave address, without mutating `self.slave`.
     ///
     /// Used for battery BMS probing where we need to address different
-    /// slave addresses (0x33–0x37) without affecting the default slave (0x32)
+    /// slave addresses (0x32–0x37) without affecting the model-specific slave
     /// used by the main poll cycle.
     pub async fn read_registers_at_slave(
         &mut self,
@@ -1253,9 +1262,11 @@ mod tests {
     #[test]
     fn set_slave_changes_address() {
         let mut client = ModbusClient::new("10.0.0.1", 8899, "SN0001");
-        assert_eq!(client.slave, 0x32);
-        client.set_slave(0x01);
-        assert_eq!(client.slave, 0x01);
+        assert_eq!(client.slave, 0x11);
+        assert_eq!(client.slave_address(), 0x11);
+        client.set_slave(0x31);
+        assert_eq!(client.slave, 0x31);
+        assert_eq!(client.slave_address(), 0x31);
     }
 
     #[test]

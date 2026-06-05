@@ -191,6 +191,10 @@ pub const HR_ENABLE_RTC: u16 = 166;
 
 /// Export priority for AC-coupled inverters (0=battery, 1=grid, 2=load).
 pub const HR_EXPORT_PRIORITY: u16 = 311;
+/// AC-coupled battery charge power limit percentage (1-100).
+pub const HR_AC_BATTERY_CHARGE_LIMIT: u16 = 313;
+/// AC-coupled battery discharge power limit percentage (1-100).
+pub const HR_AC_BATTERY_DISCHARGE_LIMIT: u16 = 314;
 /// Enable EPS (Emergency Power Supply) mode (bool).
 pub const HR_ENABLE_EPS: u16 = 317;
 
@@ -256,6 +260,25 @@ pub const HR_DISCHARGE_TARGET_SOC_9: u16 = 296;
 pub const HR_DISCHARGE_SLOT_10_START: u16 = 297;
 pub const HR_DISCHARGE_SLOT_10_END: u16 = 298;
 pub const HR_DISCHARGE_TARGET_SOC_10: u16 = 299;
+
+// ===========================================================================
+// Three-phase battery/control registers (HR 1080-1124)
+// ===========================================================================
+
+/// Three-phase battery discharge power limit percentage (HR 1108).
+pub const HR_3PH_BATTERY_DISCHARGE_LIMIT: u16 = 1108;
+/// Three-phase battery SOC reserve / discharge floor percentage (HR 1109).
+pub const HR_3PH_BATTERY_SOC_RESERVE: u16 = 1109;
+/// Three-phase battery charge power limit percentage (HR 1110).
+pub const HR_3PH_BATTERY_CHARGE_LIMIT: u16 = 1110;
+/// Three-phase charge target SOC percentage (HR 1111).
+pub const HR_3PH_CHARGE_TARGET_SOC: u16 = 1111;
+/// Three-phase AC charge enable (HR 1112).
+pub const HR_3PH_AC_CHARGE_ENABLE: u16 = 1112;
+/// Three-phase force discharge enable (HR 1122).
+pub const HR_3PH_FORCE_DISCHARGE_ENABLE: u16 = 1122;
+/// Three-phase force charge enable (HR 1123).
+pub const HR_3PH_FORCE_CHARGE_ENABLE: u16 = 1123;
 
 // ===========================================================================
 // System time registers (read/write for clock sync)
@@ -345,8 +368,10 @@ pub const SAFE_WRITE_REGS: &[u16] = &[
     295, 296, 297, 298, 299, // Per-slot charge targets (Gen3)
     242, 245, // Per-slot discharge targets (Gen3)
     272, 275, // AC-coupled features
-    311, 317, // Pause mode/slot
-    318, 319, 320,
+    311, 313, 314, 317, // Pause mode/slot
+    318, 319, 320, // Three-phase controls
+    1108, 1109, 1110, 1111, 1112, 1122, 1123, // EMS plant-level control / discharge slots
+    2040, 2044, 2045, 2046, 2047, 2048, 2049, 2050, 2051, 2052,
 ];
 
 // ===========================================================================
@@ -419,6 +444,24 @@ pub const AC_CONFIG_BLOCK: RegisterBlock = RegisterBlock {
     register_type: RegisterType::Holding,
     name: "holding_300_359",
 };
+
+/// Three-phase configuration block — HR 1080-1124 mirror the key single-phase
+/// battery/control settings at different addresses.
+pub const THREE_PHASE_CONFIG_BLOCK: RegisterBlock = RegisterBlock {
+    start: 1080,
+    count: 45,
+    register_type: RegisterType::Holding,
+    name: "holding_1080_1124",
+};
+
+/// Extra blocks for models that need both AC config and three-phase config.
+pub const AC_AND_THREE_PHASE_BLOCKS: &[RegisterBlock] = &[AC_CONFIG_BLOCK, THREE_PHASE_CONFIG_BLOCK];
+
+/// Extra blocks for HV three-phase models that also use extended schedules.
+pub const EXTENDED_AND_THREE_PHASE_BLOCKS: &[RegisterBlock] = &[
+    EXTENDED_SLOTS_BLOCK,
+    THREE_PHASE_CONFIG_BLOCK,
+];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -527,10 +570,16 @@ mod tests {
         assert!(SAFE_WRITE_REGS.contains(&HR_SYSTEM_TIME_MINUTE)); // 39
         assert!(SAFE_WRITE_REGS.contains(&HR_SYSTEM_TIME_SECOND)); // 40
         assert!(SAFE_WRITE_REGS.contains(&HR_EXPORT_PRIORITY)); // 311
+        assert!(SAFE_WRITE_REGS.contains(&HR_AC_BATTERY_CHARGE_LIMIT)); // 313
+        assert!(SAFE_WRITE_REGS.contains(&HR_AC_BATTERY_DISCHARGE_LIMIT)); // 314
         assert!(SAFE_WRITE_REGS.contains(&HR_ENABLE_EPS)); // 317
         assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_PAUSE_MODE)); // 318
         assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_PAUSE_SLOT_1_START)); // 319
         assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_PAUSE_SLOT_1_END)); // 320
+        assert!(SAFE_WRITE_REGS.contains(&HR_3PH_BATTERY_DISCHARGE_LIMIT)); // 1108
+        assert!(SAFE_WRITE_REGS.contains(&HR_3PH_BATTERY_SOC_RESERVE)); // 1109
+        assert!(SAFE_WRITE_REGS.contains(&HR_3PH_BATTERY_CHARGE_LIMIT)); // 1110
+        assert!(SAFE_WRITE_REGS.contains(&HR_3PH_CHARGE_TARGET_SOC)); // 1111
         assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_TARGET_SOC_1)); // 242
         assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_TARGET_SOC_2)); // 245
         assert!(SAFE_WRITE_REGS.contains(&HR_DISCHARGE_TARGET_SOC_1)); // 272

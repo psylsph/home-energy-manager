@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-06-05
+
+### Added
+
+- **AC-coupled battery controls**: AC-coupled inverters now read and write
+  their battery charge/discharge limits through the correct AC registers
+  (HR 313/314, 1-100%) instead of the DC-coupled HR 111/112 (0-50%). The
+  Control page adapts the slider scale and labelling automatically for AC
+  models.
+- **Three-phase / HV / commercial battery controls**: Three-phase,
+  all-in-one commercial, HV Gen 3, and AllInOne Hybrid models now read and
+  write the mirrored 1000-range register bank (HR 1080-1124) for discharge
+  limit, SOC reserve, charge limit, charge target SOC, AC-charge enable,
+  force discharge, and force charge. The poll loop dynamically requests the
+  three-phase config block based on the detected model.
+- **DSP firmware display**: The inverter page now shows both ARM and DSP
+  firmware versions. The two chips run independently and mismatched versions
+  can indicate a partial firmware update.
+- **Model-specific Modbus slave addressing**: Initial reads now use the
+  canonical GivEnergy detection address `0x11`, switching to `0x31` for
+  AC-coupled and Gen 1 Hybrid models once detected. This matches the
+  givenergy-modbus / GivTCP reference behaviour. Battery BMS reads still
+  target `0x32` / `0x33+` explicitly.
+- **Dongle memory-leak corruption detection**: 60-register blocks are now
+  checked against the known GivEnergy data-adapter memory-leak fingerprint
+  (e.g. `0xC0A8` from the dongle's own IP at characteristic offsets). When
+  detected, the entire poll cycle is re-polled rather than broadcasting
+  garbage values.
+- **Optional block carry-forward**: When an optional block (AC config,
+  Gen3 extended slots, three-phase config) is skipped or times out for a
+  single poll, the previously-known values are kept on-screen rather than
+  flashing back to zeros/defaults. This prevents transient flicker on slow
+  links and after model-aware polls that arrive out-of-order.
+
+### Changed
+
+- **Control page labelling**: Section renamed from "Battery Limits" to
+  "Battery & Power Limits". Individual controls relabelled for the detected
+  model (e.g. "Three-phase Charge Power Limit", "AC Discharge Power Limit").
+  "Reserve SOC" renamed to "Minimum SOC". "Inverter Max Output" renamed to
+  "Inverter Active Power Limit" and now shows the equivalent kW alongside
+  the percentage.
+
 ## [0.11.2] - 2026-06-04
 
 ### Added

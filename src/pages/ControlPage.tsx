@@ -707,28 +707,54 @@ export default function ControlPage() {
   const reserveSoc = (draftReserve != null && snapshot?.battery_reserve !== draftReserve)
     ? Math.max(4, Math.min(100, draftReserve))
     : Math.max(4, Math.min(100, snapshot?.battery_reserve ?? 4));
-  // GivTCP / inverter registers HR111 and HR112 are 0-50, but expose them
-  // in the GUI as 0-100% for a more natural user-facing control.
+  const isAcCoupled = snapshot?.device_type_code === '3001' || snapshot?.device_type_code === '3002';
+  const isThreePhaseLimitModel = snapshot?.device_type_code != null
+    && (snapshot.device_type_code.startsWith('40')
+      || snapshot.device_type_code.startsWith('41')
+      || snapshot.device_type_code.startsWith('60')
+      || snapshot.device_type_code.startsWith('81')
+      || snapshot.device_type_code.startsWith('82'));
+  const usesDirectPowerLimit = isAcCoupled || isThreePhaseLimitModel;
+  // DC-coupled hybrid registers HR111/112 are 0-50 and are displayed as 0-100%.
+  // AC-coupled HR313/314 and three-phase HR1110/1108 are already 1-100%, so display directly.
+  const rateRegisterMax = usesDirectPowerLimit ? 100 : 50;
+  const rateDisplayMultiplier = usesDirectPowerLimit ? 1 : 2;
+  const rateDisplayMin = usesDirectPowerLimit ? 1 : 0;
   const snapshotChargeRate = snapshot?.charge_rate != null
-    ? Math.max(0, Math.min(50, snapshot.charge_rate))
+    ? Math.max(0, Math.min(rateRegisterMax, snapshot.charge_rate))
     : undefined;
   const snapshotDischargeRate = snapshot?.discharge_rate != null
-    ? Math.max(0, Math.min(50, snapshot.discharge_rate))
+    ? Math.max(0, Math.min(rateRegisterMax, snapshot.discharge_rate))
     : undefined;
-  const chargeRate = (draftCharge != null && (snapshotChargeRate == null || snapshotChargeRate * 2 !== draftCharge))
-    ? Math.max(0, Math.min(100, draftCharge))
-    : snapshotChargeRate != null ? snapshotChargeRate * 2 : undefined;
-  const dischargeRate = (draftDischarge != null && (snapshotDischargeRate == null || snapshotDischargeRate * 2 !== draftDischarge))
-    ? Math.max(0, Math.min(100, draftDischarge))
-    : snapshotDischargeRate != null ? snapshotDischargeRate * 2 : undefined;
+  const chargeRate = (draftCharge != null && (snapshotChargeRate == null || snapshotChargeRate * rateDisplayMultiplier !== draftCharge))
+    ? Math.max(rateDisplayMin, Math.min(100, draftCharge))
+    : snapshotChargeRate != null ? snapshotChargeRate * rateDisplayMultiplier : undefined;
+  const dischargeRate = (draftDischarge != null && (snapshotDischargeRate == null || snapshotDischargeRate * rateDisplayMultiplier !== draftDischarge))
+    ? Math.max(rateDisplayMin, Math.min(100, draftDischarge))
+    : snapshotDischargeRate != null ? snapshotDischargeRate * rateDisplayMultiplier : undefined;
   const activePowerRate = (draftActivePower != null && snapshot?.active_power_rate !== draftActivePower) ? draftActivePower : snapshot?.active_power_rate;
+  const activePowerWatts = activePowerRate != null && snapshot?.max_ac_power_w
+    ? Math.round(activePowerRate / 100 * snapshot.max_ac_power_w)
+    : null;
+  const activePowerKw = activePowerWatts != null
+    ? `${Number((activePowerWatts / 1000).toFixed(1))}kW`
+    : null;
 
-  // Calculate wattage from rate% × battery capacity (per GivTCP formula)
-  // capped by the inverter's max battery power rate
+  // DC hybrid HR111/112 are 0-50, using the GivTCP formula:
+  // display_rate / 200 × battery_capacity. AC-coupled HR313/314 and three-phase
+  // HR1110/1108 are direct 1-100% percentages of inverter battery power rating.
   const maxBatteryPowerW = snapshot?.max_battery_power_w ?? 0;
   const batteryCapacityW = (snapshot?.battery_capacity_kwh ?? 0) * 1000;
-  const chargeWatts = chargeRate != null ? Math.min(Math.round(chargeRate / 200 * batteryCapacityW), maxBatteryPowerW) : null;
-  const dischargeWatts = dischargeRate != null ? Math.min(Math.round(dischargeRate / 200 * batteryCapacityW), maxBatteryPowerW) : null;
+  const chargeWatts = chargeRate != null
+    ? usesDirectPowerLimit
+      ? Math.round(chargeRate / 100 * maxBatteryPowerW)
+      : Math.min(Math.round(chargeRate / 200 * batteryCapacityW), maxBatteryPowerW)
+    : null;
+  const dischargeWatts = dischargeRate != null
+    ? usesDirectPowerLimit
+      ? Math.round(dischargeRate / 100 * maxBatteryPowerW)
+      : Math.min(Math.round(dischargeRate / 200 * batteryCapacityW), maxBatteryPowerW)
+    : null;
 
   const [reserveSaving, setReserveSaving] = useState(false);
   const [chargeRateSaving, setChargeRateSaving] = useState(false);
@@ -803,7 +829,7 @@ export default function ControlPage() {
     if (chargeRate == null) return;
     setChargeRateSaving(true);
     try {
-      await apiPost('/api/control/charge-rate', { limit: Math.round(chargeRate / 2) });
+      await apiPost('/api/control/charge-rate', { limit: Math.round(chargeRate / rateDisplayMultiplier) });
     } catch { /* handled silently */ }
     setChargeRateSaving(false);
   };
@@ -812,7 +838,7 @@ export default function ControlPage() {
     if (dischargeRate == null) return;
     setDischargeRateSaving(true);
     try {
-      await apiPost('/api/control/discharge-rate', { limit: Math.round(dischargeRate / 2) });
+      await apiPost('/api/control/discharge-rate', { limit: Math.round(dischargeRate / rateDisplayMultiplier) });
     } catch { /* handled silently */ }
     setDischargeRateSaving(false);
   };
@@ -978,14 +1004,14 @@ export default function ControlPage() {
 
       {/* Section 5: Auto Winter Mode */}
       <AutoWinterSection />
-      {/* Section 6: Battery Limits */}
+      {/* Section 6: Battery & Power Limits */}
       <section className="space-y-3">
-        <h2 className="text-text-primary font-semibold text-lg">Battery Limits</h2>
+        <h2 className="text-text-primary font-semibold text-lg">Battery & Power Limits</h2>
         <div className="bg-bg-surface rounded-xl p-4 space-y-5">
           {/* Reserve SOC */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <span className="text-text-secondary text-sm">Reserve SOC</span>
+              <span className="text-text-secondary text-sm">Minimum SOC</span>
               <span className="font-mono text-text-primary text-sm">{reserveSoc}%</span>
             </div>
             <div className="flex items-center gap-3">
@@ -1008,20 +1034,20 @@ export default function ControlPage() {
             </div>
           </div>
 
-          {/* Charge Rate */}
+          {/* Charge Power Limit */}
           <div className="space-y-1">
             <div className="flex items-center justify-between">
-              <span className="text-text-secondary text-sm">Charge Rate</span>
+              <span className="text-text-secondary text-sm">{isThreePhaseLimitModel ? 'Three-phase Charge Power Limit' : isAcCoupled ? 'AC Charge Power Limit' : 'Battery Charge Power Limit'}</span>
               <span className="font-mono text-text-primary text-sm">{chargeRate ?? '—'}%{chargeWatts != null && chargeWatts > 0 ? ` (${(chargeWatts / 1000).toFixed(1)} kW)` : ''}</span>
             </div>
             <div className="flex items-center gap-3">
               <input
                 type="range"
-                min={0}
+                min={rateDisplayMin}
                 max={100}
                 step={1}
                 value={chargeRate ?? 100}
-                onChange={(e) => setDraftCharge(Math.max(0, Math.min(100, Number(e.target.value))))}
+                onChange={(e) => setDraftCharge(Math.max(rateDisplayMin, Math.min(100, Number(e.target.value))))}
                 className="flex-1"
               />
               <button
@@ -1034,20 +1060,20 @@ export default function ControlPage() {
             </div>
           </div>
 
-          {/* Discharge Rate */}
+          {/* Discharge Power Limit */}
           <div className="space-y-1">
             <div className="flex items-center justify-between">
-              <span className="text-text-secondary text-sm">Discharge Rate</span>
+              <span className="text-text-secondary text-sm">{isThreePhaseLimitModel ? 'Three-phase Discharge Power Limit' : isAcCoupled ? 'AC Discharge Power Limit' : 'Battery Discharge Power Limit'}</span>
               <span className="font-mono text-text-primary text-sm">{dischargeRate ?? '—'}%{dischargeWatts != null && dischargeWatts > 0 ? ` (${(dischargeWatts / 1000).toFixed(1)} kW)` : ''}</span>
             </div>
             <div className="flex items-center gap-3">
               <input
                 type="range"
-                min={0}
+                min={rateDisplayMin}
                 max={100}
                 step={1}
                 value={dischargeRate ?? 100}
-                onChange={(e) => setDraftDischarge(Math.max(0, Math.min(100, Number(e.target.value))))}
+                onChange={(e) => setDraftDischarge(Math.max(rateDisplayMin, Math.min(100, Number(e.target.value))))}
                 className="flex-1"
               />
               <button
@@ -1060,11 +1086,11 @@ export default function ControlPage() {
             </div>
           </div>
 
-          {/* Inverter Max Output */}
+          {/* Inverter Active Power Limit */}
           <div className="space-y-1">
             <div className="flex items-center justify-between">
-              <span className="text-text-secondary text-sm">Inverter Max Output</span>
-              <span className="font-mono text-text-primary text-sm">{activePowerRate ?? '—'}%</span>
+              <span className="text-text-secondary text-sm">Inverter Active Power Limit</span>
+              <span className="font-mono text-text-primary text-sm">{activePowerRate ?? '—'}%{activePowerKw != null && activePowerWatts != null && activePowerWatts > 0 ? `(${activePowerKw})` : ''}</span>
             </div>
             <div className="flex items-center gap-3">
               <input

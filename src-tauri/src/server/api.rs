@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::inverter::encoder::{ControlCommand, RegisterWrite};
+use crate::inverter::model::DeviceType;
 use crate::inverter::poll::{AppState, PollSettings};
 use crate::modbus::registers::encode_hhmm;
 
@@ -22,6 +23,32 @@ fn ok_response(message: &str) -> Json<Value> {
 
 fn error_response(error: &str) -> Json<Value> {
     Json(json!({ "ok": false, "error": error }))
+}
+
+/// Return true when the latest snapshot is from an AC-coupled inverter.
+async fn is_ac_coupled_snapshot(state: &Arc<AppState>) -> bool {
+    let snapshot = state.latest_snapshot.lock().await;
+    snapshot
+        .as_ref()
+        .map(|s| matches!(s.device_type, DeviceType::ACCoupled | DeviceType::ACCoupledMk2))
+        .unwrap_or(false)
+}
+
+async fn is_three_phase_limit_snapshot(state: &Arc<AppState>) -> bool {
+    let snapshot = state.latest_snapshot.lock().await;
+    snapshot
+        .as_ref()
+        .map(|s| {
+            matches!(
+                s.device_type,
+                DeviceType::ThreePhase
+                    | DeviceType::ACThreePhase
+                    | DeviceType::AioCommercial
+                    | DeviceType::HybridHvGen3
+                    | DeviceType::AllInOneHybrid
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// Queue register writes for execution by the poll loop.
@@ -446,7 +473,12 @@ pub async fn set_reserve(
         None => return error_response("Missing 'soc' field (4-100)"),
     };
 
-    let cmd = ControlCommand::SetBatterySocReserve { reserve: soc };
+    let is_three_phase = is_three_phase_limit_snapshot(&state).await;
+    let cmd = if is_three_phase {
+        ControlCommand::SetThreePhaseBatterySocReserve { reserve: soc }
+    } else {
+        ControlCommand::SetBatterySocReserve { reserve: soc }
+    };
     match cmd.encode() {
         Ok(writes) => {
             tracing::info!("SetReserve encoded: {:?}", writes);
@@ -467,12 +499,27 @@ pub async fn set_charge_rate(
         None => return error_response("Missing 'limit' field (0-50)"),
     };
 
-    let cmd = ControlCommand::SetChargeLimit { limit };
+    let is_ac_coupled = is_ac_coupled_snapshot(&state).await;
+    let is_three_phase = is_three_phase_limit_snapshot(&state).await;
+    let cmd = if is_three_phase {
+        ControlCommand::SetThreePhaseChargeLimit { limit }
+    } else if is_ac_coupled {
+        ControlCommand::SetAcChargeLimit { limit }
+    } else {
+        ControlCommand::SetChargeLimit { limit }
+    };
     match cmd.encode() {
         Ok(writes) => {
             tracing::info!("SetChargeLimit encoded: {:?}", writes);
             queue_writes(&state, writes).await;
-            ok_response(&format!("Charge limit set to {}%", limit))
+            let label = if is_three_phase {
+                "Three-phase"
+            } else if is_ac_coupled {
+                "AC-coupled"
+            } else {
+                "Battery"
+            };
+            ok_response(&format!("{} charge limit set to {}%", label, limit))
         }
         Err(e) => error_response(&format!("Validation error: {}", e)),
     }
@@ -488,12 +535,27 @@ pub async fn set_discharge_rate(
         None => return error_response("Missing 'limit' field (0-50)"),
     };
 
-    let cmd = ControlCommand::SetDischargeLimit { limit };
+    let is_ac_coupled = is_ac_coupled_snapshot(&state).await;
+    let is_three_phase = is_three_phase_limit_snapshot(&state).await;
+    let cmd = if is_three_phase {
+        ControlCommand::SetThreePhaseDischargeLimit { limit }
+    } else if is_ac_coupled {
+        ControlCommand::SetAcDischargeLimit { limit }
+    } else {
+        ControlCommand::SetDischargeLimit { limit }
+    };
     match cmd.encode() {
         Ok(writes) => {
             tracing::info!("SetDischargeLimit encoded: {:?}", writes);
             queue_writes(&state, writes).await;
-            ok_response(&format!("Discharge limit set to {}%", limit))
+            let label = if is_three_phase {
+                "Three-phase"
+            } else if is_ac_coupled {
+                "AC-coupled"
+            } else {
+                "Battery"
+            };
+            ok_response(&format!("{} discharge limit set to {}%", label, limit))
         }
         Err(e) => error_response(&format!("Validation error: {}", e)),
     }

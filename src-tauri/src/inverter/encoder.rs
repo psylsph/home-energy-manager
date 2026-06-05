@@ -6,6 +6,12 @@
 use chrono::{Datelike, Timelike, Utc};
 
 use crate::modbus::registers::{
+    HR_AC_BATTERY_CHARGE_LIMIT,
+    HR_AC_BATTERY_DISCHARGE_LIMIT,
+    HR_3PH_BATTERY_CHARGE_LIMIT,
+    HR_3PH_BATTERY_DISCHARGE_LIMIT,
+    HR_3PH_BATTERY_SOC_RESERVE,
+    HR_3PH_CHARGE_TARGET_SOC,
     HR_ACTIVE_POWER_RATE,
     HR_BATTERY_CALIBRATION_STAGE,
     HR_BATTERY_CHARGE_LIMIT,
@@ -135,10 +141,22 @@ pub enum ControlCommand {
     SetDischargeSlot1 { start: u16, end: u16 },
     /// Set discharge slot 2 times (HHMM packed).
     SetDischargeSlot2 { start: u16, end: u16 },
-    /// Set battery charge limit percentage (0-50).
+    /// Set DC-coupled hybrid battery charge limit percentage (0-50, HR 111).
     SetChargeLimit { limit: u16 },
-    /// Set battery discharge limit percentage (0-50).
+    /// Set DC-coupled hybrid battery discharge limit percentage (0-50, HR 112).
     SetDischargeLimit { limit: u16 },
+    /// Set AC-coupled battery charge limit percentage (1-100, HR 313).
+    SetAcChargeLimit { limit: u16 },
+    /// Set AC-coupled battery discharge limit percentage (1-100, HR 314).
+    SetAcDischargeLimit { limit: u16 },
+    /// Set three-phase battery charge power limit percentage (1-100, HR 1110).
+    SetThreePhaseChargeLimit { limit: u16 },
+    /// Set three-phase battery discharge power limit percentage (1-100, HR 1108).
+    SetThreePhaseDischargeLimit { limit: u16 },
+    /// Set three-phase battery SOC reserve (4-100, HR 1109).
+    SetThreePhaseBatterySocReserve { reserve: u16 },
+    /// Set three-phase charge target SOC (4-100, HR 1111).
+    SetThreePhaseChargeTargetSoc { soc: u16 },
     /// Set inverter max output active power rate percentage (0-100).
     SetActivePowerRate { rate: u16 },
     /// Set Eco mode (self-consumption, no discharge, clear discharge slots).
@@ -250,6 +268,32 @@ impl ControlCommand {
                 // Reference bounds: [0-50]. Same reasoning as charge limit.
                 validate_range(*limit, 0, 50, "discharge limit")?;
                 vec![rw(HR_BATTERY_DISCHARGE_LIMIT, *limit)]
+            }
+            ControlCommand::SetAcChargeLimit { limit } => {
+                // givenergy-modbus set_battery_charge_limit_ac bounds: [1-100].
+                validate_range(*limit, 1, 100, "AC charge limit")?;
+                vec![rw(HR_AC_BATTERY_CHARGE_LIMIT, *limit)]
+            }
+            ControlCommand::SetAcDischargeLimit { limit } => {
+                // givenergy-modbus set_battery_discharge_limit_ac bounds: [1-100].
+                validate_range(*limit, 1, 100, "AC discharge limit")?;
+                vec![rw(HR_AC_BATTERY_DISCHARGE_LIMIT, *limit)]
+            }
+            ControlCommand::SetThreePhaseChargeLimit { limit } => {
+                validate_range(*limit, 1, 100, "three-phase charge limit")?;
+                vec![rw(HR_3PH_BATTERY_CHARGE_LIMIT, *limit)]
+            }
+            ControlCommand::SetThreePhaseDischargeLimit { limit } => {
+                validate_range(*limit, 1, 100, "three-phase discharge limit")?;
+                vec![rw(HR_3PH_BATTERY_DISCHARGE_LIMIT, *limit)]
+            }
+            ControlCommand::SetThreePhaseBatterySocReserve { reserve } => {
+                validate_range(*reserve, 4, 100, "three-phase SOC reserve")?;
+                vec![rw(HR_3PH_BATTERY_SOC_RESERVE, *reserve)]
+            }
+            ControlCommand::SetThreePhaseChargeTargetSoc { soc } => {
+                validate_range(*soc, 4, 100, "three-phase target SOC")?;
+                vec![rw(HR_3PH_CHARGE_TARGET_SOC, *soc)]
             }
             ControlCommand::SetActivePowerRate { rate } => {
                 validate_range(*rate, 0, 100, "active power rate")?;
@@ -573,6 +617,61 @@ mod tests {
         assert!(cmd.encode().is_err());
         let ok = ControlCommand::SetChargeLimit { limit: 50 };
         assert!(ok.encode().is_ok());
+    }
+
+    #[test]
+    fn set_ac_charge_limits_use_ac_registers() {
+        let writes = ControlCommand::SetAcChargeLimit { limit: 100 }
+            .encode()
+            .unwrap();
+        assert_eq!(writes[0].address, HR_AC_BATTERY_CHARGE_LIMIT);
+        assert_eq!(writes[0].value, 100);
+        assert!(ControlCommand::SetAcChargeLimit { limit: 0 }.encode().is_err());
+
+        let writes = ControlCommand::SetAcDischargeLimit { limit: 1 }
+            .encode()
+            .unwrap();
+        assert_eq!(writes[0].address, HR_AC_BATTERY_DISCHARGE_LIMIT);
+        assert_eq!(writes[0].value, 1);
+        assert!(ControlCommand::SetAcDischargeLimit { limit: 101 }
+            .encode()
+            .is_err());
+    }
+
+    #[test]
+    fn set_three_phase_limits_use_1000_range_registers() {
+        let writes = ControlCommand::SetThreePhaseChargeLimit { limit: 100 }
+            .encode()
+            .unwrap();
+        assert_eq!(writes[0].address, HR_3PH_BATTERY_CHARGE_LIMIT);
+        assert_eq!(writes[0].value, 100);
+        assert!(ControlCommand::SetThreePhaseChargeLimit { limit: 0 }
+            .encode()
+            .is_err());
+
+        let writes = ControlCommand::SetThreePhaseDischargeLimit { limit: 1 }
+            .encode()
+            .unwrap();
+        assert_eq!(writes[0].address, HR_3PH_BATTERY_DISCHARGE_LIMIT);
+        assert_eq!(writes[0].value, 1);
+        assert!(ControlCommand::SetThreePhaseDischargeLimit { limit: 101 }
+            .encode()
+            .is_err());
+
+        assert_eq!(
+            ControlCommand::SetThreePhaseBatterySocReserve { reserve: 20 }
+                .encode()
+                .unwrap()[0]
+                .address,
+            HR_3PH_BATTERY_SOC_RESERVE
+        );
+        assert_eq!(
+            ControlCommand::SetThreePhaseChargeTargetSoc { soc: 95 }
+                .encode()
+                .unwrap()[0]
+                .address,
+            HR_3PH_CHARGE_TARGET_SOC
+        );
     }
 
     #[test]

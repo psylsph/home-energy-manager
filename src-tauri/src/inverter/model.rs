@@ -336,11 +336,29 @@ impl DeviceType {
     /// Returns additional register blocks that should be polled for this device type,
     /// beyond the standard set (IR 0-59, HR 0-59, HR 60-119).
     pub fn extra_poll_blocks(&self) -> &'static [crate::modbus::registers::RegisterBlock] {
-        use crate::modbus::registers::{AC_CONFIG_BLOCK, EXTENDED_SLOTS_BLOCK};
+        use crate::modbus::registers::{
+            AC_AND_THREE_PHASE_BLOCKS, AC_CONFIG_BLOCK, EXTENDED_AND_THREE_PHASE_BLOCKS,
+            EXTENDED_SLOTS_BLOCK, THREE_PHASE_CONFIG_BLOCK,
+        };
         match self {
+            Self::HybridHvGen3 | Self::AllInOneHybrid => EXTENDED_AND_THREE_PHASE_BLOCKS,
+            Self::ACThreePhase => AC_AND_THREE_PHASE_BLOCKS,
+            Self::ThreePhase | Self::AioCommercial => &[THREE_PHASE_CONFIG_BLOCK],
             dt if dt.supports_gen3_extended() => &[EXTENDED_SLOTS_BLOCK],
-            Self::ACCoupled | Self::ACCoupledMk2 | Self::ACThreePhase => &[AC_CONFIG_BLOCK],
+            Self::ACCoupled | Self::ACCoupledMk2 => &[AC_CONFIG_BLOCK],
             _ => &[],
+        }
+    }
+
+    /// Preferred Modbus slave address for operational inverter register reads.
+    ///
+    /// Matches givenergy-modbus/GivTCP: `0x11` is canonical for detection and
+    /// most models; AC-coupled and Gen1 Hybrid expose operational registers at
+    /// `0x31`. Battery BMS reads remain separate at `0x32`/`0x33+`.
+    pub fn preferred_read_slave_address(&self) -> u8 {
+        match self {
+            Self::ACCoupled | Self::ACCoupledMk2 | Self::Gen1Hybrid => 0x31,
+            _ => 0x11,
         }
     }
 }
@@ -535,7 +553,15 @@ pub struct InverterSnapshot {
     #[serde(default)]
     pub battery_calibration_stage: u8,
     pub inverter_serial: String,
+    /// ARM firmware version (HR(21)). For 0x20xx hybrids the century
+    /// (`arm_fw / 100`) determines generation: 3 → Gen3, 8/9 → Gen2,
+    /// anything else → Gen1.
     pub firmware_version: String,
+    /// DSP firmware version (HR(19)). Shown for diagnostic purposes alongside
+    /// the ARM firmware — the two chips run independently and mismatched
+    /// versions can indicate a partial firmware update.
+    #[serde(default)]
+    pub dsp_firmware_version: String,
 
     // -- Schedules --
     /// Charge slots 0-9 (10 slots for Gen3 extended; slots 3-9 unused on Gen1/2).
@@ -874,5 +900,15 @@ mod tests {
         assert_eq!(DeviceType::from_register(0x4099), DeviceType::ThreePhase);
         assert_eq!(DeviceType::from_register(0x8099), DeviceType::AllInOne6kW);
         assert_eq!(DeviceType::from_register(0x8199), DeviceType::HybridHvGen3);
+    }
+
+    #[test]
+    fn preferred_read_slave_address_matches_reference() {
+        assert_eq!(DeviceType::ACCoupled.preferred_read_slave_address(), 0x31);
+        assert_eq!(DeviceType::ACCoupledMk2.preferred_read_slave_address(), 0x31);
+        assert_eq!(DeviceType::Gen1Hybrid.preferred_read_slave_address(), 0x31);
+        assert_eq!(DeviceType::Gen2Hybrid.preferred_read_slave_address(), 0x11);
+        assert_eq!(DeviceType::Gen3Hybrid.preferred_read_slave_address(), 0x11);
+        assert_eq!(DeviceType::AllInOne6kW.preferred_read_slave_address(), 0x11);
     }
 }

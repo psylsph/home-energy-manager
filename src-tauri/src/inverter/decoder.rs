@@ -152,6 +152,7 @@ fn block_key(block: &crate::modbus::registers::RegisterBlock) -> &'static str {
         (RegisterType::Holding, 60) => "holding_60_119",
         (RegisterType::Holding, 240) => "holding_240_299",
         (RegisterType::Holding, 300) => "holding_300_359",
+        (RegisterType::Holding, 1080) => "holding_1080_1124",
         (RegisterType::Input, 60) => "battery_input_60_119",
         _ => "unknown",
     }
@@ -194,6 +195,7 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
             "holding_60_119" => decode_holding_60_119(data, &mut snap, &mut raw),
             "holding_240_299" => decode_holding_240_299(data, &mut snap),
             "holding_300_359" => decode_holding_300_359(data, &mut snap),
+            "holding_1080_1124" => decode_holding_1080_1124(data, &mut snap, &mut raw),
             _ => {
                 log::warn!("Unknown block '{}' in decode_snapshot", key);
             }
@@ -325,6 +327,13 @@ fn decode_holding_0_59(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawC
     } else {
         String::new()
     };
+    // DSP firmware version: HR(19)
+    let dsp_fw = get_reg(data, 19);
+    snap.dsp_firmware_version = if dsp_fw > 0 {
+        format!("{}", dsp_fw)
+    } else {
+        String::new()
+    };
     // Refine 0x20xx hybrid generation using ARM firmware.
     snap.device_type = snap.device_type.refine_with_arm_fw(dtc_raw, arm_fw);
     snap.device_type_display = snap.device_type.display_name().to_string();
@@ -394,11 +403,13 @@ fn decode_holding_60_119(data: &[u16], snap: &mut InverterSnapshot, raw: &mut Ra
     snap.battery_reserve = get_reg(data, 110 - 60) as u8;
     raw.battery_soc_reserve = snap.battery_reserve as u16;
 
-    // Battery charge limit: HR(111) → index 51
-    snap.charge_rate = get_reg(data, 111 - 60) as u8;
-
-    // Battery discharge limit: HR(112) → index 52
-    snap.discharge_rate = get_reg(data, 112 - 60) as u8;
+    // Battery charge/discharge limits for DC-coupled hybrids: HR(111/112).
+    // AC-coupled inverters use HR(313/314) from the AC config block instead;
+    // HR(111/112) can read as 0 on AC models and must not overwrite the real limits.
+    if !matches!(snap.device_type, DeviceType::ACCoupled | DeviceType::ACCoupledMk2) {
+        snap.charge_rate = get_reg(data, 111 - 60) as u8;
+        snap.discharge_rate = get_reg(data, 112 - 60) as u8;
+    }
 
     // Charge target SOC: HR(116) → index 56
     snap.target_soc = get_reg(data, 116 - 60) as u8;
@@ -504,11 +515,17 @@ fn decode_holding_240_299(data: &[u16], snap: &mut InverterSnapshot) {
 
 /// Decode holding registers 300-359 (AC configuration block).
 ///
-/// Contains export priority (311), EPS enable (317), pause mode (318),
-/// and pause slot times (319-320).
+/// Contains export priority (311), AC charge/discharge limits (313/314),
+/// EPS enable (317), pause mode (318), and pause slot times (319-320).
 fn decode_holding_300_359(data: &[u16], snap: &mut InverterSnapshot) {
     // HR 311: export priority (0=battery, 1=grid, 2=load)
     snap.ac_export_priority = get_reg(data, 311 - 300) as u8;
+
+    // HR 313/314: AC-coupled charge/discharge power percentage limits.
+    // AC-coupled inverters do not use the DC hybrid HR 111/112 registers,
+    // so expose these through the existing charge_rate/discharge_rate fields.
+    snap.charge_rate = get_reg(data, 313 - 300) as u8;
+    snap.discharge_rate = get_reg(data, 314 - 300) as u8;
 
     // HR 317: EPS enable (bool)
     snap.ac_eps_enabled = get_reg(data, 317 - 300) != 0;
@@ -518,6 +535,32 @@ fn decode_holding_300_359(data: &[u16], snap: &mut InverterSnapshot) {
 
     // HR 319-320: battery pause slot
     snap.battery_pause_slot = decode_timeslot(data, 319 - 300, 320 - 300);
+}
+
+/// Decode holding registers 1080-1124 (three-phase battery/control block).
+///
+/// Three-phase and commercial/HV models mirror key single-phase battery controls
+/// into the 1000-range register bank. Relevant mappings from givenergy-modbus
+/// `model/inverter_threephase.py`:
+///   HR 1108 = battery_discharge_limit_ac
+///   HR 1109 = battery_soc_reserve
+///   HR 1110 = battery_charge_limit_ac
+///   HR 1111 = charge_target_soc
+///   HR 1112 = ac_charge_enable
+///   HR 1122 = force_discharge_enable
+///   HR 1123 = force_charge_enable
+fn decode_holding_1080_1124(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawConfig) {
+    snap.discharge_rate = get_reg(data, 1108 - 1080) as u8;
+    snap.battery_reserve = get_reg(data, 1109 - 1080) as u8;
+    raw.battery_soc_reserve = snap.battery_reserve as u16;
+    snap.charge_rate = get_reg(data, 1110 - 1080) as u8;
+    snap.target_soc = get_reg(data, 1111 - 1080) as u8;
+
+    // These are distinct from the single-phase HR96/59 flags but represent
+    // the equivalent three-phase force/AC-charge state.
+    snap.enable_charge = get_reg(data, 1112 - 1080) != 0 || get_reg(data, 1123 - 1080) != 0;
+    snap.enable_discharge = get_reg(data, 1122 - 1080) != 0;
+    raw.enable_discharge = snap.enable_discharge;
 }
 
 /// Decode meter data from raw register values (IR 60-89) into a MeterData struct.
@@ -714,6 +757,7 @@ mod tests {
         holding_data[15] = 0x3334; // '3'(0x33), '4'(0x34)
         holding_data[16] = 0x3536; // '5'(0x35), '6'(0x36)
         holding_data[17] = 0x3738; // '7'(0x37), '8'(0x38)
+        holding_data[19] = 999; // HR(19): DSP firmware = 999
         holding_data[21] = 1234; // HR(21): ARM firmware version
         holding_data[27] = 1; // HR(27): eco mode
         holding_data[50] = 80; // HR(50): active_power_rate = 80%
@@ -815,6 +859,7 @@ mod tests {
 
         // Firmware version
         assert_eq!(snap.firmware_version, "1234");
+        assert_eq!(snap.dsp_firmware_version, "999");
 
         // Charge slot 1: 01:00–05:00, target_soc=100 (from global HR(116))
         assert!(snap.charge_slots[0].enabled);
@@ -844,6 +889,90 @@ mod tests {
         assert_eq!(snap.discharge_slots[1].start_hour, 17);
         assert_eq!(snap.discharge_slots[1].end_hour, 20);
         assert!(!snap.enable_discharge, "enable_discharge flag is false");
+    }
+
+    #[test]
+    fn three_phase_uses_1000_range_limits() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x4001; // Three Phase
+
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[110 - 60] = 4;
+        holding_60_data[111 - 60] = 11; // single-phase charge limit — should be overwritten
+        holding_60_data[112 - 60] = 12; // single-phase discharge limit — should be overwritten
+        holding_60_data[116 - 60] = 50;
+
+        let mut three_phase = vec![0u16; 45];
+        three_phase[1108 - 1080] = 88; // discharge limit
+        three_phase[1109 - 1080] = 25; // reserve
+        three_phase[1110 - 1080] = 77; // charge limit
+        three_phase[1111 - 1080] = 95; // target SOC
+        three_phase[1112 - 1080] = 1; // ac charge enable
+        three_phase[1122 - 1080] = 1; // force discharge enable
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+            make_block(
+                RegisterType::Holding,
+                1080,
+                45,
+                "holding_1080_1124",
+                three_phase,
+            ),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.device_type, DeviceType::ThreePhase);
+        assert_eq!(snap.charge_rate, 77);
+        assert_eq!(snap.discharge_rate, 88);
+        assert_eq!(snap.battery_reserve, 25);
+        assert_eq!(snap.target_soc, 95);
+        assert!(snap.enable_charge);
+        assert!(snap.enable_discharge);
+    }
+
+    #[test]
+    fn ac_coupled_uses_ac_charge_discharge_limits() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x3001; // AC Coupled
+
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[111 - 60] = 11; // DC hybrid charge limit — should be ignored for AC
+        holding_60_data[112 - 60] = 12; // DC hybrid discharge limit — should be ignored for AC
+
+        let mut ac_config = vec![0u16; 60];
+        ac_config[313 - 300] = 77;
+        ac_config[314 - 300] = 88;
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+            make_block(
+                RegisterType::Holding,
+                300,
+                60,
+                "holding_300_359",
+                ac_config,
+            ),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.device_type, DeviceType::ACCoupled);
+        assert_eq!(snap.charge_rate, 77);
+        assert_eq!(snap.discharge_rate, 88);
     }
 
     #[test]
