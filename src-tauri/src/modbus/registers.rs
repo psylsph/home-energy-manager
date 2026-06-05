@@ -455,13 +455,12 @@ pub const THREE_PHASE_CONFIG_BLOCK: RegisterBlock = RegisterBlock {
 };
 
 /// Extra blocks for models that need both AC config and three-phase config.
-pub const AC_AND_THREE_PHASE_BLOCKS: &[RegisterBlock] = &[AC_CONFIG_BLOCK, THREE_PHASE_CONFIG_BLOCK];
+pub const AC_AND_THREE_PHASE_BLOCKS: &[RegisterBlock] =
+    &[AC_CONFIG_BLOCK, THREE_PHASE_CONFIG_BLOCK];
 
 /// Extra blocks for HV three-phase models that also use extended schedules.
-pub const EXTENDED_AND_THREE_PHASE_BLOCKS: &[RegisterBlock] = &[
-    EXTENDED_SLOTS_BLOCK,
-    THREE_PHASE_CONFIG_BLOCK,
-];
+pub const EXTENDED_AND_THREE_PHASE_BLOCKS: &[RegisterBlock] =
+    &[EXTENDED_SLOTS_BLOCK, THREE_PHASE_CONFIG_BLOCK];
 
 // ---------------------------------------------------------------------------
 // Helpers

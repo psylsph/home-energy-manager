@@ -124,3 +124,69 @@ pub async fn start_server_with_frontend(
         tracing::error!("HTTP server error: {e}");
     }
 }
+
+/// Start the HTTP server with frontend static file serving, trying successive
+/// ports if the preferred port is already in use.
+///
+/// Desktop Tauri windows navigate to the Axum origin for same-origin API and
+/// WebSocket access. If an older app version is still listening on the preferred
+/// port, blindly navigating there shows the old frontend. This helper reports
+/// the actual bound port before serving so the window always attaches to the
+/// newly-started process.
+pub async fn start_server_with_frontend_on_available_port(
+    state: Arc<AppState>,
+    bind_addr: &str,
+    preferred_port: u16,
+    dist_dir: String,
+    bound_tx: std::sync::mpsc::Sender<Result<u16, String>>,
+) {
+    const MAX_PORT_ATTEMPTS: u16 = 20;
+
+    let mut last_error = None;
+    for offset in 0..MAX_PORT_ATTEMPTS {
+        let Some(port) = preferred_port.checked_add(offset) else {
+            break;
+        };
+        let addr = format!("{}:{}", bind_addr, port);
+        tracing::info!(
+            "HTTP server attempting bind on {} (serving frontend from {})",
+            addr,
+            dist_dir
+        );
+
+        let listener = match tokio::net::TcpListener::bind(&addr).await {
+            Ok(listener) => listener,
+            Err(e) => {
+                let message = format!("Failed to bind HTTP server on {addr}: {e}");
+                if e.kind() == std::io::ErrorKind::AddrInUse {
+                    tracing::warn!("{message}; trying next port");
+                    last_error = Some(message);
+                    continue;
+                }
+
+                tracing::error!("{message}");
+                let _ = bound_tx.send(Err(message));
+                return;
+            }
+        };
+
+        tracing::info!("HTTP server bound on {}", addr);
+        let _ = bound_tx.send(Ok(port));
+        let app = create_router_with_frontend(state, &dist_dir)
+            .into_make_service_with_connect_info::<std::net::SocketAddr>();
+        if let Err(e) = axum::serve(listener, app).await {
+            tracing::error!("HTTP server error: {e}");
+        }
+        return;
+    }
+
+    let message = last_error.unwrap_or_else(|| {
+        format!(
+            "No available HTTP server port in range {}-{}",
+            preferred_port,
+            preferred_port.saturating_add(MAX_PORT_ATTEMPTS - 1)
+        )
+    });
+    tracing::error!("{message}");
+    let _ = bound_tx.send(Err(message));
+}

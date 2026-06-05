@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-06-05
+
+### Fixed
+
+- **macOS stale version display**: Desktop builds now wait for the embedded
+  local server to bind before navigating the window. If an older app instance
+  is still holding the preferred port (usually `7337`), the new app falls
+  forward to the next available port and navigates there, preventing the window
+  from accidentally showing an old frontend such as v0.9.3.
+- **Mobile bottom navigation**: The bottom navigation now switches to icon-only
+  mode on narrow screens, shrinks icons below the `sm` breakpoint, and uses
+  equal-width flexible items so tabs no longer run off the side of phone
+  screens.
+
 ## [0.12.0] - 2026-06-05
 
 ### Added

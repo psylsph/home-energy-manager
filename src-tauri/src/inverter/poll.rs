@@ -340,7 +340,10 @@ fn carry_forward_optional_block_values(
     // block is skipped for one poll, keep the previous AC config values rather
     // than flashing defaults/zeros in the UI.
     if !has_ac_config_block
-        && matches!(snap.device_type, DeviceType::ACCoupled | DeviceType::ACCoupledMk2 | DeviceType::ACThreePhase)
+        && matches!(
+            snap.device_type,
+            DeviceType::ACCoupled | DeviceType::ACCoupledMk2 | DeviceType::ACThreePhase
+        )
         && snap.device_type == prev.device_type
     {
         if snap.charge_rate != prev.charge_rate || snap.discharge_rate != prev.discharge_rate {
@@ -412,13 +415,17 @@ fn carry_forward_optional_block_values(
     // block is missed, preserve values that only exist there: per-slot targets
     // for slots 1/2 and extended slots 3-10. Standard slot times for slots 1/2
     // are still decoded from HR(31/32/44/45/56/57/94/95), so avoid replacing them.
-    if !has_extended_slots_block && snap.device_type.supports_gen3_extended() && snap.device_type == prev.device_type {
+    if !has_extended_slots_block
+        && snap.device_type.supports_gen3_extended()
+        && snap.device_type == prev.device_type
+    {
         for idx in 0..2 {
             if snap.charge_slots[idx].target_soc == 0 && prev.charge_slots[idx].target_soc > 0 {
                 snap.charge_slots[idx].target_soc = prev.charge_slots[idx].target_soc;
                 changed = true;
             }
-            if snap.discharge_slots[idx].target_soc == 0 && prev.discharge_slots[idx].target_soc > 0 {
+            if snap.discharge_slots[idx].target_soc == 0 && prev.discharge_slots[idx].target_soc > 0
+            {
                 snap.discharge_slots[idx].target_soc = prev.discharge_slots[idx].target_soc;
                 changed = true;
             }
@@ -434,7 +441,9 @@ fn carry_forward_optional_block_values(
             }
         }
         if changed {
-            tracing::warn!("Extended schedule block missing — carrying forward previous extended slot data");
+            tracing::warn!(
+                "Extended schedule block missing — carrying forward previous extended slot data"
+            );
         }
     }
 
@@ -875,9 +884,15 @@ fn sanitize_snapshot(
     // registers HR(313/314). If that optional block is skipped or times out for
     // one poll, the values can decode as 0. Since AC bounds are 1-100, carry
     // forward the last known-good values rather than showing a transient 0%.
-    if matches!(snap.device_type, DeviceType::ACCoupled | DeviceType::ACCoupledMk2) {
+    if matches!(
+        snap.device_type,
+        DeviceType::ACCoupled | DeviceType::ACCoupledMk2
+    ) {
         if let Some(p) = prev {
-            if matches!(p.device_type, DeviceType::ACCoupled | DeviceType::ACCoupledMk2) {
+            if matches!(
+                p.device_type,
+                DeviceType::ACCoupled | DeviceType::ACCoupledMk2
+            ) {
                 if snap.charge_rate == 0 && p.charge_rate > 0 {
                     tracing::warn!(
                         prev = p.charge_rate,
@@ -2112,24 +2127,39 @@ mod tests {
 
     #[test]
     fn model_detection_repolls_for_ac_coupled_address_switch_and_extra_block() {
-        assert!(should_repoll_after_model_detection(DeviceType::ACCoupled, 0x11));
+        assert!(should_repoll_after_model_detection(
+            DeviceType::ACCoupled,
+            0x11
+        ));
         // Even once already on 0x31, AC still needs an immediate model-aware
         // re-poll so the optional HR300-359 block is requested.
-        assert!(should_repoll_after_model_detection(DeviceType::ACCoupled, 0x31));
+        assert!(should_repoll_after_model_detection(
+            DeviceType::ACCoupled,
+            0x31
+        ));
     }
 
     #[test]
     fn model_detection_repolls_for_models_with_extra_blocks() {
         // Gen3 uses the extended HR240-299 block, so it should re-poll after
         // detection even when the slave address is already correct.
-        assert!(should_repoll_after_model_detection(DeviceType::Gen3Hybrid, 0x11));
+        assert!(should_repoll_after_model_detection(
+            DeviceType::Gen3Hybrid,
+            0x11
+        ));
         // Three-phase models use the HR1080-1124 block.
-        assert!(should_repoll_after_model_detection(DeviceType::ThreePhase, 0x11));
+        assert!(should_repoll_after_model_detection(
+            DeviceType::ThreePhase,
+            0x11
+        ));
     }
 
     #[test]
     fn model_detection_does_not_repoll_for_plain_gen2_on_0x11() {
-        assert!(!should_repoll_after_model_detection(DeviceType::Gen2Hybrid, 0x11));
+        assert!(!should_repoll_after_model_detection(
+            DeviceType::Gen2Hybrid,
+            0x11
+        ));
     }
 
     #[test]
@@ -2152,7 +2182,8 @@ mod tests {
             ..Default::default()
         };
 
-        let changed = carry_forward_optional_block_values(&mut snap, Some(&prev), false, true, true);
+        let changed =
+            carry_forward_optional_block_values(&mut snap, Some(&prev), false, true, true);
         assert!(changed);
         assert_eq!(snap.charge_rate, 80);
         assert_eq!(snap.discharge_rate, 70);
@@ -2206,7 +2237,8 @@ mod tests {
             ..Default::default()
         };
 
-        let changed = carry_forward_optional_block_values(&mut snap, Some(&prev), true, false, true);
+        let changed =
+            carry_forward_optional_block_values(&mut snap, Some(&prev), true, false, true);
         assert!(changed);
         assert_eq!(snap.charge_slots[0].target_soc, 80);
         assert_eq!(snap.discharge_slots[1].target_soc, 40);
@@ -2251,7 +2283,8 @@ mod tests {
             ..Default::default()
         };
 
-        let changed = carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, false);
+        let changed =
+            carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, false);
         assert!(changed);
         assert_eq!(snap.charge_rate, 81);
         assert_eq!(snap.discharge_rate, 72);
@@ -2303,7 +2336,10 @@ mod tests {
         data[28] = 0x4C32;
         data[41] = 0xC0A8;
         data[43] = 0xC0A8;
-        assert!(!is_block_suspicious(&data), "3hits should be below threshold");
+        assert!(
+            !is_block_suspicious(&data),
+            "3hits should be below threshold"
+        );
     }
 
     #[test]

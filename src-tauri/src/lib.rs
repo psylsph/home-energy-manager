@@ -7,9 +7,35 @@ pub mod settings;
 use history::HistoryDb;
 use inverter::poll::{run_poll_loop, AppState};
 use server::logs::{LogCaptureLayer, LogRing};
-use server::{start_server, start_server_with_frontend};
+use server::{
+    start_server, start_server_with_frontend, start_server_with_frontend_on_available_port,
+};
 use settings::Settings;
 use std::sync::Arc;
+
+fn show_startup_error(window: &tauri::WebviewWindow, message: &str) {
+    let html = format!(
+        r#"<main style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 32px; color: #f8fafc; background: #0f172a; min-height: 100vh; box-sizing: border-box;">
+<h1 style="margin: 0 0 12px; font-size: 22px;">Home Energy Manager could not start its local server</h1>
+<p style="line-height: 1.5; max-width: 720px; color: #cbd5e1;">The app could not bind a local HTTP port, so it has not connected to any existing server. This avoids accidentally showing an older installed version.</p>
+<pre style="white-space: pre-wrap; background: #1e293b; color: #e2e8f0; padding: 16px; border-radius: 12px; max-width: 720px;">{}</pre>
+<p style="line-height: 1.5; max-width: 720px; color: #cbd5e1;">Quit any other Home Energy Manager / givenergy-local processes and reopen the app.</p>
+</main>"#,
+        html_escape(message)
+    );
+    if let Ok(script_arg) = serde_json::to_string(&html) {
+        let _ = window.eval(format!("document.body.innerHTML = {script_arg};"));
+    }
+}
+
+fn html_escape(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -156,18 +182,42 @@ pub fn run() {
                     });
                 tracing::info!("Production frontend path: {}", dist_dir);
 
+                let (bound_tx, bound_rx) = std::sync::mpsc::channel();
                 tauri::async_runtime::spawn(async move {
-                    start_server_with_frontend(server_state, "0.0.0.0", http_port, dist_dir).await;
+                    start_server_with_frontend_on_available_port(
+                        server_state,
+                        "0.0.0.0",
+                        http_port,
+                        dist_dir,
+                        bound_tx,
+                    )
+                    .await;
                 });
 
-                // Give the server a moment to bind, then navigate the
-                // Tauri window away from the asset protocol to the Axum
-                // origin (same-origin for fetch + WebSocket).
-                std::thread::sleep(std::time::Duration::from_millis(300));
+                // Navigate the Tauri window only after the embedded Axum server
+                // has actually bound. If an older app still owns :7337, the
+                // server falls forward to the next free port and we navigate to
+                // that new port instead of accidentally displaying the old app.
+                let bind_result = bound_rx.recv_timeout(std::time::Duration::from_secs(3));
                 if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.eval(
-                        format!("window.location.replace('http://127.0.0.1:{}')", http_port).as_str(),
-                    );
+                    match bind_result {
+                        Ok(Ok(bound_port)) => {
+                            tracing::info!("Navigating desktop window to local server on port {bound_port}");
+                            let _ = window.eval(
+                                format!("window.location.replace('http://127.0.0.1:{}')", bound_port)
+                                    .as_str(),
+                            );
+                        }
+                        Ok(Err(e)) => {
+                            tracing::error!("Embedded HTTP server failed to start: {e}");
+                            show_startup_error(&window, &e);
+                        }
+                        Err(e) => {
+                            let message = format!("Timed out waiting for embedded HTTP server to bind: {e}");
+                            tracing::error!("{message}");
+                            show_startup_error(&window, &message);
+                        }
+                    }
                 }
             }
 

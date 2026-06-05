@@ -406,7 +406,10 @@ fn decode_holding_60_119(data: &[u16], snap: &mut InverterSnapshot, raw: &mut Ra
     // Battery charge/discharge limits for DC-coupled hybrids: HR(111/112).
     // AC-coupled inverters use HR(313/314) from the AC config block instead;
     // HR(111/112) can read as 0 on AC models and must not overwrite the real limits.
-    if !matches!(snap.device_type, DeviceType::ACCoupled | DeviceType::ACCoupledMk2) {
+    if !matches!(
+        snap.device_type,
+        DeviceType::ACCoupled | DeviceType::ACCoupledMk2
+    ) {
         snap.charge_rate = get_reg(data, 111 - 60) as u8;
         snap.discharge_rate = get_reg(data, 112 - 60) as u8;
     }
@@ -961,13 +964,7 @@ mod tests {
                 "holding_60_119",
                 holding_60_data,
             ),
-            make_block(
-                RegisterType::Holding,
-                300,
-                60,
-                "holding_300_359",
-                ac_config,
-            ),
+            make_block(RegisterType::Holding, 300, 60, "holding_300_359", ac_config),
         ];
         let snap = decode_snapshot(&blocks);
         assert_eq!(snap.device_type, DeviceType::ACCoupled);

@@ -905,7 +905,10 @@ mod tests {
     #[test]
     fn preferred_read_slave_address_matches_reference() {
         assert_eq!(DeviceType::ACCoupled.preferred_read_slave_address(), 0x31);
-        assert_eq!(DeviceType::ACCoupledMk2.preferred_read_slave_address(), 0x31);
+        assert_eq!(
+            DeviceType::ACCoupledMk2.preferred_read_slave_address(),
+            0x31
+        );
         assert_eq!(DeviceType::Gen1Hybrid.preferred_read_slave_address(), 0x31);
         assert_eq!(DeviceType::Gen2Hybrid.preferred_read_slave_address(), 0x11);
         assert_eq!(DeviceType::Gen3Hybrid.preferred_read_slave_address(), 0x11);

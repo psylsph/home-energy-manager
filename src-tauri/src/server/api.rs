@@ -30,7 +30,12 @@ async fn is_ac_coupled_snapshot(state: &Arc<AppState>) -> bool {
     let snapshot = state.latest_snapshot.lock().await;
     snapshot
         .as_ref()
-        .map(|s| matches!(s.device_type, DeviceType::ACCoupled | DeviceType::ACCoupledMk2))
+        .map(|s| {
+            matches!(
+                s.device_type,
+                DeviceType::ACCoupled | DeviceType::ACCoupledMk2
+            )
+        })
         .unwrap_or(false)
 }
 

@@ -6,13 +6,13 @@
 use chrono::{Datelike, Timelike, Utc};
 
 use crate::modbus::registers::{
-    HR_AC_BATTERY_CHARGE_LIMIT,
-    HR_AC_BATTERY_DISCHARGE_LIMIT,
     HR_3PH_BATTERY_CHARGE_LIMIT,
     HR_3PH_BATTERY_DISCHARGE_LIMIT,
     HR_3PH_BATTERY_SOC_RESERVE,
     HR_3PH_CHARGE_TARGET_SOC,
     HR_ACTIVE_POWER_RATE,
+    HR_AC_BATTERY_CHARGE_LIMIT,
+    HR_AC_BATTERY_DISCHARGE_LIMIT,
     HR_BATTERY_CALIBRATION_STAGE,
     HR_BATTERY_CHARGE_LIMIT,
     HR_BATTERY_DISCHARGE_LIMIT,
@@ -626,7 +626,9 @@ mod tests {
             .unwrap();
         assert_eq!(writes[0].address, HR_AC_BATTERY_CHARGE_LIMIT);
         assert_eq!(writes[0].value, 100);
-        assert!(ControlCommand::SetAcChargeLimit { limit: 0 }.encode().is_err());
+        assert!(ControlCommand::SetAcChargeLimit { limit: 0 }
+            .encode()
+            .is_err());
 
         let writes = ControlCommand::SetAcDischargeLimit { limit: 1 }
             .encode()
