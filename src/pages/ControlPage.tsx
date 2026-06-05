@@ -708,6 +708,31 @@ export default function ControlPage() {
     ? Math.max(4, Math.min(100, draftReserve))
     : Math.max(4, Math.min(100, snapshot?.battery_reserve ?? 4));
   const isAcCoupled = snapshot?.device_type_code === '3001' || snapshot?.device_type_code === '3002';
+
+  // ARM firmware version as integer (e.g. 318, 352, 449). Used for firmware-gating
+  // the extended schedule block on Gen3 hybrids.
+  const armFwNum = snapshot?.firmware_version != null && snapshot.firmware_version !== ''
+    ? parseInt(snapshot.firmware_version, 10)
+    : NaN;
+  const isHybrid = snapshot?.device_type_code != null && snapshot.device_type_code.startsWith('20');
+
+  // Slot ordering mismatch warning — see issue #41.
+  // Our app uses the canonical register naming from the givenergy-modbus
+  // reference library: Slot 1 = HR 94-95 (charge) / HR 56-57 (discharge),
+  // Slot 2 = HR 31-32 (charge) / HR 44-45 (discharge). GE Cloud's UI appears
+  // to label them the other way around (Cloud Slot 1 = HR 31-32 / 44-45).
+  // Pure labelling difference — underlying schedule data is identical.
+  // Only relevant for devices with 2+ slots: Gen1 hybrids and AC-coupled only
+  // have one slot, so there's no Slot 1 vs Slot 2 ambiguity to warn about.
+  const maxSlotsForWarning = snapshot?.max_charge_slots ?? 0;
+  const showSlotOrderingWarning = isHybrid && maxSlotsForWarning >= 2;
+
+  // Gen3 hybrid firmware gating — see givenergy-modbus reference library:
+  // the extended schedule block (HR 240-299, used for per-slot target SOCs
+  // and slots 3-10) is only supported on ARM firmware > 302. On older firmware
+  // the dongle returns stale or garbage values, which can show up as phantom
+  // schedules or wrong target SOCs. See issue #41.
+  const isLegacyGen3Fw = isHybrid && !Number.isNaN(armFwNum) && armFwNum > 0 && armFwNum <= 302;
   const isThreePhaseLimitModel = snapshot?.device_type_code != null
     && (snapshot.device_type_code.startsWith('40')
       || snapshot.device_type_code.startsWith('41')
@@ -966,16 +991,51 @@ export default function ControlPage() {
       {/* Section 3: Charge Schedule */}
       {!cosyEnabled && <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Charge Schedule</h2>
-        <p className="text-text-secondary/60 text-xs">Please Allow upto 30 Seconds for Changes to Take Effect</p>
+        <p className="text-text-secondary/60 text-xs">Please Allow upto 30 Seconds for Changes to Save</p>
         <div className="space-y-3">
           {chargeSlots.map((slot, i) => (
-            <ScheduleSlotEditor
-              key={`charge-${i}-${slot.enabled}-${slot.start_hour}:${slot.start_minute}-${slot.end_hour}:${slot.end_minute}-${slot.target_soc}`}
-              slotIndex={i}
-              slot={slot}
-              onSave={handleSlotSave}
-              showTargetSoc
-            />
+            <>
+              {i === 1 && (showSlotOrderingWarning || isLegacyGen3Fw) && (
+                <div key="slot-warn-charge" className="space-y-2">
+                  {showSlotOrderingWarning && (
+                    <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-yellow-200">
+                      <div className="font-semibold mb-1">
+                        Slot labels differ from the GivEnergy cloud
+                      </div>
+                      Our app uses the canonical Modbus register layout from the{' '}
+                      <code>givenergy-modbus</code> reference library, which labels
+                      charge slots in the opposite order to the GivEnergy cloud UI:
+                      our <strong>Slot 1</strong> is the cloud&apos;s <strong>Slot 2</strong>{' '}
+                      (registers HR 94-95) and vice versa (registers HR 31-32). The
+                      underlying schedule data is identical — only the labels differ.
+                      If your schedule appears in a different slot than you expected,
+                      this is why. See{' '}
+                      <a href="https://github.com/psylsph/home-energy-manager/issues/41" target="_blank" rel="noreferrer" className="underline">issue #41</a>.
+                    </div>
+                  )}
+                  {isLegacyGen3Fw && (
+                    <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-yellow-200">
+                      <div className="font-semibold mb-1">
+                        Older Gen3 firmware detected (ARM FW {snapshot?.firmware_version})
+                      </div>
+                      Slot 2 and beyond (and per-slot target SOCs) come from extended
+                      registers (HR 240-299) that your inverter firmware does not fully
+                      support. Values shown here may be stale or incorrect. GivEnergy&apos;s
+                      own cloud UI generally hides these slots on this firmware. Updating
+                      your inverter firmware to version 303 or later (if available) will
+                      resolve this.
+                    </div>
+                  )}
+                </div>
+              )}
+              <ScheduleSlotEditor
+                key={`charge-${i}-${slot.enabled}-${slot.start_hour}:${slot.start_minute}-${slot.end_hour}:${slot.end_minute}-${slot.target_soc}`}
+                slotIndex={i}
+                slot={slot}
+                onSave={handleSlotSave}
+                showTargetSoc
+              />
+            </>
           ))}
         </div>
       </section>}
@@ -984,16 +1044,47 @@ export default function ControlPage() {
       {!cosyEnabled && modeToCategory(effectiveMode) === 'timed' && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold text-lg">Discharge Schedule</h2>
-          <p className="text-text-secondary/60 text-xs">Please Allow upto 30 Seconds for Changes to Take Effect</p>
+          <p className="text-text-secondary/60 text-xs">Please Allow upto 30 Seconds for Changes to Save</p>
           <div className="space-y-3">
             {dischargeSlots.map((slot, i) => (
-              <ScheduleSlotEditor
-                key={`discharge-${i}-${slot.enabled}-${slot.start_hour}:${slot.start_minute}-${slot.end_hour}:${slot.end_minute}`}
-                slotIndex={i}
-                slot={slot}
-                onSave={handleSlotSave}
-                showTargetSoc={false}
-              />
+              <>
+                {i === 1 && (showSlotOrderingWarning || isLegacyGen3Fw) && (
+                  <div key="slot-warn-discharge" className="space-y-2">
+                    {showSlotOrderingWarning && (
+                      <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-yellow-200">
+                        <div className="font-semibold mb-1">
+                          Slot labels differ from the GivEnergy cloud
+                        </div>
+                        Our app uses the canonical Modbus register layout from the{' '}
+                        <code>givenergy-modbus</code> reference library, which labels
+                        discharge slots in the opposite order to the GivEnergy cloud UI:
+                        our <strong>Slot 1</strong> is the cloud&apos;s <strong>Slot 2</strong>{' '}
+                        (registers HR 56-57) and vice versa (registers HR 44-45). The
+                        underlying schedule data is identical — only the labels differ.
+                        See{' '}
+                        <a href="https://github.com/psylsph/home-energy-manager/issues/41" target="_blank" rel="noreferrer" className="underline">issue #41</a>.
+                      </div>
+                    )}
+                    {isLegacyGen3Fw && (
+                      <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-yellow-200">
+                        <div className="font-semibold mb-1">
+                          Older Gen3 firmware detected (ARM FW {snapshot?.firmware_version})
+                        </div>
+                        Slot 2 and beyond come from extended registers (HR 240-299) that
+                        your inverter firmware does not fully support. Values shown here
+                        may be stale or incorrect.
+                      </div>
+                    )}
+                  </div>
+                )}
+                <ScheduleSlotEditor
+                  key={`discharge-${i}-${slot.enabled}-${slot.start_hour}:${slot.start_minute}-${slot.end_hour}:${slot.end_minute}`}
+                  slotIndex={i}
+                  slot={slot}
+                  onSave={handleSlotSave}
+                  showTargetSoc={false}
+                />
+              </>
             ))}
           </div>
         </section>

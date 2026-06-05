@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.4] - 2026-06-05
+
+### Added
+
+- **Schedule slot labelling warnings** ([#41](https://github.com/psylsph/home-energy-manager/issues/41)):
+  Added yellow callout warnings above Slot 2 in the Charge Schedule and
+  Discharge Schedule sections explaining two things that have confused users:
+
+  1. **Slot ordering mismatch with the GE Cloud UI.** Our app uses the
+     canonical `givenergy-modbus` reference library register layout (Slot 1 =
+     HR 94-95 / HR 56-57, Slot 2 = HR 31-32 / HR 44-45), which labels slots in
+     the opposite order to the GivEnergy cloud UI. Underlying schedule data is
+     identical — only the labels differ. The warning explains this and links
+     to issue #41 for full context. Shown on hybrids with 2+ schedule slots.
+
+  2. **Older Gen3 firmware (ARM FW ≤ 302) lacks extended register support.**
+  Slots 3-10 and per-slot target SOCs come from HR 240-299, which is only
+  supported on Gen3 firmware > 302 per the reference library. On older
+  firmware these registers may return stale or garbage values. The warning
+  recommends updating firmware to 303+ if available. Shown only on Gen3
+  hybrids with ARM FW ≤ 302.
+
 ## [0.12.3] - 2026-06-05
 
 ### Fixed
