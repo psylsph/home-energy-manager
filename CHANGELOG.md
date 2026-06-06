@@ -5,11 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.13.5] - 2026-06-06
 
 ### Changed
 
-- **DMG now has standard /Applications symlink** — restored the normal macOS drag-to-Applications workflow instead of warning users not to use /Applications. The DMG ships with a `Launch.command` script that auto-handles Gatekeeper, zombie cleanup, and quarantine removal on first launch. (PR #...)
+- **DMG now has standard /Applications symlink** — restored the normal macOS drag-to-Applications workflow instead of warning users not to use /Applications. The DMG ships with a `Launch.command` script that auto-handles Gatekeeper, zombie cleanup, and quarantine removal on first launch.
 
 - **CI macOS DMG customization updated**: `/Applications` symlink is retained. `Launch.command` is copied into the DMG. README instructions reflect the standard workflow: drag to /Applications, then double-click `Launch.command`.
 
