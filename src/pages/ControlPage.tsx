@@ -591,23 +591,23 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: 'standa
 function AgileControls() {
   const [chargeThreshold, setChargeThreshold] = useState(10);
   const [dischargeThreshold, setDischargeThreshold] = useState(30);
-  const [region, setRegion] = useState('_A');
+  const [region, setRegion] = useState('A');
 
   const regions = [
-    { code: '_A', label: 'Eastern England' },
-    { code: '_B', label: 'East Midlands' },
-    { code: '_C', label: 'London' },
-    { code: '_D', label: 'North Wales & Merseyside' },
-    { code: '_E', label: 'West Midlands' },
-    { code: '_F', label: 'North East England' },
-    { code: '_G', label: 'North West England' },
-    { code: '_H', label: 'Southern England' },
-    { code: '_J', label: 'South East England' },
-    { code: '_K', label: 'South Wales' },
-    { code: '_L', label: 'South West England' },
-    { code: '_M', label: 'Yorkshire' },
-    { code: '_N', label: 'South & Central Scotland' },
-    { code: '_P', label: 'North Scotland' },
+    { code: 'A', label: 'Eastern England' },
+    { code: 'B', label: 'East Midlands' },
+    { code: 'C', label: 'London' },
+    { code: 'D', label: 'North Wales & Merseyside' },
+    { code: 'E', label: 'West Midlands' },
+    { code: 'F', label: 'North East England' },
+    { code: 'G', label: 'North West England' },
+    { code: 'H', label: 'Southern England' },
+    { code: 'J', label: 'South East England' },
+    { code: 'K', label: 'South Wales' },
+    { code: 'L', label: 'South West England' },
+    { code: 'M', label: 'Yorkshire' },
+    { code: 'N', label: 'South & Central Scotland' },
+    { code: 'P', label: 'North Scotland' },
   ];
 
   const [saving, setSaving] = useState(false);

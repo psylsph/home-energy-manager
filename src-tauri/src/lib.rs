@@ -227,31 +227,49 @@ pub fn run() {
             // This bypasses any issues with the bundle.icon config or
             // Tauri codegen not picking up the icon at runtime on Linux.
             let icon_path = std::path::PathBuf::from("icons/128x128.png");
-            match tauri::image::Image::from_path(&icon_path) {
+            let abs_path = std::fs::canonicalize(&icon_path).unwrap_or(icon_path.clone());
+            tracing::info!(
+                "Loading window icon from {} (exists: {})",
+                abs_path.display(),
+                abs_path.exists()
+            );
+            match tauri::image::Image::from_path(&abs_path) {
                 Ok(img) => {
+                    tracing::info!(
+                        "Window icon decoded: {}x{} ({} bytes RGBA)",
+                        img.width(),
+                        img.height(),
+                        img.rgba().len()
+                    );
                     if let Some(window) = app.get_webview_window("main") {
-                        if let Err(e) = window.set_icon(img) {
-                            tracing::warn!(
-                                "Failed to set window icon from {}: {e}",
-                                icon_path.display()
-                            );
-                        } else {
-                            tracing::debug!(
-                                "Set window icon from {}",
-                                icon_path.display()
-                            );
+                        tracing::info!(
+                            "Main window found (label: {}), setting icon...",
+                            window.label()
+                        );
+                        match window.set_icon(img) {
+                            Ok(()) => {
+                                tracing::info!(
+                                    "Window icon set successfully from {}",
+                                    abs_path.display()
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to set window icon from {}: {e}",
+                                    abs_path.display()
+                                );
+                            }
                         }
                     } else {
-                        tracing::debug!(
-                            "Main window not found, cannot set icon from {}",
-                            icon_path.display()
+                        tracing::warn!(
+                            "Main window not found (app.get_webview_window returned None), cannot set icon"
                         );
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "Failed to load window icon from {}: {e}",
-                        icon_path.display()
+                    tracing::error!(
+                        "Failed to load/encode window icon from {}: {e}",
+                        abs_path.display()
                     );
                 }
             }
