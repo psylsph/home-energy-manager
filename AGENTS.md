@@ -282,7 +282,56 @@ Flags passed in: `has_ac_config_block`, `has_extended_slots_block`, `has_three_p
 
 ## Known issues
 
-### macOS 26.5 blocks ad-hoc signed binaries
+### Linux toolbar icon not showing (GNOME Wayland)
+
+**Symptom**: The app icon shows as a generic gear in the dock/taskbar on
+GNOME Wayland. `set_icon()` in Rust succeeds (returns Ok) but the desktop
+environment ignores the embedded window icon.
+
+**Root cause**: GNOME Wayland 43+ deliberately ignores window icons set via
+`gtk_window_set_icon()` / `Window::set_icon()`. It resolves the icon
+entirely through **application ID matching**:
+
+1. The window's GTK application ID (`app_id` on Wayland) must match a
+   `.desktop` file ID (the filename without `.desktop`).
+2. The icon is then taken from the `Icon=` key in that `.desktop` file.
+
+**Configuration required in `tauri.conf.json`**:
+
+```json
+"app": {
+  "enableGTKAppId": true
+}
+```
+
+This sets the GTK app ID to the Tauri identifier (e.g. `com.givenergy.local`),
+which becomes the surface `app_id` on Wayland.
+
+**Dev mode workaround** (run once after `git pull` or fresh clone):
+
+```bash
+bash scripts/install-dev-desktop.sh
+```
+
+This creates `~/.local/share/applications/com.givenergy.local.desktop`
+with the correct `app_id`-matching filename and the icon path set to
+`src-tauri/icons/128x128.png`. The desktop entry is the canonical (non-hidden)
+type so the compositor picks it up correctly.
+
+**Packaged app** (installed via `.deb` / `.rpm`): the package already
+installs a matching desktop file. The `postinst` script refreshes the
+desktop database and icon cache automatically.
+
+**Troubleshooting**: If the icon still doesn't appear after installing the
+desktop file, check these steps:
+
+1. Verify the file exists: `ls -la ~/.local/share/applications/com.givenergy.local.desktop`
+2. Confirm `app.enableGTKAppId` is `true` in `src-tauri/tauri.conf.json`
+3. Rebuild: `cargo tauri dev` (a full rebuild may be needed)
+4. Check logs for `Window icon set successfully` — if that appears, the
+   issue is purely at the DE/compositor level
+
+## macOS 26.5 blocks ad-hoc signed binaries
 
 **Symptom**: The app binary silently exits with no output and no port 7337 when
 the .app bundle is installed in `/Applications`. Same binary runs fine from
