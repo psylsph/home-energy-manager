@@ -101,36 +101,38 @@ jobs:
           hdiutil detach "$MNT" -quiet >/dev/null 2>&1 || hdiutil detach "$MNT" -force
 
           # Give macOS a moment to fully release the mounted image before
-          # creating a replacement. This avoids intermittent
-          # "hdiutil: create failed - Resource busy" on Apple Silicon jobs.
+          # creating a replacement.
           sleep 2
 
-          # Remove misleading /Applications symlink — macOS 26.5 blocks unsigned
-          # apps in /Applications, so the symlink invites users to break the app.
-          rm -f "$STAGE/Applications"
+          # Keep the /Applications symlink — standard macOS DMG behaviour.
+          # The app is ad-hoc signed and macOS 26.5 will prompt the user to
+          # approve it via System Settings → Privacy & Security → "Open Anyway"
+          # on first launch. This one-time Gatekeeper approval is the normal
+          # macOS workflow for unsigned apps.
 
-          # Add install instructions.
+          # Copy in the launcher script that auto-handles quarantine + zombie cleanup.
+          if [ -f "$GITHUB_WORKSPACE/launch.command" ]; then
+            cp "$GITHUB_WORKSPACE/launch.command" "$STAGE/Launch.command"
+            chmod +x "$STAGE/Launch.command"
+          fi
+
+          # Add concise install instructions.
           cat > "$STAGE/README.txt" << 'EOF'
           Home Energy Manager — macOS Install Notes
           ======================================
 
-          IMPORTANT: Do NOT drag this app to /Applications.
-          macOS 26.5 (Sequoia) blocks unsigned apps in /Applications.
+          1. Drag Home Energy Manager.app into the Applications folder
+          2. Double-click Launch.command to start the app (auto-handles Gatekeeper)
+             Or open Terminal and run: xattr -d com.apple.quarantine /Applications/Home\ Energy\ Manager.app
+             Or right-click the app → Open → Open
 
-          Instead, drag Home Energy Manager.app to your Desktop or Home folder.
-          Then double-click to run.
+          If Gatekeeper still blocks it on first launch:
+          System Settings → Privacy & Security → click "Open Anyway"
 
-          On first launch you may see a Gatekeeper warning:
-          1. Open System Settings → Privacy & Security
-          2. Click "Open Anyway" next to the security warning
-          3. Or right-click the app → Open → Open
-
-          For Apple Silicon (M1/M2/M3/M4) Macs, use the aarch64 release.
-          For Intel Macs, use the x86_64 release.
+          For Intel Macs, use the x86_64 (Intel) release.
           EOF
 
-          # Rebuild DMG from staging directory. Write to RUNNER_TEMP first so
-          # we never create the new image beside a recently-detached source DMG.
+          # Rebuild DMG from staging directory.
           for attempt in 1 2 3 4 5; do
             if hdiutil create -ov -srcfolder "$STAGE" -format UDZO \
               -volname "Home Energy Manager" -fs HFS+ "$NEW_DMG"; then
@@ -290,7 +292,7 @@ jobs:
             | `Linux-RPM-...rpm` | **Linux** — RHEL/Fedora/openSUSE, not macOS |
             | `Linux-AppImage-...AppImage` | **Linux** — portable AppImage |
 
-            > **macOS users**: Do NOT drag the app to `/Applications`. macOS 26.5+ blocks unsigned apps there. Drag it to your **Desktop** or **Home folder** instead. See the README.txt inside the DMG for details.
+            > **macOS users**: Drag the app to your Applications folder. On first launch Gatekeeper may block it — open System Settings → Privacy & Security → click "Open Anyway". Or right-click the app → Open. See README.txt inside the DMG for details.
 
             ---
 

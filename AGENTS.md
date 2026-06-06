@@ -297,33 +297,31 @@ even running the binary directly via terminal fails, not just `open`.
 
 | Issue | Trigger | Status |
 |---|---|---|
-| 1. `/Applications` block | Binary launched from `/Applications` | **Fixed** (FAQ + launch.command) |
-| 2. Gatekeeper blocks `open` | `open GivEnergy-Local.app` or double-click | **Fixed** (FAQ + launch.command) |
-| 3. x86_64 binary crashes under Rosetta | macOS 26.5 + Rosetta | **Fixed** (FAQ recommends aarch64) |
+| 1. `/Applications` block | Binary launched from `/Applications` | **Mitigated** (one-time "Open Anyway" approval via System Settings) |
+| 2. Gatekeeper blocks `open` | `open GivEnergy-Local.app` or double-click | **Mitigated** (one-time approval or `xattr -d com.apple.quarantine`) |
+| 3. x86_64 binary crashes under Rosetta | macOS 26.5 + Rosetta | **Fixed** (documented — use aarch64 builds) |
 
-**CI fix implemented**:
-The `.github/workflows/build.yml` now includes a `Customize macOS DMG` step that:
+**Standard DMG workflow**:
+The DMG retains the standard `/Applications` symlink so drag-to-Applications
+works as expected. On first launch, macOS 26.5 will show a Gatekeeper warning.
+The user can approve it via:
 
-1. Removes the misleading `/Applications` symlink from the DMG
-2. Adds a `README.txt` with install instructions (drag to Desktop, not /Applications)
-3. Rebuilds the DMG with these changes
+1. `xattr -d com.apple.quarantine /Applications/Home\ Energy\ Manager.app`
+2. System Settings → Privacy & Security → click "Open Anyway" next to the app
+3. Or right-click the app → Open → Open
 
-The workflow uses manual `cargo tauri build` + `softprops/action-gh-release` instead
-of `tauri-action` so the DMG can be customized before upload.
+After this one-time approval the app runs normally from `/Applications`.
 
-**Workaround for end users**:
-
-- Download `GivEnergy-Local_aarch64.app.tar.gz` from releases (not the DMG)
-- Or install the .app on Desktop, not in /Applications
-- Run via `./launch.command` in the project root (searches Desktop first)
+**launch.command**:
+There is a `launch.command` script in the project root that searches Desktop
+first (avoids the /Applications block entirely), then falls back to /Applications.
+This is useful for headless/terminal use.
 
 **Known good archs**:
-
-- The aarch64 (ARM64) app works correctly from Desktop
+- The aarch64 (ARM64) app works correctly from Desktop and from /Applications
+  after one-time Gatekeeper approval
 - The x86_64 (Intel) app crashes silently under Rosetta on macOS 26.5+
-- The aarch64.app.tar.gz release artifact contains the correct binary
-- The aarch64.dmg release artifact has the correct binary but misleading
-  /Applications symlink
+- Always use the aarch64 release on Apple Silicon Macs
 
 ## Release process
 
