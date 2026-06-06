@@ -223,6 +223,39 @@ pub fn run() {
                 }
             }
 
+            // Explicitly set the window icon from the PNG file.
+            // This bypasses any issues with the bundle.icon config or
+            // Tauri codegen not picking up the icon at runtime on Linux.
+            let icon_path = std::path::PathBuf::from("icons/128x128.png");
+            match tauri::image::Image::from_path(&icon_path) {
+                Ok(img) => {
+                    if let Some(window) = app.get_webview_window("main") {
+                        if let Err(e) = window.set_icon(img) {
+                            tracing::warn!(
+                                "Failed to set window icon from {}: {e}",
+                                icon_path.display()
+                            );
+                        } else {
+                            tracing::debug!(
+                                "Set window icon from {}",
+                                icon_path.display()
+                            );
+                        }
+                    } else {
+                        tracing::debug!(
+                            "Main window not found, cannot set icon from {}",
+                            icon_path.display()
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to load window icon from {}: {e}",
+                        icon_path.display()
+                    );
+                }
+            }
+
             // Spawn the Modbus polling loop
             let poll_state = state.clone();
             tauri::async_runtime::spawn(async move {

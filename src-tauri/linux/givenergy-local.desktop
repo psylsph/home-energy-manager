@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Home Energy Manager (X11 fallback)
-Comment=
-Exec=givenergy-local
-Icon=givenergy-local
-StartupWMClass=givenergy-local
-Terminal=false
-NoDisplay=true

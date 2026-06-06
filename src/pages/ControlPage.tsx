@@ -581,7 +581,128 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: 'standa
           </button>
         </div>
       )}
+
+      {mode === 'agile' && <AgileControls />}
     </section>
+  );
+}
+
+/** Agile Octopus controls — shown when Agile charging mode is selected. */
+function AgileControls() {
+  const [chargeThreshold, setChargeThreshold] = useState(10);
+  const [dischargeThreshold, setDischargeThreshold] = useState(30);
+  const [region, setRegion] = useState('_A');
+
+  const regions = [
+    { code: '_A', label: 'Eastern England' },
+    { code: '_B', label: 'East Midlands' },
+    { code: '_C', label: 'London' },
+    { code: '_D', label: 'North Wales & Merseyside' },
+    { code: '_E', label: 'West Midlands' },
+    { code: '_F', label: 'North East England' },
+    { code: '_G', label: 'North West England' },
+    { code: '_H', label: 'Southern England' },
+    { code: '_J', label: 'South East England' },
+    { code: '_K', label: 'South Wales' },
+    { code: '_L', label: 'South West England' },
+    { code: '_M', label: 'Yorkshire' },
+    { code: '_N', label: 'South & Central Scotland' },
+    { code: '_P', label: 'North Scotland' },
+  ];
+
+  const [saving, setSaving] = useState(false);
+  const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
+
+  const saveConfig = async () => {
+    setSaving(true);
+    setSaveFeedback(null);
+    try {
+      await apiPost('/api/agile', {
+        enabled: true,
+        region,
+        charge_threshold: chargeThreshold,
+        discharge_threshold: dischargeThreshold,
+      });
+      setSaveFeedback('saved');
+    } catch {
+      setSaveFeedback('error');
+    }
+    setSaving(false);
+    setTimeout(() => setSaveFeedback(null), 2000);
+  };
+
+  return (
+    <div className="space-y-4 mt-3">
+      <p className="text-text-secondary/60 text-xs">
+        Automatically charges when Agile prices are low and discharges when prices are high.
+        Prices are fetched from the public Octopus Energy API — no account needed.
+      </p>
+
+      {/* Region selector */}
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between">
+          <span className="text-text-secondary text-sm">Region</span>
+          <span className="font-mono text-text-primary text-xs">{region}</span>
+        </div>
+        <select
+          value={region}
+          onChange={(e) => setRegion(e.target.value)}
+          className="w-full bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-3 py-2 border border-transparent focus:border-battery outline-none cursor-pointer"
+        >
+          {regions.map((r) => (
+            <option key={r.code} value={r.code}>{r.label}</option>
+          ))}
+        </select>
+      </div>
+
+      {/* Charge threshold */}
+      <div className="space-y-1">
+        <div className="flex items-center justify-between">
+          <span className="text-text-secondary text-sm">Charge when below</span>
+          <span className="font-mono text-text-primary text-sm">{chargeThreshold}p/kWh</span>
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={50}
+          step={0.5}
+          value={chargeThreshold}
+          onChange={(e) => setChargeThreshold(Number(e.target.value))}
+          className="w-full"
+        />
+        <p className="text-text-secondary text-xs">
+          Force-charge the battery from the grid when the current half-hour price is at or below this threshold.
+        </p>
+      </div>
+
+      {/* Discharge threshold */}
+      <div className="space-y-1">
+        <div className="flex items-center justify-between">
+          <span className="text-text-secondary text-sm">Discharge when above</span>
+          <span className="font-mono text-text-primary text-sm">{dischargeThreshold}p/kWh</span>
+        </div>
+        <input
+          type="range"
+          min={5}
+          max={100}
+          step={0.5}
+          value={dischargeThreshold}
+          onChange={(e) => setDischargeThreshold(Number(e.target.value))}
+          className="w-full"
+        />
+        <p className="text-text-secondary text-xs">
+          Discharge the battery to power the home when the current half-hour price is at or above this threshold.
+        </p>
+      </div>
+
+      <button
+        onClick={saveConfig}
+        disabled={saving}
+        className="w-full py-2 bg-battery/20 text-battery rounded-lg text-sm font-medium hover:bg-battery/30 transition disabled:opacity-50"
+      >
+        {saving ? 'Saving...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save'}
+      </button>
+    </div>
   );
 }
 
@@ -700,17 +821,24 @@ export default function ControlPage() {
   const [draftCharge, setDraftCharge] = useState<number | null>(null);
   const [draftDischarge, setDraftDischarge] = useState<number | null>(null);
   const [draftActivePower, setDraftActivePower] = useState<number | null>(null);
-  const snapshotCosyEnabled = snapshot?.cosy_enabled ?? false;
-  const [localCosyOverride, setLocalCosyOverride] = useState<boolean | null>(null);
-  // Use snapshot value unless user just toggled (local override takes precedence
-  // until the next poll cycle updates the snapshot from backend settings).
-  const cosyEnabled = localCosyOverride ?? snapshotCosyEnabled;
-  const setCosyEnabled = (v: boolean) => { setLocalCosyOverride(v); };
   type ChargeMode = 'standard' | 'cosy' | 'agile';
-  const chargeMode: ChargeMode = cosyEnabled ? 'cosy' : 'standard';
+  const snapshotCosyEnabled = snapshot?.cosy_enabled ?? false;
+  const [localChargeOverride, setLocalChargeOverride] = useState<ChargeMode | null>(null);
+  // Use local override if user has interacted; otherwise derive from snapshot.
+  // Snapshot only knows cosy_enabled (boolean), so 'agile' can only come from a local override.
+  const chargeMode: ChargeMode = localChargeOverride ?? (snapshotCosyEnabled ? 'cosy' : 'standard');
+  const cosyEnabled = chargeMode === 'cosy';
   const setChargeMode = (m: ChargeMode) => {
-    if (m === 'cosy') setCosyEnabled(true);
-    else setCosyEnabled(false);
+    setLocalChargeOverride(m);
+    // Keep the backend cosy flag in sync — only 'cosy' mode has it enabled.
+    const newCosyEnabled = m === 'cosy';
+    // Fire-and-forget: update cosy_enabled via the API so the next poll
+    // reflects it, but don't await (the local override takes immediate effect).
+    fetch('/api/cosy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: newCosyEnabled }),
+    }).catch(() => {});
   };
 
   const currentMode = snapshot?.battery_mode ?? 'eco';

@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Home Energy Manager
-Comment=Local monitoring and control for GivEnergy solar/battery inverters
-Exec=givenergy-local
-Icon=givenergy-local
-Terminal=false
-Categories=Utility;
