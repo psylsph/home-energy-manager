@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.1] - 2026-06-06
+
+### Fixed
+
+- **"Stop Charge" button finally obeys your schedule**
+  If you had a charge slot set up and winter mode left on, the button would
+  light up all the time — even when your battery was just sitting there in
+  Eco mode. It was looking at the wrong signals. Now it only lights up when
+  you're actually inside a charge window.
+- **Energy flow diagram and Battery page agree with reality now**
+  Same fix as above — they stopped randomly showing "Override" outside
+  charge windows.
+- **Dongle busy errors won't snowball on you anymore**
+  When the dongle said "busy" three times in a row, the app used to kill
+  the connection and start a slow reconnect spiral (5 seconds, then 10,
+  then 20…). That just made everything worse. Now it shrugs, skips that
+  poll, and tries again on the next normal refresh.
+- **Charge slots clean up after winter mode**
+  If you'd ever used winter mode or force charge, a stale flag could sit
+  around and confuse the app. Now saving a charge slot sweeps that flag
+  away.
+- **Less flakiness when the dongle gets chatty**
+  Stale response frames from the dongle are now cleared out during reads,
+  not just before writes. Helps keep a brief hiccup from turning into a
+  cascade of failures.
+
 ## [0.15.0] - 2026-06-06
 
 ### Added
