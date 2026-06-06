@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Home Energy Manager",
-  "mainBinaryName": "givenergy-local",
+
   "version": "0.13.7",
   "identifier": "com.givenergy.local",
   "build": {
@@ -50,26 +50,12 @@
         ],
         "provides": ["giv-energy-local"],
         "conflicts": ["giv-energy-local"],
-        "replaces": ["giv-energy-local"],
-        "desktopTemplate": "linux/home-energy-manager.desktop.hbs",
-        "files": {
-          "/usr/share/applications/com.givenergy.local.desktop": "linux/com.givenergy.local.desktop",
-          "/usr/share/applications/givenergy-local.desktop": "linux/givenergy-local.desktop"
-        },
-        "postInstallScript": "linux/refresh-desktop-cache.sh",
-        "postRemoveScript": "linux/refresh-desktop-cache.sh"
+        "replaces": ["giv-energy-local"]
       },
       "rpm": {
         "provides": ["GivEnergy-Local"],
         "conflicts": ["GivEnergy-Local"],
-        "obsoletes": ["GivEnergy-Local"],
-        "desktopTemplate": "linux/home-energy-manager.desktop.hbs",
-        "files": {
-          "/usr/share/applications/com.givenergy.local.desktop": "linux/com.givenergy.local.desktop",
-          "/usr/share/applications/givenergy-local.desktop": "linux/givenergy-local.desktop"
-        },
-        "postInstallScript": "linux/refresh-desktop-cache.sh",
-        "postRemoveScript": "linux/refresh-desktop-cache.sh"
+        "obsoletes": ["GivEnergy-Local"]
       }
     }
   }
