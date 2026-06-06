@@ -223,17 +223,10 @@ pub fn run() {
                 }
             }
 
-            // Explicitly set the window icon from the PNG file.
-            // This bypasses any issues with the bundle.icon config or
-            // Tauri codegen not picking up the icon at runtime on Linux.
-            let icon_path = std::path::PathBuf::from("icons/128x128.png");
-            let abs_path = std::fs::canonicalize(&icon_path).unwrap_or(icon_path.clone());
-            tracing::info!(
-                "Loading window icon from {} (exists: {})",
-                abs_path.display(),
-                abs_path.exists()
-            );
-            match tauri::image::Image::from_path(&abs_path) {
+            // Set the window icon from the bundled PNG.
+            // `include_bytes!` embeds the file at compile time, avoiding
+            // runtime working-directory issues (macOS .app bundle CWD is /).
+            match tauri::image::Image::from_bytes(include_bytes!("../icons/128x128.png")) {
                 Ok(img) => {
                     tracing::info!(
                         "Window icon decoded: {}x{} ({} bytes RGBA)",
@@ -248,16 +241,10 @@ pub fn run() {
                         );
                         match window.set_icon(img) {
                             Ok(()) => {
-                                tracing::info!(
-                                    "Window icon set successfully from {}",
-                                    abs_path.display()
-                                );
+                                tracing::info!("Window icon set successfully");
                             }
                             Err(e) => {
-                                tracing::error!(
-                                    "Failed to set window icon from {}: {e}",
-                                    abs_path.display()
-                                );
+                                tracing::error!("Failed to set window icon: {e}");
                             }
                         }
                     } else {
@@ -267,10 +254,7 @@ pub fn run() {
                     }
                 }
                 Err(e) => {
-                    tracing::error!(
-                        "Failed to load/encode window icon from {}: {e}",
-                        abs_path.display()
-                    );
+                    tracing::error!("Failed to load/encode window icon: {e}");
                 }
             }
 

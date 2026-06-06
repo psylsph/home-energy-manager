@@ -841,64 +841,69 @@ function AgileControls() {
     return startIdx >= 0 ? allCached.slice(startIdx, startIdx + 48) : [];
   }, []);
 
-  // Fetch prices from Octopus API, covering today onwards
-  const fetchPrices = useCallback(async () => {
-    setPricesLoading(true);
-    setPricesError(null);
-    try {
-      const now = new Date();
-      const todayStr = now.toISOString().slice(0, 10); // YYYY-MM-DD
-
-      const baseUrl = `https://api.octopus.energy/v1/products/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-${region}/standard-unit-rates/`;
-      const url = `${baseUrl}?period_from=${todayStr}T00:00:00Z&page_size=96`;
-      const res = await fetch(url);
-      if (!res.ok) {
-        setPricesError(`API returned ${res.status}`);
-        setPricesLoading(false);
-        return;
-      }
-      const json = await res.json();
-      const slots: PriceSlot[] = (json.results || []).map((r: { valid_from: string; valid_to: string; value_inc_vat: number }) => ({
-        validFrom: new Date(r.valid_from),
-        validTo: new Date(r.valid_to),
-        pence: r.value_inc_vat,
-      }));
-
-      // Update cache by date
-      const newCache = { ...pricesCache.current };
-      for (const slot of slots) {
-        const key = slot.validFrom.toISOString().slice(0, 10);
-        if (!newCache[key]) newCache[key] = [];
-        // Deduplicate by slot start time
-        if (!newCache[key].some(s => s.validFrom.getTime() === slot.validFrom.getTime())) {
-          newCache[key].push(slot);
-        }
-      }
-      // Prune cache: keep only today, yesterday (just fetched), and tomorrow
-      const yesterday = new Date(now.getTime() - 86400000);
-      const keepKeys = [
-        yesterday.toISOString().slice(0, 10),
-        todayStr,
-        new Date(now.getTime() + 86400000).toISOString().slice(0, 10),
-      ];
-      for (const key of Object.keys(newCache)) {
-        if (!keepKeys.includes(key)) delete newCache[key];
-      }
-      pricesCache.current = newCache;
-
-      setDisplaySlots(computeRollingWindow());
-    } catch (e) {
-      setPricesError((e as Error).message);
-    }
-    setPricesLoading(false);
-  }, [region, computeRollingWindow]);
-
-  // Fetch on region change and periodically to pick up new data
+  // Fetch prices from Octopus API (covering today onwards), cache by date so
+  // the display survives the API's next-day handover, and re-fetch every 5
+  // minutes to pick up newly published prices. The fetch logic lives inside
+  // the effect (rather than a useCallback) so the react-hooks linter doesn't
+  // trace the synchronous setState calls as cascading-render triggers.
   useEffect(() => {
-    fetchPrices();
-    const interval = setInterval(fetchPrices, 5 * 60 * 1000); // every 5 minutes
-    return () => clearInterval(interval);
-  }, [fetchPrices]);
+    let cancelled = false;
+
+    const load = async () => {
+      setPricesLoading(true);
+      setPricesError(null);
+      try {
+        const now = new Date();
+        const todayStr = now.toISOString().slice(0, 10); // YYYY-MM-DD
+
+        const baseUrl = `https://api.octopus.energy/v1/products/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-${region}/standard-unit-rates/`;
+        const url = `${baseUrl}?period_from=${todayStr}T00:00:00Z&page_size=96`;
+        const res = await fetch(url);
+        if (!res.ok) {
+          if (!cancelled) setPricesError(`API returned ${res.status}`);
+          return;
+        }
+        const json = await res.json();
+        const slots: PriceSlot[] = (json.results || []).map((r: { valid_from: string; valid_to: string; value_inc_vat: number }) => ({
+          validFrom: new Date(r.valid_from),
+          validTo: new Date(r.valid_to),
+          pence: r.value_inc_vat,
+        }));
+
+        // Update cache by date
+        const newCache = { ...pricesCache.current };
+        for (const slot of slots) {
+          const key = slot.validFrom.toISOString().slice(0, 10);
+          if (!newCache[key]) newCache[key] = [];
+          // Deduplicate by slot start time
+          if (!newCache[key].some(s => s.validFrom.getTime() === slot.validFrom.getTime())) {
+            newCache[key].push(slot);
+          }
+        }
+        // Prune cache: keep only today, yesterday (just fetched), and tomorrow
+        const yesterday = new Date(now.getTime() - 86400000);
+        const keepKeys = [
+          yesterday.toISOString().slice(0, 10),
+          todayStr,
+          new Date(now.getTime() + 86400000).toISOString().slice(0, 10),
+        ];
+        for (const key of Object.keys(newCache)) {
+          if (!keepKeys.includes(key)) delete newCache[key];
+        }
+        pricesCache.current = newCache;
+
+        if (!cancelled) setDisplaySlots(computeRollingWindow());
+      } catch (e) {
+        if (!cancelled) setPricesError((e as Error).message);
+      } finally {
+        if (!cancelled) setPricesLoading(false);
+      }
+    };
+
+    load();
+    const interval = setInterval(load, 5 * 60 * 1000); // every 5 minutes
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [region, computeRollingWindow]);
 
   // Recompute rolling window every 30 seconds (for the "now" indicator)
   useEffect(() => {
