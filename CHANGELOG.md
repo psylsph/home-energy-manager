@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Force Charge and Force Discharge now work on three-phase inverters**:
+  If you have a three-phase, commercial, or HV hybrid inverter, hitting
+  "Force Charge" or "Force Discharge" in the app finally does something.
+  These buttons were using single-phase registers (HR 96/59) that three-phase
+  inverters don't listen to — they need separate registers (HR 1123/1122).
+  The app now checks your inverter model and writes to the right place.
+- **Cosy charging now works on three-phase inverters too**: Same root
+  cause — the Cosy timer was writing single-phase charge/discharge flags
+  regardless of model. Cosy entry, exit, and crash recovery now use the
+  correct three-phase registers on compatible inverters.
+
 ## [0.13.7] - 2026-06-06
 
 ### Fixed
