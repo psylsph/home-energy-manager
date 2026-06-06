@@ -30,10 +30,25 @@ function modeLabel(mode: string): string {
   return MODE_LABELS[mode] || mode;
 }
 
-/** Battery mode label, overridden to "Cosy" when cosy mode is enabled in settings. */
-function modeDisplayLabel(mode: string, cosyActive: boolean, cosyEnabled: boolean): string {
+/** Battery mode label, overridden to "Cosy" when cosy mode is enabled, */
+/** or "Override" when force charge or force discharge is active.       */
+function modeDisplayLabel(
+  mode: string, cosyActive: boolean, cosyEnabled: boolean,
+  enableCharge: boolean, enableChargeTarget: boolean, enableDischarge: boolean,
+  deviceTypeCode: string,
+): string {
   if (cosyActive) return 'Cosy';
   if (cosyEnabled && (mode === 'eco' || mode === 'eco_paused')) return 'Cosy';
+  // Check if force charge is active: single-phase needs both flags,
+  // three-phase uses HR 1123 directly which sets enable_charge alone.
+  const isThreePhase = deviceTypeCode.startsWith('40') || deviceTypeCode.startsWith('41')
+    || deviceTypeCode.startsWith('60') || deviceTypeCode.startsWith('81')
+    || deviceTypeCode.startsWith('82');
+  const forceChargeActive = isThreePhase
+    ? enableCharge
+    : enableCharge && enableChargeTarget;
+  const forceDischargeActive = enableDischarge;
+  if (forceChargeActive || forceDischargeActive) return 'Override';
   return modeLabel(mode);
 }
 
@@ -300,7 +315,7 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
           fill="#8B949E"
           style={{ fontSize: 10, fontFamily: 'sans-serif' }}
         >
-          {modeDisplayLabel(s.battery_mode, s.cosy_active, s.cosy_enabled)}
+          {modeDisplayLabel(s.battery_mode, s.cosy_active, s.cosy_enabled, s.enable_charge, s.enable_charge_target, s.enable_discharge, s.device_type_code)}
         </text>
         <FlowNode
           {...NODES.inverter}

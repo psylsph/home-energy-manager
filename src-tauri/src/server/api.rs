@@ -623,16 +623,34 @@ pub async fn set_active_power_rate(
 }
 
 /// POST /api/control/pause — pause the battery.
+///
+/// Disables charge and discharge. For three-phase models, also clears
+/// the three-phase force discharge and force charge enable flags.
 pub async fn pause_battery(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let cmd = ControlCommand::PauseBattery;
-    match cmd.encode() {
-        Ok(writes) => {
-            tracing::info!("PauseBattery encoded: {:?}", writes);
-            queue_writes(&state, writes).await;
-            ok_response("Battery paused")
-        }
-        Err(e) => error_response(&format!("Validation error: {}", e)),
+    let is_three_phase = is_three_phase_limit_snapshot(&state).await;
+    let mut writes = match ControlCommand::PauseBattery.encode() {
+        Ok(w) => w,
+        Err(e) => return error_response(&format!("Validation error: {}", e)),
+    };
+    if is_three_phase {
+        // Also clear three-phase-specific force discharge/charge flags
+        use crate::modbus::registers::{HR_3PH_FORCE_DISCHARGE_ENABLE, HR_3PH_FORCE_CHARGE_ENABLE, HR_3PH_AC_CHARGE_ENABLE};
+        writes.push(crate::inverter::encoder::RegisterWrite {
+            address: HR_3PH_FORCE_DISCHARGE_ENABLE,
+            value: 0,
+        });
+        writes.push(crate::inverter::encoder::RegisterWrite {
+            address: HR_3PH_FORCE_CHARGE_ENABLE,
+            value: 0,
+        });
+        writes.push(crate::inverter::encoder::RegisterWrite {
+            address: HR_3PH_AC_CHARGE_ENABLE,
+            value: 0,
+        });
     }
+    tracing::info!("PauseBattery encoded: {:?}", writes);
+    queue_writes(&state, writes).await;
+    ok_response("Battery paused")
 }
 
 /// POST /api/control/force-charge — enable charging with target SOC.

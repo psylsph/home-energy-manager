@@ -927,6 +927,21 @@ export default function ControlPage() {
       : Math.min(Math.round(dischargeRate / 200 * batteryCapacityW), maxBatteryPowerW)
     : null;
 
+  // Derive force charge/discharge state from snapshot registers, with
+  // local override so the toggle feels instant (doesn't wait for next poll).
+  // For single-phase: force charge when both enable_charge and enable_charge_target are set.
+  // For three-phase: enable_charge alone suffices (HR 1123 is the force-charge flag).
+  const snapshotForceCharge = isThreePhaseLimitModel
+    ? (snapshot?.enable_charge ?? false)
+    : (snapshot?.enable_charge && snapshot?.enable_charge_target) ?? false;
+  const [localForceChargeOverride, setLocalForceChargeOverride] = useState<boolean | null>(null);
+  const forceChargeActive = localForceChargeOverride ?? snapshotForceCharge;
+  const [forceChargeLoading, setForceChargeLoading] = useState(false);
+  // Force discharge is active when enable_discharge is set.
+  const snapshotForceDischarge = snapshot?.enable_discharge ?? false;
+  const [localForceDischargeOverride, setLocalForceDischargeOverride] = useState<boolean | null>(null);
+  const forceDischargeActive = localForceDischargeOverride ?? snapshotForceDischarge;
+  const [forceDischargeLoading, setForceDischargeLoading] = useState(false);
   const [reserveSaving, setReserveSaving] = useState(false);
   const [chargeRateSaving, setChargeRateSaving] = useState(false);
   const [dischargeRateSaving, setDischargeRateSaving] = useState(false);
@@ -1029,18 +1044,70 @@ export default function ControlPage() {
       <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Quick Actions</h2>
         <div className="grid grid-cols-4 gap-2 sm:gap-3">
-          <ActionButton
-            label="Force Charge"
-            icon="☀️"
-            path="/api/control/force-charge"
-            body={{ minutes: 30 }}
-          />
-          <ActionButton
-            label="Force Discharge"
-            icon="⚡"
-            path="/api/control/force-discharge"
-            body={{ minutes: 30 }}
-          />
+          <div className="relative">
+            <button
+              onClick={async () => {
+                setForceChargeLoading(true);
+                try {
+                  if (forceChargeActive) {
+                    await apiPost('/api/control/pause');
+                    setLocalForceChargeOverride(false);
+                  } else {
+                    await apiPost('/api/control/force-charge', { minutes: 30 });
+                    setLocalForceChargeOverride(true);
+                  }
+                } catch { /* handled silently */ }
+                setForceChargeLoading(false);
+              }}
+              disabled={forceChargeLoading}
+              className={`w-full flex flex-col items-center gap-1 sm:gap-2 p-2 sm:p-4 rounded-xl border transition disabled:opacity-50 ${forceChargeActive
+                ? 'bg-green-900/30 border-green-500/40 hover:bg-green-900/50'
+                : 'bg-bg-surface border-transparent hover:border-battery/40 hover:bg-bg-elevated'
+              }`}
+            >
+              <span className="text-xl sm:text-2xl">{forceChargeActive ? '⏹' : '☀️'}</span>
+              <span className="text-text-primary text-xs sm:text-sm font-medium leading-tight text-center">
+                {forceChargeActive ? 'Stop Charge' : 'Force Charge'}
+              </span>
+            </button>
+            {forceChargeLoading && (
+              <div className="absolute inset-0 flex items-center justify-center bg-bg-surface/80 rounded-xl">
+                <div className="w-5 h-5 border-2 border-battery border-t-transparent rounded-full animate-spin" />
+              </div>
+            )}
+          </div>
+          <div className="relative">
+            <button
+              onClick={async () => {
+                setForceDischargeLoading(true);
+                try {
+                  if (forceDischargeActive) {
+                    await apiPost('/api/control/pause');
+                    setLocalForceDischargeOverride(false);
+                  } else {
+                    await apiPost('/api/control/force-discharge');
+                    setLocalForceDischargeOverride(true);
+                  }
+                } catch { /* handled silently */ }
+                setForceDischargeLoading(false);
+              }}
+              disabled={forceDischargeLoading}
+              className={`w-full flex flex-col items-center gap-1 sm:gap-2 p-2 sm:p-4 rounded-xl border transition disabled:opacity-50 ${forceDischargeActive
+                ? 'bg-green-900/30 border-green-500/40 hover:bg-green-900/50'
+                : 'bg-bg-surface border-transparent hover:border-battery/40 hover:bg-bg-elevated'
+              }`}
+            >
+              <span className="text-xl sm:text-2xl">{forceDischargeActive ? '⏹' : '⚡'}</span>
+              <span className="text-text-primary text-xs sm:text-sm font-medium leading-tight text-center">
+                {forceDischargeActive ? 'Stop Discharge' : 'Force Discharge'}
+              </span>
+            </button>
+            {forceDischargeLoading && (
+              <div className="absolute inset-0 flex items-center justify-center bg-bg-surface/80 rounded-xl">
+                <div className="w-5 h-5 border-2 border-battery border-t-transparent rounded-full animate-spin" />
+              </div>
+            )}
+          </div>
           <ActionButton
             label="Pause Battery"
             icon="⏸️"
