@@ -137,6 +137,120 @@ Modbus TCP.
 Implementation should validate current-limit writes against the charger-reported
 minimum and maximum current before sending register `91`.
 
+### Automated Consumption Reports
+
+**Status**: Investigation complete; implementation not started.
+
+[Issue #49](https://github.com/psylsph/home-energy-manager/issues/49) requests
+automated daily/weekly/monthly/yearly consumption reports with PDF generation
+and email delivery, similar to GivEnergy's cloud portal reports.
+
+#### Existing foundation
+
+The app already has a strong data foundation for this feature:
+
+- **Full time-series history**: SQLite database (`history.db`) stores one row
+  per poll cycle (~60s) with 29 columns covering all energy counters
+  (`today_solar_kwh`, `today_import_kwh`, `today_export_kwh`, `today_charge_kwh`,
+  `today_discharge_kwh`, `today_consumption_kwh`), power readings, battery
+  state, grid metrics, and settings.
+- **Tariff configuration**: `settings.json` already stores import/export tariffs
+  with peak/off-peak rates and time windows (`import_tariff_config`,
+  `export_tariff_config`).
+- **Cost computation logic**: The frontend `HistoryPage.tsx` already computes
+  cumulative import cost and export income from `today_*_kwh` deltas with
+  time-of-day tariff classification. This logic would move to the backend
+  for report generation.
+- **REST history API**: `GET /api/history` supports bucketed queries across
+  1h/6h/24h/7d/30d/6m/1y/month ranges with MAX aggregation for cumulative
+  counters and AVG for instantaneous fields.
+- **CSV export**: Manual export already exists in the frontend.
+
+#### Proposed scope
+
+**Backend** — new module: `src-tauri/src/reports/`
+
+| File | Purpose |
+|---|---|
+| `mod.rs` | Report types (DailySummary, WeeklySummary, MonthlySummary), delta calculation, report metadata DB table |
+| `pdf.rs` | PDF generation using `printpdf` or `genpdf` crate |
+| `email.rs` | SMTP email delivery using `lettre` crate |
+| `scheduler.rs` | Scheduled report triggers (end-of-day, end-of-week, end-of-month) using `tokio-cron-scheduler` or custom Tokio timers |
+
+**New API endpoints**:
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET/POST | `/api/reports/config` | Read/update report preferences (frequency, recipients, formats) |
+| POST | `/api/reports/generate` | Manually trigger a report for a given date range |
+| GET | `/api/reports/list` | List past generated reports with metadata |
+| GET | `/api/reports/{id}/download` | Download a generated PDF |
+| GET | `/api/history/summary` | New endpoint returning aggregated daily totals (not bucketed time-series) with cost breakdown |
+
+**Computed report fields** (for any date range):
+
+| Field | Derivation |
+|---|---|
+| Solar energy generated | Delta of `today_solar_kwh` across range |
+| Grid import (peak/off-peak) | Delta of `today_import_kwh`, split by tariff windows |
+| Grid export (peak/off-peak) | Delta of `today_export_kwh`, split by tariff windows |
+| Battery charge energy | Delta of `today_charge_kwh` |
+| Battery discharge energy | Delta of `today_discharge_kwh` |
+| Home consumption | Delta of `today_consumption_kwh` |
+| AC charge energy | Delta of `today_ac_charge_kwh` |
+| Import cost / Export income | Deltas × tariff rates at time of use |
+| Self-consumption rate | `1 - (import / consumption)` |
+| Battery round-trip efficiency | `discharge / charge` |
+| Peak power values | MAX of instantaneous fields |
+| Average SOC, min/max SOC | From SOC history |
+
+**New settings fields** (in `settings.json`):
+
+```json
+{
+  "reports_enabled": false,
+  "reports_frequency": "daily",
+  "reports_email_recipients": ["user@example.com"],
+  "smtp_host": "smtp.example.com",
+  "smtp_port": 587,
+  "smtp_username": "",
+  "smtp_password": "",
+  "reports_include_cost": true,
+  "reports_include_tariff_breakdown": true
+}
+```
+
+**Frontend** — new page + settings section:
+
+- `src/pages/ReportsPage.tsx` — view past reports, manual generate trigger,
+  download PDFs
+- Report configuration section in `SettingsPage.tsx` — frequency, recipients,
+  SMTP credentials
+- Navigation entry for `/reports`
+
+**New Rust crate dependencies**:
+
+| Crate | Purpose |
+|---|---|
+| `printpdf` or `genpdf` | PDF generation |
+| `lettre` | SMTP email delivery |
+| `tokio-cron-scheduler` (optional) | Cron-style scheduling |
+
+#### Outstanding questions
+
+1. **PDF format** — should it replicate GivEnergy's portal report layout, or
+   use a simpler design? An HTML-template approach (render HTML, convert to PDF
+   via a headless browser or wkhtmltopdf) could decouple layout from code.
+2. **Email delivery** — SMTP self-configuration (most private) vs OAuth
+   (Google/Apple, easier setup). SMTP is simpler to implement and doesn't
+   require external API keys, but requires the user to know their SMTP settings.
+3. **Scheduling** — in-process scheduling (runs while the app is alive) is the
+   simplest approach and works well for headless server deployments. The poll
+   loop already runs indefinitely, so adding a scheduler task is natural.
+4. **Password storage** — SMTP passwords should not be stored in plain text.
+   Options: OS keychain (via `keyring` crate), optional encryption with a
+   master password, or environment-variable-only (pulled from env, never stored).
+
 ## Later candidates
 
 ### Read-only EMS support
