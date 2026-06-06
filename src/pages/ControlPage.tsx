@@ -207,7 +207,7 @@ function ScheduleSlotEditor({
               </div>
               <input
                 type="range"
-                min={0}
+                min={4}
                 max={100}
                 step={5}
                 value={local.target_soc}
@@ -1412,7 +1412,7 @@ export default function ControlPage() {
     snapshot?.discharge_slots?.length != null && snapshot.discharge_slots.length >= maxDischargeSlots
       ? snapshot.discharge_slots.slice(0, maxDischargeSlots)
       : Array.from({ length: maxDischargeSlots }, () => ({
-        enabled: false, start_hour: 16, start_minute: 0, end_hour: 19, end_minute: 0, target_soc: 0,
+        enabled: false, start_hour: 16, start_minute: 0, end_hour: 19, end_minute: 0, target_soc: 4,
       } as ScheduleSlot));
 
   const [requestedMode, setRequestedMode] = useState<BatteryMode | null>(null);

@@ -482,12 +482,12 @@ impl ControlCommand {
                 ]
             }
             ControlCommand::SetChargeTargetSocSlot { slot, soc } => {
-                validate_range(*soc, 0, 100, "per-slot target SOC")?;
+                validate_range(*soc, 4, 100, "per-slot target SOC")?;
                 let reg = charge_target_soc_for_slot(*slot)?;
                 vec![rw(reg, *soc)]
             }
             ControlCommand::SetDischargeTargetSocSlot { slot, soc } => {
-                validate_range(*soc, 0, 100, "per-slot discharge target SOC")?;
+                validate_range(*soc, 4, 100, "per-slot discharge target SOC")?;
                 let reg = discharge_target_soc_for_slot(*slot)?;
                 vec![rw(reg, *soc)]
             }
