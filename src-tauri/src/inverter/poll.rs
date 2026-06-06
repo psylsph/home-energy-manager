@@ -834,6 +834,13 @@ fn sanitize_snapshot(
                 else if raw < prev_val && raw < 5.0 && prev_val > 5.0 {
                     // Legitimate midnight reset — accept raw as-is
                 }
+                // Allow small jitter from dongle register precision noise.
+                // The dongle's 16-bit registers can fluctuate by 0.1–0.2 kWh
+                // between consecutive polls. Treating these as corruption
+                // is worse than the tiny dip — it creates flat spots in graphs.
+                else if raw < prev_val && (prev_val - raw) < 0.5 {
+                    // Accept — small fluctuation is normal read noise
+                }
                 // Counter must not decrease (register corruption)
                 else if raw < prev_val {
                     tracing::warn!(
