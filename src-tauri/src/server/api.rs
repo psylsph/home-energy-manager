@@ -940,6 +940,43 @@ pub async fn set_cosy(
 }
 
 // ---------------------------------------------------------------------------
+// Agile Octopus endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /api/agile — get Agile Octopus config.
+pub async fn get_agile(State(_state): State<Arc<AppState>>) -> Json<Value> {
+    let settings = crate::settings::Settings::load();
+    Json(json!({
+        "ok": true,
+        "enabled": settings.agile_enabled,
+        "region": settings.agile_region,
+        "charge_threshold": settings.agile_charge_threshold,
+        "discharge_threshold": settings.agile_discharge_threshold,
+    }))
+}
+
+/// POST /api/agile — update Agile Octopus config.
+pub async fn set_agile(
+    State(_state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<Value> {
+    let mut app_settings = crate::settings::Settings::load();
+    app_settings.agile_enabled = body["enabled"].as_bool().unwrap_or(false);
+    if let Some(r) = body["region"].as_str() {
+        app_settings.agile_region = r.to_string();
+    }
+    app_settings.agile_charge_threshold = body["charge_threshold"].as_f64().unwrap_or(10.0);
+    app_settings.agile_discharge_threshold = body["discharge_threshold"].as_f64().unwrap_or(30.0);
+
+    if let Err(e) = app_settings.save() {
+        tracing::warn!("Failed to persist agile config: {e}");
+        return error_response(&format!("Failed to save: {e}"));
+    }
+
+    ok_response("Agile config updated")
+}
+
+// ---------------------------------------------------------------------------
 // Battery calibration endpoint (developer mode)
 // ---------------------------------------------------------------------------
 

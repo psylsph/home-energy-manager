@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { useInverterStore } from '../store/useInverterStore';
 import { apiPost, apiGet } from '../lib/api';
 import type { ScheduleSlot } from '../lib/types';
@@ -480,6 +480,22 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: 'standa
           <option value="agile">Agile</option>
         </select>
       </div>
+
+      {(mode === 'cosy' || mode === 'agile') && (
+        <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-2.5 space-y-1">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] font-bold text-amber-400 uppercase tracking-wide">Beta</span>
+            <span className="text-[11px] text-amber-300 font-medium">App must be kept running</span>
+          </div>
+          <p className="text-[11px] text-amber-200/70 leading-relaxed">
+            {mode === 'cosy'
+              ? 'Cosy mode schedules force-charging based on time slots you define. The app must stay running for slot entry and exit to work — if you close it mid-slot, the inverter stays in force-charge mode until you reopen the app or stop it manually.'
+              : 'Agile mode automatically charges and discharges based on live Octopus prices. The app must stay running for price checks and switching to work — if you close it, the inverter stays in whatever mode it was last set to.'
+            }
+          </p>
+        </div>
+      )}
+
       {mode === 'cosy' && (
         <p className="text-text-secondary/60 text-xs mt-3">
           Force-charges the battery from the grid during these windows. The inverter is locked to Cosy mode while enabled.
@@ -587,11 +603,145 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: 'standa
   );
 }
 
+// Map UK postcode area (first 1-2 letters) to Octopus GSP group letter.
+// Based on Distribution Network Operator boundaries and tariff regions.
+const POSTCODE_AREA_TO_GSP: Record<string, string> = {
+  // GSP A — Eastern England
+  CB: 'A', CO: 'A', IP: 'A', NR: 'A', PE: 'A', AL: 'A', CM: 'A', EN: 'A', SG: 'A', SS: 'A', WD: 'A',
+  // GSP B — East Midlands
+  CV: 'B', DE: 'B', DN: 'B', LE: 'B', LN: 'B', NG: 'B', NN: 'B',
+  // GSP C — London
+  BR: 'C', CR: 'C', DA: 'C', E: 'C', EC: 'C', HA: 'C', IG: 'C', KT: 'C', N: 'C', NW: 'C',
+  RM: 'C', SE: 'C', SM: 'C', SW: 'C', TW: 'C', UB: 'C', W: 'C', WC: 'C',
+  // GSP D — North Wales & Merseyside
+  CH: 'D',  L: 'D', LL: 'D', WA: 'D',
+  // GSP E — West Midlands
+  B: 'E', DY: 'E', ST: 'E', TF: 'E', WS: 'E', WV: 'E', WR: 'E',
+  // GSP F — North East England
+  DH: 'F', DL: 'F', NE: 'F', SR: 'F', TS: 'F',
+  // GSP G — North West England
+  BB: 'G', BL: 'G', CA: 'G', FY: 'G', LA: 'G', M: 'G', OL: 'G', PR: 'G', SK: 'G', WN: 'G',
+  // GSP H — Southern England
+  BN: 'H', GU: 'H', PO: 'H', RH: 'H', SO: 'H',
+  // GSP J — South East England
+  CT: 'J', ME: 'J', TN: 'J',
+  // GSP K — South Wales
+  CF: 'K', LD: 'K', NP: 'K', SA: 'K',
+  // GSP L — South West England
+  BA: 'L', BS: 'L', DT: 'L', EX: 'L', PL: 'L', TA: 'L', TQ: 'L', TR: 'L', SN: 'L', SP: 'L', GL: 'L',
+  // GSP M — Yorkshire
+  BD: 'M', HD: 'M', HG: 'M', HX: 'M', HU: 'M', LS: 'M', WF: 'M', YO: 'M',
+  // GSP N — South & Central Scotland
+  DD: 'N', DG: 'N', EH: 'N', FK: 'N', G: 'N', KA: 'N', KY: 'N', ML: 'N', TD: 'N',
+  // GSP P — North Scotland
+  AB: 'P', HS: 'P', IV: 'P', KW: 'P', ZE: 'P',
+};
+
+/** Summary bar shown below the price forecast grid. */
+function PriceSummary({ prices, decisionForPrice }: {
+  prices: { validFrom: Date; validTo: Date; pence: number }[];
+  decisionForPrice: (p: number) => 'charge' | 'discharge' | 'nothing';
+}) {
+  const { snapshot } = useInverterStore();
+  const [importTariff, setImportTariff] = useState(0.285);
+  const [exportTariff, setExportTariff] = useState(0.15);
+
+  // Load tariff config from backend
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await apiGet<{ ok: boolean; data: { import_tariff: number; export_tariff: number; import_tariff_config: unknown } }>('/api/settings');
+        if (res.ok) {
+          setImportTariff(res.data.import_tariff);
+          setExportTariff(res.data.export_tariff);
+        }
+      } catch { /* use defaults */ }
+    })();
+  }, []);
+
+  const now = new Date();
+  const upcoming = prices.filter(s => s.validTo > now);
+  const chargeSlots = upcoming.filter(s => decisionForPrice(s.pence) === 'charge');
+  const dischargeSlots = upcoming.filter(s => decisionForPrice(s.pence) === 'discharge');
+  const idleSlots = upcoming.filter(s => decisionForPrice(s.pence) === 'nothing');
+
+  const avgChargePrice = chargeSlots.length
+    ? chargeSlots.reduce((a, s) => a + s.pence, 0) / chargeSlots.length
+    : 0;
+  const avgDischargePrice = dischargeSlots.length
+    ? dischargeSlots.reduce((a, s) => a + s.pence, 0) / dischargeSlots.length
+    : 0;
+  const minPrice = upcoming.length ? Math.min(...upcoming.map(s => s.pence)) : 0;
+  const maxPrice = upcoming.length ? Math.max(...upcoming.map(s => s.pence)) : 0;
+
+  // Rough daily saving estimate
+  // Assume each 30-min slot can charge/discharge at 1/48 of daily battery throughput.
+  // Typical: one full charge cycle per day at battery capacity.
+  const battKwh = snapshot?.battery_capacity_kwh ?? 5;
+  const chargeSaving = chargeSlots.length
+    ? (chargeSlots.length / 48) * battKwh * Math.max(0, importTariff - avgChargePrice / 100)
+    : 0;
+  const dischargeSaving = dischargeSlots.length
+    ? (dischargeSlots.length / 48) * battKwh * Math.max(0, avgDischargePrice / 100 - (exportTariff))
+    : 0;
+  const totalSaving = chargeSaving + dischargeSaving;
+
+  return (
+    <div className="bg-bg-surface rounded-lg p-2.5 space-y-1.5">
+      <div className="flex items-center gap-3 text-xs text-text-secondary flex-wrap">
+        <span className="flex items-center gap-1">
+          <span className="inline-block w-2 h-2 rounded-full bg-battery" />
+          {chargeSlots.length} charge
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="inline-block w-2 h-2 rounded-full bg-orange-500" />
+          {dischargeSlots.length} discharge
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="inline-block w-2 h-2 rounded-full bg-text-secondary/30" />
+          {idleSlots.length} hold
+        </span>
+        <span className="text-text-secondary/50">·</span>
+        <span>Min {minPrice.toFixed(1)}p</span>
+        <span className="text-text-secondary/50">·</span>
+        <span>Max {maxPrice.toFixed(1)}p</span>
+      </div>
+      {chargeSlots.length > 0 && (
+        <div className="text-xs text-text-secondary">
+          Avg charge price: <span className="font-mono text-battery">{avgChargePrice.toFixed(1)}p</span>
+          {avgChargePrice < importTariff * 100 && (
+            <> — saves <span className="font-mono text-battery">{(importTariff * 100 - avgChargePrice).toFixed(1)}p</span>/kWh vs standard rate</>
+          )}
+        </div>
+      )}
+      {dischargeSlots.length > 0 && (
+        <div className="text-xs text-text-secondary">
+          Avg discharge price: <span className="font-mono text-orange-400">{avgDischargePrice.toFixed(1)}p</span>
+          {avgDischargePrice > exportTariff * 100 && (
+            <> — earns <span className="font-mono text-orange-400">{(avgDischargePrice - exportTariff * 100).toFixed(1)}p</span>/kWh vs standard export</>
+          )}
+        </div>
+      )}
+      {totalSaving > 0.01 && (
+        <div className="text-xs font-medium">
+          Estimated daily saving:{' '}
+          <span className="font-mono text-battery">£{totalSaving.toFixed(2)}</span>
+          {battKwh > 0 && (
+            <span className="text-text-secondary"> ({(battKwh).toFixed(1)}kWh battery, {(importTariff * 100).toFixed(1)}p import)</span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Agile Octopus controls — shown when Agile charging mode is selected. */
 function AgileControls() {
   const [chargeThreshold, setChargeThreshold] = useState(10);
   const [dischargeThreshold, setDischargeThreshold] = useState(30);
   const [region, setRegion] = useState('A');
+  const [postcode, setPostcode] = useState('');
+  const [postcodeLookup, setPostcodeLookup] = useState<'idle' | 'loading' | 'found' | 'not_found' | 'error'>('idle');
 
   const regions = [
     { code: 'A', label: 'Eastern England' },
@@ -610,8 +760,113 @@ function AgileControls() {
     { code: 'P', label: 'North Scotland' },
   ];
 
+  const lookUpPostcode = useCallback(async (pc: string) => {
+    const clean = pc.replace(/\s+/g, '').toUpperCase();
+    if (clean.length < 3) return;
+    setPostcodeLookup('loading');
+    try {
+      const res = await fetch(`https://api.postcodes.io/postcodes/${encodeURIComponent(clean)}`);
+      if (!res.ok) {
+        setPostcodeLookup('not_found');
+        return;
+      }
+      const json = await res.json();
+      if (json.status !== 200) {
+        setPostcodeLookup('not_found');
+        return;
+      }
+      // Extract postcode area (first 1-2 alpha characters)
+      const match = clean.match(/^([A-Z]{1,2})/);
+      if (!match) {
+        setPostcodeLookup('not_found');
+        return;
+      }
+      const area = match[1];
+      const gsp = POSTCODE_AREA_TO_GSP[area];
+      if (gsp) {
+        setRegion(gsp);
+        setPostcodeLookup('found');
+      } else {
+        setPostcodeLookup('not_found');
+      }
+    } catch {
+      setPostcodeLookup('error');
+    }
+  }, []);
+
+  const debouncedPostcode = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handlePostcodeChange = (value: string) => {
+    setPostcode(value);
+    if (debouncedPostcode.current) clearTimeout(debouncedPostcode.current);
+    if (value.replace(/\s+/g, '').length >= 3) {
+      debouncedPostcode.current = setTimeout(() => lookUpPostcode(value), 500);
+    } else {
+      setPostcodeLookup('idle');
+    }
+  };
+
+  // Half-hourly price data from Octopus API
+  interface PriceSlot {
+    validFrom: Date;
+    validTo: Date;
+    pence: number;
+  }
+  const [prices, setPrices] = useState<PriceSlot[]>([]);
+  const [pricesLoading, setPricesLoading] = useState(false);
+  const [pricesError, setPricesError] = useState<string | null>(null);
+
+  // Fetch prices when region or thresholds change
+  useEffect(() => {
+    (async () => {
+      setPricesLoading(true);
+      setPricesError(null);
+      try {
+        const url = `https://api.octopus.energy/v1/products/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-${region}/standard-unit-rates/?page_size=48`;
+        const res = await fetch(url);
+        if (!res.ok) {
+          setPricesError(`API returned ${res.status}`);
+          setPricesLoading(false);
+          return;
+        }
+        const json = await res.json();
+        const slots: PriceSlot[] = (json.results || []).map((r: { valid_from: string; valid_to: string; value_inc_vat: number }) => ({
+          validFrom: new Date(r.valid_from),
+          validTo: new Date(r.valid_to),
+          pence: r.value_inc_vat,
+        }));
+        // Sort by time ascending
+        slots.sort((a, b) => a.validFrom.getTime() - b.validFrom.getTime());
+        setPrices(slots);
+      } catch (e) {
+        setPricesError((e as Error).message);
+      }
+      setPricesLoading(false);
+    })();
+  }, [region]);
+
   const [saving, setSaving] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
+
+  // Load config from backend on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await apiGet<{ ok: boolean; enabled: boolean; region: string; charge_threshold: number; discharge_threshold: number }>('/api/agile');
+        if (res.ok) {
+          setRegion(res.region);
+          setChargeThreshold(res.charge_threshold);
+          setDischargeThreshold(res.discharge_threshold);
+        }
+      } catch { /* use defaults */ }
+    })();
+  }, []);
+
+  // Determine charge/discharge decision for a given price
+  const decisionForPrice = (pence: number): 'charge' | 'discharge' | 'nothing' => {
+    if (pence <= chargeThreshold) return 'charge';
+    if (pence >= dischargeThreshold) return 'discharge';
+    return 'nothing';
+  };
 
   const saveConfig = async () => {
     setSaving(true);
@@ -637,6 +892,40 @@ function AgileControls() {
         Automatically charges when Agile prices are low and discharges when prices are high.
         Prices are fetched from the public Octopus Energy API — no account needed.
       </p>
+
+      {/* Postcode lookup */}
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between">
+          <span className="text-text-secondary text-sm">Postcode</span>
+          {postcodeLookup === 'found' && (
+            <span className="text-xs text-battery">Region set to {region}</span>
+          )}
+          {postcodeLookup === 'loading' && (
+            <span className="text-xs text-text-secondary flex items-center gap-1">
+              <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
+              Looking up…
+            </span>
+          )}
+          {postcodeLookup === 'not_found' && (
+            <span className="text-xs text-amber-400">Could not determine region</span>
+          )}
+          {postcodeLookup === 'error' && (
+            <span className="text-xs text-red-400">Lookup failed</span>
+          )}
+        </div>
+        <div className="flex gap-2">
+          <input
+            type="text"
+            placeholder="e.g. SW1A 1AA"
+            value={postcode}
+            onChange={(e) => handlePostcodeChange(e.target.value)}
+            className="flex-1 bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-3 py-2 border border-transparent focus:border-battery outline-none"
+          />
+        </div>
+        <p className="text-text-secondary text-xs">
+          Enter your postcode to auto-detect your Octopus region. Powered by postcodes.io.
+        </p>
+      </div>
 
       {/* Region selector */}
       <div className="space-y-1.5">
@@ -693,6 +982,87 @@ function AgileControls() {
         <p className="text-text-secondary text-xs">
           Discharge the battery to power the home when the current half-hour price is at or above this threshold.
         </p>
+      </div>
+
+      {/* Price forecast — 12 columns × 4 rows, no scroll */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-text-secondary text-sm">Price Forecast</span>
+          {pricesLoading && (
+            <span className="text-xs text-text-secondary flex items-center gap-1">
+              <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
+              Loading…
+            </span>
+          )}
+          {pricesError && (
+            <span className="text-xs text-red-400">{pricesError}</span>
+          )}
+        </div>
+
+        {prices.length === 0 && !pricesLoading && (
+          <p className="text-text-secondary text-xs py-2">No price data available.</p>
+        )}
+
+        {prices.length >= 48 && (
+          <>
+            <div className="bg-bg-surface rounded-lg p-2 space-y-0.5">
+              {/* 4 rows × 12 columns = 48 half-hour slots */}
+              {Array.from({ length: 4 }, (_, row) => (
+                <div key={row} className="grid grid-cols-12 gap-0.5">
+                  {Array.from({ length: 12 }, (_, col) => {
+                    const idx = row * 12 + col;
+                    const slot = prices[idx];
+                    if (!slot) return <div key={col} />;
+                    const decision = decisionForPrice(slot.pence);
+                    const now = new Date();
+                    const isPast = slot.validTo <= now;
+                    const isNow = slot.validFrom <= now && slot.validTo > now;
+                    const mins = String(slot.validFrom.getMinutes()).padStart(2, '0');
+                    let barColor = 'bg-bg-elevated';
+                    if (!isPast) {
+                      if (decision === 'charge') barColor = 'bg-battery';
+                      else if (decision === 'discharge') barColor = 'bg-orange-500';
+                      else barColor = 'bg-text-secondary/30';
+                    }
+                    return (
+                      <div
+                        key={col}
+                        className={`flex flex-col items-center rounded-sm py-0.5 ${barColor} ${isNow ? 'ring-1 ring-battery' : ''} ${isPast ? 'opacity-30' : ''}`}
+                        title={`${slot.validFrom.toLocaleTimeString()} - ${slot.validTo.toLocaleTimeString()}: ${slot.pence.toFixed(1)}p — ${isPast ? 'past' : decision}`}
+                      >
+                        <span className="text-[9px] leading-none font-mono">{slot.pence.toFixed(1)}</span>
+                        <span className="text-[7px] leading-none text-text-secondary mt-px">:{mins}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+
+            {/* Summary bar */}
+            <PriceSummary prices={prices} decisionForPrice={decisionForPrice} />
+          </>
+        )}
+
+        {/* Legend */}
+        <div className="flex gap-3 text-[10px] text-text-secondary">
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-2.5 h-2.5 rounded-sm bg-battery" />
+            Charge
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-2.5 h-2.5 rounded-sm bg-text-secondary/30" />
+            Hold
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-2.5 h-2.5 rounded-sm bg-orange-500" />
+            Discharge
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-2.5 h-2.5 rounded-sm opacity-30 bg-bg-elevated" />
+            Past
+          </span>
+        </div>
       </div>
 
       <button
@@ -840,6 +1210,18 @@ export default function ControlPage() {
       body: JSON.stringify({ enabled: newCosyEnabled }),
     }).catch(() => {});
   };
+
+  // On mount, load agile config from backend to seed the local override.
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await apiGet<{ ok: boolean; enabled: boolean }>('/api/agile');
+        if (res.ok && res.enabled) {
+          setLocalChargeOverride('agile');
+        }
+      } catch { /* use defaults */ }
+    })();
+  }, []);
 
   const currentMode = snapshot?.battery_mode ?? 'eco';
   const cosyActive = snapshot?.cosy_active ?? false;
@@ -1204,7 +1586,7 @@ export default function ControlPage() {
       <CosyChargingSection mode={chargeMode} cosyActive={cosyActive} onModeChange={setChargeMode} />
 
       {/* Section 3: Charge Schedule */}
-      {!cosyEnabled && schedulesUnsupported && (
+      {!cosyEnabled && chargeMode !== 'agile' && schedulesUnsupported && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold text-lg">Charge/Discharge Schedules</h2>
           <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm text-yellow-200">
@@ -1216,7 +1598,7 @@ export default function ControlPage() {
         </section>
       )}
 
-      {!cosyEnabled && !schedulesUnsupported && <section className="space-y-3">
+      {!cosyEnabled && chargeMode !== 'agile' && !schedulesUnsupported && <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Charge Schedule</h2>
         <p className="text-text-secondary/60 text-xs">Please Allow upto 30 Seconds for Changes to Save</p>
         <div className="space-y-3">
@@ -1267,8 +1649,8 @@ export default function ControlPage() {
         </div>
       </section>}
 
-      {/* Section 4: Discharge Schedule — hidden when cosy mode is enabled */}
-      {!cosyEnabled && !schedulesUnsupported && modeToCategory(effectiveMode) === 'timed' && (
+      {/* Section 4: Discharge Schedule — hidden when cosy or agile mode is enabled */}
+      {!cosyEnabled && chargeMode !== 'agile' && !schedulesUnsupported && modeToCategory(effectiveMode) === 'timed' && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold text-lg">Discharge Schedule</h2>
           <p className="text-text-secondary/60 text-xs">Please Allow upto 30 Seconds for Changes to Save</p>

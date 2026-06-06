@@ -5,20 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.14.0] - 2026-06-06
+
+### Added
+
+- **Charging Mode selector**: Replaced the Cosy on/off toggle with a
+  three-way dropdown — **Standard**, **Cosy** (beta), and **Agile** (beta).
+  The selector sits directly below Battery Mode on the Control page.
+- **Agile Octopus tariff integration** (beta):
+  - Enter your postcode to auto-detect your Octopus region (via
+    postcodes.io), with manual override.
+  - Set charge and discharge price thresholds.
+  - Live 12×4 price forecast grid colour-coded by action
+    (charge / hold / discharge) with summary counts and daily savings
+    estimate.
+  - Backend state machine polls the Octopus API and automatically
+    force-charges or force-discharges based on current price vs thresholds.
+  - Reverts to Eco mode when prices sit between thresholds.
+  - Uses the same model-aware force charge/discharge commands as Cosy
+    (single-phase and three-phase registers supported).
+- **Cosy charging now works on three-phase inverters too**: Cosy entry,
+  exit, and crash recovery use the correct three-phase registers
+  (HR 1123/1122/1112) on compatible inverters.
+
+### Changed
+
+- **Force Charge / Force Discharge are now toggle buttons**: Click once to
+  start, click again to stop. The button reflects the current inverter state
+  on page load (`enable_charge` + `enable_charge_target` for charge,
+  `enable_discharge` for discharge).
+- **Pause Battery now matches GivTCP behaviour**: Disables both
+  `enable_charge` and `enable_discharge` registers. On three-phase models,
+  also clears the three-phase force flags (HR 1122/1123/1112).
+- **Status page mode label shows "Override"**: When force charge or force
+  discharge is active, the battery mode label on the Energy Flow Diagram and
+  Battery page displays "Override" instead of the underlying Eco/Timed label.
+- **Pause Battery no longer sets SOC to 100%**: It now just clears charge
+  and discharge flags, matching the expected "stop everything" semantics.
 
 ### Fixed
 
 - **Force Charge and Force Discharge now work on three-phase inverters**:
-  If you have a three-phase, commercial, or HV hybrid inverter, hitting
-  "Force Charge" or "Force Discharge" in the app finally does something.
-  These buttons were using single-phase registers (HR 96/59) that three-phase
-  inverters don't listen to — they need separate registers (HR 1123/1122).
-  The app now checks your inverter model and writes to the right place.
-- **Cosy charging now works on three-phase inverters too**: Same root
-  cause — the Cosy timer was writing single-phase charge/discharge flags
-  regardless of model. Cosy entry, exit, and crash recovery now use the
-  correct three-phase registers on compatible inverters.
+  These buttons now check your inverter model and write to the correct
+  registers (HR 1123/1122 instead of HR 96/59).
 
 ## [0.13.7] - 2026-06-06
 

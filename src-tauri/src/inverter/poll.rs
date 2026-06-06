@@ -70,6 +70,27 @@ pub enum PollMessage {
 }
 
 // ---------------------------------------------------------------------------
+// Agile Octopus price types
+// ---------------------------------------------------------------------------
+
+/// A single half-hour price slot from the Octopus API.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PriceSlot {
+    pub pence: f64,
+    pub valid_from: i64, // unix timestamp
+    pub valid_to: i64,   // unix timestamp
+}
+
+/// Current state of the Agile Octopus state machine.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum AgileState {
+    #[default]
+    Idle,
+    Charging,
+    Discharging,
+}
+
+// ---------------------------------------------------------------------------
 // Poll settings
 // ---------------------------------------------------------------------------
 
@@ -190,6 +211,10 @@ pub struct AppState {
     pub auto_winter_saved: Arc<Mutex<Option<AutoWinterSaved>>>,
     /// Whether cosy charging is currently active (force-charging in a slot).
     pub cosy_active: Arc<Mutex<bool>>,
+    /// Agile Octopus state machine (Idle / Charging / Discharging).
+    pub agile_state: Arc<Mutex<AgileState>>,
+    /// Cached Octopus Agile prices for the current region.
+    pub cached_agile_prices: Arc<Mutex<Vec<PriceSlot>>>,
 }
 
 impl AppState {
@@ -215,6 +240,8 @@ impl AppState {
             cosy_active: Arc::new(Mutex::new(
                 crate::settings::Settings::load().cosy_active_persisted,
             )),
+            agile_state: Arc::new(Mutex::new(AgileState::Idle)),
+            cached_agile_prices: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -247,6 +274,8 @@ impl AppState {
             cosy_active: Arc::new(Mutex::new(
                 crate::settings::Settings::load().cosy_active_persisted,
             )),
+            agile_state: Arc::new(Mutex::new(AgileState::Idle)),
+            cached_agile_prices: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -2025,6 +2054,169 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             }
                                         } else {
                                             drop(cosy_active);
+                                        }
+                                    }
+                                }
+
+                                // ---- Agile Octopus mode ----
+                                {
+                                    let settings = crate::settings::Settings::load();
+                                    if settings.agile_enabled {
+                                        // Find current price from cache, or refresh
+                                        let now_ts = chrono::Utc::now().timestamp();
+                                        let prices = state.cached_agile_prices.lock().await;
+                                        let current_price = prices.iter().find(|s| now_ts >= s.valid_from && now_ts < s.valid_to).map(|s| s.pence);
+
+                                        let price = if current_price.is_some() {
+                                            current_price
+                                        } else {
+                                            // Cache miss — fetch fresh prices from Octopus API
+                                            drop(prices);
+                                            let region = &settings.agile_region;
+                                            let url = format!(
+                                                "https://api.octopus.energy/v1/products/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-{region}/standard-unit-rates/?page_size=48"
+                                            );
+                                            let fetch_result = tokio::task::spawn_blocking(move || -> Result<Vec<PriceSlot>, String> {
+                                                let mut resp = ureq::get(&url)
+                                                    .call()
+                                                    .map_err(|e| format!("HTTP error: {e}"))?;
+                                                let body = resp.body_mut().read_to_string()
+                                                    .map_err(|e| format!("read error: {e}"))?;
+                                                let json: serde_json::Value = serde_json::from_str(&body)
+                                                    .map_err(|e| format!("JSON error: {e}"))?;
+                                                let results = json["results"]
+                                                    .as_array()
+                                                    .ok_or_else(|| "missing results".to_string())?;
+                                                let slots: Vec<PriceSlot> = results
+                                                    .iter()
+                                                    .filter_map(|r| {
+                                                        let pence = r["value_inc_vat"].as_f64()?;
+                                                        let from = r["valid_from"].as_str()?;
+                                                        let to = r["valid_to"].as_str()?;
+                                                        let from_ts = chrono::DateTime::parse_from_rfc3339(from).ok()?.timestamp();
+                                                        let to_ts = chrono::DateTime::parse_from_rfc3339(to).ok()?.timestamp();
+                                                        Some(PriceSlot { pence, valid_from: from_ts, valid_to: to_ts })
+                                                    })
+                                                    .collect();
+                                                Ok(slots)
+                                            }).await;
+
+                                            match fetch_result {
+                                                Ok(Ok(fresh)) => {
+                                                    let mut prices = state.cached_agile_prices.lock().await;
+                                                    *prices = fresh;
+                                                    prices.iter().find(|s| now_ts >= s.valid_from && now_ts < s.valid_to).map(|s| s.pence)
+                                                }
+                                                Ok(Err(e)) => {
+                                                    tracing::warn!("Agile: failed to fetch prices: {e}");
+                                                    None
+                                                }
+                                                Err(e) => {
+                                                    tracing::error!("Agile: spawn_blocking failed: {e}");
+                                                    None
+                                                }
+                                            }
+                                        };
+
+                                        if let Some(price) = price {
+                                            let charge_threshold = settings.agile_charge_threshold;
+                                            let discharge_threshold = settings.agile_discharge_threshold;
+
+                                            let ag_state = state.agile_state.lock().await;
+
+                                            if price <= charge_threshold {
+                                                if *ag_state != AgileState::Charging {
+                                                    // Enter charge mode
+                                                    client.drain_stale_frames().await;
+                                                    tracing::info!("Agile: price {price}p ≤ {charge_threshold}p — force charging");
+                                                    drop(ag_state);
+                                                    let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
+                                                    let cmd = if use_3ph {
+                                                        ControlCommand::ThreePhaseForceCharge { target_soc: 100 }
+                                                    } else {
+                                                        ControlCommand::ForceCharge { target_soc: 100 }
+                                                    };
+                                                    let mut all_ok = true;
+                                                    if let Ok(writes) = cmd.encode() {
+                                                        for w in &writes {
+                                                            if let Err(e) = client.write_register(w.address, w.value).await {
+                                                                tracing::error!("Agile: write reg {} failed: {e}", w.address);
+                                                                all_ok = false;
+                                                            }
+                                                            tokio::time::sleep(Duration::from_millis(1500)).await;
+                                                        }
+                                                    } else {
+                                                        all_ok = false;
+                                                    }
+                                                    if all_ok {
+                                                        *state.agile_state.lock().await = AgileState::Charging;
+                                                    }
+                                                }
+                                            } else if price >= discharge_threshold {
+                                                if *ag_state != AgileState::Discharging {
+                                                    // Enter discharge mode
+                                                    client.drain_stale_frames().await;
+                                                    tracing::info!("Agile: price {price}p ≥ {discharge_threshold}p — force discharging");
+                                                    drop(ag_state);
+                                                    let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
+                                                    let cmd = if use_3ph {
+                                                        ControlCommand::ThreePhaseForceDischarge
+                                                    } else {
+                                                        ControlCommand::ForceDischarge
+                                                    };
+                                                    let mut all_ok = true;
+                                                    if let Ok(writes) = cmd.encode() {
+                                                        for w in &writes {
+                                                            if let Err(e) = client.write_register(w.address, w.value).await {
+                                                                tracing::error!("Agile: write reg {} failed: {e}", w.address);
+                                                                all_ok = false;
+                                                            }
+                                                            tokio::time::sleep(Duration::from_millis(1500)).await;
+                                                        }
+                                                    } else {
+                                                        all_ok = false;
+                                                    }
+                                                    if all_ok {
+                                                        *state.agile_state.lock().await = AgileState::Discharging;
+                                                    }
+                                                }
+                                            } else {
+                                                // Hold — price between thresholds: revert to Eco mode
+                                                if *ag_state != AgileState::Idle {
+                                                    client.drain_stale_frames().await;
+                                                    tracing::info!("Agile: hold (price {price}p), reverting to Eco");
+                                                    drop(ag_state);
+                                                    let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
+                                                    let cmd = if use_3ph {
+                                                        ControlCommand::ThreePhaseCosyExit
+                                                    } else {
+                                                        ControlCommand::CosyExit
+                                                    };
+                                                    let mut all_ok = true;
+                                                    if let Ok(writes) = cmd.encode() {
+                                                        for w in &writes {
+                                                            if let Err(e) = client.write_register(w.address, w.value).await {
+                                                                tracing::error!("Agile: write reg {} failed: {e}", w.address);
+                                                                all_ok = false;
+                                                            }
+                                                            tokio::time::sleep(Duration::from_millis(1500)).await;
+                                                        }
+                                                    } else {
+                                                        all_ok = false;
+                                                    }
+                                                    if all_ok {
+                                                        *state.agile_state.lock().await = AgileState::Idle;
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            // No price data available for current time
+                                            // Reset to idle so we don't get stuck in previous state
+                                            let mut ag_state = state.agile_state.lock().await;
+                                            if *ag_state != AgileState::Idle {
+                                                *ag_state = AgileState::Idle;
+                                                tracing::debug!("Agile: no price data for current time, reset to idle");
+                                            }
                                         }
                                     }
                                 }

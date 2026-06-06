@@ -131,6 +131,19 @@ pub struct Settings {
     #[serde(default = "default_aw_debounce")]
     pub auto_winter_debounce_readings: u32,
 
+    /// Agile Octopus mode enabled.
+    #[serde(default)]
+    pub agile_enabled: bool,
+    /// Agile Octopus region code (A-P).
+    #[serde(default = "default_agile_region")]
+    pub agile_region: String,
+    /// Agile Octopus charge threshold in p/kWh.
+    #[serde(default = "default_agile_charge_threshold")]
+    pub agile_charge_threshold: f64,
+    /// Agile Octopus discharge threshold in p/kWh.
+    #[serde(default = "default_agile_discharge_threshold")]
+    pub agile_discharge_threshold: f64,
+
     /// Cosy charging mode enabled.
     #[serde(default)]
     pub cosy_enabled: bool,
@@ -191,6 +204,18 @@ fn default_aw_debounce() -> u32 {
     10
 }
 
+fn default_agile_region() -> String {
+    "A".to_string()
+}
+
+fn default_agile_charge_threshold() -> f64 {
+    10.0
+}
+
+fn default_agile_discharge_threshold() -> f64 {
+    30.0
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -211,6 +236,10 @@ impl Default for Settings {
             auto_winter_saved_target_soc: None,
             import_tariff_config: None,
             export_tariff_config: None,
+            agile_enabled: false,
+            agile_region: default_agile_region(),
+            agile_charge_threshold: default_agile_charge_threshold(),
+            agile_discharge_threshold: default_agile_discharge_threshold(),
             cosy_enabled: false,
             cosy_slots: (0..3).map(|_| CosySlot::default()).collect(),
             cosy_active_persisted: false,
@@ -336,6 +365,10 @@ mod tests {
             auto_winter_saved_target_soc: Some(80),
             import_tariff_config: None,
             export_tariff_config: None,
+            agile_enabled: true,
+            agile_region: "B".to_string(),
+            agile_charge_threshold: 12.5,
+            agile_discharge_threshold: 35.0,
             cosy_enabled: false,
             cosy_slots: vec![],
             cosy_active_persisted: false,
@@ -381,6 +414,10 @@ mod tests {
             auto_winter_saved_target_soc: None,
             import_tariff_config: None,
             export_tariff_config: None,
+            agile_enabled: false,
+            agile_region: "A".to_string(),
+            agile_charge_threshold: 10.0,
+            agile_discharge_threshold: 30.0,
             cosy_enabled: false,
             cosy_slots: vec![],
             cosy_active_persisted: false,
