@@ -447,11 +447,15 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: 'standa
   const handleModeChange = async (newMode: 'standard' | 'cosy' | 'agile') => {
     // Don't switch until slots have loaded
     if (!loaded || slots.length === 0) return;
-    const newEnabled = newMode === 'cosy';
+    const cosyEnabled = newMode === 'cosy';
+    const agileEnabled = newMode === 'agile';
     onModeChange(newMode);
     setSaving(true);
     try {
-      await apiPost('/api/cosy', { enabled: newEnabled, slots });
+      await Promise.all([
+        apiPost('/api/cosy', { enabled: cosyEnabled, slots }),
+        apiPost('/api/agile', { enabled: agileEnabled }),
+      ]);
       setSaveFeedback('saved');
     } catch {
       setSaveFeedback('error');
