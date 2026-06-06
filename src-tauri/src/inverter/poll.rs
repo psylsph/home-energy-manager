@@ -2211,9 +2211,11 @@ mod tests {
 
     #[test]
     fn app_state_new_creates_valid_state() {
-        let state = AppState::new();
-        // Can obtain a receiver from the broadcast channel.
-        let _rx = state.tx.subscribe();
+        crate::test_util::with_isolated_config_dir(|| {
+            let state = AppState::new();
+            // Can obtain a receiver from the broadcast channel.
+            let _rx = state.tx.subscribe();
+        });
     }
 
     /// Cosy crash-recovery: when the app restarts, in-memory `cosy_active`
@@ -2581,17 +2583,21 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn app_state_latest_snapshot_starts_none() {
-        let state = Arc::new(AppState::new());
-        let snapshot = state.latest_snapshot.lock().await;
-        assert!(snapshot.is_none());
+    #[test]
+    fn app_state_latest_snapshot_starts_none() {
+        crate::test_util::with_isolated_config_dir(|| {
+            let state = Arc::new(AppState::new());
+            let snapshot = state.latest_snapshot.blocking_lock();
+            assert!(snapshot.is_none());
+        });
     }
 
-    #[tokio::test]
-    async fn app_state_connection_starts_disconnected() {
-        let state = Arc::new(AppState::new());
-        let cs = state.connection_state.lock().await;
-        assert_eq!(*cs, ConnectionState::Disconnected);
+    #[test]
+    fn app_state_connection_starts_disconnected() {
+        crate::test_util::with_isolated_config_dir(|| {
+            let state = Arc::new(AppState::new());
+            let cs = state.connection_state.blocking_lock();
+            assert_eq!(*cs, ConnectionState::Disconnected);
+        });
     }
 }
