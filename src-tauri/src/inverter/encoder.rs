@@ -383,15 +383,25 @@ impl ControlCommand {
                 // traffic that can trigger function code mismatches and
                 // timeouts on slow dongles (observed with Gen1/AC inverters).
                 // ForceCharge only needs eco mode + charge flags + target SOC.
+                // We DO clear enable_discharge so a stale discharge flag from
+                // a previous mode (e.g. after app restart) doesn't conflict.
                 vec![
                     rw(HR_BATTERY_POWER_MODE, 1), // eco mode — required for charge to work
+                    rw(HR_ENABLE_DISCHARGE, 0),   // clear any stale discharge flag
                     rw(HR_ENABLE_CHARGE, 1),
                     rw(HR_ENABLE_CHARGE_TARGET, 1),
                     rw(HR_CHARGE_TARGET_SOC, *target_soc),
                 ]
             }
             ControlCommand::ForceDischarge => {
+                // Clear stale charge registers so a previous force-charge mode
+                // (e.g. left over after app restart) doesn't conflict with the
+                // discharge. Without this, the inverter may keep charging
+                // instead of discharging when both flags are set.
                 vec![
+                    rw(HR_BATTERY_POWER_MODE, 1), // eco mode
+                    rw(HR_ENABLE_CHARGE, 0),        // clear any force charge
+                    rw(HR_ENABLE_CHARGE_TARGET, 0), // clear charge target
                     rw(HR_ENABLE_DISCHARGE, 1),
                     rw(HR_DISCHARGE_SLOT_1_START, 0),  // 00:00
                     rw(HR_DISCHARGE_SLOT_1_END, 2359), // 23:59
@@ -400,13 +410,16 @@ impl ControlCommand {
             ControlCommand::ThreePhaseForceCharge { target_soc } => {
                 validate_range(*target_soc, 4, 100, "target SOC")?;
                 vec![
-                    rw(HR_BATTERY_POWER_MODE, 1),         // eco mode (common register)
-                    rw(HR_3PH_FORCE_CHARGE_ENABLE, 1),   // three-phase force charge
+                    rw(HR_BATTERY_POWER_MODE, 1),          // eco mode (common register)
+                    rw(HR_3PH_FORCE_DISCHARGE_ENABLE, 0),  // clear stale discharge
+                    rw(HR_3PH_FORCE_CHARGE_ENABLE, 1),    // three-phase force charge
                     rw(HR_3PH_CHARGE_TARGET_SOC, *target_soc),
                 ]
             }
             ControlCommand::ThreePhaseForceDischarge => {
                 vec![
+                    rw(HR_BATTERY_POWER_MODE, 1),          // eco mode (common register)
+                    rw(HR_3PH_FORCE_CHARGE_ENABLE, 0),     // clear stale charge
                     rw(HR_3PH_FORCE_DISCHARGE_ENABLE, 1),
                 ]
             }
@@ -847,28 +860,36 @@ mod tests {
     fn force_charge_encodes() {
         let cmd = ControlCommand::ForceCharge { target_soc: 80 };
         let writes = cmd.encode().unwrap();
-        assert_eq!(writes.len(), 4);
+        assert_eq!(writes.len(), 5);
         assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
         assert_eq!(writes[0].value, 1); // eco mode
-        assert_eq!(writes[1].address, HR_ENABLE_CHARGE);
-        assert_eq!(writes[1].value, 1);
-        assert_eq!(writes[2].address, HR_ENABLE_CHARGE_TARGET);
+        assert_eq!(writes[1].address, HR_ENABLE_DISCHARGE);
+        assert_eq!(writes[1].value, 0); // clear stale discharge
+        assert_eq!(writes[2].address, HR_ENABLE_CHARGE);
         assert_eq!(writes[2].value, 1);
-        assert_eq!(writes[3].address, HR_CHARGE_TARGET_SOC);
-        assert_eq!(writes[3].value, 80);
+        assert_eq!(writes[3].address, HR_ENABLE_CHARGE_TARGET);
+        assert_eq!(writes[3].value, 1);
+        assert_eq!(writes[4].address, HR_CHARGE_TARGET_SOC);
+        assert_eq!(writes[4].value, 80);
     }
 
     #[test]
     fn force_discharge_encodes() {
         let cmd = ControlCommand::ForceDischarge;
         let writes = cmd.encode().unwrap();
-        assert_eq!(writes.len(), 3);
-        assert_eq!(writes[0].address, HR_ENABLE_DISCHARGE);
-        assert_eq!(writes[0].value, 1);
-        assert_eq!(writes[1].address, HR_DISCHARGE_SLOT_1_START);
-        assert_eq!(writes[1].value, 0);
-        assert_eq!(writes[2].address, HR_DISCHARGE_SLOT_1_END);
-        assert_eq!(writes[2].value, 2359);
+        assert_eq!(writes.len(), 6);
+        assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
+        assert_eq!(writes[0].value, 1); // eco mode
+        assert_eq!(writes[1].address, HR_ENABLE_CHARGE);
+        assert_eq!(writes[1].value, 0); // clear stale charge
+        assert_eq!(writes[2].address, HR_ENABLE_CHARGE_TARGET);
+        assert_eq!(writes[2].value, 0); // clear charge target
+        assert_eq!(writes[3].address, HR_ENABLE_DISCHARGE);
+        assert_eq!(writes[3].value, 1);
+        assert_eq!(writes[4].address, HR_DISCHARGE_SLOT_1_START);
+        assert_eq!(writes[4].value, 0);
+        assert_eq!(writes[5].address, HR_DISCHARGE_SLOT_1_END);
+        assert_eq!(writes[5].value, 2359);
     }
 
     #[test]
@@ -911,22 +932,28 @@ mod tests {
     fn three_phase_force_charge_uses_three_phase_registers() {
         let cmd = ControlCommand::ThreePhaseForceCharge { target_soc: 80 };
         let writes = cmd.encode().unwrap();
-        assert_eq!(writes.len(), 3);
+        assert_eq!(writes.len(), 4);
         assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
         assert_eq!(writes[0].value, 1);
-        assert_eq!(writes[1].address, HR_3PH_FORCE_CHARGE_ENABLE);
-        assert_eq!(writes[1].value, 1);
-        assert_eq!(writes[2].address, HR_3PH_CHARGE_TARGET_SOC);
-        assert_eq!(writes[2].value, 80);
+        assert_eq!(writes[1].address, HR_3PH_FORCE_DISCHARGE_ENABLE);
+        assert_eq!(writes[1].value, 0); // clear stale discharge
+        assert_eq!(writes[2].address, HR_3PH_FORCE_CHARGE_ENABLE);
+        assert_eq!(writes[2].value, 1);
+        assert_eq!(writes[3].address, HR_3PH_CHARGE_TARGET_SOC);
+        assert_eq!(writes[3].value, 80);
     }
 
     #[test]
     fn three_phase_force_discharge_uses_three_phase_registers() {
         let cmd = ControlCommand::ThreePhaseForceDischarge;
         let writes = cmd.encode().unwrap();
-        assert_eq!(writes.len(), 1);
-        assert_eq!(writes[0].address, HR_3PH_FORCE_DISCHARGE_ENABLE);
+        assert_eq!(writes.len(), 3);
+        assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
         assert_eq!(writes[0].value, 1);
+        assert_eq!(writes[1].address, HR_3PH_FORCE_CHARGE_ENABLE);
+        assert_eq!(writes[1].value, 0); // clear stale charge
+        assert_eq!(writes[2].address, HR_3PH_FORCE_DISCHARGE_ENABLE);
+        assert_eq!(writes[2].value, 1);
     }
 
     #[test]
