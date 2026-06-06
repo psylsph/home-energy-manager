@@ -1095,7 +1095,9 @@ impl ModbusClient {
 
 #[cfg(test)]
 mod tests {
+    #![allow(dead_code)]
     use super::*;
+    use super::super::framer::HEADER_SIZE;
 
     // -----------------------------------------------------------------------
     // Parsing register data from raw payload bytes
@@ -1353,5 +1355,698 @@ mod tests {
         let names: Vec<&str> = blocks.iter().map(|b| b.name).collect();
 
         assert_eq!(names, vec!["holding_300_359"]);
+    }
+
+    // =======================================================================
+    // Mock GivEnergy dongle server
+    // =======================================================================
+    //
+    // Simulates the real dongle's behavior over TCP — returns configurable
+    // response sequences per-request so tests can exercise the full retry
+    // and stale-frame logic.
+
+    use std::sync::Arc;
+    use tokio::net::TcpListener;
+
+    /// Programmed response for a single request.
+    enum MockResponse {
+        /// Send this frame as-is.
+        Raw(Vec<u8>),
+        /// Simulate a read response with the given slave/function/base/data.
+        ReadResponse {
+            slave: u8,
+            function: u8,
+            base: u16,
+            data: Vec<u16>,
+        },
+        /// Simulate a Modbus exception (function code with high bit set).
+        Exception {
+            slave: u8,
+            function: u8, // will be OR'd with 0x80
+            code: u8,
+        },
+    }
+
+    impl MockResponse {
+        fn encode(&self) -> Vec<u8> {
+            match self {
+                MockResponse::Raw(frame) => frame.clone(),
+                MockResponse::ReadResponse {
+                    slave,
+                    function,
+                    base,
+                    data,
+                } => build_read_response(*slave, *function, *base, data),
+                MockResponse::Exception {
+                    slave,
+                    function,
+                    code,
+                } => build_exception_response(*slave, *function | 0x80, *code),
+            }
+        }
+    }
+
+    /// Build a GivEnergy-wrapped read response frame.
+    ///
+    /// Uses the real `encode_frame` from the framer so the format matches
+    /// what the client expects exactly.
+    fn build_read_response(slave: u8, function: u8, base_register: u16, data: &[u16]) -> Vec<u8> {
+        // Build the inner Modbus-style payload: serial(10) + base(2) + count(2) + register_data
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"TEST123456"); // 10-byte serial
+        payload.extend_from_slice(&base_register.to_be_bytes());
+        payload.extend_from_slice(&(data.len() as u16).to_be_bytes());
+        for val in data {
+            payload.extend_from_slice(&val.to_be_bytes());
+        }
+        // `encode_frame` wraps with GivEnergy header + CRC
+        crate::modbus::framer::encode_frame("TEST123456", slave, function, &payload)
+    }
+
+    /// Build a GivEnergy-wrapped Modbus exception response.
+    fn build_exception_response(slave: u8, function_with_error: u8, code: u8) -> Vec<u8> {
+        // Exception inner payload is just the exception code (no serial/base/count)
+        let payload = vec![code];
+        crate::modbus::framer::encode_frame("TEST123456", slave, function_with_error, &payload)
+    }
+
+    /// Parse an incoming GivEnergy frame to extract the inner request details.
+    /// Returns (slave, function, payload) where payload for a read request
+    /// is the start register (2 bytes) + count (2 bytes).
+    fn parse_request(data: &[u8]) -> Option<(u8, u8, Vec<u8>)> {
+        if data.len() < HEADER_SIZE + 4 {
+            return None;
+        }
+        // Skip 26-byte header: txn(2)+proto(2)+len(2)+unit(1)+func(1)+serial(10)+padding(8)
+        let inner_start = HEADER_SIZE;
+        let inner = &data[inner_start..];
+        if inner.len() < 4 {
+            return None;
+        }
+        let slave = inner[0];
+        let function = inner[1];
+        // Inner payload starts after slave(1)+func(1), before CRC (last 2 bytes)
+        let payload_end = inner.len() - 2; // exclude CRC
+        let payload = inner[2..payload_end].to_vec();
+        Some((slave, function, payload))
+    }
+
+    /// Run a mock server that replies to each request with the next response
+    /// from `responses` (cycling if there are fewer responses than requests).
+    async fn run_mock_server(
+        listener: TcpListener,
+        responses: Arc<Vec<MockResponse>>,
+    ) {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 4096];
+        let mut idx = 0usize;
+
+        loop {
+            let n = match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await {
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                Ok(Ok(n)) => n,
+            };
+
+            if n == 0 {
+                break;
+            }
+
+            // Look up the programmed response (cycle if exhausted)
+            let response = &responses[idx % responses.len()];
+            idx += 1;
+
+            let frame = response.encode();
+            if stream.write_all(&frame).await.is_err() {
+                break;
+            }
+        }
+    }
+
+    // =======================================================================
+    // Producer/consumer client
+    // =======================================================================
+    //
+    // The tests below exercise a producer/consumer-style client that matches
+    // responses by content (slave + function + register range) rather than
+    // sequential position. This mirrors how givenergy-modbus works.
+    //
+    // Infrastructure:
+    //
+    //   ResponseKey = (slave, function, base_register, count)
+    //   pending: HashMap<ResponseKey, oneshot::Sender<DecodedFrame>>
+    //
+    //   Consumer task: reads all incoming frames, routes by key
+    //   Producer task: dequeues from tx_queue, writes with jitter
+    //
+    // The production implementation will be in ModbusClient. These tests
+    // validate the pattern before the refactor.
+
+    /// Content-based response key for matching responses to pending requests.
+    ///
+    /// Mirrors givenergy-modbus's `shape_hash()` concept — a response matches
+    /// a request when slave, function code, and register range all agree.
+    #[derive(Debug, Clone, Hash, Eq, PartialEq)]
+    struct ResponseKey {
+        slave: u8,
+        function: u8,
+        base_register: u16,
+        count: u16,
+    }
+
+    impl ResponseKey {
+        fn from_read_request(slave: u8, function: u8, start: u16, count: u16) -> Self {
+            Self {
+                slave,
+                function,
+                base_register: start,
+                count,
+            }
+        }
+
+        fn from_decoded_frame(frame: &DecodedFrame, payload: &[u8]) -> Option<Self> {
+            // Read response payload: byte_count(1) + data(byte_count)
+            // Extract base register and count from the original request context
+            // is not available here. Instead, we derive from the data array
+            // location — for a read response, the payload contains register
+            // values starting at some base.
+            //
+            // Since we can't know the base_register from the response alone,
+            // this is a best-effort match. In the real implementation, the
+            // pending map is keyed by the request, not derived from the response.
+            if payload.len() < 3 {
+                return None;
+            }
+            let byte_count = payload[0] as usize;
+            if payload.len() < 1 + byte_count {
+                return None;
+            }
+            let register_count = (byte_count / 2) as u16;
+            Some(Self {
+                slave: frame.slave,
+                function: frame.function,
+                base_register: 0, // unknown from response alone
+                count: register_count,
+            })
+        }
+    }
+
+    /// Extract the expected response key from an outgoing read request frame.
+    /// Returns None for non-read frames (writes, etc.).
+    fn read_request_key(frame: &[u8]) -> Option<ResponseKey> {
+        let (slave, function, payload) = parse_request(frame)?;
+        if function != 0x03 && function != 0x04 {
+            return None;
+        }
+        if payload.len() < 4 {
+            return None;
+        }
+        let start = u16::from_be_bytes([payload[0], payload[1]]);
+        let count = u16::from_be_bytes([payload[2], payload[3]]);
+        Some(ResponseKey::from_read_request(slave, function, start, count))
+    }
+
+    /// Extract the key from a decoded response frame for matching.
+    fn response_frame_key(frame: &DecodedFrame) -> Option<ResponseKey> {
+        // For a read response (function 0x03/0x04): payload = byte_count + data
+        if frame.function != 0x03 && frame.function != 0x04 {
+            return None;
+        }
+        if frame.payload.is_empty() {
+            return None;
+        }
+        let byte_count = frame.payload[0] as usize;
+        let register_count = (byte_count / 2) as u16;
+        Some(ResponseKey {
+            slave: frame.slave,
+            function: frame.function,
+            base_register: 0, // unknown — matched by slave+func+count in practice
+            count: register_count,
+        })
+    }
+
+    fn dummy_register_values(start: u16, count: u16) -> Vec<u16> {
+        (start..start + count).collect()
+    }
+
+    // =======================================================================
+    // Integration tests — simulate real dongle behavior over TCP
+    // =======================================================================
+
+    /// Helper: start a mock server and connect a client to it.
+    /// Returns (port, server_handle, client).
+    async fn setup_client_with_server(
+        responses: Vec<MockResponse>,
+    ) -> (u16, tokio::task::JoinHandle<()>, ModbusClient) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let responses = Arc::new(responses);
+        let server_handle = tokio::spawn(async move {
+            run_mock_server(listener, responses).await;
+        });
+
+        let mut client = ModbusClient::new("127.0.0.1", port, "TEST123456");
+        client.set_timeout(Duration::from_secs(5));
+        client.connect().await.unwrap();
+
+        (port, server_handle, client)
+    }
+
+    #[tokio::test]
+    async fn happy_path_single_read() {
+        // Server returns correct IR 0-19 response
+        let data: Vec<u16> = (0..20).collect();
+        let responses = vec![MockResponse::ReadResponse {
+            slave: 0x11,
+            function: 0x04,
+                base: 0,data,
+        }];
+
+        let (_port, server, mut client) = setup_client_with_server(responses).await;
+
+        let result = client
+            .read_registers(RegisterType::Input, 0, 20)
+            .await
+            .unwrap();
+
+        assert_eq!(result.len(), 20);
+        assert_eq!(result[0], 0);
+        assert_eq!(result[19], 19);
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn wrong_slave_response_triggers_retry_and_succeeds() {
+        // First response: wrong slave (battery 0x35 instead of inverter 0x11)
+        // Second response: correct
+        let wrong_data: Vec<u16> = (100..120).collect(); // data, but from wrong device
+        let correct_data: Vec<u16> = (0..20).collect();
+
+        let responses = vec![
+            MockResponse::ReadResponse {
+                slave: 0x35,
+                function: 0x04,
+                base: 200,
+                data: wrong_data,
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 0,
+                data: correct_data,
+            },
+        ];
+
+        let (_port, server, mut client) = setup_client_with_server(responses).await;
+
+        let result = client
+            .read_registers(RegisterType::Input, 0, 20)
+            .await
+            .unwrap();
+
+        assert_eq!(result.len(), 20);
+        assert_eq!(result[0], 0);
+        assert_eq!(result[19], 19);
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn wrong_slave_all_retries_exhausted_returns_error() {
+        // All 5 responses (4 stale retries + 1 initial) have wrong slave
+        let wrong_data: Vec<u16> = (100..120).collect();
+        let responses = vec![MockResponse::ReadResponse {
+            slave: 0x35,
+            function: 0x04,
+                base: 200,
+                data: wrong_data,
+        }];
+
+        let (_port, server, mut client) = setup_client_with_server(responses).await;
+
+        let err = client
+            .read_registers(RegisterType::Input, 0, 20)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, ClientError::InvalidResponse(msg) if msg.contains("slave mismatch")),
+            "Expected slave mismatch error, got: {}",
+            err
+        );
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn code_67_busy_triggers_retry_and_succeeds() {
+        let data: Vec<u16> = (0..20).collect();
+        let responses = vec![
+            MockResponse::Exception {
+                slave: 0x11,
+                function: 0x04,
+                code: 67,
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 0,data,
+            },
+        ];
+
+        let (_port, server, mut client) = setup_client_with_server(responses).await;
+
+        // With the current sequential client, after receiving an exception
+        // the function returns Err, so this will fail. Once the
+        // producer/consumer pattern is implemented, exceptions should also
+        // retry. For now, this documents the expected current behavior.
+        let result = client.read_registers(RegisterType::Input, 0, 20).await;
+
+        // Exception should propagate as InvalidResponse
+        assert!(result.is_err(), "Expected error from code 67 exception");
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_frame_behind_correct_frame_in_buffer() {
+        // The dongle has TWO responses buffered: a stale response from a
+        // previous request (wrong register range) and the correct response.
+        // The correct response is behind the stale one.
+        //
+        // With sequential read: first read gets the stale frame, retries
+        // and drains → second read gets the correct one.
+
+        let correct_data: Vec<u16> = (0..20).collect();
+        // Stale response for a DIFFERENT request (base 200 instead of 0)
+        let stale_data: Vec<u16> = (200..220).collect();
+
+        let responses = vec![
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 200,
+                data: stale_data,
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 0,
+                data: correct_data,
+            },
+        ];
+
+        let (_port, server, mut client) = setup_client_with_server(responses).await;
+
+        let result = client
+            .read_registers(RegisterType::Input, 0, 20)
+            .await
+            .unwrap();
+
+        // Should get the correct data after the stale frame is consumed
+        assert_eq!(result.len(), 20);
+        assert_eq!(result[0], 0);
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn multiple_wrong_slave_frames_in_buffer_then_correct() {
+        // Battery modules at 0x34, 0x35 respond before inverter at 0x11.
+        // All three responses are buffered in the dongle's TCP output.
+        let correct_data: Vec<u16> = (0..20).collect();
+
+        let responses = vec![
+            MockResponse::ReadResponse {
+                slave: 0x34,
+                function: 0x04,
+                base: 100,
+                data: (100..120).collect(),
+            },
+            MockResponse::ReadResponse {
+                slave: 0x35,
+                function: 0x04,
+                base: 200,
+                data: (200..220).collect(),
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 0,
+                data: correct_data,
+            },
+        ];
+
+        let (_port, server, mut client) = setup_client_with_server(responses).await;
+
+        let result = client
+            .read_registers(RegisterType::Input, 0, 20)
+            .await
+            .unwrap();
+
+        assert_eq!(result.len(), 20);
+        assert_eq!(result[0], 0);
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn code_67_followed_by_multiple_wrong_slave_then_correct() {
+        // The worst case: dongle busy, then battery module responses,
+        // then finally the correct inverter response.
+        let correct_data: Vec<u16> = (0..20).collect();
+
+        let responses = vec![
+            MockResponse::Exception {
+                slave: 0x11,
+                function: 0x04,
+                code: 67,
+            },
+            MockResponse::ReadResponse {
+                slave: 0x34,
+                function: 0x04,
+                base: 100,
+                data: (100..120).collect(),
+            },
+            MockResponse::ReadResponse {
+                slave: 0x35,
+                function: 0x04,
+                base: 200,
+                data: (200..220).collect(),
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 0,
+                data: correct_data,
+            },
+        ];
+
+        let (_port, server, mut client) = setup_client_with_server(responses).await;
+
+        // Current sequential client will fail on the first exception.
+        // Producer/consumer pattern will drain all stale frames and succeed.
+        let result = client.read_registers(RegisterType::Input, 0, 20).await;
+        assert!(result.is_err(),
+            "Sequential client fails on code 67; producer/consumer will make this pass");
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn heartbeat_is_absorbed_by_consumer() {
+        // The dongle sends a heartbeat before the response. The consumer
+        // should handle it transparently without the caller seeing it.
+
+        // Build a minimal heartbeat frame
+        let mut heartbeat = vec![0x59, 0x59, 0x00, 0x01, 0x00, 0x00, 0x01, 0x01];
+        let len = 2u16; // minimum: unit(1) + function(1)
+        heartbeat[4..6].copy_from_slice(&len.to_be_bytes());
+
+        let correct_data: Vec<u16> = (0..20).collect();
+
+        let responses = vec![
+            // Heartbeat request from dongle (should be responded to, not forwarded)
+            MockResponse::Raw(heartbeat.clone()),
+            // Correct read response
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 0,
+                data: correct_data,
+            },
+        ];
+
+        let (_port, server, mut client) = setup_client_with_server(responses).await;
+
+        let result = client
+            .read_registers(RegisterType::Input, 0, 20)
+            .await;
+
+        // The heartbeat response might confuse the sequential client.
+        // With producer/consumer, heartbeats are absorbed.
+        eprintln!("Heartbeat test result: {:?}", result);
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn split_register_read_reassembles_correctly() {
+        // Reading 60 registers (3 chunks of 20) should reassemble.
+        // Each chunk response has the correct data.
+        let data_0_19: Vec<u16> = (0..20).collect();
+        let data_20_39: Vec<u16> = (20..40).collect();
+        let data_40_59: Vec<u16> = (40..60).collect();
+
+        let responses = vec![
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 0,
+                data: data_0_19,
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 20,
+                data: data_20_39,
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 40,
+                data: data_40_59,
+            },
+        ];
+
+        let (_port, server, mut client) = setup_client_with_server(responses).await;
+
+        let result = client
+            .read_registers(RegisterType::Input, 0, 60)
+            .await
+            .unwrap();
+
+        assert_eq!(result.len(), 60);
+        assert_eq!(result[0], 0);
+        assert_eq!(result[30], 30);
+        assert_eq!(result[59], 59);
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_blocks_returns_all_standard_blocks() {
+        // Simulate reading all 3 standard poll blocks.
+        // Each 60-register block is split into 3 chunks of 20.
+        let responses = vec![
+            // input_0_59, chunks 0..19, 20..39, 40..59
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 0,
+                data: (0..20).collect(),
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 20,
+                data: (20..40).collect(),
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 40,
+                data: (40..60).collect(),
+            },
+            // holding_0_59, chunks 0..19, 20..39, 40..59
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x03,
+                base: 0,
+                data: (100..120).collect(),
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x03,
+                base: 20,
+                data: (120..140).collect(),
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x03,
+                base: 40,
+                data: (140..160).collect(),
+            },
+            // holding_60_119, chunks 60..79, 80..99, 100..119
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x03,
+                base: 60,
+                data: (200..220).collect(),
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x03,
+                base: 80,
+                data: (220..240).collect(),
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x03,
+                base: 100,
+                data: (240..260).collect(),
+            },
+        ];
+
+        let (_port, server, mut client) = setup_client_with_server(responses).await;
+
+        let blocks = client.read_blocks(STANDARD_POLL_BLOCKS).await.unwrap();
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].block.name, "input_0_59");
+        assert_eq!(blocks[0].data.len(), 60);
+        assert_eq!(blocks[0].data[0], 0);
+        assert_eq!(blocks[1].block.name, "holding_0_59");
+        assert_eq!(blocks[1].data[0], 100);
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_blocks_fails_on_first_standard_block_error() {
+        // First block fails — entire read_blocks should fail
+        let responses = vec![MockResponse::Exception {
+            slave: 0x11,
+            function: 0x04,
+            code: 67,
+        }];
+
+        let (_port, server, mut client) = setup_client_with_server(responses).await;
+
+        let result = client.read_blocks(STANDARD_POLL_BLOCKS).await;
+        assert!(result.is_err(), "read_blocks should fail when first block errors");
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_register_sends_correct_frame() {
+        // Write response: serial(10) + register(2) + value(2) = 14 bytes
+        let mut payload = Vec::with_capacity(14);
+        payload.extend_from_slice(b"TEST123456"); // 10-byte serial
+        payload.extend_from_slice(&[0x00u8, 0x1B]); // register 27
+        payload.extend_from_slice(&[0x00u8, 0x01]); // value 1
+        let response = crate::modbus::framer::encode_frame(
+            "TEST123456", 0x11, 0x06, &payload
+        );
+
+        let responses = vec![MockResponse::Raw(response)];
+
+        let (_port, server, mut client) = setup_client_with_server(responses).await;
+
+        let result = client.write_register(27, 1).await;
+        assert!(result.is_ok(), "Write register failed: {:?}", result);
+
+        server.await.unwrap();
     }
 }

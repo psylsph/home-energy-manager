@@ -28,10 +28,10 @@ const TRANSACTION_ID: u16 = 0x5959;
 const PROTOCOL_ID: u16 = 0x0001;
 
 /// Fixed unit identifier.
-const UNIT_ID: u8 = 0x01;
+pub(crate) const UNIT_ID: u8 = 0x01;
 
 /// Transparent-message function code used by the GivEnergy data adapter.
-const FUNCTION_ID_TRANSPARENT: u8 = 0x02;
+pub(crate) const FUNCTION_ID_TRANSPARENT: u8 = 0x02;
 
 /// Heartbeat-request function code sent by the dongle every ~3 minutes.
 /// The client must respond within 5 seconds; after 3 missed heartbeats
@@ -43,7 +43,7 @@ const SERIAL_LEN: usize = 10;
 
 /// Header size: transaction ID (2) + protocol ID (2) + length (2) + unit ID (1)
 /// + function ID (1) + serial (10) + padding (8) = 26 bytes.
-const HEADER_SIZE: usize = 2 + 2 + 2 + 1 + 1 + SERIAL_LEN + 8;
+pub(crate) const HEADER_SIZE: usize = 2 + 2 + 2 + 1 + 1 + SERIAL_LEN + 8;
 
 /// CRC-16/Modbus lookup table (compile-time generated).
 const CRC_ALGO: Crc<u16> = Crc::<u16>::new(&CRC_16_MODBUS);
@@ -134,7 +134,7 @@ pub fn crc16_modbus(data: &[u8]) -> u16 {
 /// Encode the serial number string into exactly 10 bytes (Latin-1, space-padded).
 ///
 /// Panics if the serial string is longer than 10 bytes.
-fn encode_serial(serial: &str) -> [u8; SERIAL_LEN] {
+pub(crate) fn encode_serial(serial: &str) -> [u8; SERIAL_LEN] {
     assert!(
         serial.len() <= SERIAL_LEN,
         "serial number must be at most {SERIAL_LEN} bytes, got {}",
