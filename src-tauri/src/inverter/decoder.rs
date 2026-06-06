@@ -291,20 +291,23 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
     // would immediately override back to Eco on the next poll. The inverter
     // simply won't discharge if there are no active slots, which is correct.
 
-    // Preserve slot time fields but expose effective enabled state to the UI.
-    // This prevents toggling schedules off/on from clearing configured times:
-    // HR 96/59 are the master enable flags, while the slot registers retain
-    // the configured windows.
-    if !snap.device_type.uses_three_phase_schedule_slots() {
-        if !snap.enable_charge {
-            for slot in &mut snap.charge_slots {
-                slot.enabled = false;
-            }
-        }
-        if !snap.enable_discharge {
-            for slot in &mut snap.discharge_slots {
-                slot.enabled = false;
-            }
+    // Charge slots: expose effective enabled state to the UI based on the
+    // master enable_charge flag. This prevents toggling schedules off/on from
+    // clearing configured times: HR 96 is the master enable flag, while the
+    // slot registers retain the configured windows.
+    //
+    // Discharge slots are intentionally NOT gated on enable_discharge here.
+    // That flag is the master "timed discharge" switch, controlled by the
+    // battery mode (Timed Demand/Export) — not by individual slot writes.
+    // A discharge slot's enabled state therefore reflects whether it has
+    // configured times (decode_timeslot), so users can set up discharge
+    // slots while in Eco mode without forcing an immediate mode switch.
+    // The schedule only becomes active when the user selects Timed Demand.
+    if !snap.device_type.uses_three_phase_schedule_slots()
+        && !snap.enable_charge
+    {
+        for slot in &mut snap.charge_slots {
+            slot.enabled = false;
         }
     }
 
@@ -1132,8 +1135,9 @@ mod tests {
         assert!(!snap.enable_discharge);
 
         // Mode: eco=1, discharge=false, reserve=4 (!=100) → Eco
-        // Note: discharge slots have valid times but show disabled because
-        // enable_discharge is false (global override).
+        // Note: discharge slots have valid times and show enabled (their
+        // configuration is independent of the master enable_discharge flag,
+        // which only controls the battery mode).
         assert_eq!(snap.battery_mode, BatteryMode::Eco);
 
         // Home power: solar - battery_power - grid_power
@@ -1165,13 +1169,15 @@ mod tests {
         // Charge slot 3: not configured → disabled
         assert!(!snap.charge_slots[2].enabled);
 
-        // Discharge slots retain their configured times but show disabled
-        // because the master enable_discharge flag is false. This lets the UI
-        // toggle schedules off/on without losing the slot settings.
-        assert!(!snap.discharge_slots[0].enabled);
+        // Discharge slots show enabled when they have configured times,
+        // independent of the master enable_discharge flag. That flag controls
+        // the battery mode (Timed Demand), not whether a slot is configured —
+        // so users can set up discharge slots in Eco mode without the slot
+        // toggle snapping back to disabled on the next poll.
+        assert!(snap.discharge_slots[0].enabled);
         assert_eq!(snap.discharge_slots[0].start_hour, 16);
         assert_eq!(snap.discharge_slots[0].end_hour, 19);
-        assert!(!snap.discharge_slots[1].enabled);
+        assert!(snap.discharge_slots[1].enabled);
         assert_eq!(snap.discharge_slots[1].start_hour, 17);
         assert_eq!(snap.discharge_slots[1].end_hour, 20);
         assert!(!snap.enable_discharge, "enable_discharge flag is false");

@@ -1275,84 +1275,41 @@ fn sanitize_snapshot(
             sanitized = true;
         }
 
-        // Slot time delta checks: a slot's start/end times should not change
-        // by more than 12 hours between consecutive polls (one poll cycle is
-        // at most 60 seconds; no legitimate schedule change causes a 12h jump).
-        // We compare each slot against its previous counterpart.
-        const MAX_SLOT_HOUR_SHIFT: i16 = 12;
-
+        // Slot times are user-configured holding registers — they only change
+        // when the user explicitly writes them. A delta check would incorrectly
+        // reject legitimate overnight transitions (e.g. start jumping from 00:00
+        // to 23:00). The existing decode_timeslot already returns disabled when
+        // start==end, guarding against partial-write reads. We only sanity-check
+        // the enabled/times consistency (enabled toggled without times).
         for i in 0..snap.charge_slots.len().min(p.charge_slots.len()) {
-            let cur_sh = snap.charge_slots[i].start_hour;
-            let cur_eh = snap.charge_slots[i].end_hour;
-            let cur_en = snap.charge_slots[i].enabled;
-
-            let prev_sh = p.charge_slots[i].start_hour;
-            let prev_eh = p.charge_slots[i].end_hour;
-            let prev_en = p.charge_slots[i].enabled;
-
-            if cur_en != prev_en && (cur_sh != prev_sh || cur_eh != prev_eh) {
-                tracing::warn!(
-                    slot = i,
-                    cur_enabled = cur_en,
-                    prev_enabled = prev_en,
-                    "Charge slot {i} enabled changed with different times — reverting",
-                );
-                snap.charge_slots[i].enabled = prev_en;
-                sanitized = true;
-            }
-            if cur_sh.abs_diff(prev_sh) as i16 > MAX_SLOT_HOUR_SHIFT
-                || cur_eh.abs_diff(prev_eh) as i16 > MAX_SLOT_HOUR_SHIFT
+            if snap.charge_slots[i].enabled != p.charge_slots[i].enabled
+                && (snap.charge_slots[i].start_hour != p.charge_slots[i].start_hour
+                    || snap.charge_slots[i].end_hour != p.charge_slots[i].end_hour)
             {
                 tracing::warn!(
                     slot = i,
-                    cur_sh,
-                    prev_sh,
-                    cur_eh,
-                    prev_eh,
-                    "Charge slot {i} times jumped by >12h — using previous",
+                    cur_enabled = snap.charge_slots[i].enabled,
+                    prev_enabled = p.charge_slots[i].enabled,
+                    "Charge slot {i} enabled changed with different times — reverting",
                 );
-                snap.charge_slots[i].start_hour = prev_sh;
-                snap.charge_slots[i].start_minute = p.charge_slots[i].start_minute;
-                snap.charge_slots[i].end_hour = prev_eh;
-                snap.charge_slots[i].end_minute = p.charge_slots[i].end_minute;
+                snap.charge_slots[i].enabled = p.charge_slots[i].enabled;
                 sanitized = true;
             }
         }
 
+        // Discharge slots — same reasoning as charge slots above.
         for i in 0..snap.discharge_slots.len().min(p.discharge_slots.len()) {
-            let cur_sh = snap.discharge_slots[i].start_hour;
-            let cur_eh = snap.discharge_slots[i].end_hour;
-            let cur_en = snap.discharge_slots[i].enabled;
-
-            let prev_sh = p.discharge_slots[i].start_hour;
-            let prev_eh = p.discharge_slots[i].end_hour;
-            let prev_en = p.discharge_slots[i].enabled;
-
-            if cur_en != prev_en && (cur_sh != prev_sh || cur_eh != prev_eh) {
-                tracing::warn!(
-                    slot = i,
-                    cur_enabled = cur_en,
-                    prev_enabled = prev_en,
-                    "Discharge slot {i} enabled changed with different times — reverting",
-                );
-                snap.discharge_slots[i].enabled = prev_en;
-                sanitized = true;
-            }
-            if cur_sh.abs_diff(prev_sh) as i16 > MAX_SLOT_HOUR_SHIFT
-                || cur_eh.abs_diff(prev_eh) as i16 > MAX_SLOT_HOUR_SHIFT
+            if snap.discharge_slots[i].enabled != p.discharge_slots[i].enabled
+                && (snap.discharge_slots[i].start_hour != p.discharge_slots[i].start_hour
+                    || snap.discharge_slots[i].end_hour != p.discharge_slots[i].end_hour)
             {
                 tracing::warn!(
                     slot = i,
-                    cur_sh,
-                    prev_sh,
-                    cur_eh,
-                    prev_eh,
-                    "Discharge slot {i} times jumped by >12h — using previous",
+                    cur_enabled = snap.discharge_slots[i].enabled,
+                    prev_enabled = p.discharge_slots[i].enabled,
+                    "Discharge slot {i} enabled changed with different times — reverting",
                 );
-                snap.discharge_slots[i].start_hour = prev_sh;
-                snap.discharge_slots[i].start_minute = p.discharge_slots[i].start_minute;
-                snap.discharge_slots[i].end_hour = prev_eh;
-                snap.discharge_slots[i].end_minute = p.discharge_slots[i].end_minute;
+                snap.discharge_slots[i].enabled = p.discharge_slots[i].enabled;
                 sanitized = true;
             }
         }
@@ -2697,6 +2654,8 @@ mod tests {
 
     #[test]
     fn model_detection_repolls_for_ac_coupled_address_switch_and_extra_block() {
+        // ACCoupled: slave changes from detection 0x11 to operational 0x31,
+        // AND the optional HR300-359 (AC config) block needs to be requested.
         assert!(should_repoll_after_model_detection(
             DeviceType::ACCoupled,
             0x11

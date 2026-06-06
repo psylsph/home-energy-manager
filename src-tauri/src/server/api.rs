@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use crate::inverter::encoder::{ControlCommand, RegisterWrite};
 use crate::inverter::model::DeviceType;
 use crate::inverter::poll::{AppState, PollSettings};
-use crate::modbus::registers::encode_hhmm;
+use crate::modbus::registers::{encode_hhmm, HR_ENABLE_CHARGE_TARGET};
 
 // ---------------------------------------------------------------------------
 // Helper: standard JSON response
@@ -75,16 +75,21 @@ fn discharge_slot_command_for_device(
     start: u16,
     end: u16,
 ) -> Result<ControlCommand, String> {
+    // When disabled, clear the slot times (write 0/0). We deliberately do NOT
+    // touch the master enable_discharge flag here — that is controlled by the
+    // battery mode (Timed Demand/Export). Keeping slot configuration
+    // independent of mode selection matches the givenergy-modbus reference,
+    // where set_discharge_slot() writes only the slot registers. Coupling the
+    // two forced an immediate Eco→TimedDemand mode switch whenever a discharge
+    // slot was saved.
     let (start, end) = if enabled { (start, end) } else { (0, 0) };
-    match (device_type.uses_three_phase_schedule_slots(), slot, enabled) {
-        (true, 1, _) => Ok(ControlCommand::SetThreePhaseDischargeSlot1 { start, end }),
-        (true, 2, _) => Ok(ControlCommand::SetThreePhaseDischargeSlot2 { start, end }),
-        (true, 3..=10, _) => Ok(ControlCommand::SetDischargeSlotN { slot, start, end }),
-        (false, _, false) => Ok(ControlCommand::SetEnableDischarge { enabled: false }),
-        (false, 1, true) => Ok(ControlCommand::SetDischargeSlot1 { start, end }),
-        (false, 2, true) => Ok(ControlCommand::SetDischargeSlot2 { start, end }),
-        (false, 3..=10, true) => Ok(ControlCommand::SetDischargeSlotN { slot, start, end }),
-        (_, _, _) => Err(format!("Unsupported discharge slot {}", slot)),
+    match (device_type.uses_three_phase_schedule_slots(), slot) {
+        (true, 1) => Ok(ControlCommand::SetThreePhaseDischargeSlot1 { start, end }),
+        (true, 2) => Ok(ControlCommand::SetThreePhaseDischargeSlot2 { start, end }),
+        (false, 1) => Ok(ControlCommand::SetDischargeSlot1 { start, end }),
+        (false, 2) => Ok(ControlCommand::SetDischargeSlot2 { start, end }),
+        (_, 3..=10) => Ok(ControlCommand::SetDischargeSlotN { slot, start, end }),
+        (_, _) => Err(format!("Unsupported discharge slot {}", slot)),
     }
 }
 
@@ -399,10 +404,16 @@ pub async fn set_charge_slot(
             // reference, enable_charge alone (without enable_charge_target)
             // enables slot-based charging — NOT immediate force charge.
             //
-            // We do NOT set enable_charge_target or charge_target_soc here;
-            // those trigger an immediate force charge.
+            // We also clear enable_charge_target (HR 20) to 0 so that a
+            // stale force-charge flag from a previous operation doesn't
+            // cause snapshotForceCharge (enable_charge && enable_charge_target)
+            // to show as true when the user simply configured a schedule slot.
             if enabled {
                 if !device_type.uses_three_phase_schedule_slots() {
+                    writes.push(RegisterWrite {
+                        address: HR_ENABLE_CHARGE_TARGET,
+                        value: 0,
+                    });
                     if let Ok(enable_writes) =
                         (ControlCommand::SetEnableCharge { enabled: true }).encode()
                     {
@@ -437,7 +448,10 @@ pub async fn set_charge_slot(
 ///         "enabled": true}`
 ///
 /// If `enabled` is false, the slot times are set to 0 (per givenergy-modbus reference).
-/// Also updates `enable_discharge` based on whether any discharge slot remains active.
+/// This writes ONLY the slot time registers — it does not touch the master
+/// `enable_discharge` flag, which is controlled by the battery mode (Timed
+/// Demand/Export). The schedule becomes active when the user selects a timed
+/// mode, keeping slot configuration independent of mode selection.
 pub async fn set_discharge_slot(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -486,17 +500,13 @@ pub async fn set_discharge_slot(
 
     match cmd.encode() {
         Ok(mut writes) => {
-            if enabled && !device_type.uses_three_phase_schedule_slots() {
-                // User explicitly enabled the discharge slot; also enable the
-                // single-phase master discharge flag so the schedule becomes active again.
-                if let Ok(enable_writes) =
-                    (ControlCommand::SetEnableDischarge { enabled: true }).encode()
-                {
-                    writes.extend(enable_writes);
-                }
-            }
-            // Write per-slot discharge target SOC (extended registers HR 272+) when the
-            // inverter supports the HR240-299 schedule/target block.
+            // We do NOT set enable_discharge here. That flag is the master
+            // "timed discharge" switch and is controlled by the battery mode
+            // (Timed Demand/Export). Setting it from a slot save forced an
+            // immediate Eco→TimedDemand mode switch. Per givenergy-modbus,
+            // set_discharge_slot() writes only the slot time registers.
+            // Write per-slot discharge target SOC (extended registers HR 272+)
+            // when the inverter supports the HR240-299 schedule/target block.
             if enabled && target_soc > 0 && device_type.uses_extended_schedule_slots() {
                 if let Ok(target_writes) = (ControlCommand::SetDischargeTargetSocSlot {
                     slot,
@@ -1084,7 +1094,7 @@ mod tests {
         assert!(matches!(
             discharge_slot_command_for_device(DeviceType::Gen3Hybrid, 1, false, 1600, 1900)
                 .unwrap(),
-            ControlCommand::SetEnableDischarge { enabled: false }
+            ControlCommand::SetDischargeSlot1 { start: 0, end: 0 }
         ));
     }
 

@@ -712,6 +712,11 @@ impl ModbusClient {
             // Send and receive
             let decoded = self.send_and_receive(&request).await?;
 
+            // Check for stale response (slave/function/base register from a previous
+            // request). The GivEnergy dongle sometimes queues responses from multiple
+            // bus devices. If the response has the wrong slave, try reading the NEXT
+            // buffered response (the correct one may be queued behind a mis-addressed
+            // one) before sending a new request.
             // Check for stale response (slave/function/base register from a previous request).
             if decoded.slave != self.slave {
                 if attempt < Self::MAX_STALE_RETRIES {
