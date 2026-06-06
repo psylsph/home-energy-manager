@@ -1,10 +1,10 @@
-# GivEnergy Local
+# Home Energy Manager
 
 Desktop app for monitoring and controlling GivEnergy solar inverters over local Modbus TCP.
 
 ## Stack
 
-- **Frontend**: React 19 + TypeScript + Vite 8 + Tailwind CSS 4 + Zustand + Recharts + React Router 7
+- **Frontend**: React 19 + TypeScript + Vite 9 + Tailwind CSS 4 + Zustand + Recharts + React Router 7
 - **Backend**: Tauri 2 desktop shell; embedded Axum HTTP/WS server on port **7337**
 - **Modbus**: Custom Rust TCP client to GivEnergy data adapter (port **8899**) aligned with [givenergy-modbus](https://github.com/dewet22/givenergy-modbus) reference library and [GivTCP](https://github.com/dewet22/giv_tcp)
 - **Testing**: Rust unit tests only (no frontend tests, no integration tests)
@@ -147,8 +147,9 @@ Applied on EVERY reading regardless of previous state:
 
 Only active after 3 readings post-connect (grace period):
 
-- **Monotonic increase**: `today_*_kwh` must never decrease (except midnight rollover)
+- **Monotonic increase**: `today_*_kwh` must not decrease significantly (except midnight rollover)
 - **Time-based rate limit**: `max_increase = elapsed_hours × 10 kW + 1 kWh`
+- **Jitter tolerance**: decreases < 0.5 kWh accepted as normal dongle register precision noise
 - **Midnight rollover**: decrease allowed when `raw < 5` and `prev > 5`
 - **Near-zero prev**: delta increase check skipped when `prev < 1.0` (unreliable baseline)
 
