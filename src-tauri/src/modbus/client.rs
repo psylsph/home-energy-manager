@@ -714,65 +714,46 @@ impl ModbusClient {
 
             // Check for stale response (slave/function/base register from a previous
             // request). The GivEnergy dongle sometimes queues responses from multiple
-            // bus devices. If the response has the wrong slave, try reading the NEXT
-            // buffered response (the correct one may be queued behind a mis-addressed
-            // one) before sending a new request.
-            // Check for stale response (slave/function/base register from a previous request).
-            if decoded.slave != self.slave {
+            // bus devices and the TCP stream can hold frames from other slaves (e.g.
+            // battery module at 0x35 responding instead of the inverter at 0x31).
+            // Before retrying, drain ALL queued frames from the buffer so the next
+            // fresh request gets a fresh response — otherwise we chase stale frames
+            // through every retry.
+            if decoded.slave != self.slave
+                || decoded.function != expected_fc
+                || (|| -> Result<bool, ClientError> {
+                    let (rb, rc) = Self::response_register_metadata(&decoded)?;
+                    Ok(rb != start || rc > count)
+                })()?
+            {
                 if attempt < Self::MAX_STALE_RETRIES {
                     tracing::debug!(
-                        "Stale response (got slave 0x{:02X}, expected 0x{:02X}) — retrying ({}/{})",
-                        decoded.slave,
-                        self.slave,
-                        attempt + 1,
-                        Self::MAX_STALE_RETRIES,
+                        "Stale response (slave=0x{:02X}, func=0x{:02X}) — draining and retrying ({}/{})",
+                        decoded.slave, decoded.function,
+                        attempt + 1, Self::MAX_STALE_RETRIES,
                     );
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    // Drain any queued stale frames before sending a new request.
+                    // Use a longer delay (500ms, matching givenergy-modbus) so the
+                    // dongle has time to recover before the next attempt.
+                    self.drain_stale_frames().await;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                     continue;
                 }
-                return Err(ClientError::InvalidResponse(format!(
-                    "slave mismatch: expected 0x{:02X}, got 0x{:02X}",
-                    self.slave, decoded.slave
-                )));
-            }
-
-            if decoded.function != expected_fc {
-                if attempt < Self::MAX_STALE_RETRIES {
-                    tracing::debug!(
-                        "Stale response (got 0x{:02X}, expected 0x{:02X}) — retrying ({}/{})",
-                        decoded.function,
-                        expected_fc,
-                        attempt + 1,
-                        Self::MAX_STALE_RETRIES,
-                    );
-                    // Brief pause before retry to let the dongle catch up
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
+                // Determine the most useful error message.
+                if decoded.slave != self.slave {
+                    return Err(ClientError::InvalidResponse(format!(
+                        "slave mismatch: expected 0x{:02X}, got 0x{:02X}",
+                        self.slave, decoded.slave
+                    )));
                 }
-                return Err(ClientError::InvalidResponse(format!(
-                    "function code mismatch: expected 0x{:02X}, got 0x{:02X}",
-                    expected_fc, decoded.function
-                )));
-            }
-
-            let (resp_base_register, resp_register_count) =
-                Self::response_register_metadata(&decoded)?;
-            if resp_base_register != start || resp_register_count > count {
-                if attempt < Self::MAX_STALE_RETRIES {
-                    tracing::debug!(
-                        "Stale response (got {reg_type_name} {}..{} count {}, expected {}..{} count {}) — retrying ({}/{})",
-                        resp_base_register,
-                        resp_base_register.saturating_add(resp_register_count.saturating_sub(1)),
-                        resp_register_count,
-                        start,
-                        start + count - 1,
-                        count,
-                        attempt + 1,
-                        Self::MAX_STALE_RETRIES,
-                    );
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
+                if decoded.function != expected_fc {
+                    return Err(ClientError::InvalidResponse(format!(
+                        "function code mismatch: expected 0x{:02X}, got 0x{:02X}",
+                        expected_fc, decoded.function
+                    )));
                 }
+                let (resp_base_register, resp_register_count) =
+                    Self::response_register_metadata(&decoded)?;
                 return Err(ClientError::InvalidResponse(format!(
                     "register range mismatch: expected {}..{} count {}, got {}..{} count {}",
                     start,
