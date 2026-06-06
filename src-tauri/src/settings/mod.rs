@@ -137,6 +137,16 @@ pub struct Settings {
     /// Cosy charging slots (up to 3, stored locally).
     #[serde(default)]
     pub cosy_slots: Vec<CosySlot>,
+    /// Persisted mirror of the in-memory `cosy_active` flag. The poll loop
+    /// writes this whenever `cosy_active` transitions so a crash/restart can
+    /// detect a missed CosyExit (the inverter was left force-charging after
+    /// the slot ended but before the app came back up).
+    ///
+    /// On startup the poll loop initializes in-memory `cosy_active` from
+    /// this field. If it's `true` and the current time is outside any Cosy
+    /// slot, the normal state machine will fire CosyExit on the first poll.
+    #[serde(default)]
+    pub cosy_active_persisted: bool,
 
     /// Persisted `enable_charge_target` saved before winter mode activated.
     /// `Some` means winter mode was active when the last state was saved.
@@ -203,6 +213,7 @@ impl Default for Settings {
             export_tariff_config: None,
             cosy_enabled: false,
             cosy_slots: (0..3).map(|_| CosySlot::default()).collect(),
+            cosy_active_persisted: false,
         }
     }
 }
@@ -325,6 +336,7 @@ mod tests {
             export_tariff_config: None,
             cosy_enabled: false,
             cosy_slots: vec![],
+            cosy_active_persisted: false,
         };
         let json = serde_json::to_string(&s).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
@@ -369,6 +381,7 @@ mod tests {
             export_tariff_config: None,
             cosy_enabled: false,
             cosy_slots: vec![],
+            cosy_active_persisted: false,
         };
 
         // We can't easily override the settings path for testing,
@@ -577,6 +590,16 @@ mod tests {
         // Gap between slots
         assert_eq!(cosy_active_slot(11 * 60, &slots), None);
         assert_eq!(cosy_active_slot(18 * 60, &slots), None);
+        // Exact end-of-slot boundaries (exclusive): the cosy state machine
+        // relies on these returning None so it fires CosyExit at the correct
+        // tick for every slot, not just slot 1.
+        assert_eq!(cosy_active_slot(5 * 60 + 30, &slots), None, "slot 1 end");
+        assert_eq!(cosy_active_slot(16 * 60, &slots), None, "slot 2 end");
+        assert_eq!(cosy_active_slot(22 * 60, &slots), None, "slot 3 end");
+        // And one minute before each end still matches.
+        assert_eq!(cosy_active_slot(5 * 60 + 29, &slots), Some(100), "slot 1 last min");
+        assert_eq!(cosy_active_slot(15 * 60 + 59, &slots), Some(80), "slot 2 last min");
+        assert_eq!(cosy_active_slot(21 * 60 + 59, &slots), Some(100), "slot 3 last min");
     }
 
     #[test]

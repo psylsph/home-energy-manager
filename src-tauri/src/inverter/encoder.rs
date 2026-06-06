@@ -137,9 +137,9 @@ pub enum ControlCommand {
     SetBatterySocReserve { reserve: u16 },
     /// Set charge target SOC (0-100).
     SetChargeTargetSoc { soc: u16 },
-    /// Exit cosy mode: disable charge, disable charge target, re-enable discharge,
-    /// restore eco power mode. Puts the inverter back to normal Eco self-consumption
-    /// after a cosy force-charge slot ends.
+    /// Exit cosy mode: disable charge, disable charge target, disable timed
+    /// discharge, and restore eco power mode. Puts the inverter back to normal
+    /// Eco self-consumption after a cosy force-charge slot ends.
     CosyExit,
     /// Set charge slot 1 times (HHMM packed).
     SetChargeSlot1 { start: u16, end: u16 },
@@ -233,8 +233,8 @@ impl ControlCommand {
                 vec![
                     rw(HR_ENABLE_CHARGE, 0),        // stop force charge
                     rw(HR_ENABLE_CHARGE_TARGET, 0), // clear charge target
+                    rw(HR_ENABLE_DISCHARGE, 0),     // disable timed discharge
                     rw(HR_BATTERY_POWER_MODE, 1),   // eco mode
-                    rw(HR_ENABLE_DISCHARGE, 1),     // allow discharge again
                 ]
             }
             ControlCommand::SetBatterySocReserve { reserve } => {
@@ -859,10 +859,10 @@ mod tests {
         assert_eq!(writes[0].value, 0);
         assert_eq!(writes[1].address, HR_ENABLE_CHARGE_TARGET);
         assert_eq!(writes[1].value, 0);
-        assert_eq!(writes[2].address, HR_BATTERY_POWER_MODE);
-        assert_eq!(writes[2].value, 1); // eco mode
-        assert_eq!(writes[3].address, HR_ENABLE_DISCHARGE);
-        assert_eq!(writes[3].value, 1);
+        assert_eq!(writes[2].address, HR_ENABLE_DISCHARGE);
+        assert_eq!(writes[2].value, 0);
+        assert_eq!(writes[3].address, HR_BATTERY_POWER_MODE);
+        assert_eq!(writes[3].value, 1); // eco mode
     }
 
     #[test]

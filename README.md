@@ -46,6 +46,20 @@ sudo apt install libwebkit2gtk-4.1-0 librsvg2-2
 
 These are needed by the Tauri desktop framework. The `.deb` package declares them as dependencies going forward, but on older builds you'll need to install them manually.
 
+To uninstall the Linux `.deb` package:
+
+```bash
+sudo apt purge home-energy-manager
+```
+
+This removes the installed application package, but leaves your user data in `~/.givenergy-local`. To delete settings and recorded history as well:
+
+```bash
+rm -rf ~/.givenergy-local
+```
+
+⚠️ Deleting `~/.givenergy-local` permanently removes all local history data (`history.db`) as well as settings.
+
 > **Raspberry Pi**: ARM64 builds are available (`*_arm64.deb`). Requires a 64-bit OS (Raspberry Pi OS 64-bit, Ubuntu Server, etc.).
 
 ### 2. Find your inverter's IP address

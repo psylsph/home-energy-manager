@@ -212,7 +212,9 @@ impl AppState {
             auto_winter_config: Arc::new(Mutex::new(AutoWinterConfig::default())),
             auto_winter_state: Arc::new(Mutex::new(AutoWinterState::default())),
             auto_winter_saved: Arc::new(Mutex::new(None)),
-            cosy_active: Arc::new(Mutex::new(false)),
+            cosy_active: Arc::new(Mutex::new(
+                crate::settings::Settings::load().cosy_active_persisted,
+            )),
         }
     }
 }
@@ -242,7 +244,9 @@ impl AppState {
             auto_winter_config: Arc::new(Mutex::new(AutoWinterConfig::default())),
             auto_winter_state: Arc::new(Mutex::new(AutoWinterState::default())),
             auto_winter_saved: Arc::new(Mutex::new(None)),
-            cosy_active: Arc::new(Mutex::new(false)),
+            cosy_active: Arc::new(Mutex::new(
+                crate::settings::Settings::load().cosy_active_persisted,
+            )),
         }
     }
 }
@@ -499,6 +503,25 @@ fn carry_forward_battery_modules_with(
                 // Re-sort by index for consistent ordering
                 snap.battery_modules.sort_by_key(|m| m.index);
             }
+        }
+    }
+}
+
+/// Persist the in-memory `cosy_active` flag to settings so a crash/restart
+/// can detect a missed CosyExit (the inverter was left force-charging after
+/// the slot ended but before the app came back up). On startup,
+/// [`AppState::new`] seeds the in-memory flag from this persisted value, and
+/// the normal cosy state machine fires CosyExit on the next poll if the
+/// current time is outside any Cosy slot.
+fn persist_cosy_active(active: bool) {
+    let mut settings = crate::settings::Settings::load();
+    if settings.cosy_active_persisted != active {
+        settings.cosy_active_persisted = active;
+        if let Err(e) = settings.save() {
+            tracing::warn!(
+                active,
+                "Failed to persist cosy_active flag: {e}"
+            );
         }
     }
 }
@@ -797,6 +820,12 @@ fn sanitize_snapshot(
             // rejections. 10 kW is a generous residential circuit capacity.
             let elapsed_secs = (snap.timestamp - p.timestamp).max(0) as f32;
             let max_increase_kwh = (elapsed_secs / 3600.0) * 10.0 + 1.0;
+            // Daily energy registers are typically 0.1 kWh resolution, and
+            // derived counters can wobble by one tick due to read timing or
+            // float representation (e.g. 7.6 → 7.5). Treat tiny decreases as
+            // reading noise: keep the displayed/history value monotonic, but
+            // don't warn or trigger an immediate re-poll.
+            let decrease_noise_tolerance_kwh = 0.15;
 
             macro_rules! check_energy_delta {
             ($name:literal, $value:expr, $prev:expr) => {
@@ -834,14 +863,18 @@ fn sanitize_snapshot(
                 else if raw < prev_val && raw < 5.0 && prev_val > 5.0 {
                     // Legitimate midnight reset — accept raw as-is
                 }
-                // Allow small jitter from dongle register precision noise.
-                // The dongle's 16-bit registers can fluctuate by 0.1–0.2 kWh
-                // between consecutive polls. Treating these as corruption
-                // is worse than the tiny dip — it creates flat spots in graphs.
-                else if raw < prev_val && (prev_val - raw) < 0.5 {
-                    // Accept — small fluctuation is normal read noise
+                // Tiny one-tick decreases are normal read noise; carry the
+                // previous value forward silently so cumulative values remain
+                // monotonic without spamming warnings or forcing a re-poll.
+                else if raw < prev_val && raw + decrease_noise_tolerance_kwh >= prev_val {
+                    tracing::debug!(
+                        field = $name, raw, prev = prev_val,
+                        tolerance_kwh = decrease_noise_tolerance_kwh,
+                        "Daily energy decreased within noise tolerance — carrying forward previous",
+                    );
+                    $value = prev_val;
                 }
-                // Counter must not decrease (register corruption)
+                // Counter must not decrease materially (register corruption)
                 else if raw < prev_val {
                     tracing::warn!(
                         field = $name, raw, prev = prev_val,
@@ -1419,24 +1452,25 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 let mut meter_probe_done = false;
 
                 // Restore cosy_active from persisted settings on restart.
-                // Without this, a client reboot during a cosy slot would leave
-                // the inverter in the previous force-charge state but the client
-                // thinking cosy is inactive, never sending the exit command.
+                // Without this, a client reboot during OR after a cosy slot
+                // would leave the inverter in the previous force-charge state.
+                // AppState::new already seeded `state.cosy_active` from
+                // `cosy_active_persisted`; here we only log what we restored.
                 {
                     let settings = crate::settings::Settings::load();
-                    if settings.cosy_enabled {
+                    if settings.cosy_enabled && settings.cosy_active_persisted {
                         let now = chrono::Local::now();
                         let now_minutes = now.hour() as u16 * 60 + now.minute() as u16;
                         let in_slot =
                             crate::settings::cosy_active_slot(now_minutes, &settings.cosy_slots);
-                        if let Some(restore_target_soc) = in_slot {
+                        if in_slot.is_some() {
                             tracing::info!(
-                                "Cosy: restart detected inside slot (target SOC {}%) — force-charge will be retried after first poll",
-                                restore_target_soc
+                                "Cosy: restart detected inside slot — force-charge will be re-sent on next poll"
                             );
-                            // Leave cosy_active=false so the normal Cosy state machine
-                            // re-sends ForceCharge after the first successful poll. If a
-                            // write fails, it will keep retrying on subsequent polls.
+                        } else {
+                            tracing::info!(
+                                "Cosy: restart detected AFTER slot ended — CosyExit will be sent on next poll to restore Eco mode"
+                            );
                         }
                     }
                 }
@@ -1859,9 +1893,11 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     // this system vs. manually.
                                     snapshot.auto_winter_active =
                                         matches!(*aw_state, AutoWinterState::WinterActive);
-                                    snapshot.cosy_active = *state.cosy_active.lock().await;
                                     // Load cosy_enabled from settings so the frontend
                                     // knows cosy is configured even between slots.
+                                    // (cosy_active is set later, AFTER the cosy state
+                                    // machine runs, so the broadcast reflects the
+                                    // post-transition value.)
                                     snapshot.cosy_enabled = crate::settings::Settings::load().cosy_enabled;
 
                                     // Persist saved values to disk so they survive a
@@ -1944,6 +1980,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 
                                             if all_writes_ok {
                                                 *state.cosy_active.lock().await = true;
+                                                persist_cosy_active(true);
                                             } else {
                                                 tracing::warn!("Cosy: force-charge writes failed — will retry on next poll");
                                             }
@@ -1972,6 +2009,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 
                                             if all_writes_ok {
                                                 *state.cosy_active.lock().await = false;
+                                                persist_cosy_active(false);
                                             } else {
                                                 tracing::warn!("Cosy: exit writes failed — will retry on next poll");
                                             }
@@ -1980,6 +2018,14 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         }
                                     }
                                 }
+
+                                // Reflect the (possibly updated) cosy_active flag
+                                // AFTER the cosy state machine has run. Without this,
+                                // the broadcast snapshot would carry the previous
+                                // cycle's value for one poll after a slot transition
+                                // — e.g. showing "Cosy Active" for an extra poll
+                                // after the slot actually ended.
+                                snapshot.cosy_active = *state.cosy_active.lock().await;
 
                                 {
                                     let mut latest = state.latest_snapshot.lock().await;
@@ -2170,6 +2216,65 @@ mod tests {
         let _rx = state.tx.subscribe();
     }
 
+    use std::sync::Mutex;
+    /// Serializes tests that touch `GIVENERGY_LOCAL_CONFIG_DIR` so they don't
+    /// race on the env var when the full test suite runs in parallel.
+    static COSY_SETTINGS_TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    /// Cosy crash-recovery: when the app restarts, in-memory `cosy_active`
+    /// is seeded from `cosy_active_persisted` in settings. If the persisted
+    /// flag is `true` (we crashed mid-Cosy), the cosy state machine on the
+    /// next poll will either re-send ForceCharge (if still inside a slot)
+    /// or fire CosyExit (if the slot ended while we were down).
+    #[test]
+    fn cosy_active_seeds_from_persisted_flag() {
+        let _guard = COSY_SETTINGS_TEST_MUTEX.lock().unwrap();
+        // Use a temp config dir so we don't touch the user's real settings.
+        let tmp = std::env::temp_dir().join(format!(
+            "givenergy-test-cosy-seed-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&tmp);
+        std::env::set_var("GIVENERGY_LOCAL_CONFIG_DIR", &tmp);
+
+        // Persist cosy_active_persisted=true to settings.
+        persist_cosy_active(true);
+        let state = AppState::new();
+        let seeded = *state.cosy_active.blocking_lock();
+
+        // Clean up.
+        std::env::remove_var("GIVENERGY_LOCAL_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert!(
+            seeded,
+            "AppState::new should seed cosy_active from cosy_active_persisted"
+        );
+    }
+
+    #[test]
+    fn cosy_persist_helper_round_trips_through_disk() {
+        let _guard = COSY_SETTINGS_TEST_MUTEX.lock().unwrap();
+        let tmp = std::env::temp_dir().join(format!(
+            "givenergy-test-cosy-persist-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&tmp);
+        std::env::set_var("GIVENERGY_LOCAL_CONFIG_DIR", &tmp);
+
+        persist_cosy_active(true);
+        let after_true = crate::settings::Settings::load();
+        assert!(after_true.cosy_active_persisted);
+
+        persist_cosy_active(false);
+        let after_false = crate::settings::Settings::load();
+        assert!(!after_false.cosy_active_persisted);
+
+        // Clean up.
+        std::env::remove_var("GIVENERGY_LOCAL_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn model_detection_repolls_for_ac_coupled_address_switch_and_extra_block() {
         assert!(should_repoll_after_model_detection(
@@ -2220,6 +2325,62 @@ mod tests {
             Some(DeviceType::ACCoupledMk2),
             false
         ));
+    }
+
+    #[test]
+    fn daily_energy_tiny_decrease_is_noise_not_repoll() {
+        let prev = InverterSnapshot {
+            timestamp: 100,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            battery_reserve: 4,
+            today_consumption_kwh: 7.6,
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            timestamp: 104,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            battery_reserve: 4,
+            today_consumption_kwh: 7.5,
+            ..Default::default()
+        };
+        let mut pending_mode = None;
+
+        let sanitized = sanitize_snapshot(&mut snap, Some(&prev), false, &mut pending_mode);
+
+        assert!(!sanitized, "noise tolerance must not force immediate re-poll");
+        assert_eq!(snap.today_consumption_kwh, prev.today_consumption_kwh);
+    }
+
+    #[test]
+    fn daily_energy_material_decrease_is_sanitized() {
+        let prev = InverterSnapshot {
+            timestamp: 100,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            battery_reserve: 4,
+            today_consumption_kwh: 7.6,
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            timestamp: 104,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            battery_reserve: 4,
+            today_consumption_kwh: 7.3,
+            ..Default::default()
+        };
+        let mut pending_mode = None;
+
+        let sanitized = sanitize_snapshot(&mut snap, Some(&prev), false, &mut pending_mode);
+
+        assert!(sanitized);
+        assert_eq!(snap.today_consumption_kwh, prev.today_consumption_kwh);
     }
 
     #[test]

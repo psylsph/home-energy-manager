@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.6] - 2026-06-06
+
+### Fixed
+
+- **Write-register frames were malformed** ([#8](https://github.com/psylsph/home-energy-manager/issues/8)):
+  Function-code-6 writes (Cosy force-charge entry/exit, charge/discharge slot
+  programming, mode switches, charge limits) were sending a 36-byte frame
+  with a double CRC — the transparent-protocol CRC appended by `encode_frame`
+  plus an extra write-specific CRC the client was prepending into the payload.
+  Real dongles silently ignored these malformed frames, so every write timed
+  out while reads continued working. Fixed by passing only `register + value`
+  as the inner payload and letting `encode_frame` append the single correct
+  CRC over `device_address + function_code + register + value`. New regression
+  test asserts the frame is exactly 34 bytes with MBAP length 28.
+- **Cosy exit was writing the wrong discharge state**: `CosyExit` enabled
+  timed discharge (`HR_ENABLE_DISCHARGE = 1`) on exit, which depending on
+  `HR_BATTERY_POWER_MODE` could land the inverter in Timed Demand or Timed
+  Export instead of Eco. CosyExit now sets `HR_ENABLE_DISCHARGE = 0` and
+  `HR_BATTERY_POWER_MODE = 1`, restoring normal Eco self-consumption.
+- **Cosy stop not visible for slot 2/3**: `snapshot.cosy_active` was being
+  stamped before the cosy state machine ran, so the broadcast carried the
+  pre-transition value for one cycle when a slot ended. The flag is now
+  stamped after the state machine runs, so the UI reflects the exit on the
+  same poll cycle that fires CosyExit. `cosy_active_slot` boundary tests
+  now explicitly cover slot 1, 2, and 3 end-times.
+- **Cosy crash/restart leaves inverter force-charging**: `cosy_active` was
+  in-memory only, so a crash mid-slot followed by a restart after the slot
+  ended would leave the inverter stuck in ForceCharge. The flag is now
+  persisted to `settings.json` as `cosy_active_persisted` on every
+  transition; `AppState::new` seeds the in-memory flag from this persisted
+  value on startup, and the normal cosy state machine fires CosyExit on the
+  first poll if the persisted flag is `true` but the current time is outside
+  any Cosy slot.
+- **Noisy daily-energy warnings**: Tiny one-tick decreases in daily energy
+  counters (e.g. 7.6 → 7.5 kWh) are now treated as read noise rather than
+  register corruption. The previous value is carried forward silently at
+  debug level (no warning logged, no immediate re-poll triggered). Material
+  decreases (≥0.15 kWh) still log a warning and force a re-poll.
+
+### Added
+
+- **DEBUG logging for FC6 writes**: Write requests now emit a
+  `Sent write request, awaiting ack` line with `req_len`, `mbap_len`, and a
+  hex preview, so the developer console can confirm whether outgoing writes
+  are correctly shaped (34 bytes / MBAP len 28) versus the previously broken
+  36-byte / MBAP-len-30 form.
+- **Linux uninstall instructions** in the README (`sudo apt purge
+  home-energy-manager`), with a note that `~/.givenergy-local` is preserved
+  and a warning that deleting it also removes `history.db`.
+
 ## [0.13.5] - 2026-06-06
 
 ### Changed
@@ -16,6 +66,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`launch.command` now automates Gatekeeper + zombie cleanup**: copies the app to Desktop if only found in /Applications (macOS 26.5 blocks ad-hoc signed binaries from /Applications), removes quarantine, kills stale 8KB RSS Gatekeeper zombie processes, then launches the app.
 
 - **AGENTS.md documentation updated**: macOS 26.5 known-issues section rewritten to document the standard DMG workflow with one-time "Open Anyway" approval, instead of the previous workaround approach.
+
+### Fixed
+
+- **Tolerate small daily energy decreases from dongle register jitter**: Added
+  a tolerance in the delta sanitizer so tiny fluctuations (0.1-0.2 kWh) from
+  dongle 16-bit register precision don't trigger false-positive 'register
+  corruption' warnings.
 
 ## [0.13.4] - 2026-06-05
 

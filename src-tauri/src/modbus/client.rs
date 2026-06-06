@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use super::framer::{self, crc16_modbus, DecodedFrame, RegisterType};
+use super::framer::{self, DecodedFrame, RegisterType};
 use super::registers::{RegisterBlock, STANDARD_POLL_BLOCKS};
 
 // ---------------------------------------------------------------------------
@@ -841,32 +841,18 @@ impl ModbusClient {
     ///   - Device address **0x11** (inverter setup address), NOT 0x32
     ///   - One register per request (no batching)
     ///
-    /// The CRC/check field is CrcModbus(function_code + register + value),
-    /// which differs from the standard Modbus CRC over the full PDU.
-    /// However, the dongle appears to ignore the CRC on incoming requests.
+    /// The CRC/check field is the normal transparent-frame CRC over
+    /// `device_address + function_code + register + value`, appended by
+    /// [`framer::encode_frame`]. Do not append a second write-specific CRC:
+    /// real dongles silently ignore those malformed 36-byte write frames.
     ///
     /// Handles stale read responses and dongle-busy exceptions (code 67)
     /// with automatic retries.
     pub async fn write_register(&mut self, register: u16, value: u16) -> Result<(), ClientError> {
         let inner_function: u8 = 6; // Write Single Holding Register
-        let device_address: u8 = 0x11; // Inverter setup address for writes
 
-        // Build inner payload: register(2) + value(2)
-        let mut payload = Vec::with_capacity(4);
-        payload.extend_from_slice(&register.to_be_bytes());
-        payload.extend_from_slice(&value.to_be_bytes());
-
-        // Calculate check/CRC per givenergy-modbus convention:
-        // CrcModbus(function_code + register + value)
-        let mut check_data = Vec::with_capacity(5);
-        check_data.push(inner_function);
-        check_data.extend_from_slice(&register.to_be_bytes());
-        check_data.extend_from_slice(&value.to_be_bytes());
-        let check = crc16_modbus(&check_data);
-        payload.extend_from_slice(&check.to_le_bytes());
-
-        // Encode the full frame
-        let request = framer::encode_frame(&self.serial, device_address, inner_function, &payload);
+        // Encode the full frame.
+        let request = Self::build_write_register_request(&self.serial, register, value);
 
         // GivEnergy dongles return exception code 67 (busy) frequently.
         // We retry a few times with moderate delays, but fail fast rather
@@ -878,7 +864,16 @@ impl ModbusClient {
 
         for attempt in 0..max_attempts {
             if need_resend {
+                let mbap_len = u16::from_be_bytes([request[4], request[5]]);
+                let hex_preview = dump_hex(&request);
                 self.send_raw(&request).await?;
+                tracing::debug!(
+                    register,
+                    value,
+                    req_len = request.len(),
+                    mbap_len,
+                    "Sent write request, awaiting ack: [{hex_preview}]"
+                );
                 need_resend = false;
             }
 
@@ -977,6 +972,18 @@ impl ModbusClient {
         Err(ClientError::InvalidResponse(
             "exhausted write retries".to_string(),
         ))
+    }
+
+    /// Build a single-register write request frame.
+    ///
+    /// The payload passed to `encode_frame` is only register + value. The
+    /// transparent-protocol CRC/check is appended by `encode_frame` over the
+    /// full inner PDU (`0x11 0x06 register value`), matching givenergy-modbus.
+    fn build_write_register_request(serial: &str, register: u16, value: u16) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(4);
+        payload.extend_from_slice(&register.to_be_bytes());
+        payload.extend_from_slice(&value.to_be_bytes());
+        framer::encode_frame(serial, 0x11, 0x06, &payload)
     }
 
     /// Read a set of poll blocks, returning raw data per block.
@@ -1188,6 +1195,26 @@ mod tests {
         let decoded = decoded_read_response(0x32, 0x03, 80, 20);
         let metadata = ModbusClient::response_register_metadata(&decoded).unwrap();
         assert_eq!(metadata, (80, 20));
+    }
+
+    #[test]
+    fn write_register_request_has_single_transparent_crc() {
+        let frame = ModbusClient::build_write_register_request("WG2301G167", 27, 1);
+
+        // 6-byte MBAP + 28-byte transparent payload. The earlier malformed
+        // implementation appended an extra write-specific CRC and produced a
+        // 36-byte frame with MBAP len 30, which real dongles ignored.
+        assert_eq!(frame.len(), 34);
+        assert_eq!(u16::from_be_bytes([frame[4], frame[5]]), 28);
+        assert_eq!(&frame[26..32], &[0x11, 0x06, 0x00, 0x1B, 0x00, 0x01]);
+
+        let expected_crc = framer::crc16_modbus(&frame[26..32]);
+        assert_eq!(&frame[32..34], &expected_crc.to_le_bytes());
+
+        let decoded = framer::decode_frame(&frame).unwrap();
+        assert_eq!(decoded.slave, 0x11);
+        assert_eq!(decoded.function, 0x06);
+        assert_eq!(decoded.payload, vec![0x00, 0x1B, 0x00, 0x01]);
     }
 
     #[test]
