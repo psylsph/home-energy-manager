@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.1] - 2026-06-07
+
+### Fixed
+
+- **Three-phase battery voltage no longer stuck at 0V**
+  The sanitizer capped three-phase battery voltage at 100V, but HV
+  stackable batteries operate at 200–600V. A valid reading like 241.9V
+  was rejected as out of range and fell back to the previous value (0.0
+  on first read), keeping the voltage permanently stuck at zero. Raised
+  the three-phase cap to 600V, matching the full HV operating envelope.
+
 ## [0.17.0] - 2026-06-07
 
 ### Added
