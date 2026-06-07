@@ -23,6 +23,9 @@ export function formatFrequency(f: number): string {
 }
 
 export function formatTemp(c: number): string {
+  if (!Number.isFinite(c)) {
+    return '—';
+  }
   return `${c.toFixed(1)}°C`;
 }
 

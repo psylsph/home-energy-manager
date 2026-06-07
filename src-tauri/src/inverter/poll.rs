@@ -686,9 +686,11 @@ fn derive_three_phase_battery_fields(
         // No BMS data available (HV battery whose BCU read failed, or an LV
         // battery whose 0x32 read failed). Clear any garbage left by the
         // single-phase IR(56)/HR(55) decode paths so the UI shows 0, not a
-        // stale value. Max power is still the device hardware limit (no
-        // capacity to cap by).
-        snap.battery_temperature = 0.0;
+        // stale value. Use NaN so check_auto_winter doesn't misinterpret a
+        // missing-temperature sentinel as a valid cold reading (0.0 < 8.0
+        // would trigger winter mode — see review W11). Max power is still
+        // the device hardware limit (no capacity to cap by).
+        snap.battery_temperature = f32::NAN;
         snap.battery_capacity_kwh = 0.0;
         snap.max_battery_power_w = snap.device_type.max_battery_power_w();
         return;
@@ -3219,7 +3221,7 @@ mod tests {
         snap.max_battery_power_w = 0;
         snap.battery_modules = vec![];
         derive_three_phase_battery_fields(&mut snap, None);
-        assert_eq!(snap.battery_temperature, 0.0);
+        assert!(snap.battery_temperature.is_nan(), "missing BMS data should produce NaN, not 0.0");
         assert_eq!(snap.battery_capacity_kwh, 0.0);
         assert_eq!(snap.max_battery_power_w, 6000); // uncapped hardware limit
     }
