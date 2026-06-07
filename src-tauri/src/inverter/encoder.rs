@@ -230,6 +230,8 @@ impl ControlCommand {
     pub fn encode(&self) -> Result<Vec<RegisterWrite>, String> {
         let writes = match self {
             ControlCommand::SetBatteryPowerMode { mode } => {
+                // 0 = EXPORT (max power / timed export), 1 = SELF_CONSUMPTION (eco)
+                validate_range(*mode, 0, 1, "battery power mode")?;
                 vec![rw(HR_BATTERY_POWER_MODE, *mode)]
             }
             ControlCommand::SetEnableDischarge { enabled } => {
@@ -501,6 +503,8 @@ impl ControlCommand {
                 vec![rw(HR_ENABLE_EPS, if *enabled { 1 } else { 0 })]
             }
             ControlCommand::SetPauseMode { mode } => {
+                // 0 = disable, 1 = pause until soc or slot, 2 = pause slot, 3 = pause soc
+                validate_range(*mode, 0, 3, "pause mode")?;
                 vec![rw(HR_BATTERY_PAUSE_MODE, *mode)]
             }
             ControlCommand::SetPauseSlot { start, end } => {
