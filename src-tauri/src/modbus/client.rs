@@ -117,7 +117,9 @@ impl ResponseKey {
             return None;
         }
         let base_register = u16::from_be_bytes([frame.payload[10], frame.payload[11]]);
-        let count = u16::from_be_bytes([frame.payload[12], frame.payload[13]]);
+        // For write responses (function 0x06), payload[12..14] is the register
+        // value, not a count. Writes always target a single register.
+        let count = if frame.function == 0x06 { 1 } else { u16::from_be_bytes([frame.payload[12], frame.payload[13]]) };
         Some(Self { slave: frame.slave, function: frame.function, base_register, count })
     }
 }
@@ -345,11 +347,7 @@ impl ModbusClient {
             // Decode and route by content key.
             match framer::decode_frame(&frame) {
                 Ok(decoded) => {
-                    eprintln!("CONSUMER: got frame slave=0x{:02X} func=0x{:02X} payload_len={}",
-                        decoded.slave, decoded.function, decoded.payload.len());
                     if let Some(key) = ResponseKey::from_response(&decoded) {
-                        eprintln!("CONSUMER: key slave=0x{:02X} func=0x{:02X} base={} count={}",
-                            key.slave, key.function, key.base_register, key.count);
                         let mut map = pending.lock().await;
                         if let Some(tx) = map.remove(&key) {
                             let _ = tx.send(decoded);
@@ -633,7 +631,7 @@ impl ModbusClient {
     pub async fn write_register(&mut self, register: u16, value: u16) -> Result<(), ClientError> {
         let inner_function: u8 = 6;
         let request = Self::build_write_register_request(&self.serial, register, value);
-        let key = ResponseKey::from_request(self.slave, inner_function, register, 1);
+        let key = ResponseKey::from_request(0x11, inner_function, register, 1);
 
         let max_attempts: u8 = 6;
 

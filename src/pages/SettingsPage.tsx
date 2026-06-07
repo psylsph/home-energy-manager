@@ -572,11 +572,6 @@ export default function SettingsPage() {
       {/* ─── Section 7: About ─── */}
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-2">
         <h2 className="text-text-primary text-lg font-semibold font-sans">About</h2>
-
-        <div className="flex items-center gap-2 text-sm font-sans">
-          <span className="text-text-secondary">Version</span>
-          <span className="text-text-primary font-mono">{__APP_VERSION__}</span>
-        </div>
         <a
           href="https://github.com/psylsph/home-energy-manager"
           target="_blank"
