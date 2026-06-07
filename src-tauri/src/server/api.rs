@@ -837,15 +837,26 @@ pub async fn get_history(
         return error_response("No fields specified");
     }
 
-    let history = state.history.lock().await;
-    match history.as_ref() {
+    // Clone the HistoryDb handle and drop the async lock so the synchronous
+    // SQLite query runs on a blocking thread instead of pinning the Tokio
+    // worker while holding the async mutex.
+    let history_db = state.history.lock().await.clone();
+
+    match history_db {
         Some(db) => {
-            match db.query_history(range_secs, bucket_secs, offset, &fields, explicit_window) {
-                Ok(data) => {
+            let fields_clone = fields.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                db.query_history(range_secs, bucket_secs, offset, &fields_clone, explicit_window)
+            })
+            .await;
+
+            match result {
+                Ok(Ok(data)) => {
                     let map: HashMap<String, Value> = data.into_iter().collect();
                     Json(json!({ "ok": true, "data": map }))
                 }
-                Err(e) => error_response(&e),
+                Ok(Err(e)) => error_response(&e),
+                Err(e) => error_response(&format!("History query join error: {e}")),
             }
         }
         None => error_response("History database not available"),
