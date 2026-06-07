@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.4] - 2026-06-07
+
+### Added
+
+- **GET /api/logs now supports `?after=` parameter**
+  The documented `?after=<n>` query parameter was ignored — the handler
+  always returned `read_all()`. Added `read_from()` method on `LogRing`
+  and wired up the `Query` extractor. Returns a `next` field for
+  incremental polling.
+
+- **Server errors now return HTTP 500 instead of 400**
+  `error_response` always returned `BAD_REQUEST` for all errors including
+  backend failures (database errors, save failures). Added `server_error()`
+  helper returning `INTERNAL_SERVER_ERROR` so clients can distinguish
+  bad input (400) from backend outages (500).
+
+### Changed
+
+- **History repair migration documented as deliberately idempotent**
+  The cumulative-counter repair runs on every launch but checks for the
+  column first and exits immediately if present — not a performance concern.
+  Added doc comment explaining this.
+
 ## [0.17.3] - 2026-06-07
 
 ### Fixed

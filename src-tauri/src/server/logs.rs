@@ -6,9 +6,10 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::Json;
 use parking_lot::Mutex;
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 // ---------------------------------------------------------------------------
@@ -82,6 +83,37 @@ impl LogRing {
         }
         result
     }
+
+    /// Read lines starting from a given chronological index.
+    /// Returns `(lines, next_index)` where `next_index` is the index to pass
+    /// as `after` on the next poll. Returns an empty vec when `after` is
+    /// beyond the oldest available entry (the buffer has wrapped).
+    pub fn read_from(&self, after: usize) -> (Vec<String>, usize) {
+        let inner = self.buf.lock();
+        if inner.len == 0 {
+            return (Vec::new(), 0);
+        }
+        // Calculate the total chronological index range
+        let oldest_idx = inner.cursor + inner.capacity - inner.len;
+        let newest_idx = inner.cursor + inner.len - 1;
+        if after >= newest_idx {
+            // Client is caught up — no new lines.
+            return (Vec::new(), newest_idx);
+        }
+        let read_from = after.max(oldest_idx);
+        let count = newest_idx - read_from;
+        let mut result = Vec::with_capacity(count);
+        for i in 0..=count {
+            let idx = (read_from + i) % inner.capacity;
+            result.push(inner.data[idx].clone());
+        }
+        (result, newest_idx + 1)
+    }
+}
+
+#[derive(Deserialize)]
+pub struct LogQuery {
+    after: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -91,12 +123,24 @@ impl LogRing {
 /// GET /api/logs — return recent log lines.
 ///
 /// Query params: `?after=<n>` returns lines starting from index `n`.
-pub async fn get_logs(State(state): State<Arc<crate::inverter::poll::AppState>>) -> Json<Value> {
-    let lines = state.log_ring.read_all();
+/// Returns `{ "ok": true, "lines": [...], "next": <n> }` where `next` is
+/// the index to use as `after` on the next poll for incremental fetching.
+pub async fn get_logs(
+    State(state): State<Arc<crate::inverter::poll::AppState>>,
+    Query(query): Query<LogQuery>,
+) -> Json<Value> {
+    let (lines, next_index) = match query.after {
+        Some(after) => state.log_ring.read_from(after),
+        None => {
+            let lines = state.log_ring.read_all();
+            (lines, 0)
+        }
+    };
     Json(json!({
         "ok": true,
         "lines": lines,
         "count": lines.len(),
+        "next": next_index,
     }))
 }
 

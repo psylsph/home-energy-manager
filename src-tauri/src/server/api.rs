@@ -27,6 +27,13 @@ fn error_response(error: &str) -> (StatusCode, Json<Value>) {
     (StatusCode::BAD_REQUEST, Json(json!({ "ok": false, "error": error })))
 }
 
+/// Return a 500 Internal Server Error response. Use for backend failures
+/// (database errors, save failures) where the client should distinguish
+/// these from bad-input 400s.
+fn server_error(error: &str) -> (StatusCode, Json<Value>) {
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "ok": false, "error": error })))
+}
+
 /// Return true when the latest snapshot is from an AC-coupled inverter.
 async fn is_ac_coupled_snapshot(state: &Arc<AppState>) -> bool {
     let snapshot = state.latest_snapshot.lock().await;
@@ -238,7 +245,7 @@ pub async fn update_settings(
     }
     if let Err(e) = persist.save() {
         tracing::warn!("Failed to persist settings: {}", e);
-        return error_response(&format!("Failed to save settings: {}", e));
+        return server_error(&format!("Failed to save settings: {}", e));
     }
     drop(persist);
 
@@ -866,7 +873,7 @@ pub async fn get_history(
                 Err(e) => error_response(&format!("History query join error: {e}")),
             }
         }
-        None => error_response("History database not available"),
+        None => server_error("History database not available"),
     }
 }
 
@@ -925,7 +932,7 @@ pub async fn set_auto_winter(
     drop(config);
     if let Err(e) = app_settings.save() {
         tracing::warn!("Failed to persist auto winter config: {e}");
-        return error_response(&format!("Failed to save: {e}"));
+        return server_error(&format!("Failed to save: {e}"));
     }
 
     ok_response("Auto winter config updated")
@@ -992,7 +999,7 @@ pub async fn set_cosy(
 
     if let Err(e) = app_settings.save() {
         tracing::warn!("Failed to persist cosy config: {e}");
-        return error_response(&format!("Failed to save: {e}"));
+        return server_error(&format!("Failed to save: {e}"));
     }
 
     ok_response("Cosy config updated")
@@ -1029,7 +1036,7 @@ pub async fn set_agile(
 
     if let Err(e) = app_settings.save() {
         tracing::warn!("Failed to persist agile config: {e}");
-        return error_response(&format!("Failed to save: {e}"));
+        return server_error(&format!("Failed to save: {e}"));
     }
 
     ok_response("Agile config updated")

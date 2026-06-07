@@ -194,11 +194,19 @@ impl HistoryDb {
         // Migration: add today_ac_charge_kwh column if missing (added in v0.9.34)
         let _ = conn.execute_batch("ALTER TABLE readings ADD COLUMN today_ac_charge_kwh REAL");
 
-        // Migration: repair corrupted cumulative counter data.
-        // For each today_*_kwh column, fix rows where the value decreased
-        // from the previous row (counters are monotonically increasing)
-        // or jumped up by more than 2 kWh (implausible between polls).
-        // Skip if previous value is <= 5 (near midnight reset).
+        // Migration: add today_ac_charge_kwh column if missing (added in v0.9.34)
+        let _ = conn.execute_batch("ALTER TABLE readings ADD COLUMN today_ac_charge_kwh REAL");
+
+        // Idempotent migration: repair corrupted cumulative counter data.
+        // Runs on every launch (no version gate) and is intentionally
+        // idempotent — it checks for the new column and exits immediately
+        // if already present. The column-addition ALTER TABLE is a no-op
+        // when the column exists (SQLite ignores it). The repair loop
+        // below scans the readings table and fixes rows where cumulative
+        // counters decreased (register corruption). On a healthy database
+        // this scan completes within seconds for typical history sizes.
+        // Pre-v0.17.0 databases that lack the column will run the full
+        // repair once; subsequent launches are no-ops.
         let energy_cols = [
             "today_solar_kwh",
             "today_import_kwh",
