@@ -292,7 +292,8 @@ pub async fn update_settings(
 
 fn parse_settings(body: &serde_json::Value) -> Result<PollSettings, String> {
     let host = body["host"].as_str().unwrap_or("").to_string();
-    let port = body["port"].as_u64().unwrap_or(8899) as u16;
+    let port_raw = body.get("port").and_then(|v| v.as_u64());
+    let port = port_raw.unwrap_or(0) as u16;
     let serial = body["serial"].as_str().unwrap_or("").to_string();
     // Only overwrite interval if explicitly provided; otherwise keep current value.
     // The Connect button sends {host,port,serial} without interval_secs,
@@ -302,8 +303,9 @@ fn parse_settings(body: &serde_json::Value) -> Result<PollSettings, String> {
         .and_then(|v| v.as_u64())
         .unwrap_or(0); // 0 = "not provided"
 
-    if !host.is_empty() && port == 0 {
-        return Err("Invalid port".to_string());
+    // Only reject port=0 when it was explicitly provided.
+    if !host.is_empty() && port == 0 && body.get("port").is_some() {
+        return Err("Invalid port: must be > 0".to_string());
     }
     if interval_secs > 0 && interval_secs < 5 {
         return Err("interval_secs must be >= 5".to_string());
