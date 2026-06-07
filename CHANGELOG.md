@@ -5,11 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.4] - 2026-06-07
+
+### Added
+
+- **Refresh interval now has a button group**
+  Instead of a slider, you pick from 5, 10, 15 or 20 seconds — the
+  four most useful refresh rates. Old saved values get snapped to the
+  nearest option automatically.
+
+### Fixed
+
+- **Settings file no longer gets corrupted by concurrent writes**
+  If two parts of the app wrote to the settings file at the same time
+  (e.g. API handler and poll loop both saving), the JSON could get
+  mangled and fail to parse on the next load. Now saves are serialised
+  and use atomic writes (temp file + rename) so readers always see a
+  complete file.
+- **History chart lines now reach the axis**
+  On the 1h, 6h and 24h views, the x-axis started at the top of the
+  hour but data is recorded at 30-minute intervals, leaving a gap of
+  empty space before the first data point. The axis now starts at the
+  earliest reading so the line touches the y-axis.
+
 ## [0.16.3] - 2026-06-07
 
 ### Fixed
 
-- **Force-charge re-sent on restart when in a Cosy slot**
+- **Force-charge re-sent on restart when in a Cosy slot****
   If the app crashed or was restarted during a Cosy charging window, it
   logged "will re-send" but never actually sent the writes — so the
   inverter stayed in Eco mode until the next slot transition. Fixed.
