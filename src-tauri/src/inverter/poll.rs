@@ -2137,18 +2137,24 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 // ---- Cosy charging mode ----
                                 {
                                     let settings = crate::settings::Settings::load();
-                                    if settings.cosy_enabled {
-                                        let now = chrono::Local::now();
-                                        let now_minutes = now.hour() as u16 * 60 + now.minute() as u16;
+                                    let now = chrono::Local::now();
+                                    let now_minutes = now.hour() as u16 * 60 + now.minute() as u16;
 
-                                        // Check if we're inside any enabled cosy slot
-                                        let slot_target_soc = crate::settings::cosy_active_slot(now_minutes, &settings.cosy_slots);
-                                        let in_slot = slot_target_soc.is_some();
-                                        let slot_target_soc = slot_target_soc.unwrap_or(100);
+                                    // Check if we're inside any enabled cosy slot. When cosy mode is
+                                    // disabled, treat as "not in slot" so any lingering cosy_active
+                                    // flag gets cleared on the next poll (otherwise the inverter stays
+                                    // force-charging after switching away from Cosy mode).
+                                    let slot_target_soc = if settings.cosy_enabled {
+                                        crate::settings::cosy_active_slot(now_minutes, &settings.cosy_slots)
+                                    } else {
+                                        None
+                                    };
+                                    let in_slot = slot_target_soc.is_some();
+                                    let slot_target_soc = slot_target_soc.unwrap_or(100);
 
-                                        let cosy_active = state.cosy_active.lock().await;
-                                        if in_slot && !*cosy_active {
-                                            // Entering a cosy slot — start force charge.
+                                    let cosy_active = state.cosy_active.lock().await;
+                                    if in_slot && !*cosy_active {
+                                        // Entering a cosy slot — start force charge.
                                             // Drain stale frames first to avoid function code
                                             // mismatches (stale read responses can be mistaken
                                             // for write acknowledgments).
@@ -2182,8 +2188,9 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             } else {
                                                 tracing::warn!("Cosy: force-charge writes failed — will retry on next poll");
                                             }
-                                        } else if !in_slot && *cosy_active {
-                                            // Exiting a cosy slot — restore normal Eco mode.
+                                        } else if *cosy_active && !in_slot {
+                                            // Exiting a cosy slot (or cosy mode was disabled while
+                                            // active) — restore normal Eco mode.
                                             // Drain stale frames for the same reason as entry.
                                                                     tracing::info!("Cosy: exiting slot, restoring Eco mode");
                                             drop(cosy_active);
@@ -2218,7 +2225,6 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         } else {
                                             drop(cosy_active);
                                         }
-                                    }
                                 }
 
                                 // ---- Agile Octopus mode ----
@@ -2404,6 +2410,40 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                     cached_slots = cached_count,
                                                     "Agile: no price data for current time (still idle)",
                                                 );
+                                            }
+                                        }
+                                    } else {
+                                        // Agile mode disabled — if we were actively
+                                        // charging/discharging, revert to Eco so the
+                                        // inverter doesn't stay force-charging after a
+                                        // switch to Standard or Cosy mode.
+                                        let ag_state = state.agile_state.lock().await;
+                                        if *ag_state != AgileState::Idle {
+                                            tracing::info!("Agile: mode disabled while {:?} — reverting to Eco", *ag_state);
+                                            drop(ag_state);
+                                            let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
+                                            let cmd = if use_3ph {
+                                                ControlCommand::ThreePhaseCosyExit
+                                            } else {
+                                                ControlCommand::CosyExit
+                                            };
+                                            let mut all_ok = true;
+                                            if let Ok(writes) = cmd.encode() {
+                                                for w in &writes {
+                                                    if let Err(e) = client.write_register(w.address, w.value).await {
+                                                        tracing::error!("Agile: write reg {} failed: {e}", w.address);
+                                                        all_ok = false;
+                                                    }
+                                                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                                                }
+                                            } else {
+                                                all_ok = false;
+                                            }
+                                            if all_ok {
+                                                *state.agile_state.lock().await = AgileState::Idle;
+                                                persist_agile_state(AgileState::Idle);
+                                            } else {
+                                                tracing::warn!("Agile: exit writes failed — will retry on next poll");
                                             }
                                         }
                                     }

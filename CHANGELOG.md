@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.2] - 2026-06-07
+
+### Fixed
+
+- **Switching away from Cosy or Agile mode no longer leaves the battery stuck charging**
+  If you were in Cosy mode mid-slot (or Agile mid-charge) and switched to
+  Standard (or to the other mode), the inverter would keep force-charging
+  indefinitely — the app kept reporting both modes as "Active". The exit
+  cleanup now runs whenever a mode is disabled, not just when its time
+  window ends.
+
 ## [0.16.1] - 2026-06-06
 
 ### Fixed

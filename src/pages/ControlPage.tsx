@@ -482,6 +482,16 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: 'standa
       <div className="flex items-center justify-between">
         <h2 className="text-text-primary font-semibold text-lg">Charging Mode</h2>
         <div className="flex items-center gap-2">
+          <select
+          value={mode}
+          onChange={(e) => handleModeChange(e.target.value as 'standard' | 'cosy' | 'agile')}
+          disabled={saving}
+          className="bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-3 py-1.5 border border-transparent focus:border-battery outline-none cursor-pointer"
+        >
+          <option value="standard">Standard</option>
+          <option value="cosy">Cosy</option>
+          <option value="agile">Agile</option>
+        </select>
           <button
             onClick={async () => {
               setSaving(true);
@@ -502,16 +512,6 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: 'standa
           >
             {saveFeedback === 'saved' ? '✓' : saveFeedback === 'error' ? '!' : saving ? '...' : 'Apply'}
           </button>
-          <select
-          value={mode}
-          onChange={(e) => handleModeChange(e.target.value as 'standard' | 'cosy' | 'agile')}
-          disabled={saving}
-          className="bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-3 py-1.5 border border-transparent focus:border-battery outline-none cursor-pointer"
-        >
-          <option value="standard">Standard</option>
-          <option value="cosy">Cosy</option>
-          <option value="agile">Agile</option>
-        </select>
       </div>
       </div>
 
