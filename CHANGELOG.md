@@ -26,10 +26,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   If you'd ever used winter mode or force charge, a stale flag could sit
   around and confuse the app. Now saving a charge slot sweeps that flag
   away.
-- **Less flakiness when the dongle gets chatty**
-  Stale response frames from the dongle are now cleared out during reads,
-  not just before writes. Helps keep a brief hiccup from turning into a
-  cascade of failures.
+- **Completely rewrote how the app talks to the dongle**
+  The old approach was simple but fragile: fire off a request, wait for the
+  reply, and if something went wrong (wrong device answered, or a delayed
+  frame from a previous request turned up) you'd have to notice, flush the
+  junk, and retry. Miss one and everything cascaded into mismatched
+  responses and timeouts — especially on AC-coupled inverters where there
+  are battery modules on the bus answering alongside the inverter.
+
+  Now there's a background listener that just reads *everything* the dongle
+  sends back and routes each response to whoever's waiting for it by what's
+  actually *in* the response (which slave, which register range). If a
+  battery module at 0x35 answers when you asked the inverter at 0x31?
+  Nobody asked for that, so it's quietly ignored. The inverter's real
+  answer arrives a moment later and finds its match. This is how
+  givenergy-modbus (the reference library) always worked, and it's far
+  more solid in practice.
+
+  As a bonus, the whole retry system got simpler too — just time out and
+  retry instead of trying to detect every possible way a response can be
+  wrong. The slave mismatch / register range mismatch errors you used to
+  see in the console shouldn't happen anymore.
 
 ## [0.15.0] - 2026-06-06
 
