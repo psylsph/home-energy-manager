@@ -351,9 +351,10 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.inverter_temperature = get_reg(data, 41) as f32 * 0.1; // IR(41): t_inverter_heatsink (/10 °C)
 
     // -- Energy totals (all in /10 kWh) --
-    // IR(11-12) is lifetime PV total, NOT a daily value. Daily PV generation is
-    // IR(44) per givenergy-modbus sentinel cross-correlation; fall back to the
-    // older per-string daily registers when IR(44) is unavailable/zero.
+    // IR(44) is e_pv_generation_today (per givenergy-modbus sentinel
+    // cross-correlation, confirmed against the GE app's Energy-today
+    // screen — see #174). Fall back to the older per-string daily
+    // registers (IR(17)/IR(19)) when IR(44) is unavailable/zero.
     let pv_generation_today = get_reg(data, 44); // IR(44): e_pv_generation_today
     if pv_generation_today > 0 {
         snap.today_solar_kwh = pv_generation_today as f32 * 0.1;
@@ -371,8 +372,20 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.today_export_kwh = get_reg(data, 25) as f32 * 0.1; // IR(25): e_grid_out_day
     snap.today_charge_kwh = get_reg(data, 36) as f32 * 0.1; // IR(36): e_battery_charge_day
     snap.today_discharge_kwh = get_reg(data, 37) as f32 * 0.1; // IR(37): e_battery_discharge_day
-    snap.today_consumption_kwh = get_reg(data, 35) as f32 * 0.1; // IR(35): e_ac_charge_today (NOT consumption)
-    snap.today_ac_charge_kwh = snap.today_consumption_kwh;
+    // IR(35) is AC charge (grid → battery), NOT house consumption. Per the
+    // givenergy-modbus sentinel cross-correlation (#174), the GivTCP-era
+    // "e_load_day" label was a mislabel. The three-phase model confirms this:
+    // IR(1376/1377) is e_ac_charge_today and IR(1396/1397) is e_load_today.
+    // For single-phase there is no direct load register — consumption is
+    // computed (matching the reference's e_consumption_today @property).
+    snap.today_ac_charge_kwh = get_reg(data, 35) as f32 * 0.1; // IR(35): e_ac_charge_today
+    // Consumption = solar + import - export - ac_charge (ref formula).
+    // Clamped at 0 to avoid negative from meter rounding noise.
+    snap.today_consumption_kwh = (snap.today_solar_kwh
+        + snap.today_import_kwh
+        - snap.today_export_kwh
+        - snap.today_ac_charge_kwh)
+        .max(0.0);
     snap.total_export_kwh = uint32(get_reg(data, 21), get_reg(data, 22)) as f32 * 0.1; // IR(21-22): e_grid_out_total
     snap.total_import_kwh = uint32(get_reg(data, 32), get_reg(data, 33)) as f32 * 0.1; // IR(32-33): e_grid_in_total // keep raw IR(35) for energy balance
 }
@@ -1700,6 +1713,38 @@ mod tests {
         assert!((snap.today_solar_kwh - 3.7).abs() < 0.01);
         // GE app formula for single-phase consumption: PV generation + import - export - AC charge.
         assert!((snap.today_consumption_kwh - 4.2).abs() < 0.01);
+        assert!((snap.today_ac_charge_kwh - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn single_phase_consumption_formula_with_ir44() {
+        // Gen3 hybrid with solar from primary IR(44) path (not fallback).
+        // Verifies consumption computation when IR(44) is non-zero.
+        let mut input_data = vec![0u16; 60];
+        input_data[25] = 50; // export today 5.0 kWh
+        input_data[26] = 80; // import today 8.0 kWh
+        input_data[35] = 30; // AC charge today 3.0 kWh
+        input_data[44] = 100; // PV generation today 10.0 kWh
+        input_data[59] = 50; // SOC
+
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x2101; // PolarHybrid (fixed, no ARM refinement needed)
+        holding_data[59] = 1; // enable_discharge = true
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", input_data),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", vec![0; 60]),
+        ];
+        let snap = decode_snapshot(&blocks);
+
+        assert_eq!(snap.device_type, DeviceType::PolarHybrid);
+        assert!((snap.today_solar_kwh - 10.0).abs() < 0.01);
+        assert!((snap.today_import_kwh - 8.0).abs() < 0.01);
+        assert!((snap.today_export_kwh - 5.0).abs() < 0.01);
+        assert!((snap.today_ac_charge_kwh - 3.0).abs() < 0.01);
+        // Consumption = 10.0 + 8.0 - 5.0 - 3.0 = 10.0
+        assert!((snap.today_consumption_kwh - 10.0).abs() < 0.01);
     }
 
     #[test]
