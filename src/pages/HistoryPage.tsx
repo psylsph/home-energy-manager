@@ -1,4 +1,4 @@
-import { useState, useEffect, startTransition } from 'react';
+import { useState, useEffect } from 'react';
 import {
   AreaChart,
   Area,
@@ -797,9 +797,8 @@ export default function HistoryPage() {
         ...charts.flatMap((c) => c.requires ?? []),
       ]),
     ];
-    startTransition(() => {
-      setLoadingKey((k) => k + 1);
-    });
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setLoadingKey((k) => k + 1);
     fetchHistory(range, allFields, offset)
       .then((result) => {
         if (!cancelled) {
