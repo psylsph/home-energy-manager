@@ -138,7 +138,7 @@ pub enum ControlCommand {
     SetEnableCharge { enabled: bool },
     /// Set battery SOC reserve (4-100).
     SetBatterySocReserve { reserve: u16 },
-    /// Set charge target SOC (0-100).
+    /// Set charge target SOC (4-100).
     SetChargeTargetSoc { soc: u16 },
     /// Exit cosy mode: disable charge, disable charge target, disable timed
     /// discharge, and restore eco power mode. Puts the inverter back to normal
