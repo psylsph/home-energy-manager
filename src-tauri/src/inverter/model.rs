@@ -182,6 +182,11 @@ impl DeviceType {
         match self {
             Self::AllInOne6kW | Self::AllInOne3_6kW | Self::AllInOne5kW => 307.0,
             Self::ThreePhase | Self::ACThreePhase | Self::AioCommercial => 76.8,
+            // Stackable HV batteries (GIV-BAT-3.4-HV modules) use 76.8V per
+            // module; the capacity formula multiplies by module count. The AIO
+            // and Gen4 hybrids are fixed single-unit batteries at 307.0V.
+            Self::HybridHvGen3 => 76.8,
+            Self::AllInOneHybrid | Self::Gen4Hybrid => 307.0,
             _ => 51.2,
         }
     }
@@ -890,14 +895,14 @@ mod tests {
             (0x8001, DeviceType::AllInOne6kW, "All-in-One 6kW", 307.0),
             (0x8002, DeviceType::AllInOne3_6kW, "All-in-One 3.6kW", 307.0),
             (0x8003, DeviceType::AllInOne5kW, "All-in-One 5kW", 307.0),
-            (0x8102, DeviceType::HybridHvGen3, "Hybrid HV Gen3", 51.2),
+            (0x8102, DeviceType::HybridHvGen3, "Hybrid HV Gen3", 76.8),
             (
                 0x8204,
                 DeviceType::AllInOneHybrid,
                 "All-in-One Hybrid",
-                51.2,
+                307.0,
             ),
-            (0x8304, DeviceType::Gen4Hybrid, "Gen 4 Hybrid", 51.2),
+            (0x8304, DeviceType::Gen4Hybrid, "Gen 4 Hybrid", 307.0),
         ];
         for (code, expected_type, expected_name, expected_voltage) in cases {
             let dt = DeviceType::from_register(*code);
