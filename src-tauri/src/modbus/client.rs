@@ -119,8 +119,22 @@ impl ResponseKey {
         let base_register = u16::from_be_bytes([frame.payload[10], frame.payload[11]]);
         // For write responses (function 0x06), payload[12..14] is the register
         // value, not a count. Writes always target a single register.
-        let count = if frame.function == 0x06 { 1 } else { u16::from_be_bytes([frame.payload[12], frame.payload[13]]) };
-        Some(Self { slave: frame.slave, function: frame.function, base_register, count })
+        let count = if (frame.function & 0x7F) == 0x06 {
+            1
+        } else {
+            u16::from_be_bytes([frame.payload[12], frame.payload[13]])
+        };
+        // Mask off the 0x80 exception bit so exception responses (function |
+        // 0x80) match the pending request key created with the bare function
+        // code. The exception is detected later in send_and_await_response
+        // by checking frame.function >= 0x80 on the decoded frame — which
+        // still carries the original (unmasked) function code.
+        Some(Self {
+            slave: frame.slave,
+            function: frame.function & 0x7F,
+            base_register,
+            count,
+        })
     }
 }
 
@@ -382,12 +396,46 @@ impl ModbusClient {
             // Decode and route by content key.
             match framer::decode_frame(&frame) {
                 Ok(decoded) => {
+                    // Modbus exception responses carry the 0x80 bit in the
+                    // function code. Normal responses match via exact content
+                    // key (slave + function + base_register + count).
+                    // Exception responses have a shorter payload (serial(10)
+                    // + error_code(1) = 11 bytes vs ≥14 for normal), so
+                    // from_response returns None — route them manually by
+                    // matching on (slave, function & 0x7F).
                     if let Some(key) = ResponseKey::from_response(&decoded) {
                         let mut map = pending.lock().await;
                         if let Some(tx) = map.remove(&key) {
                             let _ = tx.send(decoded);
                         }
                         // No matching future -> stale frame, silently dropped.
+                    } else if decoded.function >= 0x80
+                        && decoded.payload.len() >= 11
+                    {
+                        // Exception frame — scan pending futures for a match
+                        // on the masked function code. O(n) per exception,
+                        // but exceptions are rare in normal operation.
+                        let masked = decoded.function & 0x7F;
+                        let mut map = pending.lock().await;
+                        // Collect matching keys to avoid borrow issues.
+                        let matching: Vec<ResponseKey> = map
+                            .keys()
+                            .filter(|k| {
+                                k.slave == decoded.slave && k.function == masked
+                            })
+                            .cloned()
+                            .collect();
+                        for key in &matching {
+                            if let Some(tx) = map.remove(key) {
+                                let _ = tx.send(decoded.clone());
+                            }
+                        }
+                    } else {
+                        tracing::debug!(
+                            "Consumer: unrouteable frame (function 0x{:02X}, payload {} bytes)",
+                            decoded.function,
+                            decoded.payload.len()
+                        );
                     }
                 }
                 Err(e) => {
