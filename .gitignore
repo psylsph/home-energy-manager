@@ -34,6 +34,7 @@ settings.json
 Thumbs.db
 
 REVIEW_COMMENTS.md
+CODE_REVIEW.md
 
 # E2E test results
 test-results/
