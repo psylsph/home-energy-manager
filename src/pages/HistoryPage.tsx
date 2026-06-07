@@ -743,6 +743,24 @@ export default function HistoryPage() {
         const alignedEnd = alignDown(domainEnd, range) + windowMs;
         return [alignedEnd - windowMs, alignedEnd];
       })();
+
+  // Trim the domain start to the earliest data point so the line reaches
+  // the y-axis instead of leaving a gap (e.g. domain starts 00:00 but
+  // first reading is at 00:30). Only trim for intra-day ranges where the
+  // data density makes this visible.
+  const effectiveDomain: [number, number] = (() => {
+    const intraday = range === '1h' || range === '6h' || range === '24h';
+    if (!intraday) return xDomain;
+    let firstTs = Infinity;
+    for (const pts of Object.values(data)) {
+      if (pts.length > 0 && pts[0].t < firstTs) firstTs = pts[0].t;
+    }
+    if (firstTs !== Infinity && firstTs > xDomain[0]) {
+      return [firstTs, xDomain[1]];
+    }
+    return xDomain;
+  })();
+
   const [importTariffCfg, setImportTariffCfg] = useState<TariffConfig>({
     peak_rate: 0.285, off_peak_rate: 0.09, off_peak_start: '00:30', off_peak_end: '05:30',
   });
@@ -918,8 +936,8 @@ export default function HistoryPage() {
               chart={chart}
               data={data}
               range={range}
-              domain={xDomain}
-              ticks={getXAxisTicks(range, xDomain)}
+              domain={effectiveDomain}
+              ticks={getXAxisTicks(range, effectiveDomain)}
             />
           ))}
         </div>
