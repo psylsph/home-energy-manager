@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.5] - 2026-06-07
+
+### Fixed
+
+- **Frame decoder now accepts unit ID 0x00** (reference accepts both 0x00 and 0x01).
+- **ForceDischarge clears discharge slot 2** in addition to slot 1, matching GivTCP.
+- **Hour/minute validation added to slot API handlers** — hours 0-23, minutes 0-59
+  are now enforced before encoding to HHMM.
+- **Unknown /api/* paths return 404** instead of serving the frontend index.html.
+- **detect_lan_ip() moved to spawn_blocking** — no longer blocks the Tokio worker.
+- **Settings save uses fixed temp file name** with orphan cleanup on each write.
+- **All `log::` calls replaced with `tracing::`** in discovery.rs and settings/mod.rs
+  so debug messages appear in the developer console.
+- **Added doc comments** for unverified IR(180-239) range, mixed-lock connected_clients,
+  discovery false-positive risk, and AIO voltage discrepancy (307V vs GivTCP's 317V).
+
 ## [0.17.4] - 2026-06-07
 
 ### Added
