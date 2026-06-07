@@ -7,6 +7,12 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
+
+/// Serializes concurrent saves so two async tasks don't race on the same
+/// temp file name. Without this, `save()` could fail with "No such file or
+/// directory" when the temp was already renamed by another save.
+static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 
 /// Tariff configuration with peak and off-peak rates.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -316,12 +322,14 @@ impl Settings {
 
     /// Save current settings to disk using an atomic write (temp file + rename).
     ///
-    /// This prevents the "trailing characters" parse errors that happened when
-    /// two async tasks (e.g. API handler + poll loop's cosy/agile persistence)
-    /// wrote to the same file concurrently — the old `fs::write` could
-    /// overwrite a partial write mid-stream, leaving a corrupted JSON file
-    /// that `load()` couldn't parse.
+    /// A global mutex serializes concurrent saves so two async tasks don't
+    /// race on the same temp file name — the old fixed temp name caused
+    /// "No such file or directory" errors when one rename stole the temp
+    /// out from under another. The temp file name also includes a timestamp
+    /// to avoid collisions if the mutex is ever removed.
     pub fn save(&self) -> Result<(), String> {
+        let _lock = SETTINGS_LOCK.lock().map_err(|e| format!("Lock error: {e}"))?;
+
         let path = Self::settings_path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -333,7 +341,13 @@ impl Settings {
         // Write to a temp file first so a crash mid-write never corrupts
         // the real file. `rename()` is atomic on POSIX — readers either see
         // the old complete file or the new complete file.
-        let tmp_path = path.with_extension("json.tmp");
+        let tmp_path = path.with_extension(format!(
+            "json.tmp.{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
         fs::write(&tmp_path, &json)
             .map_err(|e| format!("Failed to write temp settings: {}", e))?;
         fs::rename(&tmp_path, &path)
