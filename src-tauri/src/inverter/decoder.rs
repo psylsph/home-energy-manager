@@ -514,6 +514,16 @@ fn decode_holding_60_119(data: &[u16], snap: &mut InverterSnapshot, raw: &mut Ra
             slot.target_soc = global_target;
         }
     }
+    // Apply the same global fallback to enabled discharge slots — they have
+    // no separate global register, and per-slot SOCs (HR 272/275) only get
+    // read when the extended HR240-299 block is polled. Without this fallback
+    // discharge slots show 0% unless the extended block is available AND the
+    // per-slot register reads > 0.
+    for slot in &mut snap.discharge_slots {
+        if slot.enabled {
+            slot.target_soc = global_target;
+        }
+    }
 }
 
 /// Decode holding registers 240-299 (extended 10-slot scheduling).
