@@ -377,6 +377,9 @@ This is useful for headless/terminal use.
 ## Release process
 
 1. Bump version in `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`
-2. Update `CHANGELOG.md`
-3. Commit, tag (`vX.Y.Z`), push tag
-4. GitHub Actions workflow (`.github/workflows/build.yml`) builds for macOS (ARM + x64), Linux, Windows and creates a GitHub Release with binaries attached
+2. Update `CHANGELOG.md` with a new heading for the version
+3. Commit, then **immediately tag** (`vX.Y.Z`) — match the heading in the changelog
+   exactly. Every version heading in CHANGELOG.md MUST have a corresponding git
+   tag. No exceptions. Push both the commit and the tag.
+4. GitHub Actions workflow (`.github/workflows/build.yml`) builds for macOS
+   (ARM + x64), Linux, Windows and creates a GitHub Release with binaries
