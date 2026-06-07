@@ -55,7 +55,12 @@ export function useWebSocket() {
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
+      if (event.code === 1000) {
+        // Code 1000 = Normal Closure (sent by cleanup `ws.close(1000, ...)`).
+        // The component intentionally closed this connection — don't reconnect.
+        return;
+      }
       console.log('WebSocket closed, reconnecting in 3s...');
       reconnectTimeout.current = window.setTimeout(() => connectRef.current(), 3000);
     };
@@ -76,7 +81,7 @@ export function useWebSocket() {
     connect();
     return () => {
       clearTimeout(reconnectTimeout.current);
-      wsRef.current?.close();
+      wsRef.current?.close(1000, 'Unmount');
     };
   }, [connect, fetchInitialStatus]);
 }
