@@ -260,7 +260,7 @@ export default function BatteryPage() {
                       {cellCount > 0 && (
                         <div className="space-y-1">
                           <div className="text-text-secondary text-xs">Cell Voltages</div>
-                          <div className="flex items-end gap-px h-8">
+                          <div className="flex items-end gap-px h-24">
                             {m.cell_voltages.map((v, i) => {
                               // Typical LFP cell: 2.5V–3.65V. Scale to bar height.
                               const pct = Math.max(0, Math.min(100, ((v - 2.5) / 1.15) * 100));
