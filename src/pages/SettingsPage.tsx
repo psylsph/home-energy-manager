@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback } from 'react';
 import { apiGet, apiPost, getApiBase, getServerPort } from '../lib/api';
 import type { PollSettings, DiscoveredInverter, TariffConfig } from '../lib/types';
 import { useInverterStore } from '../store/useInverterStore';
-import { isTauri } from '../lib/api';
 
 function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -536,28 +535,7 @@ export default function SettingsPage() {
         </button>
       </section>
 
-      {/* ─── Section 5: Desktop-only ─── */}
-      {isTauri && (
-        <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
-          <h2 className="text-text-primary text-lg font-semibold font-sans">Desktop Settings</h2>
-
-          <label className="flex items-center justify-between cursor-pointer">
-            <span className="text-text-primary text-sm font-sans">Auto-start on login</span>
-            <Toggle checked={false} onChange={() => {}} />
-          </label>
-
-          <label className="flex items-center justify-between cursor-pointer">
-            <span className="text-text-primary text-sm font-sans">Minimise to system tray</span>
-            <Toggle checked={false} onChange={() => {}} />
-          </label>
-
-          <p className="text-text-secondary text-xs font-sans">
-            These settings only appear in the desktop app
-          </p>
-        </section>
-      )}
-
-      {/* ─── Section 6: Developer Mode ─── */}
+      {/* ─── Section 5: Developer Mode ─── */}
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-3">
         <h2 className="text-text-primary text-lg font-semibold font-sans">Developer</h2>
         <div className="flex items-center justify-between">
