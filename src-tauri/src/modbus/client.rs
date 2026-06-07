@@ -606,7 +606,7 @@ impl ModbusClient {
     /// Maximum number of registers to request in a single Modbus read.
     /// The GivEnergy WiFi/Ethernet dongle has a limited frame buffer and will
     /// return fewer registers than requested if this is exceeded.
-    const MAX_REGISTERS_PER_READ: u16 = 20;
+    const MAX_REGISTERS_PER_READ: u16 = 60;
 
     /// Inter-request delay to avoid overwhelming the GivEnergy dongle.
     /// The dongle has a very slow processor and limited frame buffer.
@@ -1861,30 +1861,15 @@ mod tests {
 
     #[tokio::test]
     async fn split_register_read_reassembles_correctly() {
-        // Reading 60 registers (3 chunks of 20) should reassemble.
-        // Each chunk response has the correct data.
-        let data_0_19: Vec<u16> = (0..20).collect();
-        let data_20_39: Vec<u16> = (20..40).collect();
-        let data_40_59: Vec<u16> = (40..60).collect();
+        // Reading 60 registers as a single request.
+        let data: Vec<u16> = (0..60).collect();
 
         let responses = vec![
             MockResponse::ReadResponse {
                 slave: 0x11,
                 function: 0x04,
                 base: 0,
-                data: data_0_19,
-            },
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x04,
-                base: 20,
-                data: data_20_39,
-            },
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x04,
-                base: 40,
-                data: data_40_59,
+                data,
             },
         ];
 
@@ -1905,84 +1890,35 @@ mod tests {
 
     #[tokio::test]
     async fn read_blocks_returns_all_standard_blocks() {
-        // Simulate reading all 3 standard poll blocks.
-        // Each 60-register block is split into 3 chunks of 20.
+        // Each 60-register block is read as a single request.
         let responses = vec![
-            // input_0_59, chunks 0..19, 20..39, 40..59
+            // input_0_59: IR 0-59
             MockResponse::ReadResponse {
                 slave: 0x11,
                 function: 0x04,
                 base: 0,
-                data: (0..20).collect(),
+                data: (0..60).collect(),
             },
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x04,
-                base: 20,
-                data: (20..40).collect(),
-            },
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x04,
-                base: 40,
-                data: (40..60).collect(),
-            },
-            // holding_0_59, chunks 0..19, 20..39, 40..59
+            // holding_0_59: HR 0-59
             MockResponse::ReadResponse {
                 slave: 0x11,
                 function: 0x03,
                 base: 0,
-                data: (100..120).collect(),
+                data: (100..160).collect(),
             },
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x03,
-                base: 20,
-                data: (120..140).collect(),
-            },
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x03,
-                base: 40,
-                data: (140..160).collect(),
-            },
-            // holding_60_119, chunks 60..79, 80..99, 100..119
+            // holding_60_119: HR 60-119
             MockResponse::ReadResponse {
                 slave: 0x11,
                 function: 0x03,
                 base: 60,
-                data: (200..220).collect(),
+                data: (200..260).collect(),
             },
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x03,
-                base: 80,
-                data: (220..240).collect(),
-            },
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x03,
-                base: 100,
-                data: (240..260).collect(),
-            },
-            // input_180_239, chunks 180..199, 200..219, 220..239
+            // input_180_239: IR 180-239
             MockResponse::ReadResponse {
                 slave: 0x11,
                 function: 0x04,
                 base: 180,
-                data: (500..520).collect(),
-            },
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x04,
-                base: 200,
-                data: (520..540).collect(),
-            },
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x04,
-                base: 220,
-                data: (540..560).collect(),
+                data: (500..560).collect(),
             },
         ];
 
