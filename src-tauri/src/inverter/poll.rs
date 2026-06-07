@@ -1910,10 +1910,11 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 tokio::time::sleep(Duration::from_millis(1500)).await;
                             }
                         }
-
-                        // Flush any stale frames left over from write responses
-                        // before starting the read cycle
                         }
+
+                        // The consumer task handles stale frames — unmatched
+                        // responses (including duplicate write ACKs) are silently
+                        // dropped during the read cycle. No explicit flush needed.
 
                     let (poll_ok, sanitized) = async {
                         match client.read_all_with_extras(known_device_type.as_ref()).await {
@@ -2648,10 +2649,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     let cosy_active = state.cosy_active.lock().await;
                                     if in_slot && !*cosy_active {
                                         // Entering a cosy slot — start force charge.
-                                            // Drain stale frames first to avoid function code
-                                            // mismatches (stale read responses can be mistaken
-                                            // for write acknowledgments).
-                                                                    tracing::info!("Cosy: entering slot, force-charging to {}%", slot_target_soc);
+                                                                            tracing::info!("Cosy: entering slot, force-charging to {}%", slot_target_soc);
                                             drop(cosy_active);
                                             let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
                                             let cmd = if use_3ph {
@@ -2684,8 +2682,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         } else if *cosy_active && !in_slot {
                                             // Exiting a cosy slot (or cosy mode was disabled while
                                             // active) — restore normal Eco mode.
-                                            // Drain stale frames for the same reason as entry.
-                                                                    tracing::info!("Cosy: exiting slot, restoring Eco mode");
+                                                                                                                tracing::info!("Cosy: exiting slot, restoring Eco mode");
                                             drop(cosy_active);
                                             let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
                                             let cmd = if use_3ph {
