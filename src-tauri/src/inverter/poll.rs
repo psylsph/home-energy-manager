@@ -368,6 +368,92 @@ fn should_probe_external_meters(
         .unwrap_or(false)
 }
 
+/// Cumulative energy counters captured during the post-connect grace period.
+///
+/// The first few reads after a TCP reconnect are the dongle's most corruption-
+/// prone window. A single plausible-but-wrong value (e.g. `today_consumption_kwh
+/// = 44.5` when the real reading is `~43.4`) that lands during the grace period
+/// is only checked against the loose 0–200 kWh absolute range, so it sails
+/// through and becomes the delta-check baseline. Every subsequent correct
+/// reading is then rejected as a "decrease" until real consumption climbs back
+/// above the poisoned baseline.
+///
+/// To prevent this, we collect the cumulative counters from each grace reading
+/// and, at the end of the grace window, replace the snapshot's counters with the
+/// **median** of the samples. The median is robust against a single spike (the
+/// common case): for three readings `[43.4, 44.5, 43.5]` it picks `43.5`, the
+/// true value, instead of trusting whichever reading happened to land first.
+#[derive(Clone, Copy, Default)]
+struct GraceCumulativeSamples {
+    today_solar_kwh: f32,
+    today_import_kwh: f32,
+    today_export_kwh: f32,
+    today_charge_kwh: f32,
+    today_discharge_kwh: f32,
+    today_consumption_kwh: f32,
+    today_ac_charge_kwh: f32,
+    total_import_kwh: f32,
+    total_export_kwh: f32,
+}
+
+impl GraceCumulativeSamples {
+    /// Capture the cumulative counters from a sanitized snapshot.
+    fn from_snapshot(s: &InverterSnapshot) -> Self {
+        Self {
+            today_solar_kwh: s.today_solar_kwh,
+            today_import_kwh: s.today_import_kwh,
+            today_export_kwh: s.today_export_kwh,
+            today_charge_kwh: s.today_charge_kwh,
+            today_discharge_kwh: s.today_discharge_kwh,
+            today_consumption_kwh: s.today_consumption_kwh,
+            today_ac_charge_kwh: s.today_ac_charge_kwh,
+            total_import_kwh: s.total_import_kwh,
+            total_export_kwh: s.total_export_kwh,
+        }
+    }
+
+    /// Overwrite a snapshot's cumulative counters with the median values.
+    fn apply_to(&self, s: &mut InverterSnapshot) {
+        s.today_solar_kwh = self.today_solar_kwh;
+        s.today_import_kwh = self.today_import_kwh;
+        s.today_export_kwh = self.today_export_kwh;
+        s.today_charge_kwh = self.today_charge_kwh;
+        s.today_discharge_kwh = self.today_discharge_kwh;
+        s.today_consumption_kwh = self.today_consumption_kwh;
+        s.today_ac_charge_kwh = self.today_ac_charge_kwh;
+        s.total_import_kwh = self.total_import_kwh;
+        s.total_export_kwh = self.total_export_kwh;
+    }
+
+    /// Compute the per-field median across grace samples.
+    ///
+    /// For an odd sample count this is the middle element; for an even count it
+    /// is the lower-middle (we only ever collect 3 samples, so the standard
+    /// odd-count median applies). Requires at least one sample.
+    fn median(samples: &[Self]) -> Self {
+        debug_assert!(!samples.is_empty());
+        // Collect each field into its own Vec, sort, and take the middle.
+        macro_rules! median_field {
+            ($field:ident) => {{
+                let mut v: Vec<f32> = samples.iter().map(|s| s.$field).collect();
+                v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                v[v.len() / 2]
+            }};
+        }
+        Self {
+            today_solar_kwh: median_field!(today_solar_kwh),
+            today_import_kwh: median_field!(today_import_kwh),
+            today_export_kwh: median_field!(today_export_kwh),
+            today_charge_kwh: median_field!(today_charge_kwh),
+            today_discharge_kwh: median_field!(today_discharge_kwh),
+            today_consumption_kwh: median_field!(today_consumption_kwh),
+            today_ac_charge_kwh: median_field!(today_ac_charge_kwh),
+            total_import_kwh: median_field!(total_import_kwh),
+            total_export_kwh: median_field!(total_export_kwh),
+        }
+    }
+}
+
 fn carry_forward_optional_block_values(
     snap: &mut InverterSnapshot,
     prev: Option<&InverterSnapshot>,
@@ -1612,6 +1698,13 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // After GRACE_READINGS the delta checks kick in.
                 let mut readings_since_connect: u8 = 0;
                 const GRACE_READINGS: u8 = 3;
+                // Collect cumulative-counter samples during the grace period so
+                // the delta-check baseline can be set to the median of the grace
+                // readings rather than trusting whichever one happened to land
+                // first. A single corrupted-but-in-range grace reading would
+                // otherwise poison the baseline and cause every subsequent
+                // correct lower reading to be rejected as a "decrease".
+                let mut grace_cumulative_samples: Vec<GraceCumulativeSamples> = Vec::new();
                 let mut pending_mode: Option<BatteryMode> = None;
                 let mut known_device_type: Option<crate::inverter::model::DeviceType> = None;
                 let mut detected_meters: Vec<u8> = Vec::new();
@@ -2064,6 +2157,33 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     (s, mods)
                                 };
                                 carry_forward_battery_modules_with(&mut snapshot, prev_modules.as_deref());
+
+                                // Grace-period baseline hardening: capture this
+                                // reading's cumulative counters, and on the final
+                                // grace reading replace them with the median of all
+                                // grace samples. This prevents a single corrupted
+                                // grace reading from poisoning the delta baseline.
+                                if in_grace {
+                                    grace_cumulative_samples
+                                        .push(GraceCumulativeSamples::from_snapshot(&snapshot));
+                                    if readings_since_connect == GRACE_READINGS - 1
+                                        && grace_cumulative_samples.len() >= 2
+                                    {
+                                        let median =
+                                            GraceCumulativeSamples::median(&grace_cumulative_samples);
+                                        tracing::info!(
+                                            n = grace_cumulative_samples.len(),
+                                            consumption_samples = ?grace_cumulative_samples
+                                                .iter()
+                                                .map(|s| s.today_consumption_kwh)
+                                                .collect::<Vec<_>>(),
+                                            median_consumption = median.today_consumption_kwh,
+                                            "Grace period complete — cumulative baseline set to median of grace readings"
+                                        );
+                                        median.apply_to(&mut snapshot);
+                                    }
+                                }
+
                                 readings_since_connect = readings_since_connect.saturating_add(1);
 
                                 if readings_since_connect == 1 {
@@ -2661,6 +2781,64 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grace_median_rejects_single_spike_in_consumption() {
+        // Reproduces the reported scenario: the first stable read after a
+        // restart latched a corrupted-high `today_consumption_kwh = 44.5`,
+        // then every correct reading (~43.4) was rejected as a "decrease".
+        // The median of the three grace readings picks the true value.
+        let mk = |consumption: f32| {
+            let mut s = GraceCumulativeSamples::default();
+            s.today_consumption_kwh = consumption;
+            s
+        };
+        let samples = [mk(43.4), mk(44.5), mk(43.5)];
+        let median = GraceCumulativeSamples::median(&samples);
+        // Sorted: [43.4, 43.5, 44.5] -> middle is 43.5, the true reading.
+        assert_eq!(median.today_consumption_kwh, 43.5);
+
+        // A single low outlier is also rejected.
+        let samples = [mk(44.5), mk(10.0), mk(44.6)];
+        let median = GraceCumulativeSamples::median(&samples);
+        assert_eq!(median.today_consumption_kwh, 44.5);
+    }
+
+    #[test]
+    fn grace_median_handles_all_cumulative_fields_independently() {
+        let mk = |consumption: f32, import: f32, total_import: f32| GraceCumulativeSamples {
+            today_consumption_kwh: consumption,
+            today_import_kwh: import,
+            total_import_kwh: total_import,
+            ..Default::default()
+        };
+        let samples = [
+            mk(43.4, 5.0, 1000.0),
+            mk(44.5, 50.0, 1000.0), // corrupted daily import spike
+            mk(43.5, 5.1, 1000.1),
+        ];
+        let median = GraceCumulativeSamples::median(&samples);
+        assert_eq!(median.today_consumption_kwh, 43.5);
+        assert_eq!(median.today_import_kwh, 5.1);
+        assert_eq!(median.total_import_kwh, 1000.0);
+    }
+
+    #[test]
+    fn grace_median_apply_writes_all_fields_back() {
+        let median = GraceCumulativeSamples {
+            today_consumption_kwh: 43.5,
+            total_import_kwh: 1000.0,
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            today_consumption_kwh: 44.5, // poisoned value
+            total_import_kwh: 0.0,
+            ..Default::default()
+        };
+        median.apply_to(&mut snap);
+        assert_eq!(snap.today_consumption_kwh, 43.5);
+        assert_eq!(snap.total_import_kwh, 1000.0);
+    }
 
     #[test]
     fn poll_settings_default() {

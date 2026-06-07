@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the same poll cycle, undoing the force-charge that Cosy had just
   started. The cleanup now checks if another mode is actively in control
   before sending conflicting writes.
+- **Settings file no longer gets corrupted by concurrent writes**
+  If two parts of the app wrote to the settings file at the same time
+  (e.g. API handler and poll loop both saving), the JSON could get
+  mangled and fail to parse on the next load. Now uses atomic writes
+  (temp file + rename) so readers always see a complete file.
 - **Switching away from Cosy or Agile mode no longer leaves the battery stuck charging**
   If you were in Cosy mode mid-slot (or Agile mid-charge) and switched to
   Standard (or to the other mode), the inverter would keep force-charging

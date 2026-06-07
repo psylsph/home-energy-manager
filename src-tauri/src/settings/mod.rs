@@ -314,7 +314,13 @@ impl Settings {
         }
     }
 
-    /// Save current settings to disk.
+    /// Save current settings to disk using an atomic write (temp file + rename).
+    ///
+    /// This prevents the "trailing characters" parse errors that happened when
+    /// two async tasks (e.g. API handler + poll loop's cosy/agile persistence)
+    /// wrote to the same file concurrently — the old `fs::write` could
+    /// overwrite a partial write mid-stream, leaving a corrupted JSON file
+    /// that `load()` couldn't parse.
     pub fn save(&self) -> Result<(), String> {
         let path = Self::settings_path();
         if let Some(parent) = path.parent() {
@@ -323,7 +329,16 @@ impl Settings {
         }
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize settings: {}", e))?;
-        fs::write(&path, json).map_err(|e| format!("Failed to write settings: {}", e))?;
+
+        // Write to a temp file first so a crash mid-write never corrupts
+        // the real file. `rename()` is atomic on POSIX — readers either see
+        // the old complete file or the new complete file.
+        let tmp_path = path.with_extension("json.tmp");
+        fs::write(&tmp_path, &json)
+            .map_err(|e| format!("Failed to write temp settings: {}", e))?;
+        fs::rename(&tmp_path, &path)
+            .map_err(|e| format!("Failed to rename settings file: {}", e))?;
+
         log::debug!("Settings saved to {}", path.display());
         Ok(())
     }
