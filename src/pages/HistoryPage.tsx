@@ -797,6 +797,7 @@ export default function HistoryPage() {
         ...charts.flatMap((c) => c.requires ?? []),
       ]),
     ];
+    setLoadingKey((k) => k + 1);
     fetchHistory(range, allFields, offset)
       .then((result) => {
         if (!cancelled) {
