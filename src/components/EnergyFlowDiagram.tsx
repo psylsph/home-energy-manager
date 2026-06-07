@@ -34,7 +34,7 @@ function modeLabel(mode: string): string {
 /** or "Override" when force charge or force discharge is active.       */
 function modeDisplayLabel(
   mode: string, cosyActive: boolean, cosyEnabled: boolean,
-  enableCharge: boolean, enableDischarge: boolean, inChargeWindow: boolean,
+  enableCharge: boolean, enableDischarge: boolean, inChargeWindow: boolean, inDischargeWindow: boolean,
 ): string {
   if (cosyActive) return 'Cosy';
   if (cosyEnabled && (mode === 'eco' || mode === 'eco_paused')) return 'Cosy';
@@ -43,7 +43,9 @@ function modeDisplayLabel(
   // enable_charge register (HR 96 / HR 1123) is a sticky schedule-enable
   // flag, not an instantaneous "charging now" signal.
   const forceChargeActive = enableCharge && inChargeWindow;
-  const forceDischargeActive = enableDischarge;
+  // Same logic for discharge: the enable_discharge flag (HR 59) enables
+  // timed slots; force discharge is only active when inside a window.
+  const forceDischargeActive = enableDischarge && inDischargeWindow;
   if (forceChargeActive || forceDischargeActive) return 'Override';
   return modeLabel(mode);
 }
@@ -217,6 +219,16 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
       ? curMin >= startMin && curMin < endMin
       : curMin >= startMin || curMin < endMin;
   });
+  const dischargeSlotActive = (s.discharge_slots ?? []).some(slot => {
+    if (!slot.enabled) return false;
+    const now = new Date();
+    const curMin = now.getHours() * 60 + now.getMinutes();
+    const startMin = slot.start_hour * 60 + slot.start_minute;
+    const endMin = slot.end_hour * 60 + slot.end_minute;
+    return startMin < endMin
+      ? curMin >= startMin && curMin < endMin
+      : curMin >= startMin || curMin < endMin;
+  });
 
   const flows: FlowDef[] = [
     // Solar → Inverter (always top→centre)
@@ -321,7 +333,7 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
           fill="#8B949E"
           style={{ fontSize: 10, fontFamily: 'sans-serif' }}
         >
-          {modeDisplayLabel(s.battery_mode, s.cosy_active, s.cosy_enabled, s.enable_charge, s.enable_discharge, chargeSlotActive)}
+          {modeDisplayLabel(s.battery_mode, s.cosy_active, s.cosy_enabled, s.enable_charge, s.enable_discharge, chargeSlotActive, dischargeSlotActive)}
         </text>
         {s.agile_active && (
           <text
