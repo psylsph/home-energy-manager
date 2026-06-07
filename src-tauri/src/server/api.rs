@@ -915,6 +915,7 @@ pub async fn set_auto_winter(
     drop(config);
     if let Err(e) = app_settings.save() {
         tracing::warn!("Failed to persist auto winter config: {e}");
+        return error_response(&format!("Failed to save: {e}"));
     }
 
     ok_response("Auto winter config updated")
