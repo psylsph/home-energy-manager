@@ -286,15 +286,22 @@ export default function BatteryPage() {
                         </div>
                       )}
 
-                      {/* Cell temperature groups */}
+                      {/* Cell temperature probes */}
                       {m.cell_temperatures && m.cell_temperatures.length > 0 && (
                         <div className="space-y-1">
-                          <div className="text-text-secondary text-xs">Cell Group Temps</div>
-                          <div className="flex gap-2">
+                          <div className="text-text-secondary text-xs">
+                            {m.cell_temperatures.length > 8 ? 'Cell Temps' : 'Cell Group Temps'}
+                          </div>
+                          <div className="flex flex-wrap gap-1">
                             {m.cell_temperatures.map((t, i) => (
-                              <div key={i} className="bg-bg-elevated rounded-lg px-2 py-1 text-xs font-mono">
-                                <span className="text-text-secondary">G{i + 1}</span>{' '}
-                                <span className="text-text-primary">{formatTemp(t)}</span>
+                              <div
+                                key={i}
+                                className="inline-flex items-center justify-center gap-1.5 bg-bg-elevated rounded-lg px-2 py-1 text-xs font-mono tabular-nums"
+                              >
+                                <span className="text-text-secondary w-[2ch] text-right">
+                                  {m.cell_temperatures.length > 8 ? i + 1 : `G${i + 1}`}
+                                </span>
+                                <span className="text-text-primary w-[7ch] text-right">{formatTemp(t)}</span>
                               </div>
                             ))}
                           </div>

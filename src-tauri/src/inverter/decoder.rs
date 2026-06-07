@@ -1188,6 +1188,35 @@ pub fn validate_hv_bmu(data: &[u16]) -> bool {
     trimmed.len() >= 4 && trimmed.chars().all(|c| c.is_ascii_graphic() || c == ' ')
 }
 
+/// Backfill per-module SOC and pack-level capacity for HV modules.
+///
+/// HV BMU registers expose only cell voltages, cell temperatures and serial —
+/// there is **no per-module SOC register** (confirmed against GivTCP's
+/// `hvbmu.py`). The BCU cluster reports the stack-wide SOC spread
+/// (`battery_soc_max` / `battery_soc_min`) and the per-module Ah capacity.
+/// Modules in a stack track within a few % of each other, so the cluster SOC
+/// average is a defensible per-module fill, and the per-module Ah lets the
+/// Battery page show per-module capacity/health for HV (which `decode_hv_bmu_block`
+/// cannot derive from the BMU bank alone).
+pub fn backfill_hv_module_fields(
+    modules: &mut [crate::inverter::model::BatteryModule],
+    cluster: &HvBcuCluster,
+) {
+    let module_soc = cluster.battery_soc_max.saturating_add(cluster.battery_soc_min) / 2;
+    let module_soc = module_soc.min(100);
+    // Per-module nominal Ah. The cluster reports per-module capacity (IR 98),
+    // so each module takes the same value; design == calibrated for HV.
+    let per_module_ah = cluster.nominal_capacity_ah;
+    for m in modules.iter_mut() {
+        m.soc = module_soc;
+        if per_module_ah > 0.0 {
+            m.capacity_ah = per_module_ah;
+            m.design_capacity_ah = per_module_ah;
+            m.remaining_capacity_ah = per_module_ah * module_soc as f32 / 100.0;
+        }
+    }
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -2044,5 +2073,39 @@ mod tests {
     fn validate_hv_bmu_rejects_empty_block() {
         // All-zero serial → not a real module.
         assert!(!validate_hv_bmu(&vec![0u16; 60]));
+    }
+
+    #[test]
+    fn backfill_hv_module_fields_sets_soc_from_cluster_average() {
+        // HV BMU has no per-module SOC register; the BCU cluster reports the
+        // stack-wide spread (soc_max=90, soc_min=84 → avg 87). All modules in
+        // the stack take the same estimate, plus per-module Ah from IR(98).
+        use crate::inverter::decoder::HvBcuCluster;
+        use crate::inverter::model::BatteryModule;
+        let cluster = HvBcuCluster {
+            number_of_modules: 5,
+            battery_soc_max: 90,
+            battery_soc_min: 84,
+            nominal_capacity_ah: 51.0,
+            ..Default::default()
+        };
+        let mut modules: Vec<BatteryModule> = (0..5)
+            .map(|i| BatteryModule {
+                index: i,
+                soc: 0, // decode_hv_bmu_block leaves SOC at 0
+                capacity_ah: 0.0,
+                design_capacity_ah: 0.0,
+                remaining_capacity_ah: 0.0,
+                ..Default::default()
+            })
+            .collect();
+        backfill_hv_module_fields(&mut modules, &cluster);
+        for m in &modules {
+            assert_eq!(m.soc, 87, "module {} SOC not backfilled", m.index);
+            assert!((m.capacity_ah - 51.0).abs() < 0.001);
+            assert!((m.design_capacity_ah - 51.0).abs() < 0.001);
+            // Remaining = 51Ah * 87% = 44.37 Ah.
+            assert!((m.remaining_capacity_ah - 44.37).abs() < 0.01);
+        }
     }
 }

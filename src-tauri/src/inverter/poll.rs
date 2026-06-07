@@ -2336,6 +2336,20 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             tokio::time::sleep(Duration::from_millis(100)).await;
                                         }
                                     }
+
+                                    // HV BMU modules do not expose a per-module SOC register
+                                    // (confirmed against GivTCP's hvbmu.py — the BMU bank is
+                                    // cell voltages, cell temps and serial only). The BCU
+                                    // cluster reports the stack-wide SOC spread and per-module
+                                    // Ah capacity, which we backfill onto each module so the
+                                    // Battery page shows a sensible non-zero per-module SOC
+                                    // and capacity instead of 0%.
+                                    if let Some(cluster) = &hv_cluster {
+                                        crate::inverter::decoder::backfill_hv_module_fields(
+                                            &mut snapshot.battery_modules,
+                                            cluster,
+                                        );
+                                    }
                                 } else {
                                     // --- LV battery: BMS pack reads ---
                                     //
