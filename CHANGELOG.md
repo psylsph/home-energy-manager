@@ -5,6 +5,122 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.2] - 2026-06-07
+
+### Fixed
+
+- **Three-phase battery voltage no longer stuck at 0°C with false winter mode**
+  When the HV BCU/BMS read failed, `battery_temperature` was set to 0.0,
+  which passed the sanitizer and triggered `check_auto_winter` (0°C < 8°C
+  threshold), force-charging the battery purely because temperature data
+  was missing. Now uses `NaN` as the sentinel, which comparisons always
+  return false for — winter mode never activates on missing data.
+
+- **Single-phase consumption no longer understated by double-subtracting AC charge**
+  IR(35) is `e_ac_charge_today` (grid→battery energy), not house consumption.
+  Consumption is now computed from the energy balance formula
+  (`solar + import - export - ac_charge`), matching the reference library.
+
+- **Lifetime battery charge/discharge energy no longer zero**
+  The `IR(180,60)` poll block was never read — it carries alternative total
+  battery energy counters. Added to the standard poll blocks and decoded
+  into new `total_charge_kwh` / `total_discharge_kwh` snapshot fields.
+
+- **Modbus exception code reading fixed for real dongle frames**
+  Exception responses embed the 10-byte serial prefix before the exception
+  code; the code was reading `payload[0]` (a serial byte like `'S'=0x53`)
+  instead of `payload[10]`. The busy-retry path for code 67 was dead against
+  real hardware.
+
+- **TCP stream resynchronisation after stray bytes**
+  A single stray byte permanently desynchronised the stream. Now scans for
+  the `0x59590001` start marker, discards garbage before it, and recovers
+  from split markers across reads — matching the reference framer.
+
+- **HHMM time values now validated before sending to inverter**
+  Slot-write commands had no validation on packed HHMM values. A malformed
+  value like 1690 (16:90) could reach the inverter. Added `validate_hhmm()`
+  to all ten slot-encoding arms.
+
+- **Charge target flag cleared when target SOC is 100%**
+  100% means "no limit" — the enable flag should be 0, matching GivTCP's
+  reference write pattern.
+
+- **Consective-failure break no longer tears down TCP**
+  The `break` on 3 consecutive failures exited the inner loop into the
+  disconnect path, forcing a full reconnect (warmup + grace period).
+  Now falls through to the sleep-wait section, staying connected.
+
+- **Dongle memory-leak corruption no longer broadcast before re-poll**
+  When the corruption fingerprint matched, the snapshot was sanitised,
+  stored, broadcast via WebSocket and written to history before the re-poll
+  replaced it. Now returns early without broadcasting.
+
+- **Nominal battery voltage corrected for HV device types**
+  `HybridHvGen3`, `AllInOneHybrid` and `Gen4Hybrid` fell through to the
+  51.2V LV default, producing capacity ~7× too low. Now return the correct
+  per-module (76.8V) or stack (307.0V) voltage.
+
+### Performance
+
+- **MAX_REGISTERS_PER_READ increased from 20 to 60**
+  Every 60-register block was split into 3 sub-requests, tripling Modbus
+  traffic and latency. Now reads 60 per request, matching the reference.
+  Saves ~450ms of inter-request delay per poll cycle.
+
+- **Settings loaded once per cycle instead of 5× synchronously**
+  `Settings::load()` reads `settings.json` from disk synchronously on the
+  Tokio worker thread, and was called 5-6 times per poll cycle across
+  auto-winter, cosy and agile sections. Consolidated to a single load.
+
+- **History API query moved to blocking thread**
+  The history endpoint held the async lock across synchronous SQLite I/O.
+  For 30d/1y ranges this blocked the Tokio worker for hundreds of
+  milliseconds. Now runs on `spawn_blocking`.
+
+- **Settings API no longer holds lock across disk I/O**
+  Tariff defaults are pre-loaded before the async lock, and the lock is
+  dropped before `persist.save()`. The poll loop is no longer starved
+  while settings are written to disk.
+
+### Changed
+
+- **API now returns proper HTTP status codes**
+  All handlers returned 200 with `{ok:true/false}` in the body — errors
+  were indistinguishable by status code. Now returns 400 for application
+  errors and 200 for success, so the frontend can branch on the status.
+
+- **In-memory settings updated after disk save succeeds**
+  Previously the in-memory copy was mutated first, then `persist.save()`
+  ran. If the disk write failed, the poll loop reconnected to the new
+  host while `settings.json` held the old one. Now saves to disk first.
+
+- **Auto-winter save failure now returns error**
+  `set_auto_winter` logged a warning on save failure but returned
+  success, matching `set_cosy` and `set_agile` which already returned
+  the error correctly.
+
+- **Port parsing distinguishes "not provided" from "explicitly 0"**
+  The port default was 8899, making the `if port == 0` validation dead
+  code. Now uses `body.get("port")` to detect explicit omission.
+
+### Fixed (Frontend)
+
+- **WebSocket no longer reconnects after intentional close**
+  Cleanup called `ws.close()` which fired `onclose` asynchronously,
+  scheduling an orphan reconnect. Now closes with code 1000 (Normal
+  Closure) and `onclose` only reconnects for non-1000 codes.
+
+- **Removed dead Desktop Settings toggles**
+  "Auto-start on login" and "Minimise to system tray" were bound to
+  `checked={false} onChange={() => {}}` — completely non-functional.
+  Removed the section.
+
+- **History loading spinner now actually shows**
+  `loadingKey` was decremented in the fetch callbacks but never
+  incremented before the fetch. Added the increment so the spinner
+  displays while data is loading.
+
 ## [0.17.1] - 2026-06-07
 
 ### Fixed
