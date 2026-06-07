@@ -222,8 +222,12 @@ export default function BatteryPage() {
                         )}
                         <span className="text-text-secondary">Cells</span>
                         <span className="text-text-primary font-mono text-right">{m.num_cells || cellCount}</span>
-                        <span className="text-text-secondary">Cycles</span>
-                        <span className="text-text-primary font-mono text-right">{m.num_cycles ?? '—'}</span>
+                        {m.num_cycles > 0 && (
+                          <>
+                            <span className="text-text-secondary">Cycles</span>
+                            <span className="text-text-primary font-mono text-right">{m.num_cycles}</span>
+                          </>
+                        )}
                         {m.bms_firmware > 0 && (
                           <>
                             <span className="text-text-secondary">BMS FW</span>
@@ -268,9 +272,9 @@ export default function BatteryPage() {
                               const maxV = Math.max(...voltages);
                               return (
                                 <div className="flex flex-col justify-between text-[10px] font-mono text-text-secondary pb-5 select-none">
-                                  <span>{maxV.toFixed(3)}V</span>
-                                  <span>{((maxV + minV) / 2).toFixed(3)}V</span>
-                                  <span>{minV.toFixed(3)}V</span>
+                                  <span>{Math.floor(maxV * 1000) / 1000}V</span>
+                                  <span>{Math.floor(((maxV + minV) / 2) * 1000) / 1000}V</span>
+                                  <span>{Math.floor(minV * 1000) / 1000}V</span>
                                 </div>
                               );
                             })()}
@@ -289,7 +293,7 @@ export default function BatteryPage() {
                                   return voltages.map((v, i) => {
                                     const pct = scale(v);
                                     return (
-                                      <div key={i} className="flex-1 flex flex-col items-center justify-end">
+                                      <div key={i} className="flex-1 self-stretch flex flex-col items-center justify-end">
                                         <div
                                           className="w-full rounded-t-sm"
                                           style={{
