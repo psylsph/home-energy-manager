@@ -365,6 +365,57 @@ pub const BATTERY_1_POLL_BLOCK: RegisterBlock = RegisterBlock {
     name: "battery1_input_60_119",
 };
 
+// ===========================================================================
+// HV battery BCU/BMU polling (HV stackable batteries)
+// ===========================================================================
+//
+// Per givenergy-modbus reference (model/hv_bcu.py) and GivTCP: HV stackable
+// batteries (e.g. GIV-BAT-3.4-HV modules in a GIV-BAT-17.0-HV stack) do NOT
+// answer at the LV battery address 0x32. They use a separate cluster protocol:
+//
+//   BMS aggregation:  0xA0 — IR(61) holds the number of BCUs present
+//   BCU (per stack):  0x70–0x8F — cluster-level data, IR 60-119
+//   BMU (per module): 0x50–0x6F — per-cell data, IR 60-119 (stride 120 per BCU)
+//
+// BCU cluster input registers (IR 60-119) layout per the reference:
+//   IR(60-63):   pack_software_version (validity fingerprint, e.g. "GA000005")
+//   IR(64):      number_of_modules (uint16)
+//   IR(65):      cells_per_module (uint16)
+//   IR(67):      cluster_cell_voltage (uint16, mV — max cell in cluster)
+//   IR(68):      cluster_cell_temperature (uint16, 0.1 °C — max cell in cluster)
+//   IR(70):      status (uint16)
+//   IR(73):      battery_voltage (/10 V) — pack terminal voltage
+//   IR(74):      load_voltage (/10 V)
+//   IR(76):      battery_current (int16 /10 A)
+//   IR(79):      battery_power (/1000 → kW)
+//   IR(80):      battery_soc_max (hi byte) / battery_soc_min (lo byte)
+//   IR(81):      battery_soh (uint16)
+//   IR(82-83):   charge_energy_total (uint32 /10 kWh)
+//   IR(84-85):   discharge_energy_total (uint32 /10 kWh)
+//   IR(90-91):   charge_energy_today (uint32 /10 kWh)
+//   IR(92-93):   discharge_energy_today (uint32 /10 kWh)
+//   IR(98):      battery_nominal_capacity_ah (/10 Ah — PER MODULE)
+//   IR(99):      remaining_battery_capacity_ah (/10 Ah — PER MODULE)
+//   IR(100):     number_of_cycles (/10)
+//   IR(102-105): voltage/current limits (/10)
+
+/// BMS aggregation device address — reports the number of BCUs at IR(61).
+pub const HV_BMS_ADDRESS: u8 = 0xA0;
+
+/// First BCU device address (one per physical HV stack: 0x70, 0x71, … 0x8F).
+pub const HV_BCU_BASE_ADDRESS: u8 = 0x70;
+
+/// First BMU device address (one per module within a stack: 0x50, 0x51, … 0x6F).
+pub const HV_BMU_BASE_ADDRESS: u8 = 0x50;
+
+/// BCU cluster block read — IR(60, 60) per stack.
+pub const HV_BCU_POLL_BLOCK: RegisterBlock = RegisterBlock {
+    start: 60,
+    count: 60,
+    register_type: RegisterType::Input,
+    name: "hv_bcu_input_60_119",
+};
+
 // ---------------------------------------------------------------------------
 // Write whitelist — registers that are safe to write to
 // ---------------------------------------------------------------------------

@@ -385,6 +385,30 @@ impl DeviceType {
         )
     }
 
+    /// Whether this device's battery uses the HV BCU/BMU stack protocol
+    /// (device addresses 0x70/0x50) rather than the LV pack protocol (0x32).
+    ///
+    /// Mirrors givenergy-modbus `_HV_MODELS` / `PlantCapabilities.is_hv`:
+    /// coarse families "4" (HYBRID_3PH), "6" (AC_3PH) and "8" (ALL_IN_ONE and
+    /// variants) all use HV stacks. AIO Commercial (family "41") is excluded —
+    /// it resolves to its own specific model, not the coarse HV family.
+    ///
+    /// For these models the LV BMS read at 0x32 will not respond; battery
+    /// temperature/capacity must come from the BCU cluster read at 0x70.
+    pub fn uses_hv_battery(&self) -> bool {
+        matches!(
+            self,
+            Self::ThreePhase
+                | Self::ACThreePhase
+                | Self::AllInOne6kW
+                | Self::AllInOne3_6kW
+                | Self::AllInOne5kW
+                | Self::HybridHvGen3
+                | Self::AllInOneHybrid
+                | Self::Gen4Hybrid
+        )
+    }
+
     /// Whether schedule (charge/discharge slot) writes/reads are supported for this device.
     pub fn supports_schedule_slots(&self) -> bool {
         !matches!(
@@ -1013,5 +1037,29 @@ mod tests {
         assert_eq!(DeviceType::Gen2Hybrid.preferred_read_slave_address(), 0x11);
         assert_eq!(DeviceType::Gen3Hybrid.preferred_read_slave_address(), 0x11);
         assert_eq!(DeviceType::AllInOne6kW.preferred_read_slave_address(), 0x11);
+    }
+
+    #[test]
+    fn uses_hv_battery_matches_reference_hv_models() {
+        // Mirrors givenergy-modbus _HV_MODELS / PlantCapabilities.is_hv:
+        // coarse families 4 (HYBRID_3PH), 6 (AC_3PH), 8 (ALL_IN_ONE + variants).
+        assert!(DeviceType::ThreePhase.uses_hv_battery()); // 0x40xx (GIV-3HY-11)
+        assert!(DeviceType::ACThreePhase.uses_hv_battery()); // 0x60xx
+        assert!(DeviceType::AllInOne6kW.uses_hv_battery()); // 0x8001
+        assert!(DeviceType::AllInOne3_6kW.uses_hv_battery()); // 0x8002
+        assert!(DeviceType::AllInOne5kW.uses_hv_battery()); // 0x8003
+        assert!(DeviceType::HybridHvGen3.uses_hv_battery()); // 0x81xx
+        assert!(DeviceType::AllInOneHybrid.uses_hv_battery()); // 0x82xx
+        assert!(DeviceType::Gen4Hybrid.uses_hv_battery()); // 0x83xx (family 8)
+
+        // LV / non-HV models use the 0x32 pack protocol instead.
+        assert!(!DeviceType::Gen3Hybrid.uses_hv_battery());
+        assert!(!DeviceType::Gen2Hybrid.uses_hv_battery());
+        assert!(!DeviceType::Gen1Hybrid.uses_hv_battery());
+        assert!(!DeviceType::ACCoupled.uses_hv_battery());
+        assert!(!DeviceType::ACCoupledMk2.uses_hv_battery());
+        // AIO Commercial (0x41xx) resolves to its own specific model, not the
+        // coarse HV family 4 — excluded per the reference.
+        assert!(!DeviceType::AioCommercial.uses_hv_battery());
     }
 }

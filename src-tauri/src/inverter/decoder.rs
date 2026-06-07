@@ -978,6 +978,145 @@ pub fn decode_battery_block_into(
 }
 
 // ===========================================================================
+// HV BCU (Battery Control Unit) cluster decode
+// ===========================================================================
+//
+// HV stackable batteries (GIV-BAT-*-HV) expose cluster-level data on a BCU at
+// device address 0x70+i. The register layout (IR 60-119) is distinct from the
+// LV pack protocol at 0x32. See givenergy-modbus model/hv_bcu.py and GivTCP
+// model/hvbcu.py for the authoritative reference.
+
+/// Parsed BCU cluster-level data from one HV battery stack (IR 60-119 at 0x70+i).
+///
+/// Carries the fields needed to populate the snapshot for HV systems where the
+/// inverter's own register blocks carry no battery temperature or capacity.
+/// Per-module cell detail comes separately from the BMU reads (commit 2).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HvBcuCluster {
+    /// Pack software version string (validity fingerprint), e.g. "GA000005".
+    pub pack_software_version: String,
+    /// Number of BMU modules in this stack (IR 64).
+    pub number_of_modules: u16,
+    /// Cells per module (IR 65).
+    pub cells_per_module: u16,
+    /// Pack terminal voltage in V (IR 73, /10).
+    pub battery_voltage: f32,
+    /// Pack current in A (IR 76, int16 /10).
+    pub battery_current: f32,
+    /// Pack power in W (IR 79, /1000 → kW × 1000).
+    pub battery_power_w: i32,
+    /// Highest SOC reported by any module (IR 80 hi byte).
+    pub battery_soc_max: u8,
+    /// Lowest SOC reported by any module (IR 80 lo byte).
+    pub battery_soc_min: u8,
+    /// State of health % (IR 81).
+    pub battery_soh: u8,
+    /// Hottest cell temperature across the cluster in °C (IR 68, ×0.1).
+    pub temperature: f32,
+    /// Nominal capacity per module in Ah (IR 98, /10).
+    pub nominal_capacity_ah: f32,
+    /// Remaining capacity per module in Ah (IR 99, /10).
+    pub remaining_capacity_ah: f32,
+}
+
+impl HvBcuCluster {
+    /// Total nominal pack capacity in Ah (per-module Ah × module count).
+    pub fn total_capacity_ah(&self) -> f32 {
+        self.nominal_capacity_ah * self.number_of_modules as f32
+    }
+
+    /// Total remaining pack capacity in Ah (per-module Ah × module count).
+    pub fn total_remaining_ah(&self) -> f32 {
+        self.remaining_capacity_ah * self.number_of_modules as f32
+    }
+}
+
+/// Decode the BCU cluster input register block (IR 60-119) into an [`HvBcuCluster`].
+///
+/// `data` is the 60-register slice read from device 0x70+i. Register indices below
+/// are absolute IR addresses (the block starts at IR 60, so subtract 60 to index).
+pub fn decode_hv_bcu_cluster(data: &[u16]) -> HvBcuCluster {
+    // Pack software version: IR(60-63), gateway_version encoding (2 Latin-1
+    // chars per register for the prefix, then 4 ASCII digits). The block starts
+    // at IR(60), so these are at slice offsets 0-3.
+    let pack_software_version = decode_gateway_version(data, 0);
+
+    let number_of_modules = get_reg(data, 64 - 60);
+    let cells_per_module = get_reg(data, 65 - 60);
+
+    let battery_voltage = get_reg(data, 73 - 60) as f32 * 0.1;
+    let battery_current = signed(get_reg(data, 76 - 60)) as f32 * 0.1;
+    // IR(79) is /1000 → kW; convert to watts to match the snapshot convention.
+    let battery_power_w = (get_reg(data, 79 - 60) as f32 * 0.001 * 1000.0) as i32;
+
+    let soc_packed = get_reg(data, 80 - 60);
+    let battery_soc_max = ((soc_packed >> 8) & 0xFF) as u8;
+    let battery_soc_min = (soc_packed & 0xFF) as u8;
+    let battery_soh = (get_reg(data, 81 - 60) & 0xFF) as u8;
+
+    let temperature = get_reg(data, 68 - 60) as f32 * 0.1;
+
+    let nominal_capacity_ah = get_reg(data, 98 - 60) as f32 * 0.1;
+    let remaining_capacity_ah = get_reg(data, 99 - 60) as f32 * 0.1;
+
+    HvBcuCluster {
+        pack_software_version,
+        number_of_modules,
+        cells_per_module,
+        battery_voltage,
+        battery_current,
+        battery_power_w,
+        battery_soc_max,
+        battery_soc_min,
+        battery_soh,
+        temperature,
+        nominal_capacity_ah,
+        remaining_capacity_ah,
+    }
+}
+
+/// Decode a gateway/pack version string from 4 consecutive registers.
+///
+/// Mirrors givenergy-modbus `Converter.gateway_version`: the first two
+/// registers yield a Latin-1 prefix (2 chars each, NULs stripped), the last
+/// two yield 4 ASCII digits. e.g. `[0x4741, 0x3030, 0x0000, 0x0005]` →
+/// "GA000005".
+fn decode_gateway_version(data: &[u16], start: usize) -> String {
+    let regs: [u16; 4] = [
+        get_reg(data, start),
+        get_reg(data, start + 1),
+        get_reg(data, start + 2),
+        get_reg(data, start + 3),
+    ];
+    let prefix = b""
+        .iter()
+        .copied()
+        .chain(regs[0].to_be_bytes())
+        .chain(regs[1].to_be_bytes())
+        .filter(|&b| b != 0)
+        .map(|b| b as char)
+        .collect::<String>();
+    let digits = regs[2]
+        .to_be_bytes()
+        .iter()
+        .chain(regs[3].to_be_bytes().iter())
+        .map(|b| (*b).to_string())
+        .collect::<String>();
+    prefix + &digits
+}
+
+/// Whether a raw BCU cluster block represents a real, present HV stack.
+///
+/// Per givenergy-modbus `Bcu.is_valid()`: the pack software version (IR 60-63)
+/// must be non-empty and not all-zeros/all-spaces. A non-existent BCU (no HV
+/// battery attached) returns an empty or all-zero version.
+pub fn validate_hv_bcu(data: &[u16]) -> bool {
+    let version = decode_gateway_version(data, 0);
+    let trimmed = version.trim();
+    !trimmed.is_empty() && !trimmed.chars().all(|c| c == '0')
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 
@@ -1696,5 +1835,85 @@ mod tests {
         let snap = decode_snapshot(&blocks);
         // Raw -200 kept as-is (negative = importing)
         assert_eq!(snap.grid_power, -200);
+    }
+
+    // --- HV BCU cluster decode ---
+    //
+    // Register values mirror the givenergy-modbus `test_bcu_from_synthetic_registers`
+    // fixture so we stay aligned with the reference layout.
+
+    fn hv_bcu_fixture() -> Vec<u16> {
+        // 60-register slice for IR 60-119 read from device 0x70.
+        let mut d = vec![0u16; 60];
+        d[0] = 0x4741; // IR(60): 'G','A'
+        d[1] = 0x3030; // IR(61): '0','0'
+        d[2] = 0x0000; // IR(62)
+        d[3] = 0x0005; // IR(63): version suffix → "GA000005"
+        d[64 - 60] = 5; // IR(64): number_of_modules = 5
+        d[65 - 60] = 24; // IR(65): cells_per_module = 24
+        d[68 - 60] = 295; // IR(68): cluster_cell_temperature = 29.5 °C
+        d[73 - 60] = 3840; // IR(73): battery_voltage = 384.0 V
+        d[74 - 60] = 3820; // IR(74): load_voltage = 382.0 V
+        d[76 - 60] = (-125i16) as u16; // IR(76): battery_current = -12.5 A
+        d[79 - 60] = 4800; // IR(79): battery_power = 4.8 kW
+        d[80 - 60] = (90 << 8) | 85; // IR(80): soc_max=90, soc_min=85
+        d[81 - 60] = 98; // IR(81): battery_soh = 98
+        d[98 - 60] = 510; // IR(98): nominal_capacity_ah = 51.0 Ah (per module)
+        d[99 - 60] = 440; // IR(99): remaining_capacity_ah = 44.0 Ah (per module)
+        d
+    }
+
+    #[test]
+    fn decode_hv_bcu_cluster_matches_reference_layout() {
+        let data = hv_bcu_fixture();
+        let c = decode_hv_bcu_cluster(&data);
+        assert_eq!(c.pack_software_version, "GA000005");
+        assert_eq!(c.number_of_modules, 5);
+        assert_eq!(c.cells_per_module, 24);
+        assert!((c.battery_voltage - 384.0).abs() < 0.001);
+        assert!((c.battery_current - -12.5).abs() < 0.001);
+        assert_eq!(c.battery_power_w, 4800);
+        assert_eq!(c.battery_soc_max, 90);
+        assert_eq!(c.battery_soc_min, 85);
+        assert_eq!(c.battery_soh, 98);
+        assert!((c.temperature - 29.5).abs() < 0.001);
+        assert!((c.nominal_capacity_ah - 51.0).abs() < 0.001);
+        assert!((c.remaining_capacity_ah - 44.0).abs() < 0.001);
+        // Stack totals: per-module Ah × module count.
+        assert!((c.total_capacity_ah() - 255.0).abs() < 0.001);
+        assert!((c.total_remaining_ah() - 220.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn validate_hv_bcu_accepts_present_stack() {
+        assert!(validate_hv_bcu(&hv_bcu_fixture()));
+    }
+
+    #[test]
+    fn validate_hv_bcu_rejects_empty_block() {
+        // All-zero registers: no pack_software_version → not a real BCU.
+        assert!(!validate_hv_bcu(&vec![0u16; 60]));
+    }
+
+    #[test]
+    fn validate_hv_bcu_rejects_all_zero_version() {
+        // A version field that is all '0' characters is the no-stack sentinel
+        // per givenergy-modbus Bcu.is_valid() (covers the distinct "present but
+        // all-zero" case from the empty-block case above). Prefix regs set to
+        // 0x3030 ('0','0') and digit regs zeroed yields "00000000".
+        let mut data = vec![0u16; 60];
+        data[0] = 0x3030; // '0','0'
+        data[1] = 0x3030;
+        data[2] = 0x0000;
+        data[3] = 0x0000;
+        assert!(!validate_hv_bcu(&data));
+    }
+
+    #[test]
+    fn decode_gateway_version_matches_reference_converter() {
+        // Mirrors givenergy-modbus Converter.gateway_version: [0x4741, 0x3030,
+        // 0x0000, 0x0005] → "GA000005".
+        let data = [0x4741u16, 0x3030, 0x0000, 0x0005, 0, 0];
+        assert_eq!(decode_gateway_version(&data, 0), "GA000005");
     }
 }
