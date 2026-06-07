@@ -1940,9 +1940,9 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 }
                                 if block_suspicious {
                                     tracing::warn!(
-                                        "Dongle memory-leak corruption detected — re-polling without broadcasting"
+                                        "Dongle memory-leak corruption detected — skipping broadcast, waiting for next poll cycle"
                                     );
-                                    return (true, true);
+                                    return (true, false);
                                 }
                                 let has_ac_config_block = blocks.iter().any(|b| {
                                     b.block.register_type == crate::modbus::registers::RegisterType::Holding
