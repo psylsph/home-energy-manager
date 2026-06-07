@@ -5,10 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.16.0] - 2026-06-06
+## [0.16.1] - 2026-06-06
 
 ### Fixed
 
+- **Cosy force-charge and writes were silently failing**
+  The new network reading code had a bug matching write responses
+  — it read the wrong bytes from the reply and discarded them,
+  so every write timed out even though the dongle actually
+  acknowledged it. This broke Cosy charging, mode switching, and
+  any other write operation. Fixed now.
 - **"Stop Charge" button finally obeys your schedule**
   If you had a charge slot set up and winter mode left on, the button would
   light up all the time — even when your battery was just sitting there in
