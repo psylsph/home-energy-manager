@@ -260,24 +260,32 @@ impl ControlCommand {
                 ]
             }
             ControlCommand::SetChargeSlot1 { start, end } => {
+                validate_hhmm(*start, "charge slot 1 start")?;
+                validate_hhmm(*end, "charge slot 1 end")?;
                 vec![
                     rw(HR_CHARGE_SLOT_1_START, *start),
                     rw(HR_CHARGE_SLOT_1_END, *end),
                 ]
             }
             ControlCommand::SetChargeSlot2 { start, end } => {
+                validate_hhmm(*start, "charge slot 2 start")?;
+                validate_hhmm(*end, "charge slot 2 end")?;
                 vec![
                     rw(HR_CHARGE_SLOT_2_START, *start),
                     rw(HR_CHARGE_SLOT_2_END, *end),
                 ]
             }
             ControlCommand::SetDischargeSlot1 { start, end } => {
+                validate_hhmm(*start, "discharge slot 1 start")?;
+                validate_hhmm(*end, "discharge slot 1 end")?;
                 vec![
                     rw(HR_DISCHARGE_SLOT_1_START, *start),
                     rw(HR_DISCHARGE_SLOT_1_END, *end),
                 ]
             }
             ControlCommand::SetDischargeSlot2 { start, end } => {
+                validate_hhmm(*start, "discharge slot 2 start")?;
+                validate_hhmm(*end, "discharge slot 2 end")?;
                 vec![
                     rw(HR_DISCHARGE_SLOT_2_START, *start),
                     rw(HR_DISCHARGE_SLOT_2_END, *end),
@@ -320,22 +328,38 @@ impl ControlCommand {
                 validate_range(*soc, 4, 100, "three-phase target SOC")?;
                 vec![rw(HR_3PH_CHARGE_TARGET_SOC, *soc)]
             }
-            ControlCommand::SetThreePhaseChargeSlot1 { start, end } => vec![
-                rw(HR_3PH_CHARGE_SLOT_1_START, *start),
-                rw(HR_3PH_CHARGE_SLOT_1_END, *end),
-            ],
-            ControlCommand::SetThreePhaseChargeSlot2 { start, end } => vec![
-                rw(HR_3PH_CHARGE_SLOT_2_START, *start),
-                rw(HR_3PH_CHARGE_SLOT_2_END, *end),
-            ],
-            ControlCommand::SetThreePhaseDischargeSlot1 { start, end } => vec![
-                rw(HR_3PH_DISCHARGE_SLOT_1_START, *start),
-                rw(HR_3PH_DISCHARGE_SLOT_1_END, *end),
-            ],
-            ControlCommand::SetThreePhaseDischargeSlot2 { start, end } => vec![
-                rw(HR_3PH_DISCHARGE_SLOT_2_START, *start),
-                rw(HR_3PH_DISCHARGE_SLOT_2_END, *end),
-            ],
+            ControlCommand::SetThreePhaseChargeSlot1 { start, end } => {
+                validate_hhmm(*start, "3ph charge slot 1 start")?;
+                validate_hhmm(*end, "3ph charge slot 1 end")?;
+                vec![
+                    rw(HR_3PH_CHARGE_SLOT_1_START, *start),
+                    rw(HR_3PH_CHARGE_SLOT_1_END, *end),
+                ]
+            }
+            ControlCommand::SetThreePhaseChargeSlot2 { start, end } => {
+                validate_hhmm(*start, "3ph charge slot 2 start")?;
+                validate_hhmm(*end, "3ph charge slot 2 end")?;
+                vec![
+                    rw(HR_3PH_CHARGE_SLOT_2_START, *start),
+                    rw(HR_3PH_CHARGE_SLOT_2_END, *end),
+                ]
+            }
+            ControlCommand::SetThreePhaseDischargeSlot1 { start, end } => {
+                validate_hhmm(*start, "3ph discharge slot 1 start")?;
+                validate_hhmm(*end, "3ph discharge slot 1 end")?;
+                vec![
+                    rw(HR_3PH_DISCHARGE_SLOT_1_START, *start),
+                    rw(HR_3PH_DISCHARGE_SLOT_1_END, *end),
+                ]
+            }
+            ControlCommand::SetThreePhaseDischargeSlot2 { start, end } => {
+                validate_hhmm(*start, "3ph discharge slot 2 start")?;
+                validate_hhmm(*end, "3ph discharge slot 2 end")?;
+                vec![
+                    rw(HR_3PH_DISCHARGE_SLOT_2_START, *start),
+                    rw(HR_3PH_DISCHARGE_SLOT_2_END, *end),
+                ]
+            }
             ControlCommand::SetActivePowerRate { rate } => {
                 validate_range(*rate, 0, 100, "active power rate")?;
                 vec![rw(HR_ACTIVE_POWER_RATE, *rate)]
@@ -476,6 +500,8 @@ impl ControlCommand {
                 vec![rw(HR_BATTERY_PAUSE_MODE, *mode)]
             }
             ControlCommand::SetPauseSlot { start, end } => {
+                validate_hhmm(*start, "pause slot start")?;
+                validate_hhmm(*end, "pause slot end")?;
                 vec![
                     rw(HR_BATTERY_PAUSE_SLOT_1_START, *start),
                     rw(HR_BATTERY_PAUSE_SLOT_1_END, *end),
@@ -492,10 +518,14 @@ impl ControlCommand {
                 vec![rw(reg, *soc)]
             }
             ControlCommand::SetChargeSlotN { slot, start, end } => {
+                validate_hhmm(*start, &format!("charge slot {} start", slot))?;
+                validate_hhmm(*end, &format!("charge slot {} end", slot))?;
                 let (s, e) = extended_charge_slot(*slot)?;
                 vec![rw(s, *start), rw(e, *end)]
             }
             ControlCommand::SetDischargeSlotN { slot, start, end } => {
+                validate_hhmm(*start, &format!("discharge slot {} start", slot))?;
+                validate_hhmm(*end, &format!("discharge slot {} end", slot))?;
                 let (s, e) = extended_discharge_slot(*slot)?;
                 vec![rw(s, *start), rw(e, *end)]
             }
@@ -525,6 +555,25 @@ fn validate_range(val: u16, min: u16, max: u16, name: &str) -> Result<(), String
     } else {
         Ok(())
     }
+}
+
+/// Validate a packed HHMM time value.
+///
+/// Hour must be 0-23, minute 0-59. Value 60 is the disabled slot sentinel
+/// (per givenergy-modbus reference) and is accepted as valid.
+fn validate_hhmm(val: u16, label: &str) -> Result<(), String> {
+    if val == 60 {
+        return Ok(());
+    }
+    let hour = val / 100;
+    let minute = val % 100;
+    if hour > 23 {
+        return Err(format!("{}: hour {} exceeds 23", label, hour));
+    }
+    if minute > 59 {
+        return Err(format!("{}: minute {} exceeds 59", label, minute));
+    }
+    Ok(())
 }
 
 /// Map slot index (1-10) to charge target SOC register.
