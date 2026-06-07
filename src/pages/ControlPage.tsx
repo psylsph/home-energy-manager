@@ -481,7 +481,28 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: 'standa
     <section className="space-y-3 border-t border-bg-elevated pt-4">
       <div className="flex items-center justify-between">
         <h2 className="text-text-primary font-semibold text-lg">Charging Mode</h2>
-        <select
+        <div className="flex items-center gap-2">
+          <button
+            onClick={async () => {
+              setSaving(true);
+              try {
+                await Promise.all([
+                  apiPost('/api/cosy', { enabled: mode === 'cosy', slots }),
+                  apiPost('/api/agile', { enabled: mode === 'agile' }),
+                ]);
+                setSaveFeedback('saved');
+              } catch {
+                setSaveFeedback('error');
+              }
+              setSaving(false);
+              setTimeout(() => setSaveFeedback(null), 2000);
+            }}
+            disabled={saving}
+            className="text-xs font-medium px-2.5 py-1 rounded-lg bg-battery/20 text-battery hover:bg-battery/30 transition disabled:opacity-50"
+          >
+            {saveFeedback === 'saved' ? '✓' : saveFeedback === 'error' ? '!' : saving ? '...' : 'Apply'}
+          </button>
+          <select
           value={mode}
           onChange={(e) => handleModeChange(e.target.value as 'standard' | 'cosy' | 'agile')}
           disabled={saving}
@@ -491,6 +512,7 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: 'standa
           <option value="cosy">Cosy</option>
           <option value="agile">Agile</option>
         </select>
+      </div>
       </div>
 
       {(mode === 'cosy' || mode === 'agile') && (
@@ -1702,11 +1724,11 @@ export default function ControlPage() {
       {/* Section 3: Charge Schedule */}
       {!cosyEnabled && chargeMode !== 'agile' && schedulesUnsupported && (
         <section className="space-y-3">
-          <h2 className="text-text-primary font-semibold text-lg">Charge/Discharge Schedules</h2>
+          <h2 className="text-text-primary font-semibold">Charge/Discharge Schedules</h2>
           <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm text-text-primary">
             <div className="font-semibold mb-1">Schedules are hidden for this inverter model</div>
             This three-phase/HV inverter uses a different schedule register map
-            (HR 1113-1121). Reading real-time data is supported, but schedule
+            (HR 1113-1121). Reading real-time data is supported,GivEnergy Cloud
             editing is disabled until those registers are implemented safely.
           </div>
         </section>

@@ -359,7 +359,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Schedule slot labelling gotchas explained**: Yellow warning banners now
   appear on the schedule page explaining that our slot 1/2 labels are swapped
-  vs the GivEnergy cloud app (the data is the same, only the names differ),
+  vs the GivEnergy Cloud app (the data is the same, only the names differ),
   and that older Gen3 firmware (below version 303) can't use slots 3-10.
   ([#41](https://github.com/psylsph/home-energy-manager/issues/41))
 - **AC-coupled battery controls**: Charge/discharge limit sliders now use the

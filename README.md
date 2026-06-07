@@ -101,7 +101,7 @@ Click **Scan Network** on the Settings page. The app will scan your local networ
 
 ## What it does
 
-Home Energy Manager connects directly to your inverter's WiFi or Ethernet data adapter over your home network. It shows you what's happening right now and lets you change settings without needing a GivEnergy cloud account or portal login.
+Home Energy Manager connects directly to your inverter's WiFi or Ethernet data adapter over your home network. It shows you what's happening right now and lets you change settings without needing a GivEnergy Cloud account or portal login.
 
 - **Real-time dashboard** — see solar generation, battery charge level, grid import/export, and home consumption updating live
 - **Energy flow diagram** — visual animation showing where power is flowing right now (solar → battery → home → grid)
