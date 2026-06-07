@@ -50,11 +50,18 @@ pub fn run() {
             {
                 use tracing_subscriber::prelude::*;
                 let capture_layer = LogCaptureLayer::new(log_ring.clone());
+                // Default console (stdout/stderr) level is WARN. INFO floods the
+                // terminal/journal when running headless — most INFO lines are
+                // routine (first poll, grace-period summary, write confirmations)
+                // and only matter when debugging. The in-memory LogRing that
+                // backs the developer console (LogsPage) is a SEPARATE layer with
+                // its own runtime min_level, so this default does not affect it.
+                // Override for a session with RUST_LOG=info (or =debug).
                 let fmt_layer = tracing_subscriber::fmt::layer()
                     .with_target(false)
                     .with_filter(
                         tracing_subscriber::EnvFilter::try_from_default_env()
-                            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+                            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"))
                     );
                 tracing_subscriber::registry()
                     .with(fmt_layer)
@@ -341,11 +348,18 @@ pub fn run_headless(args: &[String]) {
     {
         use tracing_subscriber::prelude::*;
         let capture_layer = LogCaptureLayer::new(log_ring.clone());
+        // Default console (stdout/stderr) level is WARN. INFO floods the
+        // terminal/journal when running headless — most INFO lines are routine
+        // (first poll, grace-period summary, write confirmations) and only
+        // matter when debugging. The in-memory LogRing that backs the developer
+        // console (LogsPage) is a SEPARATE layer with its own runtime min_level,
+        // so this default does not affect it. Override for a session with
+        // RUST_LOG=info (or =debug).
         let fmt_layer = tracing_subscriber::fmt::layer()
             .with_target(false)
             .with_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
             );
         tracing_subscriber::registry()
             .with(fmt_layer)
