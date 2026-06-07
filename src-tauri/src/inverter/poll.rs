@@ -3022,16 +3022,19 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 // reconnecting triggers a costly warmup + grace period
                                 // that extends the outage. The next interval will retry.
                                 consecutive_failures = 0;
-                                break; // exit inner loop → sleep for interval → retry
+                                // Fall through to the sleep-wait section below instead
+                                // of breaking out of the inner loop — staying connected
+                                // avoids the warmup + grace period on the next poll.
+                            } else {
+                                // Transient error — retry after a short pause
+                                tracing::debug!(
+                                    "Poll read failed ({}/{}) — retrying",
+                                    consecutive_failures,
+                                    MAX_CONSECUTIVE_FAILURES,
+                                );
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                                continue; // stay in the inner loop
                             }
-                            // Transient error — retry after a short pause
-                            tracing::debug!(
-                                "Poll read failed ({}/{}) — retrying",
-                                consecutive_failures,
-                                MAX_CONSECUTIVE_FAILURES,
-                            );
-                            tokio::time::sleep(Duration::from_secs(2)).await;
-                            continue; // stay in the inner loop
                         }
                     }
 
