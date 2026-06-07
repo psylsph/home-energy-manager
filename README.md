@@ -106,53 +106,72 @@ Home Energy Manager connects directly to your inverter's WiFi or Ethernet data a
 - **Real-time dashboard** — see solar generation, battery charge level, grid import/export, and home consumption updating live
 - **Energy flow diagram** — visual animation showing where power is flowing right now (solar → battery → home → grid)
 - **Battery details** — individual cell voltages, temperatures and health per battery module
-- **Charge & discharge schedules** — set time slots for when your battery charges from the grid or discharges to power your home
-- **Mode switching** — Eco, Timed Discharge, and Pause modes
+- **Charge & discharge schedules** — set time slots for when your battery charges from the grid or discharges to power your home (up to **10 slots** on supported models)
+- **Battery modes** — Eco, Timed Discharge, and Pause, plus **Force Charge** / **Force Discharge** override buttons for instant manual control
 - **SOC control** — adjust battery reserve level, charge/discharge power limits, and charge target
+- **Octopus Cosy automation** (beta) — enter your three Cosy cheap-rate windows and the app force-charges the battery through each one, then returns the inverter to Eco mode in between. Survives an app restart mid-slot.
+- **Octopus Agile automation** (beta) — enter your postcode to auto-detect your Octopus region, set charge and discharge price thresholds, and the app force-charges when Agile prices are low, force-discharges when they're high, and sits in Eco mode the rest of the time. Includes a live 24-hour price forecast grid.
+- **Auto Winter Mode** — a local re-implementation of GivEnergy Cloud's winter mode: force-charges the battery from the grid when its temperature drops, to protect it from the cold. (Note: this is independent of the cloud's winter mode — the inverter has no built-in winter capability, it's entirely cloud/app-driven.)
+- **Three-phase, HV and commercial inverters** — full support for the GIV-3HY family, AC three-phase, HV Gen 3, and All-in-One commercial units, reading their 1000-range register layout and writing their native schedule/limit registers
 - **Auto-discovery** — just enter your inverter's IP address; the serial number is detected automatically
-- **History & cost tracking** — 7 time-range charts for solar, battery, grid, and home energy, with configurable import/export tariffs (peak/off-peak)
-- **Developer console** — live log viewer for diagnostics (enable in Settings)
+- **History & cost tracking** — 7 time-range charts for solar, battery, grid, and home energy, plus a month calendar view, with configurable import/export tariffs (peak/off-peak) and CSV export
+- **Multi-instance** — run several copies against different inverters, each with its own config directory and HTTP port
+- **Headless server mode** — runs as a pure background service on a Raspberry Pi or always-on server, serving the UI over HTTP/WebSocket to any browser on your LAN
+- **Developer console** — live log viewer for diagnostics, with adjustable capture level (enable in Settings)
 
 ---
 
 ## Supported Inverters
 
-Home Energy Manager works with all known GivEnergy inverter models, but some
-have more controls available than others. Here's a quick guide:
+Home Energy Manager works with all known GivEnergy inverter models. Real-time
+monitoring, manual overrides (Force Charge / Force Discharge), Cosy and Agile
+automation, and Auto Winter Mode work on every model. The main difference between
+models is **how many charge/discharge schedule slots** you can set, and where
+the battery temperature/capacity values come from:
 
-### Full control ✅
+### 10-slot schedules ✅
 
-*Read live data, set charge/discharge schedules, adjust limits, change modes*
+*Full control: read live data, set up to 10 charge + 10 discharge slots, adjust
+limits, change modes, force charge/discharge, Cosy/Agile automation*
+
+| Model | Notes |
+|---|---|
+| **Gen 3 Hybrid** (5kW/8kW/10kW) | Most common. Extended 10-slot schedules require ARM firmware ≥ 303. |
+| **Gen 4 Hybrid** | Latest generation |
+| **Three Phase** (e.g. GIV-3HY-11 11kW) | Uses the IR 1000-1413 register layout. Schedules at HR 1113-1121 (slots 1-2) + HR 240-299 (slots 3-10). Battery temp/capacity come from the BMS module read. |
+| **AC Three Phase** | Same three-phase register layout |
+| **HV Gen 3** | High-voltage hybrid |
+| **All-in-One** (3.6kW/5kW/6kW) | Commercial all-in-one units |
+| **All-in-One Hybrid** | Combined hybrid + AIO |
+| **AIO Commercial** | Commercial three-phase variant |
+
+### 2-slot schedules ✅
+
+*Full control with the simpler 2-slot schedule layout*
 
 | Model | Notes |
 |---|---|
 | **Gen 2 Hybrid** | Standard home hybrid inverter |
-| **Gen 3 Hybrid** (standard, 8kW, 10kW) | Most common. Extended 10-slot schedules on firmware ≥ 303 |
-| **Gen 4 Hybrid** | Latest generation |
+| **Gen 3 Plus Hybrid** / **Polar Hybrid** | Newer single-phase variants |
+| **PV Inverter** (no battery) | Solar-only — battery controls hidden |
 
-### Read + basic controls ✅
+### 1-slot schedules ✅
 
-*Read live data, change charge/discharge power limits, adjust SOC reserve and modes — but schedules use the simpler single-slot layout*
+*Read live data, change charge/discharge power limits, adjust SOC reserve and
+modes — but only a single charge + single discharge slot*
 
 | Model | Notes |
 |---|---|
 | **Gen 1 Hybrid** | Older generation, 1 charge + 1 discharge slot |
 | **AC Coupled** (standard & Mk2) | Retrofit battery system. Charge/discharge limits are 1-100% (not 0-50%). 1 charge + 1 discharge slot. |
 
-### Read-only 📡
-
-*Read all live data (solar, grid, battery, energy totals) — control and schedule editing not yet implemented*
-
-| Model | Notes |
-|---|---|
-| **Three Phase** (11kW) | Real-time monitoring works. Uses a different register layout for controls — coming in a future update. |
-| **AC Three Phase** | Same as Three Phase |
-| **HV Gen 3** | High-voltage hybrid |
-| **All-in-One** (5kW, 6kW, 8kW, 10kW) | Commercial all-in-one units |
-| **All-in-One Hybrid** | Combined hybrid + AIO |
-
 > **Not sure which model you have?** Open the app, connect to your inverter,
 > and check the Inverter tab — it shows the detected model name and details.
+>
+> **Slot labelling note**: GivEnergy's cloud portal labels charge slots 1 and 2
+> in the opposite order to this app (and to the givenergy-modbus / GivTCP
+> reference libraries). The underlying data is identical — only the labels
+> differ. A yellow banner in the app flags this where it matters.
 
 ## How it works
 
