@@ -48,6 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wrong. The slave mismatch / register range mismatch errors you used to
   see in the console shouldn't happen anymore.
 
+  Huge thanks to the GivTCP and givenergy-modbus projects for providing
+  the right approach to handling the dongle's quirky network behaviour.
+
 ## [0.15.0] - 2026-06-06
 
 ### Added
