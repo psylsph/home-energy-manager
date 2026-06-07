@@ -1466,19 +1466,20 @@ fn sanitize_snapshot(
         // to 23:00). The existing decode_timeslot already returns disabled when
         // start==end, guarding against partial-write reads. We only sanity-check
         // the enabled/times consistency (enabled toggled without times).
+        // Slot times only change via explicit user writes — the encode path
+        // validates HHMM values and the decode_timeslot guard (disabled when
+        // start==end) handles partial-write reads. No revert needed.
         for i in 0..snap.charge_slots.len().min(p.charge_slots.len()) {
             if snap.charge_slots[i].enabled != p.charge_slots[i].enabled
                 && (snap.charge_slots[i].start_hour != p.charge_slots[i].start_hour
                     || snap.charge_slots[i].end_hour != p.charge_slots[i].end_hour)
             {
-                tracing::warn!(
+                tracing::debug!(
                     slot = i,
                     cur_enabled = snap.charge_slots[i].enabled,
                     prev_enabled = p.charge_slots[i].enabled,
-                    "Charge slot {i} enabled changed with different times — reverting",
+                    "Charge slot {i} enabled + times changed (expected after write)",
                 );
-                snap.charge_slots[i].enabled = p.charge_slots[i].enabled;
-                sanitized = true;
             }
         }
 
@@ -1488,14 +1489,12 @@ fn sanitize_snapshot(
                 && (snap.discharge_slots[i].start_hour != p.discharge_slots[i].start_hour
                     || snap.discharge_slots[i].end_hour != p.discharge_slots[i].end_hour)
             {
-                tracing::warn!(
+                tracing::debug!(
                     slot = i,
                     cur_enabled = snap.discharge_slots[i].enabled,
                     prev_enabled = p.discharge_slots[i].enabled,
-                    "Discharge slot {i} enabled changed with different times — reverting",
+                    "Discharge slot {i} enabled + times changed (expected after write)",
                 );
-                snap.discharge_slots[i].enabled = p.discharge_slots[i].enabled;
-                sanitized = true;
             }
         }
 
