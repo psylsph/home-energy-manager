@@ -622,6 +622,59 @@ fn carry_forward_battery_modules_with(
     }
 }
 
+/// Derive battery temperature, capacity and max power for three-phase / HV /
+/// commercial inverters from the BMS module data.
+///
+/// The three-phase inverter register blocks (IR 1000-1413, HR 1080-1124) do
+/// NOT expose battery pack temperature or capacity — only converter heatsink
+/// temperatures (`t_inverter`/`t_boost`/`t_buck_boost`) and SOC/power/current.
+/// Single-phase gets these from IR(56) and HR(55), but those registers are not
+/// populated on three-phase hardware, so `decode_input_0_59` /
+/// `decode_holding_0_59` leave either garbage (IR 56) or zero (HR 55) behind.
+///
+/// The authoritative source for three-phase battery temperature and capacity
+/// is the BMS module read (slave 0x32, same LV BMS protocol as single-phase).
+/// After those reads complete this derives the snapshot-level fields from the
+/// module data — mirroring what single-phase gets directly from the inverter
+/// block. Only applies to devices whose telemetry lives in the 1000-range
+/// blocks; single-phase is untouched.
+fn derive_three_phase_battery_fields(snap: &mut InverterSnapshot) {
+    if !snap.device_type.needs_three_phase_input_blocks() {
+        return;
+    }
+    if snap.battery_modules.is_empty() {
+        // No BMS data available (HV battery using the 0x70 BCU protocol, or
+        // the 0x32 read failed). Clear any garbage left by the single-phase
+        // IR(56)/HR(55) decode paths so the UI shows 0, not a stale value.
+        // Max power is still the device hardware limit (no capacity to cap by).
+        snap.battery_temperature = 0.0;
+        snap.battery_capacity_kwh = 0.0;
+        snap.max_battery_power_w = snap.device_type.max_battery_power_w();
+        return;
+    }
+    // Capacity: sum of module Ah x nominal pack voltage (/1000 -> kWh).
+    let total_cap_ah: f32 = snap.battery_modules.iter().map(|m| m.capacity_ah).sum();
+    let nominal_v = snap.device_type.nominal_battery_voltage();
+    snap.battery_capacity_kwh = total_cap_ah * nominal_v / 1000.0;
+    // Temperature: hottest cell-group temperature across all modules.
+    snap.battery_temperature = snap
+        .battery_modules
+        .iter()
+        .map(|m| m.temperature)
+        .fold(f32::NEG_INFINITY, f32::max);
+    // Max battery power: device hardware limit, capped at half the capacity
+    // (same formula single-phase uses in decode_holding_0_59). If the BMS did
+    // not report capacity, fall back to the uncapped hardware limit.
+    let cap_w = snap.battery_capacity_kwh * 1000.0;
+    snap.max_battery_power_w = if cap_w > 0.0 {
+        snap.device_type
+            .max_battery_power_w()
+            .min((cap_w / 2.0) as u32)
+    } else {
+        snap.device_type.max_battery_power_w()
+    };
+}
+
 /// Persist the in-memory `cosy_active` flag to settings so a crash/restart
 /// can detect a missed CosyExit (the inverter was left force-charging after
 /// the slot ended but before the app came back up). On startup,
@@ -2137,6 +2190,12 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     }
                                 }
 
+                                // Three-phase / HV / commercial inverters have no
+                                // battery temperature or capacity registers in their
+                                // inverter blocks — derive them from the BMS module
+                                // data (single-phase gets these from IR(56)/HR(55)).
+                                derive_three_phase_battery_fields(&mut snapshot);
+
                                 // Store latest snapshot.
                                 // Sanitize against physically impossible values first.
                                 // Skip delta checks during the grace period after connect.
@@ -2781,6 +2840,87 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inverter::model::{BatteryModule, DeviceType};
+
+    #[test]
+    fn derive_three_phase_battery_fields_is_noop_for_single_phase() {
+        // Single-phase must be untouched — it gets temp/capacity from IR(56)/HR(55).
+        let mut snap = InverterSnapshot::default();
+        snap.device_type = DeviceType::Gen3Hybrid;
+        snap.battery_temperature = 31.5;
+        snap.battery_capacity_kwh = 5.12;
+        snap.max_battery_power_w = 3600;
+        snap.battery_modules = vec![BatteryModule::default()];
+        derive_three_phase_battery_fields(&mut snap);
+        assert_eq!(snap.battery_temperature, 31.5);
+        assert_eq!(snap.battery_capacity_kwh, 5.12);
+        assert_eq!(snap.max_battery_power_w, 3600);
+    }
+
+    #[test]
+    fn derive_three_phase_battery_fields_from_bms_modules() {
+        // Two modules: 100Ah + 200Ah at 76.8V nominal (three-phase) = 23.04 kWh.
+        let mut snap = InverterSnapshot::default();
+        snap.device_type = DeviceType::ThreePhase;
+        // Garbage left by the single-phase IR(56)/HR(55) decode paths.
+        snap.battery_temperature = 999.0;
+        snap.battery_capacity_kwh = 0.0;
+        snap.max_battery_power_w = 0;
+        snap.battery_modules = vec![
+            BatteryModule {
+                index: 0,
+                capacity_ah: 100.0,
+                temperature: 28.0,
+                ..Default::default()
+            },
+            BatteryModule {
+                index: 1,
+                capacity_ah: 200.0,
+                temperature: 31.5,
+                ..Default::default()
+            },
+        ];
+        derive_three_phase_battery_fields(&mut snap);
+        // Capacity: 300Ah * 76.8V / 1000 = 23.04 kWh.
+        assert!((snap.battery_capacity_kwh - 23.04).abs() < 0.01);
+        // Temperature: hottest module (31.5, not 999 garbage).
+        assert!((snap.battery_temperature - 31.5).abs() < 0.01);
+        // Max power: min(6000 hardware, 23040W/2) = 6000.
+        assert_eq!(snap.max_battery_power_w, 6000);
+    }
+
+    #[test]
+    fn derive_three_phase_battery_fields_capacity_caps_max_power() {
+        // Small battery: capacity-derived cap is below the hardware limit.
+        // 50Ah at 76.8V = 3.84 kWh -> cap at 1920W < 6000W hardware limit.
+        let mut snap = InverterSnapshot::default();
+        snap.device_type = DeviceType::ThreePhase;
+        snap.battery_modules = vec![BatteryModule {
+            index: 0,
+            capacity_ah: 50.0,
+            temperature: 25.0,
+            ..Default::default()
+        }];
+        derive_three_phase_battery_fields(&mut snap);
+        assert!((snap.battery_capacity_kwh - 3.84).abs() < 0.01);
+        assert_eq!(snap.max_battery_power_w, 1920);
+    }
+
+    #[test]
+    fn derive_three_phase_battery_fields_clears_garbage_when_no_bms() {
+        // HV battery (0x32 LV read fails) or BMS read error: no modules.
+        // Must clear the garbage IR(56) value and fall back to hardware max.
+        let mut snap = InverterSnapshot::default();
+        snap.device_type = DeviceType::ThreePhase;
+        snap.battery_temperature = 999.0; // garbage from IR(56)
+        snap.battery_capacity_kwh = 999.0; // garbage from HR(55)
+        snap.max_battery_power_w = 0;
+        snap.battery_modules = vec![];
+        derive_three_phase_battery_fields(&mut snap);
+        assert_eq!(snap.battery_temperature, 0.0);
+        assert_eq!(snap.battery_capacity_kwh, 0.0);
+        assert_eq!(snap.max_battery_power_w, 6000); // uncapped hardware limit
+    }
 
     #[test]
     fn grace_median_rejects_single_spike_in_consumption() {

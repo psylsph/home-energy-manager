@@ -454,7 +454,7 @@ pub struct MeterData {
 ///
 /// For LV batteries each physical battery is a "module". For HV stacks
 /// (All-in-One, HV Gen3) a module is a BMU within the BCU stack.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct BatteryModule {
     /// Module index (0-based).
     pub index: usize,

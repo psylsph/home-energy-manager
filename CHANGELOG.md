@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.5] - 2026-06-07
+
+### Fixed
+
+- **Three-phase batteries now show temperature, capacity and max power**
+  On three-phase inverters (like the GIV-3HY-11) the Battery and Inverter
+  tabs were showing zeros for battery temperature, stored/available
+  capacity and max charge/discharge power. The cause was that those
+  values don't exist anywhere in the three-phase inverter's own registers
+  — they only live in the battery pack's BMS. The app was reading the
+  single-phase registers instead, which are simply not populated on
+  three-phase hardware. It now derives temperature, capacity and max
+  power from the BMS module data (the same place single-phase gets them
+  indirectly). If the BMS read fails or the pack isn't responding, the
+  fields now show a clean zero with the inverter's hardware power limit,
+  rather than a stale garbage value.
+
+### Changed
+
+- **Far fewer log messages by default**
+  Both the terminal/journal output (when running headless) and the
+  developer console used to default to the INFO level, which floods
+  the logs with routine per-poll lines — useful when debugging, but
+  noisy day-to-day and liable to push genuine warnings out of the
+  2000-entry developer console ring. Both now default to WARN. You
+  still see everything that matters, and can bump either one back up
+  for a session (the developer console has its level buttons; the
+  terminal takes `RUST_LOG=info` or `=debug`).
+
 ## [0.16.4] - 2026-06-07
 
 ### Added
