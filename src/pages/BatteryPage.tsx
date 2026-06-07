@@ -260,28 +260,64 @@ export default function BatteryPage() {
                       {cellCount > 0 && (
                         <div className="space-y-1">
                           <div className="text-text-secondary text-xs">Cell Voltages</div>
-                          <div className="flex items-end gap-px h-24">
-                            {m.cell_voltages.map((v, i) => {
-                              // Typical LFP cell: 2.5V–3.65V. Scale to bar height.
-                              const pct = Math.max(0, Math.min(100, ((v - 2.5) / 1.15) * 100));
+                          <div className="flex gap-2">
+                            {/* Y-axis labels */}
+                            {(() => {
+                              const voltages = m.cell_voltages;
+                              const minV = Math.min(...voltages);
+                              const maxV = Math.max(...voltages);
                               return (
-                                <div key={i} className="flex-1 flex flex-col items-center">
-                                  <div
-                                    className="w-full rounded-t-sm"
-                                    style={{
-                                      height: `${pct}%`,
-                                      backgroundColor: v < 2.8 ? '#EF4444' : v < 3.0 ? '#F59E0B' : '#22C55E',
-                                      minHeight: '2px',
-                                    }}
-                                    title={`Cell ${i + 1}: ${v.toFixed(3)}V`}
-                                  />
+                                <div className="flex flex-col justify-between text-[10px] font-mono text-text-secondary pb-5 select-none">
+                                  <span>{maxV.toFixed(3)}V</span>
+                                  <span>{((maxV + minV) / 2).toFixed(3)}V</span>
+                                  <span>{minV.toFixed(3)}V</span>
                                 </div>
                               );
-                            })}
-                          </div>
-                          <div className="flex justify-between text-text-secondary text-[10px] font-mono">
-                            <span>{m.cell_voltages[0]?.toFixed(2)}V</span>
-                            <span>{m.cell_voltages[cellCount - 1]?.toFixed(2)}V</span>
+                            })()}
+                            {/* Bars */}
+                            <div className="flex-1">
+                              <div className="flex items-end gap-px h-24">
+                                {(() => {
+                                  const voltages = m.cell_voltages;
+                                  const minV = Math.min(...voltages);
+                                  const maxV = Math.max(...voltages);
+                                  const range = maxV - minV;
+                                  const scale = (v: number) =>
+                                    range > 0.001
+                                      ? Math.max(0, Math.min(100, ((v - minV) / range) * 100))
+                                      : 100;
+                                  return voltages.map((v, i) => {
+                                    const pct = scale(v);
+                                    return (
+                                      <div key={i} className="flex-1 flex flex-col items-center justify-end">
+                                        <div
+                                          className="w-full rounded-t-sm"
+                                          style={{
+                                            height: `${pct}%`,
+                                            backgroundColor:
+                                              v < 2.8 ? '#EF4444' : v < 3.0 ? '#F59E0B' : '#22C55E',
+                                            minHeight: '2px',
+                                          }}
+                                          title={`Cell ${i + 1}: ${v.toFixed(3)}V (${pct.toFixed(0)}%)`}
+                                        />
+                                      </div>
+                                    );
+                                  });
+                                })()}
+                              </div>
+                              {/* X-axis cell labels — show every Nth label to avoid crowding */}
+                              <div className="flex text-[10px] font-mono text-text-secondary mt-0.5 select-none">
+                                {(() => {
+                                  const count = m.cell_voltages.length;
+                                  const step = count > 16 ? Math.floor(count / 8) : 1;
+                                  return Array.from({ length: count }).map((_, i) => (
+                                    <div key={i} className="flex-1 text-center">
+                                      {i % step === 0 && i + 1}
+                                    </div>
+                                  ));
+                                })()}
+                              </div>
+                            </div>
                           </div>
                         </div>
                       )}
