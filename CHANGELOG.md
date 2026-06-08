@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.13] - 2026-06-08
+
+### Fixed
+
+- **Gen3 stuck in Timed mode**: Switching to Eco mode now also clears all
+  discharge slot registers (HR44-45, HR56-57) to prevent the inverter
+  firmware from auto-re-enabling `enable_discharge`. Gen3 retains HR59=1
+  when discharge slot registers are non-zero, making Eco mode impossible
+  through the standard SetEcoMode command alone.
+
+### Changed
+
+- **Discharge Schedule hidden in Eco mode**: The Discharge Schedule section
+  is no longer visible when in Eco mode — only charge slots can be
+  configured. Switching to Timed mode shows both charge and discharge
+  schedules, reading existing configurations from the inverter registers.
+  This avoids the Gen3 issue where configuring discharge slots from Eco
+  mode causes the inverter to auto-enable timed discharge.
+
 ## [0.17.12] - 2026-06-08
 
 ### Fixed

@@ -284,6 +284,12 @@ When an optional block is requested but the read fails (timeout, exception, or s
 
 Flags passed in: `has_ac_config_block`, `has_extended_slots_block`, `has_three_phase_config_block` (computed from the actual `BlockRead`s returned in the current cycle, not from `device_type`). Carry-forward only triggers when the device type matches the expected model AND the optional block is absent in the current cycle.
 
+### Discharge slot visibility by mode
+
+The Discharge Schedule section is hidden when in **Eco** mode and visible when in **Timed** mode (set in `ControlPage.tsx`). This avoids a Gen3 inverter firmware quirk where writing any non-zero value to a discharge slot register causes the inverter to auto-set `enable_discharge=1` (HR59), making it impossible to remain in Eco mode.
+
+When switching from Timed to Eco mode, the backend (`server/api.rs` `set_mode`) appends writes that clear all discharge slot registers (HR44-45, HR56-57) to prevent the inverter from auto-enabling discharge. Slots configured by other apps (e.g. GivEnergy cloud) while in Eco mode will persist on the inverter but won't be visible in the UI until the user switches to Timed mode.
+
 ## Known issues
 
 ### Linux toolbar icon not showing (GNOME Wayland)

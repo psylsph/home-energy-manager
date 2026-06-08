@@ -1,7 +1,7 @@
 {
   "name": "givenergy-local",
   "private": true,
-  "version": "0.17.12",
+  "version": "0.17.13",
   "description": "Local monitoring and control for GivEnergy solar/battery inverters",
   "author": "Stuart Harding",
   "license": "MIT",

@@ -362,8 +362,20 @@ pub async fn set_mode(
     };
 
     match cmd.encode() {
-        Ok(writes) => {
+        Ok(mut writes) => {
             tracing::info!("Mode command encoded: {:?}", writes);
+            // When switching to Eco mode, clear ALL discharge slot registers
+            // to prevent Gen3 inverter firmware from auto-re-enabling
+            // enable_discharge. The Gen3 keeps HR59=1 when discharge slot
+            // registers are non-zero, making it impossible to stay in Eco.
+            if mode_str == "eco" || mode_str == "eco_paused" {
+                // Discharge slot 2: HR44-45
+                writes.push(RegisterWrite { address: 44, value: 0 });
+                writes.push(RegisterWrite { address: 45, value: 0 });
+                // Discharge slot 1: HR56-57
+                writes.push(RegisterWrite { address: 56, value: 0 });
+                writes.push(RegisterWrite { address: 57, value: 0 });
+            }
             queue_writes(&state, writes).await;
             ok_response(&format!("Mode set to {}", mode_str))
         }

@@ -1475,7 +1475,7 @@ export default function ControlPage() {
   // The inverter confirming the change is handled by deriving effectiveMode below.
   useEffect(() => {
     if (!requestedMode) return;
-    const timeout = setTimeout(() => setRequestedMode(null), 30_000);
+    const timeout = setTimeout(() => setRequestedMode(null), 10_000);
     return () => clearTimeout(timeout);
   }, [requestedMode]);
 
@@ -1710,7 +1710,7 @@ export default function ControlPage() {
         {requestedMode && !modeAction.loading && (
           <p className="text-amber-400 text-sm flex items-center gap-1.5">
             <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
-            Settings are being applied — this may take up to 30 seconds
+            Settings are being applied — this may take up to 10 seconds
           </p>
         )}
         {modeAction.error && (
@@ -1736,7 +1736,7 @@ export default function ControlPage() {
 
       {!cosyEnabled && chargeMode !== 'agile' && !schedulesUnsupported && <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Charge Schedule</h2>
-        <p className="text-text-secondary/60 text-xs">Please Allow upto 30 Seconds for Changes to Save</p>
+        <p className="text-text-secondary/60 text-xs">Please Allow upto 10 Seconds for Changes to Save</p>
         <div className="space-y-3">
           {chargeSlots.map((slot, i) => (
             <>
@@ -1785,12 +1785,17 @@ export default function ControlPage() {
         </div>
       </section>}
 
-      {/* Section 4: Discharge Schedule — visible in all modes so users can
-          pre-configure slots before switching to Timed Demand/Export */}
-      {!cosyEnabled && chargeMode !== 'agile' && !schedulesUnsupported && (
+      {/* Section 4: Discharge Schedule — only visible in Timed mode.
+          In Eco mode discharge slots are hidden because the Gen3 inverter
+          firmware auto-enables discharge when slot registers are present,
+          making it impossible to stay in Eco mode with configured slots.
+          When switching to Timed, existing discharge slots configured by
+          other apps (e.g. GivEnergy cloud) are read from the inverter
+          and displayed automatically. */}
+      {!cosyEnabled && chargeMode !== 'agile' && !schedulesUnsupported && modeToCategory(effectiveMode) === 'timed' && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold text-lg">Discharge Schedule</h2>
-          <p className="text-text-secondary/60 text-xs">Please Allow upto 30 Seconds for Changes to Save</p>
+          <p className="text-text-secondary/60 text-xs">Please Allow upto 10 Seconds for Changes to Save</p>
           <div className="space-y-3">
             {dischargeSlots.map((slot, i) => (
               <>
