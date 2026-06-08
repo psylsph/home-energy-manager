@@ -1,9 +1,19 @@
 import { useInverterStore } from '../store/useInverterStore';
 import type { MeterData } from '../lib/types';
 
+/** A phase is "active" if it has a plausible non-zero voltage (>10 V). */
+const VOLTAGE_THRESHOLD = 10;
+
 function MeterCard({ meter }: { meter: MeterData }) {
   const dir = meter.p_active_total >= 0 ? '↓ Import' : '↑ Export';
   const absPower = Math.abs(meter.p_active_total);
+
+  const hasL2 = meter.v_phase_2 > VOLTAGE_THRESHOLD;
+  const hasL3 = meter.v_phase_3 > VOLTAGE_THRESHOLD;
+  const showThreePhase = hasL2 || hasL3;
+
+  const phaseCols = showThreePhase ? 'grid-cols-3' : 'grid-cols-1';
+
   return (
     <div className="bg-bg-surface rounded-xl p-4 space-y-3">
       <div className="flex items-center justify-between">
@@ -17,26 +27,30 @@ function MeterCard({ meter }: { meter: MeterData }) {
         <span className="text-sm text-text-secondary">W {dir}</span>
       </div>
 
-      {/* Voltages */}
-      <div className="grid grid-cols-3 gap-2 text-center">
+      {/* Per-phase readings — only show phases with real voltage */}
+      <div className={`grid ${phaseCols} gap-2 text-center`}>
         <div>
           <div className="text-xs text-text-secondary">L1</div>
           <div className="font-mono text-sm text-text-primary">{meter.v_phase_1.toFixed(1)}V</div>
           <div className="font-mono text-xs text-text-secondary">{meter.i_phase_1.toFixed(2)}A</div>
           <div className="font-mono text-xs text-text-secondary">{meter.p_active_phase_1 >= 0 ? '+' : ''}{meter.p_active_phase_1}W</div>
         </div>
-        <div>
-          <div className="text-xs text-text-secondary">L2</div>
-          <div className="font-mono text-sm text-text-primary">{meter.v_phase_2.toFixed(1)}V</div>
-          <div className="font-mono text-xs text-text-secondary">{meter.i_phase_2.toFixed(2)}A</div>
-          <div className="font-mono text-xs text-text-secondary">{meter.p_active_phase_2 >= 0 ? '+' : ''}{meter.p_active_phase_2}W</div>
-        </div>
-        <div>
-          <div className="text-xs text-text-secondary">L3</div>
-          <div className="font-mono text-sm text-text-primary">{meter.v_phase_3.toFixed(1)}V</div>
-          <div className="font-mono text-xs text-text-secondary">{meter.i_phase_3.toFixed(2)}A</div>
-          <div className="font-mono text-xs text-text-secondary">{meter.p_active_phase_3 >= 0 ? '+' : ''}{meter.p_active_phase_3}W</div>
-        </div>
+        {showThreePhase && (
+          <div>
+            <div className="text-xs text-text-secondary">L2</div>
+            <div className="font-mono text-sm text-text-primary">{meter.v_phase_2.toFixed(1)}V</div>
+            <div className="font-mono text-xs text-text-secondary">{meter.i_phase_2.toFixed(2)}A</div>
+            <div className="font-mono text-xs text-text-secondary">{meter.p_active_phase_2 >= 0 ? '+' : ''}{meter.p_active_phase_2}W</div>
+          </div>
+        )}
+        {showThreePhase && (
+          <div>
+            <div className="text-xs text-text-secondary">L3</div>
+            <div className="font-mono text-sm text-text-primary">{meter.v_phase_3.toFixed(1)}V</div>
+            <div className="font-mono text-xs text-text-secondary">{meter.i_phase_3.toFixed(2)}A</div>
+            <div className="font-mono text-xs text-text-secondary">{meter.p_active_phase_3 >= 0 ? '+' : ''}{meter.p_active_phase_3}W</div>
+          </div>
+        )}
       </div>
 
       {/* Totals */}

@@ -485,10 +485,12 @@ impl ModbusClient {
                     if buf.len() > keep {
                         let discarded = buf.len() - keep;
                         if discarded > 100 {
-                            tracing::warn!(
-                                "No frame header in {} byte buffer, discarding {} bytes",
+                            let prefix_hex = buf[..buf.len().min(16)].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                            tracing::debug!(
+                                "No frame header in {} byte buffer, discarding {} bytes (first bytes: {})",
                                 buf.len(),
-                                discarded
+                                discarded,
+                                prefix_hex
                             );
                         } else {
                             tracing::debug!(
