@@ -26,13 +26,13 @@ Download the latest release for your platform from the [**Releases page**](https
 
 | Platform | File |
 |---|---|
-| 🪟 Windows | `.msi` with `x64` or `x86_64` (NSIS installer temporarily disabled — GitHub asset 504) |
+| 🪟 Windows | `.msi` with `x64` or `x86_64` |
 | 🍎 macOS (Apple Silicon — M1/M2/M3/M4) | `.dmg` with `aarch64` |
 | 🍎 macOS (Intel) | `.dmg` with `x64` or `x86_64` |
 | 🐧 Linux (x86_64) | `.deb` with `amd64`, or `.rpm` with `x86_64` |
 | 🐧 Linux (ARM64 — Raspberry Pi) | `.deb` with `arm64`/`aarch64`, or `.rpm` with `aarch64` |
 
-**Download note**: AppImage and NSIS (.exe) installers are temporarily unavailable due to a GitHub CDN issue with Tauri bundling assets. Use `.msi` (Windows), `.deb`/`.rpm` (Linux), or `.dmg` (macOS) instead. `.rpm` files are Linux packages, not macOS installers. For Apple Silicon macOS, download the `.dmg` file containing `aarch64`.
+**Download note**: Use `.msi` for Windows, `.deb`/`.rpm` for Linux, or `.dmg` for macOS. `.rpm` files are Linux packages, not macOS installers. For Apple Silicon macOS, download the `.dmg` file containing `aarch64`.
 
 **macOS users**: Do NOT drag the app to `/Applications` — macOS blocks unsigned apps there. Drag it to your **Desktop** or **Home folder** instead. On first launch, right-click the app → **Open** → **Open** to bypass Gatekeeper.
 
