@@ -719,7 +719,7 @@ export default function HistoryPage() {
   const [range, setRange] = useState<HistoryRange>('24h');
   const [offset, setOffset] = useState(0);
   const [data, setData] = useState<Record<string, TimePoint[]>>({});
-  const [loadingKey, setLoadingKey] = useState(0);
+  
   const now = useNow();
   const rangeMs: Record<string, number> = {
     '1h': 3600000,
@@ -786,7 +786,7 @@ export default function HistoryPage() {
     })();
   }, []);
 
-  const loading = loadingKey > 0;
+  
 
   useEffect(() => {
     let cancelled = false;
@@ -797,8 +797,6 @@ export default function HistoryPage() {
         ...charts.flatMap((c) => c.requires ?? []),
       ]),
     ];
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setLoadingKey((k) => k + 1);
     fetchHistory(range, allFields, offset)
       .then((result) => {
         if (!cancelled) {
@@ -814,11 +812,6 @@ export default function HistoryPage() {
           setData({});
         }
       })
-      .finally(() => {
-        if (!cancelled) {
-          setLoadingKey((k) => Math.max(0, k - 1));
-        }
-      });
     return () => { cancelled = true; };
   }, [tab, range, offset, importTariffCfg, exportTariffCfg]);
 
@@ -921,12 +914,7 @@ export default function HistoryPage() {
       )}
 
       {/* Charts */}
-      {loading ? (
-        <div className="flex flex-col items-center justify-center py-20 gap-4">
-          <div className="w-8 h-8 border-4 border-flow-active border-t-transparent rounded-full animate-spin" />
-          <p className="text-text-secondary text-sm font-sans">Loading history…</p>
-        </div>
-      ) : !hasData ? (
+      {!hasData ? (
         <div className="flex flex-col items-center justify-center py-20 gap-3">
           <p className="text-text-secondary text-sm font-sans">No data available for this period</p>
           <p className="text-text-secondary/50 text-xs font-sans">
