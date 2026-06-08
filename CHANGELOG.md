@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.10] - 2026-06-08
+
+### Fixed
+
+- **F5 refresh no longer loses the page (#59)**
+  Switched the frontend router from `BrowserRouter` to `HashRouter`. This
+  means all page navigation happens after the `#` in the URL (e.g.
+  `http://host:7337/#/battery` instead of `http://host:7337/battery`).
+  The server only ever sees requests for `/`, so pressing F5 on any page
+  now correctly reloads the app instead of hitting a 404 or showing a
+  blank screen. This should also fix the issue where updates took up to
+  10 minutes to appear in non-incognito browsers — the browser can no
+  longer cache stale route responses.
+
+### Roadmap
+
+- Added "Static asset caching headers" as a near-term candidate for
+  further improving post-update load times (`Cache-Control` headers on
+  static assets).
+
 ## [0.17.9] - 2026-06-08
 
 ### Fixed

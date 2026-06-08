@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import MetersPage from './pages/MetersPage';
-import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
+import { HashRouter, Routes, Route, NavLink } from 'react-router-dom';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useInverterStore } from './store/useInverterStore';
 import StatusPage from './pages/StatusPage';
@@ -238,8 +238,8 @@ function Layout() {
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <HashRouter>
       <Layout />
-    </BrowserRouter>
+    </HashRouter>
   );
 }

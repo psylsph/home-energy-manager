@@ -2102,15 +2102,22 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     // A meter is present if V_phase_1 (IR 60) is non-zero and >100V.
                                     // Three-phase/HV models use the inverter's internal grid CT at
                                     // IR 1079-1082 instead of separate external meters, so skip.
+                                    //
+                                    // Uses a short 3-second timeout with no retries. A real meter
+                                    // responds in well under 1s; a non-existent slave never responds
+                                    // at all, so retries and long timeouts just delay startup.
+                                    // Worst case for 8 absent meters: 8 × 3s = 24s (vs ~10 min
+                                    // with the standard 15s/5-attempt path).
                                     tracing::info!("Probing for external CT meters...");
                                     let mut found_meters: Vec<u8> = Vec::new();
                                     for &addr in crate::modbus::registers::METER_ADDRESSES {
                                         match client
-                                            .read_registers_at_slave(
+                                            .probe_registers_at_slave(
                                                 addr,
                                                 crate::modbus::framer::RegisterType::Input,
                                                 60,
                                                 30,
+                                                Duration::from_secs(3),
                                             )
                                             .await
                                         {
@@ -2137,7 +2144,6 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                 );
                                             }
                                         }
-                                        tokio::time::sleep(Duration::from_millis(100)).await;
                                     }
                                     detected_meters = found_meters;
                                     meter_probe_done = true;

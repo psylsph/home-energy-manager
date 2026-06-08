@@ -713,6 +713,43 @@ impl ModbusClient {
         Ok(all_values)
     }
 
+    /// Probe a single register block at a specific slave address with a
+    /// short timeout and no retries.
+    ///
+    /// Designed for meter/CT discovery where the probed slave likely doesn't
+    /// exist — a single attempt with a tight timeout avoids blocking the
+    /// startup sequence for tens of seconds per non-existent address.
+    ///
+    /// Temporarily overrides `self.timeout` for the duration of the call,
+    /// then restores it. Uses exactly one attempt (no stale-retry loop).
+    pub async fn probe_registers_at_slave(
+        &mut self,
+        slave: u8,
+        register_type: RegisterType,
+        start: u16,
+        count: u16,
+        probe_timeout: Duration,
+    ) -> Result<Vec<u16>, ClientError> {
+        let original_slave = self.slave;
+        let original_timeout = self.timeout;
+        self.slave = slave;
+        self.timeout = probe_timeout;
+
+        let request =
+            framer::build_read_request(&self.serial, self.slave, register_type, start, count);
+        let expected_fc = register_type.function_code();
+        let key = ResponseKey::from_request(self.slave, expected_fc, start, count);
+
+        let result = match self.send_and_await_response(request, key).await {
+            Ok(decoded) => Self::parse_register_response(&decoded, count),
+            Err(e) => Err(e),
+        };
+
+        self.slave = original_slave;
+        self.timeout = original_timeout;
+        result
+    }
+
     /// Read registers at a specific slave address, without mutating `self.slave`.
     ///
     /// Used for battery BMS probing where we need to address different
@@ -2031,5 +2068,344 @@ mod tests {
         assert!(result.is_ok(), "Write register failed: {:?}", result);
 
         server.await.unwrap();
+    }
+
+    // =======================================================================
+    // probe_registers_at_slave tests
+    // =======================================================================
+
+    #[tokio::test]
+    async fn probe_finds_meter_at_responding_slave() {
+        // A meter at slave 0x03 responds with valid data.
+        // probe_registers_at_slave should return the data with a single attempt.
+        let meter_data: Vec<u16> = vec![
+            2300, // V_phase_1 = 230.0V (>100V → valid)
+            0, 0, 0, 0, 0, 0, 0, // rest of IR 60-66
+            100,  // p_active_total (IR 68)
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]; // 30 values
+        assert_eq!(meter_data.len(), 30);
+
+        let responses = vec![MockResponse::ReadResponse {
+            slave: 0x03,
+            function: 0x04,
+            base: 60,
+            data: meter_data.clone(),
+        }];
+
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+
+        let result = client
+            .probe_registers_at_slave(
+                0x03,
+                RegisterType::Input,
+                60,
+                30,
+                Duration::from_secs(3),
+            )
+            .await;
+
+        assert!(result.is_ok(), "probe should succeed when meter responds: {:?}", result);
+        assert_eq!(result.unwrap()[0], 2300);
+    }
+
+    #[tokio::test]
+    async fn probe_returns_error_for_non_responding_slave() {
+        // No mock response configured for slave 0x05.
+        // The probe should time out after the short probe_timeout (no retries).
+        // We use a very short timeout to keep the test fast.
+        let _responses: Vec<MockResponse> = vec![];
+
+        // We need a server that accepts the connection but never responds.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server_handle = tokio::spawn(async move {
+            let (mut _stream, _) = listener.accept().await.unwrap();
+            // Read incoming frames but never respond — simulates a non-existent slave.
+            let mut buf = [0u8; 1024];
+            loop {
+                match tokio::time::timeout(Duration::from_secs(2), _stream.read(&mut buf)).await {
+                    Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                    Ok(Ok(_)) => {}
+                }
+            }
+        });
+
+        let mut client = ModbusClient::new("127.0.0.1", port, "TEST123456");
+        client.set_timeout(Duration::from_secs(5)); // default (should not be used by probe)
+        client.connect().await.unwrap();
+
+        let start = std::time::Instant::now();
+        let result = client
+            .probe_registers_at_slave(
+                0x05,
+                RegisterType::Input,
+                60,
+                30,
+                Duration::from_millis(200), // very short for test speed
+            )
+            .await;
+
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "probe should fail when slave doesn't respond");
+        // Single attempt: should be close to the probe_timeout, NOT 5× longer
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "probe should not retry — elapsed {elapsed:?} suggests retries occurred"
+        );
+
+        // Verify the original timeout was restored
+        assert_eq!(client.timeout, Duration::from_secs(5));
+
+        server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn probe_restores_original_slave_address() {
+        // Verify that probe_registers_at_slave restores the original slave
+        // address even when the probe fails (timeout).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server_handle = tokio::spawn(async move {
+            let (mut _stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            loop {
+                match tokio::time::timeout(Duration::from_secs(2), _stream.read(&mut buf)).await {
+                    Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                    Ok(Ok(_)) => {}
+                }
+            }
+        });
+
+        let mut client = ModbusClient::new("127.0.0.1", port, "TEST123456");
+        client.set_timeout(Duration::from_millis(100));
+        client.connect().await.unwrap();
+
+        assert_eq!(client.slave, 0x11); // default
+
+        let _ = client
+            .probe_registers_at_slave(
+                0x05,
+                RegisterType::Input,
+                60,
+                30,
+                Duration::from_millis(50),
+            )
+            .await;
+
+        assert_eq!(client.slave, 0x11, "slave address must be restored after probe");
+
+        server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn probe_restores_original_timeout_on_success() {
+        // Verify that probe_registers_at_slave restores the original timeout
+        // after a successful probe.
+        let meter_data: Vec<u16> = vec![2300; 30];
+        let responses = vec![MockResponse::ReadResponse {
+            slave: 0x03,
+            function: 0x04,
+            base: 60,
+            data: meter_data,
+        }];
+
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+        // setup_client_with_server sets timeout to 500ms
+        let expected_timeout = Duration::from_millis(500);
+        assert_eq!(client.timeout, expected_timeout);
+
+        let _ = client
+            .probe_registers_at_slave(
+                0x03,
+                RegisterType::Input,
+                60,
+                30,
+                Duration::from_secs(3),
+            )
+            .await;
+
+        assert_eq!(
+            client.timeout, expected_timeout,
+            "timeout must be restored after successful probe"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_does_not_retry_on_timeout() {
+        // Confirms that probe_registers_at_slave makes exactly ONE attempt.
+        // The mock server only provides one response slot; if the probe retried
+        // it would send a second request that the server can't satisfy.
+        // But more importantly: measure elapsed time to prove no retry delay.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server_handle = tokio::spawn(async move {
+            let (mut _stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            loop {
+                match tokio::time::timeout(Duration::from_secs(2), _stream.read(&mut buf)).await {
+                    Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                    Ok(Ok(_)) => {}
+                }
+            }
+        });
+
+        let mut client = ModbusClient::new("127.0.0.1", port, "TEST123456");
+        client.set_timeout(Duration::from_secs(15));
+        client.connect().await.unwrap();
+
+        let probe_timeout = Duration::from_millis(200);
+        let start = std::time::Instant::now();
+        let _ = client
+            .probe_registers_at_slave(
+                0x07,
+                RegisterType::Input,
+                60,
+                30,
+                probe_timeout,
+            )
+            .await;
+        let elapsed = start.elapsed();
+
+        // With retries, 5 attempts × (200ms + 500ms delay) = 3.5s.
+        // Without retries: ~200ms.
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "single attempt should complete in ~200ms, got {elapsed:?} — retries likely occurred"
+        );
+
+        server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn probe_sequential_8_addresses_fast() {
+        // Simulates the real meter-probe scenario: 8 non-responding addresses.
+        // Measures total elapsed time to confirm the full scan is fast.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server_handle = tokio::spawn(async move {
+            let (mut _stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            loop {
+                match tokio::time::timeout(Duration::from_secs(5), _stream.read(&mut buf)).await {
+                    Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                    Ok(Ok(_)) => {}
+                }
+            }
+        });
+
+        let mut client = ModbusClient::new("127.0.0.1", port, "TEST123456");
+        client.set_timeout(Duration::from_secs(15));
+        client.connect().await.unwrap();
+
+        let probe_timeout = Duration::from_millis(200);
+        let addresses: &[u8] = &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+
+        let start = std::time::Instant::now();
+        let mut found = 0usize;
+        for &addr in addresses {
+            let result = client
+                .probe_registers_at_slave(
+                    addr,
+                    RegisterType::Input,
+                    60,
+                    30,
+                    probe_timeout,
+                )
+                .await;
+            if result.is_ok() {
+                found += 1;
+            }
+        }
+        let elapsed = start.elapsed();
+
+        assert_eq!(found, 0, "no meters should be detected on a silent server");
+        // 8 × 200ms = 1.6s worst case. With old code: 8 × 5 × 15s = 600s.
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "8-address probe should take <3s, got {elapsed:?}"
+        );
+
+        server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn probe_detects_meter_among_8_addresses() {
+        // Meter at address 0x03 responds; all others time out.
+        // Uses a server that only responds to the correct slave.
+        let meter_data: Vec<u16> = vec![
+            2350, // V_phase_1 = 235.0V
+            0, 0, 0, 0, 0, 0, 500, // IR 60-67
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]; // 30 values
+        assert_eq!(meter_data.len(), 30);
+
+        let responses = vec![MockResponse::ReadResponse {
+            slave: 0x03,
+            function: 0x04,
+            base: 60,
+            data: meter_data.clone(),
+        }];
+
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+
+        let addresses: &[u8] = &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        let mut found_addrs: Vec<u8> = Vec::new();
+        let mut found_data: Vec<Vec<u16>> = Vec::new();
+
+        for &addr in addresses {
+            if let Ok(data) = client
+                .probe_registers_at_slave(
+                    addr,
+                    RegisterType::Input,
+                    60,
+                    30,
+                    Duration::from_millis(200),
+                )
+                .await
+            {
+                found_addrs.push(addr);
+                found_data.push(data);
+            }
+        }
+
+        assert_eq!(found_addrs, vec![0x03]);
+        assert_eq!(found_data[0][0], 2350);
+    }
+
+    #[tokio::test]
+    async fn probe_restores_original_slave_on_success() {
+        // Slave should be restored even when the probe succeeds.
+        let meter_data: Vec<u16> = vec![2300; 30];
+        let responses = vec![MockResponse::ReadResponse {
+            slave: 0x05,
+            function: 0x04,
+            base: 60,
+            data: meter_data,
+        }];
+
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+
+        assert_eq!(client.slave, 0x11);
+
+        let _ = client
+            .probe_registers_at_slave(
+                0x05,
+                RegisterType::Input,
+                60,
+                30,
+                Duration::from_secs(3),
+            )
+            .await;
+
+        assert_eq!(
+            client.slave, 0x11,
+            "slave address must be restored after successful probe"
+        );
     }
 }

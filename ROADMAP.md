@@ -34,6 +34,40 @@ See also: `derive_three_phase_battery_fields()` in poll.rs, GivTCP
 
 ## Near-term candidates
 
+### Static asset caching headers
+
+**Status**: Planned. Related to [Issue #59](https://github.com/psylsph/home-energy-manager/issues/59).
+
+The F5-refresh problem is solved by switching to `HashRouter` (v0.17.10),
+but a secondary improvement is to add proper `Cache-Control` headers to the
+Axum static file serving in `src-tauri/src/server/mod.rs`.
+
+Currently `tower_http::services::ServeDir` serves all files (including
+`index.html`) with no cache directives. After an app update, browsers may
+serve a stale `index.html` that references old content-hashed JS bundles,
+causing a blank page until the cache expires (reported as "up to 10 minutes").
+
+**Proposed change**:
+
+1. Enable the `set-header` feature on `tower-http` in `Cargo.toml`:
+   ```toml
+   tower-http = { version = "0.6", features = ["cors", "fs", "set-header"] }
+   ```
+
+2. In `create_router_with_frontend`, wrap `ServeDir` with response header
+   layers:
+   - `Cache-Control: public, max-age=31536000, immutable` on everything
+     under `/assets/` — Vite content-hashes filenames so they're safe to
+     cache forever
+   - `Cache-Control: no-store` on `index.html` — the SPA entry point must
+     never be cached because it changes with every deploy
+
+3. Consider replacing the double `ServeDir` fallback with an explicit
+   catch-all route for the SPA that serves `index.html` with `no-store`,
+   while letting `ServeDir` handle `/assets/*` with aggressive caching.
+
+This is standard SPA deployment practice (same pattern as nginx/Caddy/Vercel).
+
 ### Octopus Agile Integration
 
 **Status**: Investigation complete; implementation not started.
