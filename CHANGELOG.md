@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.14] - 2026-06-08
+
+### Fixed
+
+- **24h history chart now starts at 00:00 local time**: The x-axis always
+  spans midnight to midnight for the 24h view, regardless of when the
+  first data point falls. The backend query alignment was also fixed to
+  use local midnight (not UTC midnight), so users in BST/GMT+1 no longer
+  see charts starting at 01:00.
+- **6h/1h charts still trim to first data point**: Shorter ranges still
+  start at the earliest available reading so the line reaches the y-axis.
+
 ## [0.17.13] - 2026-06-08
 
 ### Fixed
