@@ -368,7 +368,26 @@ Then in the unRAID **Docker** page:
 6. Add a **Container Path** of `/root/.givenergy-local`
 7. Set the corresponding **Host Path** to `/mnt/user/appdata/givenergy-local/data`
 
-The container will persist data (settings + history) across stop/start cycles. To update, rebuild the image with the latest code and recreate the container.
+The container will persist data (settings + history) across stop/start cycles.
+
+### 7. Updating
+
+To update to the latest version, pull the latest code and rebuild:
+
+```bash
+cd /mnt/user/appdata/givenergy-local
+git pull
+docker build --no-cache -t givenergy-local .
+docker rm -f givenergy-local
+docker run -d \
+  --name givenergy-local \
+  --network host \
+  -v /mnt/user/appdata/givenergy-local/data:/root/.givenergy-local \
+  --restart unless-stopped \
+  givenergy-local
+```
+
+Your settings and history are preserved in the mounted volume — only the binary is replaced.
 
 ## Running Multiple Instances
 

@@ -1842,11 +1842,8 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 const MAX_CONSECUTIVE_FAILURES: u8 = 3;
                 // Track persistent failures ACROSS intervals. consecutive_failures
                 // resets within each interval, so a dead socket loops: 3 failures
-                // → sleep → 3 failures → sleep forever. This counter breaks out to
-                // reconnect after MAX_DEAD_CYCLES consecutive intervals with
-                // zero successful polls.
-                let mut consecutive_dead_cycles: u8 = 0;
-                const MAX_DEAD_CYCLES: u8 = 6;
+                // → sleep → 3 failures → sleep forever. Now we break out to
+                // reconnect immediately on the 3rd consecutive failure.
                 // Track consecutive dongle memory-leak fingerprint hits.
                 // After MAX_SUSPICIOUS_CYCLES, break to reconnect — persistent
                 // corruption means the dongle has probably crashed.
@@ -3096,7 +3093,6 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     match poll_ok {
                         true => {
                             consecutive_failures = 0;
-                            consecutive_dead_cycles = 0;
                             consecutive_suspicious = 0;
 
                             // Sanitization was applied — corrupted register data
@@ -3112,25 +3108,11 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                             consecutive_failures += 1;
                             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
                                 tracing::warn!(
-                                    "Poll read failed ({}/{}) — skipping this cycle",
                                     consecutive_failures,
-                                    MAX_CONSECUTIVE_FAILURES,
+                                    max = MAX_CONSECUTIVE_FAILURES,
+                                    "Poll read failed 3× — reconnecting"
                                 );
-                                // Skip the poll cycle instead of tearing down TCP.
-                                // GivEnergy dongles can stay busy for several seconds;
-                                // reconnecting triggers a costly warmup + grace period
-                                // that extends the outage. The next interval will retry.
-                                consecutive_failures = 0;
-                                consecutive_dead_cycles += 1;
-                                if consecutive_dead_cycles >= MAX_DEAD_CYCLES {
-                                    tracing::warn!(
-                                        dead_cycles = consecutive_dead_cycles,
-                                        max = MAX_DEAD_CYCLES,
-                                        "Persistent read failure — reconnecting"
-                                    );
-                                    break;
-                                }
-                                // Fall through to the sleep-wait section below instead
+                                break;
                                 // of breaking out of the inner loop — staying connected
                                 // avoids the warmup + grace period on the next poll.
                             } else {

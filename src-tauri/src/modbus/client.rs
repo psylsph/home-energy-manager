@@ -197,7 +197,7 @@ impl ModbusClient {
             serial_suspect: false,
             slave: 0x11, // canonical GivEnergy inverter address for detection
             writer: None,
-            timeout: Duration::from_secs(15),
+            timeout: Duration::from_secs(5),
             pending: Arc::new(Mutex::new(HashMap::new())),
             connected: Arc::new(AtomicBool::new(false)),
             consumer_handle: None,
