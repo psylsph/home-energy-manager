@@ -1847,6 +1847,11 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // zero successful polls.
                 let mut consecutive_dead_cycles: u8 = 0;
                 const MAX_DEAD_CYCLES: u8 = 6;
+                // Track consecutive dongle memory-leak fingerprint hits.
+                // After MAX_SUSPICIOUS_CYCLES, break to reconnect — persistent
+                // corruption means the dongle has probably crashed.
+                let mut consecutive_suspicious: u8 = 0;
+                const MAX_SUSPICIOUS_CYCLES: u8 = 6;
 
                 // Grace period: for the first few reads after connect, skip
                 // delta sanitization. The dongle can return plausible-but-wrong
@@ -1999,9 +2004,20 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     }
                                 }
                                 if block_suspicious {
-                                    tracing::warn!(
-                                        "Dongle memory-leak corruption detected — skipping broadcast, waiting for next poll cycle"
-                                    );
+                                    consecutive_suspicious += 1;
+                                    if consecutive_suspicious >= MAX_SUSPICIOUS_CYCLES {
+                                        tracing::warn!(
+                                            suspicious = consecutive_suspicious,
+                                            max = MAX_SUSPICIOUS_CYCLES,
+                                            "Persistent fingerprint corruption — reconnecting"
+                                        );
+                                    } else {
+                                        tracing::warn!(
+                                            suspicious = consecutive_suspicious,
+                                            max = MAX_SUSPICIOUS_CYCLES,
+                                            "Dongle memory-leak corruption detected — skipping broadcast, waiting for next poll cycle"
+                                        );
+                                    }
                                     return (true, false);
                                 }
                                 let has_ac_config_block = blocks.iter().any(|b| {
@@ -2620,10 +2636,14 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         "First poll read after connect — data is flowing"
                                     );
                                 }
-                                // Load settings once per cycle — all subsequent accesses
-                                // use this in-memory copy instead of synchronously reading
-                                // settings.json up to 5 times from the Tokio worker thread.
-                                let poll_settings = crate::settings::Settings::load();
+                                // Load settings from disk on a blocking thread
+                                // so synchronous file I/O doesn't stall the poll
+                                // loop on slow/networked filesystems.
+                                let poll_settings = tokio::task::spawn_blocking(
+                                    crate::settings::Settings::load,
+                                )
+                                .await
+                                .unwrap_or_default();
 
                                 // ---- Auto winter mode ----
                                 {
@@ -3071,6 +3091,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                         true => {
                             consecutive_failures = 0;
                             consecutive_dead_cycles = 0;
+                            consecutive_suspicious = 0;
 
                             // Sanitization was applied — corrupted register data
                             // detected. Re-poll immediately instead of waiting
@@ -3117,6 +3138,19 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 continue; // stay in the inner loop
                             }
                         }
+                    }
+
+                    // If consecutive fingerprint corruption exceeds the
+                    // threshold, break out of the inner loop to force a
+                    // reconnect (the dongle may have crashed and needs a
+                    // fresh TCP session to recover).
+                    if consecutive_suspicious >= MAX_SUSPICIOUS_CYCLES {
+                        tracing::warn!(
+                            suspicious = consecutive_suspicious,
+                            max = MAX_SUSPICIOUS_CYCLES,
+                            "Persistent fingerprint corruption — disconnecting"
+                        );
+                        break;
                     }
 
                     // Sleep for the configured interval, but wake early if:
