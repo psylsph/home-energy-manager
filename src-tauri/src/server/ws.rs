@@ -10,6 +10,7 @@ use std::sync::Arc;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::ConnectInfo;
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
 use crate::inverter::poll::{AppState, PollMessage};
@@ -74,7 +75,17 @@ pub async fn ws_handler(
     connect_info: ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
     let peer = connect_info.0;
-    ws.on_upgrade(move |socket| handle_ws(socket, state, peer))
+
+    // Limit concurrent WebSocket connections to prevent resource exhaustion.
+    const MAX_WS_CLIENTS: usize = 32;
+    if state.connected_clients.lock().count() >= MAX_WS_CLIENTS {
+        tracing::warn!(
+            "WebSocket connection from {peer} rejected — {MAX_WS_CLIENTS} clients already connected"
+        );
+        return (StatusCode::SERVICE_UNAVAILABLE, "Too many WebSocket connections").into_response();
+    }
+
+    ws.on_upgrade(move |socket| handle_ws(socket, state, peer)).into_response()
 }
 
 /// Inner WebSocket loop — runs for the lifetime of a single connection.
@@ -109,36 +120,64 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, peer: std::net::
         }
     }
 
-    // Forward broadcast messages to the WebSocket client until
-    // the client disconnects or the channel closes.
+    // Detect half-open connections: if the client hasn't sent any message
+    // (or pong) for 30 seconds, consider the connection dead. Tokio's
+    // broadcast recv has no timeout, so we use select! to race it against
+    // a sleep or incoming WebSocket frame. Receiving any frame (including
+    // Pong from the client's WebSocket stack) proves the connection is
+    // still alive. If the client disconnects, `recv().await` returns None.
+    let keepalive = tokio::time::Duration::from_secs(30);
+
     loop {
-        match rx.recv().await {
-            Ok(poll_msg) => {
-                let text = match serde_json::to_string(&poll_msg) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        tracing::warn!("Failed to serialise WebSocket message: {}", e);
-                        continue;
+        tokio::select! {
+            // Incoming WebSocket message from client (close, pong, or error).
+            // Any message proves the connection is alive. None = disconnect.
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {
+                        // Pong or any other frame — connection alive, continue.
                     }
-                };
-                if socket.send(Message::Text(text.into())).await.is_err() {
-                    // Client disconnected.
-                    break;
+                    Some(Err(e)) => {
+                        tracing::debug!("WebSocket error from {peer}: {e}");
+                        break;
+                    }
                 }
             }
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
-                // The client is falling behind — send a lag notification.
-                let notice = serde_json::json!({
-                    "type": "lagged",
-                    "count": count,
-                });
-                let text = notice.to_string();
-                if socket.send(Message::Text(text.into())).await.is_err() {
-                    break;
+            // Broadcast message from the poll loop.
+            broadcast = rx.recv() => {
+                match broadcast {
+                    Ok(poll_msg) => {
+                        let text = match serde_json::to_string(&poll_msg) {
+                            Ok(t) => t,
+                            Err(e) => {
+                                tracing::warn!("Failed to serialise WebSocket message: {}", e);
+                                continue;
+                            }
+                        };
+                        if socket.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                        let notice = serde_json::json!({
+                            "type": "lagged",
+                            "count": count,
+                        });
+                        let text = notice.to_string();
+                        if socket.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                // Broadcast channel closed — no more data.
+            // Timeout — no broadcast and no client message. Treat as
+            // half-open connection and disconnect.
+            _ = tokio::time::sleep(keepalive) => {
+                tracing::debug!(
+                    "WebSocket client {peer} timed out after {keepalive:?} — disconnecting"
+                );
                 break;
             }
         }

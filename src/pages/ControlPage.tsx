@@ -1525,7 +1525,7 @@ export default function ControlPage() {
     setReserveSaving(true);
     try {
       await apiPost('/api/control/reserve', { soc: reserveSoc });
-    } catch { /* handled silently */ }
+    } catch (e: unknown) { console.warn("Slot save failed:", e); }
     setReserveSaving(false);
   };
 
@@ -1534,7 +1534,7 @@ export default function ControlPage() {
     setChargeRateSaving(true);
     try {
       await apiPost('/api/control/charge-rate', { limit: Math.round(chargeRate / rateDisplayMultiplier) });
-    } catch { /* handled silently */ }
+    } catch (e: unknown) { console.warn("Slot save failed:", e); }
     setChargeRateSaving(false);
   };
 
@@ -1543,7 +1543,7 @@ export default function ControlPage() {
     setDischargeRateSaving(true);
     try {
       await apiPost('/api/control/discharge-rate', { limit: Math.round(dischargeRate / rateDisplayMultiplier) });
-    } catch { /* handled silently */ }
+    } catch (e: unknown) { console.warn("Slot save failed:", e); }
     setDischargeRateSaving(false);
   };
 
@@ -1552,7 +1552,7 @@ export default function ControlPage() {
     setActivePowerSaving(true);
     try {
       await apiPost('/api/control/active-power-rate', { rate: activePowerRate });
-    } catch { /* handled silently */ }
+    } catch (e: unknown) { console.warn("Slot save failed:", e); }
     setActivePowerSaving(false);
   };
 
@@ -1574,7 +1574,7 @@ export default function ControlPage() {
                     await apiPost('/api/control/force-charge', { minutes: 30 });
                     setLocalForceChargeOverride(true);
                   }
-                } catch { /* handled silently */ }
+                } catch (e: unknown) { console.warn("Slot save failed:", e); }
                 setForceChargeLoading(false);
               }}
               disabled={forceChargeLoading}
@@ -1606,7 +1606,7 @@ export default function ControlPage() {
                     await apiPost('/api/control/force-discharge');
                     setLocalForceDischargeOverride(true);
                   }
-                } catch { /* handled silently */ }
+                } catch (e: unknown) { console.warn("Slot save failed:", e); }
                 setForceDischargeLoading(false);
               }}
               disabled={forceDischargeLoading}

@@ -104,7 +104,8 @@ export default function SettingsPage() {
           setExportTariffCfg((p) => ({ ...p, peak_rate: s.export_tariff ?? 0.15 }));
         }
         setSettingsLoaded(true);
-      } catch {
+      } catch (e: unknown) {
+        console.warn('Failed to load settings:', e);
         setSettingsLoaded(true);
       }
     })();
@@ -115,7 +116,7 @@ export default function SettingsPage() {
         const res = await apiGet<{ ok: boolean; lan_ip: string | null; clients: string[]; client_count: number }>('/api/status');
         if (res.lan_ip) setLanIp(res.lan_ip);
         if (res.clients) setClients(res.clients);
-      } catch { /* ignore */ }
+      } catch (e: unknown) { console.warn('Failed to fetch status:', e); }
     })();
   }, []);
 
