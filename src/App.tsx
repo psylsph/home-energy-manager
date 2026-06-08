@@ -11,6 +11,7 @@ import HistoryPage from './pages/HistoryPage';
 import LogsPage from './pages/LogsPage';
 import SolarPage from './pages/SolarPage';
 import InverterPage from './pages/InverterPage';
+import PowerPage from './pages/PowerPage';
 import ErrorBoundary from './components/ErrorBoundary';
 
 function ThemeToggle() {
@@ -50,6 +51,7 @@ function ConnectionIndicator() {
 
 const NAV_ITEMS = [
   { to: '/', label: 'Status', icon: StatusIcon },
+  { to: '/power', label: 'Power', icon: PowerIcon },
   { to: '/battery', label: 'Battery', icon: BatteryIcon },
   { to: '/inverter', label: 'Inverter', icon: InverterIcon },
   { to: '/solar', label: 'Solar', icon: SolarIcon },
@@ -71,6 +73,14 @@ function HistoryIcon() {
   return (
     <svg className="w-7 h-7 sm:w-5 sm:h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+    </svg>
+  );
+}
+
+function PowerIcon() {
+  return (
+    <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M13 2L4 14h7l-1 8 10-13h-7V2z" />
     </svg>
   );
 }
@@ -168,6 +178,7 @@ function Layout() {
       <main className="flex-1 overflow-auto px-4 py-6 md:px-6 md:py-8">
         <Routes>
           <Route path="/" element={<ErrorBoundary><StatusPage /></ErrorBoundary>} />
+          <Route path="/power" element={<ErrorBoundary><PowerPage /></ErrorBoundary>} />
           <Route path="/battery" element={<ErrorBoundary><BatteryPage /></ErrorBoundary>} />
           <Route path="/history" element={<ErrorBoundary><HistoryPage /></ErrorBoundary>} />
           <Route path="/control" element={<ErrorBoundary><ControlPage /></ErrorBoundary>} />

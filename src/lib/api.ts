@@ -87,12 +87,16 @@ export async function fetchHistory(
   range: string,
   fields: string[],
   offset: number = 0,
+  rolling: boolean = false,
 ): Promise<Record<string, Array<{ t: number; v: number }>>> {
   const params = new URLSearchParams({
     range,
     fields: fields.join(','),
     offset: String(offset),
   });
+  if (rolling) {
+    params.set('rolling', 'true');
+  }
   const res = await apiGet<{ ok: boolean; data: Record<string, Array<{ t: number; v: number }>> }>(
     `/api/history?${params}`,
   );

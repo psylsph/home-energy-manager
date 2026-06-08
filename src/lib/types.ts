@@ -152,4 +152,4 @@ export interface TimePoint {
   v: number;
 }
 
-export type HistoryRange = '1h' | '6h' | '24h' | '7d' | '30d' | '6m' | '1y' | 'month';
+export type HistoryRange = '1h' | '6h' | '12h' | '24h' | 'today' | '7d' | '30d' | 'month' | '6m' | '1y';
