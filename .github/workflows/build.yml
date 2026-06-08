@@ -285,7 +285,7 @@ jobs:
             | `macOS-Apple-Silicon-...dmg` | **macOS** — Apple Silicon (M1/M2/M3/M4) |
             | `macOS-Intel-...dmg` | **macOS** — Intel |
             | `Windows-Installer-...exe` | **Windows** — standard installer |
-            | `Windows-MSI-...msi` | **Windows** — MSI package (NSIS installer temporarily disabled) |
+            | `Windows-MSI-...msi` | **Windows** — MSI package |
             | `Linux-Debian-...deb` | **Linux** — Debian/Ubuntu |
             | `Linux-RPM-...rpm` | **Linux** — RHEL/Fedora/openSUSE, not macOS |
             | — | AppImage temporarily disabled — GitHub asset returns 504 |
