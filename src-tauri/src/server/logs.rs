@@ -93,9 +93,16 @@ impl LogRing {
         if inner.len == 0 {
             return (Vec::new(), 0);
         }
-        // Calculate the total chronological index range
-        let oldest_idx = inner.cursor + inner.capacity - inner.len;
-        let newest_idx = inner.cursor + inner.len - 1;
+        // When the buffer is partially filled (len < capacity), entries are
+        // stored at indices 0..len with cursor at len. When full, entries
+        // wrap around starting at cursor (the oldest entry).
+        let (oldest_idx, newest_idx) = if inner.len < inner.capacity {
+            // Partially filled: indices 0..len-1, cursor at len.
+            (0, inner.len - 1)
+        } else {
+            // Full: oldest at cursor, newest at cursor + len - 1.
+            (inner.cursor, inner.cursor + inner.len - 1)
+        };
         if after >= newest_idx {
             // Client is caught up — no new lines.
             return (Vec::new(), newest_idx);
@@ -331,5 +338,51 @@ impl<'a> tracing::field::Visit for FieldVisitor<'a> {
         value: &(dyn std::error::Error + 'static),
     ) {
         write!(self.buf, " {}={}", field.name(), value).ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_from_partially_filled_does_not_underflow() {
+        let ring = LogRing::new(10);
+        for i in 0..5 {
+            ring.push(&format!("line {i}"));
+        }
+        // after=0 should return all 5 lines from a partially-filled buffer
+        // (len=5 < capacity=10). The arithmetic bug caused oldest_idx to
+        // compute as 10, making newest_idx - read_from underflow.
+        let (lines, next_idx) = ring.read_from(0);
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0], "line 0");
+        assert_eq!(lines[4], "line 4");
+        assert_eq!(next_idx, 5);
+    }
+
+    #[test]
+    fn read_from_at_newest_returns_empty() {
+        let ring = LogRing::new(10);
+        for i in 0..5 {
+            ring.push(&format!("line {i}"));
+        }
+        let (lines, next_idx) = ring.read_from(4);
+        assert!(lines.is_empty());
+        assert_eq!(next_idx, 4);
+    }
+
+    #[test]
+    fn read_from_wrapped_buffer() {
+        let ring = LogRing::new(5);
+        for i in 0..5 {
+            ring.push(&format!("line {i}")); // fills 0..4, cursor=0
+        }
+        ring.push(&"line 5".to_string()); // wraps: 5 at index 0, cursor=1
+        // after=1 should skip line 0 (which was overwritten) and return lines 1-5
+        let (lines, _) = ring.read_from(1);
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0], "line 1");
+        assert_eq!(lines[4], "line 5");
     }
 }

@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.6] - 2026-06-07
+
+### Fixed
+
+- **Crash in `/api/logs?after=` handler fixed**
+  `LogRing::read_from` had an arithmetic underflow when the ring buffer
+  was partially filled (len < capacity). `oldest_idx` computed as 2000
+  for a partially-filled buffer, causing `newest_idx - read_from` to
+  underflow to ~2^64 and `Vec::with_capacity` to panic. Fixed the
+  virtual-index formula to handle the partially-filled case separately
+  (entries at 0..len, not at cursor+capacity-len). Added 3 regression
+  tests.
+
 ## [0.17.5] - 2026-06-07
 
 ### Fixed
