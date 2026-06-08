@@ -1,6 +1,6 @@
 [package]
 name = "givenergy-local"
-version = "0.17.6"
+version = "0.17.7"
 description = "Local monitoring and control for GivEnergy solar/battery inverters"
 authors = ["Stuart Harding"]
 license = "MIT"

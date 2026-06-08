@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.7] - 2026-06-07
+
+### Fixed
+
+- **Exception retry logic no longer retries permanent errors**
+  The read-path retry guard checked both `msg.contains("code 67")` and
+  `msg.contains("Modbus exception")`. Since every exception message
+  contains "Modbus exception", ALL exceptions triggered retry (4×500ms
+  = 2s wasted). Now only code 67 (busy/dongle-busy) is retried.
+
+- **Safe-write whitelist expanded to match reference**
+  Added ~25 missing registers: HR 1005 (three-phase real-time control),
+  1078 (battery reserve), 199 (parallel mode), 331 (force off-grid),
+  5010/5014 (restart/calculated load), 554-573 (Smart Load slots),
+  and 2053-2071 (EMS charge/export slots).
+
+- **Integer truncation guarded in cosy slot parsing**
+  Hours clamped to 0-23, minutes to 0-59 before u8 cast.
+
 ## [0.17.6] - 2026-06-07
 
 ### Fixed

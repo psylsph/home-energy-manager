@@ -773,7 +773,7 @@ impl ModbusClient {
                     continue;
                 }
                 Err(ClientError::InvalidResponse(msg)) if attempt < Self::MAX_STALE_RETRIES
-                    && (msg.contains("code 67") || msg.contains("Modbus exception"))
+                    && msg.contains("code 67")
                 => {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     continue;

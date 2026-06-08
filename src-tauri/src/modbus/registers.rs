@@ -448,8 +448,21 @@ pub const SAFE_WRITE_REGS: &[u16] = &[
     311, 313, 314, 317, // Pause mode/slot
     318, 319, 320, // Three-phase controls
     1108, 1109, 1110, 1111, 1112, 1113, 1114, 1115, 1116, 1118, 1119, 1120, 1121, 1122, 1123,
+    1005, // REAL_TIME_CONTROL (three-phase mirror of HR166)
+    1078, // BATTERY_RESERVE_PERCENT (three-phase)
     // EMS plant-level control / discharge slots
     2040, 2044, 2045, 2046, 2047, 2048, 2049, 2050, 2051, 2052,
+    // EMS charge and export slots (givenergy-modbus WRITE_SAFE_REGISTERS)
+    2053, 2054, 2055, 2056, 2057, 2058, 2059, 2060, 2061, 2062, 2063, 2064, 2065, 2066, 2067,
+    2068, 2069, 2070, 2071,
+    // App-confirmed writable registers (givenergy-modbus #167)
+    199, // ENABLE_INVERTER_PARALLEL_MODE
+    331, // FORCE_OFF_GRID — non-damaging, but sustained islanding state
+    // Smart Load slots 1-10 (app-confirmed, bounded HHMM values)
+    554, 555, 556, 557, 558, 559, 560, 561, 562, 563, 564, 565, 566, 567, 568, 569, 570, 571, 572, 573,
+    // Other app-confirmed registers
+    5010, // RESTART_HARDWARE — same class as HR163 REBOOT
+    5014, // ENABLE_CALCULATED_LOAD
 ];
 
 // ===========================================================================

@@ -243,7 +243,7 @@ pub async fn update_settings(
         persist.export_tariff_config = Some(cfg.clone());
     }
     if let Some(hp) = body.get("http_port").and_then(|v| v.as_u64()) {
-        persist.http_port = hp as u16;
+        persist.http_port = hp.min(u16::MAX as u64) as u16;
     }
     if let Err(e) = persist.save() {
         tracing::warn!("Failed to persist settings: {}", e);
@@ -1004,10 +1004,10 @@ pub async fn set_cosy(
             .iter()
             .map(|s| crate::settings::CosySlot {
                 enabled: s["enabled"].as_bool().unwrap_or(false),
-                start_hour: s["start_hour"].as_u64().unwrap_or(0) as u8,
-                start_minute: s["start_minute"].as_u64().unwrap_or(0) as u8,
-                end_hour: s["end_hour"].as_u64().unwrap_or(0) as u8,
-                end_minute: s["end_minute"].as_u64().unwrap_or(0) as u8,
+                start_hour: s["start_hour"].as_u64().map(|v| v.min(23)).unwrap_or(0) as u8,
+                start_minute: s["start_minute"].as_u64().map(|v| v.min(59)).unwrap_or(0) as u8,
+                end_hour: s["end_hour"].as_u64().map(|v| v.min(23)).unwrap_or(0) as u8,
+                end_minute: s["end_minute"].as_u64().map(|v| v.min(59)).unwrap_or(0) as u8,
                 target_soc: s["target_soc"].as_u64().unwrap_or(100) as u8,
             })
             .collect();
