@@ -71,7 +71,7 @@ jobs:
 
       - name: Build Tauri app (Linux)
         if: matrix.platform == 'ubuntu-22.04' || matrix.platform == 'ubuntu-24.04-arm'
-        run: cargo tauri build --target ${{ matrix.target }} --bundles deb,rpm,appimage
+        run: cargo tauri build --target ${{ matrix.target }} --bundles deb,rpm
 
       - name: Customize macOS DMG
         if: matrix.platform == 'macos-latest'
@@ -202,6 +202,7 @@ jobs:
               if ext_lower == ".rpm":
                   return f"Linux-RPM-{arch}-{product}-{version}.rpm"
               if ext_lower == ".appimage":
+          pass # AppImage disabled — apprun-old asset returns 504 on GitHub
                   return f"Linux-AppImage-{arch}-{product}-{version}.AppImage"
               return f"{platform}-{arch}-{product}-{version}{ext}"
 
@@ -209,7 +210,7 @@ jobs:
           for path in bundle_dir.rglob("*"):
               if not path.is_file():
                   continue
-              if path.suffix.lower() not in {".dmg", ".deb", ".rpm", ".msi", ".exe", ".appimage"}:
+              if path.suffix.lower() not in {".dmg", ".deb", ".rpm", ".msi", ".exe"}:
                   continue
               dest = out_dir / friendly_name(path)
               if " " in dest.name:
@@ -290,7 +291,7 @@ jobs:
             | `Windows-MSI-...msi` | **Windows** — MSI package |
             | `Linux-Debian-...deb` | **Linux** — Debian/Ubuntu |
             | `Linux-RPM-...rpm` | **Linux** — RHEL/Fedora/openSUSE, not macOS |
-            | `Linux-AppImage-...AppImage` | **Linux** — portable AppImage |
+            | — | AppImage temporarily disabled — GitHub asset returns 504 |
 
             > **macOS users**: Drag the app to your Applications folder. On first launch Gatekeeper may block it — open System Settings → Privacy & Security → click "Open Anyway". Or right-click the app → Open. See README.txt inside the DMG for details.
 
