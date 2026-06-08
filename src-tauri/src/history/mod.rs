@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use chrono::{Local, TimeZone};
+use chrono::{Local, TimeZone, Timelike};
 use rusqlite::{params, Connection, Result as SqlResult};
 use serde::Serialize;
 
@@ -393,7 +393,22 @@ impl HistoryDb {
                 let aligned_end = match range_secs {
                     3600 => ((raw_end / 3600) * 3600) + 3600,
                     21600 => ((raw_end / 21600) * 21600) + 21600,
-                    _ => ((raw_end / 86400) * 86400) + 86400,
+                    _ => {
+                        // Align to local midnight so day-based ranges start at
+                        // 00:00 local time instead of 00:00 UTC. This prevents
+                        // 24h charts from appearing to start at 01:00 in
+                        // timezones east of UTC (e.g. BST/GMT+1).
+                        let raw_local = chrono::DateTime::from_timestamp(raw_end, 0)
+                            .unwrap()
+                            .with_timezone(&chrono::Local);
+                        let secs_today = raw_local.time().num_seconds_from_midnight();
+                        if secs_today == 0 {
+                            raw_end
+                        } else {
+                            // Add remaining seconds to reach next local midnight
+                            raw_end + (86400 - secs_today as i64)
+                        }
+                    }
                 };
                 (aligned_end - range_secs, aligned_end)
             }
