@@ -911,9 +911,17 @@ fn sanitize_snapshot(
         sanitized = true;
     }
 
-    // Grid voltage: UK single-phase is nominally 230V ±10% (207–253V).
-    // Anything outside 180–280V is clearly corrupt register data.
-    if snap.grid_voltage < 180.0 || snap.grid_voltage > 280.0 {
+    // Grid voltage:
+    //   Single-phase: UK nominal 230V ±10% (207–253V), anything outside 180–280V
+    //     is clearly corrupt register data.
+    //   Three-phase (line-to-line): UK nominal 415V ±10% (373–456V), match the
+    //     reference library's v_ac1 bounds of 0–500V (IR(1061)).
+    let (v_min, v_max) = if snap.device_type.needs_three_phase_input_blocks() {
+        (0.0, 500.0)
+    } else {
+        (180.0, 280.0)
+    };
+    if snap.grid_voltage < v_min || snap.grid_voltage > v_max {
         if let Some(p) = prev {
             tracing::warn!(
                 raw = snap.grid_voltage,

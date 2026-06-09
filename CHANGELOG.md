@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.15] - 2026-06-09
+
+### Fixed
+
+- **Three-phase grid voltage sanitised away**: The grid voltage range check
+  (180–280V) was hardcoded for single-phase (230V phase-to-neutral).
+  Three-phase models report ~415V line-to-line from IR 1061, triggering
+  "Grid voltage out of range" warnings every cycle and falling back to
+  the previous value or 230.0V. Now uses 0–500V bounds for three-phase
+  models, matching the reference library's v_ac1 range.
+
 ## [0.17.14] - 2026-06-08
 
 ### Fixed

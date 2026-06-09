@@ -1560,9 +1560,9 @@ mod tests {
         ir1000[1020 - 1000] = 15_000; // PV2 power 1500.0W
 
         let mut ir1060 = vec![0u16; 60];
-        ir1060[1061 - 1060] = 2310; // grid voltage L1 231.0V
-        ir1060[1062 - 1060] = 2320; // grid voltage L2 232.0V
-        ir1060[1063 - 1060] = 2290; // grid voltage L3 229.0V
+        ir1060[1061 - 1060] = 4150; // grid voltage L1 415.0V (line-to-line)
+        ir1060[1062 - 1060] = 4160; // grid voltage L2 416.0V (line-to-line)
+        ir1060[1063 - 1060] = 4140; // grid voltage L3 414.0V (line-to-line)
         ir1060[1064 - 1060] = 10;   // current L1 1.0A
         ir1060[1065 - 1060] = 12;   // current L2 1.2A
         ir1060[1066 - 1060] = 8;    // current L3 0.8A
@@ -1626,7 +1626,7 @@ mod tests {
         assert_eq!(snap.battery_power, 500);
         assert_eq!(snap.home_power, 2_200);
         assert_eq!(snap.soc, 67);
-        assert!((snap.grid_voltage - 231.0).abs() < 0.1);
+        assert!((snap.grid_voltage - 415.0).abs() < 0.1);
         assert!((snap.grid_frequency - 50.0).abs() < 0.01);
         assert!((snap.today_solar_kwh - 12.3).abs() < 0.1);
         assert!((snap.today_import_kwh - 4.5).abs() < 0.1);
@@ -1657,9 +1657,9 @@ mod tests {
         // Apparent power from IR(1073-1074) — raw 15000 → 1500VA
         assert_eq!(snap.meters[0].p_apparent_total, 1500, "Apparent from register");
         // Voltages from IR(1061-1063)
-        assert!((snap.meters[0].v_phase_1 - 231.0).abs() < 0.1);
-        assert!((snap.meters[0].v_phase_2 - 232.0).abs() < 0.1);
-        assert!((snap.meters[0].v_phase_3 - 229.0).abs() < 0.1);
+        assert!((snap.meters[0].v_phase_1 - 415.0).abs() < 0.1);
+        assert!((snap.meters[0].v_phase_2 - 416.0).abs() < 0.1);
+        assert!((snap.meters[0].v_phase_3 - 414.0).abs() < 0.1);
         assert!((snap.meters[0].frequency - 50.0).abs() < 0.01);
         assert!((snap.meters[0].e_import_active_kwh - 88.8).abs() < 0.1, "3-phase meter import = total_import_kwh");
         assert!((snap.meters[0].e_export_active_kwh - 99.9).abs() < 0.1, "3-phase meter export = total_export_kwh");
