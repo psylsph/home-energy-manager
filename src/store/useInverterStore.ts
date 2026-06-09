@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { InverterSnapshot, ConnectionState } from '../lib/types';
+import type { InverterSnapshot, ConnectionState, ScheduleSlot } from '../lib/types';
 
 type ThemeMode = 'dark' | 'light';
 
@@ -9,11 +9,15 @@ interface InverterState {
   connectedHost: string | null;
   developerMode: boolean;
   themeMode: ThemeMode;
+  /** Discharge slots configured locally in Eco mode, not yet written to the inverter. */
+  pendingDischargeSlots: Record<number, ScheduleSlot>;
   setSnapshot: (snapshot: InverterSnapshot) => void;
   clearSnapshot: () => void;
   setConnection: (state: ConnectionState, host?: string) => void;
   setDeveloperMode: (enabled: boolean) => void;
   setThemeMode: (mode: ThemeMode) => void;
+  setPendingDischargeSlots: (slots: Record<number, ScheduleSlot>) => void;
+  clearPendingDischargeSlots: () => void;
 }
 
 function loadDeveloperMode(): boolean {
@@ -33,12 +37,27 @@ function loadThemeMode(): ThemeMode {
   }
 }
 
+function loadPendingDischargeSlots(): Record<number, ScheduleSlot> {
+  try {
+    const stored = localStorage.getItem('pendingDischargeSlots');
+    if (stored) return JSON.parse(stored);
+  } catch { /* ignore */ }
+  return {};
+}
+
+function savePendingDischargeSlots(slots: Record<number, ScheduleSlot>) {
+  try {
+    localStorage.setItem('pendingDischargeSlots', JSON.stringify(slots));
+  } catch { /* ignore */ }
+}
+
 export const useInverterStore = create<InverterState>((set) => ({
   snapshot: null,
   connectionState: 'disconnected',
   connectedHost: null,
   developerMode: loadDeveloperMode(),
   themeMode: loadThemeMode(),
+  pendingDischargeSlots: loadPendingDischargeSlots(),
   setSnapshot: (snapshot) => set({ snapshot }),
   clearSnapshot: () => set({ snapshot: null }),
   setConnection: (state, host) => set({ connectionState: state, connectedHost: host ?? null }),
@@ -53,5 +72,13 @@ export const useInverterStore = create<InverterState>((set) => ({
       localStorage.setItem('themeMode', mode);
     } catch { /* ignore */ }
     set({ themeMode: mode });
+  },
+  setPendingDischargeSlots: (slots) => {
+    savePendingDischargeSlots(slots);
+    set({ pendingDischargeSlots: slots });
+  },
+  clearPendingDischargeSlots: () => {
+    savePendingDischargeSlots({});
+    set({ pendingDischargeSlots: {} });
   },
 }));

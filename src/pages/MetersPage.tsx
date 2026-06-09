@@ -12,6 +12,10 @@ function MeterCard({ meter }: { meter: MeterData }) {
   const hasL3 = meter.v_phase_3 > VOLTAGE_THRESHOLD;
   const showThreePhase = hasL2 || hasL3;
 
+  // Per-phase power is unavailable for the synthetic built-in CT (address 0x00)
+  // — three-phase inverters have no per-phase signed grid power registers.
+  const showPerPhasePower = meter.address !== 0;
+
   const phaseCols = showThreePhase ? 'grid-cols-3' : 'grid-cols-1';
 
   return (
@@ -33,14 +37,14 @@ function MeterCard({ meter }: { meter: MeterData }) {
           <div className="text-xs text-text-secondary">L1</div>
           <div className="font-mono text-sm text-text-primary">{meter.v_phase_1.toFixed(1)}V</div>
           <div className="font-mono text-xs text-text-secondary">{meter.i_phase_1.toFixed(2)}A</div>
-          <div className="font-mono text-xs text-text-secondary">{meter.p_active_phase_1 >= 0 ? '+' : ''}{meter.p_active_phase_1}W</div>
+          {showPerPhasePower && <div className="font-mono text-xs text-text-secondary">{meter.p_active_phase_1 >= 0 ? '+' : ''}{meter.p_active_phase_1}W</div>}
         </div>
         {showThreePhase && (
           <div>
             <div className="text-xs text-text-secondary">L2</div>
             <div className="font-mono text-sm text-text-primary">{meter.v_phase_2.toFixed(1)}V</div>
             <div className="font-mono text-xs text-text-secondary">{meter.i_phase_2.toFixed(2)}A</div>
-            <div className="font-mono text-xs text-text-secondary">{meter.p_active_phase_2 >= 0 ? '+' : ''}{meter.p_active_phase_2}W</div>
+            {showPerPhasePower && <div className="font-mono text-xs text-text-secondary">{meter.p_active_phase_2 >= 0 ? '+' : ''}{meter.p_active_phase_2}W</div>}
           </div>
         )}
         {showThreePhase && (
@@ -48,7 +52,7 @@ function MeterCard({ meter }: { meter: MeterData }) {
             <div className="text-xs text-text-secondary">L3</div>
             <div className="font-mono text-sm text-text-primary">{meter.v_phase_3.toFixed(1)}V</div>
             <div className="font-mono text-xs text-text-secondary">{meter.i_phase_3.toFixed(2)}A</div>
-            <div className="font-mono text-xs text-text-secondary">{meter.p_active_phase_3 >= 0 ? '+' : ''}{meter.p_active_phase_3}W</div>
+            {showPerPhasePower && <div className="font-mono text-xs text-text-secondary">{meter.p_active_phase_3 >= 0 ? '+' : ''}{meter.p_active_phase_3}W</div>}
           </div>
         )}
       </div>

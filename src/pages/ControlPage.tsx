@@ -11,7 +11,7 @@ const ECO_MODES: { key: BatteryMode; label: string; tooltip: string }[] = [
 ];
 
 const TIMED_MODES: { key: BatteryMode; label: string; tooltip: string }[] = [
-  { key: 'timed_demand', label: 'Timed Discharge', tooltip: 'Discharges battery during scheduled times to power your home' },
+  { key: 'timed_demand', label: 'Timed Discharge', tooltip: 'Battery covers home demand automatically, plus follows your export schedule during slot times' },
   { key: 'export_paused', label: 'Paused', tooltip: 'Pauses scheduled discharge. Schedule is kept for next time.' },
 ];
 
@@ -248,7 +248,7 @@ function AutoWinterSection() {
           setEnabled(res.data.config.enabled);
           setColdThreshold(Math.round(res.data.config.cold_threshold));
           setRecoveryThreshold(Math.round(res.data.config.recovery_threshold));
-          setTargetSoc(res.data.config.target_soc);
+          setTargetSoc(Math.max(4, res.data.config.target_soc));
           setDebounce(res.data.config.debounce_readings);
         }
       } catch { /* use defaults */ }
@@ -1462,13 +1462,14 @@ export default function ControlPage() {
         enabled: false, start_hour: 0, start_minute: 0, end_hour: 6, end_minute: 0, target_soc: 100,
       } as ScheduleSlot));
 
-  const dischargeSlots: ScheduleSlot[] =
+  const baseDischargeSlots: ScheduleSlot[] =
     snapshot?.discharge_slots?.length != null && snapshot.discharge_slots.length >= maxDischargeSlots
       ? snapshot.discharge_slots.slice(0, maxDischargeSlots)
       : Array.from({ length: maxDischargeSlots }, () => ({
         enabled: false, start_hour: 16, start_minute: 0, end_hour: 19, end_minute: 0, target_soc: 4,
       } as ScheduleSlot));
 
+  const { pendingDischargeSlots, setPendingDischargeSlots, clearPendingDischargeSlots } = useInverterStore();
   const [requestedMode, setRequestedMode] = useState<BatteryMode | null>(null);
 
   // Clear requested mode after 30s timeout (safety net for unconfirmed writes).
@@ -1499,16 +1500,62 @@ export default function ControlPage() {
     ? requestedMode
     : currentMode;
 
+  const isTimedMode = modeToCategory(effectiveMode) === 'timed';
+
+  // In Eco mode, overlay any pending local edits on top of the base slots.
+  // In Timed mode, just use the inverter-reported slots directly.
+  const dischargeSlots: ScheduleSlot[] = isTimedMode
+    ? baseDischargeSlots
+    : baseDischargeSlots.map((s, i) => pendingDischargeSlots[i] ?? s);
+
+  // A discharge slot is considered "configured" if it has a non-zero time window.
+  const isDischargeSlotConfigured = (s: ScheduleSlot) =>
+    s.enabled && (s.start_hour !== s.end_hour || s.start_minute !== s.end_minute);
+
+  // Check if any discharge slot is ready (either existing on inverter, or pending locally).
+  const hasAnyDischargeSlot =
+    dischargeSlots.some(s => isDischargeSlotConfigured(s)) ||
+    Object.keys(pendingDischargeSlots).length > 0;
+
   const handleModeChange = async (mode: BatteryMode) => {
     setRequestedMode(mode);
     try {
-      await modeAction.execute('/api/control/mode', { mode });
+      // When switching to Timed mode with pending local discharge slots,
+      // send everything atomically so HR59=1 is never set without slot constraints.
+      if (modeToCategory(mode) === 'timed' && Object.keys(pendingDischargeSlots).length > 0) {
+        const slots: { slot: number; enabled: boolean; start_hour: number; start_minute: number; end_hour: number; end_minute: number; target_soc: number }[] = [];
+        Object.entries(pendingDischargeSlots).forEach(([i, s]) => {
+          const idx = Number(i);
+          slots.push({
+            slot: idx + 1,
+            enabled: s.enabled,
+            start_hour: s.start_hour,
+            start_minute: s.start_minute,
+            end_hour: s.end_hour,
+            end_minute: s.end_minute,
+            target_soc: s.target_soc,
+          });
+        });
+        await modeAction.execute('/api/control/mode', { mode, discharge_slots: slots });
+        clearPendingDischargeSlots();
+      } else {
+        await modeAction.execute('/api/control/mode', { mode });
+      }
     } catch {
       setRequestedMode(null);
     }
   };
 
   const handleSlotSave = async (index: number, slot: ScheduleSlot, path: string) => {
+    const isDischarge = path === '/api/control/discharge-slot';
+
+    // In Eco mode, hold discharge slot edits locally — don't write to inverter.
+    if (isDischarge && !isTimedMode) {
+      const next = { ...pendingDischargeSlots, [index]: slot };
+      setPendingDischargeSlots(next);
+      return;
+    }
+
     // API expects 1-based slot number
     await apiPost(path, {
       slot: index + 1,
@@ -1660,11 +1707,15 @@ export default function ControlPage() {
                 key={key}
                 onClick={() => {
                   if (key === 'eco') handleModeChange('eco');
-                  else handleModeChange('timed_demand');
+                  else if (hasAnyDischargeSlot) handleModeChange('timed_demand');
                 }}
-                className={`px-4 py-1.5 text-xs font-medium transition flex items-center gap-1.5 ${modeToCategory(effectiveMode) === key
-                    ? 'bg-battery/20 text-battery'
-                    : 'text-text-secondary hover:bg-bg-surface'
+                disabled={key === 'timed' && !hasAnyDischargeSlot}
+                title={key === 'timed' && !hasAnyDischargeSlot ? 'Configure at least one discharge slot before switching to Timed mode' : undefined}
+                className={`px-4 py-1.5 text-xs font-medium transition flex items-center gap-1.5 ${key === 'timed' && !hasAnyDischargeSlot
+                    ? 'text-text-secondary/40 cursor-not-allowed'
+                    : modeToCategory(effectiveMode) === key
+                      ? 'bg-battery/20 text-battery'
+                      : 'text-text-secondary hover:bg-bg-surface'
                   }`}
               >
                 {modeAction.loading && modeToCategory(requestedMode ?? currentMode) === key && (
@@ -1785,17 +1836,20 @@ export default function ControlPage() {
         </div>
       </section>}
 
-      {/* Section 4: Discharge Schedule — only visible in Timed mode.
-          In Eco mode discharge slots are hidden because the Gen3 inverter
-          firmware auto-enables discharge when slot registers are present,
-          making it impossible to stay in Eco mode with configured slots.
-          When switching to Timed, existing discharge slots configured by
-          other apps (e.g. GivEnergy cloud) are read from the inverter
-          and displayed automatically. */}
-      {!cosyEnabled && chargeMode !== 'agile' && !schedulesUnsupported && modeToCategory(effectiveMode) === 'timed' && (
+      {/* Section 4: Discharge Schedule — always visible.
+          In Eco mode, slot edits are held locally until the user switches to Timed.
+          The Timed button is locked until at least one discharge slot is configured. */}
+      {!cosyEnabled && chargeMode !== 'agile' && !schedulesUnsupported && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold text-lg">Discharge Schedule</h2>
-          <p className="text-text-secondary/60 text-xs">Please Allow upto 10 Seconds for Changes to Save</p>
+          {!isTimedMode && (
+            <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-text-primary">
+              Configure your discharge slots here, then switch to <strong>Timed</strong> mode to activate them. Slots are saved to the inverter when you switch.
+            </div>
+          )}
+          {isTimedMode && (
+            <p className="text-text-secondary/60 text-xs">Please Allow upto 10 Seconds for Changes to Save</p>
+          )}
           <div className="space-y-3">
             {dischargeSlots.map((slot, i) => (
               <>

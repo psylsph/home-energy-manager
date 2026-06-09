@@ -284,11 +284,23 @@ When an optional block is requested but the read fails (timeout, exception, or s
 
 Flags passed in: `has_ac_config_block`, `has_extended_slots_block`, `has_three_phase_config_block` (computed from the actual `BlockRead`s returned in the current cycle, not from `device_type`). Carry-forward only triggers when the device type matches the expected model AND the optional block is absent in the current cycle.
 
-### Discharge slot visibility by mode
+### Discharge slot handling
 
-The Discharge Schedule section is hidden when in **Eco** mode and visible when in **Timed** mode (set in `ControlPage.tsx`). This avoids a Gen3 inverter firmware quirk where writing any non-zero value to a discharge slot register causes the inverter to auto-set `enable_discharge=1` (HR59), making it impossible to remain in Eco mode.
+The Discharge Schedule section is always visible regardless of mode. This lets users configure discharge slots ahead of time, even while in Eco mode.
 
-When switching from Timed to Eco mode, the backend (`server/api.rs` `set_mode`) appends writes that clear all discharge slot registers (HR44-45, HR56-57) to prevent the inverter from auto-enabling discharge. Slots configured by other apps (e.g. GivEnergy cloud) while in Eco mode will persist on the inverter but won't be visible in the UI until the user switches to Timed mode.
+**Eco mode constraints:**
+- Slot edits in Eco mode are held **client-side only** — no API call is made to the inverter (prevents the Gen3 firmware quirk where non-zero slot registers auto-enable `enable_discharge`)
+- The **Timed** mode button is locked (disabled) until at least one discharge slot is configured
+- A yellow banner explains: "Configure your discharge slots here, then switch to Timed mode to activate them"
+
+**Switching to Timed mode:**
+- The frontend sends discharge slots + mode change atomically in a single request
+- The backend (`server/api.rs` `set_mode`) writes slot registers **before** the `enable_discharge=1` flag, so the inverter never sees HR59=1 without slot constraints (which would cause unrestricted export)
+
+**Switching from Timed to Eco mode:**
+- The backend appends writes that clear all discharge slot registers (HR44-45, HR56-57) to prevent the inverter from auto-enabling discharge on Gen3 firmware
+
+**Safety**: The reference library (`givenergy-modbus`) always provides a default discharge slot when enabling timed discharge. Setting `enable_discharge=1` without any slot constraint causes the Gen3 inverter to discharge freely (unrestricted export). HEM prevents this by requiring at least one configured slot before allowing the Timed mode switch.
 
 ## Known issues
 

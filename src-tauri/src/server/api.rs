@@ -352,6 +352,8 @@ pub async fn set_mode(
     };
     let soc_reserve = body["soc_reserve"].as_u64().unwrap_or(4) as u16;
 
+    let is_timed = mode_str == "timed_demand" || mode_str == "timed_export";
+
     let cmd = match mode_str {
         "eco" => ControlCommand::SetEcoMode { soc_reserve },
         "eco_paused" => ControlCommand::PauseBattery,
@@ -364,6 +366,7 @@ pub async fn set_mode(
     match cmd.encode() {
         Ok(mut writes) => {
             tracing::info!("Mode command encoded: {:?}", writes);
+
             // When switching to Eco mode, clear ALL discharge slot registers
             // to prevent Gen3 inverter firmware from auto-re-enabling
             // enable_discharge. The Gen3 keeps HR59=1 when discharge slot
@@ -376,6 +379,85 @@ pub async fn set_mode(
                 writes.push(RegisterWrite { address: 56, value: 0 });
                 writes.push(RegisterWrite { address: 57, value: 0 });
             }
+
+            // When switching to Timed mode, the frontend may include
+            // discharge_slots that were configured locally in Eco mode.
+            // Write them atomically BEFORE the enable_discharge flag so the
+            // inverter never sees HR59=1 without slot constraints.
+            if is_timed {
+                if let Some(slots) = body["discharge_slots"].as_array() {
+                    let device_type = state
+                        .latest_snapshot
+                        .lock()
+                        .await
+                        .as_ref()
+                        .map(|s| s.device_type)
+                        .unwrap_or(DeviceType::Gen2Hybrid);
+
+                    // Prepend slot writes before the mode writes.
+                    let mut slot_writes = Vec::new();
+                    for slot_obj in slots {
+                        let slot_num = match slot_obj["slot"].as_u64() {
+                            Some(s) => s as u8,
+                            None => continue,
+                        };
+                        let enabled = slot_obj["enabled"].as_bool().unwrap_or(true);
+                        let start_hour = slot_obj["start_hour"].as_u64().unwrap_or(0) as u8;
+                        let start_minute = slot_obj["start_minute"].as_u64().unwrap_or(0) as u8;
+                        let end_hour = slot_obj["end_hour"].as_u64().unwrap_or(0) as u8;
+                        let end_minute = slot_obj["end_minute"].as_u64().unwrap_or(0) as u8;
+                        let target_soc = slot_obj["target_soc"].as_u64().unwrap_or(100) as u8;
+
+                        let (start, end) = (
+                            encode_hhmm(start_hour, start_minute),
+                            encode_hhmm(end_hour, end_minute),
+                        );
+
+                        let cmd = match discharge_slot_command_for_device(
+                            device_type, slot_num, enabled, start, end,
+                        ) {
+                            Ok(cmd) => cmd,
+                            Err(e) => {
+                                tracing::warn!("Skipping discharge slot {}: {}", slot_num, e);
+                                continue;
+                            }
+                        };
+
+                        match cmd.encode() {
+                            Ok(mut w) => {
+                                // Write per-slot discharge target SOC for extended models.
+                                if enabled && target_soc > 0
+                                    && device_type.uses_extended_schedule_slots()
+                                {
+                                    if let Ok(target_writes) = (
+                                        ControlCommand::SetDischargeTargetSocSlot {
+                                            slot: slot_num,
+                                            soc: target_soc as u16,
+                                        }
+                                        .encode()
+                                    ) {
+                                        w.extend(target_writes);
+                                    }
+                                }
+                                slot_writes.extend(w);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to encode discharge slot {}: {}",
+                                    slot_num,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    // Slot writes go FIRST so they're on the inverter before
+                    // HR59=1 is set.
+                    let mut combined = slot_writes;
+                    combined.append(&mut writes);
+                    writes = combined;
+                }
+            }
+
             queue_writes(&state, writes).await;
             ok_response(&format!("Mode set to {}", mode_str))
         }

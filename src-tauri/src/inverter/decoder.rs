@@ -123,7 +123,7 @@ fn decode_timeslot(data: &[u16], start_idx: usize, end_idx: usize) -> ScheduleSl
             start_minute: sm,
             end_hour: eh,
             end_minute: em,
-            target_soc: 0,
+            target_soc: 4,
         },
         _ => ScheduleSlot::default(),
     }
@@ -497,7 +497,7 @@ fn decode_holding_60_119(data: &[u16], snap: &mut InverterSnapshot, raw: &mut Ra
     snap.enable_charge = get_reg(data, 96 - 60) != 0;
 
     // Battery SOC reserve: HR(110) → index 50
-    snap.battery_reserve = get_reg(data, 110 - 60) as u8;
+    snap.battery_reserve = (get_reg(data, 110 - 60) as u8).clamp(4, 100);
     raw.battery_soc_reserve = snap.battery_reserve as u16;
 
     // Battery charge/discharge limits for DC-coupled hybrids: HR(111/112).
@@ -512,7 +512,7 @@ fn decode_holding_60_119(data: &[u16], snap: &mut InverterSnapshot, raw: &mut Ra
     }
 
     // Charge target SOC: HR(116) → index 56
-    snap.target_soc = get_reg(data, 116 - 60) as u8;
+    snap.target_soc = (get_reg(data, 116 - 60) as u8).clamp(4, 100);
 
     // Apply global charge_target_soc to each enabled charge slot
     let global_target = snap.target_soc;
@@ -583,7 +583,7 @@ fn decode_holding_240_299(data: &[u16], snap: &mut InverterSnapshot) {
         let offset = base - 240;
         let start_val = get_reg(data, offset);
         let end_val = get_reg(data, offset + 1);
-        let target = get_reg(data, offset + 2) as u8;
+        let target = (get_reg(data, offset + 2) as u8).clamp(4, 100);
 
         // Disabled when start == end (zero-duration slot)
         if start_val == end_val {
@@ -607,8 +607,8 @@ fn decode_holding_240_299(data: &[u16], snap: &mut InverterSnapshot) {
 
     // Per-slot target SOCs for slots 1-2 (HR 242, 245) — these augment
     // the global target_soc set in decode_holding_60_119
-    let t1 = get_reg(data, 242 - 240) as u8;
-    let t2 = get_reg(data, 245 - 240) as u8;
+    let t1 = (get_reg(data, 242 - 240) as u8).clamp(4, 100);
+    let t2 = (get_reg(data, 245 - 240) as u8).clamp(4, 100);
     if snap.charge_slots[0].enabled && t1 > 0 {
         snap.charge_slots[0].target_soc = t1;
     }
@@ -626,7 +626,7 @@ fn decode_holding_240_299(data: &[u16], snap: &mut InverterSnapshot) {
         }
         let start_val = get_reg(data, offset);
         let end_val = get_reg(data, offset + 1);
-        let target = get_reg(data, offset + 2) as u8;
+        let target = (get_reg(data, offset + 2) as u8).clamp(4, 100);
 
         // Disabled when start == end (zero-duration slot)
         if start_val == end_val {
@@ -649,8 +649,8 @@ fn decode_holding_240_299(data: &[u16], snap: &mut InverterSnapshot) {
     }
 
     // Per-slot discharge target SOCs for slots 1-2 (HR 272, 275)
-    let dt1 = get_reg(data, 272 - 240) as u8;
-    let dt2 = get_reg(data, 275 - 240) as u8;
+    let dt1 = (get_reg(data, 272 - 240) as u8).clamp(4, 100);
+    let dt2 = (get_reg(data, 275 - 240) as u8).clamp(4, 100);
     if snap.discharge_slots[0].enabled && dt1 > 0 {
         snap.discharge_slots[0].target_soc = dt1;
     }
@@ -710,10 +710,10 @@ fn decode_holding_1000_1079(_data: &[u16], _snap: &mut InverterSnapshot, _raw: &
 
 fn decode_holding_1080_1124(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawConfig) {
     snap.discharge_rate = get_reg(data, 1108 - 1080) as u8;
-    snap.battery_reserve = get_reg(data, 1109 - 1080) as u8;
+    snap.battery_reserve = (get_reg(data, 1109 - 1080) as u8).clamp(4, 100);
     raw.battery_soc_reserve = snap.battery_reserve as u16;
     snap.charge_rate = get_reg(data, 1110 - 1080) as u8;
-    snap.target_soc = get_reg(data, 1111 - 1080) as u8;
+    snap.target_soc = (get_reg(data, 1111 - 1080) as u8).clamp(4, 100);
 
     // Three-phase schedule slots 1-2 live in this block rather than the
     // single-phase HR31/32, HR44/45, HR56/57 and HR94/95 locations.
@@ -821,8 +821,7 @@ fn decode_input_1060_1119(data: &[u16], snap: &mut InverterSnapshot) {
         // IR(1083-1085) carry unsigned load-only power (p_load_ac1..3), not net
         // grid flow. IR(1091-1093) carry unsigned export-only power (p_out_ac1..3).
         // Neither can produce a signed net per-phase value, so set to 0 (unknown).
-        // The reference library (givenergy-modbus) and GivTCP both keep these
-        // separate — they do not synthesise per-phase grid flow.
+        // The UI hides per-phase power for the synthetic CT (address 0x00).
         p_active_phase_1: 0,
         p_active_phase_2: 0,
         p_active_phase_3: 0,
@@ -1648,10 +1647,8 @@ mod tests {
             snap.meters[0].p_active_total, -600,
             "Meter total = -grid_power (positive = import)"
         );
-        // No per-phase signed grid power registers exist for three-phase —
-        // p_active_phase_* is set to 0 (unknown), matching the reference
-        // libraries which keep per-phase load/export separate from grid flow.
-        assert_eq!(snap.meters[0].p_active_phase_1, 0, "L1 = unknown (no per-phase grid power register)");
+        // Per-phase grid power unavailable — no dedicated signed registers.
+        assert_eq!(snap.meters[0].p_active_phase_1, 0, "L1 = unknown");
         assert_eq!(snap.meters[0].p_active_phase_2, 0, "L2 = unknown");
         assert_eq!(snap.meters[0].p_active_phase_3, 0, "L3 = unknown");
         // Power factor from IR(1068) — raw 980 → 0.980

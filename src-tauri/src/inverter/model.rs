@@ -527,7 +527,7 @@ pub struct BatteryModule {
 }
 
 /// A single charge or discharge schedule slot.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ScheduleSlot {
     /// Whether the slot is active (start_time >= 60).
     pub enabled: bool,
@@ -539,9 +539,30 @@ pub struct ScheduleSlot {
     pub end_hour: u8,
     /// End minute (0-59).
     pub end_minute: u8,
-    /// Target SOC (from separate register, 0 if not applicable).
-    #[serde(default)]
+    /// Target SOC (from separate register, min 4 to protect battery).
+    #[serde(default = "default_target_soc")]
     pub target_soc: u8,
+}
+
+fn default_target_soc() -> u8 {
+    4
+}
+
+fn default_soc_reserve() -> u8 {
+    4
+}
+
+impl Default for ScheduleSlot {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            start_hour: 0,
+            start_minute: 0,
+            end_hour: 0,
+            end_minute: 0,
+            target_soc: 4,
+        }
+    }
 }
 
 /// Complete snapshot of inverter state.
@@ -615,6 +636,8 @@ pub struct InverterSnapshot {
     /// Human-readable device type name for the frontend.
     #[serde(default)]
     pub device_type_display: String,
+    /// Battery SOC reserve (HR 110 / HR 1109), clamped to min 4 to protect battery.
+    #[serde(default = "default_soc_reserve")]
     pub battery_reserve: u8,
     pub charge_rate: u8,
     pub discharge_rate: u8,
@@ -625,6 +648,8 @@ pub struct InverterSnapshot {
     /// Max AC output power in watts (per device model).
     #[serde(default)]
     pub max_ac_power_w: u32,
+    /// Charge target SOC (HR 116 / HR 1111), clamped to min 4 to protect battery.
+    #[serde(default = "default_soc_reserve")]
     pub target_soc: u8,
     pub enable_charge: bool,
     pub enable_charge_target: bool,
@@ -860,7 +885,7 @@ mod tests {
     fn schedule_slot_default_is_disabled() {
         let slot = ScheduleSlot::default();
         assert!(!slot.enabled);
-        assert_eq!(slot.target_soc, 0);
+        assert_eq!(slot.target_soc, 4);
     }
 
     #[test]

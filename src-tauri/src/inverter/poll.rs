@@ -575,11 +575,11 @@ fn carry_forward_optional_block_values(
         && snap.device_type == prev.device_type
     {
         for idx in 0..2 {
-            if snap.charge_slots[idx].target_soc == 0 && prev.charge_slots[idx].target_soc > 0 {
+            if snap.charge_slots[idx].target_soc == 4 && prev.charge_slots[idx].target_soc > 4 {
                 snap.charge_slots[idx].target_soc = prev.charge_slots[idx].target_soc;
                 changed = true;
             }
-            if snap.discharge_slots[idx].target_soc == 0 && prev.discharge_slots[idx].target_soc > 0
+            if snap.discharge_slots[idx].target_soc == 4 && prev.discharge_slots[idx].target_soc > 4
             {
                 snap.discharge_slots[idx].target_soc = prev.discharge_slots[idx].target_soc;
                 changed = true;

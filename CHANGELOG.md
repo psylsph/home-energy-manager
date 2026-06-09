@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.16] - 2026-06-09
+
+### Changed
+
+- **All SOC control values clamped to minimum 4%**: Battery SOC reserve (HR 110/1109),
+  charge target SOC (HR 116/1111), and per-slot target SOCs (HR 242/245/248…/272/275…)
+  are now clamped to 4–100% on read from the inverter. Values below 4% can cause
+  battery damage and are overridden to the safe floor. Sliders on the Control page
+  already enforced min=4 on write; the decoder now enforces it on read so the UI
+  never displays or carries forward an unsafe value.
+
+- **Discharge schedule always visible, Timed mode requires slots**: The discharge
+  schedule section is now always visible regardless of mode. In Eco mode, slot edits
+  are held locally (not sent to the inverter) until the user switches to Timed mode.
+  The Timed mode button is locked until at least one discharge slot is configured —
+  this prevents unrestricted battery export that occurs when `enable_discharge` is
+  set without slot constraints on Gen3 inverters. When switching to Timed, slots and
+  the mode flag are sent atomically so the inverter never sees `HR59=1` without
+  slot times. Pending slot configurations survive tab switches and app restarts
+  via localStorage persistence.
+
+- **Timed Discharge tooltip clarified**: Updated to "Battery covers home demand
+  automatically, plus follows your export schedule during slot times" to make clear
+  that dynamic home demand coverage is not lost when using timed export slots.
+
 ## [0.17.15] - 2026-06-09
 
 ### Fixed
