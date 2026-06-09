@@ -32,7 +32,10 @@ use crate::inverter::decoder::decode_snapshot;
 use crate::inverter::encoder::{ControlCommand, RegisterWrite};
 use crate::inverter::model::{BatteryMode, DeviceType, InverterSnapshot};
 use crate::modbus::client::ModbusClient;
-use crate::modbus::registers::{HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE_TARGET};
+use crate::modbus::registers::{
+    encode_hhmm, HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC,
+    HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET,
+};
 
 // ---------------------------------------------------------------------------
 // Connection state
@@ -793,6 +796,103 @@ fn persist_agile_state_sync(label: String) {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cosy slot register writes
+// ---------------------------------------------------------------------------
+
+/// Generate register writes to program a Cosy slot into the inverter's charge
+/// slot 1 registers and optionally enable charging.
+///
+/// When `active` is true (slot is currently running), writes the slot times,
+/// enables charging, and sets the target SOC. When `active` is false (preloading
+/// the next slot), writes only the slot times so the inverter has them ready
+/// for when the slot starts — but does NOT enable charging.
+///
+/// For three-phase models, uses the three-phase charge slot 1 registers.
+/// For Gen3+ models, also writes the per-slot target SOC in the HR 240-299 block.
+fn cosy_slot_register_writes(
+    slot: &crate::settings::CosySlot,
+    device_type: DeviceType,
+    active: bool,
+) -> Vec<RegisterWrite> {
+    let start = encode_hhmm(slot.start_hour, slot.start_minute);
+    let end = encode_hhmm(slot.end_hour, slot.end_minute);
+
+    let mut writes = Vec::new();
+
+    // Write slot times into the inverter's charge slot 1 registers.
+    if device_type.uses_three_phase_schedule_slots() {
+        // Three-phase models use HR 1113-1114 for charge slot 1.
+        use crate::modbus::registers::{
+            HR_3PH_CHARGE_SLOT_1_START, HR_3PH_CHARGE_SLOT_1_END,
+        };
+        writes.push(RegisterWrite { address: HR_3PH_CHARGE_SLOT_1_START, value: start });
+        writes.push(RegisterWrite { address: HR_3PH_CHARGE_SLOT_1_END, value: end });
+    } else {
+        // Single-phase models use HR 94-95 for charge slot 1.
+        writes.push(RegisterWrite { address: HR_CHARGE_SLOT_1_START, value: start });
+        writes.push(RegisterWrite { address: HR_CHARGE_SLOT_1_END, value: end });
+    }
+
+    if active {
+        // Enable charge so the inverter acts on the slot schedule.
+        writes.push(RegisterWrite { address: HR_ENABLE_CHARGE, value: 1 });
+        writes.push(RegisterWrite { address: HR_ENABLE_CHARGE_TARGET, value: 1 });
+        writes.push(RegisterWrite { address: HR_CHARGE_TARGET_SOC, value: slot.target_soc as u16 });
+    }
+
+    // For Gen3+/extended models, also write per-slot target SOC.
+    if active && device_type.uses_extended_schedule_slots() {
+        use crate::modbus::registers::HR_CHARGE_TARGET_SOC_1;
+        writes.push(RegisterWrite { address: HR_CHARGE_TARGET_SOC_1, value: slot.target_soc as u16 });
+    }
+
+    writes
+}
+
+/// Generate register writes to clear the inverter's charge slot 1 registers
+/// and disable charging (used when there's no next Cosy slot to preload).
+fn clear_cosy_slot_registers(device_type: DeviceType) -> Vec<RegisterWrite> {
+    let mut writes = Vec::new();
+
+    if device_type.uses_three_phase_schedule_slots() {
+        use crate::modbus::registers::{
+            HR_3PH_CHARGE_SLOT_1_START, HR_3PH_CHARGE_SLOT_1_END,
+        };
+        writes.push(RegisterWrite { address: HR_3PH_CHARGE_SLOT_1_START, value: 0 });
+        writes.push(RegisterWrite { address: HR_3PH_CHARGE_SLOT_1_END, value: 0 });
+    } else {
+        writes.push(RegisterWrite { address: HR_CHARGE_SLOT_1_START, value: 0 });
+        writes.push(RegisterWrite { address: HR_CHARGE_SLOT_1_END, value: 0 });
+    }
+
+    writes.push(RegisterWrite { address: HR_ENABLE_CHARGE, value: 0 });
+    writes.push(RegisterWrite { address: HR_ENABLE_CHARGE_TARGET, value: 0 });
+
+    writes
+}
+
+/// Execute a list of register writes to the inverter with inter-write delays.
+/// Returns `true` if all writes succeeded.
+async fn write_registers_to_inverter(
+    client: &mut ModbusClient,
+    writes: &[RegisterWrite],
+    label: &str,
+) -> bool {
+    let mut all_ok = true;
+    for w in writes {
+        match client.write_register(w.address, w.value).await {
+            Ok(()) => tracing::info!("{}: wrote reg {} = {}", label, w.address, w.value),
+            Err(e) => {
+                tracing::error!("{}: write reg {} failed: {e}", label, w.address);
+                all_ok = false;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+    }
+    all_ok
 }
 
 /// Returns `true` if any field was sanitized (fallback applied).
@@ -1933,6 +2033,10 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // after model detection for devices that use the HV BCU protocol.
                 let mut detected_hv_stacks: Vec<(u8, u8)> = Vec::new();
                 let mut hv_probe_done = false;
+                // Tracks which Cosy slot index was last preloaded into the
+                // inverter's charge slot registers. Only re-writes when the
+                // "next upcoming slot" changes (e.g. after a slot ends).
+                let mut cosy_last_preloaded_slot: Option<usize> = None;
 
                 // Restore cosy_active from persisted settings on restart.
                 // Without this, a client reboot during OR after a cosy slot
@@ -2771,6 +2875,20 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 }
 
                                 // ---- Cosy charging mode ----
+                                //
+                                // Writes Cosy slot schedules into the inverter's own charge slot
+                                // registers so the inverter follows the schedule independently.
+                                //
+                                // When a Cosy slot is ACTIVE: writes the current slot times +
+                                // enable_charge + target SOC to the inverter.
+                                //
+                                // When no Cosy slot is active: preloads the NEXT upcoming slot's
+                                // times into the inverter registers (with enable_charge=0) so the
+                                // inverter has the schedule ready. If there's no next slot, clears
+                                // the registers.
+                                //
+                                // This means if the app crashes, the inverter already has the
+                                // correct schedule loaded and can act on it.
                                 {
                                     let settings = &poll_settings;
                                     let now = chrono::Local::now();
@@ -2780,83 +2898,165 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     // disabled, treat as "not in slot" so any lingering cosy_active
                                     // flag gets cleared on the next poll (otherwise the inverter stays
                                     // force-charging after switching away from Cosy mode).
-                                    let slot_target_soc = if settings.cosy_enabled {
-                                        crate::settings::cosy_active_slot(now_minutes, &settings.cosy_slots)
+                                    let current_slot = if settings.cosy_enabled {
+                                        settings.cosy_slots.iter().enumerate().find(|(_, s)| s.enabled && s.contains_minutes(now_minutes))
                                     } else {
                                         None
                                     };
-                                    let in_slot = slot_target_soc.is_some();
-                                    let slot_target_soc = slot_target_soc.unwrap_or(100);
+                                    let in_slot = current_slot.is_some();
 
                                     let cosy_active = state.cosy_active.lock().await;
                                     if in_slot && !*cosy_active {
-                                        // Entering a cosy slot — start force charge.
-                                                                            tracing::info!("Cosy: entering slot, force-charging to {}%", slot_target_soc);
-                                            drop(cosy_active);
-                                            let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
-                                            let cmd = if use_3ph {
-                                                ControlCommand::ThreePhaseForceCharge { target_soc: slot_target_soc as u16 }
-                                            } else {
-                                                ControlCommand::ForceCharge { target_soc: slot_target_soc as u16 }
-                                            };
-                                            let mut all_writes_ok = true;
-                                            if let Ok(writes) = cmd.encode() {
-                                                for w in &writes {
-                                                    match client.write_register(w.address, w.value).await {
-                                                        Ok(()) => tracing::info!("Cosy: wrote reg {} = {}", w.address, w.value),
-                                                        Err(e) => {
-                                                            tracing::error!("Cosy: write reg {} failed: {e}", w.address);
-                                                            all_writes_ok = false;
-                                                        }
-                                                    }
-                                                    tokio::time::sleep(Duration::from_millis(1500)).await;
-                                                }
-                                            } else {
-                                                all_writes_ok = false;
-                                            }
+                                        // ---- Entering a cosy slot ----
+                                        // Write the active slot's times into the inverter's charge
+                                        // slot registers and enable charging.
+                                        let (slot_idx, cosy_slot) = current_slot.unwrap();
+                                        tracing::info!(
+                                            "Cosy: entering slot {} ({}:{:02}-{}:{:02}), target SOC {}%",
+                                            slot_idx,
+                                            cosy_slot.start_hour, cosy_slot.start_minute,
+                                            cosy_slot.end_hour, cosy_slot.end_minute,
+                                            cosy_slot.target_soc
+                                        );
+                                        drop(cosy_active);
 
-                                            if all_writes_ok {
-                                                *state.cosy_active.lock().await = true;
-                                                persist_cosy_active(true);
-                                            } else {
-                                                tracing::warn!("Cosy: force-charge writes failed — will retry on next poll");
-                                            }
-                                        } else if *cosy_active && !in_slot {
-                                            // Exiting a cosy slot (or cosy mode was disabled while
-                                            // active) — restore normal Eco mode.
-                                                                                                                tracing::info!("Cosy: exiting slot, restoring Eco mode");
-                                            drop(cosy_active);
-                                            let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
-                                            let cmd = if use_3ph {
-                                                ControlCommand::ThreePhaseCosyExit
-                                            } else {
-                                                ControlCommand::CosyExit
-                                            };
-                                            let mut all_writes_ok = true;
-                                            if let Ok(writes) = cmd.encode() {
-                                                for w in &writes {
-                                                    match client.write_register(w.address, w.value).await {
-                                                        Ok(()) => tracing::info!("Cosy: wrote reg {} = {}", w.address, w.value),
-                                                        Err(e) => {
-                                                            tracing::error!("Cosy: write reg {} failed: {e}", w.address);
-                                                            all_writes_ok = false;
-                                                        }
-                                                    }
-                                                    tokio::time::sleep(Duration::from_millis(1500)).await;
-                                                }
-                                            } else {
-                                                all_writes_ok = false;
-                                            }
+                                        let writes = cosy_slot_register_writes(
+                                            cosy_slot, snapshot.device_type, true,
+                                        );
+                                        let ok = write_registers_to_inverter(
+                                            &mut client, &writes, "Cosy enter",
+                                        ).await;
 
-                                            if all_writes_ok {
-                                                *state.cosy_active.lock().await = false;
-                                                persist_cosy_active(false);
+                                        if ok {
+                                            *state.cosy_active.lock().await = true;
+                                            persist_cosy_active(true);
+                                            // Mark the preloaded slot as stale since we're now active.
+                                            cosy_last_preloaded_slot = None;
+                                        } else {
+                                            tracing::warn!("Cosy: enter writes failed — will retry on next poll");
+                                        }
+                                    } else if *cosy_active && !in_slot {
+                                        // ---- Exiting a cosy slot ----
+                                        // Disable charging and preload the next upcoming slot's
+                                        // times (or clear if no next slot).
+                                        tracing::info!("Cosy: exiting slot, restoring Eco mode");
+                                        drop(cosy_active);
+
+                                        // First, disable charge and charge target.
+                                        let mut writes = vec![
+                                            RegisterWrite { address: HR_ENABLE_CHARGE, value: 0 },
+                                            RegisterWrite { address: HR_ENABLE_CHARGE_TARGET, value: 0 },
+                                        ];
+                                        // For three-phase models, also clear force flags.
+                                        if snapshot.device_type.uses_three_phase_schedule_slots() {
+                                            use crate::modbus::registers::{
+                                                HR_3PH_FORCE_CHARGE_ENABLE,
+                                                HR_3PH_AC_CHARGE_ENABLE,
+                                                HR_3PH_FORCE_DISCHARGE_ENABLE,
+                                            };
+                                            writes.push(RegisterWrite { address: HR_3PH_FORCE_CHARGE_ENABLE, value: 0 });
+                                            writes.push(RegisterWrite { address: HR_3PH_AC_CHARGE_ENABLE, value: 0 });
+                                            writes.push(RegisterWrite { address: HR_3PH_FORCE_DISCHARGE_ENABLE, value: 0 });
+                                        }
+                                        // Restore eco mode.
+                                        use crate::modbus::registers::HR_BATTERY_POWER_MODE;
+                                        writes.push(RegisterWrite { address: HR_BATTERY_POWER_MODE, value: 1 });
+                                        // Also clear enable_discharge to match CosyExit behaviour.
+                                        use crate::modbus::registers::HR_ENABLE_DISCHARGE;
+                                        writes.push(RegisterWrite { address: HR_ENABLE_DISCHARGE, value: 0 });
+
+                                        // Now preload the next upcoming slot's times (with
+                                        // enable_charge=0 so the inverter doesn't act on it yet).
+                                        if settings.cosy_enabled {
+                                            let next = crate::settings::find_next_cosy_slot(
+                                                now_minutes, &settings.cosy_slots,
+                                            );
+                                            if let Some((next_idx, next_slot, minutes_until)) = next {
+                                                tracing::info!(
+                                                    "Cosy: preloading next slot {} ({}:{:02}-{}:{:02}) in {} min",
+                                                    next_idx,
+                                                    next_slot.start_hour, next_slot.start_minute,
+                                                    next_slot.end_hour, next_slot.end_minute,
+                                                    minutes_until
+                                                );
+                                                writes.extend(cosy_slot_register_writes(
+                                                    next_slot, snapshot.device_type, false,
+                                                ));
                                             } else {
-                                                tracing::warn!("Cosy: exit writes failed — will retry on next poll");
+                                                tracing::info!("Cosy: no upcoming slot — clearing charge slot registers");
+                                                writes.extend(clear_cosy_slot_registers(snapshot.device_type));
                                             }
                                         } else {
-                                            drop(cosy_active);
+                                            // Cosy mode was disabled while active — clear registers.
+                                            writes.extend(clear_cosy_slot_registers(snapshot.device_type));
                                         }
+
+                                        let ok = write_registers_to_inverter(
+                                            &mut client, &writes, "Cosy exit",
+                                        ).await;
+
+                                        if ok {
+                                            *state.cosy_active.lock().await = false;
+                                            persist_cosy_active(false);
+                                            // Update the preloaded tracker to the next slot (or None).
+                                            cosy_last_preloaded_slot = if settings.cosy_enabled {
+                                                crate::settings::find_next_cosy_slot(
+                                                    now_minutes, &settings.cosy_slots,
+                                                ).map(|(idx, _, _)| idx)
+                                            } else {
+                                                None
+                                            };
+                                        } else {
+                                            tracing::warn!("Cosy: exit writes failed — will retry on next poll");
+                                        }
+                                    } else if !in_slot && !*cosy_active {
+                                        // ---- Idle: ensure the next upcoming slot is preloaded ----
+                                        // Only re-writes when the "next upcoming slot" index changes
+                                        // (e.g. after a slot ends or on first poll after connect).
+                                        drop(cosy_active);
+                                        if settings.cosy_enabled {
+                                            let next = crate::settings::find_next_cosy_slot(
+                                                now_minutes, &settings.cosy_slots,
+                                            );
+                                            let next_idx = next.as_ref().map(|(idx, _, _)| *idx);
+                                            // Only write when the next slot changes or on first poll.
+                                            if next_idx != cosy_last_preloaded_slot {
+                                                if let Some((next_idx, next_slot, minutes_until)) = next {
+                                                    tracing::info!(
+                                                        "Cosy: preloading next slot {} ({}:{:02}-{}:{:02}) in {} min",
+                                                        next_idx,
+                                                        next_slot.start_hour, next_slot.start_minute,
+                                                        next_slot.end_hour, next_slot.end_minute,
+                                                        minutes_until
+                                                    );
+                                                    let writes = cosy_slot_register_writes(
+                                                        next_slot, snapshot.device_type, false,
+                                                    );
+                                                    let ok = write_registers_to_inverter(
+                                                        &mut client, &writes, "Cosy preload",
+                                                    ).await;
+                                                    if ok {
+                                                        cosy_last_preloaded_slot = Some(next_idx);
+                                                    }
+                                                } else {
+                                                    // No upcoming slot — clear registers if they were set.
+                                                    if cosy_last_preloaded_slot.is_some() {
+                                                        tracing::info!("Cosy: no upcoming slot — clearing charge slot registers");
+                                                        let writes = clear_cosy_slot_registers(snapshot.device_type);
+                                                        let ok = write_registers_to_inverter(
+                                                            &mut client, &writes, "Cosy clear",
+                                                        ).await;
+                                                        if ok {
+                                                            cosy_last_preloaded_slot = None;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        // Already in an active cosy slot — nothing to do.
+                                        drop(cosy_active);
+                                    }
                                 }
 
                                 // ---- Agile Octopus mode ----

@@ -98,6 +98,48 @@ pub fn cosy_active_slot(now_minutes: u16, slots: &[CosySlot]) -> Option<u8> {
     None
 }
 
+/// Find the next upcoming enabled Cosy slot after `now_minutes`.
+///
+/// Returns `(slot_index, &CosySlot, minutes_until_start)`. Scans today first,
+/// then wraps around midnight to check the next day. Returns `None` if there
+/// are no enabled slots at all.
+pub fn find_next_cosy_slot<'a>(
+    now_minutes: u16,
+    slots: &'a [CosySlot],
+) -> Option<(usize, &'a CosySlot, u16)> {
+    let enabled: Vec<(usize, &CosySlot)> = slots
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.enabled)
+        .collect();
+    if enabled.is_empty() {
+        return None;
+    }
+
+    let now = now_minutes as i32;
+    let day_minutes: i32 = 24 * 60;
+
+    let mut best: Option<(usize, &'a CosySlot, i32)> = None;
+    for (idx, slot) in &enabled {
+        let start = slot.start_hour as i32 * 60 + slot.start_minute as i32;
+        // Minutes until this slot starts (may wrap past midnight).
+        let until = (start - now).rem_euclid(day_minutes);
+        // If the slot is currently active, `until` would be 0 and we should
+        // skip it — we want the NEXT slot, not the current one.
+        if slot.contains_minutes(now_minutes) {
+            continue;
+        }
+        match best {
+            None => best = Some((*idx, *slot, until)),
+            Some((_, _, best_until)) if until < best_until => {
+                best = Some((*idx, *slot, until));
+            }
+            _ => {}
+        }
+    }
+    best.map(|(idx, slot, until)| (idx, slot, until as u16))
+}
+
 /// Application settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -736,5 +778,103 @@ mod tests {
         assert_eq!(cosy_active_slot(15, &slots), Some(100));
         // At 00:45, second slot matches
         assert_eq!(cosy_active_slot(45, &slots), Some(80));
+    }
+
+    // ======================================================================
+    // find_next_cosy_slot tests
+    // ======================================================================
+
+    #[test]
+    fn find_next_slot_basic() {
+        let slots = vec![
+            CosySlot {
+                enabled: true,
+                start_hour: 2,
+                start_minute: 0,
+                end_hour: 5,
+                end_minute: 30,
+                target_soc: 100,
+            },
+            CosySlot {
+                enabled: true,
+                start_hour: 13,
+                start_minute: 0,
+                end_hour: 16,
+                end_minute: 0,
+                target_soc: 80,
+            },
+            CosySlot {
+                enabled: true,
+                start_hour: 20,
+                start_minute: 0,
+                end_hour: 22,
+                end_minute: 0,
+                target_soc: 100,
+            },
+        ];
+        // At 01:00, next slot is slot 0 (starts 02:00, 60 min away)
+        let (idx, _, until) = find_next_cosy_slot(60, &slots).unwrap();
+        assert_eq!(idx, 0);
+        assert_eq!(until, 60);
+        // At 10:00, next slot is slot 1 (starts 13:00, 180 min away)
+        let (idx, _, until) = find_next_cosy_slot(10 * 60, &slots).unwrap();
+        assert_eq!(idx, 1);
+        assert_eq!(until, 180);
+        // At 17:00, next slot is slot 2 (starts 20:00, 180 min away)
+        let (idx, _, until) = find_next_cosy_slot(17 * 60, &slots).unwrap();
+        assert_eq!(idx, 2);
+        assert_eq!(until, 180);
+        // At 23:00, wraps to next day: slot 0 (starts 02:00, 180 min away)
+        let (idx, _, until) = find_next_cosy_slot(23 * 60, &slots).unwrap();
+        assert_eq!(idx, 0);
+        assert_eq!(until, 180);
+    }
+
+    #[test]
+    fn find_next_slot_skips_currently_active() {
+        let slots = vec![
+            CosySlot {
+                enabled: true,
+                start_hour: 2,
+                start_minute: 0,
+                end_hour: 5,
+                end_minute: 0,
+                target_soc: 100,
+            },
+            CosySlot {
+                enabled: true,
+                start_hour: 13,
+                start_minute: 0,
+                end_hour: 16,
+                end_minute: 0,
+                target_soc: 80,
+            },
+        ];
+        // At 03:00 (inside slot 0), next should be slot 1 (starts 13:00, 600 min)
+        let (idx, _, until) = find_next_cosy_slot(3 * 60, &slots).unwrap();
+        assert_eq!(idx, 1);
+        assert_eq!(until, 600);
+        // At 14:00 (inside slot 1), wraps to next day: slot 0 (starts 02:00, 720 min)
+        let (idx, _, until) = find_next_cosy_slot(14 * 60, &slots).unwrap();
+        assert_eq!(idx, 0);
+        assert_eq!(until, 720);
+    }
+
+    #[test]
+    fn find_next_slot_returns_none_when_no_enabled() {
+        let slots = vec![CosySlot {
+            enabled: false,
+            start_hour: 2,
+            start_minute: 0,
+            end_hour: 5,
+            end_minute: 0,
+            target_soc: 100,
+        }];
+        assert!(find_next_cosy_slot(0, &slots).is_none());
+    }
+
+    #[test]
+    fn find_next_slot_returns_none_when_empty() {
+        assert!(find_next_cosy_slot(0, &[] as &[CosySlot]).is_none());
     }
 }

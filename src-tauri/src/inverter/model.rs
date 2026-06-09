@@ -341,18 +341,25 @@ impl DeviceType {
 
     /// Maximum number of charge schedule slots this device supports.
     ///
-    /// - AC Coupled and Gen1 Hybrid: **1** charge slot (HR 94-95)
+    /// - AC Coupled, Gen1 Hybrid, and Gen2 Hybrid: **1** charge slot (HR 94-95)
     /// - Gen3/AIO/HV/Gen4 and three-phase families: up to **10** slots
     /// - Other single-phase inverters: **2** slots
+    ///
+    /// Gen2 hybrids physically have the HR 31-32 register pair but the firmware
+    /// does not honour a second charge slot — the official GivEnergy app and
+    /// GivTCP both expose only one charge slot for Gen2.
     pub fn max_charge_slots(&self) -> u8 {
         match self {
-            Self::ACCoupled | Self::ACCoupledMk2 | Self::Gen1Hybrid => 1,
+            Self::ACCoupled | Self::ACCoupledMk2 | Self::Gen1Hybrid | Self::Gen2Hybrid => 1,
             dt if dt.uses_extended_schedule_slots() => 10,
             _ => 2,
         }
     }
 
     /// Maximum number of discharge schedule slots this device supports.
+    ///
+    /// Gen2 hybrids support 2 discharge slots (HR 56-57 and HR 44-45) unlike
+    /// charge slots where only 1 is functional.
     pub fn max_discharge_slots(&self) -> u8 {
         match self {
             Self::ACCoupled | Self::ACCoupledMk2 | Self::Gen1Hybrid => 1,

@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.17] - 2026-06-09
+
+### Changed
+
+- **Cosy charging now programs the inverter's own schedule registers**: Instead of
+  using ForceCharge/CosyExit (app-managed charge state), the Cosy state machine now
+  writes the current slot's times directly into the inverter's charge slot 1 registers
+  (HR 94-95 / HR 1113-1114) with `enable_charge=1` and target SOC. If the app crashes
+  mid-slot, the inverter follows the loaded schedule independently.
+
+- **Next Cosy slot preloaded into inverter registers**: When no Cosy slot is active,
+  the poll loop preloads the next upcoming slot's times into the inverter registers
+  (with `enable_charge=0`). The inverter always has the schedule ready — if the app
+  crashes between slots, the inverter will start charging at the right time on its own.
+  If there are no upcoming slots, the registers are cleared.
+
+- **Only re-writes preload when slot changes**: A `cosy_last_preloaded_slot` tracker
+  prevents unnecessary Modbus traffic — the slot times are only written to the
+  inverter when the next slot index actually changes.
+
+### Fixed
+
+- **Gen2 Hybrid correctly limited to 1 charge slot**: Gen2 inverters physically have
+  the HR 31-32 register pair but firmware does not honour a second charge slot.
+  The official GivEnergy app and GivTCP both expose only one charge slot for Gen2.
+  `max_charge_slots()` now returns 1 for Gen2, matching the reference libraries.
+
 ## [0.17.16] - 2026-06-09
 
 ### Changed
