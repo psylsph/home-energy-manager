@@ -9,6 +9,19 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import { fetchHistory, apiGet, isTauri } from '../lib/api';
+import {
+  HISTORY_CHART_GRID_PROPS,
+  HISTORY_RANGES,
+  HISTORY_RANGE_MS,
+  getHistoryRangeDomain,
+  getHistoryXAxisMinTickGap,
+  getHistoryXAxisTicks,
+  formatHistoryXAxisTick,
+  isRollingHistoryRange,
+  shouldRefreshHistoryRange,
+  shouldTrimHistoryRangeLeadingGap,
+  trimDomainStartToFirstDataPoint,
+} from '../lib/historyRangeConfig';
 import type { HistoryRange, PollSettings, TariffConfig } from '../lib/types';
 
 // ---------------------------------------------------------------------------
@@ -89,17 +102,6 @@ function removeSpikes(points: TimePoint[], field: string): TimePoint[] {
 // Constants
 // ---------------------------------------------------------------------------
 
-const RANGES: { key: HistoryRange; label: string }[] = [
-  { key: '1h', label: '1h' },
-  { key: '6h', label: '6h' },
-  { key: '24h', label: '24h' },
-  { key: '7d', label: '7d' },
-  { key: '30d', label: '30d' },
-  { key: 'month', label: 'Month' },
-  { key: '6m', label: '6m' },
-  { key: '1y', label: '1y' },
-];
-
 const TABS: { key: MetricTab; label: string }[] = [
   { key: 'battery', label: 'Battery' },
   { key: 'solar', label: 'Solar' },
@@ -107,44 +109,6 @@ const TABS: { key: MetricTab; label: string }[] = [
   { key: 'home', label: 'Home' },
   { key: 'cost', label: 'Cost' },
 ];
-
-function alignDown(ts: number, range: HistoryRange): number {
-  const d = new Date(ts);
-  if (range === '1h') {
-    d.setMinutes(0, 0, 0);
-  } else if (range === '6h') {
-    d.setMinutes(0, 0, 0);
-    d.setHours(Math.floor(d.getHours() / 6) * 6);
-  } else {
-    d.setHours(0, 0, 0, 0);
-  }
-  return d.getTime();
-}
-
-/** Return [startOfMonthMs, endOfMonthMs] for the given month offset (0 = current). */
-function getMonthBoundaryMs(offset: number): [number, number] {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = now.getMonth(); // 0-11
-  // Go back `offset` months
-  let targetMonth = month - offset;
-  let targetYear = year;
-  while (targetMonth < 0) {
-    targetMonth += 12;
-    targetYear -= 1;
-  }
-  // Start of target month (local midnight of the 1st)
-  const start = new Date(targetYear, targetMonth, 1, 0, 0, 0, 0).getTime();
-  // End = start of next month
-  let nextMonth = targetMonth + 1;
-  let nextYear = targetYear;
-  if (nextMonth > 11) {
-    nextMonth = 0;
-    nextYear += 1;
-  }
-  const end = new Date(nextYear, nextMonth, 1, 0, 0, 0, 0).getTime();
-  return [start, end];
-}
 
 function isOffPeak(ts: number, start: string, end: string): boolean {
   const d = new Date(ts);
@@ -319,20 +283,6 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
 // Helpers
 // ---------------------------------------------------------------------------
 
-function formatXAxis(ts: number, range: HistoryRange): string {
-  const d = new Date(ts);
-  if (range === '1h' || range === '6h' || range === '24h') {
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
-  if (range === '7d' || range === '30d') {
-    return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
-  }
-  if (range === 'month') {
-    return String(d.getDate());
-  }
-  return d.toLocaleDateString([], { month: 'short', year: 'numeric' });
-}
-
 function formatWindowLabel(range: HistoryRange, offset: number): string {
   if (range === 'month') {
     const now = new Date();
@@ -347,107 +297,36 @@ function formatWindowLabel(range: HistoryRange, offset: number): string {
     const d = new Date(targetYear, targetMonth, 1);
     return d.toLocaleDateString([], { month: 'long', year: 'numeric' });
   }
+  if (range === 'today') {
+    if (offset === 0) return 'Today';
+    const now = new Date();
+    const target = new Date(now.getFullYear(), now.getMonth(), now.getDate() - offset);
+    return target.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+  }
   if (offset === 0) return 'Now';
-  const rangeMs: Record<string, number> = {
-    '1h': 3600000,
-    '6h': 21600000,
-    '24h': 86400000,
-    '7d': 604800000,
-    '30d': 2592000000,
-    '6m': 15552000000,
-    '1y': 31536000000,
-  };
-  const ms = rangeMs[range] ?? 86400000;
+  const ms = HISTORY_RANGE_MS[range] ?? HISTORY_RANGE_MS['24h'] ?? 86400000;
   const end = new Date(Date.now() - offset * ms);
   const start = new Date(end.getTime() - ms);
-  const fmt = (d: Date) =>
-    range === '1h' || range === '6h' || range === '24h'
-      ? d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-      : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const fmt = (d: Date) => {
+    if (range === '1h' || range === '6h' || range === '12h' || range === '24h') {
+      return d.toLocaleString([], {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+    }
+    if (range === '6m' || range === '1y') {
+      return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+    }
+    return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  };
   return `${fmt(start)} — ${fmt(end)}`;
 }
 
 // ---------------------------------------------------------------------------
 // Single chart component
 // ---------------------------------------------------------------------------
-
-/** Generate clean evenly-spaced x-axis tick timestamps for any range.
- *
- * Returns `undefined` for ranges shorter than 7d (Recharts' auto-ticks
- * work well for intra-day views).
- */
-function getXAxisTicks(range: HistoryRange, domain: [number, number]): number[] | undefined {
-  const startMs = domain[0];
-  const endMs = domain[1];
-  const spanMs = endMs - startMs;
-  const startDate = new Date(startMs);
-
-  // --- Intra-day ranges: explicit hour/minute ticks ---
-  if (range === '1h') {
-    const ticks: number[] = [];
-    const cursor = new Date(startDate);
-    cursor.setMinutes(0, 0, 0); // align to minute 0
-    while (cursor.getTime() < endMs) {
-      ticks.push(cursor.getTime());
-      cursor.setMinutes(cursor.getMinutes() + 10); // every 10 min
-    }
-    return ticks;
-  }
-
-  if (range === '6h') {
-    const ticks: number[] = [];
-    const cursor = new Date(startDate);
-    cursor.setMinutes(0, 0, 0); // align to top of hour
-    while (cursor.getTime() < endMs) {
-      ticks.push(cursor.getTime());
-      cursor.setHours(cursor.getHours() + 1); // every 1 hour
-    }
-    return ticks;
-  }
-
-  if (range === '24h') {
-    const ticks: number[] = [];
-    const cursor = new Date(startDate);
-    cursor.setMinutes(0, 0, 0);
-    while (cursor.getTime() < endMs) {
-      ticks.push(cursor.getTime());
-      cursor.setHours(cursor.getHours() + 3); // every 3 hours
-    }
-    return ticks;
-  }
-
-  // --- 6m / 1y: month-level ticks ---
-  if (range === '6m' || range === '1y') {
-    const endDate = new Date(endMs);
-    const totalMonths = (endDate.getFullYear() - startDate.getFullYear()) * 12
-      + (endDate.getMonth() - startDate.getMonth());
-    const stepMonths = Math.max(1, Math.floor(totalMonths / 6));
-    const ticks: number[] = [];
-    for (let i = 0; i <= totalMonths; i += stepMonths) {
-      const m = startDate.getMonth() + i;
-      const y = startDate.getFullYear() + Math.floor(m / 12);
-      const t = new Date(y, m % 12, 1);
-      ticks.push(t.getTime());
-    }
-    return ticks;
-  }
-
-  // --- 7d / 30d / month: day-level ticks every ~5 days + last day ---
-  const totalDays = spanMs / 86400000;
-  const numDays = Math.round(totalDays);
-  const step = Math.max(1, Math.floor(numDays / 6));
-  const daysTicks: number[] = [];
-  for (let i = 0; i < numDays; i += step) {
-    const t = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate() + i);
-    daysTicks.push(t.getTime());
-  }
-  // Always include the last day
-  const lastDayTs = endMs - 86400000;
-  if (daysTicks.length === 0 || Math.abs(daysTicks[daysTicks.length - 1] - lastDayTs) > 3600000) {
-    daysTicks.push(lastDayTs);
-  }
-  return daysTicks;
-}
 
 function ChartCard({ chart, data, range, domain, ticks }: {
   chart: ChartDef;
@@ -528,18 +407,18 @@ function ChartCard({ chart, data, range, domain, ticks }: {
               </linearGradient>
             ))}
           </defs>
-          <CartesianGrid strokeDasharray="4 4" stroke="var(--color-grid-stroke)" strokeWidth={2} />
+          <CartesianGrid {...HISTORY_CHART_GRID_PROPS} />
           <XAxis
             dataKey="t"
             type="number"
             domain={domain}
             ticks={ticks}
-            tickFormatter={(v: number) => formatXAxis(v, range)}
+            tickFormatter={(v: number) => formatHistoryXAxisTick(v, range)}
             stroke="#8B949E"
             tick={{ fontSize: 11, style: { fontWeight: 700 } }}
             tickLine={false}
             axisLine={false}
-            minTickGap={range === '1h' || range === '6h' || range === '24h' ? 30 : 40}
+            minTickGap={getHistoryXAxisMinTickGap(range)}
           />
           <YAxis
             stroke="#8B949E"
@@ -721,43 +600,12 @@ export default function HistoryPage() {
   const [data, setData] = useState<Record<string, TimePoint[]>>({});
   
   const now = useNow();
-  const rangeMs: Record<string, number> = {
-    '1h': 3600000,
-    '6h': 21600000,
-    '24h': 86400000,
-    '7d': 604800000,
-    '30d': 2592000000,
-    '6m': 15552000000,
-    '1y': 31536000000,
-  };
-
-  // For calendar month view, use exact month boundaries as the domain.
-  // This ensures the x-axis always spans the full 1st to last day of the
-  // month regardless of data availability.
-  const monthBoundary = range === 'month' ? getMonthBoundaryMs(offset) : null;
-  const xDomain: [number, number] = range === 'month' && monthBoundary
-    ? monthBoundary
-    : (() => {
-        const windowMs = rangeMs[range] ?? 86400000;
-        const domainEnd = now - offset * windowMs;
-        const alignedEnd = alignDown(domainEnd, range) + windowMs;
-        return [alignedEnd - windowMs, alignedEnd];
-      })();
-
-  // Trim the domain start to the earliest data point so the line reaches
-  // the y-axis instead of leaving a gap. Only for 1h/6h (not 24h — the
-  // user expects 24h to always span midnight to midnight).
-  const effectiveDomain: [number, number] = (() => {
-    if (range !== '1h' && range !== '6h') return xDomain;
-    let firstTs = Infinity;
-    for (const pts of Object.values(data)) {
-      if (pts.length > 0 && pts[0].t < firstTs) firstTs = pts[0].t;
-    }
-    if (firstTs !== Infinity && firstTs > xDomain[0]) {
-      return [firstTs, xDomain[1]];
-    }
-    return xDomain;
-  })();
+  const rolling = isRollingHistoryRange(range);
+  const refreshKey = shouldRefreshHistoryRange(range, offset) ? now : 0;
+  const xDomain: [number, number] = getHistoryRangeDomain(range, offset, now);
+  const displayDomain = shouldTrimHistoryRangeLeadingGap(range)
+    ? trimDomainStartToFirstDataPoint(xDomain, data)
+    : xDomain;
 
   const [importTariffCfg, setImportTariffCfg] = useState<TariffConfig>({
     peak_rate: 0.285, off_peak_rate: 0.09, off_peak_start: '00:30', off_peak_end: '05:30',
@@ -795,7 +643,7 @@ export default function HistoryPage() {
         ...charts.flatMap((c) => c.requires ?? []),
       ]),
     ];
-    fetchHistory(range, allFields, offset)
+    fetchHistory(range, allFields, offset, rolling)
       .then((result) => {
         if (!cancelled) {
           const cleaned: Record<string, TimePoint[]> = {};
@@ -811,7 +659,7 @@ export default function HistoryPage() {
         }
       })
     return () => { cancelled = true; };
-  }, [tab, range, offset, importTariffCfg, exportTariffCfg]);
+  }, [tab, range, offset, importTariffCfg, exportTariffCfg, refreshKey, rolling]);
 
   const handleTabChange = (t: MetricTab) => {
     setTab(t);
@@ -855,7 +703,7 @@ export default function HistoryPage() {
 
       {/* Time range */}
       <div className="flex items-center gap-2 bg-bg-surface rounded-xl p-2 overflow-x-auto">
-        {RANGES.map((r) => (
+        {HISTORY_RANGES.map((r) => (
           <button
             key={r.key}
             onClick={() => handleRangeChange(r.key)}
@@ -927,8 +775,8 @@ export default function HistoryPage() {
               chart={chart}
               data={data}
               range={range}
-              domain={effectiveDomain}
-              ticks={getXAxisTicks(range, effectiveDomain)}
+              domain={displayDomain}
+              ticks={getHistoryXAxisTicks(range, displayDomain)}
             />
           ))}
         </div>

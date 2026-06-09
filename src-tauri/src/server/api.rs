@@ -801,17 +801,19 @@ pub async fn sync_clock(State(state): State<Arc<AppState>>) -> (StatusCode, Json
 
 #[derive(Debug, Deserialize)]
 pub struct HistoryQuery {
-    /// Time range shorthand: "1h", "6h", "24h", "7d", "30d", "6m", "1y"
+    /// Time range shorthand: "1h", "6h", "12h", "24h", "today", "7d", "30d", "6m", "1y"
     pub range: Option<String>,
     /// Comma-separated field names
     pub fields: Option<String>,
     /// Number of windows to page back (default 0)
     pub offset: Option<i64>,
+    /// Use a rolling [now - range, now] window instead of an aligned bucket.
+    pub rolling: Option<bool>,
 }
 
 /// GET /api/history — aggregated time-series data for charts.
 ///
-/// Query params: `range`, `fields`, `offset`.
+/// Query params: `range`, `fields`, `offset`, `rolling`.
 /// Returns `{ok: true, data: {field: [{t, v}, ...]}}`.
 pub async fn get_history(
     State(state): State<Arc<AppState>>,
@@ -820,20 +822,43 @@ pub async fn get_history(
     let range_str = params.range.as_deref().unwrap_or("24h");
     let fields_str = params.fields.as_deref().unwrap_or("soc");
     let offset = params.offset.unwrap_or(0);
+    let rolling = params.rolling.unwrap_or(false);
 
     let (range_secs, bucket_secs) = match range_str {
         "1h" => (3600, 30),
         "6h" => (3600 * 6, 60),
+        "12h" => (3600 * 12, 120),
         "24h" => (86400, 300),
+        "today" => (86400, 300),
         "7d" => (86400 * 7, 1800),
         "30d" => (86400 * 30, 7200),
         "6m" => (86400 * 180, 43200),
         "1y" => (86400 * 365, 86400),
         "month" => (0, 3600), // calendar month — uses explicit window
-        _ => return error_response("Invalid range. Use: 1h, 6h, 24h, 7d, 30d, 6m, 1y, month"),
+        _ => return error_response("Invalid range. Use: 1h, 6h, 12h, 24h, today, 7d, 30d, 6m, 1y, month"),
     };
 
-    let explicit_window: Option<(i64, i64)> = if range_str == "month" {
+    let explicit_window: Option<(i64, i64)> = if rolling && range_str != "month" && range_str != "today" {
+        let end_ts = chrono::Utc::now().timestamp() - offset * range_secs;
+        Some((end_ts - range_secs, end_ts))
+    } else if range_str == "today" {
+        let now = chrono::Local::now();
+        let start_date = now.date_naive() - chrono::Duration::days(offset);
+        let start_local = start_date.and_hms_opt(0, 0, 0).unwrap();
+        let start_local_dt = chrono::Local
+            .from_local_datetime(&start_local)
+            .earliest()
+            .unwrap();
+        let end_date = start_date.succ_opt().unwrap();
+        let end_local = end_date.and_hms_opt(0, 0, 0).unwrap();
+        let end_ts = chrono::Local
+            .from_local_datetime(&end_local)
+            .earliest()
+            .unwrap()
+            .timestamp();
+
+        Some((start_local_dt.timestamp(), end_ts))
+    } else if range_str == "month" {
         // Compute calendar month boundaries in local time.
         let now = chrono::Local::now();
         // Apply offset (month offset, since month windows have variable length)
