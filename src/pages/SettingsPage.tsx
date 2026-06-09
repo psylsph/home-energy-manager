@@ -44,6 +44,9 @@ export default function SettingsPage() {
   const [port, setPort] = useState(8899);
   const [serial, setSerial] = useState('');
 
+/// Snap a poll interval to the nearest valid value (5, 10, 15, or 20).
+const VALID_INTERVALS = [5, 10, 15, 20];
+
   // Discover
   const [discovering, setDiscovering] = useState(false);
   const [discoverResults, setDiscoverResults] = useState<DiscoveredInverter[]>([]);
@@ -51,13 +54,6 @@ export default function SettingsPage() {
 
   // Refresh interval
   const [intervalSecs, setIntervalSecs] = useState(20);
-
-  // Snap a poll interval to the nearest valid value (5, 10, 15, or 20).
-  // Used on load so the UI always shows one of the 4 buttons as active.
-  const VALID_INTERVALS = [5, 10, 15, 20];
-  const clampInterval = (v: number) => VALID_INTERVALS.reduce((a, b) =>
-    Math.abs(b - v) < Math.abs(a - v) ? b : a
-  );
 
   // HTTP server port
   const [httpPort, setHttpPort] = useState(7337);
@@ -86,6 +82,9 @@ export default function SettingsPage() {
 
   // Load settings on mount
   useEffect(() => {
+    const clampInterval = (v: number) => [5, 10, 15, 20].reduce((a, b) =>
+      Math.abs(b - v) < Math.abs(a - v) ? b : a
+    );
     (async () => {
       try {
         const res = await apiGet<{ok: boolean, data: PollSettings}>('/api/settings');
