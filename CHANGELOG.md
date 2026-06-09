@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.18] - 2026-06-09
+
+### Changed
+
+- **Battery temperature now sourced from BMS module average instead of inverter register IR(56)**: The inverter's own temperature register (`t_battery` on IR(56)) is frequently stale or garbage across all inverter models — not just three-phase where it was never populated, but single-phase too. The new `derive_battery_fields_from_bms()` function always overrides battery_temperature with the **average module temperature** from the BMS (BCU cluster for HV stacks, LV module average for everything else). Falls back to IR(56) only if no BMS data is available at all.
+
 ## [0.17.17] - 2026-06-09
 
 ### Changed
