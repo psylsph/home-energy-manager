@@ -33,12 +33,15 @@ type PowerSeriesKey =
   | 'gridPower'
   | 'homePower';
 
+type PowerChartKey = PowerSeriesKey | 'soc';
+
 interface PowerRow {
   t: number;
   solarPower: number | null;
   batteryPower: number | null;
   gridPower: number | null;
   homePower: number | null;
+  soc: number | null;
 }
 
 interface PowerHistoryState {
@@ -47,7 +50,7 @@ interface PowerHistoryState {
   error: string;
 }
 
-const HISTORY_FIELDS = ['solar_power', 'battery_power', 'grid_power', 'home_power'];
+const HISTORY_FIELDS = ['solar_power', 'battery_power', 'grid_power', 'home_power', 'soc'];
 const EMPTY_HISTORY_DATA: Record<string, TimePoint[]> = {};
 
 const POWER_SERIES: { key: PowerSeriesKey; label: string; color: string }[] = [
@@ -59,6 +62,7 @@ const POWER_SERIES: { key: PowerSeriesKey; label: string; color: string }[] = [
 
 const HOME_POWER_SERIES = POWER_SERIES.find((series) => series.key === 'homePower');
 const DIRECTIONAL_POWER_SERIES = POWER_SERIES.filter((series) => series.key !== 'homePower');
+const SOC_SERIES = { key: 'soc', label: 'Battery SOC', color: '#A78BFA' } as const;
 
 const SPIKE_THRESHOLD_W = 4000;
 
@@ -91,6 +95,7 @@ function buildPowerRows(data: Record<string, TimePoint[]>): PowerRow[] {
   const battery = pointsByTimestamp(data.battery_power);
   const grid = pointsByTimestamp(data.grid_power);
   const home = pointsByTimestamp(data.home_power);
+  const soc = pointsByTimestamp(data.soc);
   const timestamps = new Set<number>();
 
   for (const field of HISTORY_FIELDS) {
@@ -104,6 +109,7 @@ function buildPowerRows(data: Record<string, TimePoint[]>): PowerRow[] {
     const batteryValue = battery.get(t);
     const gridValue = grid.get(t);
     const homeValue = home.get(t);
+    const socValue = soc.get(t);
 
     return {
       t,
@@ -111,6 +117,7 @@ function buildPowerRows(data: Record<string, TimePoint[]>): PowerRow[] {
       batteryPower: batteryValue == null ? null : -batteryValue,
       gridPower: gridValue == null ? null : -gridValue,
       homePower: homeValue == null ? null : Math.max(homeValue, 0),
+      soc: socValue == null ? null : Math.min(100, Math.max(0, socValue)),
     };
   });
 }
@@ -131,6 +138,10 @@ function formatAxisWatts(value: number): string {
   const abs = Math.abs(value);
   if (abs >= 1000) return `${value < 0 ? '-' : ''}${Math.round(abs / 100) / 10}k`;
   return `${Math.round(value)}`;
+}
+
+function formatAxisPercent(value: number): string {
+  return `${Math.round(value)}%`;
 }
 
 function useNow(): number {
@@ -308,6 +319,13 @@ export default function PowerPage() {
                 <span className="text-text-secondary">{series.label}</span>
               </span>
             ))}
+            <span className="flex items-center gap-1.5 text-xs font-sans font-semibold">
+              <span
+                className="inline-block w-5 h-0.5 shrink-0"
+                style={{ backgroundColor: SOC_SERIES.color }}
+              />
+              <span className="text-text-secondary">{SOC_SERIES.label}</span>
+            </span>
           </div>
         </div>
 
@@ -329,7 +347,7 @@ export default function PowerPage() {
           </div>
         ) : (
           <ResponsiveContainer width="100%" height={320}>
-            <ComposedChart data={rows} margin={{ top: 10, right: 10, left: -12, bottom: 0 }}>
+            <ComposedChart data={rows} margin={{ top: 10, right: 4, left: -12, bottom: 0 }}>
               <defs>
                 {DIRECTIONAL_POWER_SERIES.map((series) => (
                   <linearGradient
@@ -346,7 +364,12 @@ export default function PowerPage() {
                 ))}
               </defs>
               <CartesianGrid {...HISTORY_CHART_GRID_PROPS} />
-              <ReferenceLine y={0} stroke="rgba(255,255,255,0.28)" strokeWidth={1.5} />
+              <ReferenceLine
+                yAxisId="power"
+                y={0}
+                stroke="rgba(255,255,255,0.28)"
+                strokeWidth={1.5}
+              />
               <XAxis
                 dataKey="t"
                 type="number"
@@ -360,12 +383,24 @@ export default function PowerPage() {
                 minTickGap={getHistoryXAxisMinTickGap(range)}
               />
               <YAxis
+                yAxisId="power"
                 stroke="#8B949E"
                 tick={{ fontSize: 11, style: { fontWeight: 700 } }}
                 tickLine={false}
                 axisLine={false}
                 domain={yDomain}
                 tickFormatter={(v: number) => formatAxisWatts(v)}
+              />
+              <YAxis
+                yAxisId="soc"
+                orientation="right"
+                width={36}
+                stroke={SOC_SERIES.color}
+                tick={{ fontSize: 11, style: { fontWeight: 700 }, fill: SOC_SERIES.color }}
+                tickLine={false}
+                axisLine={false}
+                domain={[0, 100]}
+                tickFormatter={(v: number) => formatAxisPercent(v)}
               />
               <Tooltip
                 contentStyle={{
@@ -381,7 +416,10 @@ export default function PowerPage() {
                 }}
                 formatter={(value, name) => {
                   const n = typeof value === 'number' ? value : Number(value);
-                  const key = String(name) as PowerSeriesKey;
+                  const key = String(name) as PowerChartKey;
+                  if (key === SOC_SERIES.key) {
+                    return [formatAxisPercent(n), SOC_SERIES.label];
+                  }
                   const label = POWER_SERIES.find((series) => series.key === key)?.label ?? name;
                   const batteryDirection = n < 0 ? 'Charge' : n > 0 ? 'Discharge' : '';
                   const gridDirection = n < 0 ? 'Export' : n > 0 ? 'Import' : '';
@@ -396,6 +434,7 @@ export default function PowerPage() {
               {DIRECTIONAL_POWER_SERIES.map((series) => (
                 <Area
                   key={series.key}
+                  yAxisId="power"
                   type="monotone"
                   dataKey={series.key}
                   stroke={series.color}
@@ -408,6 +447,7 @@ export default function PowerPage() {
               ))}
               {HOME_POWER_SERIES && (
                 <Line
+                  yAxisId="power"
                   type="monotone"
                   dataKey={HOME_POWER_SERIES.key}
                   stroke={HOME_POWER_SERIES.color}
@@ -418,6 +458,18 @@ export default function PowerPage() {
                   connectNulls
                 />
               )}
+              <Line
+                yAxisId="soc"
+                type="monotone"
+                dataKey={SOC_SERIES.key}
+                stroke={SOC_SERIES.color}
+                strokeWidth={2}
+                strokeDasharray="5 4"
+                dot={false}
+                activeDot={{ r: 4 }}
+                isAnimationActive={false}
+                connectNulls
+              />
             </ComposedChart>
           </ResponsiveContainer>
         )}
