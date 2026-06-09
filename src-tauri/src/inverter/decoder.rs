@@ -807,10 +807,6 @@ fn decode_input_1060_1119(data: &[u16], snap: &mut InverterSnapshot) {
     let pf_raw = signed(get_reg(data, 8)) as f32 * 0.001;
     // IR(1073-1074): p_grid_apparent (uint32 /10 VA).
     let p_apparent = uint32(get_reg(data, 13), get_reg(data, 14)) as f32 * 0.1;
-    // IR(1083-1085): p_load_ac1..3 (/10 W) — real per-phase load power.
-    let p_load_ac1 = get_reg(data, 23) as f32 * 0.1;
-    let p_load_ac2 = get_reg(data, 24) as f32 * 0.1;
-    let p_load_ac3 = get_reg(data, 25) as f32 * 0.1;
 
     snap.meters.push(MeterData {
         address: 0x00, // synthetic "built-in grid CT"
@@ -821,11 +817,15 @@ fn decode_input_1060_1119(data: &[u16], snap: &mut InverterSnapshot) {
         i_phase_2: i2,
         i_phase_3: i3,
         i_total,
-        // No per-phase grid import/export registers exist; use per-phase load
-        // power as the best available proxy for the grid CT direction.
-        p_active_phase_1: -p_load_ac1 as i32,
-        p_active_phase_2: -p_load_ac2 as i32,
-        p_active_phase_3: -p_load_ac3 as i32,
+        // Three-phase inverters have no per-phase signed grid power registers.
+        // IR(1083-1085) carry unsigned load-only power (p_load_ac1..3), not net
+        // grid flow. IR(1091-1093) carry unsigned export-only power (p_out_ac1..3).
+        // Neither can produce a signed net per-phase value, so set to 0 (unknown).
+        // The reference library (givenergy-modbus) and GivTCP both keep these
+        // separate — they do not synthesise per-phase grid flow.
+        p_active_phase_1: 0,
+        p_active_phase_2: 0,
+        p_active_phase_3: 0,
         p_active_total: -p_grid,
         p_reactive_total: 0, // no reactive register available
         p_apparent_total: p_apparent as i32,
@@ -1648,10 +1648,12 @@ mod tests {
             snap.meters[0].p_active_total, -600,
             "Meter total = -grid_power (positive = import)"
         );
-        // Per-phase load power from IR(1083-1085) — raw values /10 W
-        assert_eq!(snap.meters[0].p_active_phase_1, -70, "L1 = -p_load_ac1");
-        assert_eq!(snap.meters[0].p_active_phase_2, -80, "L2 = -p_load_ac2");
-        assert_eq!(snap.meters[0].p_active_phase_3, -60, "L3 = -p_load_ac3");
+        // No per-phase signed grid power registers exist for three-phase —
+        // p_active_phase_* is set to 0 (unknown), matching the reference
+        // libraries which keep per-phase load/export separate from grid flow.
+        assert_eq!(snap.meters[0].p_active_phase_1, 0, "L1 = unknown (no per-phase grid power register)");
+        assert_eq!(snap.meters[0].p_active_phase_2, 0, "L2 = unknown");
+        assert_eq!(snap.meters[0].p_active_phase_3, 0, "L3 = unknown");
         // Power factor from IR(1068) — raw 980 → 0.980
         assert!((snap.meters[0].pf_total - 0.980).abs() < 0.001, "PF from register");
         // Apparent power from IR(1073-1074) — raw 15000 → 1500VA

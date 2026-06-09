@@ -995,7 +995,7 @@ fn sanitize_snapshot(
     // Typical UK home peak is ~10 kW; even with EV charging rarely exceeds 15 kW.
     // Also reject negative home power (can't have negative consumption).
     let max_home_power: i32 = 15_000;
-    if snap.home_power.abs() > max_home_power || snap.home_power < 0 {
+    if snap.home_power.abs() > max_home_power {
         if let Some(p) = prev {
             tracing::warn!(
                 raw = snap.home_power,
