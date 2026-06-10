@@ -62,6 +62,9 @@ body {
 }
 
 /* Safe area inset utilities for iOS PWA home-screen mode */
+@utility pt-safe {
+  padding-top: env(safe-area-inset-top, 0px);
+}
 @utility pb-safe {
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }

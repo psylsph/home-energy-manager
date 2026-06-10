@@ -8,14 +8,14 @@ interface Props {
 
 // Radial layout — Inverter hub at centre, four nodes at cardinal points.
 const W = 520;
-const H = 425;
+const H = 440;
 
 const NODES = {
-  inverter: { cx: W / 2, cy: 207, color: '#22D3EE', label: 'Inverter' },
-  solar:    { cx: W / 2, cy: 50,  color: '#F59E0B', label: 'Solar' },
-  home:     { cx: 55,    cy: 207, color: '#14B8A6', label: 'Home' },
-  grid:     { cx: W - 55, cy: 207, color: '#EF4444', label: 'Grid' },
-  battery:  { cx: W / 2, cy: 365, color: '#6366F1', label: 'Battery' },
+  inverter: { cx: W / 2, cy: 222, color: '#22D3EE', label: 'Inverter' },
+  solar:    { cx: W / 2, cy: 65,  color: '#F59E0B', label: 'Solar' },
+  home:     { cx: 55,    cy: 222, color: '#14B8A6', label: 'Home' },
+  grid:     { cx: W - 55, cy: 222, color: '#EF4444', label: 'Grid' },
+  battery:  { cx: W / 2, cy: 380, color: '#6366F1', label: 'Battery' },
 };
 
 const MODE_LABELS: Record<string, string> = {
@@ -135,7 +135,7 @@ function FlowAnimation({ flow, maxPower }: { flow: FlowDef; maxPower: number }) 
       </line>
       {/* Arrow at midpoint */}
       <polygon
-        points="0,-6 12,0 0,6"
+        points="0,-8 16,0 0,8"
         fill="#22D3EE"
         transform={`translate(${mx},${my}) rotate(${angle})`}
       />
@@ -173,7 +173,7 @@ function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
       <circle cx={cx} cy={cy} r={r} fill="#0D1117" stroke={safeColor} strokeWidth={hub ? 2.5 : 2} />
       {/* Label */}
       <text
-        x={cx} y={cy - (hub ? 15 : 14)}
+        x={cx} y={cy - (hub ? 15 : 16)}
         textAnchor="middle"
         fill={safeColor}
         fontSize={hub ? 11 : 11.5}
@@ -185,7 +185,7 @@ function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
       </text>
       {/* Value */}
       <text
-        x={cx} y={cy + (hub ? 9 : 7)}
+        x={cx} y={cy + (hub ? 9 : 5)}
         textAnchor="middle"
         fill="#F0F6FC"
         fontSize="18"
@@ -196,7 +196,7 @@ function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
       </text>
       {/* Unit / secondary info */}
       <text
-        x={cx} y={cy + (hub ? 25 : 22)}
+        x={cx} y={cy + (hub ? 25 : 19)}
         textAnchor="middle"
         fill="#8B949E"
         fontSize="11"
@@ -336,7 +336,7 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
         {/* Battery mode label */}
         <text
           x={W / 2}
-          y={402}
+          y={417}
           textAnchor="middle"
           fill="#8B949E"
           style={{ fontSize: 10, fontFamily: 'sans-serif' }}
@@ -346,7 +346,7 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
         {s.agile_active && (
           <text
             x={W / 2}
-            y={417}
+            y={432}
             textAnchor="middle"
             fill="#F59E0B"
             style={{ fontSize: 9, fontFamily: 'sans-serif' }}
