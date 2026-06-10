@@ -336,7 +336,7 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
         {/* Battery mode label */}
         <text
           x={W / 2}
-          y={418}
+          y={400}
           textAnchor="middle"
           fill="#8B949E"
           style={{ fontSize: 10, fontFamily: 'sans-serif' }}
@@ -346,7 +346,7 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
         {s.agile_active && (
           <text
             x={W / 2}
-            y={430}
+            y={423}
             textAnchor="middle"
             fill="#F59E0B"
             style={{ fontSize: 9, fontFamily: 'sans-serif' }}
