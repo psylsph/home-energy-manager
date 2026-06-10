@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.22] - 2026-06-10
+
+### Fixed
+
+- **Battery temperature now always from BMS module average** for all inverter types, including HV stacks (three-phase, AIO, HV Gen3). Previously the BCU cluster register IR(68) was used for HV stacks, which returns stale or garbage values on some battery firmware versions (e.g. DA0.011 — [#48](https://github.com/psylsph/home-energy-manager/issues/48)). Capacity, voltage, current, and SOC still come from the BCU cluster when available.
+- **Refactored power field sanitization** into a shared `check_power_field()` helper with the 10-readings suspect-count release method. Battery, grid, solar, and home power now all use the same consistent logic instead of battery/grid/solar having a simpler (no-release) check.
+
+### Added
+
+- **PWA / remote access guide** in README — how to use Home Energy Manager from a phone via Tailscale, including PWA home-screen install and Funnel alternative.
+
 ## [0.17.21] - 2026-06-10
 
 ### Added

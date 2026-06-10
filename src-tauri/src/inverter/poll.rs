@@ -661,12 +661,14 @@ fn carry_forward_battery_modules_with(
 /// populated on three-phase hardware, so `decode_input_0_59` /
 /// `decode_holding_0_59` leave either garbage (IR 56) or zero (HR 55) behind.
 ///
-/// The authoritative source for three-phase battery temperature and capacity
-/// is the battery itself. For HV stacks that is the BCU cluster read
-/// (`hv_cluster`); for LV packs it is the per-module BMS read at 0x32. This
-/// derives the snapshot-level fields from whichever source is available —
-/// mirroring what single-phase gets directly from the inverter block. Only
-/// applies to devices whose telemetry lives in the 1000-range blocks;
+/// The authoritative source for battery temperature is always the BMS
+/// per-module cell temperature probes, averaged across all modules. This
+/// is more reliable than the BCU cluster's IR(68) register (which can
+/// return stale or garbage values on some battery firmware versions, e.g.
+/// DA0.011 — see #48) and far more reliable than the inverter's IR(56).
+/// Capacity, voltage, current, and SOC for three-phase/HV still come from
+/// the BCU cluster when available, as the BMU blocks don't expose those.
+///
 /// Override battery temperature from BMS module data for ALL device types.
 ///
 /// The inverter register block IR(56) frequently carries stale or garbage
@@ -684,14 +686,24 @@ fn derive_battery_fields_from_bms(
 ) {
     let is_three_phase = snap.device_type.needs_three_phase_input_blocks();
 
-    if let Some(cluster) = hv_cluster {
-        // --- HV stack: BCU cluster data available ---
-        // Always use BCU cluster temperature for battery temperature
-        // (more reliable than IR(56) which is often garbage).
-        snap.battery_temperature = cluster.temperature;
+    // --- Temperature: always from BMS module average when available ---
+    // The BCU cluster IR(68) and inverter IR(56) are both unreliable
+    // (stale/garbage on some firmware versions, e.g. DA0.011 — #48).
+    // The per-module cell temperature probes are the authoritative source.
+    if !snap.battery_modules.is_empty() {
+        let count = snap.battery_modules.len() as f32;
+        let temp_sum: f32 = snap.battery_modules.iter().map(|m| m.temperature).sum();
+        snap.battery_temperature = temp_sum / count;
+    } else if is_three_phase {
+        // No BMS module data at all on a three-phase inverter: clear
+        // the garbage that IR(56) leaves behind.
+        snap.battery_temperature = f32::NAN;
+    }
+    // Single-phase with no BMS modules: keep IR(56) as fallback.
 
+    // --- HV cluster: capacity, voltage, current, SOC (NOT temperature) ---
+    if let Some(cluster) = hv_cluster {
         if is_three_phase {
-            // For three-phase, also derive capacity, voltage, current, SOC.
             let nominal_v = snap.device_type.nominal_battery_voltage();
             snap.battery_capacity_kwh = cluster.total_capacity_ah() * nominal_v / 1000.0;
             if cluster.battery_voltage > 0.0 {
@@ -703,30 +715,17 @@ fn derive_battery_fields_from_bms(
             }
         }
     } else if snap.battery_modules.is_empty() {
-        // --- No BMS data ---
+        // --- No BMS data at all ---
         if is_three_phase {
-            // Clear garbage from IR(56)/HR(55) decode paths.
-            snap.battery_temperature = f32::NAN;
             snap.battery_capacity_kwh = 0.0;
             snap.max_battery_power_w = snap.device_type.max_battery_power_w();
         }
-        // Single-phase with no BMS: keep the IR(56) value as fallback.
         return;
-    } else {
-        // --- LV BMS module data available ---
-        // Temperature: average module temperature across all modules.
-        // More representative than the per-module max (which could
-        // be a single outlier cell) and far more reliable than IR(56)
-        // which frequently carries stale or garbage data.
-        let count = snap.battery_modules.len() as f32;
-        let temp_sum: f32 = snap.battery_modules.iter().map(|m| m.temperature).sum();
-        snap.battery_temperature = temp_sum / count;
-
-        if is_three_phase {
-            let total_cap_ah: f32 = snap.battery_modules.iter().map(|m| m.capacity_ah).sum();
-            let nominal_v = snap.device_type.nominal_battery_voltage();
-            snap.battery_capacity_kwh = total_cap_ah * nominal_v / 1000.0;
-        }
+    } else if is_three_phase {
+        // --- LV BMS module data only (no HV cluster) ---
+        let total_cap_ah: f32 = snap.battery_modules.iter().map(|m| m.capacity_ah).sum();
+        let nominal_v = snap.device_type.nominal_battery_voltage();
+        snap.battery_capacity_kwh = total_cap_ah * nominal_v / 1000.0;
     }
 
     // Max battery power for three-phase: device hardware limit capped at
@@ -931,6 +930,57 @@ struct ConsecutiveSuspectCounts(HashMap<&'static str, u8>);
 /// and accept the raw value as legitimate.
 const SUSPECT_RELEASE_THRESHOLD: u8 = 10;
 
+/// Apply the 10-readings suspect-count method to a signed power field.
+/// Returns `true` if the value was sanitized (replaced with previous).
+fn check_power_field(
+    raw_value: i32,
+    prev_value: Option<i32>,
+    limit: i32,
+    label: &'static str,
+    suspect_counts: &mut ConsecutiveSuspectCounts,
+) -> (i32, bool) {
+    if raw_value.abs() <= limit {
+        suspect_counts.0.remove(label);
+        return (raw_value, false);
+    }
+
+    // If the previous value was also out-of-range and matches raw,
+    // we already accepted this in a prior cycle.
+    let already_accepted = prev_value.is_some_and(|pv| raw_value == pv && pv.abs() > limit);
+
+    if already_accepted {
+        suspect_counts.0.remove(label);
+        return (raw_value, false);
+    }
+
+    let count = suspect_counts.0.entry(label).or_insert(0);
+    *count += 1;
+    if *count >= SUSPECT_RELEASE_THRESHOLD {
+        tracing::info!(
+            raw = raw_value,
+            count = *count,
+            "{label} persistently out of range — accepting as legitimate"
+        );
+        suspect_counts.0.remove(label);
+        (raw_value, false)
+    } else if let Some(pv) = prev_value {
+        tracing::warn!(
+            raw = raw_value,
+            prev = pv,
+            count = *count,
+            "{label} out of range — using previous"
+        );
+        (pv, true)
+    } else {
+        tracing::debug!(
+            raw = raw_value,
+            count = *count,
+            "{label} out of range — no previous, accepting raw"
+        );
+        (raw_value, false)
+    }
+}
+
 fn sanitize_snapshot(
     snap: &mut InverterSnapshot,
     prev: Option<&InverterSnapshot>,
@@ -941,21 +991,34 @@ fn sanitize_snapshot(
 ) -> bool {
     let mut sanitized = false;
     let max_battery_power: i32 = 10_000; // 10 kW — residential battery limit
+    let max_grid_power: i32 = 10_000; // 10 kW — typical UK single-phase supply
+    let max_solar_power: i32 = 10_000; // 10 kW — residential PV limit
+    let max_home_power: i32 = 15_000; // 15 kW — includes EV charging margin
 
-    // Battery power: reject impossible spikes (>10 kW)
-    if snap.battery_power.abs() > max_battery_power {
-        if let Some(p) = prev {
-            tracing::warn!(
-                raw = snap.battery_power,
-                prev = p.battery_power,
-                "Battery power out of range — using previous value"
-            );
-            snap.battery_power = p.battery_power;
-        } else {
-            snap.battery_power = 0;
-        }
-        sanitized = true;
-    }
+    // Power fields: apply the 10-readings suspect-count method.
+    // On first out-of-range encounter, fall back to previous (safe).
+    // If the value persists for SUSPECT_RELEASE_THRESHOLD cycles,
+    // accept it as legitimate (conservative threshold was wrong for
+    // this installation — e.g. 100 A supply, three-phase, commercial).
+    let prev_battery = prev.map(|p| p.battery_power);
+    let (val, was_sanitized) = check_power_field(snap.battery_power, prev_battery, max_battery_power, "battery_power", suspect_counts);
+    snap.battery_power = val;
+    sanitized |= was_sanitized;
+
+    let prev_grid = prev.map(|p| p.grid_power);
+    let (val, was_sanitized) = check_power_field(snap.grid_power, prev_grid, max_grid_power, "grid_power", suspect_counts);
+    snap.grid_power = val;
+    sanitized |= was_sanitized;
+
+    let prev_solar = prev.map(|p| p.solar_power);
+    let (val, was_sanitized) = check_power_field(snap.solar_power, prev_solar, max_solar_power, "solar_power", suspect_counts);
+    snap.solar_power = val;
+    sanitized |= was_sanitized;
+
+    let prev_home = prev.map(|p| p.home_power);
+    let (val, was_sanitized) = check_power_field(snap.home_power, prev_home, max_home_power, "home_power", suspect_counts);
+    snap.home_power = val;
+    sanitized |= was_sanitized;
 
     // SOC: if 0 but power is flowing, clearly a garbled register
     if snap.soc == 0 && (snap.solar_power > 0 || snap.battery_power != 0 || snap.grid_power != 0) {
@@ -1015,21 +1078,7 @@ fn sanitize_snapshot(
         sanitized = true;
     }
 
-    // Grid power: reject impossible values (>10 kW for a typical UK single-phase supply)
-    let max_grid_power: i32 = 10_000;
-    if snap.grid_power.abs() > max_grid_power {
-        if let Some(p) = prev {
-            tracing::warn!(
-                raw = snap.grid_power,
-                prev = p.grid_power,
-                "Grid power out of range — using previous"
-            );
-            snap.grid_power = p.grid_power;
-        } else {
-            snap.grid_power = 0;
-        }
-        sanitized = true;
-    }
+
 
     // Grid voltage:
     //   Single-phase: UK nominal 230V ±10% (207–253V), anything outside 180–280V
@@ -1071,21 +1120,7 @@ fn sanitize_snapshot(
         sanitized = true;
     }
 
-    // Solar power: reject impossible values (>10 kW residential)
-    let max_solar_power: i32 = 10_000;
-    if snap.solar_power > max_solar_power {
-        if let Some(p) = prev {
-            tracing::warn!(
-                raw = snap.solar_power,
-                prev = p.solar_power,
-                "Solar power out of range — using previous"
-            );
-            snap.solar_power = p.solar_power;
-        } else {
-            snap.solar_power = 0;
-        }
-        sanitized = true;
-    }
+
 
     // Battery module voltage: reject impossible values.
     // LV packs run ~48-57V, HV packs up to ~345V. Anything above 500V is
@@ -1111,60 +1146,7 @@ fn sanitize_snapshot(
         }
     }
 
-    // Home power: reject impossible values on first encounter, but accept
-    // them if they persist for SUSPECT_RELEASE_THRESHOLD consecutive cycles.
-    // Typical UK home peak is ~10 kW; even with EV charging rarely exceeds
-    // 15 kW on single-phase. But three-phase installations can legitimately
-    // exceed this (16 kW+ with EV + heat pump + normal loads).
-    // Also reject negative home power (can't have negative consumption).
-    let max_home_power: i32 = 15_000;
-    if snap.home_power.abs() > max_home_power {
-        // If the value matches the previous reading and that was also
-        // out of range, we've already accepted this value in a prior
-        // cycle (or prior session) — accept it silently.
-        let already_accepted = prev
-            .is_some_and(|p| snap.home_power == p.home_power && p.home_power.abs() > max_home_power);
 
-        if already_accepted {
-            suspect_counts.0.remove("home_power");
-        } else {
-            let count = suspect_counts.0.entry("home_power").or_insert(0);
-            *count += 1;
-            if *count >= SUSPECT_RELEASE_THRESHOLD {
-                tracing::info!(
-                    raw = snap.home_power,
-                    count = *count,
-                    "Home power persistently out of range — accepting as legitimate"
-                );
-                suspect_counts.0.remove("home_power");
-            } else if let Some(p) = prev {
-                tracing::warn!(
-                    raw = snap.home_power,
-                    prev = p.home_power,
-                    count = *count,
-                    "Home power out of range — using previous"
-                );
-                snap.home_power = p.home_power;
-                sanitized = true;
-            } else {
-                // No previous reading to fall back to, and the value hasn't
-                // yet reached the release threshold. Accept the raw value
-                // rather than clamping to 0 — a single corrupt reading will
-                // be corrected on the next cycle (when a real prev exists),
-                // and a legitimate high load will be caught by the
-                // already_accepted check on the next cycle.
-                tracing::debug!(
-                    raw = snap.home_power,
-                    count = *count,
-                    "Home power out of range — no previous, accepting raw"
-                );
-                // Don't set sanitized — keep the raw value
-            }
-        }
-    } else {
-        // Normal reading — reset the suspect counter for home power
-        suspect_counts.0.remove("home_power");
-    }
 
     // Daily energy totals (`today_*_kwh`): cumulative kWh counters that
     // monotonically increase from 0 and reset to 0 at midnight.
@@ -3664,9 +3646,11 @@ mod tests {
     }
 
     #[test]
-    fn derive_battery_fields_from_bms_from_hv_cluster() {
+    fn derive_battery_fields_from_bms_from_hv_cluster_with_modules() {
         // HV stack: 5 modules × 51Ah at 76.8V nominal (three-phase) = 19.58 kWh.
         // Matches a GIV-BAT-17.0-HV (5 × GIV-BAT-3.4-HV) on a GIV-3HY-11.
+        // Temperature comes from BMU module average, NOT the BCU cluster IR(68)
+        // (which can return stale/garbage values on some firmware — #48).
         use crate::inverter::decoder::HvBcuCluster;
         let cluster = HvBcuCluster {
             pack_software_version: "GA000005".to_string(),
@@ -3680,7 +3664,7 @@ mod tests {
             battery_soc_max: 87,
             battery_soc_min: 85,
             battery_soh: 99,
-            temperature: 29.5,
+            temperature: 6.0, // Stale/garbage from IR(68) on firmware DA0.011
             nominal_capacity_ah: 51.0,
             remaining_capacity_ah: 44.0,
         };
@@ -3693,18 +3677,91 @@ mod tests {
         snap.battery_temperature = 999.0;
         snap.battery_capacity_kwh = 999.0;
         snap.max_battery_power_w = 0;
-        snap.battery_modules = vec![]; // BMU reads land in commit 2
+        // BMU modules with accurate cell-probe temperatures.
+        snap.battery_modules = vec![
+            BatteryModule {
+                index: 0,
+                temperature: 18.5,
+                ..Default::default()
+            },
+            BatteryModule {
+                index: 1,
+                temperature: 19.0,
+                ..Default::default()
+            },
+            BatteryModule {
+                index: 2,
+                temperature: 18.8,
+                ..Default::default()
+            },
+            BatteryModule {
+                index: 3,
+                temperature: 19.2,
+                ..Default::default()
+            },
+            BatteryModule {
+                index: 4,
+                temperature: 18.6,
+                ..Default::default()
+            },
+        ];
         derive_battery_fields_from_bms(&mut snap, Some(&cluster));
         // Capacity: 5 × 51Ah × 76.8V / 1000 = 19.58 kWh.
         assert!((snap.battery_capacity_kwh - 19.584).abs() < 0.01);
-        // Temperature from the BCU cluster, not the garbage IR(56).
-        assert!((snap.battery_temperature - 29.5).abs() < 0.01);
+        // Temperature from BMU module average (NOT cluster IR(68) = 6.0).
+        // (18.5 + 19.0 + 18.8 + 19.2 + 18.6) / 5 = 18.82
+        assert!((snap.battery_temperature - 18.82).abs() < 0.01);
         // Voltage/current overridden authoritatively from the BCU.
         assert!((snap.battery_voltage - 384.0).abs() < 0.01);
         assert!((snap.battery_current - -12.5).abs() < 0.01);
         // SOC fallback from the BCU's highest module SOC.
         assert_eq!(snap.soc, 87);
         // Max power: min(6000 hardware, 19584W/2) = 6000.
+        assert_eq!(snap.max_battery_power_w, 6000);
+    }
+
+    #[test]
+    fn derive_battery_fields_from_bms_hv_cluster_no_modules() {
+        // HV cluster available but BMU reads failed — no modules.
+        // Temperature is NaN (don't trust stale IR(68)), but capacity/
+        // voltage/current/SOC still derived from the cluster.
+        use crate::inverter::decoder::HvBcuCluster;
+        let cluster = HvBcuCluster {
+            pack_software_version: "GA000005".to_string(),
+            number_of_modules: 5,
+            cells_per_module: 24,
+            cluster_cell_voltage: 3.2,
+            status: 0x01,
+            battery_voltage: 384.0,
+            battery_current: -12.5,
+            battery_power_w: -4800,
+            battery_soc_max: 87,
+            battery_soc_min: 85,
+            battery_soh: 99,
+            temperature: 6.0,
+            nominal_capacity_ah: 51.0,
+            remaining_capacity_ah: 44.0,
+        };
+        let mut snap = InverterSnapshot::default();
+        snap.device_type = DeviceType::ThreePhase;
+        snap.battery_temperature = 999.0;
+        snap.battery_capacity_kwh = 999.0;
+        snap.battery_voltage = 0.0;
+        snap.battery_current = 0.0;
+        snap.soc = 0;
+        snap.max_battery_power_w = 0;
+        snap.battery_modules = vec![];
+        derive_battery_fields_from_bms(&mut snap, Some(&cluster));
+        // Temperature: NaN — no modules to average, and IR(68) is untrusted.
+        assert!(
+            snap.battery_temperature.is_nan(),
+            "expected NaN when no modules available, got {}",
+            snap.battery_temperature
+        );
+        // Capacity, voltage, current, SOC still derived from cluster.
+        assert!((snap.battery_capacity_kwh - 19.584).abs() < 0.01);
+        assert!((snap.battery_voltage - 384.0).abs() < 0.01);
+        assert_eq!(snap.soc, 87);
         assert_eq!(snap.max_battery_power_w, 6000);
     }
 

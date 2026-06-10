@@ -14,6 +14,61 @@
 
 </div>
 
+## 📱 Using Home Energy Manager as a Mobile App Away From Home
+
+Home Energy Manager runs a built-in web server (port **7337** by default). Combined with [**Tailscale**](https://tailscale.com) (a free, zero-config VPN), you can access it from anywhere on your phone — no cloud dependency, no public port forwarding, no static IP required.
+
+### How it works
+
+1. **Install Tailscale** on the machine running Home Energy Manager (e.g. a Raspberry Pi or always-on PC) and on your phone.
+2. Both devices join the same **Tailnet** (your private mesh network).
+3. Open your phone browser to `http://<tailscale-ip>:7337` or save it as a home-screen PWA.
+
+Tailscale encrypts traffic end-to-end using WireGuard, so your inverter data never touches the public internet in plain text.
+
+### Quick start
+
+```bash
+# Install Tailscale on Linux (server)
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+
+# Make a note of the Tailscale IP shown after login
+# (or find it later with: tailscale ip -4)
+```
+
+Then on your phone:
+1. Install the **Tailscale** app from the App Store / Play Store
+2. Log in to the same Tailscale account — your devices appear automatically
+3. Open Safari / Chrome and go to `http://<tailscale-ip>:7337`
+4. Tap **Share → Add to Home Screen** for a native-app-like icon
+
+> 💡 **Tip**: Make sure the Home Energy Manager machine is set to run on boot (`Settings → Startup` or a systemd service) so you don't need to log in remotely to start it.
+
+### Alternative: Tailscale Funnel (no client needed on the phone)
+
+If you don't want Tailscale installed on your phone, you can use **Tailscale Funnel** to expose the web UI via a public `.ts.net` URL:
+
+```bash
+# After Tailscale is installed and logged in:
+sudo tailscale serve --bg --https 443 127.0.0.1:7337
+sudo tailscale funnel --bg 443
+```
+
+Your app will be available at `https://<machine-name>.<tailnet-name>.ts.net` — accessible from any browser, with Tailscale handling TLS termination. Note that Funnel is a Tailscale **paid feature** (Free tier has limited quota).
+
+### Why this beats the cloud
+
+| | Cloud portal | Tailscale + HEM |
+|---|---|---|
+| **Latency** | ~1–3s delayed | Real-time (local LAN speed)|
+| **Internet required?** | Always | Only when away from home |
+| **Cloud dependency** | Full (GE servers) | None |
+| **Data privacy** | Via GivEnergy | End-to-end encrypted |
+| **Cost** | Free | Free (HEM + Tailscale)
+
+---
+
 ## Important Information about the GivEnergy-Local Renaming
 
 The user-facing name is changing to **Home Energy Manager**. The Linux package/launcher and macOS/Windows app names now use the new name, while the executable remains `givenergy-local` and existing settings/history stay in `~/.givenergy-local` (or `%USERPROFILE%\.givenergy-local` on Windows), so upgrades continue to use the same `settings.json` and `history.db`.

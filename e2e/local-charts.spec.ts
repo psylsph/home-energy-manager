@@ -112,3 +112,48 @@ test.describe('Charts - Shared Range (Simulator)', () => {
     await expect(page.getByRole('button', { name: '6h', exact: true })).toHaveAttribute('aria-pressed', 'true');
   });
 });
+
+test.describe('PWA Manifest', () => {
+  test('manifest.json is served and is valid JSON', async ({ baseUrl }) => {
+    const resp = await fetch(`${baseUrl}/manifest.json`);
+    expect(resp.ok).toBe(true);
+    expect(resp.headers.get('content-type')).toMatch(/json/);
+
+    const manifest = await resp.json();
+    expect(manifest.name).toBe('Home Energy Manager');
+    expect(manifest.short_name).toBe('Energy Manager');
+    expect(manifest.display).toBe('standalone');
+    expect(manifest.theme_color).toBe('#0D1117');
+  });
+
+  test('manifest.json declares Android icon sizes', async ({ baseUrl }) => {
+    const resp = await fetch(`${baseUrl}/manifest.json`);
+    const manifest = await resp.json();
+
+    expect(Array.isArray(manifest.icons)).toBe(true);
+    const sizes = manifest.icons.map((i: { sizes: string }) => i.sizes);
+    expect(sizes).toContain('192x192');
+    expect(sizes).toContain('512x512');
+
+    // Verify the icon files are actually served
+    for (const icon of manifest.icons) {
+      const iconResp = await fetch(`${baseUrl}${icon.src}`);
+      expect(iconResp.ok).toBe(true);
+      expect(iconResp.headers.get('content-type')).toMatch(/png/);
+    }
+  });
+
+  test('index.html links to manifest', async ({ page }) => {
+    await page.goto('/');
+    const manifestLink = page.locator('link[rel="manifest"]');
+    await expect(manifestLink).toHaveAttribute('href', '/manifest.json');
+  });
+
+  test('dist contains apple touch icons', async ({ baseUrl }) => {
+    const resp152 = await fetch(`${baseUrl}/apple-touch-icon-152x152.png`);
+    expect(resp152.ok).toBe(true);
+
+    const resp180 = await fetch(`${baseUrl}/apple-touch-icon-180x180.png`);
+    expect(resp180.ok).toBe(true);
+  });
+});
