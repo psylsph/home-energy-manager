@@ -20,7 +20,9 @@
     "lint": "eslint .",
     "lint:md": "markdownlint . --ignore node_modules --ignore src-tauri/target",
     "test:e2e": "playwright test",
-    "test:e2e:headed": "playwright test --headed"
+    "test:e2e:headed": "playwright test --headed",
+    "test:local": "playwright test --config playwright.local.config.ts",
+    "test:local:headed": "playwright test --config playwright.local.config.ts --headed"
   },
   "devDependencies": {
     "@eslint/js": "^9.27.0",

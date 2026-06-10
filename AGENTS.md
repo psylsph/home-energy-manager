@@ -11,7 +11,7 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 - **Frontend**: React 19 + TypeScript + Vite 9 + Tailwind CSS 4 + Zustand + Recharts + React Router 7
 - **Backend**: Tauri 2 desktop shell; embedded Axum HTTP/WS server on port **7337**
 - **Modbus**: Custom Rust TCP client to GivEnergy data adapter (port **8899**) aligned with [givenergy-modbus](https://github.com/dewet22/givenergy-modbus) reference library and [GivTCP](https://github.com/dewet22/giv_tcp)
-- **Testing**: Rust unit tests (244) + integration tests with a mock TCP server that simulates GivEnergy dongle behaviour + Playwright end-to-end tests for UI behaviour
+- **Testing**: Rust unit tests (244) + integration tests with a mock TCP server that simulates GivEnergy dongle behaviour + Playwright end-to-end tests for UI behaviour. Local-only E2E tests use the [GivEnergy Simulator](https://github.com/psylsph/givenergy-simulator) to exercise the real Modbus protocol stack.
 - **References**: Local clones at `~/repos/givenergy-modbus` and `~/repos/giv_tcp` are the source of truth for register layout, slot maps, slave addressing, and command encoding
 
 ## Prerequisites
@@ -33,7 +33,7 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 | `cargo tauri dev` | Dev mode with Tauri window + Vite + hot-reload |
 | `cargo tauri build` | Production build of the desktop app |
 | `docker build .` | Docker container build (verifies full multi-stage build) |
-| `npm run test:e2e` | Playwright end-to-end tests (requires `npm run build` + `cd src-tauri && cargo build --release` first) |
+| `npm run test:e2e` | Playwright end-to-end tests (requires `npm run build` + `cd src-tauri && cargo build --release` first) |\n| `npm run test:local` | Local-only E2E tests using GivEnergy Simulator. **MUST NOT BE RUN ON GITHUB pipeline**. Requires simulator build at `~/repos/givenergy-simulator/target/release/sim-api` |
 
 Order for full verification: `cargo clippy` → `npm run lint` → `npm run lint:md` → `npm run build` (typechecks) → `cargo test` in `src-tauri/` → `npm run test:e2e` (end-to-end tests) → `docker build .` (container build).
 

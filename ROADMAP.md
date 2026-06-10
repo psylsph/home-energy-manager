@@ -70,6 +70,56 @@ causing a blank page until the cache expires (reported as "up to 10 minutes").
 
 This is standard SPA deployment practice (same pattern as nginx/Caddy/Vercel).
 
+### GivCloud DNS re-configuration (dongle-level)
+
+**Status**: Under investigation. Related to [giv_tcp issue #546](https://github.com/britkat1980/giv_tcp/issues/546).
+
+If GivEnergy Ltd were to go under, the `givenergy.cloud` domain could be sold to an untrusted third party, potentially giving them control over all customer installations — even those using local control.
+
+#### Discovery
+
+The GivEnergy dongle exposes a plaintext configuration protocol on **telnet port 23**. Using `netcat`:
+
+```
+$ nc 192.168.X.XXX 23
+Login as:admin
+Password:admin
+CMD>cfg
+CFG>prof show
+#PROFILE
+#VER_2_1
+...
+M2M_NET2_ENABLE=1
+M2M_NET2_PORT=7654
+M2M_NET2_SERADD=comms.givenergy.cloud
+M2M_NET2_TCPTO=300
+...
+```
+
+The `M2M_NET2_*` settings control the dongle's connection to the GivEnergy cloud.
+
+#### Interaction commands
+
+| Command | Description |
+|---|---|
+| `up` | Navigate up the menu hierarchy |
+| `cfg > set M2M_NET2_SERADD <addr>` | Change the cloud server address |
+| `cfg > prof save` | Persist changes to flash storage |
+| `reboot` | Reboot dongle to apply config changes |
+
+#### Safety notes
+
+- Do **not** just set `M2M_NET2_ENABLE` to `0` — on boot, the inverter re-enables it
+- Recommended sandbox address: `127.0.0.1` (prevents any outbound cloud traffic)
+- The dongle emits a lot of debug junk; response traffic needs filtering
+
+#### Proposed implementation
+
+1. **Backend**: Add a lightweight telnet/CLI client to interact with the dongle's config shell — parse `prof show` output to extract current M2M settings, send `set` commands to override, and trigger `prof save` + `reboot`
+2. **API**: `GET /api/dongle/cloud-config` (read current M2M settings), `POST /api/dongle/cloud-config` (update server address)
+3. **Frontend**: Settings page section — show current dongle cloud address with an override input (default `127.0.0.1`) and a "Reboot dongle" button
+4. **Advanced**: For users running a local GivTCP server, allow setting the address to their own server (enables fully local-cloud alternatives like Axle or Predbat)
+
 ### Octopus Agile Integration
 
 **Status**: Investigation complete; implementation not started.
