@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.21] - 2026-06-10
+
+### Added
+
+- **PWA mobile polish** (suggested by [@jammmyb](https://github.com/jammmyb) in issue #63):
+  - Apple touch icons (152×152, 180×180) for iOS home screen
+  - `apple-mobile-web-app-capable` and `status-bar-style` meta tags for standalone PWA mode
+  - Safe area inset utilities (`pt-safe`, `pb-safe`, `pl-safe`, `pr-safe`) using `env(safe-area-inset-*)`
+  - Header gains `pt-safe` for iOS status bar clearance; bottom nav already had `pb-safe`
+- **Energy flow diagram visual enhancements**:
+  - Larger node circles (hub: `48→56`, leaf: `44→50`) for better readability
+  - Larger value/unit/label fonts inside nodes
+  - Dynamic flow stroke width proportional to power volume (2.5–6px)
+  - Larger directional arrows (12px→16px) so they're visible against thicker lines
+  - All nodes shifted down 15px to prevent the solar circle from clipping at the SVG top edge
+  - Text fields repositioned for equal vertical spacing within node circles
+
+### Changed
+
+- **Vite watch ignored paths**: Added `**/src-tauri/target/**` to `server.watch.ignored` to prevent ENOSPC file watcher errors during development
+
+### Internal
+
+- **Version bump**: 0.17.20 → 0.17.21 across `package.json`, `Cargo.toml`, `tauri.conf.json`, and `Cargo.lock`
+- **Pre-existing ESLint fixes**: Removed unused `waitForSnapshotField` function in `local-control-page.spec.ts`, removed unused `chartArea` variable in `local-power-page.spec.ts`, and fixed unnecessary escape in `local-battery-page.spec.ts` — these were blocking CI
+
 ## [0.17.20] - 2026-06-10
 
 ### Added

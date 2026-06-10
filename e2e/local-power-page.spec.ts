@@ -71,8 +71,6 @@ test.describe('Power Page - Chart', () => {
 
   test('should display chart area', async ({ page }) => {
     await page.goto('/#/power');
-    // Recharts container should render
-    const chartArea = page.locator('.recharts-wrapper, [class*="recharts"]').first();
     // Chart may or may not have data yet — just verify the page doesn't error
     await page.waitForTimeout(2000);
   });

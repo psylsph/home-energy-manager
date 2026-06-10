@@ -10,23 +10,6 @@
 
 import { test, expect } from './local-fixture.js';
 
-/** Wait for a snapshot field to match an expected value. */
-async function waitForSnapshotField(
-  baseUrl: string,
-  field: string,
-  predicate: (val: unknown) => boolean,
-  timeoutMs = 15_000,
-): Promise<void> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const resp = await fetch(`${baseUrl}/api/snapshot`);
-    const data = await resp.json();
-    if (data.ok && predicate(data.data[field])) return;
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  throw new Error(`Timed out waiting for snapshot field ${field}`);
-}
-
 test.describe('Control Page - Quick Actions', () => {
   test('should show Quick Actions heading', async ({ page }) => {
     await page.goto('/#/control');

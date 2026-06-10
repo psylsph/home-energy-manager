@@ -139,7 +139,7 @@ test.describe('Battery Page - Modules', () => {
     await page.goto('/#/battery');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    await expect(page.locator('text=/Module \d/').first()).toBeVisible({ timeout: 5_000 });
+    await expect(page.locator('text=/Module \\d/').first()).toBeVisible({ timeout: 5_000 });
   });
 
   test('should expand module details on click', async ({ page }) => {
