@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.25] - 2026-06-10
+
+### Added
+
+- **Panel Visibility toggles in Settings** — Hide Power, Battery, Solar,
+  Meters, or History from the bottom navigation bar. Saved to config, so
+  it persists across restarts. Great for decluttering if you don't use
+  every panel.
+
+- **Load Discharge Limiter moved out of Developer Controls** — It now
+  lives below Battery & Power Limits on the Control page, always visible
+  when your battery is in Eco mode. No need to enable Developer Mode to
+  use it.
+
 ## [0.17.24] - 2026-06-10
 
 ### Fixed

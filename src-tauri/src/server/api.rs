@@ -166,6 +166,7 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "export_tariff": settings.export_tariff,
             "import_tariff_config": settings.import_tariff_config,
             "export_tariff_config": settings.export_tariff_config,
+            "hidden_panels": settings.hidden_panels,
         }
     })))
 }
@@ -249,6 +250,10 @@ pub async fn update_settings(
     }
     if let Some(hp) = body.get("http_port").and_then(|v| v.as_u64()) {
         persist.http_port = hp.min(u16::MAX as u64) as u16;
+    }
+    if let Some(hp) = body.get("hidden_panels").and_then(|v| v.as_array()) {
+        let panels: Vec<String> = hp.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+        persist.hidden_panels = panels;
     }
     if let Err(e) = persist.save() {
         tracing::warn!("Failed to persist settings: {}", e);

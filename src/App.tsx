@@ -1,7 +1,9 @@
 import { useEffect } from 'react';
 import MetersPage from './pages/MetersPage';
-import { HashRouter, Routes, Route, NavLink } from 'react-router-dom';
+import { HashRouter, Routes, Route, NavLink, Navigate } from 'react-router-dom';
 import { useWebSocket } from './hooks/useWebSocket';
+import type { PollSettings } from './lib/types';
+import { apiGet } from './lib/api';
 import { useInverterStore } from './store/useInverterStore';
 import StatusPage from './pages/StatusPage';
 import BatteryPage from './pages/BatteryPage';
@@ -150,11 +152,37 @@ function LogsIcon() {
 
 function Layout() {
   useWebSocket();
-  const { developerMode, themeMode } = useInverterStore();
+  const { developerMode, themeMode, hiddenPanels, setHiddenPanels } = useInverterStore();
+
+  // Load hidden panels from settings on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await apiGet<{ ok: boolean; data: PollSettings }>('/api/settings');
+        if (res.ok && res.data.hidden_panels) {
+          setHiddenPanels(res.data.hidden_panels);
+        }
+      } catch { /* use defaults */ }
+    })();
+  }, []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = themeMode;
   }, [themeMode]);
+
+  const visibleItems = NAV_ITEMS.filter(item => {
+    const key = item.to.replace(/^\//, '');
+    return !key || !hiddenPanels.includes(key);
+  });
+
+  // Helper: return the panel element unless it's hidden, then redirect to /
+  function panelRoute(path: string, element: React.ReactNode) {
+    const key = path.replace(/^\//, '');
+    if (hiddenPanels.includes(key)) {
+      return <Route path={path} element={<Navigate to="/" replace />} />;
+    }
+    return <Route path={path} element={element} />;
+  }
 
   return (
     <div className="min-h-screen bg-bg-base flex flex-col">
@@ -178,14 +206,14 @@ function Layout() {
       <main className="flex-1 overflow-auto px-4 py-6 md:px-6 md:py-8 pb-safe">
         <Routes>
           <Route path="/" element={<ErrorBoundary><StatusPage /></ErrorBoundary>} />
-          <Route path="/power" element={<ErrorBoundary><PowerPage /></ErrorBoundary>} />
-          <Route path="/battery" element={<ErrorBoundary><BatteryPage /></ErrorBoundary>} />
-          <Route path="/history" element={<ErrorBoundary><HistoryPage /></ErrorBoundary>} />
+          {panelRoute('/power', <ErrorBoundary><PowerPage /></ErrorBoundary>)}
+          {panelRoute('/battery', <ErrorBoundary><BatteryPage /></ErrorBoundary>)}
+          {panelRoute('/history', <ErrorBoundary><HistoryPage /></ErrorBoundary>)}
           <Route path="/control" element={<ErrorBoundary><ControlPage /></ErrorBoundary>} />
           <Route path="/settings" element={<ErrorBoundary><SettingsPage /></ErrorBoundary>} />
-          <Route path="/solar" element={<ErrorBoundary><SolarPage /></ErrorBoundary>} />
-          <Route path="/meters" element={<ErrorBoundary><MetersPage /></ErrorBoundary>} />
-          <Route path="/inverter" element={<ErrorBoundary><InverterPage /></ErrorBoundary>} />
+          {panelRoute('/solar', <ErrorBoundary><SolarPage /></ErrorBoundary>)}
+          {panelRoute('/meters', <ErrorBoundary><MetersPage /></ErrorBoundary>)}
+          {panelRoute('/inverter', <ErrorBoundary><InverterPage /></ErrorBoundary>)}
           {developerMode && <Route path="/logs" element={<ErrorBoundary><LogsPage /></ErrorBoundary>} />}
         </Routes>
       </main>
@@ -198,7 +226,7 @@ function Layout() {
           - md+:  icon + text label
           A title/aria-label keeps icon-only modes discoverable. */}
       <nav className="sticky bottom-0 bg-bg-surface/90 backdrop-blur-md border-t border-white/5 px-0 pt-1 pb-safe flex items-stretch z-30">
-        {NAV_ITEMS.map(({ to, label, icon: Icon }) => (
+        {visibleItems.map(({ to, label, icon: Icon }) => (
           <NavLink
             key={to}
             to={to}

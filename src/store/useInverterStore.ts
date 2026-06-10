@@ -9,6 +9,8 @@ interface InverterState {
   connectedHost: string | null;
   developerMode: boolean;
   themeMode: ThemeMode;
+  /** Panels hidden from the bottom navigation. */
+  hiddenPanels: string[];
   /** Shared time range used by Power and History charts. */
   chartRange: HistoryRange;
   /** Discharge slots configured locally in Eco mode, not yet written to the inverter. */
@@ -21,6 +23,7 @@ interface InverterState {
   setChartRange: (range: HistoryRange) => void;
   setPendingDischargeSlots: (slots: Record<number, ScheduleSlot>) => void;
   clearPendingDischargeSlots: () => void;
+  setHiddenPanels: (panels: string[]) => void;
 }
 
 function loadDeveloperMode(): boolean {
@@ -83,6 +86,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   connectedHost: null,
   developerMode: loadDeveloperMode(),
   themeMode: loadThemeMode(),
+  hiddenPanels: [],
   chartRange: loadChartRange(),
   pendingDischargeSlots: loadPendingDischargeSlots(),
   setSnapshot: (snapshot) => set({ snapshot }),
@@ -114,4 +118,5 @@ export const useInverterStore = create<InverterState>((set) => ({
     savePendingDischargeSlots({});
     set({ pendingDischargeSlots: {} });
   },
+  setHiddenPanels: (panels) => set({ hiddenPanels: panels }),
 }));

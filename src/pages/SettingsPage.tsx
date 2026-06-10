@@ -74,6 +74,8 @@ const VALID_INTERVALS = [5, 10, 15, 20];
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [lanIp, setLanIp] = useState<string | null>(null);
   const [clients, setClients] = useState<string[]>([]);
+  const [hiddenPanels, setHiddenPanels] = useState<string[]>([]);
+  const [panelSaving, setPanelSaving] = useState(false);
 
   const flash = useCallback((text: string, ok: boolean) => {
     setMessage({ text, ok });
@@ -103,6 +105,9 @@ const VALID_INTERVALS = [5, 10, 15, 20];
           setExportTariffCfg(s.export_tariff_config);
         } else {
           setExportTariffCfg((p) => ({ ...p, peak_rate: s.export_tariff ?? 0.15 }));
+        }
+        if (s.hidden_panels) {
+          setHiddenPanels(s.hidden_panels);
         }
         setSettingsLoaded(true);
       } catch (e: unknown) {
@@ -178,6 +183,20 @@ const VALID_INTERVALS = [5, 10, 15, 20];
       flash('Failed to save tariffs', false);
     }
     setSaving(false);
+  };
+
+  // Save panel visibility
+  const handlePanelSave = async () => {
+    setPanelSaving(true);
+    try {
+      await apiPost('/api/settings', { hidden_panels: hiddenPanels });
+      // Push to store immediately so App.tsx picks it up without restart
+      useInverterStore.getState().setHiddenPanels(hiddenPanels);
+      flash('Panel visibility saved', true);
+    } catch {
+      flash('Failed to save panel visibility', false);
+    }
+    setPanelSaving(false);
   };
 
   // Discover
@@ -461,6 +480,45 @@ const VALID_INTERVALS = [5, 10, 15, 20];
         </div>
       </section>
 
+      {/* ─── Section 3.5: Panel Visibility ─── */}
+      <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
+        <h2 className="text-text-primary text-lg font-semibold font-sans">Panel Visibility</h2>
+        <p className="text-text-secondary text-xs font-sans">
+          Hide panels you don't use from the bottom navigation bar
+        </p>
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+          {([
+            ['power', 'Power'],
+            ['battery', 'Battery'],
+            ['solar', 'Solar'],
+            ['meters', 'Meters'],
+            ['history', 'History'],
+          ] as const).map(([key, label]) => (
+            <label key={key} className="flex items-center gap-2 cursor-pointer select-none bg-bg-elevated rounded-xl px-4 py-3 border border-white/5 hover:border-white/10 transition-colors">
+              <input
+                type="checkbox"
+                checked={!hiddenPanels.includes(key)}
+                onChange={() => {
+                  setHiddenPanels(prev =>
+                    prev.includes(key)
+                      ? prev.filter(p => p !== key)
+                      : [...prev, key]
+                  );
+                }}
+                className="w-4 h-4 accent-battery rounded"
+              />
+              <span className="text-text-primary text-sm font-sans">{label}</span>
+            </label>
+          ))}
+        </div>
+        <button
+          onClick={handlePanelSave}
+          className="self-start bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
+        >
+          {panelSaving ? 'Saving…' : 'Save Panel Visibility'}
+        </button>
+      </section>
+
       {/* ─── Section 4: Energy Tariffs ─── */}
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
         <h2 className="text-text-primary text-lg font-semibold font-sans">Energy Tariffs</h2>
@@ -576,9 +634,6 @@ const VALID_INTERVALS = [5, 10, 15, 20];
         <div className="flex items-center justify-between">
           <div className="flex flex-col gap-0.5">
             <span className="text-text-primary text-sm font-sans">Developer Mode</span>
-            <span className="text-text-secondary text-xs font-sans">
-              Shows the Logs page for debugging
-            </span>
           </div>
           <Toggle checked={developerMode} onChange={setDeveloperMode} />
         </div>

@@ -252,6 +252,10 @@ pub struct Settings {
     #[serde(default)]
     pub load_limiter_active_persisted: bool,
 
+    /// Panels hidden from the bottom navigation bar (e.g. ["power", "battery", "solar", "meters", "history"]) .
+    #[serde(default)]
+    pub hidden_panels: Vec<String>,
+
     /// Full import tariff config with peak/off-peak rates and times.
     /// Falls back to legacy `import_tariff` if `None`.
     #[serde(default)]
@@ -343,6 +347,7 @@ impl Default for Settings {
             cosy_slots: (0..3).map(|_| CosySlot::default()).collect(),
             cosy_active_persisted: false,
             agile_state_persisted: String::new(),
+            hidden_panels: Vec::new(),
         }
     }
 }
@@ -506,6 +511,7 @@ mod tests {
             cosy_slots: vec![],
             cosy_active_persisted: false,
             agile_state_persisted: "discharging".to_string(),
+            hidden_panels: Vec::new(),
         };
         let json = serde_json::to_string(&s).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
@@ -569,6 +575,7 @@ mod tests {
             cosy_slots: vec![],
             cosy_active_persisted: false,
             agile_state_persisted: String::new(),
+            hidden_panels: Vec::new(),
         };
 
         // We can't easily override the settings path for testing,

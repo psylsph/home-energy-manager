@@ -2233,6 +2233,8 @@ export default function ControlPage() {
             </div>
           </div>
         </div>
+        {/* Load Discharge Limiter — always visible when battery is in Eco mode */}
+        <LoadLimiterSection />
         {/* Developer Controls (dev mode only) */}
         {developerMode && (
           <section className="space-y-4 border-t border-bg-elevated pt-4 mt-4">
@@ -2240,7 +2242,6 @@ export default function ControlPage() {
               <h2 className="text-text-primary font-semibold text-lg">Developer Controls</h2>
               <span className="text-xs bg-amber-500/20 text-text-primary px-2 py-0.5 rounded-full font-medium">DEV</span>
             </div>
-            <LoadLimiterSection />
             <BatteryCalibrationSection />
             <RebootInverterSection />
           </section>

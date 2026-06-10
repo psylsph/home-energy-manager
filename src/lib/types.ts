@@ -107,6 +107,7 @@ export interface PollSettings {
   export_tariff: number;
   import_tariff_config: TariffConfig | null;
   export_tariff_config: TariffConfig | null;
+  hidden_panels: string[];
 }
 
 export interface DiscoveredInverter {
