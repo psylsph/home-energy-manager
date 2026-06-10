@@ -47,15 +47,29 @@ test.describe('Chart ranges', () => {
     await page.getByRole('button', { name: '6h' }).click();
     await expectRangeSelected(page, '6h');
 
-    await page.getByRole('link', { name: 'History' }).click();
+    await page.goto('/#/history');
     await expectRangeSelected(page, '6h');
 
     await page.getByRole('button', { name: '12h' }).click();
     await expectRangeSelected(page, '12h');
 
-    await page.getByRole('link', { name: 'Power' }).click();
+    await page.goto('/#/power');
     await expect(page.getByRole('heading', { name: 'Power Flow' })).toBeVisible();
     await expectRangeSelected(page, '12h');
+  });
+
+  test('selected time range survives a page reload', async ({ page }) => {
+    await page.goto('/#/power');
+    await page.evaluate(() => localStorage.removeItem('chartRange'));
+    await page.reload();
+    await expect(page.getByRole('heading', { name: 'Power Flow' })).toBeVisible();
+
+    await page.getByRole('button', { name: '6h' }).click();
+    await expectRangeSelected(page, '6h');
+
+    await page.reload();
+    await expect(page.getByRole('heading', { name: 'Power Flow' })).toBeVisible();
+    await expectRangeSelected(page, '6h');
   });
 });
 
