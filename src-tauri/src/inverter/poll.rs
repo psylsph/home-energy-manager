@@ -2109,10 +2109,11 @@ fn check_load_limiter(
                     ]);
                 }
             } else {
-                tracing::debug!(
+                tracing::info!(
                     home_power,
                     threshold,
-                    "Load limiter: load dropped below threshold, resetting"
+                    consecutive,
+                    "Load limiter: load dropped below threshold, resetting count"
                 );
                 *state = LoadLimiterState::Idle;
             }
@@ -2165,7 +2166,7 @@ fn check_load_limiter(
                 if *consecutive >= debounce_count {
                     tracing::info!(
                         consecutive,
-                        "Load limiter: restoring Eco mode"
+                        "Load limiter: restoring Eco mode — load below threshold for full delay"
                     );
                     *state = LoadLimiterState::Idle;
                     return Some(vec![
@@ -2183,10 +2184,22 @@ fn check_load_limiter(
                         },
                     ]);
                 }
+                // Periodic progress log every ~20% of the delay
+                let every_nth = std::cmp::max(1, debounce_count / 5);
+                if *consecutive % every_nth == 0 {
+                    tracing::info!(
+                        consecutive,
+                        debounce_count,
+                        "Load limiter: counting down — {}/{} polls remaining",
+                        debounce_count - *consecutive,
+                        debounce_count
+                    );
+                }
             } else {
-                tracing::debug!(
+                tracing::info!(
                     home_power,
                     threshold,
+                    consecutive,
                     "Load limiter: load rose above threshold, staying Paused"
                 );
                 *state = LoadLimiterState::Paused;
