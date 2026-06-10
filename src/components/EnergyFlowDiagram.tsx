@@ -173,7 +173,7 @@ function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
       <circle cx={cx} cy={cy} r={r} fill="#0D1117" stroke={safeColor} strokeWidth={hub ? 2.5 : 2} />
       {/* Label */}
       <text
-        x={cx} y={cy - (hub ? 14 : 13)}
+        x={cx} y={cy - (hub ? 15 : 14)}
         textAnchor="middle"
         fill={safeColor}
         fontSize={hub ? 11 : 11.5}
@@ -185,7 +185,7 @@ function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
       </text>
       {/* Value */}
       <text
-        x={cx} y={cy + (hub ? 10 : 9)}
+        x={cx} y={cy + (hub ? 9 : 7)}
         textAnchor="middle"
         fill="#F0F6FC"
         fontSize="18"
@@ -196,7 +196,7 @@ function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
       </text>
       {/* Unit / secondary info */}
       <text
-        x={cx} y={cy + (hub ? 27 : 26)}
+        x={cx} y={cy + (hub ? 25 : 22)}
         textAnchor="middle"
         fill="#8B949E"
         fontSize="11"
@@ -336,7 +336,7 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
         {/* Battery mode label */}
         <text
           x={W / 2}
-          y={400}
+          y={402}
           textAnchor="middle"
           fill="#8B949E"
           style={{ fontSize: 10, fontFamily: 'sans-serif' }}
@@ -346,7 +346,7 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
         {s.agile_active && (
           <text
             x={W / 2}
-            y={423}
+            y={417}
             textAnchor="middle"
             fill="#F59E0B"
             style={{ fontSize: 9, fontFamily: 'sans-serif' }}
