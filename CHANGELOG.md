@@ -5,166 +5,156 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.23] - 2026-06-10
+
+### Fixed
+
+- **Battery symbol layout on the status screen** — The battery node in the
+  energy flow diagram now has evenly-spaced labels (mode, SOC, power, and
+  the battery name) so nothing looks squashed or floating. Mobile and
+  desktop both render the same way.
+
 ## [0.17.22] - 2026-06-10
 
 ### Fixed
 
-- **Battery temperature now always from BMS module average** for all inverter types, including HV stacks (three-phase, AIO, HV Gen3). Previously the BCU cluster register IR(68) was used for HV stacks, which returns stale or garbage values on some battery firmware versions (e.g. DA0.011 — [#48](https://github.com/psylsph/home-energy-manager/issues/48)). Capacity, voltage, current, and SOC still come from the BCU cluster when available.
-- **Refactored power field sanitization** into a shared `check_power_field()` helper with the 10-readings suspect-count release method. Battery, grid, solar, and home power now all use the same consistent logic instead of battery/grid/solar having a simpler (no-release) check.
+- **Battery temperature now always comes from the battery itself** — Every
+  inverter model now reads temperature from the BMS module average instead of
+  relying on the inverter's own (often stale) register. HV stacks were using
+  the BCU cluster IR(68) which can sit on garbage for hours on some firmware
+  versions. Capacity, voltage, current, and SOC still come from the BCU.
+
+- **Power sanitisation now consistent across all fields** — Battery, grid,
+  solar, and home power all use the same logic for detecting and recovering
+  from corrupted reads, instead of battery/grid/solar using a simpler
+  (no-release) check. Less chance of a glitchy reading freezing your display.
 
 ### Added
 
-- **PWA / remote access guide** in README — how to use Home Energy Manager from a phone via Tailscale, including PWA home-screen install and Funnel alternative.
+- **PWA remote access guide** in the README — if you want to check your
+  system from your phone while you're out, there's now a step-by-step guide
+  covering Tailscale, Funnel, and home-screen install.
 
 ## [0.17.21] - 2026-06-10
 
 ### Added
 
-- **PWA mobile polish** (suggested by [@jammmyb](https://github.com/jammmyb) in issue #63):
-  - Apple touch icons (152×152, 180×180) for iOS home screen
-  - `apple-mobile-web-app-capable` and `status-bar-style` meta tags for standalone PWA mode
-  - Safe area inset utilities (`pt-safe`, `pb-safe`, `pl-safe`, `pr-safe`) using `env(safe-area-inset-*)`
-  - Header gains `pt-safe` for iOS status bar clearance; bottom nav already had `pb-safe`
-- **Energy flow diagram visual enhancements**:
-  - Larger node circles (hub: `48→56`, leaf: `44→50`) for better readability
-  - Larger value/unit/label fonts inside nodes
-  - Dynamic flow stroke width proportional to power volume (2.5–6px)
-  - Larger directional arrows (12px→16px) so they're visible against thicker lines
-  - All nodes shifted down 15px to prevent the solar circle from clipping at the SVG top edge
-  - Text fields repositioned for equal vertical spacing within node circles
-
-### Changed
-
-- **Vite watch ignored paths**: Added `**/src-tauri/target/**` to `server.watch.ignored` to prevent ENOSPC file watcher errors during development
-
-### Internal
-
-- **Version bump**: 0.17.20 → 0.17.21 across `package.json`, `Cargo.toml`, `tauri.conf.json`, and `Cargo.lock`
-- **Pre-existing ESLint fixes**: Removed unused `waitForSnapshotField` function in `local-control-page.spec.ts`, removed unused `chartArea` variable in `local-power-page.spec.ts`, and fixed unnecessary escape in `local-battery-page.spec.ts` — these were blocking CI
+- **iOS home screen polish** (suggested by [@jammmyb](https://github.com/jammmyb)):
+  - Proper Apple touch icons so the app icon doesn't look like a generic
+    screenshot when you save it to your home screen
+  - Meta tags for standalone PWA mode — no browser chrome, feels like a real app
+  - Safe area insets so the header and nav bar don't hide under the notch or
+    rounded corners on modern iPhones
+- **Energy flow diagram looks better** — Bigger bubbles, larger text, flow
+  lines that get thicker when lots of power is moving, arrows you can actually
+  see. The solar bubble no longer clips off the top edge on smaller screens.
 
 ## [0.17.20] - 2026-06-10
 
 ### Added
 
-- **Interactive chart legends** (contributed by [@mikemonkers](https://github.com/mikemonkers) in PR #62):
-  - New reusable `SeriesLegend` component with clickable legend items
-  - Power chart and multi-series History chart series can now be muted/restored by clicking their legend labels
-  - Muted series render at 22% opacity with no active dot
-- **Shared chart time range**: The selected time range (1h, 6h, 12h, etc.) is now shared between the Power and History pages via Zustand store + localStorage, persisting across page reloads
-- **Simulator-based E2E coverage**: New `local-charts.spec.ts` with 5 tests covering legend toggles, range sharing between pages, and reload persistence — tested against the real GivEnergy simulator
+- **Clickable chart legends** (contributed by [@mikemonkers](https://github.com/mikemonkers)):
+  Click a legend label to mute that series — handy when you want to focus on
+  just grid or just solar without changing the chart config.
+- **Shared time range** between Power and History pages — switch to 6h on
+  one page and it follows you to the other. Persists across reloads too.
+- **5 new end-to-end tests** covering legend behaviour, range sharing, and
+  reload persistence — all running against the real GivEnergy simulator.
 
 ### Accessibility
 
-- **`aria-pressed` on range buttons**: All time range selection buttons on the Power and History pages now have `aria-pressed` attributes, improving screen reader feedback
-
-### Internal
-
-- **Version bump**: 0.17.19 → 0.17.20 across `package.json`, `Cargo.toml`, `tauri.conf.json`, and `Cargo.lock`
-- **Vite watch ignored paths**: Added `**/src-tauri/target/**` to `server.watch.ignored` to prevent ENOSPC file watcher errors during development
+- **Time range buttons now announce their state** — screen readers will tell
+  you which time range is currently selected.
 
 ## [0.17.19] - 2026-06-09
 
 ### Added
 
-- **CT clamp configuration display on Meters page**: New "CT Clamp Configuration" card reads three inverter registers and shows the current CT setup at a glance:
-  - `enable_ammeter` (HR 7) — whether the external CT ammeter input is enabled
-  - `enable_reversed_ct_clamp` (HR 42) — whether the CT is installed reversed
-  - `meter_type` (HR 47) — the connected meter type (CT/EM418 vs EM115)
-  - If the ammeter is disabled, a hint explains how to enable it in the inverter settings
-  - Helps users understand why meters may or may not be detected
+- **CT clamp configuration card on the Meters page** — Shows whether your
+  external CT ammeter is enabled, whether it's installed reversed, and
+  what type of meter is connected. If the ammeter is off, a hint tells
+  you how to turn it on. Should help a lot with "why are my meters not
+  showing anything" questions.
 
 ### Changed
 
-- **Windows release asset updated**: The standard `.exe` installer has been removed from the build. Windows releases now ship only the MSI package (`--bundles msi`). The GitHub release notes table has been updated accordingly.
-
-### Documentation
-
-- **AGENTS.md**: Updated with general project rules (never close issues/PRs without permission), Playwright e2e test instructions, Docker build command, and full verification order.
-- **ROADMAP.md**: Minor formatting fixes for planned features.
-
-### Internal
-
-- **Version bump**: 0.17.18 → 0.17.19 across `package.json`, `Cargo.toml`, `tauri.conf.json`, and `Cargo.lock`.
+- **Windows builds now ship as MSI only** — the `.exe` installer is gone.
+  MSI gives you a proper install/uninstall experience.
 
 ## [0.17.18] - 2026-06-09
 
 ### Changed
 
-- **Battery temperature now sourced from BMS module average instead of inverter register IR(56)**: The inverter's own temperature register (`t_battery` on IR(56)) is frequently stale or garbage across all inverter models — not just three-phase where it was never populated, but single-phase too. The new `derive_battery_fields_from_bms()` function always overrides battery_temperature with the **average module temperature** from the BMS (BCU cluster for HV stacks, LV module average for everything else). Falls back to IR(56) only if no BMS data is available at all.
+- **Battery temperature now reads from the BMS, not the inverter** — The
+  inverter's temperature register (IR 56) is notoriously unreliable across
+  all models, not just three-phase. The app now takes the average module
+  temperature from the BMS instead, which is what your battery actually
+  feels. Falls back to IR 56 only if the BMS isn't responding.
 
 ## [0.17.17] - 2026-06-09
 
 ### Changed
 
-- **Cosy charging now programs the inverter's own schedule registers**: Instead of
-  using ForceCharge/CosyExit (app-managed charge state), the Cosy state machine now
-  writes the current slot's times directly into the inverter's charge slot 1 registers
-  (HR 94-95 / HR 1113-1114) with `enable_charge=1` and target SOC. If the app crashes
-  mid-slot, the inverter follows the loaded schedule independently.
+- **Cosy charging now writes into the inverter's own schedule** — Instead of
+  keeping the charge state purely on the app side (which meant a crash would
+  leave the battery stuck force-charging), Cosy now loads the current slot
+  times directly into the inverter's schedule registers. If the app falls
+  over mid-slot, the inverter just keeps following the schedule.
 
-- **Next Cosy slot preloaded into inverter registers**: When no Cosy slot is active,
-  the poll loop preloads the next upcoming slot's times into the inverter registers
-  (with `enable_charge=0`). The inverter always has the schedule ready — if the app
-  crashes between slots, the inverter will start charging at the right time on its own.
-  If there are no upcoming slots, the registers are cleared.
-
-- **Only re-writes preload when slot changes**: A `cosy_last_preloaded_slot` tracker
-  prevents unnecessary Modbus traffic — the slot times are only written to the
-  inverter when the next slot index actually changes.
+- **Next Cosy slot preloaded before it starts** — The poll loop writes the
+  upcoming slot's times into the inverter registers ahead of time (with the
+  enable flag off). If the app crashes between slots, the inverter picks up
+  the next charge window on its own. Only re-writes when the slot index
+  actually changes, so no pointless Modbus chatter.
 
 ### Fixed
 
-- **Gen2 Hybrid correctly limited to 1 charge slot**: Gen2 inverters physically have
-  the HR 31-32 register pair but firmware does not honour a second charge slot.
-  The official GivEnergy app and GivTCP both expose only one charge slot for Gen2.
-  `max_charge_slots()` now returns 1 for Gen2, matching the reference libraries.
+- **Gen2 Hybrid now correctly limited to 1 charge slot** — Gen2 inverters
+  have the register for a second slot but the firmware ignores it. Both
+  GivEnergy's own app and GivTCP only show one slot for Gen2, so the app
+  now matches.
 
 ## [0.17.16] - 2026-06-09
 
 ### Changed
 
-- **All SOC control values clamped to minimum 4%**: Battery SOC reserve (HR 110/1109),
-  charge target SOC (HR 116/1111), and per-slot target SOCs (HR 242/245/248…/272/275…)
-  are now clamped to 4–100% on read from the inverter. Values below 4% can cause
-  battery damage and are overridden to the safe floor. Sliders on the Control page
-  already enforced min=4 on write; the decoder now enforces it on read so the UI
-  never displays or carries forward an unsafe value.
+- **SOC values below 4% are now caught and corrected on read** — The Control
+  page sliders already stopped you writing unsafe values, but the decoder
+  now also clamps any reading below 4% to the safe floor. This keeps
+  garbage register reads from showing up as 0% or negative in the UI.
 
-- **Discharge schedule always visible, Timed mode requires slots**: The discharge
-  schedule section is now always visible regardless of mode. In Eco mode, slot edits
-  are held locally (not sent to the inverter) until the user switches to Timed mode.
-  The Timed mode button is locked until at least one discharge slot is configured —
-  this prevents unrestricted battery export that occurs when `enable_discharge` is
-  set without slot constraints on Gen3 inverters. When switching to Timed, slots and
-  the mode flag are sent atomically so the inverter never sees `HR59=1` without
-  slot times. Pending slot configurations survive tab switches and app restarts
-  via localStorage persistence.
+- **Discharge schedule always visible, even in Eco mode** — You can now
+  configure your discharge slots ahead of time without switching modes.
+  Edits stay local until you switch to Timed mode, which prevents the
+  Gen3 firmware quirk where setting non-zero slot registers auto-enables
+  unrestricted export. The Timed button stays locked until you've set at
+  least one slot, and when you do switch, slots + mode flag are sent to
+  the inverter in one shot so it never sees enable_discharge=1 without
+  slot constraints.
 
-- **Timed Discharge tooltip clarified**: Updated to "Battery covers home demand
-  automatically, plus follows your export schedule during slot times" to make clear
-  that dynamic home demand coverage is not lost when using timed export slots.
+- **Timed Discharge tooltip clarified** — Now reads "Battery covers home
+  demand automatically, plus follows your export schedule during slot
+  times" to make clear you don't lose automatic home coverage when using
+  timed export.
 
 ## [0.17.15] - 2026-06-09
 
 ### Fixed
 
-- **Three-phase grid voltage sanitised away**: The grid voltage range check
-  (180–280V) was hardcoded for single-phase (230V phase-to-neutral).
-  Three-phase models report ~415V line-to-line from IR 1061, triggering
-  "Grid voltage out of range" warnings every cycle and falling back to
-  the previous value or 230.0V. Now uses 0–500V bounds for three-phase
-  models, matching the reference library's v_ac1 range.
+- **Three-phase grid voltage no longer rejected as out of range** — The
+  voltage check was hardcoded for single-phase (180–280V), but three-phase
+  models report ~415V line-to-line. Every poll cycle was flagging it as
+  corrupted and falling back to 230V. Now uses 0–500V for three-phase.
 
 ## [0.17.14] - 2026-06-08
 
 ### Fixed
 
-- **24h history chart now starts at 00:00 local time**: The x-axis always
-  spans midnight to midnight for the 24h view, regardless of when the
-  first data point falls. The backend query alignment was also fixed to
-  use local midnight (not UTC midnight), so users in BST/GMT+1 no longer
-  see charts starting at 01:00.
-- **6h/1h charts still trim to first data point**: Shorter ranges still
+- **24h history chart now starts at local midnight** — The x-axis was
+  sometimes starting at 01:00 for users in BST because the backend was
+  aligning to UTC midnight instead of local time. Your daily chart now
+  actually spans your full day.
+- **Shorter ranges still trim to first data point** — 6h and 1h views
   start at the earliest available reading so the line reaches the y-axis.
 
 ## [0.17.13] - 2026-06-08
@@ -557,109 +547,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a session (the developer console has its level buttons; the
   terminal takes `RUST_LOG=info` or `=debug`).
 
-## [0.16.4] - 2026-06-07
-
-### Added
-
-- **Refresh interval now has a button group**
-  Instead of a slider, you pick from 5, 10, 15 or 20 seconds — the
-  four most useful refresh rates. Old saved values get snapped to the
-  nearest option automatically.
+## [0.16.0] - 2026-06-07
 
 ### Fixed
 
-- **Settings file no longer gets corrupted by concurrent writes**
-  If two parts of the app wrote to the settings file at the same time
-  (e.g. API handler and poll loop both saving), the JSON could get
-  mangled and fail to parse on the next load. Now saves are serialised
-  and use atomic writes (temp file + rename) so readers always see a
-  complete file.
-- **History chart lines now reach the axis**
-  On the 1h, 6h and 24h views, the x-axis started at the top of the
-  hour but data is recorded at 30-minute intervals, leaving a gap of
-  empty space before the first data point. The axis now starts at the
-  earliest reading so the line touches the y-axis.
+- **Dongle comms completely rewritten** — The old approach was simple but
+  fragile: fire off a request, wait for the reply, and if something went
+  wrong (wrong device answered, or a delayed frame from a previous request
+  turned up) you'd have to notice, flush the junk, and retry. Miss one and
+  everything cascaded into mismatched responses and timeouts — especially
+  on AC-coupled inverters where battery modules share the bus. Now there's
+  a background listener that reads everything the dongle sends and routes
+  each response by what's actually *in* the response (which slave, which
+  register range). If a battery module answers when you asked the inverter?
+  Nobody asked for that, so it's quietly ignored. This is how the reference
+  library always worked, and it's far more solid in practice.
 
-## [0.16.3] - 2026-06-07
+- **Force-charge re-sent on restart when in a Cosy slot** — If the app
+  crashed or was restarted during a Cosy charging window, it logged "will
+  re-send" but never actually sent the writes. Fixed.
 
-### Fixed
-
-- **Force-charge re-sent on restart when in a Cosy slot****
-  If the app crashed or was restarted during a Cosy charging window, it
-  logged "will re-send" but never actually sent the writes — so the
-  inverter stayed in Eco mode until the next slot transition. Fixed.
-- **Agile mode cleanup no longer cancels a Cosy charge mid-slot**
-  Switching from Agile to Cosy could send a "stop everything" command
-  in the same poll cycle, undoing the force-charge that Cosy had just
-  started. The cleanup now checks if another mode is actively in control
-  before sending conflicting writes.
-- **Settings file no longer gets corrupted by concurrent writes**
-  If two parts of the app wrote to the settings file at the same time
-  (e.g. API handler and poll loop both saving), the JSON could get
-  mangled and fail to parse on the next load. Now uses atomic writes
-  (temp file + rename) so readers always see a complete file.
-- **Switching away from Cosy or Agile mode no longer leaves the battery stuck charging**
-  If you were in Cosy mode mid-slot (or Agile mid-charge) and switched to
-  Standard (or to the other mode), the inverter would keep force-charging
-  indefinitely — the app kept reporting both modes as "Active". The exit
+- **Mode switching cleanup** — Switching from Agile to Cosy (or away from
+  either) could leave the battery force-charging indefinitely. The exit
   cleanup now runs whenever a mode is disabled, not just when its time
   window ends.
 
-## [0.16.1] - 2026-06-06
+- **Cosy writes were silently failing** — A bug matching write responses
+  caused every write to time out even though the dongle acknowledged it.
+  This broke Cosy charging, mode switching, and everything else that
+  needed a write. Fixed.
 
-### Fixed
+- **Settings file no longer gets corrupted by concurrent writes** — If
+  two parts of the app wrote to the settings file at the same time, the
+  JSON could get mangled. Now saves are serialised and use atomic writes
+  (temp file + rename) so readers always see a complete file.
 
-- **Cosy force-charge and writes were silently failing**
-  The new network reading code had a bug matching write responses
-  — it read the wrong bytes from the reply and discarded them,
-  so every write timed out even though the dongle actually
-  acknowledged it. This broke Cosy charging, mode switching, and
-  any other write operation. Fixed now.
-- **"Stop Charge" button finally obeys your schedule**
-  If you had a charge slot set up and winter mode left on, the button would
-  light up all the time — even when your battery was just sitting there in
-  Eco mode. It was looking at the wrong signals. Now it only lights up when
-  you're actually inside a charge window.
-- **Status page shows which Agile slot is active**
-  When Agile Octopus mode is running, the energy flow diagram now shows
-  "Agile: charging" or "Agile: discharging" so you can see what the
-  state machine is doing at a glance.
-- **Energy flow diagram and Battery page agree with reality now**
-  Same fix as above — they stopped randomly showing "Override" outside
-  charge windows.
-- **Dongle busy errors won't snowball on you anymore**
-  When the dongle said "busy" three times in a row, the app used to kill
-  the connection and start a slow reconnect spiral (5 seconds, then 10,
-  then 20…). That just made everything worse. Now it shrugs, skips that
-  poll, and tries again on the next normal refresh.
-- **Charge slots clean up after winter mode**
-  If you'd ever used winter mode or force charge, a stale flag could sit
-  around and confuse the app. Now saving a charge slot sweeps that flag
-  away.
-- **Completely rewrote how the app talks to the dongle**
-  The old approach was simple but fragile: fire off a request, wait for the
-  reply, and if something went wrong (wrong device answered, or a delayed
-  frame from a previous request turned up) you'd have to notice, flush the
-  junk, and retry. Miss one and everything cascaded into mismatched
-  responses and timeouts — especially on AC-coupled inverters where there
-  are battery modules on the bus answering alongside the inverter.
+- **"Stop Charge" button now listens to your schedule** — It was lighting
+  up even when your battery was just sitting in Eco mode. Now it only
+  shows when you're actually inside a charge window.
 
-  Now there's a background listener that just reads *everything* the dongle
-  sends back and routes each response to whoever's waiting for it by what's
-  actually *in* the response (which slave, which register range). If a
-  battery module at 0x35 answers when you asked the inverter at 0x31?
-  Nobody asked for that, so it's quietly ignored. The inverter's real
-  answer arrives a moment later and finds its match. This is how
-  givenergy-modbus (the reference library) always worked, and it's far
-  more solid in practice.
+- **Dongle busy errors won't snowball anymore** — Three busy errors used
+  to kill the connection and start a slow reconnect spiral (5s, then 10s,
+  then 20s…). Now it shrugs, skips that poll, and tries again on the next
+  normal refresh.
 
-  As a bonus, the whole retry system got simpler too — just time out and
-  retry instead of trying to detect every possible way a response can be
-  wrong. The slave mismatch / register range mismatch errors you used to
-  see in the console shouldn't happen anymore.
+- **Charge slots clean up after winter mode** — A stale flag could linger
+  and confuse the app. Saving a charge slot now sweeps it away.
 
-  Huge thanks to the GivTCP and givenergy-modbus projects for providing
-  the right approach to handling the dongle's quirky network behaviour.
+- **History chart lines now reach the axis** — The x-axis was starting at
+  the top of the hour but data is recorded at 30-minute intervals, leaving
+  a gap before the first data point. The axis now starts at the earliest
+  reading.
+
+### Added
+
+- **Status page shows which Agile slot is active** — The energy flow
+  diagram now shows "Agile: charging" or "Agile: discharging" so you can
+  see what the state machine is doing at a glance.
+
+- **Refresh interval now a button group** — Instead of a slider, you pick
+  from 5, 10, 15 or 20 seconds. Old saved values get snapped to the
+  nearest option.
 
 ## [0.15.0] - 2026-06-06
 

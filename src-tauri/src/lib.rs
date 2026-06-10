@@ -108,6 +108,28 @@ pub fn run() {
                 aw.debounce_readings = app_settings.auto_winter_debounce_readings;
             }
 
+            // Apply saved load limiter config
+            {
+                let mut ll = state.load_limiter_config.blocking_lock();
+                ll.enabled = app_settings.load_limiter_enabled;
+                ll.threshold_w = app_settings.load_limiter_threshold_w;
+                ll.trigger_delay_minutes = app_settings.load_limiter_trigger_delay_minutes;
+                ll.start_hour = app_settings.load_limiter_start_hour;
+                ll.start_minute = app_settings.load_limiter_start_minute;
+                ll.end_hour = app_settings.load_limiter_end_hour;
+                ll.end_minute = app_settings.load_limiter_end_minute;
+            }
+
+            // If the load limiter was active when the app last ran, mark the
+            // state as PausedFromRestart so the first poll immediately restores
+            // Eco if the load has already dropped below threshold while the app
+            // was down.
+            if app_settings.load_limiter_active_persisted {
+                let mut ll_state = state.load_limiter_state.blocking_lock();
+                *ll_state = crate::inverter::poll::LoadLimiterState::PausedFromRestart;
+                tracing::info!("Restored load limiter state: PausedFromRestart (post-crash)");
+            }
+
             // Load persisted auto-winter saved values (original register
             // values captured before winter mode activated).
             {
@@ -407,6 +429,28 @@ pub fn run_headless(args: &[String]) {
             aw.recovery_threshold = app_settings.auto_winter_recovery_threshold;
             aw.target_soc = app_settings.auto_winter_target_soc;
             aw.debounce_readings = app_settings.auto_winter_debounce_readings;
+        }
+
+        // Apply saved load limiter config
+        {
+            let mut ll = state.load_limiter_config.lock().await;
+            ll.enabled = app_settings.load_limiter_enabled;
+            ll.threshold_w = app_settings.load_limiter_threshold_w;
+            ll.trigger_delay_minutes = app_settings.load_limiter_trigger_delay_minutes;
+            ll.start_hour = app_settings.load_limiter_start_hour;
+            ll.start_minute = app_settings.load_limiter_start_minute;
+            ll.end_hour = app_settings.load_limiter_end_hour;
+            ll.end_minute = app_settings.load_limiter_end_minute;
+        }
+
+        // If the load limiter was active when the app last ran, mark the
+        // state as PausedFromRestart so the first poll immediately restores
+        // Eco if the load has already dropped below threshold while the app
+        // was down.
+        if app_settings.load_limiter_active_persisted {
+            let mut ll_state = state.load_limiter_state.lock().await;
+            *ll_state = crate::inverter::poll::LoadLimiterState::PausedFromRestart;
+            tracing::info!("Restored load limiter state: PausedFromRestart (post-crash)");
         }
 
         // Load persisted auto-winter saved values

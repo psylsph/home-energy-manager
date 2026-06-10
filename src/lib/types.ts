@@ -40,6 +40,7 @@ export interface InverterSnapshot {
   enable_charge: boolean;
   enable_discharge: boolean;
   auto_winter_active: boolean;
+  load_limiter_active: boolean;
   cosy_active: boolean;
   cosy_enabled: boolean;
   agile_active: boolean;

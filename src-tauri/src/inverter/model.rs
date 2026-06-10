@@ -684,6 +684,9 @@ pub struct InverterSnapshot {
     /// Battery calibration stage (0=off, 5=balance).
     #[serde(default)]
     pub battery_calibration_stage: u8,
+    /// True when the load discharge limiter is actively pausing discharge.
+    #[serde(default)]
+    pub load_limiter_active: bool,
     pub inverter_serial: String,
     /// ARM firmware version (HR(21)). For 0x20xx hybrids the century
     /// (`arm_fw / 100`) determines generation: 3 → Gen3, 8/9 → Gen2,

@@ -226,6 +226,32 @@ pub struct Settings {
     #[serde(default)]
     pub auto_winter_saved_target_soc: Option<u16>,
 
+    // -- Load discharge limiter --
+    /// Whether the load discharge limiter is enabled.
+    #[serde(default)]
+    pub load_limiter_enabled: bool,
+    /// Home power threshold in watts.
+    #[serde(default = "default_ll_threshold")]
+    pub load_limiter_threshold_w: u32,
+    /// Minutes the load must stay above/below the threshold.
+    #[serde(default = "default_ll_trigger_delay")]
+    pub load_limiter_trigger_delay_minutes: u32,
+    /// Activation window start hour.
+    #[serde(default)]
+    pub load_limiter_start_hour: u8,
+    /// Activation window start minute.
+    #[serde(default)]
+    pub load_limiter_start_minute: u8,
+    /// Activation window end hour.
+    #[serde(default)]
+    pub load_limiter_end_hour: u8,
+    /// Activation window end minute.
+    #[serde(default)]
+    pub load_limiter_end_minute: u8,
+    /// Persisted active flag so a crash/restart can detect the limiter was mid-pause.
+    #[serde(default)]
+    pub load_limiter_active_persisted: bool,
+
     /// Full import tariff config with peak/off-peak rates and times.
     /// Falls back to legacy `import_tariff` if `None`.
     #[serde(default)]
@@ -238,6 +264,14 @@ pub struct Settings {
 
 fn default_http_port() -> u16 {
     7337
+}
+
+fn default_ll_threshold() -> u32 {
+    3000
+}
+
+fn default_ll_trigger_delay() -> u32 {
+    5
 }
 
 fn default_import_tariff() -> f64 {
@@ -291,6 +325,14 @@ impl Default for Settings {
             auto_winter_debounce_readings: default_aw_debounce(),
             auto_winter_saved_enable_target: None,
             auto_winter_saved_target_soc: None,
+            load_limiter_enabled: false,
+            load_limiter_threshold_w: default_ll_threshold(),
+            load_limiter_trigger_delay_minutes: default_ll_trigger_delay(),
+            load_limiter_start_hour: 0,
+            load_limiter_start_minute: 0,
+            load_limiter_end_hour: 0,
+            load_limiter_end_minute: 0,
+            load_limiter_active_persisted: false,
             import_tariff_config: None,
             export_tariff_config: None,
             agile_enabled: false,
@@ -420,6 +462,12 @@ mod tests {
         assert_eq!(s.auto_winter_debounce_readings, 10);
         assert_eq!(s.auto_winter_saved_enable_target, None);
         assert_eq!(s.auto_winter_saved_target_soc, None);
+        assert!(!s.load_limiter_enabled);
+        assert_eq!(s.load_limiter_threshold_w, 3000);
+        assert_eq!(s.load_limiter_trigger_delay_minutes, 5);
+        assert_eq!(s.load_limiter_start_hour, 0);
+        assert_eq!(s.load_limiter_end_hour, 0);
+        assert!(!s.load_limiter_active_persisted);
     }
 
     #[test]
@@ -440,6 +488,14 @@ mod tests {
             auto_winter_debounce_readings: 5,
             auto_winter_saved_enable_target: Some(true),
             auto_winter_saved_target_soc: Some(80),
+            load_limiter_enabled: true,
+            load_limiter_threshold_w: 5000,
+            load_limiter_trigger_delay_minutes: 10,
+            load_limiter_start_hour: 16,
+            load_limiter_start_minute: 0,
+            load_limiter_end_hour: 20,
+            load_limiter_end_minute: 0,
+            load_limiter_active_persisted: false,
             import_tariff_config: None,
             export_tariff_config: None,
             agile_enabled: true,
@@ -466,6 +522,11 @@ mod tests {
         assert_eq!(decoded.auto_winter_debounce_readings, 5);
         assert_eq!(decoded.auto_winter_saved_enable_target, Some(true));
         assert_eq!(decoded.auto_winter_saved_target_soc, Some(80));
+        assert!(decoded.load_limiter_enabled);
+        assert_eq!(decoded.load_limiter_threshold_w, 5000);
+        assert_eq!(decoded.load_limiter_trigger_delay_minutes, 10);
+        assert_eq!(decoded.load_limiter_start_hour, 16);
+        assert_eq!(decoded.load_limiter_end_hour, 20);
     }
 
     #[test]
@@ -490,6 +551,14 @@ mod tests {
             auto_winter_debounce_readings: 10,
             auto_winter_saved_enable_target: None,
             auto_winter_saved_target_soc: None,
+            load_limiter_enabled: false,
+            load_limiter_threshold_w: 3000,
+            load_limiter_trigger_delay_minutes: 5,
+            load_limiter_start_hour: 0,
+            load_limiter_start_minute: 0,
+            load_limiter_end_hour: 0,
+            load_limiter_end_minute: 0,
+            load_limiter_active_persisted: false,
             import_tariff_config: None,
             export_tariff_config: None,
             agile_enabled: false,

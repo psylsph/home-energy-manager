@@ -33,8 +33,9 @@ use crate::inverter::encoder::{ControlCommand, RegisterWrite};
 use crate::inverter::model::{BatteryMode, DeviceType, InverterSnapshot};
 use crate::modbus::client::ModbusClient;
 use crate::modbus::registers::{
-    encode_hhmm, HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC,
-    HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET,
+    encode_hhmm, HR_BATTERY_POWER_MODE, HR_BATTERY_SOC_RESERVE, HR_CHARGE_SLOT_1_END,
+    HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET,
+    HR_ENABLE_DISCHARGE,
 };
 
 // ---------------------------------------------------------------------------
@@ -185,6 +186,72 @@ pub struct AutoWinterSaved {
     pub target_soc: u8,
 }
 
+// ---------------------------------------------------------------------------
+// Load discharge limiter
+// ---------------------------------------------------------------------------
+
+/// State machine for the load discharge limiter.
+///
+/// Monitors `home_power` and pauses battery discharge (Eco Paused) when
+/// home load exceeds a threshold for a sustained period, then restores
+/// Eco mode when the load drops below the threshold for the same period.
+/// Only operates when the battery is in Eco mode and no other automated
+/// mode (auto-winter, Cosy, Agile) is active.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub enum LoadLimiterState {
+    /// Limiter idle — not monitoring.
+    #[default]
+    Idle,
+    /// Home load above threshold, counting towards trigger delay.
+    HighLoadPending {
+        /// Consecutive polls where home_power was above threshold.
+        consecutive: u32,
+    },
+    /// Limiter active — battery discharge is paused (Eco Paused).
+    Paused,
+    /// Restored from persistence after a crash — first poll will check
+    /// load and immediately restore Eco if already below threshold.
+    PausedFromRestart,
+    /// Home load dropped below threshold, counting towards restore.
+    LowLoadPending {
+        /// Consecutive polls where home_power was below threshold.
+        consecutive: u32,
+    },
+}
+
+/// Configuration for the load discharge limiter.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LoadLimiterConfig {
+    /// Master toggle.
+    pub enabled: bool,
+    /// Home power threshold in watts.
+    pub threshold_w: u32,
+    /// Minutes the load must stay above/below threshold before triggering.
+    pub trigger_delay_minutes: u32,
+    /// Activation window start hour.
+    pub start_hour: u8,
+    /// Activation window start minute.
+    pub start_minute: u8,
+    /// Activation window end hour.
+    pub end_hour: u8,
+    /// Activation window end minute.
+    pub end_minute: u8,
+}
+
+impl Default for LoadLimiterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold_w: 3000,
+            trigger_delay_minutes: 5,
+            start_hour: 0,
+            start_minute: 0,
+            end_hour: 0,
+            end_minute: 0,
+        }
+    }
+}
+
 /// Shared state accessible from HTTP handlers, the WebSocket endpoint, etc.
 pub struct AppState {
     /// Most recently decoded snapshot (or `None` if never polled).
@@ -216,6 +283,10 @@ pub struct AppState {
     pub auto_winter_state: Arc<Mutex<AutoWinterState>>,
     /// Saved register values to restore when winter mode deactivates.
     pub auto_winter_saved: Arc<Mutex<Option<AutoWinterSaved>>>,
+    /// Load discharge limiter configuration.
+    pub load_limiter_config: Arc<Mutex<LoadLimiterConfig>>,
+    /// Load discharge limiter state machine.
+    pub load_limiter_state: Arc<Mutex<LoadLimiterState>>,
     /// Whether cosy charging is currently active (force-charging in a slot).
     pub cosy_active: Arc<Mutex<bool>>,
     /// Agile Octopus state machine (Idle / Charging / Discharging).
@@ -244,6 +315,8 @@ impl AppState {
             auto_winter_config: Arc::new(Mutex::new(AutoWinterConfig::default())),
             auto_winter_state: Arc::new(Mutex::new(AutoWinterState::default())),
             auto_winter_saved: Arc::new(Mutex::new(None)),
+            load_limiter_config: Arc::new(Mutex::new(LoadLimiterConfig::default())),
+            load_limiter_state: Arc::new(Mutex::new(LoadLimiterState::default())),
             cosy_active: Arc::new(Mutex::new(
                 crate::settings::Settings::load().cosy_active_persisted,
             )),
@@ -278,6 +351,8 @@ impl AppState {
             auto_winter_config: Arc::new(Mutex::new(AutoWinterConfig::default())),
             auto_winter_state: Arc::new(Mutex::new(AutoWinterState::default())),
             auto_winter_saved: Arc::new(Mutex::new(None)),
+            load_limiter_config: Arc::new(Mutex::new(LoadLimiterConfig::default())),
+            load_limiter_state: Arc::new(Mutex::new(LoadLimiterState::default())),
             cosy_active: Arc::new(Mutex::new(
                 crate::settings::Settings::load().cosy_active_persisted,
             )),
@@ -1906,6 +1981,222 @@ fn check_auto_winter(
     None
 }
 
+/// Check load discharge limiter and return register writes if the state
+/// machine transitions to Paused or back to Idle.
+///
+/// Returns `Some(writes)` when a transition requires register writes,
+/// `None` otherwise.
+fn check_load_limiter(
+    snap: &InverterSnapshot,
+    config: &LoadLimiterConfig,
+    state: &mut LoadLimiterState,
+    poll_interval_secs: u64,
+) -> Option<Vec<RegisterWrite>> {
+    if !config.enabled {
+        *state = LoadLimiterState::Idle;
+        return None;
+    }
+
+    // Only operate when battery is in Eco or EcoPaused mode.
+    // EcoPaused is what the limiter sets when it pauses discharge — it
+    // must be accepted so the recovery countdown can proceed.
+    // No other automated modes should be active.
+    if snap.battery_mode != BatteryMode::Eco && snap.battery_mode != BatteryMode::EcoPaused {
+        // If we're Paused but the battery mode isn't one we manage,
+        // someone changed it externally — return to Idle without writing.
+        if matches!(*state, LoadLimiterState::Paused)
+            || matches!(*state, LoadLimiterState::PausedFromRestart)
+            || matches!(*state, LoadLimiterState::LowLoadPending { .. })
+        {
+            tracing::info!(
+                mode = ?snap.battery_mode,
+                "Load limiter: battery mode changed externally, returning to Idle"
+            );
+            *state = LoadLimiterState::Idle;
+        }
+        return None;
+    }
+
+    // Don't interfere with other automated modes.
+    if snap.auto_winter_active || snap.cosy_active || snap.agile_active {
+        return None;
+    }
+
+    // Check activation window.
+    let now = chrono::Local::now();
+    let now_minutes = now.hour() as u16 * 60 + now.minute() as u16;
+    let start_mins = config.start_hour as u16 * 60 + config.start_minute as u16;
+    let end_mins = config.end_hour as u16 * 60 + config.end_minute as u16;
+
+    // All zeros means always active.
+    let in_window = if start_mins == 0 && end_mins == 0 {
+        true
+    } else if end_mins <= start_mins {
+        // Crosses midnight
+        now_minutes >= start_mins || now_minutes < end_mins
+    } else {
+        now_minutes >= start_mins && now_minutes < end_mins
+    };
+
+    if !in_window {
+        // Outside window — if we're Paused, restore Eco.
+        if matches!(*state, LoadLimiterState::Paused)
+            || matches!(*state, LoadLimiterState::PausedFromRestart)
+        {
+            tracing::info!("Load limiter: outside activation window, restoring Eco");
+            *state = LoadLimiterState::Idle;
+            return Some(vec![
+                RegisterWrite {
+                    address: HR_BATTERY_POWER_MODE,
+                    value: 1, // self-consumption
+                },
+                RegisterWrite {
+                    address: HR_ENABLE_DISCHARGE,
+                    value: 0,
+                },
+                RegisterWrite {
+                    address: HR_BATTERY_SOC_RESERVE,
+                    value: 4, // default reserve
+                },
+            ]);
+        }
+        return None;
+    }
+
+    let home_power = snap.home_power;
+    let threshold = config.threshold_w as i32;
+    let debounce_count = if poll_interval_secs == 0 {
+        config.trigger_delay_minutes // fallback
+    } else {
+        (config.trigger_delay_minutes as u64 * 60)
+            .div_ceil(poll_interval_secs) as u32
+    };
+
+    match state {
+        LoadLimiterState::Idle => {
+            if home_power > threshold {
+                tracing::info!(
+                    home_power,
+                    threshold,
+                    "Load limiter: home load above threshold — counting"
+                );
+                *state = LoadLimiterState::HighLoadPending { consecutive: 1 };
+            }
+        }
+        LoadLimiterState::HighLoadPending { consecutive } => {
+            if home_power > threshold {
+                *consecutive += 1;
+                if *consecutive >= debounce_count {
+                    tracing::info!(
+                        home_power,
+                        threshold,
+                        "Load limiter: pausing battery discharge (Eco Paused)"
+                    );
+                    *state = LoadLimiterState::Paused;
+                    return Some(vec![
+                        RegisterWrite {
+                            address: HR_BATTERY_POWER_MODE,
+                            value: 1, // self-consumption
+                        },
+                        RegisterWrite {
+                            address: HR_ENABLE_DISCHARGE,
+                            value: 0,
+                        },
+                        RegisterWrite {
+                            address: HR_BATTERY_SOC_RESERVE,
+                            value: 100, // Eco Paused = reserve 100%
+                        },
+                    ]);
+                }
+            } else {
+                tracing::debug!(
+                    home_power,
+                    threshold,
+                    "Load limiter: load dropped below threshold, resetting"
+                );
+                *state = LoadLimiterState::Idle;
+            }
+        }
+        LoadLimiterState::Paused => {
+            if home_power <= threshold {
+                tracing::info!(
+                    home_power,
+                    threshold,
+                    "Load limiter: load below threshold — counting"
+                );
+                *state = LoadLimiterState::LowLoadPending { consecutive: 1 };
+            }
+        }
+        // Post-crash restart: the debounce delay already elapsed while
+        // the app was down. If the load is already below threshold,
+        // restore Eco immediately. If still high, transition to normal Paused.
+        LoadLimiterState::PausedFromRestart => {
+            if home_power <= threshold {
+                tracing::info!(
+                    "Load limiter: post-crash — load below threshold, restoring Eco immediately"
+                );
+                *state = LoadLimiterState::Idle;
+                return Some(vec![
+                    RegisterWrite {
+                        address: HR_BATTERY_POWER_MODE,
+                        value: 1,
+                    },
+                    RegisterWrite {
+                        address: HR_ENABLE_DISCHARGE,
+                        value: 0,
+                    },
+                    RegisterWrite {
+                        address: HR_BATTERY_SOC_RESERVE,
+                        value: 4,
+                    },
+                ]);
+            } else {
+                tracing::info!(
+                    home_power,
+                    threshold,
+                    "Load limiter: post-crash — load still high, staying Paused"
+                );
+                *state = LoadLimiterState::Paused;
+            }
+        }
+        LoadLimiterState::LowLoadPending { consecutive } => {
+            if home_power <= threshold {
+                *consecutive += 1;
+                if *consecutive >= debounce_count {
+                    tracing::info!(
+                        consecutive,
+                        "Load limiter: restoring Eco mode"
+                    );
+                    *state = LoadLimiterState::Idle;
+                    return Some(vec![
+                        RegisterWrite {
+                            address: HR_BATTERY_POWER_MODE,
+                            value: 1, // self-consumption
+                        },
+                        RegisterWrite {
+                            address: HR_ENABLE_DISCHARGE,
+                            value: 0,
+                        },
+                        RegisterWrite {
+                            address: HR_BATTERY_SOC_RESERVE,
+                            value: 4, // default reserve
+                        },
+                    ]);
+                }
+            } else {
+                tracing::debug!(
+                    home_power,
+                    threshold,
+                    "Load limiter: load rose above threshold, staying Paused"
+                );
+                *state = LoadLimiterState::Paused;
+            }
+        }
+    }
+
+    None
+}
+
 /// Validate raw battery BMS register data to reject garbage from non-existent
 /// batteries on multi-battery probe addresses (0x33-0x37).
 ///
@@ -2906,6 +3197,53 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                 ),
                                                 Err(e) => tracing::error!(
                                                     "Auto winter: write reg {} failed: {e}",
+                                                    w.address
+                                                ),
+                                            }
+                                            tokio::time::sleep(Duration::from_millis(1500)).await;
+                                        }
+                                    }
+                                }
+
+                                // ---- Load discharge limiter ----
+                                {
+                                    let config = state.load_limiter_config.lock().await;
+                                    let mut ll_state = state.load_limiter_state.lock().await;
+                                    let writes = check_load_limiter(
+                                        &snapshot,
+                                        &config,
+                                        &mut ll_state,
+                                        poll_settings.poll_interval,
+                                    );
+
+                                    // Tag the snapshot so the frontend knows.
+                                    snapshot.load_limiter_active =
+                                        matches!(*ll_state, LoadLimiterState::Paused)
+                                        || matches!(*ll_state, LoadLimiterState::PausedFromRestart);
+
+                                    let was_active = poll_settings.load_limiter_active_persisted;
+                                    let now_active = snapshot.load_limiter_active;
+                                    drop(config);
+                                    drop(ll_state);
+
+                                    // Persist active flag to disk so a crash/restart can detect it.
+                                    if was_active != now_active {
+                                        let mut app_settings = poll_settings.clone();
+                                        app_settings.load_limiter_active_persisted = now_active;
+                                        if let Err(e) = app_settings.save() {
+                                            tracing::warn!("Failed to persist load limiter state: {e}");
+                                        }
+                                    }
+
+                                    if let Some(writes) = writes {
+                                        for w in &writes {
+                                            match client.write_register(w.address, w.value).await {
+                                                Ok(()) => tracing::info!(
+                                                    "Load limiter: wrote reg {} = {}",
+                                                    w.address, w.value
+                                                ),
+                                                Err(e) => tracing::error!(
+                                                    "Load limiter: write reg {} failed: {e}",
                                                     w.address
                                                 ),
                                             }

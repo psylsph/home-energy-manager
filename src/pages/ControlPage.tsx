@@ -1200,13 +1200,10 @@ function BatteryCalibrationSection() {
   const isActive = stage > 0 && stage < 7;
 
   return (
-    <section className="space-y-3 border-t border-bg-elevated pt-4">
-      <div className="flex items-center gap-2">
-        <h2 className="text-text-primary font-semibold text-lg">Battery Calibration</h2>
-        <span className="text-xs bg-amber-500/20 text-text-primary px-2 py-0.5 rounded-full font-medium">DEV</span>
-      </div>
+    <div className="space-y-3">
+      <h3 className="text-text-primary font-medium text-base">Battery Calibration</h3>
 
-      <div className="bg-amber-900/20 border border-amber-700/30 rounded-xl p-3 space-y-2">
+      <div className="bg-amber-900/20 border border-amber-700/30 rounded-xl p-3 space-y-3">
         <p className="text-text-primary text-xs font-medium">⚠️  WARNING</p>
         <p className="text-text-secondary text-xs">
           Calibration cycles the battery through: discharge → calibrate lower
@@ -1214,34 +1211,48 @@ function BatteryCalibrationSection() {
           process cannot be cancelled — it must run to completion.
           This can take several hours. Only use if you understand the risks.
         </p>
-      </div>
 
-      <div className="bg-bg-surface rounded-xl p-3 space-y-2">
-        <div className="flex items-center justify-between">
-          <span className="text-text-secondary text-sm">Current Stage</span>
-          <span className={`font-mono text-sm ${isActive ? 'text-amber-400' : 'text-text-primary'}`}>
-            {stageLabels[stage] || `Unknown (${stage})`}
-          </span>
-        </div>
-
-        <div className="flex gap-2 pt-1">
+        <div className="flex items-center gap-3 pt-3 border-t border-amber-700/20">
           <button
             onClick={handleStartCalibration}
             disabled={saving || isActive}
-            className="w-full py-2 bg-amber-500/20 text-text-primary rounded-lg text-xs font-medium hover:bg-amber-500/30 transition disabled:opacity-40 border border-amber-500/30"
+            className="flex-1 py-1.5 bg-amber-500/20 text-text-primary rounded-lg text-xs font-medium hover:bg-amber-500/30 transition disabled:opacity-40 border border-amber-500/30"
           >
-            Start Calibration
+            {saving ? 'Sending...' : feedback === 'saved' ? '✓ Sent' : feedback === 'error' ? '✗ Error' : 'Start Calibration'}
           </button>
+          <span className="text-text-secondary text-xs shrink-0">
+            Stage: <span className={`font-mono ${isActive ? 'text-amber-400' : 'text-text-primary'}`}>
+              {stageLabels[stage] || `Unknown (${stage})`}
+            </span>
+          </span>
         </div>
-
-        {feedback && (
-          <p className={`text-xs ${feedback === 'saved' ? 'text-battery' : 'text-red-400'}`}>
-            {feedback === 'saved' ? 'Command sent' : 'Error sending command'}
-          </p>
-        )}
       </div>
+    </div>
+  );
+}
 
-      {/* Reboot Inverter */}
+/** Reboot inverter button — developer mode only. */
+function RebootInverterSection() {
+  const [saving, setSaving] = useState(false);
+  const [feedback, setFeedback] = useState<'saved' | 'error' | null>(null);
+
+  const handleReboot = async () => {
+    if (!confirm('⚠️  REBOOT INVERTER\n\nThis will restart the inverter immediately. The connection will drop for 1-2 minutes.\n\nContinue?')) return;
+    setSaving(true);
+    setFeedback(null);
+    try {
+      await apiPost('/api/control/reboot');
+      setFeedback('saved');
+    } catch {
+      setFeedback('error');
+    }
+    setSaving(false);
+    setTimeout(() => setFeedback(null), 3000);
+  };
+
+  return (
+    <div className="space-y-3">
+      <h3 className="text-text-primary font-medium text-base">Inverter Reboot</h3>
       <div className="bg-red-900/20 border border-red-700/30 rounded-xl p-3 space-y-2">
         <p className="text-text-primary text-xs font-medium">⚠️  DANGER</p>
         <p className="text-text-secondary text-xs">
@@ -1249,27 +1260,245 @@ function BatteryCalibrationSection() {
           the inverter will be offline for 1-2 minutes while it restarts.
         </p>
         <button
-          onClick={async () => {
-            if (!confirm('⚠️  REBOOT INVERTER\n\nThis will restart the inverter immediately. The connection will drop for 1-2 minutes.\n\nContinue?')) return;
-            setSaving(true);
-            try {
-              await apiPost('/api/control/reboot');
-              setFeedback('saved');
-            } catch {
-              setFeedback('error');
-            }
-            setSaving(false);
-            setTimeout(() => setFeedback(null), 3000);
-          }}
+          onClick={handleReboot}
           disabled={saving}
           className="w-full py-2 bg-red-500/20 text-text-primary rounded-lg text-xs font-medium hover:bg-red-500/30 transition disabled:opacity-40 border border-red-500/30"
         >
-          Reboot Inverter
+          {saving ? 'Sending...' : feedback === 'saved' ? '✓ Sent' : feedback === 'error' ? '✗ Error' : 'Reboot Inverter'}
         </button>
       </div>
-    </section>
+    </div>
   );
 }
+
+// Type for the load limiter config from the API.
+interface LoadLimiterConfig {
+  enabled: boolean;
+  threshold_w: number;
+  trigger_delay_minutes: number;
+  start_hour: number;
+  start_minute: number;
+  end_hour: number;
+  end_minute: number;
+}
+
+/**
+ * Load Discharge Limiter — developer mode only.
+ *
+ * Monitors home power consumption. When it exceeds a user-defined threshold
+ * for a sustained period within an activation window, pauses battery
+ * discharge (Eco Paused). When the load drops below the threshold for the
+ * same period, restores Eco mode. Only operates when the battery is in Eco
+ * mode and no other automated feature (auto-winter, Cosy, Agile) is active.
+ */
+function LoadLimiterSection() {
+  const { snapshot } = useInverterStore();
+  const [enabled, setEnabled] = useState(false);
+  const [thresholdW, setThresholdW] = useState(3000);
+  const [triggerDelay, setTriggerDelay] = useState(5);
+  const [startHour, setStartHour] = useState(0);
+  const [startMinute, setStartMinute] = useState(0);
+  const [endHour, setEndHour] = useState(0);
+  const [endMinute, setEndMinute] = useState(0);
+  const [saving, setSaving] = useState(false);
+  const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await apiGet<{ ok: boolean; data: { config: LoadLimiterConfig } }>('/api/load-limiter');
+        if (res.ok) {
+          const cfg = res.data.config;
+          setEnabled(cfg.enabled);
+          setThresholdW(cfg.threshold_w);
+          setTriggerDelay(cfg.trigger_delay_minutes);
+          setStartHour(cfg.start_hour);
+          setStartMinute(cfg.start_minute);
+          setEndHour(cfg.end_hour);
+          setEndMinute(cfg.end_minute);
+        }
+      } catch { /* use defaults */ }
+    })();
+  }, []);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setSaveFeedback(null);
+    try {
+      await apiPost('/api/load-limiter', {
+        enabled,
+        threshold_w: thresholdW,
+        trigger_delay_minutes: triggerDelay,
+        start_hour: startHour,
+        start_minute: startMinute,
+        end_hour: endHour,
+        end_minute: endMinute,
+      });
+      setSaveFeedback('saved');
+    } catch {
+      setSaveFeedback('error');
+    }
+    setSaving(false);
+    setTimeout(() => setSaveFeedback(null), 2000);
+  };
+
+  const isEco = snapshot?.battery_mode === 'eco';
+  const homePower = snapshot?.home_power ?? 0;
+  const loadLimiterActive = snapshot?.load_limiter_active ?? false;
+
+  // Derive human-readable state
+  let stateLabel = 'Idle';
+  if (enabled && isEco) {
+    if (loadLimiterActive) {
+      const belowThreshold = homePower <= thresholdW;
+      stateLabel = belowThreshold ? 'Recovering…' : 'Paused';
+    } else if (homePower > thresholdW && homePower !== 0) {
+      stateLabel = 'Monitoring…';
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <h3 className="text-text-primary font-medium text-base">Load Discharge Limiter</h3>
+
+      {snapshot != null && !isEco && (
+        <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-2.5 text-xs text-text-primary">
+          Load limiter only operates in <strong>Eco</strong> mode (current:{' '}
+          {snapshot.battery_mode.replace('_', ' ')})
+        </div>
+      )}
+
+      {/* Master toggle */}
+      <div className="bg-bg-surface rounded-xl p-4 space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <span className="text-text-primary text-sm font-medium">Enable</span>
+            <p className="text-text-secondary text-xs mt-0.5">
+              Automatically pause battery discharge when home load is high
+            </p>
+          </div>
+          <button
+            onClick={() => setEnabled(!enabled)}
+            className={`relative w-10 h-5 rounded-full transition ${enabled ? 'bg-battery' : 'bg-bg-elevated'}`}
+          >
+            <span
+              className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition ${enabled ? 'left-5.5' : 'left-0.5'}`}
+            />
+          </button>
+        </div>
+
+        {enabled && (
+          <>
+            {/* Status indicator */}
+            {snapshot != null && (
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-text-secondary">State</span>
+                <span className={`font-mono font-medium ${loadLimiterActive ? 'text-amber-400' : 'text-battery'}`}>
+                  {stateLabel}
+                </span>
+              </div>
+            )}
+            {snapshot != null && (
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-text-secondary">Home Power</span>
+                <span className="font-mono text-text-primary">
+                  {homePower >= 1000 ? (homePower / 1000).toFixed(1) : homePower}{' '}
+                  {homePower >= 1000 ? 'kW' : 'W'}
+                  <span className="text-text-secondary/50 ml-1">/ {thresholdW >= 1000 ? (thresholdW / 1000).toFixed(1) : thresholdW}{thresholdW >= 1000 ? 'kW' : 'W'}</span>
+                </span>
+              </div>
+            )}
+
+            {/* Load threshold */}
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-text-secondary text-sm">Load Threshold</span>
+                <span className="font-mono text-text-primary text-sm">
+                  {thresholdW >= 1000 ? (thresholdW / 1000).toFixed(1) : thresholdW}
+                  {thresholdW >= 1000 ? ' kW' : ' W'}
+                </span>
+              </div>
+              <input
+                type="range"
+                min={500}
+                max={15000}
+                step={100}
+                value={thresholdW}
+                onChange={(e) => setThresholdW(Number(e.target.value))}
+                className="w-full"
+              />
+              <p className="text-text-secondary text-xs">
+                Pause discharge when home power stays above this for the trigger delay
+              </p>
+            </div>
+
+            {/* Trigger delay */}
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-text-secondary text-sm">Trigger Delay</span>
+                <span className="font-mono text-text-primary text-sm">{triggerDelay} min</span>
+              </div>
+              <input
+                type="range"
+                min={1}
+                max={60}
+                step={1}
+                value={triggerDelay}
+                onChange={(e) => setTriggerDelay(Number(e.target.value))}
+                className="w-full"
+              />
+              <p className="text-text-secondary text-xs">
+                How long the load must stay over/under the threshold before acting
+              </p>
+            </div>
+
+            {/* Activation window */}
+            <div className="space-y-1.5">
+              <span className="text-text-secondary text-sm">Activation Window</span>
+              <p className="text-text-secondary text-xs">
+                00:00 to 00:00 means always active
+              </p>
+              <div className="flex flex-col sm:flex-row items-center gap-4 sm:gap-6">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-text-secondary text-sm shrink-0">Start</span>
+                  <TimePicker
+                    hour={startHour}
+                    minute={startMinute}
+                    onChange={(h, m) => { setStartHour(h); setStartMinute(m); }}
+                  />
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-text-secondary text-sm shrink-0">End</span>
+                  <TimePicker
+                    hour={endHour}
+                    minute={endMinute}
+                    onChange={(h, m) => { setEndHour(h); setEndMinute(m); }}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* App-must-stay-running note */}
+            <div className="text-xs bg-blue-900/30 text-text-primary px-3 py-2 rounded-lg">
+              <strong>Note:</strong> This is implemented locally within this app. It monitors
+              home power via Modbus and pauses battery discharge when the load is high.
+              The app must stay running for this to work.
+            </div>
+          </>
+        )}
+
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="w-full py-2 bg-battery/20 text-battery rounded-lg text-sm font-medium hover:bg-battery/30 transition disabled:opacity-50"
+        >
+          {saving ? 'Saving...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 
 export default function ControlPage() {
   const { snapshot, developerMode } = useInverterStore();
@@ -2004,8 +2233,18 @@ export default function ControlPage() {
             </div>
           </div>
         </div>
-        {/* Battery Calibration (dev mode only) */}
-        {developerMode && <BatteryCalibrationSection />}
+        {/* Developer Controls (dev mode only) */}
+        {developerMode && (
+          <section className="space-y-4 border-t border-bg-elevated pt-4 mt-4">
+            <div className="flex items-center gap-2">
+              <h2 className="text-text-primary font-semibold text-lg">Developer Controls</h2>
+              <span className="text-xs bg-amber-500/20 text-text-primary px-2 py-0.5 rounded-full font-medium">DEV</span>
+            </div>
+            <LoadLimiterSection />
+            <BatteryCalibrationSection />
+            <RebootInverterSection />
+          </section>
+        )}
       </section>
     </div>
   );

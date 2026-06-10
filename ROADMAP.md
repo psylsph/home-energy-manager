@@ -47,7 +47,30 @@ See also: `derive_three_phase_battery_fields()` in poll.rs, GivTCP
 
 ## Near-term candidates
 
+### Multi-Zone Tariff Cost Calculations
+
+**Status**: Planning complete. Related to [Issue #64](https://github.com/psylsph/home-energy-manager/issues/64).
+
+The current 2-zone (Peak/Off-Peak) model cannot represent tariffs like Octopus Flux (3 zones) or Cosy (4+ zones). This project will implement a generic N-zone tariff system to accurately compute costs on the History page.
+
+#### Technical Design
+- **Data Model**: Introduce `TariffZone` (label, rate, start, end) and `MultiZoneTariffConfig` (list of zones + default day rate).
+- **Tariff Mode**: A new `tariff_mode` setting (`standard` vs `multizone`) allows seamless fallback to existing 2-zone configs.
+- **Rate Resolution**: A generic `getRate(timestamp)` function replaces the binary `isOffPeak()` logic. It iterates through zones to find a match, falling back to the `default_rate`.
+- **UI**: Preset buttons for **Flux** and **Cosy** that pre-fill complex zone configurations, with a "Custom" mode for arbitrary zone creation.
+
+#### Implementation Order
+1. **Backend**: Update `Settings` struct $\rightarrow$ `Serde` serialization tests $\rightarrow$ `GET/PUT /api/settings` endpoints.
+2. **Frontend State**: Update `types.ts` $\rightarrow$ wire `PollSettings` to `SettingsPage.tsx` and `HistoryPage.tsx`.
+3. **UI Construction**: Build the zone editor in `SettingsPage.tsx` with preset-switching logic.
+4. **Engine Update**: Implement `getMultiZoneRate()` and update the cost `preprocess` pipeline in `HistoryPage.tsx`.
+5. **Visuals**: Add per-zone cost breakdown summary and optional stacked area charts.
+
+---
+
 ### Static asset caching headers
+
+
 
 **Status**: Planned. Related to [Issue #59](https://github.com/psylsph/home-energy-manager/issues/59).
 

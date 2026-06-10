@@ -65,6 +65,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/cosy", get(api::get_cosy).post(api::set_cosy))
         // Agile Octopus
         .route("/api/agile", get(api::get_agile).post(api::set_agile))
+        // Load discharge limiter
+        .route(
+            "/api/load-limiter",
+            get(api::get_load_limiter).post(api::set_load_limiter),
+        )
         // Discovery
         .route("/api/discover", get(api::discover))
         // Developer logs

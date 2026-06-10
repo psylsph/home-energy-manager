@@ -1183,6 +1183,76 @@ pub async fn set_agile(
 }
 
 // ---------------------------------------------------------------------------
+// Load discharge limiter endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /api/load-limiter — current config and state.
+pub async fn get_load_limiter(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let config = state.load_limiter_config.lock().await.clone();
+    let ll_state = state.load_limiter_state.lock().await.clone();
+    (StatusCode::OK, Json(json!({
+        "ok": true,
+        "data": {
+            "config": config,
+            "state": ll_state,
+        }
+    })))
+}
+
+/// POST /api/load-limiter — update load discharge limiter config.
+///
+/// Body fields are optional — only provided fields are updated.
+/// Fields: `enabled`, `threshold_w`, `trigger_delay_minutes`,
+///         `start_hour`, `start_minute`, `end_hour`, `end_minute`.
+pub async fn set_load_limiter(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<Value>) {
+    let mut config = state.load_limiter_config.lock().await;
+
+    if let Some(v) = body.get("enabled").and_then(|v| v.as_bool()) {
+        config.enabled = v;
+    }
+    if let Some(v) = body.get("threshold_w").and_then(|v| v.as_u64()) {
+        config.threshold_w = v.clamp(100, 50000) as u32;
+    }
+    if let Some(v) = body.get("trigger_delay_minutes").and_then(|v| v.as_u64()) {
+        config.trigger_delay_minutes = v.clamp(1, 120) as u32;
+    }
+    if let Some(v) = body.get("start_hour").and_then(|v| v.as_u64()) {
+        config.start_hour = v.min(23) as u8;
+    }
+    if let Some(v) = body.get("start_minute").and_then(|v| v.as_u64()) {
+        config.start_minute = v.min(59) as u8;
+    }
+    if let Some(v) = body.get("end_hour").and_then(|v| v.as_u64()) {
+        config.end_hour = v.min(23) as u8;
+    }
+    if let Some(v) = body.get("end_minute").and_then(|v| v.as_u64()) {
+        config.end_minute = v.min(59) as u8;
+    }
+
+    tracing::info!("Load limiter config updated: {:?}", config);
+
+    // Persist to settings.json
+    let mut app_settings = crate::settings::Settings::load();
+    app_settings.load_limiter_enabled = config.enabled;
+    app_settings.load_limiter_threshold_w = config.threshold_w;
+    app_settings.load_limiter_trigger_delay_minutes = config.trigger_delay_minutes;
+    app_settings.load_limiter_start_hour = config.start_hour;
+    app_settings.load_limiter_start_minute = config.start_minute;
+    app_settings.load_limiter_end_hour = config.end_hour;
+    app_settings.load_limiter_end_minute = config.end_minute;
+    drop(config);
+    if let Err(e) = app_settings.save() {
+        tracing::warn!("Failed to persist load limiter config: {e}");
+        return server_error(&format!("Failed to save: {e}"));
+    }
+
+    ok_response("Load limiter config updated")
+}
+
+// ---------------------------------------------------------------------------
 // Battery calibration endpoint (developer mode)
 // ---------------------------------------------------------------------------
 
