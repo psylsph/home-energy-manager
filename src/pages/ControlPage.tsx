@@ -1165,7 +1165,7 @@ function AgileControls() {
   );
 }
 
-/** Battery calibration section — developer mode only, legacy Gen1/Gen2/Polar only. */
+/** Battery calibration section — shown when battery BMS firmware indicates Gen1/Gen2 battery. */
 function BatteryCalibrationSection() {
   const { snapshot } = useInverterStore();
   const supported = snapshot?.supports_battery_calibration ?? false;
@@ -1173,7 +1173,7 @@ function BatteryCalibrationSection() {
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<'saved' | 'error' | null>(null);
 
-  // Hide entirely for Gen3+ devices (auto-calibrate via BMS) and batteryless devices.
+  // Hide when battery auto-calibrates (Gen3+ BMS firmware >= 3000) or no battery present.
   if (!supported) return null;
 
   const handleStartCalibration = async () => {
@@ -1214,6 +1214,10 @@ function BatteryCalibrationSection() {
           limit → charge → balance → calibrate upper limit. Once started, the
           process cannot be cancelled — it must run to completion.
           This can take several hours. Only use if you understand the risks.
+        </p>
+        <p className="text-amber-300/70 text-xs">
+          ℹ️  This control is for Gen1/Gen2 batteries only (BMS firmware &lt; 3000).
+          Gen3+ batteries auto-calibrate via BMS OCV and do not need manual calibration.
         </p>
 
         <div className="flex items-center gap-3 pt-3 border-t border-amber-700/20">

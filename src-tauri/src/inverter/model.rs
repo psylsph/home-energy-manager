@@ -356,7 +356,10 @@ impl DeviceType {
         }
     }
 
-    /// Whether this device type uses legacy batteries that need manual calibration via HR(29).
+    /// Whether this device type is a legacy model that may need manual calibration via HR(29).
+    ///
+    /// This is used as a **fallback** when battery BMS firmware is unavailable (HV stacks,
+    /// read failures). The primary check uses `bms_firmware < 3000` from the battery module.
     /// Gen3+ inverters and their derivatives use batteries with BMS-managed OCV auto-calibration.
     /// Batteryless devices (EMS, Gateway, PV Inverter) return false.
     pub fn supports_manual_battery_calibration(&self) -> bool {

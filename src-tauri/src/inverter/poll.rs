@@ -3089,6 +3089,24 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 // from the inverter register blocks entirely.
                                 derive_battery_fields_from_bms(&mut snapshot, hv_cluster.as_ref());
 
+                                // Determine battery calibration support based on actual BMS
+                                // firmware from the first LV battery module, not inverter type.
+                                // Gen3+ batteries (bms_firmware >= 3000) auto-calibrate via BMS OCV
+                                // and should not be manually calibrated via HR(29).
+                                // Falls back to device type for HV stacks (bms_firmware=0) or when
+                                // no battery modules are present.
+                                snapshot.supports_battery_calibration = if let Some(bms) = snapshot.battery_modules.first() {
+                                    if bms.bms_firmware > 0 {
+                                        bms.bms_firmware < 3000
+                                    } else {
+                                        // No BMS firmware reported (HV stacks, or read failed).
+                                        // Fall back to device type — Gen3+ types don't need it.
+                                        snapshot.device_type.supports_manual_battery_calibration()
+                                    }
+                                } else {
+                                    false // No battery modules — no calibration
+                                };
+
                                 // Store latest snapshot.
                                 // Sanitize against physically impossible values first.
                                 // Skip delta checks during the grace period after connect.

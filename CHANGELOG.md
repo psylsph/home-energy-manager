@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-06-11
+
+### Changed
+
+- **Battery Calibration now checks BMS firmware instead of inverter model** —
+  The "Start Battery Calibration" button used to show or hide based on which
+  inverter you have (Gen1/Gen2/Polar showed it, everything else hid it). That's
+  the wrong check — what matters is the *battery*, not the inverter. An
+  AC-coupled inverter with a Gen2 battery attached should show the button,
+  but one with a Gen3 battery should not.
+
+  The button now reads the BMS firmware version from the first battery module:
+  firmware below 3000 means Gen1/Gen2 (manual calibration needed), firmware
+  3000 or above means Gen3+ (auto-calibrates via BMS, no button shown). A
+  small info note now appears below the warning explaining this.
+
+  If BMS firmware isn't available (HV stacks with no per-module firmware
+  reading), it falls back to the old inverter-type check. If there are no
+  battery modules at all, the button stays hidden.
+
 ## [0.17.25] - 2026-06-10
 
 ### Added
