@@ -449,6 +449,7 @@ fn decode_holding_0_59(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawC
 
     // Battery calibration stage: HR(29) — 0=off, 5=balance
     snap.battery_calibration_stage = get_reg(data, 29) as u8;
+    snap.supports_battery_calibration = snap.device_type.supports_manual_battery_calibration();
 
     // External CT ammeter enabled: HR(7) — bool
     snap.enable_ammeter = get_reg(data, 7) != 0;

@@ -1165,12 +1165,16 @@ function AgileControls() {
   );
 }
 
-/** Battery calibration section — developer mode only. */
+/** Battery calibration section — developer mode only, legacy Gen1/Gen2/Polar only. */
 function BatteryCalibrationSection() {
   const { snapshot } = useInverterStore();
+  const supported = snapshot?.supports_battery_calibration ?? false;
   const stage = snapshot?.battery_calibration_stage ?? 0;
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<'saved' | 'error' | null>(null);
+
+  // Hide entirely for Gen3+ devices (auto-calibrate via BMS) and batteryless devices.
+  if (!supported) return null;
 
   const handleStartCalibration = async () => {
     if (!confirm('⚠️  BATTERY CALIBRATION\n\nThis will cycle the battery through: discharge → calibrate → charge → balance → set capacity.\n\nThe balancing phase ensures all cells are equalized. The full cycle can take several hours.\n\nOnly proceed if you understand the risks. Continue?')) return;

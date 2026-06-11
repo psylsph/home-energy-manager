@@ -356,6 +356,16 @@ impl DeviceType {
         }
     }
 
+    /// Whether this device type uses legacy batteries that need manual calibration via HR(29).
+    /// Gen3+ inverters and their derivatives use batteries with BMS-managed OCV auto-calibration.
+    /// Batteryless devices (EMS, Gateway, PV Inverter) return false.
+    pub fn supports_manual_battery_calibration(&self) -> bool {
+        matches!(
+            self,
+            Self::Gen1Hybrid | Self::Gen2Hybrid | Self::PolarHybrid
+        )
+    }
+
     /// Maximum number of discharge schedule slots this device supports.
     ///
     /// Gen2 hybrids support 2 discharge slots (HR 56-57 and HR 44-45) unlike
@@ -681,12 +691,16 @@ pub struct InverterSnapshot {
     /// price thresholds).
     #[serde(default)]
     pub agile_enabled: bool,
-    /// Battery calibration stage (0=off, 5=balance).
+    /// Battery calibration stage (0=off, 5=balance). Only meaningful for legacy Gen1/Gen2/Polar devices.
     #[serde(default)]
     pub battery_calibration_stage: u8,
     /// True when the load discharge limiter is actively pausing discharge.
     #[serde(default)]
     pub load_limiter_active: bool,
+    /// Whether this device supports manual battery calibration via HR(29).
+    /// False for Gen3+ (auto-calibrates via BMS) and batteryless devices.
+    #[serde(default)]
+    pub supports_battery_calibration: bool,
     pub inverter_serial: String,
     /// ARM firmware version (HR(21)). For 0x20xx hybrids the century
     /// (`arm_fw / 100`) determines generation: 3 → Gen3, 8/9 → Gen2,

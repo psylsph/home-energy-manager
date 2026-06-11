@@ -62,6 +62,7 @@ export interface InverterSnapshot {
   enable_ammeter: boolean;
   enable_reversed_ct_clamp: boolean;
   meter_type: number;
+  supports_battery_calibration: boolean;
 }
 
 export interface BatteryModule {
