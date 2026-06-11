@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-06-11
+
+### Added
+
+- **Smarter external meter detection** — If your inverter is configured for
+  an external CT meter (including EM115), the app now keeps trying to find it
+  instead of giving up after the first attempt. This helps LoRA-linked meters
+  that may be slow to respond at startup. The app retries every few poll
+  cycles for up to 17 minutes before giving up.
+
+### Changed
+
+- **Faster polling for three-phase inverters** — Three-phase systems no
+  longer read two redundant sets of input registers that are completely
+  overridden by the dedicated three-phase register blocks anyway. This
+  removes about 300ms of wasted time per poll cycle and eliminates two
+  potential timeout failures that could abort the entire poll.
+
+- **Gentler communication pace for three-phase dongles** — The app now
+  leaves a slightly longer pause (250ms instead of 150ms) between Modbus
+  requests on three-phase systems, which need to read far more register
+  blocks per cycle than single-phase systems.
+
+- **Quieter logging** — A single dropped Modbus frame is now logged at
+  debug level instead of warning level. You'll only see warnings when
+  something is genuinely wrong (repeated failures or lost connections),
+  not for routine transient timeouts that are automatically retried.
+
+- **Relaxed meter presence detection** — The app now accepts a meter as
+  present when it reports any non-zero voltage, matching the upstream
+  givenergy-modbus reference library. The previous check required at
+  least 100V, which could reject a genuinely connected but lightly
+  loaded meter.
+
 ## [0.18.1] - 2026-06-11
 
 ### Fixed

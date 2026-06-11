@@ -378,13 +378,13 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.today_ac_charge_kwh = get_reg(data, 35) as f32 * 0.1; // IR(35): e_ac_charge_today
     // Consumption = solar + import - export - ac_charge (ref formula).
     // Clamped at 0 to avoid negative from meter rounding noise.
-    snap.today_consumption_kwh = (snap.today_solar_kwh
-        + snap.today_import_kwh
+    snap.today_consumption_kwh = (snap.today_solar_kwh + snap.today_import_kwh
         - snap.today_export_kwh
         - snap.today_ac_charge_kwh)
         .max(0.0);
     snap.total_export_kwh = uint32(get_reg(data, 21), get_reg(data, 22)) as f32 * 0.1; // IR(21-22): e_grid_out_total
-    snap.total_import_kwh = uint32(get_reg(data, 32), get_reg(data, 33)) as f32 * 0.1; // IR(32-33): e_grid_in_total // keep raw IR(35) for energy balance
+    snap.total_import_kwh = uint32(get_reg(data, 32), get_reg(data, 33)) as f32 * 0.1;
+    // IR(32-33): e_grid_in_total // keep raw IR(35) for energy balance
 }
 
 /// IR 180-239: Alternative battery energy counters (unverified range).
@@ -568,8 +568,7 @@ fn decode_holding_240_299(data: &[u16], snap: &mut InverterSnapshot) {
         let cs2_start = get_reg(data, 243 - 240);
         let cs2_end = get_reg(data, 244 - 240);
         if cs2_start != cs2_end {
-            if let (Some((sh, sm)), Some((eh, em))) =
-                (decode_hhmm(cs2_start), decode_hhmm(cs2_end))
+            if let (Some((sh, sm)), Some((eh, em))) = (decode_hhmm(cs2_start), decode_hhmm(cs2_end))
             {
                 snap.charge_slots[1] = ScheduleSlot {
                     enabled: true,
@@ -964,7 +963,8 @@ fn decode_input_1360_1413(data: &[u16], snap: &mut InverterSnapshot) {
     snap.total_import_kwh = uint32(get_reg(data, 22), get_reg(data, 23)) as f32 * 0.1; // IR(1382-1383): e_import_total
     snap.total_export_kwh = uint32(get_reg(data, 26), get_reg(data, 27)) as f32 * 0.1; // IR(1386-1387): e_export_total
     snap.total_charge_kwh = uint32(get_reg(data, 34), get_reg(data, 35)) as f32 * 0.1; // IR(1394-1395): e_battery_charge_total
-    snap.total_discharge_kwh = uint32(get_reg(data, 30), get_reg(data, 31)) as f32 * 0.1; // IR(1390-1391): e_battery_discharge_total
+    snap.total_discharge_kwh = uint32(get_reg(data, 30), get_reg(data, 31)) as f32 * 0.1;
+    // IR(1390-1391): e_battery_discharge_total
 }
 
 /// Decode meter data from raw register values (IR 60-89) into a MeterData struct.
@@ -1006,10 +1006,19 @@ pub fn decode_meter_data(data: &[u16], address: u8) -> MeterData {
 }
 
 /// Validate that raw meter data represents a real, connected meter.
-/// A meter is valid if phase 1 voltage is non-zero and plausible (>100V).
-pub fn validate_meter_data(data: &[u16]) -> bool {
+///
+/// Per givenergy-modbus, a meter is present when `v_phase_1` (IR 60) is
+/// non-zero. Empty/ghost meter slots always return zero voltage. We reject
+/// only extreme corruption (>500V) to avoid accepting garbage, but the
+/// presence check is `v_phase_1 != 0` — not `> 100V` — matching the
+/// reference library.
+///
+/// Returns `(is_present, v_phase_1)` so the caller can log the raw voltage
+/// for diagnostics.
+pub fn validate_meter_data(data: &[u16]) -> (bool, f32) {
     let v1 = data.first().copied().unwrap_or(0) as f32 * 0.1;
-    v1 > 100.0 && v1 < 300.0
+    let is_present = v1 > 0.0 && v1 < 500.0;
+    (is_present, v1)
 }
 
 /// Decode battery block data from a single data slice into a BatteryModule.
@@ -1333,7 +1342,10 @@ pub fn backfill_hv_module_fields(
     modules: &mut [crate::inverter::model::BatteryModule],
     cluster: &HvBcuCluster,
 ) {
-    let module_soc = cluster.battery_soc_max.saturating_add(cluster.battery_soc_min) / 2;
+    let module_soc = cluster
+        .battery_soc_max
+        .saturating_add(cluster.battery_soc_min)
+        / 2;
     let module_soc = module_soc.min(100);
     // Per-module nominal Ah. The cluster reports per-module capacity (IR 98),
     // so each module takes the same value; design == calibrated for HV.
@@ -1663,16 +1675,28 @@ mod tests {
         assert_eq!(snap.meters[0].p_active_phase_2, 0, "L2 = unknown");
         assert_eq!(snap.meters[0].p_active_phase_3, 0, "L3 = unknown");
         // Power factor from IR(1068) — raw 980 → 0.980
-        assert!((snap.meters[0].pf_total - 0.980).abs() < 0.001, "PF from register");
+        assert!(
+            (snap.meters[0].pf_total - 0.980).abs() < 0.001,
+            "PF from register"
+        );
         // Apparent power from IR(1073-1074) — raw 15000 → 1500VA
-        assert_eq!(snap.meters[0].p_apparent_total, 1500, "Apparent from register");
+        assert_eq!(
+            snap.meters[0].p_apparent_total, 1500,
+            "Apparent from register"
+        );
         // Voltages from IR(1061-1063)
         assert!((snap.meters[0].v_phase_1 - 415.0).abs() < 0.1);
         assert!((snap.meters[0].v_phase_2 - 416.0).abs() < 0.1);
         assert!((snap.meters[0].v_phase_3 - 414.0).abs() < 0.1);
         assert!((snap.meters[0].frequency - 50.0).abs() < 0.01);
-        assert!((snap.meters[0].e_import_active_kwh - 88.8).abs() < 0.1, "3-phase meter import = total_import_kwh");
-        assert!((snap.meters[0].e_export_active_kwh - 99.9).abs() < 0.1, "3-phase meter export = total_export_kwh");
+        assert!(
+            (snap.meters[0].e_import_active_kwh - 88.8).abs() < 0.1,
+            "3-phase meter import = total_import_kwh"
+        );
+        assert!(
+            (snap.meters[0].e_export_active_kwh - 99.9).abs() < 0.1,
+            "3-phase meter export = total_export_kwh"
+        );
     }
 
     #[test]
@@ -2378,5 +2402,48 @@ mod tests {
             snap.discharge_slots[0].enabled,
             "discharge slot 0 must remain enabled (was already independent)"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Meter validation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn meter_validation_accepts_nonzero_voltage() {
+        // Any non-zero plausible voltage means a meter is present.
+        let (valid, v1) = validate_meter_data(&[2300]); // 230.0V
+        assert!(valid);
+        assert!((v1 - 230.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn meter_validation_rejects_zero_voltage() {
+        let (valid, v1) = validate_meter_data(&[0]);
+        assert!(!valid);
+        assert_eq!(v1, 0.0);
+    }
+
+    #[test]
+    fn meter_validation_rejects_empty_data() {
+        let (valid, v1) = validate_meter_data(&[]);
+        assert!(!valid);
+        assert_eq!(v1, 0.0);
+    }
+
+    #[test]
+    fn meter_validation_accepts_low_but_nonzero_voltage() {
+        // givenergy-modbus only checks non-zero. A meter reporting 5.0V
+        // is present, even if the reading seems low.
+        let (valid, v1) = validate_meter_data(&[50]); // 5.0V
+        assert!(valid);
+        assert!((v1 - 5.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn meter_validation_rejects_extreme_corruption() {
+        // >500V is implausible corruption, not a real meter.
+        let (valid, v1) = validate_meter_data(&[9999]); // 999.9V
+        assert!(!valid);
+        assert!((v1 - 999.9).abs() < 0.1);
     }
 }

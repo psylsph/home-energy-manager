@@ -417,7 +417,9 @@ impl Settings {
     /// out from under another. The temp file name also includes a timestamp
     /// to avoid collisions if the mutex is ever removed.
     pub fn save(&self) -> Result<(), String> {
-        let _lock = SETTINGS_LOCK.lock().map_err(|e| format!("Lock error: {e}"))?;
+        let _lock = SETTINGS_LOCK
+            .lock()
+            .map_err(|e| format!("Lock error: {e}"))?;
 
         let path = Self::settings_path();
         if let Some(parent) = path.parent() {
@@ -433,8 +435,7 @@ impl Settings {
         let tmp_path = path.with_extension("json.tmp");
         // Clean up any orphaned temp file from a previous crash.
         let _ = std::fs::remove_file(&tmp_path);
-        fs::write(&tmp_path, &json)
-            .map_err(|e| format!("Failed to write temp settings: {}", e))?;
+        fs::write(&tmp_path, &json).map_err(|e| format!("Failed to write temp settings: {}", e))?;
         fs::rename(&tmp_path, &path)
             .map_err(|e| format!("Failed to rename settings file: {}", e))?;
 
@@ -791,9 +792,21 @@ mod tests {
         assert_eq!(cosy_active_slot(16 * 60, &slots), None, "slot 2 end");
         assert_eq!(cosy_active_slot(22 * 60, &slots), None, "slot 3 end");
         // And one minute before each end still matches.
-        assert_eq!(cosy_active_slot(5 * 60 + 29, &slots), Some(100), "slot 1 last min");
-        assert_eq!(cosy_active_slot(15 * 60 + 59, &slots), Some(80), "slot 2 last min");
-        assert_eq!(cosy_active_slot(21 * 60 + 59, &slots), Some(100), "slot 3 last min");
+        assert_eq!(
+            cosy_active_slot(5 * 60 + 29, &slots),
+            Some(100),
+            "slot 1 last min"
+        );
+        assert_eq!(
+            cosy_active_slot(15 * 60 + 59, &slots),
+            Some(80),
+            "slot 2 last min"
+        );
+        assert_eq!(
+            cosy_active_slot(21 * 60 + 59, &slots),
+            Some(100),
+            "slot 3 last min"
+        );
     }
 
     #[test]

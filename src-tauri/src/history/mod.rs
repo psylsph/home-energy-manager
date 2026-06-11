@@ -406,11 +406,8 @@ impl HistoryDb {
                             raw_end
                         } else {
                             // Next local midnight: go to midnight of the next day
-                            let tomorrow = raw_local.date_naive()
-                                + chrono::Duration::days(1);
-                            let next_midnight_naive = tomorrow
-                                .and_hms_opt(0, 0, 0)
-                                .unwrap();
+                            let tomorrow = raw_local.date_naive() + chrono::Duration::days(1);
+                            let next_midnight_naive = tomorrow.and_hms_opt(0, 0, 0).unwrap();
                             let next_midnight_local = chrono::Local
                                 .from_local_datetime(&next_midnight_naive)
                                 .earliest()

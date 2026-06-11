@@ -20,18 +20,27 @@ use crate::modbus::registers::{encode_hhmm, HR_ENABLE_CHARGE_TARGET};
 // ---------------------------------------------------------------------------
 
 fn ok_response(message: &str) -> (StatusCode, Json<Value>) {
-    (StatusCode::OK, Json(json!({ "ok": true, "message": message })))
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "message": message })),
+    )
 }
 
 fn error_response(error: &str) -> (StatusCode, Json<Value>) {
-    (StatusCode::BAD_REQUEST, Json(json!({ "ok": false, "error": error })))
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "ok": false, "error": error })),
+    )
 }
 
 /// Return a 500 Internal Server Error response. Use for backend failures
 /// (database errors, save failures) where the client should distinguish
 /// these from bad-input 400s.
 fn server_error(error: &str) -> (StatusCode, Json<Value>) {
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "ok": false, "error": error })))
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "ok": false, "error": error })),
+    )
 }
 
 /// Return true when the latest snapshot is from an AC-coupled inverter.
@@ -126,7 +135,10 @@ pub async fn get_snapshot(State(state): State<Arc<AppState>>) -> (StatusCode, Js
     let snapshot = state.latest_snapshot.lock().await;
     match snapshot.as_ref() {
         Some(snap) => (StatusCode::OK, Json(json!({ "ok": true, "data": snap }))),
-        None => (StatusCode::OK, Json(json!({ "ok": false, "error": "No snapshot available yet" }))),
+        None => (
+            StatusCode::OK,
+            Json(json!({ "ok": false, "error": "No snapshot available yet" })),
+        ),
     }
 }
 
@@ -141,20 +153,25 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> (StatusCode, Json
     let client_addrs: Vec<String> = clients.list().into_iter().map(|a| a.to_string()).collect();
     let client_count = clients.count();
     drop(clients);
-    (StatusCode::OK, Json(json!({
+    (
+        StatusCode::OK,
+        Json(json!({
         "ok": true,
         "connection": cs,
         "host": host,
         "lan_ip": lan_ip,
         "clients": client_addrs,
         "client_count": client_count,
-    })))
+        })),
+    )
 }
 
 /// GET /api/settings
 pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let settings = crate::settings::Settings::load();
-    (StatusCode::OK, Json(json!({
+    (
+        StatusCode::OK,
+        Json(json!({
         "ok": true,
         "data": {
             "host": settings.host,
@@ -168,7 +185,8 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "export_tariff_config": settings.export_tariff_config,
             "hidden_panels": settings.hidden_panels,
         }
-    })))
+        })),
+    )
 }
 
 /// POST /api/settings
@@ -206,18 +224,24 @@ pub async fn update_settings(
         .unwrap_or(export_tariff_default);
 
     // Update tariff config objects if provided
-    let import_tariff_config = body.get("import_tariff_config").and_then(|v| {
+    let import_tariff_config = body
+        .get("import_tariff_config")
+        .and_then(|v| {
         if v.is_null() {
             return None;
         }
         serde_json::from_value::<crate::settings::TariffConfig>(v.clone()).ok()
-    }).or(import_tariff_config_default);
-    let export_tariff_config = body.get("export_tariff_config").and_then(|v| {
+        })
+        .or(import_tariff_config_default);
+    let export_tariff_config = body
+        .get("export_tariff_config")
+        .and_then(|v| {
         if v.is_null() {
             return None;
         }
         serde_json::from_value::<crate::settings::TariffConfig>(v.clone()).ok()
-    }).or(export_tariff_config_default);
+        })
+        .or(export_tariff_config_default);
 
     // Build the disk-persist struct from the request body and current
     // disk state. Save to disk BEFORE touching the in-memory settings,
@@ -252,7 +276,10 @@ pub async fn update_settings(
         persist.http_port = hp.min(u16::MAX as u64) as u16;
     }
     if let Some(hp) = body.get("hidden_panels").and_then(|v| v.as_array()) {
-        let panels: Vec<String> = hp.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+        let panels: Vec<String> = hp
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
         persist.hidden_panels = panels;
     }
     if let Err(e) = persist.save() {
@@ -284,9 +311,8 @@ pub async fn update_settings(
         settings.interval_secs = incoming.interval_secs;
     }
 
-    let connection_changed = settings.host != prev_host
-        || settings.port != prev_port
-        || settings.serial != prev_serial;
+    let connection_changed =
+        settings.host != prev_host || settings.port != prev_port || settings.serial != prev_serial;
 
     if connection_changed {
         settings.version = settings.version.wrapping_add(1);
@@ -299,10 +325,7 @@ pub async fn update_settings(
 
     let msg = format!(
         "Settings updated: host={}, port={}, serial={}, interval={}s",
-        incoming.host,
-        incoming.port,
-        incoming.serial,
-        incoming.interval_secs,
+        incoming.host, incoming.port, incoming.serial, incoming.interval_secs,
     );
 
     tracing::info!("{}", msg);
@@ -378,11 +401,23 @@ pub async fn set_mode(
             // registers are non-zero, making it impossible to stay in Eco.
             if mode_str == "eco" || mode_str == "eco_paused" {
                 // Discharge slot 2: HR44-45
-                writes.push(RegisterWrite { address: 44, value: 0 });
-                writes.push(RegisterWrite { address: 45, value: 0 });
+                writes.push(RegisterWrite {
+                    address: 44,
+                    value: 0,
+                });
+                writes.push(RegisterWrite {
+                    address: 45,
+                    value: 0,
+                });
                 // Discharge slot 1: HR56-57
-                writes.push(RegisterWrite { address: 56, value: 0 });
-                writes.push(RegisterWrite { address: 57, value: 0 });
+                writes.push(RegisterWrite {
+                    address: 56,
+                    value: 0,
+                });
+                writes.push(RegisterWrite {
+                    address: 57,
+                    value: 0,
+                });
             }
 
             // When switching to Timed mode, the frontend may include
@@ -419,7 +454,11 @@ pub async fn set_mode(
                         );
 
                         let cmd = match discharge_slot_command_for_device(
-                            device_type, slot_num, enabled, start, end,
+                            device_type,
+                            slot_num,
+                            enabled,
+                            start,
+                            end,
                         ) {
                             Ok(cmd) => cmd,
                             Err(e) => {
@@ -431,16 +470,17 @@ pub async fn set_mode(
                         match cmd.encode() {
                             Ok(mut w) => {
                                 // Write per-slot discharge target SOC for extended models.
-                                if enabled && target_soc > 0
+                                if enabled
+                                    && target_soc > 0
                                     && device_type.uses_extended_schedule_slots()
                                 {
-                                    if let Ok(target_writes) = (
-                                        ControlCommand::SetDischargeTargetSocSlot {
+                                    if let Ok(target_writes) =
+                                        (ControlCommand::SetDischargeTargetSocSlot {
                                             slot: slot_num,
                                             soc: target_soc as u16,
                                         }
-                                        .encode()
-                                    ) {
+                                        .encode())
+                                    {
                                         w.extend(target_writes);
                                     }
                                 }
@@ -808,7 +848,9 @@ pub async fn pause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, J
     };
     if is_three_phase {
         // Also clear three-phase-specific force discharge/charge flags
-        use crate::modbus::registers::{HR_3PH_FORCE_DISCHARGE_ENABLE, HR_3PH_FORCE_CHARGE_ENABLE, HR_3PH_AC_CHARGE_ENABLE};
+        use crate::modbus::registers::{
+            HR_3PH_AC_CHARGE_ENABLE, HR_3PH_FORCE_CHARGE_ENABLE, HR_3PH_FORCE_DISCHARGE_ENABLE,
+        };
         writes.push(crate::inverter::encoder::RegisterWrite {
             address: HR_3PH_FORCE_DISCHARGE_ENABLE,
             value: 0,
@@ -922,10 +964,15 @@ pub async fn get_history(
         "6m" => (86400 * 180, 43200),
         "1y" => (86400 * 365, 86400),
         "month" => (0, 3600), // calendar month — uses explicit window
-        _ => return error_response("Invalid range. Use: 1h, 6h, 12h, 24h, today, 7d, 30d, 6m, 1y, month"),
+        _ => {
+            return error_response(
+                "Invalid range. Use: 1h, 6h, 12h, 24h, today, 7d, 30d, 6m, 1y, month",
+            )
+        }
     };
 
-    let explicit_window: Option<(i64, i64)> = if rolling && range_str != "month" && range_str != "today" {
+    let explicit_window: Option<(i64, i64)> =
+        if rolling && range_str != "month" && range_str != "today" {
         let end_ts = chrono::Utc::now().timestamp() - offset * range_secs;
         Some((end_ts - range_secs, end_ts))
     } else if range_str == "today" {
@@ -1005,7 +1052,13 @@ pub async fn get_history(
         Some(db) => {
             let fields_clone = fields.clone();
             let result = tokio::task::spawn_blocking(move || {
-                db.query_history(range_secs, bucket_secs, offset, &fields_clone, explicit_window)
+                db.query_history(
+                    range_secs,
+                    bucket_secs,
+                    offset,
+                    &fields_clone,
+                    explicit_window,
+                )
             })
             .await;
 
@@ -1030,13 +1083,16 @@ pub async fn get_history(
 pub async fn get_auto_winter(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let config = state.auto_winter_config.lock().await.clone();
     let aw_state = state.auto_winter_state.lock().await.clone();
-    (StatusCode::OK, Json(json!({
+    (
+        StatusCode::OK,
+        Json(json!({
         "ok": true,
         "data": {
             "config": config,
             "state": aw_state,
         }
-    })))
+        })),
+    )
 }
 
 /// POST /api/auto-winter — update auto winter config.
@@ -1096,11 +1152,14 @@ pub async fn discover(State(_state): State<Arc<AppState>>) -> (StatusCode, Json<
 
     let inverters = crate::inverter::discovery::scan_multiple_subnets(&subnets).await;
 
-    (StatusCode::OK, Json(json!({
+    (
+        StatusCode::OK,
+        Json(json!({
         "ok": true,
         "subnets": subnets,
         "inverters": inverters,
-    })))
+        })),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1111,12 +1170,15 @@ pub async fn discover(State(_state): State<Arc<AppState>>) -> (StatusCode, Json<
 pub async fn get_cosy(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let settings = crate::settings::Settings::load();
     let active = *state.cosy_active.lock().await;
-    (StatusCode::OK, Json(json!({
+    (
+        StatusCode::OK,
+        Json(json!({
         "ok": true,
         "enabled": settings.cosy_enabled,
         "active": active,
         "slots": settings.cosy_slots,
-    })))
+        })),
+    )
 }
 
 /// POST /api/cosy — update cosy charging config.
@@ -1157,13 +1219,16 @@ pub async fn set_cosy(
 /// GET /api/agile — get Agile Octopus config.
 pub async fn get_agile(State(_state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let settings = crate::settings::Settings::load();
-    (StatusCode::OK, Json(json!({
+    (
+        StatusCode::OK,
+        Json(json!({
         "ok": true,
         "enabled": settings.agile_enabled,
         "region": settings.agile_region,
         "charge_threshold": settings.agile_charge_threshold,
         "discharge_threshold": settings.agile_discharge_threshold,
-    })))
+        })),
+    )
 }
 
 /// POST /api/agile — update Agile Octopus config.
@@ -1195,13 +1260,16 @@ pub async fn set_agile(
 pub async fn get_load_limiter(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let config = state.load_limiter_config.lock().await.clone();
     let ll_state = state.load_limiter_state.lock().await.clone();
-    (StatusCode::OK, Json(json!({
+    (
+        StatusCode::OK,
+        Json(json!({
         "ok": true,
         "data": {
             "config": config,
             "state": ll_state,
         }
-    })))
+        })),
+    )
 }
 
 /// POST /api/load-limiter — update load discharge limiter config.
@@ -1464,7 +1532,8 @@ mod tests {
                 s.version, version_before,
                 "interval-only change must NOT bump version (would force reconnect)"
             );
-        }).await;
+        })
+        .await;
     }
 
     /// Changing host/port/serial must bump the settings version so the poll
@@ -1492,6 +1561,7 @@ mod tests {
                 version_before.wrapping_add(1),
                 "host change must bump version (poll loop should reconnect)"
             );
-        }).await;
+        })
+        .await;
     }
 }

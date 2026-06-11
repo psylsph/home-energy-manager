@@ -82,10 +82,15 @@ pub async fn ws_handler(
         tracing::warn!(
             "WebSocket connection from {peer} rejected — {MAX_WS_CLIENTS} clients already connected"
         );
-        return (StatusCode::SERVICE_UNAVAILABLE, "Too many WebSocket connections").into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Too many WebSocket connections",
+        )
+            .into_response();
     }
 
-    ws.on_upgrade(move |socket| handle_ws(socket, state, peer)).into_response()
+    ws.on_upgrade(move |socket| handle_ws(socket, state, peer))
+        .into_response()
 }
 
 /// Inner WebSocket loop — runs for the lifetime of a single connection.

@@ -66,6 +66,33 @@ pub const STANDARD_POLL_BLOCKS: &[RegisterBlock] = &[
     },
 ];
 
+/// Lean standard blocks for three-phase models.
+///
+/// Three-phase inverters read all real-time telemetry (PV, grid, battery,
+/// daily/lifetime energy totals) from the IR(1000-1414) range, which
+/// completely supersedes the single-phase `input_0_59` and `input_180_239`
+/// blocks. Reading those two blocks on every cycle wastes ~300 ms of
+/// inter-request delay and adds two opportunities for a timeout to kill the
+/// entire poll.
+///
+/// On the first poll (before model detection) the full `STANDARD_POLL_BLOCKS`
+/// set is used. Once a three-phase device type is confirmed, the poll loop
+/// switches to this leaner set.
+pub const STANDARD_POLL_BLOCKS_3PH: &[RegisterBlock] = &[
+    RegisterBlock {
+        start: 0,
+        count: 60,
+        register_type: RegisterType::Holding,
+        name: "holding_0_59",
+    },
+    RegisterBlock {
+        start: 60,
+        count: 60,
+        register_type: RegisterType::Holding,
+        name: "holding_60_119",
+    },
+];
+
 // ===========================================================================
 // Input Register addresses (read-only telemetry)
 // ===========================================================================

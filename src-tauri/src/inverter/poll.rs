@@ -441,24 +441,66 @@ fn should_repoll_after_model_detection(device_type: DeviceType, current_slave: u
         || !device_type.extra_poll_blocks().is_empty()
 }
 
+/// Whether to probe for external CT clamp meters on this cycle.
+///
+/// The discovery policy is:
+/// - **First scan** (after model detection, before any probe): always runs.
+/// - **If meters were found**: done — no further probing.
+/// - **If no meters found AND `enable_ammeter` or EM115 is configured**:
+///   retry every `METER_RETRY_INTERVAL` cycles, up to `METER_MAX_RETRIES`
+///   times, because the meter may be slow to respond (e.g. LoRA-linked
+///   EM115).
+/// - **If no meters found AND ammeter is not configured**: one-shot scan,
+///   then stop — nothing to find.
 fn should_probe_external_meters(
     known_device_type: Option<DeviceType>,
     meter_probe_done: bool,
+    enable_ammeter: bool,
+    meter_type: u8,
+    meter_retry_count: u8,
+    meter_cycle_since_last: u8,
 ) -> bool {
-    known_device_type
-        .map(|dt| !meter_probe_done && !dt.needs_three_phase_input_blocks())
-        .unwrap_or(false)
+    // Never probe until model is known and three-phase models skip external
+    // meters (they use the inverter's internal grid CT at IR 1079-1082).
+    let dt = match known_device_type {
+        Some(dt) => dt,
+        None => return false,
+    };
+    if dt.needs_three_phase_input_blocks() {
+        return false;
+    }
+
+    // First scan — always run.
+    if !meter_probe_done {
+        return true;
+    }
+
+    // Ammeter is expected but no meters found yet — retry on cadence.
+    let ammeter_expected = enable_ammeter || meter_type == 1; // EM115 == 1
+    if ammeter_expected
+        && meter_retry_count < METER_MAX_RETRIES
+        && meter_cycle_since_last >= METER_RETRY_INTERVAL
+    {
+        return true;
+    }
+
+    false
 }
+
+/// Maximum number of meter discovery retries after the initial scan fails
+/// to find any meters despite the inverter being configured for an external
+/// ammeter.
+const METER_MAX_RETRIES: u8 = 10;
+
+/// Retry meter discovery every N poll cycles.
+const METER_RETRY_INTERVAL: u8 = 5;
 
 /// Whether to probe for HV battery BCU stacks (0xA0 / 0x70+) on this cycle.
 ///
 /// Only HV-capable device types use the BCU/BMU protocol; LV models answer at
 /// 0x32 instead. The probe runs once after model detection, then the per-cycle
 /// BCU cluster reads take over.
-fn should_probe_hv_stacks(
-    known_device_type: Option<DeviceType>,
-    hv_probe_done: bool,
-) -> bool {
+fn should_probe_hv_stacks(known_device_type: Option<DeviceType>, hv_probe_done: bool) -> bool {
     known_device_type
         .map(|dt| !hv_probe_done && dt.uses_hv_battery())
         .unwrap_or(false)
@@ -839,10 +881,7 @@ fn persist_cosy_active_sync(active: bool) {
     if settings.cosy_active_persisted != active {
         settings.cosy_active_persisted = active;
         if let Err(e) = settings.save() {
-            tracing::warn!(
-                active,
-                "Failed to persist cosy_active flag: {e}"
-            );
+            tracing::warn!(active, "Failed to persist cosy_active flag: {e}");
         }
     }
 }
@@ -871,10 +910,7 @@ fn persist_agile_state_sync(label: String) {
     if settings.agile_state_persisted != label {
         settings.agile_state_persisted = label.clone();
         if let Err(e) = settings.save() {
-            tracing::warn!(
-                state = &label,
-                "Failed to persist agile_state: {e}"
-            );
+            tracing::warn!(state = &label, "Failed to persist agile_state: {e}");
         }
     }
 }
@@ -906,28 +942,50 @@ fn cosy_slot_register_writes(
     // Write slot times into the inverter's charge slot 1 registers.
     if device_type.uses_three_phase_schedule_slots() {
         // Three-phase models use HR 1113-1114 for charge slot 1.
-        use crate::modbus::registers::{
-            HR_3PH_CHARGE_SLOT_1_START, HR_3PH_CHARGE_SLOT_1_END,
-        };
-        writes.push(RegisterWrite { address: HR_3PH_CHARGE_SLOT_1_START, value: start });
-        writes.push(RegisterWrite { address: HR_3PH_CHARGE_SLOT_1_END, value: end });
+        use crate::modbus::registers::{HR_3PH_CHARGE_SLOT_1_END, HR_3PH_CHARGE_SLOT_1_START};
+        writes.push(RegisterWrite {
+            address: HR_3PH_CHARGE_SLOT_1_START,
+            value: start,
+        });
+        writes.push(RegisterWrite {
+            address: HR_3PH_CHARGE_SLOT_1_END,
+            value: end,
+        });
     } else {
         // Single-phase models use HR 94-95 for charge slot 1.
-        writes.push(RegisterWrite { address: HR_CHARGE_SLOT_1_START, value: start });
-        writes.push(RegisterWrite { address: HR_CHARGE_SLOT_1_END, value: end });
+        writes.push(RegisterWrite {
+            address: HR_CHARGE_SLOT_1_START,
+            value: start,
+        });
+        writes.push(RegisterWrite {
+            address: HR_CHARGE_SLOT_1_END,
+            value: end,
+        });
     }
 
     if active {
         // Enable charge so the inverter acts on the slot schedule.
-        writes.push(RegisterWrite { address: HR_ENABLE_CHARGE, value: 1 });
-        writes.push(RegisterWrite { address: HR_ENABLE_CHARGE_TARGET, value: 1 });
-        writes.push(RegisterWrite { address: HR_CHARGE_TARGET_SOC, value: slot.target_soc as u16 });
+        writes.push(RegisterWrite {
+            address: HR_ENABLE_CHARGE,
+            value: 1,
+        });
+        writes.push(RegisterWrite {
+            address: HR_ENABLE_CHARGE_TARGET,
+            value: 1,
+        });
+        writes.push(RegisterWrite {
+            address: HR_CHARGE_TARGET_SOC,
+            value: slot.target_soc as u16,
+        });
     }
 
     // For Gen3+/extended models, also write per-slot target SOC.
     if active && device_type.uses_extended_schedule_slots() {
         use crate::modbus::registers::HR_CHARGE_TARGET_SOC_1;
-        writes.push(RegisterWrite { address: HR_CHARGE_TARGET_SOC_1, value: slot.target_soc as u16 });
+        writes.push(RegisterWrite {
+            address: HR_CHARGE_TARGET_SOC_1,
+            value: slot.target_soc as u16,
+        });
     }
 
     writes
@@ -939,18 +997,34 @@ fn clear_cosy_slot_registers(device_type: DeviceType) -> Vec<RegisterWrite> {
     let mut writes = Vec::new();
 
     if device_type.uses_three_phase_schedule_slots() {
-        use crate::modbus::registers::{
-            HR_3PH_CHARGE_SLOT_1_START, HR_3PH_CHARGE_SLOT_1_END,
-        };
-        writes.push(RegisterWrite { address: HR_3PH_CHARGE_SLOT_1_START, value: 0 });
-        writes.push(RegisterWrite { address: HR_3PH_CHARGE_SLOT_1_END, value: 0 });
+        use crate::modbus::registers::{HR_3PH_CHARGE_SLOT_1_END, HR_3PH_CHARGE_SLOT_1_START};
+        writes.push(RegisterWrite {
+            address: HR_3PH_CHARGE_SLOT_1_START,
+            value: 0,
+        });
+        writes.push(RegisterWrite {
+            address: HR_3PH_CHARGE_SLOT_1_END,
+            value: 0,
+        });
     } else {
-        writes.push(RegisterWrite { address: HR_CHARGE_SLOT_1_START, value: 0 });
-        writes.push(RegisterWrite { address: HR_CHARGE_SLOT_1_END, value: 0 });
+        writes.push(RegisterWrite {
+            address: HR_CHARGE_SLOT_1_START,
+            value: 0,
+        });
+        writes.push(RegisterWrite {
+            address: HR_CHARGE_SLOT_1_END,
+            value: 0,
+        });
     }
 
-    writes.push(RegisterWrite { address: HR_ENABLE_CHARGE, value: 0 });
-    writes.push(RegisterWrite { address: HR_ENABLE_CHARGE_TARGET, value: 0 });
+    writes.push(RegisterWrite {
+        address: HR_ENABLE_CHARGE,
+        value: 0,
+    });
+    writes.push(RegisterWrite {
+        address: HR_ENABLE_CHARGE_TARGET,
+        value: 0,
+    });
 
     writes
 }
@@ -1076,22 +1150,46 @@ fn sanitize_snapshot(
     // accept it as legitimate (conservative threshold was wrong for
     // this installation — e.g. 100 A supply, three-phase, commercial).
     let prev_battery = prev.map(|p| p.battery_power);
-    let (val, was_sanitized) = check_power_field(snap.battery_power, prev_battery, max_battery_power, "battery_power", suspect_counts);
+    let (val, was_sanitized) = check_power_field(
+        snap.battery_power,
+        prev_battery,
+        max_battery_power,
+        "battery_power",
+        suspect_counts,
+    );
     snap.battery_power = val;
     sanitized |= was_sanitized;
 
     let prev_grid = prev.map(|p| p.grid_power);
-    let (val, was_sanitized) = check_power_field(snap.grid_power, prev_grid, max_grid_power, "grid_power", suspect_counts);
+    let (val, was_sanitized) = check_power_field(
+        snap.grid_power,
+        prev_grid,
+        max_grid_power,
+        "grid_power",
+        suspect_counts,
+    );
     snap.grid_power = val;
     sanitized |= was_sanitized;
 
     let prev_solar = prev.map(|p| p.solar_power);
-    let (val, was_sanitized) = check_power_field(snap.solar_power, prev_solar, max_solar_power, "solar_power", suspect_counts);
+    let (val, was_sanitized) = check_power_field(
+        snap.solar_power,
+        prev_solar,
+        max_solar_power,
+        "solar_power",
+        suspect_counts,
+    );
     snap.solar_power = val;
     sanitized |= was_sanitized;
 
     let prev_home = prev.map(|p| p.home_power);
-    let (val, was_sanitized) = check_power_field(snap.home_power, prev_home, max_home_power, "home_power", suspect_counts);
+    let (val, was_sanitized) = check_power_field(
+        snap.home_power,
+        prev_home,
+        max_home_power,
+        "home_power",
+        suspect_counts,
+    );
     snap.home_power = val;
     sanitized |= was_sanitized;
 
@@ -1153,8 +1251,6 @@ fn sanitize_snapshot(
         sanitized = true;
     }
 
-
-
     // Grid voltage:
     //   Single-phase: UK nominal 230V ±10% (207–253V), anything outside 180–280V
     //     is clearly corrupt register data.
@@ -1195,8 +1291,6 @@ fn sanitize_snapshot(
         sanitized = true;
     }
 
-
-
     // Battery module voltage: reject impossible values.
     // LV packs run ~48-57V, HV packs up to ~345V. Anything above 500V is
     // clearly a register glitch (e.g. 30,000V from corrupt BMS uint32).
@@ -1220,8 +1314,6 @@ fn sanitize_snapshot(
             sanitized = true;
         }
     }
-
-
 
     // Daily energy totals (`today_*_kwh`): cumulative kWh counters that
     // monotonically increase from 0 and reset to 0 at midnight.
@@ -1617,13 +1709,17 @@ fn sanitize_snapshot(
         for i in 0..snap.charge_slots.len() {
             let slot = &snap.charge_slots[i];
             let prev_slot = &p.charge_slots[i];
-            if slot.enabled && slot.start_hour as u16 * 60 + slot.start_minute as u16 <= 10
-                && prev_slot.enabled && prev_slot.start_hour as u16 * 60 + prev_slot.start_minute as u16 > 10
+            if slot.enabled
+                && slot.start_hour as u16 * 60 + slot.start_minute as u16 <= 10
+                && prev_slot.enabled
+                && prev_slot.start_hour as u16 * 60 + prev_slot.start_minute as u16 > 10
             {
                 tracing::warn!(
-                    slot = i, raw_start = format!("{:02}:{:02}", slot.start_hour, slot.start_minute),
+                    slot = i,
+                    raw_start = format!("{:02}:{:02}", slot.start_hour, slot.start_minute),
                     raw_end = format!("{:02}:{:02}", slot.end_hour, slot.end_minute),
-                    prev_start = format!("{:02}:{:02}", prev_slot.start_hour, prev_slot.start_minute),
+                    prev_start =
+                        format!("{:02}:{:02}", prev_slot.start_hour, prev_slot.start_minute),
                     prev_end = format!("{:02}:{:02}", prev_slot.end_hour, prev_slot.end_minute),
                     "Charge slot times suspiciously small — carrying forward previous"
                 );
@@ -1634,13 +1730,17 @@ fn sanitize_snapshot(
         for i in 0..snap.discharge_slots.len() {
             let slot = &snap.discharge_slots[i];
             let prev_slot = &p.discharge_slots[i];
-            if slot.enabled && slot.start_hour as u16 * 60 + slot.start_minute as u16 <= 10
-                && prev_slot.enabled && prev_slot.start_hour as u16 * 60 + prev_slot.start_minute as u16 > 10
+            if slot.enabled
+                && slot.start_hour as u16 * 60 + slot.start_minute as u16 <= 10
+                && prev_slot.enabled
+                && prev_slot.start_hour as u16 * 60 + prev_slot.start_minute as u16 > 10
             {
                 tracing::warn!(
-                    slot = i, raw_start = format!("{:02}:{:02}", slot.start_hour, slot.start_minute),
+                    slot = i,
+                    raw_start = format!("{:02}:{:02}", slot.start_hour, slot.start_minute),
                     raw_end = format!("{:02}:{:02}", slot.end_hour, slot.end_minute),
-                    prev_start = format!("{:02}:{:02}", prev_slot.start_hour, prev_slot.start_minute),
+                    prev_start =
+                        format!("{:02}:{:02}", prev_slot.start_hour, prev_slot.start_minute),
                     prev_end = format!("{:02}:{:02}", prev_slot.end_hour, prev_slot.end_minute),
                     "Discharge slot times suspiciously small — carrying forward previous"
                 );
@@ -2068,8 +2168,7 @@ fn check_load_limiter(
     let debounce_count = if poll_interval_secs == 0 {
         config.trigger_delay_minutes // fallback
     } else {
-        (config.trigger_delay_minutes as u64 * 60)
-            .div_ceil(poll_interval_secs) as u32
+        (config.trigger_delay_minutes as u64 * 60).div_ceil(poll_interval_secs) as u32
     };
 
     match state {
@@ -2372,6 +2471,11 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 let mut known_device_type: Option<crate::inverter::model::DeviceType> = None;
                 let mut detected_meters: Vec<u8> = Vec::new();
                 let mut meter_probe_done = false;
+                // Meter discovery retry state: when enable_ammeter or EM115 is
+                // configured but the initial scan finds nothing, we retry every
+                // METER_RETRY_INTERVAL cycles up to METER_MAX_RETRIES times.
+                let mut meter_retry_count: u8 = 0;
+                let mut meter_cycle_since_last: u8 = 0;
                 // HV battery stacks discovered via the BMS (0xA0) / BCU (0x70+)
                 // probe. Each entry is (bcu_offset, num_modules). Populated once
                 // after model detection for devices that use the HV BCU protocol.
@@ -2479,13 +2583,13 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 tokio::time::sleep(Duration::from_millis(1500)).await;
                             }
                         }
-                        }
+                    }
 
-                        // The consumer task handles stale frames — unmatched
-                        // responses (including duplicate write ACKs) are silently
-                        // dropped during the read cycle. No explicit flush needed.
+                    // The consumer task handles stale frames — unmatched
+                    // responses (including duplicate write ACKs) are silently
+                    // dropped during the read cycle. No explicit flush needed.
 
-                    let (poll_ok, sanitized) = async {
+                    let (poll_ok, sanitized, connection_lost) = async {
                         match client.read_all_with_extras(known_device_type.as_ref()).await {
                             Ok(blocks) => {
                                 let mut snapshot = decode_snapshot(&blocks);
@@ -2523,7 +2627,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             "Dongle memory-leak corruption detected — skipping broadcast, waiting for next poll cycle"
                                         );
                                     }
-                                    return (true, false);
+                                    return (true, false, false);
                                 }
                                 let has_ac_config_block = blocks.iter().any(|b| {
                                     b.block.register_type == crate::modbus::registers::RegisterType::Holding
@@ -2566,6 +2670,20 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         );
                                         client.set_slave(preferred_slave);
                                     }
+
+                                    // Three-phase models read 15+ blocks per cycle and
+                                    // need a longer inter-request delay to avoid
+                                    // overwhelming the dongle's slow processor.
+                                    if snapshot.device_type.needs_three_phase_input_blocks() {
+                                        tracing::info!(
+                                            "Three-phase model detected — increasing inter-request delay to {}ms",
+                                            ModbusClient::INTER_REQUEST_DELAY_3PH.as_millis()
+                                        );
+                                        client.set_inter_request_delay(
+                                            ModbusClient::INTER_REQUEST_DELAY_3PH,
+                                        );
+                                    }
+
                                     let has_extra_blocks = !snapshot.device_type.extra_poll_blocks().is_empty();
                                     known_device_type = Some(snapshot.device_type);
 
@@ -2580,7 +2698,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             has_extra_blocks,
                                             "Model-specific poll enabled — re-reading immediately"
                                         );
-                                        return (true, true);
+                                        return (true, true, false);
                                     }
 
                                 } else if let Some(cached_type) = known_device_type {
@@ -2601,19 +2719,42 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     }
                                 }
 
-                                if should_probe_external_meters(known_device_type, meter_probe_done)
-                                {
+                                if should_probe_external_meters(
+                                    known_device_type,
+                                    meter_probe_done,
+                                    snapshot.enable_ammeter,
+                                    snapshot.meter_type,
+                                    meter_retry_count,
+                                    meter_cycle_since_last,
+                                ) {
                                     // Probe for external CT clamp meters (device addresses 0x01-0x08).
-                                    // A meter is present if V_phase_1 (IR 60) is non-zero and >100V.
-                                    // Three-phase/HV models use the inverter's internal grid CT at
-                                    // IR 1079-1082 instead of separate external meters, so skip.
+                                    // Per givenergy-modbus, a meter is present when V_phase_1
+                                    // (IR 60) is non-zero. Three-phase/HV models use the
+                                    // inverter's internal grid CT at IR 1079-1082 instead of
+                                    // separate external meters, so skip.
                                     //
-                                    // Uses a short 3-second timeout with no retries. A real meter
-                                    // responds in well under 1s; a non-existent slave never responds
-                                    // at all, so retries and long timeouts just delay startup.
-                                    // Worst case for 8 absent meters: 8 × 3s = 24s (vs ~10 min
-                                    // with the standard 15s/5-attempt path).
-                                    tracing::info!("Probing for external CT meters...");
+                                    // Uses a short 3-second timeout with no retries for the
+                                    // initial scan. If the inverter is configured for an
+                                    // external ammeter but no meters are found, discovery is
+                                    // retried on a slow cadence (every 5 cycles, up to 10
+                                    // attempts) to handle LoRA-linked EM115 meters that may
+                                    // be slow to respond.
+                                    let is_retry = meter_probe_done;
+                                    let ammeter_expected = snapshot.enable_ammeter || snapshot.meter_type == 1;
+                                    if is_retry {
+                                        tracing::info!(
+                                            retry = meter_retry_count,
+                                            max = METER_MAX_RETRIES,
+                                            "Retrying external CT meter discovery (ammeter expected)"
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            enable_ammeter = snapshot.enable_ammeter,
+                                            meter_type = snapshot.meter_type,
+                                            device_type = ?snapshot.device_type,
+                                            "Probing for external CT meters..."
+                                        );
+                                    }
                                     let mut found_meters: Vec<u8> = Vec::new();
                                     for &addr in crate::modbus::registers::METER_ADDRESSES {
                                         match client
@@ -2627,9 +2768,8 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             .await
                                         {
                                             Ok(data) => {
-                                                if crate::inverter::decoder::validate_meter_data(
-                                                    &data,
-                                                ) {
+                                                let (valid, v1) = crate::inverter::decoder::validate_meter_data(&data);
+                                                if valid {
                                                     let meter =
                                                         crate::inverter::decoder::decode_meter_data(
                                                             &data, addr,
@@ -2641,6 +2781,14 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                     );
                                                     found_meters.push(addr);
                                                     snapshot.meters.push(meter);
+                                                } else if v1 > 0.0 {
+                                                    tracing::debug!(
+                                                        "Meter addr 0x{addr:02X}: responded with implausible voltage ({v1:.1}V) — rejected"
+                                                    );
+                                                } else {
+                                                    tracing::debug!(
+                                                        "Meter addr 0x{addr:02X}: responded with zero voltage — no meter present"
+                                                    );
                                                 }
                                             }
                                             Err(e) => {
@@ -2650,15 +2798,49 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             }
                                         }
                                     }
-                                    detected_meters = found_meters;
-                                    meter_probe_done = true;
-                                    if detected_meters.is_empty() {
-                                        tracing::info!("No external CT meters detected");
-                                    } else {
+
+                                    if !found_meters.is_empty() {
+                                        // Merge with any previously detected meters.
+                                        for addr in &found_meters {
+                                            if !detected_meters.contains(addr) {
+                                                detected_meters.push(*addr);
+                                            }
+                                        }
+                                        meter_probe_done = true;
+                                        meter_retry_count = 0;
                                         tracing::info!(
                                             "Detected {} meter(s) at addresses: {:02X?}",
                                             detected_meters.len(), detected_meters
                                         );
+                                    } else if !meter_probe_done {
+                                        // First scan found nothing.
+                                        meter_probe_done = true;
+                                        if ammeter_expected {
+                                            tracing::info!(
+                                                "No external CT meters detected on first scan — will retry (ammeter expected)"
+                                            );
+                                            // Don't increment retry_count yet; the first
+                                            // retry happens after METER_RETRY_INTERVAL cycles.
+                                            meter_cycle_since_last = 0;
+                                        } else {
+                                            tracing::info!("No external CT meters detected");
+                                        }
+                                    } else {
+                                        // Retry scan found nothing.
+                                        meter_retry_count += 1;
+                                        meter_cycle_since_last = 0;
+                                        if meter_retry_count >= METER_MAX_RETRIES {
+                                            tracing::warn!(
+                                                retries = meter_retry_count,
+                                                "Meter discovery exhausted all retries — external ammeter configured but no meter responding"
+                                            );
+                                        } else {
+                                            tracing::info!(
+                                                retry = meter_retry_count,
+                                                max = METER_MAX_RETRIES,
+                                                "No external CT meters found — will retry"
+                                            );
+                                        }
                                     }
                                 }
 
@@ -3745,16 +3927,24 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     }
                                 }
 
-                                (true, sanitized || block_suspicious)
+                                (true, sanitized || block_suspicious, false)
                             }
                             Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    consecutive_failures = consecutive_failures + 1,
-                                    max = MAX_CONSECUTIVE_FAILURES,
-                                    "Poll read failed"
-                                );
-                                (false, false)
+                                let connection_lost = e.is_connection_lost();
+                                if connection_lost {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Poll read failed — connection lost, reconnecting"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        error = %e,
+                                        consecutive_failures = consecutive_failures + 1,
+                                        max = MAX_CONSECUTIVE_FAILURES,
+                                        "Poll read failed"
+                                    );
+                                }
+                                (false, false, connection_lost)
                             }
                         }
                     }.await;
@@ -3763,6 +3953,20 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                         true => {
                             consecutive_failures = 0;
                             consecutive_suspicious = 0;
+
+                            // Tick the meter retry cadence counter.
+                            if meter_probe_done && meter_retry_count > 0
+                                && meter_retry_count < METER_MAX_RETRIES
+                            {
+                                meter_cycle_since_last += 1;
+                            }
+                            // If the first scan found nothing and ammeter is
+                            // expected, start the retry cadence.
+                            if meter_probe_done && meter_retry_count == 0
+                                && detected_meters.is_empty()
+                            {
+                                meter_cycle_since_last += 1;
+                            }
 
                             // Sanitization was applied — corrupted register data
                             // detected. Re-poll immediately instead of waiting
@@ -3774,6 +3978,9 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                             }
                         }
                         false => {
+                            if connection_lost {
+                                break;
+                            }
                             consecutive_failures += 1;
                             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
                                 tracing::warn!(
@@ -4009,7 +4216,10 @@ mod tests {
         snap.max_battery_power_w = 0;
         snap.battery_modules = vec![];
         derive_battery_fields_from_bms(&mut snap, None);
-        assert!(snap.battery_temperature.is_nan(), "missing BMS data should produce NaN, not 0.0");
+        assert!(
+            snap.battery_temperature.is_nan(),
+            "missing BMS data should produce NaN, not 0.0"
+        );
         assert_eq!(snap.battery_capacity_kwh, 0.0);
         assert_eq!(snap.max_battery_power_w, 6000); // uncapped hardware limit
     }
@@ -4303,11 +4513,19 @@ mod tests {
         // known_device_type is set but no meter probe has completed yet.
         assert!(should_probe_external_meters(
             Some(DeviceType::ACCoupled),
-            false
+            false, // meter_probe_done
+            false, // enable_ammeter
+            0,     // meter_type
+            0,     // meter_retry_count
+            0,     // meter_cycle_since_last
         ));
         assert!(should_probe_external_meters(
             Some(DeviceType::ACCoupledMk2),
-            false
+            false,
+            false,
+            0,
+            0,
+            0,
         ));
     }
 
@@ -4335,9 +4553,19 @@ mod tests {
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
 
-        let sanitized = sanitize_snapshot(&mut snap, Some(&prev), false, &mut pending_mode, &mut delta_corrections, &mut suspect_counts);
+        let sanitized = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+        );
 
-        assert!(!sanitized, "noise tolerance must not force immediate re-poll");
+        assert!(
+            !sanitized,
+            "noise tolerance must not force immediate re-poll"
+        );
         assert_eq!(snap.today_consumption_kwh, prev.today_consumption_kwh);
     }
 
@@ -4365,7 +4593,14 @@ mod tests {
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
 
-        let sanitized = sanitize_snapshot(&mut snap, Some(&prev), false, &mut pending_mode, &mut delta_corrections, &mut suspect_counts);
+        let sanitized = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+        );
 
         assert!(sanitized);
         assert_eq!(snap.today_consumption_kwh, prev.today_consumption_kwh);
@@ -4402,23 +4637,36 @@ mod tests {
             let mut pending_mode = None;
 
             let _sanitized = sanitize_snapshot(
-                &mut snap, Some(&prev), false, &mut pending_mode, &mut delta_corrections, &mut suspect_counts,
+                &mut snap,
+                Some(&prev),
+                false,
+                &mut pending_mode,
+                &mut delta_corrections,
+                &mut suspect_counts,
             );
 
             if i < DELTA_CORRECTION_RELEASE_THRESHOLD - 1 {
                 // Before threshold: carry forward the baseline
-                assert_eq!(snap.today_consumption_kwh, prev_consumption,
-                    "cycle {}: should carry forward baseline", i);
+                assert_eq!(
+                    snap.today_consumption_kwh, prev_consumption,
+                    "cycle {}: should carry forward baseline",
+                    i
+                );
             } else {
                 // On threshold cycle: accept raw — the baseline was wrong
-                assert_eq!(snap.today_consumption_kwh, raw_consumption,
-                    "cycle {}: should accept raw value after threshold", i);
+                assert_eq!(
+                    snap.today_consumption_kwh, raw_consumption,
+                    "cycle {}: should accept raw value after threshold",
+                    i
+                );
             }
         }
 
         // Counter should be reset after release
-        assert!(delta_corrections.0.get("today_consumption_kwh").is_none()
-            || *delta_corrections.0.get("today_consumption_kwh").unwrap() == 0);
+        assert!(
+            delta_corrections.0.get("today_consumption_kwh").is_none()
+                || *delta_corrections.0.get("today_consumption_kwh").unwrap() == 0
+        );
     }
 
     #[test]
@@ -4447,10 +4695,18 @@ mod tests {
             };
             let mut pending_mode = None;
             let _ = sanitize_snapshot(
-                &mut snap, Some(&prev), false, &mut pending_mode, &mut delta_corrections, &mut suspect_counts,
+                &mut snap,
+                Some(&prev),
+                false,
+                &mut pending_mode,
+                &mut delta_corrections,
+                &mut suspect_counts,
             );
         }
-        assert_eq!(*delta_corrections.0.get("today_consumption_kwh").unwrap(), 3);
+        assert_eq!(
+            *delta_corrections.0.get("today_consumption_kwh").unwrap(),
+            3
+        );
 
         // Normal increase: raw > prev → counter resets
         let prev = InverterSnapshot {
@@ -4471,23 +4727,106 @@ mod tests {
         };
         let mut pending_mode = None;
         let _ = sanitize_snapshot(
-            &mut snap, Some(&prev), false, &mut pending_mode, &mut delta_corrections, &mut suspect_counts,
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
         );
-        assert!(delta_corrections.0.get("today_consumption_kwh").is_none(),
-            "counter should be reset after normal increase");
+        assert!(
+            delta_corrections.0.get("today_consumption_kwh").is_none(),
+            "counter should be reset after normal increase"
+        );
     }
 
     #[test]
-    fn external_meter_probe_is_single_shot_and_skips_three_phase() {
+    fn external_meter_probe_is_single_shot_without_ammeter() {
+        // No ammeter configured, first scan already done — no further probing.
         assert!(!should_probe_external_meters(
             Some(DeviceType::ACCoupled),
-            true
+            true,  // meter_probe_done
+            false, // enable_ammeter
+            0,     // meter_type
+            0,     // meter_retry_count
+            5,     // meter_cycle_since_last
         ));
+    }
+
+    #[test]
+    fn external_meter_probe_skips_three_phase() {
         assert!(!should_probe_external_meters(
             Some(DeviceType::ThreePhase),
-            false
+            false,
+            false,
+            0,
+            0,
+            0,
         ));
-        assert!(!should_probe_external_meters(None, false));
+    }
+
+    #[test]
+    fn external_meter_probe_skips_unknown_device() {
+        assert!(!should_probe_external_meters(
+            None,
+            false,
+            false,
+            0,
+            0,
+            0,
+        ));
+    }
+
+    #[test]
+    fn meter_retry_fires_when_ammeter_expected() {
+        // EM115 configured (meter_type=1), first scan done, no meters found,
+        // enough cycles have passed — should retry.
+        assert!(should_probe_external_meters(
+            Some(DeviceType::Gen3Hybrid),
+            true,  // meter_probe_done
+            false, // enable_ammeter
+            1,     // meter_type = EM115
+            0,     // meter_retry_count (first retry)
+            METER_RETRY_INTERVAL, // enough cycles elapsed
+        ));
+    }
+
+    #[test]
+    fn meter_retry_respects_cadence() {
+        // EM115 configured but not enough cycles since last attempt — skip.
+        assert!(!should_probe_external_meters(
+            Some(DeviceType::Gen3Hybrid),
+            true,
+            false,
+            1,
+            0,
+            METER_RETRY_INTERVAL - 1,
+        ));
+    }
+
+    #[test]
+    fn meter_retry_stops_after_max_retries() {
+        assert!(!should_probe_external_meters(
+            Some(DeviceType::Gen3Hybrid),
+            true,
+            true, // enable_ammeter
+            0,
+            METER_MAX_RETRIES, // exhausted
+            METER_RETRY_INTERVAL,
+        ));
+    }
+
+    #[test]
+    fn meter_retry_enabled_by_enable_ammeter_flag() {
+        // enable_ammeter=true is sufficient even without EM115 meter_type.
+        assert!(should_probe_external_meters(
+            Some(DeviceType::Gen3Hybrid),
+            true,
+            true,  // enable_ammeter
+            0,     // meter_type (not EM115)
+            3,     // some retries used
+            METER_RETRY_INTERVAL,
+        ));
     }
 
     #[test]

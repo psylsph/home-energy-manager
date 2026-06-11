@@ -9,10 +9,10 @@ pub mod ws;
 
 use std::sync::Arc;
 
-use axum::routing::{get, post};
-use axum::response::Json;
-use axum::Router;
 use axum::http::StatusCode;
+use axum::response::Json;
+use axum::routing::{get, post};
+use axum::Router;
 use serde_json::json;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
@@ -23,7 +23,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     use axum::response::IntoResponse;
 
     async fn not_found_404() -> impl IntoResponse {
-        (StatusCode::NOT_FOUND, Json(json!({ "ok": false, "error": "Not found" })))
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": "Not found" })),
+        )
     }
     let cors = CorsLayer::new()
         .allow_origin(Any)

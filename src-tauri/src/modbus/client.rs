@@ -14,7 +14,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{oneshot, Mutex};
 
 use super::framer::{self, DecodedFrame, RegisterType};
-use super::registers::{RegisterBlock, STANDARD_POLL_BLOCKS};
+use super::registers::{RegisterBlock, STANDARD_POLL_BLOCKS, STANDARD_POLL_BLOCKS_3PH};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -53,6 +53,16 @@ pub enum ClientError {
 
     #[error("Invalid response: {0}")]
     InvalidResponse(String),
+}
+
+impl ClientError {
+    /// Errors that mean the TCP session is no longer usable.
+    pub fn is_connection_lost(&self) -> bool {
+        matches!(
+            self,
+            ClientError::NotConnected | ClientError::SendFailed(_) | ClientError::ReceiveFailed(_)
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -108,7 +118,12 @@ pub(crate) struct ResponseKey {
 
 impl ResponseKey {
     pub(crate) fn from_request(slave: u8, function: u8, start: u16, count: u16) -> Self {
-        Self { slave, function, base_register: start, count }
+        Self {
+            slave,
+            function,
+            base_register: start,
+            count,
+        }
     }
 
     pub(crate) fn from_response(frame: &DecodedFrame) -> Option<Self> {
@@ -173,6 +188,8 @@ pub struct ModbusClient {
     writer: Option<Arc<Mutex<OwnedWriteHalf>>>,
     /// Timeout for individual read/write operations.
     timeout: Duration,
+    /// Inter-request delay between consecutive Modbus reads.
+    inter_request_delay: Duration,
     /// Pending response futures, keyed by content hash (slave+func+base+count).
     /// The consumer task resolves these when a matching frame arrives.
     pending: Arc<Mutex<HashMap<ResponseKey, oneshot::Sender<DecodedFrame>>>>,
@@ -198,6 +215,7 @@ impl ModbusClient {
             slave: 0x11, // canonical GivEnergy inverter address for detection
             writer: None,
             timeout: Duration::from_secs(5),
+            inter_request_delay: Self::INTER_REQUEST_DELAY_DEFAULT,
             pending: Arc::new(Mutex::new(HashMap::new())),
             connected: Arc::new(AtomicBool::new(false)),
             consumer_handle: None,
@@ -239,6 +257,16 @@ impl ModbusClient {
     /// Set the I/O timeout for individual read/write operations.
     pub fn set_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
+    }
+
+    /// Set the inter-request delay between consecutive Modbus reads.
+    ///
+    /// Three-phase models read 15+ blocks per cycle and need a longer delay
+    /// (250ms, matching the givenergy-modbus reference library) to avoid
+    /// overwhelming the dongle's slow processor. Single-phase models use
+    /// the default 150ms.
+    pub fn set_inter_request_delay(&mut self, delay: Duration) {
+        self.inter_request_delay = delay;
     }
 
     /// Connect to the inverter. Returns `Err(ClientError::AlreadyConnected)` if
@@ -409,9 +437,7 @@ impl ModbusClient {
                             let _ = tx.send(decoded);
                         }
                         // No matching future -> stale frame, silently dropped.
-                    } else if decoded.function >= 0x80
-                        && decoded.payload.len() >= 11
-                    {
+                    } else if decoded.function >= 0x80 && decoded.payload.len() >= 11 {
                         // Exception frame — scan pending futures for a match
                         // on the masked function code. O(n) per exception,
                         // but exceptions are rare in normal operation.
@@ -420,9 +446,7 @@ impl ModbusClient {
                         // Collect matching keys to avoid borrow issues.
                         let matching: Vec<ResponseKey> = map
                             .keys()
-                            .filter(|k| {
-                                k.slave == decoded.slave && k.function == masked
-                            })
+                            .filter(|k| k.slave == decoded.slave && k.function == masked)
                             .cloned()
                             .collect();
                         for key in &matching {
@@ -485,7 +509,11 @@ impl ModbusClient {
                     if buf.len() > keep {
                         let discarded = buf.len() - keep;
                         if discarded > 100 {
-                            let prefix_hex = buf[..buf.len().min(16)].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                        let prefix_hex = buf[..buf.len().min(16)]
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect::<Vec<_>>()
+                            .join(" ");
                             tracing::debug!(
                                 "No frame header in {} byte buffer, discarding {} bytes (first bytes: {})",
                                 buf.len(),
@@ -617,10 +645,15 @@ impl ModbusClient {
         // Send the frame via the TCP writer.
         let writer = self.writer.as_ref().ok_or(ClientError::NotConnected)?;
         let mut writer = writer.lock().await;
-        tokio::time::timeout(self.timeout, writer.write_all(&frame))
-            .await
-            .map_err(|_| ClientError::Timeout)?
-            .map_err(|e| ClientError::SendFailed(e.to_string()))?;
+        let send_result = tokio::time::timeout(self.timeout, writer.write_all(&frame)).await;
+        if let Err(e) = send_result
+            .map_err(|_| ClientError::Timeout)
+            .and_then(|r| r.map_err(|e| ClientError::SendFailed(e.to_string())))
+        {
+            drop(writer);
+            self.pending.lock().await.remove(&key);
+            return Err(e);
+        }
         drop(writer); // release the writer lock before awaiting the response
 
         match tokio::time::timeout(self.timeout, rx).await {
@@ -644,8 +677,14 @@ impl ModbusClient {
                 }
                 Ok(frame)
             }
-            Ok(Err(_)) => Err(ClientError::NotConnected),
-            Err(_) => Err(ClientError::Timeout),
+            Ok(Err(_)) => {
+                self.pending.lock().await.remove(&key);
+                Err(ClientError::NotConnected)
+            }
+            Err(_) => {
+                self.pending.lock().await.remove(&key);
+                Err(ClientError::Timeout)
+            }
         }
     }
 
@@ -660,11 +699,12 @@ impl ModbusClient {
 
     /// Inter-request delay to avoid overwhelming the GivEnergy dongle.
     /// The dongle has a very slow processor and limited frame buffer.
-    /// The givenergy-modbus reference library uses 250ms; we use 150ms
-    /// as a compromise between reliability and poll speed.
-    /// If timeouts or exceptions on standard poll blocks occur, increase
-    /// this to 250ms (the reference value).
-    const INTER_REQUEST_DELAY: Duration = Duration::from_millis(150);
+    /// The givenergy-modbus reference library uses 250ms; we default to
+    /// 150ms for single-phase models and increase to 250ms for three-phase
+    /// (which reads 15+ blocks per cycle).
+    pub const INTER_REQUEST_DELAY_DEFAULT: Duration = Duration::from_millis(150);
+    /// Inter-request delay for three-phase models (more blocks per cycle).
+    pub const INTER_REQUEST_DELAY_3PH: Duration = Duration::from_millis(250);
 
     /// Read a block of registers (input or holding).
     ///
@@ -686,7 +726,7 @@ impl ModbusClient {
 
             // Pause between chunks to let the dongle catch up
             if offset > 0 {
-                tokio::time::sleep(Self::INTER_REQUEST_DELAY).await;
+                tokio::time::sleep(self.inter_request_delay).await;
             }
 
             let chunk_values = self
@@ -798,8 +838,15 @@ impl ModbusClient {
             if attempt == 0 {
                 tracing::debug!(
                     "Reading {} {}..{} ({} regs) from slave 0x{:02X}",
-                    if matches!(register_type, RegisterType::Input) { "IR" } else { "HR" },
-                    start, start + count - 1, count, self.slave,
+                    if matches!(register_type, RegisterType::Input) {
+                        "IR"
+                    } else {
+                        "HR"
+                    },
+                    start,
+                    start + count - 1,
+                    count,
+                    self.slave,
                 );
             }
 
@@ -811,9 +858,9 @@ impl ModbusClient {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     continue;
                 }
-                Err(ClientError::InvalidResponse(msg)) if attempt < Self::MAX_STALE_RETRIES
-                    && msg.contains("code 67")
-                => {
+                Err(ClientError::InvalidResponse(msg))
+                    if attempt < Self::MAX_STALE_RETRIES && msg.contains("code 67") =>
+                {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     continue;
                 }
@@ -904,7 +951,10 @@ impl ModbusClient {
         let max_attempts: u8 = 6;
 
         for attempt in 0..max_attempts {
-            match self.send_and_await_response(request.clone(), key.clone()).await {
+            match self
+                .send_and_await_response(request.clone(), key.clone())
+                .await
+            {
                 Ok(decoded) => {
                     if decoded.payload.len() < 14 {
                         return Err(ClientError::InvalidResponse(format!(
@@ -935,7 +985,8 @@ impl ModbusClient {
                     if attempt + 1 < max_attempts {
                         tracing::debug!(
                             "Write at {register} got exception 67 (busy), retrying ({}/{})",
-                            attempt + 1, max_attempts
+                            attempt + 1,
+                            max_attempts
                         );
                         tokio::time::sleep(Duration::from_secs(2)).await;
                         continue;
@@ -946,7 +997,11 @@ impl ModbusClient {
                     return Ok(());
                 }
                 Err(ClientError::Timeout) if attempt + 1 < max_attempts => {
-                    tracing::debug!("Write at {register} timed out, retrying ({}/{})", attempt + 1, max_attempts);
+                    tracing::debug!(
+                        "Write at {register} timed out, retrying ({}/{})",
+                        attempt + 1,
+                        max_attempts
+                    );
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     continue;
                 }
@@ -984,7 +1039,7 @@ impl ModbusClient {
         for (i, block) in blocks.iter().enumerate() {
             // Pause between blocks to let the dongle catch up
             if i > 0 {
-                tokio::time::sleep(Self::INTER_REQUEST_DELAY).await;
+                tokio::time::sleep(self.inter_request_delay).await;
             }
 
             let reg_type = match block.register_type {
@@ -1009,7 +1064,7 @@ impl ModbusClient {
                     results.push(BlockRead { block, data });
                 }
                 Err(e) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         block = block.name,
                         start = block.start,
                         count = block.count,
@@ -1044,12 +1099,23 @@ impl ModbusClient {
         &mut self,
         device_type: Option<&crate::inverter::model::DeviceType>,
     ) -> Result<Vec<BlockRead>, ClientError> {
-        let mut results = self.read_blocks(STANDARD_POLL_BLOCKS).await?;
+        // Three-phase models read all real-time telemetry from the
+        // IR(1000-1414) range, making input_0_59 and input_180_239
+        // redundant. Use the leaner block set to save ~300 ms per cycle
+        // and reduce timeout exposure. On the first poll (device_type
+        // is None) the full STANDARD_POLL_BLOCKS set is used so that
+        // model detection (from HR(0)) can proceed.
+        let standard_blocks = if device_type.is_some_and(|dt| dt.needs_three_phase_input_blocks()) {
+            STANDARD_POLL_BLOCKS_3PH
+        } else {
+            STANDARD_POLL_BLOCKS
+        };
+        let mut results = self.read_blocks(standard_blocks).await?;
 
         if let Some(dt) = device_type {
             for block in model_specific_blocks_in_poll_order(dt) {
                 // Pause between blocks to let the dongle catch up.
-                tokio::time::sleep(Self::INTER_REQUEST_DELAY).await;
+                tokio::time::sleep(self.inter_request_delay).await;
 
                 let reg_type = match block.register_type {
                     super::registers::RegisterType::Input => RegisterType::Input,
@@ -1095,8 +1161,8 @@ impl ModbusClient {
 #[cfg(test)]
 mod tests {
     #![allow(dead_code)]
-    use super::*;
     use super::super::framer::HEADER_SIZE;
+    use super::*;
 
     // -----------------------------------------------------------------------
     // Parsing register data from raw payload bytes
@@ -1327,6 +1393,23 @@ mod tests {
     }
 
     #[test]
+    fn three_phase_standard_poll_blocks_omit_redundant_inputs() {
+        assert_eq!(STANDARD_POLL_BLOCKS_3PH.len(), 2);
+        assert_eq!(STANDARD_POLL_BLOCKS_3PH[0].name, "holding_0_59");
+        assert_eq!(STANDARD_POLL_BLOCKS_3PH[1].name, "holding_60_119");
+        // No input register blocks — telemetry comes from IR 1000+
+        assert!(STANDARD_POLL_BLOCKS_3PH.iter().all(|b| b.register_type != super::super::registers::RegisterType::Input));
+    }
+
+    #[test]
+    fn inter_request_delay_is_adjustable() {
+        let mut client = ModbusClient::new("10.0.0.1", 8899, "SN0001");
+        assert_eq!(client.inter_request_delay, ModbusClient::INTER_REQUEST_DELAY_DEFAULT);
+        client.set_inter_request_delay(ModbusClient::INTER_REQUEST_DELAY_3PH);
+        assert_eq!(client.inter_request_delay, ModbusClient::INTER_REQUEST_DELAY_3PH);
+    }
+
+    #[test]
     fn three_phase_model_specific_poll_order_reads_dashboard_inputs_first() {
         use crate::inverter::model::DeviceType;
 
@@ -1459,17 +1542,17 @@ mod tests {
 
     /// Run a mock server that replies to each request with the next response
     /// from `responses` (cycling if there are fewer responses than requests).
-    async fn run_mock_server(
-        listener: TcpListener,
-        responses: Arc<Vec<MockResponse>>,
-    ) {
+    async fn run_mock_server(listener: TcpListener, responses: Arc<Vec<MockResponse>>) {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut idx = 0usize;
 
         loop {
             // Read the 6-byte MBAP header.
             let mut header = [0u8; 6];
-            if tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut header)).await.is_err() {
+            if tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut header))
+                .await
+                .is_err()
+            {
                 break;
             }
             let length = u16::from_be_bytes([header[4], header[5]]) as usize;
@@ -1478,10 +1561,9 @@ mod tests {
             let mut rest = vec![0u8; length];
             let mut read = 0usize;
             while read < length {
-                match tokio::time::timeout(
-                    Duration::from_secs(5),
-                    stream.read(&mut rest[read..]),
-                ).await {
+                match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut rest[read..]))
+                    .await
+                {
                     Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
                     Ok(Ok(n)) => read += n,
                 }
@@ -1581,7 +1663,9 @@ mod tests {
         }
         let start = u16::from_be_bytes([payload[0], payload[1]]);
         let count = u16::from_be_bytes([payload[2], payload[3]]);
-        Some(ResponseKey::from_read_request(slave, function, start, count))
+        Some(ResponseKey::from_read_request(
+            slave, function, start, count,
+        ))
     }
 
     /// Extract the key from a decoded response frame for matching.
@@ -1638,7 +1722,8 @@ mod tests {
         let responses = vec![MockResponse::ReadResponse {
             slave: 0x11,
             function: 0x04,
-                base: 0,data,
+            base: 0,
+            data,
         }];
 
         let (_port, server, mut client) = setup_client_with_server(responses).await;
@@ -1730,7 +1815,8 @@ mod tests {
             MockResponse::ReadResponse {
                 slave: 0x11,
                 function: 0x04,
-                base: 0,data,
+                base: 0,
+                data,
             },
         ];
 
@@ -1740,7 +1826,11 @@ mod tests {
         // read_registers_raw's retry loop. It retries and gets the
         // correct response.
         let result = client.read_registers(RegisterType::Input, 0, 20).await;
-        assert!(result.is_ok(), "Expected success after code 67 retry, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Expected success after code 67 retry, got: {:?}",
+            result
+        );
 
         server.await.unwrap();
     }
@@ -1864,8 +1954,11 @@ mod tests {
         // Producer/consumer: code 67 triggers retry, wrong-slave frames are
         // dropped, correct response is received.
         let result = client.read_registers(RegisterType::Input, 0, 20).await;
-        assert!(result.is_ok(),
-            "Expected success after code 67 + wrong-slave + correct, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Expected success after code 67 + wrong-slave + correct, got: {:?}",
+            result
+        );
 
         server.await.unwrap();
     }
@@ -1897,14 +1990,15 @@ mod tests {
 
         let (_port, server, mut client) = setup_client_with_server(responses).await;
 
-        let result = client
-            .read_registers(RegisterType::Input, 0, 20)
-            .await;
+        let result = client.read_registers(RegisterType::Input, 0, 20).await;
 
         // The consumer echoed the heartbeat, so the mock advanced to the read
         // response and the call succeeds. Without the echo, this would time
         // out (the mock would block waiting for the client's second frame).
-        assert!(result.is_ok(), "heartbeat not answered — read failed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "heartbeat not answered — read failed: {result:?}"
+        );
         assert_eq!(result.unwrap().len(), 20);
 
         server.await.unwrap();
@@ -1963,14 +2057,12 @@ mod tests {
         // Reading 60 registers as a single request.
         let data: Vec<u16> = (0..60).collect();
 
-        let responses = vec![
-            MockResponse::ReadResponse {
+        let responses = vec![MockResponse::ReadResponse {
                 slave: 0x11,
                 function: 0x04,
                 base: 0,
                 data,
-            },
-        ];
+        }];
 
         let (_port, server, mut client) = setup_client_with_server(responses).await;
 
@@ -2046,7 +2138,10 @@ mod tests {
         let (_port, server, mut client) = setup_client_with_server(responses).await;
 
         let result = client.read_blocks(STANDARD_POLL_BLOCKS).await;
-        assert!(result.is_err(), "read_blocks should fail when first block errors");
+        assert!(
+            result.is_err(),
+            "read_blocks should fail when first block errors"
+        );
 
         server.await.unwrap();
     }
@@ -2058,9 +2153,7 @@ mod tests {
         payload.extend_from_slice(b"TEST123456"); // 10-byte serial
         payload.extend_from_slice(&[0x00u8, 0x1B]); // register 27
         payload.extend_from_slice(&[0x00u8, 0x01]); // value 1
-        let response = crate::modbus::framer::encode_frame(
-            "TEST123456", 0x11, 0x06, &payload
-        );
+        let response = crate::modbus::framer::encode_frame("TEST123456", 0x11, 0x06, &payload);
 
         let responses = vec![MockResponse::Raw(response)];
 
@@ -2098,16 +2191,14 @@ mod tests {
         let (_port, _server, mut client) = setup_client_with_server(responses).await;
 
         let result = client
-            .probe_registers_at_slave(
-                0x03,
-                RegisterType::Input,
-                60,
-                30,
-                Duration::from_secs(3),
-            )
+            .probe_registers_at_slave(0x03, RegisterType::Input, 60, 30, Duration::from_secs(3))
             .await;
 
-        assert!(result.is_ok(), "probe should succeed when meter responds: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "probe should succeed when meter responds: {:?}",
+            result
+        );
         assert_eq!(result.unwrap()[0], 2300);
     }
 
@@ -2151,7 +2242,10 @@ mod tests {
 
         let elapsed = start.elapsed();
 
-        assert!(result.is_err(), "probe should fail when slave doesn't respond");
+        assert!(
+            result.is_err(),
+            "probe should fail when slave doesn't respond"
+        );
         // Single attempt: should be close to the probe_timeout, NOT 5× longer
         assert!(
             elapsed < Duration::from_secs(2),
@@ -2189,16 +2283,13 @@ mod tests {
         assert_eq!(client.slave, 0x11); // default
 
         let _ = client
-            .probe_registers_at_slave(
-                0x05,
-                RegisterType::Input,
-                60,
-                30,
-                Duration::from_millis(50),
-            )
+            .probe_registers_at_slave(0x05, RegisterType::Input, 60, 30, Duration::from_millis(50))
             .await;
 
-        assert_eq!(client.slave, 0x11, "slave address must be restored after probe");
+        assert_eq!(
+            client.slave, 0x11,
+            "slave address must be restored after probe"
+        );
 
         server_handle.await.unwrap();
     }
@@ -2221,13 +2312,7 @@ mod tests {
         assert_eq!(client.timeout, expected_timeout);
 
         let _ = client
-            .probe_registers_at_slave(
-                0x03,
-                RegisterType::Input,
-                60,
-                30,
-                Duration::from_secs(3),
-            )
+            .probe_registers_at_slave(0x03, RegisterType::Input, 60, 30, Duration::from_secs(3))
             .await;
 
         assert_eq!(
@@ -2263,13 +2348,7 @@ mod tests {
         let probe_timeout = Duration::from_millis(200);
         let start = std::time::Instant::now();
         let _ = client
-            .probe_registers_at_slave(
-                0x07,
-                RegisterType::Input,
-                60,
-                30,
-                probe_timeout,
-            )
+            .probe_registers_at_slave(0x07, RegisterType::Input, 60, 30, probe_timeout)
             .await;
         let elapsed = start.elapsed();
 
@@ -2312,13 +2391,7 @@ mod tests {
         let mut found = 0usize;
         for &addr in addresses {
             let result = client
-                .probe_registers_at_slave(
-                    addr,
-                    RegisterType::Input,
-                    60,
-                    30,
-                    probe_timeout,
-                )
+                .probe_registers_at_slave(addr, RegisterType::Input, 60, 30, probe_timeout)
                 .await;
             if result.is_ok() {
                 found += 1;
@@ -2396,13 +2469,7 @@ mod tests {
         assert_eq!(client.slave, 0x11);
 
         let _ = client
-            .probe_registers_at_slave(
-                0x05,
-                RegisterType::Input,
-                60,
-                30,
-                Duration::from_secs(3),
-            )
+            .probe_registers_at_slave(0x05, RegisterType::Input, 60, 30, Duration::from_secs(3))
             .await;
 
         assert_eq!(
