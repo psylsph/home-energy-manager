@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.1] - 2026-06-11
+
+### Fixed
+
+- **All-in-One control readbacks** — Residential All-in-One systems now show
+  their AC charge/discharge limits, export priority, EPS setting, and pause
+  slot correctly. These values could previously stay blank or show defaults
+  even though the inverter was reporting them.
+
 ## [0.18.0] - 2026-06-11
 
 ### Changed

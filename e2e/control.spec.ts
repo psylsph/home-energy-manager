@@ -168,7 +168,7 @@ test.describe('Quick Actions', () => {
 
     await page.goto('/');
     await page.locator('text=Control').click();
-    await page.locator('text=Pause Battery').click();
+    await page.getByRole('button', { name: /Pause Battery/ }).click();
 
     // PauseBattery = 2 writes: HR 96=0 (disable charge), HR 59=0 (disable discharge)
     const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 2, 20_000);

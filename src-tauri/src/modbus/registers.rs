@@ -178,11 +178,11 @@ pub const HR_CHARGE_TARGET_SOC_1: u16 = 242;
 pub const HR_CHARGE_TARGET_SOC_2: u16 = 245;
 
 // Gen3 charge slot 2 — extended-block copy (HR 243-244).
-// On Gen3/AIO/HV-Gen3 firmware the authoritative charge slot 2 schedule
-// lives here, not at the classic HR 31-32 location.  Named
-// `charge_slot_2_x` in givenergy-modbus.  GivTCP's RegisterMap resolves
-// CHARGE_SLOT_2_START to 243 (later class assignment shadows the original
-// 31).
+// On Gen3/AIO/HV-Gen3 firmware, GivTCP's model map makes this the later
+// charge_slot_2 definition and its command RegisterMap resolves slot 2 writes
+// here. The current givenergy-modbus SlotMap still writes slot 2 to HR 31-32
+// while decoding this extended copy, so keep this explicit until upstream
+// reference behavior converges.
 pub const HR_CHARGE_SLOT_2_GEN3_START: u16 = 243;
 pub const HR_CHARGE_SLOT_2_GEN3_END: u16 = 244;
 
@@ -448,8 +448,7 @@ pub const SAFE_WRITE_REGS: &[u16] = &[
     104, // ENABLE_BATTERY_SELF_HEATING — hardware/batch-gated
     172, // ENABLE_MANUAL_BATTERY_HEATER — likely hardware-gated like 104
     // Charge slot 2 — Gen3 extended (HR 243-244, mirrors classic HR 31-32)
-    243, 244,
-    // Charge slots 3-10 (Gen3 extended)
+    243, 244, // Charge slots 3-10 (Gen3 extended)
     246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264,
     265, 266, 267, 268, 269, // Discharge slots 3-10 (Gen3 extended)
     276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294,
@@ -464,13 +463,14 @@ pub const SAFE_WRITE_REGS: &[u16] = &[
     // EMS plant-level control / discharge slots
     2040, 2044, 2045, 2046, 2047, 2048, 2049, 2050, 2051, 2052,
     // EMS charge and export slots (givenergy-modbus WRITE_SAFE_REGISTERS)
-    2053, 2054, 2055, 2056, 2057, 2058, 2059, 2060, 2061, 2062, 2063, 2064, 2065, 2066, 2067,
-    2068, 2069, 2070, 2071,
+    2053, 2054, 2055, 2056, 2057, 2058, 2059, 2060, 2061, 2062, 2063, 2064, 2065, 2066, 2067, 2068,
+    2069, 2070, 2071,
     // App-confirmed writable registers (givenergy-modbus #167)
     199, // ENABLE_INVERTER_PARALLEL_MODE
     331, // FORCE_OFF_GRID — non-damaging, but sustained islanding state
     // Smart Load slots 1-10 (app-confirmed, bounded HHMM values)
-    554, 555, 556, 557, 558, 559, 560, 561, 562, 563, 564, 565, 566, 567, 568, 569, 570, 571, 572, 573,
+    554, 555, 556, 557, 558, 559, 560, 561, 562, 563, 564, 565, 566, 567, 568, 569, 570, 571, 572,
+    573,
     // Other app-confirmed registers
     5010, // RESTART_HARDWARE — same class as HR163 REBOOT
     5014, // ENABLE_CALCULATED_LOAD
@@ -630,8 +630,15 @@ pub const AC_AND_THREE_PHASE_BLOCKS: &[RegisterBlock] =
     &[AC_CONFIG_BLOCK, THREE_PHASE_CONFIG_BLOCK];
 
 /// Extra blocks for HV/three-phase models that also use extended schedules.
-pub const EXTENDED_AND_THREE_PHASE_BLOCKS: &[RegisterBlock] =
-    &[EXTENDED_SLOTS_BLOCK, THREE_PHASE_HIGH_CONFIG_BLOCK, THREE_PHASE_CONFIG_BLOCK];
+pub const EXTENDED_AND_THREE_PHASE_BLOCKS: &[RegisterBlock] = &[
+    EXTENDED_SLOTS_BLOCK,
+    THREE_PHASE_HIGH_CONFIG_BLOCK,
+    THREE_PHASE_CONFIG_BLOCK,
+];
+
+/// Extra blocks for residential All-in-One models: extended slots plus AC-output config.
+pub const EXTENDED_AND_AC_CONFIG_BLOCKS: &[RegisterBlock] =
+    &[EXTENDED_SLOTS_BLOCK, AC_CONFIG_BLOCK];
 
 /// Extra blocks for AC three-phase models: AC config plus full three-phase schedule/config.
 pub const AC_EXTENDED_AND_THREE_PHASE_BLOCKS: &[RegisterBlock] = &[

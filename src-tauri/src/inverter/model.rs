@@ -385,13 +385,16 @@ impl DeviceType {
     /// beyond the standard set (IR 0-59, HR 0-59, HR 60-119).
     pub fn extra_poll_blocks(&self) -> &'static [crate::modbus::registers::RegisterBlock] {
         use crate::modbus::registers::{
-            AC_CONFIG_BLOCK, AC_EXTENDED_AND_THREE_PHASE_BLOCKS, EXTENDED_AND_THREE_PHASE_BLOCKS,
-            EXTENDED_SLOTS_BLOCK,
+            AC_CONFIG_BLOCK, AC_EXTENDED_AND_THREE_PHASE_BLOCKS, EXTENDED_AND_AC_CONFIG_BLOCKS,
+            EXTENDED_AND_THREE_PHASE_BLOCKS, EXTENDED_SLOTS_BLOCK,
         };
         match self {
             Self::ACThreePhase => AC_EXTENDED_AND_THREE_PHASE_BLOCKS,
             Self::HybridHvGen3 | Self::AllInOneHybrid | Self::ThreePhase | Self::AioCommercial => {
                 EXTENDED_AND_THREE_PHASE_BLOCKS
+            }
+            Self::AllInOne6kW | Self::AllInOne3_6kW | Self::AllInOne5kW => {
+                EXTENDED_AND_AC_CONFIG_BLOCKS
             }
             dt if dt.supports_gen3_extended() => &[EXTENDED_SLOTS_BLOCK],
             Self::ACCoupled | Self::ACCoupledMk2 => &[AC_CONFIG_BLOCK],
@@ -1100,6 +1103,55 @@ mod tests {
             assert!(
                 extras.iter().any(|b| b.start == EXTENDED_SLOTS_BLOCK.start),
                 "{dt:?} should poll HR240-299 for slots 3-10"
+            );
+        }
+    }
+
+    #[test]
+    fn residential_aio_polls_extended_slots_and_ac_config_but_not_three_phase_blocks() {
+        use crate::modbus::registers::{
+            AC_CONFIG_BLOCK, EXTENDED_SLOTS_BLOCK, THREE_PHASE_CONFIG_BLOCK,
+            THREE_PHASE_HIGH_CONFIG_BLOCK,
+        };
+
+        for dt in [
+            DeviceType::AllInOne6kW,
+            DeviceType::AllInOne3_6kW,
+            DeviceType::AllInOne5kW,
+        ] {
+            assert!(
+                dt.supports_gen3_extended(),
+                "{dt:?} should support extended slots"
+            );
+            assert!(
+                !dt.uses_three_phase_schedule_slots(),
+                "{dt:?} is residential single-phase AIO"
+            );
+            assert!(
+                !dt.needs_three_phase_input_blocks(),
+                "{dt:?} must not poll IR1000+"
+            );
+
+            let extras = dt.extra_poll_blocks();
+            assert!(
+                extras.iter().any(|b| b.start == EXTENDED_SLOTS_BLOCK.start),
+                "{dt:?} should poll HR240-299 for extended slots"
+            );
+            assert!(
+                extras.iter().any(|b| b.start == AC_CONFIG_BLOCK.start),
+                "{dt:?} should poll HR300-359 for AC-output config"
+            );
+            assert!(
+                !extras
+                    .iter()
+                    .any(|b| b.start == THREE_PHASE_CONFIG_BLOCK.start),
+                "{dt:?} should not poll HR1080-1124"
+            );
+            assert!(
+                !extras
+                    .iter()
+                    .any(|b| b.start == THREE_PHASE_HIGH_CONFIG_BLOCK.start),
+                "{dt:?} should not poll HR1000-1079"
             );
         }
     }
