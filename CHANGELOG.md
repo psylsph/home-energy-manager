@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-06-12
+
+### Added
+
+- **Read-only GivEnergy EV Charger monitoring** — Added local standard
+  Modbus TCP polling for the GivEnergy EV charger on port 502, with live
+  WebSocket updates and a Home → EV branch on the Status energy-flow diagram.
+- **EV charger network settings and discovery** — Settings now include an
+  optional EV Charger address, network scan support for Modbus TCP devices on
+  port 502, and a save flow that can disable charger monitoring by clearing
+  the address.
+- **Developer-only BMS diagnostics** — The Battery page can show raw per-module
+  LV BMS status/warning registers and decoded bytes in Developer Mode for
+  field investigation. These values are undocumented by the public register
+  maps and are therefore displayed as raw diagnostic data only.
+
+### Changed
+
+- **Advanced port fields hidden by default** — Inverter and EV Charger port
+  fields are now shown only when Developer Mode is enabled; normal users see
+  just the host/address fields.
+- **Expanded planning notes** — ROADMAP now includes detailed planning for
+  multi-zone tariffs, Eco mode clarification, Flux-aware scheduling, and
+  future Gateway support.
+
+### Fixed
+
+- **EV charger polling compatibility** — The EVC Modbus client now uses the
+  expected unit id and GivTCP-compatible state mapping, so simulator and local
+  charger values are decoded correctly.
+
 ## [0.20.0] - 2026-06-12
 
 ### Changed

@@ -15,6 +15,14 @@ interface InverterState {
   chartRange: HistoryRange;
   /** Discharge slots configured locally in Eco mode, not yet written to the inverter. */
   pendingDischargeSlots: Record<number, ScheduleSlot>;
+  /** EV Charger host — non-empty when configured in Settings. */
+  evcHost: string;
+  /** EV Charger active power (watts), updated by EVC poll loop. */
+  evcPower: number;
+  /** EV Charger charging state (true = actively delivering power). */
+  evcCharging: boolean;
+  /** EV Charger Modbus connection/data status. */
+  evcConnected: boolean;
   setSnapshot: (snapshot: InverterSnapshot) => void;
   clearSnapshot: () => void;
   setConnection: (state: ConnectionState, host?: string) => void;
@@ -24,6 +32,8 @@ interface InverterState {
   setPendingDischargeSlots: (slots: Record<number, ScheduleSlot>) => void;
   clearPendingDischargeSlots: () => void;
   setHiddenPanels: (panels: string[]) => void;
+  setEvcHost: (host: string) => void;
+  setEvcData: (power: number, charging: boolean, connected?: boolean) => void;
 }
 
 function loadDeveloperMode(): boolean {
@@ -89,6 +99,10 @@ export const useInverterStore = create<InverterState>((set) => ({
   hiddenPanels: [],
   chartRange: loadChartRange(),
   pendingDischargeSlots: loadPendingDischargeSlots(),
+  evcHost: '',
+  evcPower: 0,
+  evcCharging: false,
+  evcConnected: false,
   setSnapshot: (snapshot) => set({ snapshot }),
   clearSnapshot: () => set({ snapshot: null }),
   setConnection: (state, host) => set({ connectionState: state, connectedHost: host ?? null }),
@@ -119,4 +133,6 @@ export const useInverterStore = create<InverterState>((set) => ({
     set({ pendingDischargeSlots: {} });
   },
   setHiddenPanels: (panels) => set({ hiddenPanels: panels }),
+  setEvcHost: (host) => set({ evcHost: host }),
+  setEvcData: (power, charging, connected = true) => set({ evcPower: power, evcCharging: charging, evcConnected: connected }),
 }));

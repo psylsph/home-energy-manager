@@ -414,8 +414,8 @@ impl ControlCommand {
                 // Per GivTCP reference: disable both charge and discharge.
                 // HR 72 → enable_charge, HR 73 → enable_discharge.
                 vec![
-                    rw(HR_ENABLE_CHARGE, 0),     // stop any force charge
-                    rw(HR_ENABLE_DISCHARGE, 0),  // stop any discharge
+                    rw(HR_ENABLE_CHARGE, 0),    // stop any force charge
+                    rw(HR_ENABLE_DISCHARGE, 0), // stop any discharge
                 ]
             }
             ControlCommand::ForceCharge { target_soc } => {
@@ -447,9 +447,9 @@ impl ControlCommand {
                 // Clear stale charge registers so a previous force-charge mode
                 // (e.g. left over after app restart) doesn't conflict.
                 vec![
-                    rw(HR_BATTERY_POWER_MODE, 0),     // max power → export to grid
-                    rw(HR_ENABLE_CHARGE, 0),           // clear any force charge
-                    rw(HR_ENABLE_CHARGE_TARGET, 0),    // clear charge target
+                    rw(HR_BATTERY_POWER_MODE, 0),   // max power → export to grid
+                    rw(HR_ENABLE_CHARGE, 0),        // clear any force charge
+                    rw(HR_ENABLE_CHARGE_TARGET, 0), // clear charge target
                     rw(HR_ENABLE_DISCHARGE, 1),
                     rw(HR_DISCHARGE_SLOT_1_START, 0),  // 00:00
                     rw(HR_DISCHARGE_SLOT_1_END, 2359), // 23:59
@@ -460,9 +460,9 @@ impl ControlCommand {
             ControlCommand::ThreePhaseForceCharge { target_soc } => {
                 validate_range(*target_soc, 4, 100, "target SOC")?;
                 vec![
-                    rw(HR_BATTERY_POWER_MODE, 1),          // eco mode (common register)
-                    rw(HR_3PH_FORCE_DISCHARGE_ENABLE, 0),  // clear stale discharge
-                    rw(HR_3PH_AC_CHARGE_ENABLE, 1),        // enable AC charge (GivTCP sets both)
+                    rw(HR_BATTERY_POWER_MODE, 1),         // eco mode (common register)
+                    rw(HR_3PH_FORCE_DISCHARGE_ENABLE, 0), // clear stale discharge
+                    rw(HR_3PH_AC_CHARGE_ENABLE, 1),       // enable AC charge (GivTCP sets both)
                     rw(HR_3PH_FORCE_CHARGE_ENABLE, 1),    // three-phase force charge
                     rw(HR_3PH_CHARGE_TARGET_SOC, *target_soc),
                 ]
@@ -470,8 +470,8 @@ impl ControlCommand {
             ControlCommand::ThreePhaseForceDischarge => {
                 // Mode 0 = max power / export to grid (see ForceDischarge).
                 vec![
-                    rw(HR_BATTERY_POWER_MODE, 0),         // max power → export
-                    rw(HR_3PH_FORCE_CHARGE_ENABLE, 0),     // clear stale charge
+                    rw(HR_BATTERY_POWER_MODE, 0),      // max power → export
+                    rw(HR_3PH_FORCE_CHARGE_ENABLE, 0), // clear stale charge
                     rw(HR_3PH_FORCE_DISCHARGE_ENABLE, 1),
                 ]
             }
@@ -480,7 +480,7 @@ impl ControlCommand {
                     rw(HR_3PH_FORCE_CHARGE_ENABLE, 0),    // clear force charge
                     rw(HR_3PH_AC_CHARGE_ENABLE, 0),       // clear AC charge
                     rw(HR_3PH_FORCE_DISCHARGE_ENABLE, 0), // clear force discharge
-                    rw(HR_BATTERY_POWER_MODE, 1),          // eco mode (common register)
+                    rw(HR_BATTERY_POWER_MODE, 1),         // eco mode (common register)
                 ]
             }
             ControlCommand::SyncClock => {

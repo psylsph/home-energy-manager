@@ -75,6 +75,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         // Discovery
         .route("/api/discover", get(api::discover))
+        .route("/api/evc/discover", get(api::evc_discover))
         // Developer logs
         .route("/api/logs", get(logs::get_logs))
         .route(

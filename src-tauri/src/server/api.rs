@@ -184,6 +184,8 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "import_tariff_config": settings.import_tariff_config,
             "export_tariff_config": settings.export_tariff_config,
             "hidden_panels": settings.hidden_panels,
+            "evc_host": settings.evc_host,
+            "evc_port": settings.evc_port,
         }
         })),
     )
@@ -227,19 +229,19 @@ pub async fn update_settings(
     let import_tariff_config = body
         .get("import_tariff_config")
         .and_then(|v| {
-        if v.is_null() {
-            return None;
-        }
-        serde_json::from_value::<crate::settings::TariffConfig>(v.clone()).ok()
+            if v.is_null() {
+                return None;
+            }
+            serde_json::from_value::<crate::settings::TariffConfig>(v.clone()).ok()
         })
         .or(import_tariff_config_default);
     let export_tariff_config = body
         .get("export_tariff_config")
         .and_then(|v| {
-        if v.is_null() {
-            return None;
-        }
-        serde_json::from_value::<crate::settings::TariffConfig>(v.clone()).ok()
+            if v.is_null() {
+                return None;
+            }
+            serde_json::from_value::<crate::settings::TariffConfig>(v.clone()).ok()
         })
         .or(export_tariff_config_default);
 
@@ -282,6 +284,12 @@ pub async fn update_settings(
             .collect();
         persist.hidden_panels = panels;
     }
+    if let Some(evc_host) = body.get("evc_host").and_then(|v| v.as_str()) {
+        persist.evc_host = evc_host.to_string();
+    }
+    if let Some(evc_port) = body.get("evc_port").and_then(|v| v.as_u64()) {
+        persist.evc_port = evc_port.min(u16::MAX as u64) as u16;
+    }
     if let Err(e) = persist.save() {
         tracing::warn!("Failed to persist settings: {}", e);
         return server_error(&format!("Failed to save settings: {}", e));
@@ -309,6 +317,12 @@ pub async fn update_settings(
     }
     if incoming.interval_secs > 0 {
         settings.interval_secs = incoming.interval_secs;
+    }
+    // Sync EVC settings from persisted config to in-memory PollSettings
+    {
+        let disk = crate::settings::Settings::load();
+        settings.evc_host = disk.evc_host.clone();
+        settings.evc_port = disk.evc_port;
     }
 
     let connection_changed =
@@ -357,8 +371,10 @@ fn parse_settings(body: &serde_json::Value) -> Result<PollSettings, String> {
         host,
         port,
         serial,
-        interval_secs, // caller will merge: 0 means "keep existing"
-        version: 0,    // not set by the API; caller bumps it
+        interval_secs,           // caller will merge: 0 means "keep existing"
+        version: 0,              // not set by the API; caller bumps it
+        evc_host: String::new(), // merged from disk settings separately
+        evc_port: 502,
     })
 }
 
@@ -973,65 +989,65 @@ pub async fn get_history(
 
     let explicit_window: Option<(i64, i64)> =
         if rolling && range_str != "month" && range_str != "today" {
-        let end_ts = chrono::Utc::now().timestamp() - offset * range_secs;
-        Some((end_ts - range_secs, end_ts))
-    } else if range_str == "today" {
-        let now = chrono::Local::now();
-        let start_date = now.date_naive() - chrono::Duration::days(offset);
-        let start_local = start_date.and_hms_opt(0, 0, 0).unwrap();
-        let start_local_dt = chrono::Local
-            .from_local_datetime(&start_local)
-            .earliest()
-            .unwrap();
-        let end_date = start_date.succ_opt().unwrap();
-        let end_local = end_date.and_hms_opt(0, 0, 0).unwrap();
-        let end_ts = chrono::Local
-            .from_local_datetime(&end_local)
-            .earliest()
-            .unwrap()
-            .timestamp();
+            let end_ts = chrono::Utc::now().timestamp() - offset * range_secs;
+            Some((end_ts - range_secs, end_ts))
+        } else if range_str == "today" {
+            let now = chrono::Local::now();
+            let start_date = now.date_naive() - chrono::Duration::days(offset);
+            let start_local = start_date.and_hms_opt(0, 0, 0).unwrap();
+            let start_local_dt = chrono::Local
+                .from_local_datetime(&start_local)
+                .earliest()
+                .unwrap();
+            let end_date = start_date.succ_opt().unwrap();
+            let end_local = end_date.and_hms_opt(0, 0, 0).unwrap();
+            let end_ts = chrono::Local
+                .from_local_datetime(&end_local)
+                .earliest()
+                .unwrap()
+                .timestamp();
 
-        Some((start_local_dt.timestamp(), end_ts))
-    } else if range_str == "month" {
-        // Compute calendar month boundaries in local time.
-        let now = chrono::Local::now();
-        // Apply offset (month offset, since month windows have variable length)
-        let total_months = now.year() * 12 + (now.month() as i32) - 1 - offset as i32;
-        let target_year = total_months.div_euclid(12);
-        let target_month = (total_months.rem_euclid(12) + 1) as u32;
+            Some((start_local_dt.timestamp(), end_ts))
+        } else if range_str == "month" {
+            // Compute calendar month boundaries in local time.
+            let now = chrono::Local::now();
+            // Apply offset (month offset, since month windows have variable length)
+            let total_months = now.year() * 12 + (now.month() as i32) - 1 - offset as i32;
+            let target_year = total_months.div_euclid(12);
+            let target_month = (total_months.rem_euclid(12) + 1) as u32;
 
-        // Start of target month (local midnight of the 1st)
-        let start_local = chrono::NaiveDate::from_ymd_opt(target_year, target_month, 1)
-            .unwrap()
-            .and_hms_opt(0, 0, 0)
-            .unwrap();
-        let start_local_dt = chrono::Local
-            .from_local_datetime(&start_local)
-            .earliest()
-            .unwrap();
+            // Start of target month (local midnight of the 1st)
+            let start_local = chrono::NaiveDate::from_ymd_opt(target_year, target_month, 1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap();
+            let start_local_dt = chrono::Local
+                .from_local_datetime(&start_local)
+                .earliest()
+                .unwrap();
 
-        // End of target month = start of next month
-        let (next_year, next_month) = if target_month == 12 {
-            (target_year + 1, 1u32)
+            // End of target month = start of next month
+            let (next_year, next_month) = if target_month == 12 {
+                (target_year + 1, 1u32)
+            } else {
+                (target_year, target_month + 1)
+            };
+            let end_local = chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap();
+            let end_local_dt = chrono::Local
+                .from_local_datetime(&end_local)
+                .earliest()
+                .unwrap();
+
+            let start_ts = start_local_dt.timestamp();
+            let end_ts = end_local_dt.timestamp();
+
+            Some((start_ts, end_ts))
         } else {
-            (target_year, target_month + 1)
+            None
         };
-        let end_local = chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)
-            .unwrap()
-            .and_hms_opt(0, 0, 0)
-            .unwrap();
-        let end_local_dt = chrono::Local
-            .from_local_datetime(&end_local)
-            .earliest()
-            .unwrap();
-
-        let start_ts = start_local_dt.timestamp();
-        let end_ts = end_local_dt.timestamp();
-
-        Some((start_ts, end_ts))
-    } else {
-        None
-    };
 
     let fields: Vec<String> = fields_str
         .split(',')
@@ -1158,6 +1174,29 @@ pub async fn discover(State(_state): State<Arc<AppState>>) -> (StatusCode, Json<
         "ok": true,
         "subnets": subnets,
         "inverters": inverters,
+        })),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// EVC discovery endpoint
+// ---------------------------------------------------------------------------
+
+/// GET /api/evc/discover — scan the local network for EV chargers on port 502.
+pub async fn evc_discover(State(_state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    tracing::info!("EVC network discovery requested");
+
+    let subnets = crate::inverter::discovery::detect_lan_subnets();
+    tracing::info!("EVC scanning subnets: {:?}", subnets);
+
+    let chargers = crate::evc::scan_evc_multiple_subnets(&subnets).await;
+
+    (
+        StatusCode::OK,
+        Json(json!({
+        "ok": true,
+        "subnets": subnets,
+        "chargers": chargers,
         })),
     )
 }
@@ -1366,7 +1405,7 @@ pub async fn reboot_inverter(State(state): State<Arc<AppState>>) -> (StatusCode,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::{with_isolated_config_dir, with_isolated_config_dir_async};
+    use crate::test_util::with_isolated_config_dir_async;
 
     #[test]
     fn three_phase_slot_selection_uses_three_phase_register_commands() {

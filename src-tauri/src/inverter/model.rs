@@ -547,6 +547,15 @@ pub struct BatteryModule {
     /// Remaining / available capacity in Ah (IR 88-89, uint32 0.01 Ah).
     #[serde(default)]
     pub remaining_capacity_ah: f32,
+    /// Raw LV BMS status/warning registers IR 90-94.
+    #[serde(default)]
+    pub bms_status_registers: Vec<u16>,
+    /// Raw LV BMS status bytes status_1..status_7 split from IR 90-93.
+    #[serde(default)]
+    pub bms_status: Vec<u8>,
+    /// Raw LV BMS warning bytes warning_1..warning_2 split from IR 94.
+    #[serde(default)]
+    pub bms_warnings: Vec<u8>,
 }
 
 /// A single charge or discharge schedule slot.

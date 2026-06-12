@@ -35,6 +35,14 @@ const BATTERY_MODE_LABELS: Record<string, string> = {
   export_paused: 'Export Paused',
 };
 
+const BMS_REGISTER_LABELS = ['IR90', 'IR91', 'IR92', 'IR93', 'IR94'];
+const BMS_STATUS_LABELS = ['status_1', 'status_2', 'status_3', 'status_4', 'status_5', 'status_6', 'status_7'];
+const BMS_WARNING_LABELS = ['warning_1', 'warning_2'];
+
+function formatHex(value: number, width: number): string {
+  return `0x${Math.trunc(value).toString(16).toUpperCase().padStart(width, '0')}`;
+}
+
 /** Override mode label when cosy mode is enabled, or "Override" when */
 /** force charge or force discharge is active.                         */
 function modeDisplayLabel(
@@ -56,7 +64,7 @@ function modeDisplayLabel(
 }
 
 export default function BatteryPage() {
-  const { snapshot } = useInverterStore();
+  const { snapshot, developerMode } = useInverterStore();
   const [expandedModule, setExpandedModule] = useState<number | null>(null);
 
   if (!snapshot) {
@@ -271,6 +279,41 @@ export default function BatteryPage() {
                           </>
                         )}
                       </div>
+
+                      {/* Raw LV BMS status/warning bytes — developer diagnostics only. */}
+                      {developerMode && (m.bms_status_registers?.length ?? 0) > 0 && (
+                        <div className="space-y-2 rounded-lg border border-yellow-500/25 bg-yellow-500/5 p-3">
+                          <div>
+                            <div className="text-yellow-400 text-xs font-semibold">Developer: Raw BMS Status Registers</div>
+                            <div className="text-text-secondary text-[11px]">
+                              Undocumented LV BMS bytes from IR90–IR94. Use these for before/after comparisons.
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-5 gap-1 text-[11px] font-mono">
+                            {(m.bms_status_registers ?? []).map((value, i) => (
+                              <div key={BMS_REGISTER_LABELS[i] ?? i} className="rounded bg-bg-elevated px-2 py-1 text-center">
+                                <div className="text-text-secondary">{BMS_REGISTER_LABELS[i] ?? `IR${90 + i}`}</div>
+                                <div className="text-text-primary">{formatHex(value, 4)}</div>
+                                <div className="text-text-secondary">{value}</div>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="grid grid-cols-3 sm:grid-cols-5 gap-1 text-[11px] font-mono">
+                            {(m.bms_status ?? []).map((value, i) => (
+                              <div key={BMS_STATUS_LABELS[i] ?? i} className="rounded bg-bg-elevated px-2 py-1">
+                                <span className="text-text-secondary">{BMS_STATUS_LABELS[i] ?? `status_${i + 1}`}</span>
+                                <span className="float-right text-text-primary">{value} / {formatHex(value, 2)}</span>
+                              </div>
+                            ))}
+                            {(m.bms_warnings ?? []).map((value, i) => (
+                              <div key={BMS_WARNING_LABELS[i] ?? i} className="rounded bg-bg-elevated px-2 py-1">
+                                <span className="text-text-secondary">{BMS_WARNING_LABELS[i] ?? `warning_${i + 1}`}</span>
+                                <span className="float-right text-yellow-400">{value} / {formatHex(value, 2)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
 
                       {/* Cell voltage chart */}
                       {cellCount > 0 && (

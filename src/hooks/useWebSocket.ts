@@ -3,11 +3,28 @@ import { getWsUrl, apiGet } from '../lib/api';
 import { useInverterStore } from '../store/useInverterStore';
 import type { InverterSnapshot, ConnectionState } from '../lib/types';
 
+export interface EvcSnapshot {
+  charging_state: string;
+  connection_status: string;
+  active_power: number;
+  current_l1: number;
+  current_l2: number;
+  current_l3: number;
+  voltage_l1: number;
+  voltage_l2: number;
+  voltage_l3: number;
+  meter_energy_kwh: number;
+  session_energy_kwh: number;
+  session_duration_secs: number;
+  charge_limit_a: number;
+  serial_number: string;
+}
+
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeout = useRef<number>(0);
   const connectRef = useRef<() => void>(() => {});
-  const { setSnapshot, clearSnapshot, setConnection } = useInverterStore();
+  const { setSnapshot, clearSnapshot, setConnection, setEvcData } = useInverterStore();
 
   // Fetch initial connection state from REST API (in case WS messages
   // were missed before the page loaded).
@@ -49,6 +66,13 @@ export function useWebSocket() {
           if (data.state !== 'connected') {
             clearSnapshot();
           }
+        } else if (data.type === 'evc') {
+          const evc = data as EvcSnapshot;
+          const charging = evc.charging_state === 'Charging' || evc.active_power > 0;
+          const connected = evc.connection_status === 'Connected' || evc.active_power > 0;
+          setEvcData(evc.active_power, charging, connected);
+        } else if (data.type === 'evc_disconnected') {
+          setEvcData(0, false, false);
         }
       } catch (e) {
         console.error('WebSocket parse error:', e);
@@ -69,7 +93,7 @@ export function useWebSocket() {
       console.error('WebSocket error:', err);
       ws.close();
     };
-  }, [setSnapshot, clearSnapshot, setConnection]);
+  }, [setSnapshot, clearSnapshot, setConnection, setEvcData]);
 
   // Keep ref in sync so the reconnect closure always calls the latest connect
   useEffect(() => {

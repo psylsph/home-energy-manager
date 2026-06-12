@@ -502,37 +502,37 @@ impl ModbusClient {
                 }
                 // marker at buf[0] (or after drain) — good, proceed
             } else {
-                    // No marker found. Keep only HEADER_START.len()-1 bytes so a
-                    // split marker across reads can be recovered (the framer's
-                    // sliding-window approach). Discard the rest.
-                    let keep = HEADER_START.len() - 1;
-                    if buf.len() > keep {
-                        let discarded = buf.len() - keep;
-                        if discarded > 100 {
+                // No marker found. Keep only HEADER_START.len()-1 bytes so a
+                // split marker across reads can be recovered (the framer's
+                // sliding-window approach). Discard the rest.
+                let keep = HEADER_START.len() - 1;
+                if buf.len() > keep {
+                    let discarded = buf.len() - keep;
+                    if discarded > 100 {
                         let prefix_hex = buf[..buf.len().min(16)]
                             .iter()
                             .map(|b| format!("{b:02x}"))
                             .collect::<Vec<_>>()
                             .join(" ");
-                            tracing::debug!(
+                        tracing::debug!(
                                 "No frame header in {} byte buffer, discarding {} bytes (first bytes: {})",
                                 buf.len(),
                                 discarded,
                                 prefix_hex
                             );
-                        } else {
-                            tracing::debug!(
-                                "No frame header in {} byte buffer, discarding {} bytes",
-                                buf.len(),
-                                discarded
-                            );
-                        }
-                        buf.drain(..buf.len() - keep);
+                    } else {
+                        tracing::debug!(
+                            "No frame header in {} byte buffer, discarding {} bytes",
+                            buf.len(),
+                            discarded
+                        );
                     }
-                    // Read more data from the stream.
-                    Self::fill_read_buf(reader, buf, timeout).await?;
-                    continue;
+                    buf.drain(..buf.len() - keep);
                 }
+                // Read more data from the stream.
+                Self::fill_read_buf(reader, buf, timeout).await?;
+                continue;
+            }
 
             // --- We have the marker at buf[0..4]. Enough for the header? ---
             if buf.len() < 6 {
@@ -1398,15 +1398,23 @@ mod tests {
         assert_eq!(STANDARD_POLL_BLOCKS_3PH[0].name, "holding_0_59");
         assert_eq!(STANDARD_POLL_BLOCKS_3PH[1].name, "holding_60_119");
         // No input register blocks — telemetry comes from IR 1000+
-        assert!(STANDARD_POLL_BLOCKS_3PH.iter().all(|b| b.register_type != super::super::registers::RegisterType::Input));
+        assert!(STANDARD_POLL_BLOCKS_3PH
+            .iter()
+            .all(|b| b.register_type != super::super::registers::RegisterType::Input));
     }
 
     #[test]
     fn inter_request_delay_is_adjustable() {
         let mut client = ModbusClient::new("10.0.0.1", 8899, "SN0001");
-        assert_eq!(client.inter_request_delay, ModbusClient::INTER_REQUEST_DELAY_DEFAULT);
+        assert_eq!(
+            client.inter_request_delay,
+            ModbusClient::INTER_REQUEST_DELAY_DEFAULT
+        );
         client.set_inter_request_delay(ModbusClient::INTER_REQUEST_DELAY_3PH);
-        assert_eq!(client.inter_request_delay, ModbusClient::INTER_REQUEST_DELAY_3PH);
+        assert_eq!(
+            client.inter_request_delay,
+            ModbusClient::INTER_REQUEST_DELAY_3PH
+        );
     }
 
     #[test]
@@ -1783,8 +1791,8 @@ mod tests {
         let responses = vec![MockResponse::ReadResponse {
             slave: 0x35,
             function: 0x04,
-                base: 200,
-                data: wrong_data,
+            base: 200,
+            data: wrong_data,
         }];
 
         let (_port, server, mut client) = setup_client_with_server(responses).await;
@@ -2058,10 +2066,10 @@ mod tests {
         let data: Vec<u16> = (0..60).collect();
 
         let responses = vec![MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x04,
-                base: 0,
-                data,
+            slave: 0x11,
+            function: 0x04,
+            base: 0,
+            data,
         }];
 
         let (_port, server, mut client) = setup_client_with_server(responses).await;
@@ -2175,8 +2183,8 @@ mod tests {
         // probe_registers_at_slave should return the data with a single attempt.
         let meter_data: Vec<u16> = vec![
             2300, // V_phase_1 = 230.0V (>100V → valid)
-            0, 0, 0, 0, 0, 0, 0, // rest of IR 60-66
-            100,  // p_active_total (IR 68)
+            0, 0, 0, 0, 0, 0, 0,   // rest of IR 60-66
+            100, // p_active_total (IR 68)
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ]; // 30 values
         assert_eq!(meter_data.len(), 30);

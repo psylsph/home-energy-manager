@@ -369,15 +369,15 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.today_export_kwh = get_reg(data, 25) as f32 * 0.1; // IR(25): e_grid_out_day
     snap.today_charge_kwh = get_reg(data, 36) as f32 * 0.1; // IR(36): e_battery_charge_day
     snap.today_discharge_kwh = get_reg(data, 37) as f32 * 0.1; // IR(37): e_battery_discharge_day
-    // IR(35) is AC charge (grid → battery), NOT house consumption. Per the
-    // givenergy-modbus sentinel cross-correlation (#174), the GivTCP-era
-    // "e_load_day" label was a mislabel. The three-phase model confirms this:
-    // IR(1376/1377) is e_ac_charge_today and IR(1396/1397) is e_load_today.
-    // For single-phase there is no direct load register — consumption is
-    // computed (matching the reference's e_consumption_today @property).
+                                                               // IR(35) is AC charge (grid → battery), NOT house consumption. Per the
+                                                               // givenergy-modbus sentinel cross-correlation (#174), the GivTCP-era
+                                                               // "e_load_day" label was a mislabel. The three-phase model confirms this:
+                                                               // IR(1376/1377) is e_ac_charge_today and IR(1396/1397) is e_load_today.
+                                                               // For single-phase there is no direct load register — consumption is
+                                                               // computed (matching the reference's e_consumption_today @property).
     snap.today_ac_charge_kwh = get_reg(data, 35) as f32 * 0.1; // IR(35): e_ac_charge_today
-    // Consumption = solar + import - export - ac_charge (ref formula).
-    // Clamped at 0 to avoid negative from meter rounding noise.
+                                                               // Consumption = solar + import - export - ac_charge (ref formula).
+                                                               // Clamped at 0 to avoid negative from meter rounding noise.
     snap.today_consumption_kwh = (snap.today_solar_kwh + snap.today_import_kwh
         - snap.today_export_kwh
         - snap.today_ac_charge_kwh)
@@ -399,12 +399,12 @@ fn decode_input_180_239(data: &[u16], snap: &mut InverterSnapshot) {
     // battery total energy counters (deci-kWh).
     snap.total_discharge_kwh = get_reg(data, 0) as f32 * 0.1; // IR(180): e_battery_discharge_total_alt1
     snap.total_charge_kwh = get_reg(data, 1) as f32 * 0.1; // IR(181): e_battery_charge_total_alt1
-    // IR(182-239) are NOT in the authoritative givenergy-modbus register
-    // map for any model — decoded as 0. These offsets are deliberately
-    // left unread to avoid silently shipping values from an unverified
-    // address range. If new registers are discovered here in the future,
-    // add explicit decoders and a note about which firmware/hardware
-    // revision they were confirmed on.
+                                                           // IR(182-239) are NOT in the authoritative givenergy-modbus register
+                                                           // map for any model — decoded as 0. These offsets are deliberately
+                                                           // left unread to avoid silently shipping values from an unverified
+                                                           // address range. If new registers are discovered here in the future,
+                                                           // add explicit decoders and a note about which firmware/hardware
+                                                           // revision they were confirmed on.
 }
 
 /// Decode holding registers 0-59 (configuration part 1).
@@ -1077,6 +1077,25 @@ fn decode_battery_block(data: &[u16], index: usize) -> BatteryModule {
     let cap_design = ((get_reg(data, 86 - 60) as u32) << 16) | (get_reg(data, 87 - 60) as u32);
     let cap_remaining = ((get_reg(data, 88 - 60) as u32) << 16) | (get_reg(data, 89 - 60) as u32);
 
+    // Raw status/warning bytes: IR(90-94) are undocumented by the public
+    // register maps, so expose them verbatim for field investigation.
+    let ir90 = get_reg(data, 90 - 60);
+    let ir91 = get_reg(data, 91 - 60);
+    let ir92 = get_reg(data, 92 - 60);
+    let ir93 = get_reg(data, 93 - 60);
+    let ir94 = get_reg(data, 94 - 60);
+    let bms_status_registers = vec![ir90, ir91, ir92, ir93, ir94];
+    let bms_status = vec![
+        (ir90 >> 8) as u8,
+        (ir90 & 0x00FF) as u8,
+        (ir91 >> 8) as u8,
+        (ir91 & 0x00FF) as u8,
+        (ir92 >> 8) as u8,
+        (ir92 & 0x00FF) as u8,
+        (ir93 >> 8) as u8,
+    ];
+    let bms_warnings = vec![(ir94 >> 8) as u8, (ir94 & 0x00FF) as u8];
+
     BatteryModule {
         index,
         soc,
@@ -1092,6 +1111,9 @@ fn decode_battery_block(data: &[u16], index: usize) -> BatteryModule {
         capacity_ah: cap_calibrated as f32 * 0.01,
         design_capacity_ah: cap_design as f32 * 0.01,
         remaining_capacity_ah: cap_remaining as f32 * 0.01,
+        bms_status_registers,
+        bms_status,
+        bms_warnings,
     }
 }
 
@@ -1312,9 +1334,12 @@ pub fn decode_hv_bmu_block(data: &[u16], index: usize) -> crate::inverter::model
         cell_voltages,
         cell_temperatures,
         bms_firmware: 0,
-        capacity_ah: 0.0,    // Pack-level; comes from the BCU cluster.
+        capacity_ah: 0.0, // Pack-level; comes from the BCU cluster.
         design_capacity_ah: 0.0,
         remaining_capacity_ah: 0.0,
+        bms_status_registers: Vec::new(),
+        bms_status: Vec::new(),
+        bms_warnings: Vec::new(),
     }
 }
 
@@ -1383,6 +1408,25 @@ mod tests {
             name,
         }));
         BlockRead { block, data }
+    }
+
+    #[test]
+    fn decode_battery_block_exposes_raw_bms_status_and_warning_bytes() {
+        let mut data = vec![0u16; 60];
+        data[90 - 60] = 0x0102;
+        data[91 - 60] = 0x0E10;
+        data[92 - 60] = 0x2040;
+        data[93 - 60] = 0x8000;
+        data[94 - 60] = 0xA55A;
+
+        let module = decode_battery_block(&data, 0);
+
+        assert_eq!(
+            module.bms_status_registers,
+            vec![0x0102, 0x0E10, 0x2040, 0x8000, 0xA55A]
+        );
+        assert_eq!(module.bms_status, vec![1, 2, 14, 16, 32, 64, 128]);
+        assert_eq!(module.bms_warnings, vec![165, 90]);
     }
 
     fn test_blocks() -> Vec<BlockRead> {
@@ -1585,20 +1629,20 @@ mod tests {
         ir1060[1061 - 1060] = 4150; // grid voltage L1 415.0V (line-to-line)
         ir1060[1062 - 1060] = 4160; // grid voltage L2 416.0V (line-to-line)
         ir1060[1063 - 1060] = 4140; // grid voltage L3 414.0V (line-to-line)
-        ir1060[1064 - 1060] = 10;   // current L1 1.0A
-        ir1060[1065 - 1060] = 12;   // current L2 1.2A
-        ir1060[1066 - 1060] = 8;    // current L3 0.8A
+        ir1060[1064 - 1060] = 10; // current L1 1.0A
+        ir1060[1065 - 1060] = 12; // current L2 1.2A
+        ir1060[1066 - 1060] = 8; // current L3 0.8A
         ir1060[1067 - 1060] = 5000; // grid frequency 50.00Hz
-        ir1060[1068 - 1060] = 980;  // power factor 0.980
+        ir1060[1068 - 1060] = 980; // power factor 0.980
         ir1060[1073 - 1060] = 0;
         ir1060[1074 - 1060] = 15_000; // grid apparent power 1500.0VA
         ir1060[1079 - 1060] = 0;
         ir1060[1080 - 1060] = 3000; // import 300W
         ir1060[1081 - 1060] = 0;
         ir1060[1082 - 1060] = 9000; // export 900W => grid_power +600W
-        ir1060[1083 - 1060] = 700;  // load L1 70.0W
-        ir1060[1084 - 1060] = 800;  // load L2 80.0W
-        ir1060[1085 - 1060] = 600;  // load L3 60.0W
+        ir1060[1083 - 1060] = 700; // load L1 70.0W
+        ir1060[1084 - 1060] = 800; // load L2 80.0W
+        ir1060[1085 - 1060] = 600; // load L3 60.0W
         ir1060[1089 - 1060] = 0;
         ir1060[1090 - 1060] = 22_000; // load total 2200W
 

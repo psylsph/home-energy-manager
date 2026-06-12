@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { apiGet, apiPost, getApiBase, getServerPort } from '../lib/api';
-import type { PollSettings, DiscoveredInverter, TariffConfig } from '../lib/types';
+import type { PollSettings, DiscoveredInverter, DiscoveredEvc, TariffConfig } from '../lib/types';
 import { useInverterStore } from '../store/useInverterStore';
 
 function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
@@ -58,6 +58,13 @@ const VALID_INTERVALS = [5, 10, 15, 20];
   // HTTP server port
   const [httpPort, setHttpPort] = useState(7337);
 
+  // EV Charger
+  const [evcHost, setEvcHost] = useState('');
+  const [evcPort, setEvcPort] = useState(502);
+  const [evcDiscovering, setEvcDiscovering] = useState(false);
+  const [evcDiscoverResults, setEvcDiscoverResults] = useState<DiscoveredEvc[]>([]);
+  const [evcDiscoverError, setEvcDiscoverError] = useState('');
+
   // Tariffs
   const [importTariffCfg, setImportTariffCfg] = useState<TariffConfig>({
     peak_rate: 0.285, off_peak_rate: 0.09, off_peak_start: '00:30', off_peak_end: '05:30',
@@ -109,6 +116,8 @@ const VALID_INTERVALS = [5, 10, 15, 20];
         if (s.hidden_panels) {
           setHiddenPanels(s.hidden_panels);
         }
+        setEvcHost(s.evc_host ?? '');
+        setEvcPort(s.evc_port ?? 502);
         setSettingsLoaded(true);
       } catch (e: unknown) {
         console.warn('Failed to load settings:', e);
@@ -168,6 +177,45 @@ const VALID_INTERVALS = [5, 10, 15, 20];
     } catch (error) {
       flash(error instanceof Error ? error.message : 'Failed to update HTTP port', false);
     }
+  };
+
+  // Save EV Charger settings
+  const handleEvcSave = async () => {
+    try {
+      await apiPost('/api/settings', { evc_host: evcHost, evc_port: evcPort });
+      useInverterStore.getState().setEvcHost(evcHost);
+      flash(evcHost ? 'EV Charger settings saved' : 'EV Charger disabled', true);
+    } catch (error) {
+      flash(error instanceof Error ? error.message : 'Failed to save EV charger settings', false);
+    }
+  };
+
+  // Discover EV Charger
+  const handleEvcDiscover = async () => {
+    setEvcDiscovering(true);
+    setEvcDiscoverError('');
+    setEvcDiscoverResults([]);
+    try {
+      const res = await apiGet<{ok: boolean, subnets?: string[], chargers: DiscoveredEvc[]}>('/api/evc/discover');
+      const results: DiscoveredEvc[] = (res.chargers || []).map((charger) => ({
+        host: 'ip' in charger ? (charger as Record<string, unknown>).ip as string : charger.host,
+        port: charger.port,
+        serial: charger.serial ?? null,
+      }));
+      setEvcDiscoverResults(results);
+      if (results.length === 0) {
+        const scanned = res.subnets?.length ? ` Scanned: ${res.subnets.join('.x, ')}.x` : '';
+        setEvcDiscoverError(`No EV chargers found on the network.${scanned}`);
+      }
+    } catch (error) {
+      setEvcDiscoverError(error instanceof Error ? error.message : 'EV charger discovery failed — is the backend running?');
+    }
+    setEvcDiscovering(false);
+  };
+
+  const applyDiscoveredEvc = (charger: DiscoveredEvc) => {
+    setEvcHost(charger.host);
+    setEvcPort(charger.port);
   };
 
   // Save tariffs
@@ -298,9 +346,9 @@ const VALID_INTERVALS = [5, 10, 15, 20];
         </div>
       )}
 
-      {/* ─── Section 1: Connection ─── */}
+      {/* ─── Section 1: Inverter Connection ─── */}
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
-        <h2 className="text-text-primary text-lg font-semibold font-sans">Connection</h2>
+        <h2 className="text-text-primary text-lg font-semibold font-sans">Inverter Connection</h2>
 
         {/* Connection state badge */}
         <div className="flex items-center gap-2 text-sm font-sans">
@@ -327,12 +375,15 @@ const VALID_INTERVALS = [5, 10, 15, 20];
               placeholder="192.168.x.x"
               className="min-w-0 flex-1 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
             />
-            <input
-              type="number"
-              value={port}
-              onChange={(e) => setPort(Number(e.target.value))}
-              className="w-[5.5em] shrink-0 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-            />
+            {developerMode && (
+              <input
+                type="number"
+                value={port}
+                onChange={(e) => setPort(Number(e.target.value))}
+                title="Inverter Modbus port"
+                className="w-[5.5em] shrink-0 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+              />
+            )}
           </div>
         </label>
 
@@ -393,9 +444,9 @@ const VALID_INTERVALS = [5, 10, 15, 20];
         )}
       </section>
 
-      {/* ─── Section 2: Network Access ─── */}
+      {/* ─── Section 2: Inverter Network Access ─── */}
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-3">
-        <h2 className="text-text-primary text-lg font-semibold font-sans">Network Access</h2>
+        <h2 className="text-text-primary text-lg font-semibold font-sans">Inverter Network Access</h2>
 
         <div className="flex items-center gap-3">
           <code className="bg-bg-elevated text-flow-active rounded-lg px-4 py-2 text-sm font-mono flex-1 min-w-0 select-all overflow-hidden text-ellipsis whitespace-nowrap">
@@ -430,6 +481,79 @@ const VALID_INTERVALS = [5, 10, 15, 20];
                 </div>
               );
             })}
+          </div>
+        )}
+      </section>
+
+      {/* ─── Section 2b: EV Charger ─── */}
+      <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-3">
+        <h2 className="text-text-primary text-lg font-semibold font-sans">EV Charger</h2>
+        <p className="text-text-secondary text-xs font-sans">
+          Optional. Connect a GivEnergy EV Charger on your local network for read-only monitoring. Uses standard Modbus TCP (port 502), not the proprietary inverter protocol.
+        </p>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-text-secondary text-xs font-sans">Charger Address</span>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={evcHost}
+              onChange={(e) => setEvcHost(e.target.value)}
+              placeholder="Leave blank to disable"
+              className="min-w-0 flex-1 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+            />
+            {developerMode && (
+              <input
+                type="number"
+                value={evcPort}
+                onChange={(e) => setEvcPort(Number(e.target.value))}
+                title="EV Charger Modbus port"
+                className="w-[5.5em] shrink-0 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+              />
+            )}
+          </div>
+        </label>
+
+        <div className="flex gap-3 pt-1">
+          <button
+            onClick={handleEvcSave}
+            className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
+          >
+            Save
+          </button>
+          <button
+            onClick={handleEvcDiscover}
+            disabled={evcDiscovering}
+            className="bg-bg-elevated text-text-primary font-sans text-sm px-5 py-2 rounded-lg hover:bg-bg-base transition-colors disabled:opacity-40"
+          >
+            {evcDiscovering ? 'Scanning…' : 'Scan Network'}
+          </button>
+        </div>
+
+        {/* EVC discover results */}
+        {evcDiscoverError && <p className="text-red-400 text-sm font-sans">{evcDiscoverError}</p>}
+        {evcDiscoverResults.length > 0 && (
+          <div className="flex flex-col gap-2 mt-1">
+            <span className="text-text-secondary text-xs font-sans">Discovered EV Chargers</span>
+            {evcDiscoverResults.map((charger, i) => (
+              <div
+                key={i}
+                className="bg-bg-elevated rounded-lg px-4 py-3 flex items-center justify-between"
+              >
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-text-primary text-sm font-mono">{charger.host}:{charger.port}</span>
+                  <span className="text-text-secondary text-xs font-sans">
+                    {charger.serial ?? 'Standard Modbus TCP device'}
+                  </span>
+                </div>
+                <button
+                  onClick={() => applyDiscoveredEvc(charger)}
+                  className="bg-flow-active/20 text-flow-active text-xs font-sans font-semibold px-3 py-1.5 rounded-md hover:bg-flow-active/30 transition-colors"
+                >
+                  Use
+                </button>
+              </div>
+            ))}
           </div>
         )}
       </section>

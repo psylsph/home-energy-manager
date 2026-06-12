@@ -80,6 +80,9 @@ export interface BatteryModule {
   capacity_ah: number;
   design_capacity_ah: number;
   remaining_capacity_ah: number;
+  bms_status_registers?: number[];
+  bms_status?: number[];
+  bms_warnings?: number[];
 }
 
 export interface ScheduleSlot {
@@ -109,6 +112,8 @@ export interface PollSettings {
   import_tariff_config: TariffConfig | null;
   export_tariff_config: TariffConfig | null;
   hidden_panels: string[];
+  evc_host: string;
+  evc_port: number;
 }
 
 export interface DiscoveredInverter {
@@ -116,6 +121,12 @@ export interface DiscoveredInverter {
   port: number;
   serial: string | null;
   generation: string | null;
+}
+
+export interface DiscoveredEvc {
+  host: string;
+  port: number;
+  serial: string | null;
 }
 
 export type ConnectionState = 'connected' | 'reconnecting' | 'disconnected';

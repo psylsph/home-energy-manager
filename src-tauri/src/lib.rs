@@ -1,3 +1,4 @@
+pub mod evc;
 pub mod history;
 pub mod inverter;
 pub mod modbus;
@@ -96,6 +97,8 @@ pub fn run() {
                 ps.port = app_settings.port;
                 ps.serial = app_settings.serial.clone();
                 ps.interval_secs = app_settings.poll_interval;
+                ps.evc_host = app_settings.evc_host.clone();
+                ps.evc_port = app_settings.evc_port;
             }
 
             // Apply saved auto-winter config
@@ -293,6 +296,12 @@ pub fn run() {
                 run_poll_loop(poll_state).await;
             });
 
+            // Spawn the EV charger polling loop
+            let evc_state = state.clone();
+            tauri::async_runtime::spawn(async move {
+                evc::run_evc_poll_loop(evc_state).await;
+            });
+
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -419,6 +428,8 @@ pub fn run_headless(args: &[String]) {
             ps.port = app_settings.port;
             ps.serial = app_settings.serial.clone();
             ps.interval_secs = app_settings.poll_interval;
+            ps.evc_host = app_settings.evc_host.clone();
+            ps.evc_port = app_settings.evc_port;
         }
 
         // Apply saved auto-winter config
@@ -491,6 +502,12 @@ pub fn run_headless(args: &[String]) {
         let poll_state = state.clone();
         tokio::spawn(async move {
             run_poll_loop(poll_state).await;
+        });
+
+        // Spawn the EV charger poll loop
+        let evc_state = state.clone();
+        tokio::spawn(async move {
+            evc::run_evc_poll_loop(evc_state).await;
         });
 
         // Start the HTTP server

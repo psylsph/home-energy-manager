@@ -152,7 +152,7 @@ function LogsIcon() {
 
 function Layout() {
   useWebSocket();
-  const { developerMode, themeMode, hiddenPanels, setHiddenPanels } = useInverterStore();
+  const { developerMode, themeMode, hiddenPanels, setHiddenPanels, setEvcHost } = useInverterStore();
 
   // Load hidden panels from settings on mount
   useEffect(() => {
@@ -162,9 +162,12 @@ function Layout() {
         if (res.ok && res.data.hidden_panels) {
           setHiddenPanels(res.data.hidden_panels);
         }
+        if (res.ok && res.data.evc_host) {
+          setEvcHost(res.data.evc_host);
+        }
       } catch { /* use defaults */ }
     })();
-  }, []);
+  }, [setHiddenPanels, setEvcHost]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = themeMode;

@@ -72,6 +72,10 @@ pub enum PollMessage {
         /// Host we are connected to (or trying to reach).
         host: String,
     },
+    /// EV charger data has been polled.
+    Evc(Box<crate::evc::EvcSnapshot>),
+    /// EV charger is disconnected.
+    EvcDisconnected,
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +117,10 @@ pub struct PollSettings {
     /// Monotonically increasing version — bumped by the settings API
     /// so the poll loop can detect that a reconnect is needed.
     pub version: u32,
+    /// EV Charger IP address (standard Modbus TCP).
+    pub evc_host: String,
+    /// EV Charger TCP port (default 502).
+    pub evc_port: u16,
 }
 
 impl Default for PollSettings {
@@ -123,6 +131,8 @@ impl Default for PollSettings {
             serial: String::new(),
             interval_secs: 60,
             version: 0,
+            evc_host: String::new(),
+            evc_port: 502,
         }
     }
 }
@@ -293,6 +303,8 @@ pub struct AppState {
     pub agile_state: Arc<Mutex<AgileState>>,
     /// Cached Octopus Agile prices for the current region.
     pub cached_agile_prices: Arc<Mutex<Vec<PriceSlot>>>,
+    /// Most recently decoded EV charger snapshot.
+    pub latest_evc: Arc<Mutex<Option<crate::evc::EvcSnapshot>>>,
 }
 
 impl AppState {
@@ -322,6 +334,7 @@ impl AppState {
             )),
             agile_state: Arc::new(Mutex::new(AgileState::Idle)),
             cached_agile_prices: Arc::new(Mutex::new(Vec::new())),
+            latest_evc: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -358,6 +371,7 @@ impl AppState {
             )),
             agile_state: Arc::new(Mutex::new(AgileState::Idle)),
             cached_agile_prices: Arc::new(Mutex::new(Vec::new())),
+            latest_evc: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -3955,14 +3969,16 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                             consecutive_suspicious = 0;
 
                             // Tick the meter retry cadence counter.
-                            if meter_probe_done && meter_retry_count > 0
+                            if meter_probe_done
+                                && meter_retry_count > 0
                                 && meter_retry_count < METER_MAX_RETRIES
                             {
                                 meter_cycle_since_last += 1;
                             }
                             // If the first scan found nothing and ammeter is
                             // expected, start the retry cadence.
-                            if meter_probe_done && meter_retry_count == 0
+                            if meter_probe_done
+                                && meter_retry_count == 0
                                 && detected_meters.is_empty()
                             {
                                 meter_cycle_since_last += 1;
@@ -4252,7 +4268,7 @@ mod tests {
         snap.battery_voltage = 0.0; // inverter IR block missed / garbage
         snap.battery_current = 0.0;
         snap.soc = 0; // inverter IR(1132) returned 0
-        // Garbage left by the single-phase IR(56)/HR(55) decode paths.
+                      // Garbage left by the single-phase IR(56)/HR(55) decode paths.
         snap.battery_temperature = 999.0;
         snap.battery_capacity_kwh = 999.0;
         snap.max_battery_power_w = 0;
@@ -4767,14 +4783,7 @@ mod tests {
 
     #[test]
     fn external_meter_probe_skips_unknown_device() {
-        assert!(!should_probe_external_meters(
-            None,
-            false,
-            false,
-            0,
-            0,
-            0,
-        ));
+        assert!(!should_probe_external_meters(None, false, false, 0, 0, 0,));
     }
 
     #[test]
@@ -4783,10 +4792,10 @@ mod tests {
         // enough cycles have passed — should retry.
         assert!(should_probe_external_meters(
             Some(DeviceType::Gen3Hybrid),
-            true,  // meter_probe_done
-            false, // enable_ammeter
-            1,     // meter_type = EM115
-            0,     // meter_retry_count (first retry)
+            true,                 // meter_probe_done
+            false,                // enable_ammeter
+            1,                    // meter_type = EM115
+            0,                    // meter_retry_count (first retry)
             METER_RETRY_INTERVAL, // enough cycles elapsed
         ));
     }
@@ -4822,9 +4831,9 @@ mod tests {
         assert!(should_probe_external_meters(
             Some(DeviceType::Gen3Hybrid),
             true,
-            true,  // enable_ammeter
-            0,     // meter_type (not EM115)
-            3,     // some retries used
+            true, // enable_ammeter
+            0,    // meter_type (not EM115)
+            3,    // some retries used
             METER_RETRY_INTERVAL,
         ));
     }

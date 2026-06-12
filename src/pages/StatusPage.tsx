@@ -4,7 +4,7 @@ import BatteryPanel from '../components/BatteryPanel';
 import SummaryTiles from '../components/SummaryTiles';
 
 export default function StatusPage() {
-  const { snapshot, connectionState } = useInverterStore();
+  const { snapshot, connectionState, evcHost, evcPower, evcCharging, evcConnected } = useInverterStore();
 
   if (!snapshot) {
     return (
@@ -31,7 +31,13 @@ export default function StatusPage() {
     <div className="flex flex-col gap-4 max-w-4xl mx-auto">
       {/* Energy flow diagram — full width card */}
       <section className="bg-bg-surface rounded-2xl p-4">
-        <EnergyFlowDiagram snapshot={snapshot} />
+        <EnergyFlowDiagram
+          snapshot={snapshot}
+          evcPower={evcPower}
+          evcCharging={evcCharging}
+          evcConnected={evcConnected}
+          showEvc={!!evcHost}
+        />
       </section>
 
       {/* Battery + Summary side by side on md+ */}

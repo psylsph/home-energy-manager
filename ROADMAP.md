@@ -166,26 +166,224 @@ See also: `derive_three_phase_battery_fields()` in poll.rs, GivTCP
 
 ## Near-term candidates
 
-### Multi-Zone Tariff Cost Calculations
+### Multi-Zone Tariff Cost Calculations (Issue #64 Part A)
 
 **Status**: Planning complete. Related to [Issue #64](https://github.com/psylsph/home-energy-manager/issues/64).
 
-The current 2-zone (Peak/Off-Peak) model cannot represent tariffs like Octopus Flux (3 zones) or Cosy (4+ zones). This project will implement a generic N-zone tariff system to accurately compute costs on the History page.
+The current `TariffConfig` is a 2-zone model (peak + off-peak) that cannot
+represent tariffs like Octopus Flux (3 zones) or Cosy (4+ zones). This project
+will implement a generic N-zone tariff system to accurately compute costs on
+the History page.
+
+#### Octopus Flux zone structure
+
+Octopus Flux is a 3-rate import+export tariff for solar & battery owners:
+
+| Zone | Time window | Import rate | Export rate | Notes |
+|---|---|---|---|---|
+| Off-peak | 02:00–05:00 | Cheapest | Standard | Charge battery from grid |
+| Day rate | everything else | Standard | Standard | Default/fallback |
+| Peak | 16:00–19:00 | Most expensive | **Highest** | Discharge/export to grid |
+
+Key characteristics:
+
+- Fixed zones (not half-hourly like Agile) — set once, applies every day
+- 14 UK regions (GSP groups A–P, excluding I/O) with region-specific rates
+- Symmetrical import/export structure (3 zones each, same time windows)
+- Export rates differ from import — peak export is particularly lucrative
+- No authentication required for public tariff rate lookups via Octopus API
+- Temporarily unavailable for new signups (as of June 2026) but existing
+  customers still on the tariff
 
 #### Technical Design
 
-- **Data Model**: Introduce `TariffZone` (label, rate, start, end) and `MultiZoneTariffConfig` (list of zones + default day rate).
-- **Tariff Mode**: A new `tariff_mode` setting (`standard` vs `multizone`) allows seamless fallback to existing 2-zone configs.
-- **Rate Resolution**: A generic `getRate(timestamp)` function replaces the binary `isOffPeak()` logic. It iterates through zones to find a match, falling back to the `default_rate`.
-- **UI**: Preset buttons for **Flux** and **Cosy** that pre-fill complex zone configurations, with a "Custom" mode for arbitrary zone creation.
+**Data model** (replaces current `TariffConfig`):
 
-#### Implementation Order
+```rust
+/// A single time-bounded rate zone.
+pub struct TariffZone {
+    /// Human-readable label (e.g. "Off-peak", "Peak", "Day rate").
+    pub label: String,
+    /// Rate in £/kWh during this zone.
+    pub rate: f64,
+    /// Zone start time in "HH:MM" format (24h).
+    pub start: String,
+    /// Zone end time in "HH:MM" format (24h), exclusive.
+    /// Can be before `start` to indicate crossing midnight.
+    pub end: String,
+}
 
-1. **Backend**: Update `Settings` struct $\rightarrow$ `Serde` serialization tests $\rightarrow$ `GET/PUT /api/settings` endpoints.
-2. **Frontend State**: Update `types.ts` $\rightarrow$ wire `PollSettings` to `SettingsPage.tsx` and `HistoryPage.tsx`.
-3. **UI Construction**: Build the zone editor in `SettingsPage.tsx` with preset-switching logic.
-4. **Engine Update**: Implement `getMultiZoneRate()` and update the cost `preprocess` pipeline in `HistoryPage.tsx`.
-5. **Visuals**: Add per-zone cost breakdown summary and optional stacked area charts.
+/// Generic N-zone tariff configuration.
+pub struct MultiZoneTariffConfig {
+    /// Ordered list of rate zones.
+    pub zones: Vec<TariffZone>,
+    /// Default day rate (£/kWh) when no zone matches.
+    pub default_rate: f64,
+}
+```
+
+**Tariff presets** (constructors on `MultiZoneTariffConfig`):
+
+| Preset | Import zones | Export zones |
+|---|---|---|
+| Standard (legacy) | Peak rate only (no zones, `default_rate` = user's peak rate) | Single export rate |
+| Flux | 3 zones: off-peak 02:00–05:00, peak 16:00–19:00, day default | 3 zones matching import windows but with export rates |
+| Cosy | User-defined (up to 3 slots, matching existing `CosySlot` windows) | Single export rate |
+| Custom | User-defined N zones | User-defined N zones |
+
+**Backward compatibility**:
+
+- Old `TariffConfig` (`peak_rate`, `off_peak_rate`, `off_peak_start`, `off_peak_end`)
+  in existing `settings.json` must deserialize into the new format without error
+- Migration strategy: on `Settings::load()`, if `import_tariff_config` is the old
+  `TariffConfig` shape (has `peak_rate`/`off_peak_rate` keys), convert to
+  `MultiZoneTariffConfig` with a single off-peak zone + default_rate = peak_rate
+- The old `import_tariff`/`export_tariff` flat fields remain as legacy fallback
+  (already handled this way in the frontend)
+
+**Rate resolution** (replaces `isOffPeak()`):
+
+```typescript
+function getRate(timestamp: number, config: MultiZoneTariffConfig): number {
+  const minutes = getMinutesOfDay(timestamp);
+  for (const zone of config.zones) {
+    if (isInZone(minutes, zone.start, zone.end)) {
+      return zone.rate;
+    }
+  }
+  return config.default_rate;
+}
+```
+
+- Zone matching is exclusive on `[start, end)` (matching existing `isOffPeak` semantics)
+- Zones are evaluated in order; first match wins
+- Zones crossing midnight (`end < start`) match `minutes >= start || minutes < end`
+
+#### Files to change
+
+| Layer | File | Change |
+|---|---|---|
+| Backend model | `src-tauri/src/settings/mod.rs` | Add `TariffZone`, `MultiZoneTariffConfig`. Replace `TariffConfig` with new type. Add preset constructors for Flux, Cosy, legacy 2-zone. Backward-compatible deserialization for existing `settings.json`. |
+| Backend tests | `src-tauri/src/settings/mod.rs` | Add serde roundtrip tests for new types. Add migration tests: old `TariffConfig` JSON → new `MultiZoneTariffConfig`. Verify existing `settings_roundtrip` test passes unchanged. |
+| Backend API | `src-tauri/src/server/api.rs` + `mod.rs` | Update `GET/PUT /api/settings` to serialize/deserialize new tariff format. |
+| Frontend types | `src/lib/types.ts` | Replace `TariffConfig` with `MultiZoneTariffConfig` + `TariffZone`. Update `PollSettings`. |
+| Frontend settings | `src/pages/SettingsPage.tsx` | Add tariff preset dropdown (Standard/Flux/Cosy/Custom) + N-zone editor UI. Preset switches pre-fill zones. |
+| Frontend history | `src/pages/HistoryPage.tsx` | Replace `isOffPeak()` with generic `getRate(timestamp, config)`. Update cost preprocessing pipeline in cost tab chart definitions. |
+
+#### Implementation order
+
+1. **Backend settings model** — `TariffZone`, `MultiZoneTariffConfig`, preset constructors, backward-compat migration on load
+2. **Backend serde tests** — verify old 2-zone JSON deserializes cleanly into new format, roundtrip new format, preset correctness
+3. **Backend API** — update `GET/PUT /api/settings` endpoints
+4. **Frontend types** — update `types.ts`
+5. **Frontend settings UI** — preset dropdown + zone editor in `SettingsPage.tsx`
+6. **Frontend history engine** — `getRate()` replaces `isOffPeak()`, update cost chart preprocessing
+7. **Optional: Octopus API integration** — fetch live Flux rates per region for auto-populating zone rates (instead of manual entry)
+
+#### Key design constraints
+
+- Existing `settings.json` with old `TariffConfig` must load without error (migration on read, not write)
+- Flux preset zones: off-peak 02:00–05:00, peak 16:00–19:00, day rate default
+- Flux export preset: same windows but with export-specific rates
+- Day rate = `default_rate` (fallback when no zone matches the timestamp)
+- Zone matching is exclusive on `[start, end)` (matching existing `isOffPeak` semantics)
+- No database schema changes — tariffs are settings-only
+- No Modbus register writes — this is purely a display/cost-calculation feature
+
+---
+
+### Eco/Echo Mode Clarification (Issue #64 Part B)
+
+**Status**: Planning complete. Related to [Issue #64](https://github.com/psylsph/home-energy-manager/issues/64).
+
+#### Background
+
+The issue reporter refers to "Echo mode" — this is **Eco mode** in the
+Modbus protocol (HR(27) = `battery_power_mode`: 0 = export, 1 = self-consumption).
+The GivEnergy cloud portal labels this "Eco Mode" but the user may have seen
+"Echo" in a newer portal version or may be misremembering the name.
+
+The user is confused by the behaviour difference between HEM and the GivEnergy
+cloud:
+
+- **GivEnergy cloud**: Eco mode is always "enabled" as a background overlay.
+  Charge/discharge schedules coexist with Eco mode.
+- **HEM**: Switching to Eco mode clears discharge slot registers on the inverter.
+  Discharge schedules are held client-side only and restored when switching
+  back to Timed mode.
+
+#### Why HEM clears registers
+
+This is a **deliberate safety feature**, not a bug. Gen3 firmware has a quirk
+where non-zero discharge slot registers can auto-enable `enable_discharge`,
+causing unrestricted export. HEM clears registers to prevent this. See
+`AGENTS.md` → "Discharge slot handling" → "Eco mode constraints" for full
+details.
+
+This behaviour must **not** be changed — it prevents real safety issues on
+Gen3 hardware.
+
+#### Proposed changes
+
+| Layer | File | Change |
+|---|---|---|
+| Frontend | `src/pages/ControlPage.tsx` | Add "(also known as Echo mode)" parenthetical on the Eco mode button tooltip/label |
+| Frontend | `src/pages/ControlPage.tsx` | Expand the existing Eco mode tooltip to explain: battery supplies home first, discharge schedules are held client-side in Eco and restored on Timed switch |
+| Frontend | `src/pages/ControlPage.tsx` | Add a yellow info banner (matching the existing slot-ordering banner style) below the mode selector explaining the Eco vs Timed discharge schedule handling |
+
+**NOT changing**:
+
+- The register-clearing behaviour when entering Eco mode (safety feature)
+- The client-side discharge slot holding logic
+- Any Modbus writes
+- The `BatteryMode` enum or derivation logic
+
+#### Register reference
+
+From the reference libraries:
+
+- **givenergy-modbus**: `battery_power_mode = Def(C.uint16, BatteryPowerMode, HR(27))` where `BatteryPowerMode::EXPORT = 0`, `BatteryPowerMode::SELF_CONSUMPTION = 1`
+- **GivTCP**: `eco_mode = Def(C.uint16, Enable, HR(27), valid=(0, 1))` — same register, same semantics, different naming (`eco_mode` vs `battery_power_mode`)
+- **GivTCP**: `set_eco_mode(enabled)` writes HR(27) to 1 (eco/self-consumption) or 0 (export)
+- **HEM**: `BatteryMode::from_registers(battery_power_mode, enable_discharge, battery_soc_reserve)` derives the displayed mode from HR(27) + HR(59) + HR(110)
+
+---
+
+### Flux-Aware Auto-Scheduling (Issue #64 Part C, future)
+
+**Status**: Future consideration. Related to [Issue #64](https://github.com/psylsph/home-energy-manager/issues/64).
+
+The user asks: "It would be nice to have the cal's take account of the off
+peak charge time and the peak avoid period." This goes beyond cost display to
+**automated charging/discharging based on tariff zones**.
+
+This is essentially a Flux-specific version of the existing Cosy charging mode
+and should only be attempted after the multi-zone tariff system (Part A) is
+complete.
+
+#### Proposed design
+
+- Add **"Flux"** as a 4th charging mode option in the dropdown: Standard / Cosy / Agile / **Flux**
+- Pre-configured charge slot: 02:00–05:00 (force-charge from grid at off-peak rate)
+- Pre-configured discharge slot: 16:00–19:00 (force-discharge/export at peak rate)
+- Uses the existing Cosy-style state machine (`ForceCharge`/`CosyExit`) but with
+  Flux-specific time windows derived from the tariff config
+- Settings: `flux_enabled` bool, inherits zone times from the multi-zone tariff config
+
+#### Implementation prerequisites
+
+1. Multi-zone tariff system (Part A) must be complete
+2. Tariff zone times must be accessible to the poll loop for scheduling decisions
+3. New `flux_enabled` / `flux_active` settings fields + persistence (same pattern as `cosy_enabled` / `cosy_active_persisted`)
+4. New state machine in `poll.rs` alongside existing Cosy/Agile logic
+
+#### Risk assessment
+
+- Low risk: follows the exact same architecture as Cosy mode (well-tested pattern)
+- Flux zones are fixed daily (no API calls needed for scheduling, unlike Agile)
+- Main risk is interaction between Flux/Cosy/Agile/Winter modes — mutual exclusion
+  logic already exists (`auto_winter_active || cosy_active || agile_active` check
+  in poll.rs); Flux would join the same guard
 
 ---
 
@@ -381,6 +579,572 @@ Known information from previous investigation:
 - EMS config block: holding registers `2040..2075`
 - EMS runtime block: input registers `2040..2094`
 - EMS model prefixes: `5` / `51`
+
+### AC Three-Phase (AC3 / DTC 0x60xx) — already supported
+
+The AC Three-Phase inverter (DTC `0x6001–0x60ff`) is already fully implemented
+in HEM. It shares the same register layout and polling path as the three-phase
+hybrid models (`HybridHvGen3`, `AllInOneHybrid`, `ThreePhase`).
+
+**What works today:**
+
+- `needs_three_phase_input_blocks()` → true (IR 1000-1413 polled and decoded)
+- `uses_three_phase_schedule_slots()` → true (10 slots at HR 1113-1121 + HR 240-299)
+- `uses_hv_battery()` → true (BCU/BMU protocol at 0x70/0x50)
+- `extra_poll_blocks()` → `AC_EXTENDED_AND_THREE_PHASE_BLOCKS` (AC config +
+  extended slots + three-phase config)
+- Decoder handles three-phase input register blocks (IR 1000-1413) including
+  per-phase voltage/current/power, PV, battery, and energy totals
+- Encoder has model-specific write targets for three-phase (HR 1108/1109/1110/1111)
+- Charge/discharge rate scaling uses the AC-coupled 1-100% range (not the DC
+  hybrid 0-50% range)
+- Export priority (HR 311), EPS enable (HR 317), AC charge/discharge limits
+  (HR 313/314) are all decoded and writable
+- `preferred_read_slave_address()` → 0x11
+
+**Reference library mapping:**
+
+| Reference | Model | DTC |
+|---|---|---|
+| givenergy-modbus `Model.AC_3PH` | `"6"` (coarse family) | 0x60xx |
+| GivTCP `Model.AC_3PH` | `"60"` | 0x6001 |
+| HEM `DeviceType::ACThreePhase` | — | 0x6001-0x60ff |
+
+The AC3 uses the same three-phase register layout defined in
+`givenergy_modbus/model/inverter_threephase.py`. Slots 1-2 are at HR 1113-1121
+(shadowing the single-phase HR 94-95 / 31-32 / 56-57 / 44-45), slots 3-10 at
+HR 240-299. Battery limits use HR 1108 (discharge) and HR 1110 (charge) with
+1-100% register range. Per givenergy-modbus, AC_3PH is in `AC_COUPLED_MODELS`
+(alongside single-phase `Model.AC`) and in `THREE_PHASE_MODELS`.
+
+**No further work needed** unless a user reports model-specific issues.
+
+---
+
+### Gateway (DTC 0x70xx) — not yet supported
+
+**Status**: Investigation complete; implementation not started.
+
+The GivEnergy Gateway is a **system controller** that manages up to 3
+All-in-One (AIO) battery units in parallel. It is not an inverter itself — it
+is a coordination hub that aggregates data from the attached AIOs. Identified by
+DTC range `0x7001–0x70ff`.
+
+#### Device overview
+
+| Property | Value |
+|---|---|
+| DTC range | `0x7001–0x70ff` |
+| Reference model | `givenergy-modbus` `Model.GATEWAY` (`"7"`), GivTCP `Model.GATEWAY` (`"70"`) |
+| HEM `DeviceType` | `Gateway` |
+| Slave address | 0x11 (detection + operational) |
+| Max AC power | 12,000 W (hardcoded in HEM) |
+| Battery power | 6,000 W × `parallel_aio_num` (per GivTCP) |
+| Battery capacity | 13.5 kWh × `parallel_aio_num` (per GivTCP) |
+| Schedule slots | N/A — Gateway delegates to AIOs |
+| Max AIO units | 3 (per-AIO SOC, power, energy, serial number) |
+
+#### Current HEM support (stub only)
+
+The Gateway is recognised at the `DeviceType` level but has no meaningful
+polling, decoding, or control support:
+
+| Aspect | Current state |
+|---|---|
+| `DeviceType::from_register()` | ✅ Maps 0x70xx → `Gateway` |
+| `display_name()` | ✅ Returns `"Gateway"` |
+| `max_battery_power_w()` | Returns 0 (should be `6000 × aio_count`) |
+| `max_ac_power_w()` | Returns 12000 (hardcoded) |
+| `extra_poll_blocks()` | Returns `&[]` (no extra blocks polled) |
+| `supports_schedule_slots()` | Returns `false` (correct) |
+| `needs_three_phase_input_blocks()` | Returns `false` |
+| `uses_hv_battery()` | Returns `false` |
+| `preferred_read_slave_address()` | Returns `0x11` |
+| Gateway IR/HR decoder | ❌ None — IR 1600+ range not handled |
+| Gateway-specific snapshot fields | ❌ None |
+| Write/encoder support | ❌ None (treated like EMS/Gateway in exclusion set) |
+
+The standard poll blocks (IR 0-59, HR 0-59, HR 60-119) are read for the
+Gateway at slave 0x11, but these contain only the identity registers
+(serial number, firmware). The Gateway's live measurements and configuration
+live in completely different register ranges (see below).
+
+#### Gateway register layout
+
+The Gateway uses a unique register address space, distinct from all other
+GivEnergy devices. Data is sourced from `givenergy-modbus/model/gateway.py`
+and GivTCP `givenergy_modbus_async/model/register.py`.
+
+##### Input registers — live measurements (IR 1600-1859)
+
+Per `givenergy-modbus` `refresh()`: reads IR 1600-1859 in 60-register chunks.
+
+**IR 1600-1631 — System state:**
+
+| Registers | Field | Converter | Notes |
+|---|---|---|---|
+| IR(1600-1603) | `software_version` | `gateway_version` | 4-register Latin-1 string (e.g. "GA000010") |
+| IR(1604) | `work_mode` | uint16 → WorkMode enum | |
+| IR(1608) | `v_grid` | int16 / deci | Grid voltage (V) |
+| IR(1609) | `i_grid` | int16 / deci | Grid current (A) |
+| IR(1610) | `v_load` | deci | Load voltage (V) |
+| IR(1611) | `i_load` | deci | Load current (A) |
+| IR(1612) | `i_pv` | int16 / deci | PV current (A) |
+| IR(1616) | `p_ac1` | int16 | AC power 1 (W) |
+| IR(1617) | `p_pv` | uint16 | PV power (W) |
+| IR(1618) | `p_load` | uint16 | Load power (W) |
+| IR(1619) | `p_liberty` | int16 | Liberty power (W) |
+| IR(1620-1621) | `fault_protection` | uint32 | 32-bit fault bitmask |
+| IR(1622-1623) | `gateway_fault_codes` | uint32 → decoded | 32-bit fault bitmask, MSB-first decode |
+| IR(1624) | `v_grid_relay` | deci | Grid relay voltage |
+| IR(1625) | `v_inverter_relay` | deci | Inverter relay voltage |
+| IR(1627-1631) | `first_inverter_serial_number` | serial | 5-register serial |
+
+**IR 1640-1657 — Daily/today energy totals:**
+
+| Registers | Field | Converter | Notes |
+|---|---|---|---|
+| IR(1640) | `e_grid_import_today` | deci | kWh today |
+| IR(1641-1642) | `e_grid_import_total` | uint32 / deci | V1: hi,lo; V2: lo,hi |
+| IR(1643) | `e_pv_today` | deci | kWh today |
+| IR(1644-1645) | `e_pv_total` | uint32 / deci | V1: hi,lo; V2: lo,hi |
+| IR(1646) | `e_grid_export_today` | deci | kWh today |
+| IR(1647-1648) | `e_grid_export_total` | uint32 / deci | V1: hi,lo; V2: lo,hi |
+| IR(1649) | `e_aio_charge_today` | deci | kWh today |
+| IR(1650-1651) | `e_aio_charge_total` | uint32 / deci | V1: hi,lo; V2: lo,hi |
+| IR(1652) | `e_aio_discharge_today` | deci | kWh today |
+| IR(1653-1654) | `e_aio_discharge_total` | uint32 / deci | V1: hi,lo; V2: lo,hi |
+| IR(1655) | `e_load_today` | deci | kWh today |
+| IR(1656-1657) | `e_load_total` | uint32 / deci | V1: hi,lo; V2: lo,hi |
+
+**IR 1700-1758 — Per-AIO summary and energy:**
+
+| Registers | Field | Converter | Notes |
+|---|---|---|---|
+| IR(1700) | `parallel_aio_num` | uint16 | Total AIO count |
+| IR(1701) | `parallel_aio_online_num` | uint16 | Online AIO count |
+| IR(1702) | `p_aio_total` | int16 | Total AIO power (W) |
+| IR(1703) | `aio_state` | uint16 → State | Battery state enum |
+| IR(1704) | `battery_firmware_version` | uint16 | |
+| IR(1705) | `e_aio1_charge_today` | deci | kWh today |
+| IR(1706-1707) | `e_aio1_charge_total` | uint32 / deci | V1: hi,lo; V2: lo,hi |
+| IR(1708) | `e_aio2_charge_today` | deci | kWh today |
+| IR(1709-1710) | `e_aio2_charge_total` | uint32 / deci | V1: hi,lo; V2: lo,hi |
+| IR(1711) | `e_aio3_charge_today` | deci | kWh today |
+| IR(1712-1713) | `e_aio3_charge_total` | uint32 / deci | V1: hi,lo; V2: lo,hi |
+| IR(1750) | `e_aio1_discharge_today` | deci | kWh today |
+| IR(1751-1752) | `e_aio1_discharge_total` | uint32 / deci | V1: hi,lo; V2: lo,hi |
+| IR(1753) | `e_aio2_discharge_today` | deci | kWh today |
+| IR(1754-1755) | `e_aio2_discharge_total` | uint32 / deci | V1: hi,lo; V2: lo,hi |
+| IR(1756) | `e_aio3_discharge_today` | deci | kWh today |
+| IR(1757-1758) | `e_aio3_discharge_total` | uint32 / deci | V1: hi,lo; V2: lo,hi |
+
+**IR 1795-1818 — Battery/AIO SOC and power:**
+
+| Registers | Field | Converter | Notes |
+|---|---|---|---|
+| IR(1795) | `e_battery_charge_today` | deci | kWh today |
+| IR(1796-1797) | `e_battery_charge_total` | uint32 / deci | V1: hi,lo; V2: lo,hi |
+| IR(1798) | `e_battery_discharge_today` | deci | kWh today |
+| IR(1799-1800) | `e_battery_discharge_total` | uint32 / deci | V1: hi,lo; V2: lo,hi |
+| IR(1801) | `aio1_soc` | uint16 | 0-100% |
+| IR(1802) | `aio2_soc` | uint16 | 0-100% |
+| IR(1803) | `aio3_soc` | uint16 | 0-100% |
+| IR(1816) | `p_aio1_inverter` | int16 | AIO 1 inverter power (W) |
+| IR(1817) | `p_aio2_inverter` | int16 | AIO 2 inverter power (W) |
+| IR(1818) | `p_aio3_inverter` | int16 | AIO 3 inverter power (W) |
+
+**IR 1831-1859 — AIO serial numbers (addresses differ by firmware variant):**
+
+| Variant | AIO 1 | AIO 2 | AIO 3 |
+|---|---|---|---|
+| V1 (≤ GA000009) | IR(1831-1835) | IR(1838-1842) | IR(1845-1849) |
+| V2 (≥ GA000010) | IR(1841-1845) | IR(1848-1852) | IR(1855-1859) |
+
+##### Holding registers — configuration (per GivTCP)
+
+GivTCP's `core_regs` for Gateway (family `"7"`):
+
+```
+HR 0-59   (identity — covered by standard poll)
+HR 60-119 (config part 1 — covered by standard poll)
+HR 120-179 (config part 2)
+HR 180-239 (config part 3)
+HR 240-299 (extended slots — likely unused on Gateway)
+HR 300-359 (AC config — export priority, limits, EPS, pause)
+```
+
+GivTCP's `add_regs` for Gateway adds HR 180, 240, 300 for the additional
+configuration blocks.
+
+#### Firmware variants (V1 vs V2)
+
+The Gateway has two firmware variants with different uint32 byte ordering
+for energy totals and different serial number register addresses.
+
+| Aspect | V1 (≤ GA000009) | V2 (≥ GA000010) |
+|---|---|---|
+| Detection | `IR(1603) < 10` | `IR(1603) >= 10` |
+| uint32 energy totals | hi,lo register order | lo,hi (swapped) |
+| AIO 1 serial | IR(1831-1835) | IR(1841-1845) |
+| AIO 2 serial | IR(1838-1842) | IR(1848-1852) |
+| AIO 3 serial | IR(1845-1849) | IR(1855-1859) |
+
+Detection logic from `givenergy-modbus` `select_gateway()`: read `IR(1603)`
+(last register of the version string); raw value < 10 → V1, >= 10 → V2.
+
+#### Gateway fault code decoding
+
+The 32-bit fault bitmask at IR(1622-1623) uses MSB-first bit numbering:
+
+| Bit | Fault |
+|---|---|
+| 0 | Relay 1&2 bonding |
+| 1 | Relay 3&4 bonding |
+| 2 | Relay 1&2 disconnect |
+| 3 | Relay 3&4 disconnect |
+| 4 | AC over frequency 1 |
+| 5 | AC under frequency 1 |
+| 6 | AC over voltage 1 |
+| 7 | AC under voltage 1 |
+| 8-11 | AC over/under frequency/voltage 2 |
+| 13 | No zero-point protection |
+| 14 | Over quarter AC voltage |
+| 15 | Under quarter AC voltage |
+| 16 | Over AC voltage long-time |
+| 17-20 | AC over/under frequency/voltage constant |
+| 31 | Grid mode Off |
+
+#### GivTCP Gateway handling reference
+
+GivTCP treats the Gateway identically to three-phase for charge/discharge
+rate writes:
+
+```python
+# write.py — charge rate scaling
+if "3ph" in inverter_type or "gateway" in inverter_type:
+    target = round((charge_rate / invmaxrate) * 100, 0)  # 1-100%
+    reqs = commands.set_battery_charge_limit_ac(target)
+else:
+    target = int(min((charge_rate / (batcap/2)) * 50, 50))  # 0-50%
+```
+
+Battery capacity and max rate are derived from the number of parallel AIOs:
+
+```python
+# read.py — getInvModel()
+if model == Model.GATEWAY:
+    batmaxrate = 6000 * int(parallel_aio_num)
+    batterycapacity = 13.5 * int(parallel_aio_num)
+```
+
+Gateway uses the same AC-coupled write targets (HR 313/314 for limits,
+HR 1108/1109/1110/1111 for three-phase-style config) — it inherits the
+three-phase command set because it coordinates AIOs that are themselves
+AC-coupled battery units.
+
+#### Mapping Gateway fields to InverterSnapshot
+
+The Gateway's IR 1600+ fields can be mapped to the existing `InverterSnapshot`
+structure:
+
+| InverterSnapshot field | Gateway source | Notes |
+|---|---|---|
+| `solar_power` | IR(1617) `p_pv` | uint16 W |
+| `battery_power` | IR(1619) `p_liberty` or sum of `p_aio*_inverter` | Signed W |
+| `grid_power` | IR(1616) `p_ac1` | int16 W |
+| `home_power` | IR(1618) `p_load` | uint16 W |
+| `grid_voltage` | IR(1608) `v_grid` / 10 | |
+| `grid_frequency` | Not directly in Gateway register map | May need different source |
+| `soc` | IR(1801) `aio1_soc` (or average of 1801-1803) | 0-100% |
+| `battery_capacity_kwh` | `13.5 × parallel_aio_num` | From GivTCP |
+| `max_battery_power_w` | `6000 × parallel_aio_num` | From GivTCP |
+| `today_solar_kwh` | IR(1643) `e_pv_today` / 10 | |
+| `today_import_kwh` | IR(1640) `e_grid_import_today` / 10 | |
+| `today_export_kwh` | IR(1646) `e_grid_export_today` / 10 | |
+| `today_charge_kwh` | IR(1649) `e_aio_charge_today` / 10 | |
+| `today_discharge_kwh` | IR(1652) `e_aio_discharge_today` / 10 | |
+| `today_consumption_kwh` | IR(1655) `e_load_today` / 10 | |
+| `total_import_kwh` | IR(1641-1642) `e_grid_import_total` / 10 | V1/V2 byte order |
+| `total_export_kwh` | IR(1647-1648) `e_grid_export_total` / 10 | V1/V2 byte order |
+| `device_type` | HR(0) → `DeviceType::Gateway` | |
+| `firmware_version` | IR(1600-1603) `software_version` | e.g. "GA000010" |
+| `battery_state` | Derived from `p_aio_total` sign | |
+
+New Gateway-specific fields to add to `InverterSnapshot`:
+
+| Field | Type | Source | Notes |
+|---|---|---|---|
+| `parallel_aio_count` | u8 | IR(1700) | 1-3 |
+| `parallel_aio_online` | u8 | IR(1701) | |
+| `per_aio_soc` | `[u8; 3]` | IR(1801-1803) | Per-unit SOC |
+| `per_aio_power` | `[i32; 3]` | IR(1816-1818) | Per-unit inverter power |
+| `per_aio_charge_today_kwh` | `[f32; 3]` | IR(1705, 1708, 1711) | |
+| `per_aio_discharge_today_kwh` | `[f32; 3]` | IR(1750, 1753, 1756) | |
+| `gateway_fault_codes` | Vec<String> | IR(1622-1623) | Decoded fault names |
+| `gateway_software_version` | String | IR(1600-1603) | e.g. "GA000010" |
+| `gateway_work_mode` | String | IR(1604) | Work mode enum name |
+| `gateway_is_v2` | bool | IR(1603) >= 10 | Firmware variant flag |
+
+#### Implementation plan
+
+##### Phase 1: Read-only monitoring (polling + decoding)
+
+**1.1 New register blocks** — `src-tauri/src/modbus/registers.rs`:
+
+Add Gateway-specific IR blocks (per `givenergy-modbus` `refresh()`):
+
+```rust
+/// Gateway system state: software version, work mode, grid/load/PV measurements.
+pub const GATEWAY_INPUT_BLOCK_1: RegisterBlock = RegisterBlock {
+    start: 1600, count: 60, register_type: Input, name: "input_1600_1659",
+};
+/// Gateway per-AIO energy and battery data.
+pub const GATEWAY_INPUT_BLOCK_2: RegisterBlock = RegisterBlock {
+    start: 1660, count: 60, register_type: Input, name: "input_1660_1719",
+};
+pub const GATEWAY_INPUT_BLOCK_3: RegisterBlock = RegisterBlock {
+    start: 1720, count: 60, register_type: Input, name: "input_1720_1779",
+};
+pub const GATEWAY_INPUT_BLOCK_4: RegisterBlock = RegisterBlock {
+    start: 1780, count: 60, register_type: Input, name: "input_1780_1839",
+};
+pub const GATEWAY_INPUT_BLOCK_5: RegisterBlock = RegisterBlock {
+    start: 1840, count: 20, register_type: Input, name: "input_1840_1859",
+};
+pub const GATEWAY_INPUT_BLOCKS: &[RegisterBlock] = &[
+    GATEWAY_INPUT_BLOCK_1, GATEWAY_INPUT_BLOCK_2,
+    GATEWAY_INPUT_BLOCK_3, GATEWAY_INPUT_BLOCK_4,
+    GATEWAY_INPUT_BLOCK_5,
+];
+```
+
+**1.2 Gateway HR configuration blocks** — `src-tauri/src/modbus/registers.rs`:
+
+In addition to the IR input blocks above, define HR config blocks for Gateway
+(per GivTCP `core_regs` and `add_regs`):
+
+```rust
+/// Gateway HR config: HR 120-179 (config part 2).
+pub const GATEWAY_HIGH_HR_BLOCK_1: RegisterBlock = RegisterBlock {
+    start: 120, count: 60, register_type: Holding, name: "gateway_hr_120_179",
+};
+/// Gateway HR config: HR 180-239 (config part 3).
+pub const GATEWAY_HIGH_HR_BLOCK_2: RegisterBlock = RegisterBlock {
+    start: 180, count: 60, register_type: Holding, name: "gateway_hr_180_239",
+};
+/// Gateway HR config: HR 240-299 (extended slots — likely unused).
+pub const GATEWAY_HIGH_HR_BLOCK_3: RegisterBlock = RegisterBlock {
+    start: 240, count: 60, register_type: Holding, name: "gateway_hr_240_299",
+};
+/// Gateway HR config: HR 300-359 (AC config — export priority, limits, EPS).
+pub const GATEWAY_HIGH_HR_BLOCK_4: RegisterBlock = RegisterBlock {
+    start: 300, count: 60, register_type: Holding, name: "gateway_hr_300_359",
+};
+pub const GATEWAY_HR_BLOCKS: &[RegisterBlock] = &[
+    GATEWAY_HIGH_HR_BLOCK_1, GATEWAY_HIGH_HR_BLOCK_2,
+    GATEWAY_HIGH_HR_BLOCK_3, GATEWAY_HIGH_HR_BLOCK_4,
+];
+```
+
+**1.3 DeviceType trait updates** — `src-tauri/src/inverter/model.rs`:
+
+```rust
+// Add to DeviceType impl:
+pub fn needs_gateway_input_blocks(&self) -> bool {
+    matches!(self, Self::Gateway)
+}
+
+// Update extra_poll_blocks() to include Gateway HR config blocks.
+// Note: only HR blocks go here; IR input blocks use a separate path
+// via model_specific_blocks_in_poll_order() in client.rs.
+Self::Gateway => &GATEWAY_HR_BLOCKS,
+
+// Update max values — Gateway max depends on aio_count (dynamic),
+// so this can only be a best-effort fallback until the decoder sets it:
+Self::Gateway => 12000,  // keep hardcoded for now
+```
+
+Also update `needs_three_phase_input_blocks()` — Gateway does NOT use
+the same IR 1000+ range, so this must remain false:
+
+```rust
+pub fn needs_three_phase_input_blocks(&self) -> bool {
+    matches!(
+        self,
+        Self::ThreePhase | Self::ACThreePhase | Self::AioCommercial
+            | Self::HybridHvGen3 | Self::AllInOneHybrid
+    )
+    // Gateway is NOT included here — it uses IR 1600+ instead.
+}
+```
+
+**1.4 Model-specific poll blocks** — `src-tauri/src/modbus/client.rs`:
+
+The three-phase input blocks (IR 1000-1413) are added to the poll list
+via `model_specific_blocks_in_poll_order()`. Gateway IR 1600+ blocks must
+be added the same way — NOT via `extra_poll_blocks()` which only handles
+HR config blocks:
+
+```rust
+fn model_specific_blocks_in_poll_order(
+    device_type: &crate::inverter::model::DeviceType,
+) -> Vec<&'static RegisterBlock> {
+    let mut blocks = Vec::new();
+
+    if device_type.needs_three_phase_input_blocks() {
+        blocks.extend(super::registers::THREE_PHASE_INPUT_BLOCKS.iter());
+    }
+
+    // 👇 NEW: Gateway IR 1600+ telemetry blocks
+    if device_type.needs_gateway_input_blocks() {
+        blocks.extend(super::registers::GATEWAY_INPUT_BLOCKS.iter());
+    }
+
+    blocks.extend(device_type.extra_poll_blocks().iter());
+    blocks
+}
+```
+
+Also in `read_all_with_extras()`, the `STANDARD_POLL_BLOCKS` selection
+logic must be updated. Gateway still needs HR 0-59 (identity/serial) but
+IR 0-59 and IR 180-239 are likely irrelevant (same as EMS). Consider
+either:
+
+- Keeping the full `STANDARD_POLL_BLOCKS` (safe but wasteful — Gateway
+  IR 0-59 / IR 180-239 will likely time out)
+- Creating a `STANDARD_POLL_BLOCKS_GATEWAY` that includes only HR blocks
+  - HR identity
+
+**1.5 Gateway decoder** — `src-tauri/src/inverter/decoder.rs`:
+
+Add `decode_gateway_state()` function that takes IR 1600-1859 register
+data and populates `InverterSnapshot` fields:
+
+- Map power measurements to snapshot fields
+- Decode energy totals with V1/V2-aware uint32 byte ordering
+- Extract per-AIO SOC, power, and energy
+- Decode 32-bit fault bitmask into human-readable strings
+- Decode `gateway_version` string (4-register Latin-1, same as HV BCU
+  `decode_gateway_version()` which already exists in decoder.rs)
+- Compute aggregate SOC (average of online AIOs)
+- Compute `battery_capacity_kwh` = `13.5 × parallel_aio_num`
+- Compute `max_battery_power_w` = `6000 × parallel_aio_num`
+- Handle V1 vs V2 byte ordering for uint32 energy totals
+- Leave `grid_frequency` as NAN (not available in Gateway register map)
+
+**1.6 Poll loop integration** — `src-tauri/src/inverter/poll.rs`:
+
+The IR 1600+ blocks are already handled by `model_specific_blocks_in_poll_order()`
+in client.rs (step 1.4 above) — no changes needed in poll.rs for the polling
+itself. However, poll.rs needs:
+
+- Gateway data routing: when `needs_gateway_input_blocks()` is true,
+  route IR 1600+ data blocks to the new `decode_gateway_state()`
+- Carry-forward for optional Gateway HR blocks (same pattern as
+  three-phase optional block carry-forward)
+- Gateway-specific sanitization ranges: grid voltage 0-500V, load
+  power up to 12kW+, PV power up to 12kW+, SOC 0-100%
+- The `derive_battery_fields_from_bms()` function needs updating:
+  Gateway has no HV BCU cluster — battery fields come from the decoder's
+  `parallel_aio_num`-based computation, not from BMS
+- Meter probing: Gateway uses its own grid CT (IR 1609), not external
+  meters — set `is_three_phase`-style skip when `needs_gateway_input_blocks()`
+
+**1.7 Snapshot model extensions** — `src-tauri/src/inverter/model.rs`:
+
+Add Gateway-specific fields to `InverterSnapshot` (with `#[serde(default)]`
+for backward compatibility):
+
+- `parallel_aio_count`, `parallel_aio_online`
+- `per_aio_soc`, `per_aio_power`
+- `per_aio_charge_today_kwh`, `per_aio_discharge_today_kwh`
+- `gateway_fault_codes`, `gateway_software_version`, `gateway_work_mode`
+- `gateway_is_v2`
+
+##### Phase 2: Configuration and control (writes)
+
+**2.1 Gateway encoder support** — `src-tauri/src/inverter/encoder.rs`:
+
+Gateway uses the same AC-coupled / three-phase write targets as AC3:
+
+| Control | Register | Range |
+|---|---|---|
+| Charge rate | HR 1110 (or HR 313) | 1-100% |
+| Discharge rate | HR 1108 (or HR 314) | 1-100% |
+| SOC reserve | HR 1109 | 0-100% |
+| Charge target SOC | HR 1111 | 0-100% |
+| Export priority | HR 311 | 0/1/2 |
+| EPS enable | HR 317 | bool |
+
+Per GivTCP, Gateway is treated identically to 3ph for rate scaling
+(charge/discharge watt → 1-100% AC limit register).
+
+**2.2 API routes** — `src-tauri/src/server/api.rs`:
+
+Remove `Gateway` from the `supports_schedule_slots()` exclusion set in
+relevant API routes if Gateway-specific schedule registers are discovered.
+Initially, schedule control is likely delegated to the individual AIOs,
+not the Gateway itself.
+
+##### Phase 3: Frontend display
+
+**3.1 StatusPage** — Show per-AIO data when Gateway is detected:
+
+- Aggregate power flow in EnergyFlowDiagram
+- Per-AIO SOC, power, and energy in a summary panel
+- Gateway firmware version and work mode in device info
+
+**3.2 InverterPage** — Show Gateway-specific info:
+
+- Software version ("GA000010" etc.)
+- Parallel AIO count and online count
+- Per-AIO serial numbers
+- Gateway work mode
+- Battery firmware version
+
+**3.3 HistoryPage** — Energy totals for charting:
+
+- Aggregate AIO charge/discharge energy
+- Per-AIO breakdown (optional)
+
+#### Testing strategy
+
+- **Unit tests**: Gateway decoder tests with synthetic register data
+- **Firmware variant tests**: V1 vs V2 byte ordering for uint32 energy totals
+- **Fault code tests**: Known bitmask → expected fault name list
+- **Integration tests**: Mock TCP server that simulates Gateway dongle
+  responses for IR 1600+ registers
+- **GivEnergy Simulator**: Add Gateway device type to the simulator if
+  possible, to exercise the real protocol stack
+
+#### Open questions
+
+1. **Battery temperature**: The Gateway register map doesn't appear to
+   expose per-AIO battery temperature. Need to confirm if this is available
+   elsewhere or if temperature reporting is simply unavailable for Gateway.
+
+2. **PV voltage/current**: IR(1612) has `i_pv` but there's no `v_pv` or
+   `p_pv1`/`p_pv2` split. The Gateway may aggregate PV data from the AIOs
+   rather than having its own PV inputs.
+
+3. **Grid frequency**: Not visible in the Gateway register map. May need to
+   be omitted from the display or sourced from a different register.
+
+4. **Battery mode derivation**: The standard `BatteryMode::from_registers()`
+   uses HR(27), HR(59), HR(110) which are single-phase registers. Gateway
+   uses HR(300-359) for AC config — need to confirm whether HR(27)/HR(59)
+   are populated on the Gateway or if work_mode (IR 1604) replaces them.
+
+5. **Single AIO attached**: GivTCP warns that a Gateway with a single AIO
+   provides mostly duplicate data. Consider showing a similar hint in the
+   UI.
+
+6. **Discovery**: The standard Modbus discovery in `discovery.rs` sends a
+   read request and validates the 0x5959 magic header. Need to confirm
+   Gateway dongles respond to the same discovery protocol.
+
+---
 
 ### GitHub Actions Node runtime update
 

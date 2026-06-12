@@ -4,6 +4,14 @@ import { formatPower, formatPercent, formatCurrent, formatTemp, formatVoltage } 
 
 interface Props {
   snapshot: InverterSnapshot;
+  /** EV Charger active power in watts. 0 = not charging or no data. */
+  evcPower?: number;
+  /** Whether the EV Charger is actively charging. */
+  evcCharging?: boolean;
+  /** Whether the EV Charger is connected/responding. */
+  evcConnected?: boolean;
+  /** Whether EV Charger is configured (non-empty host). When falsy, EV node is hidden. */
+  showEvc?: boolean;
 }
 
 // Radial layout — Inverter hub at centre, four nodes at cardinal points.
@@ -16,6 +24,7 @@ const NODES = {
   home:     { cx: 55,    cy: 222, color: '#14B8A6', label: 'Home' },
   grid:     { cx: W - 55, cy: 222, color: '#EF4444', label: 'Grid' },
   battery:  { cx: W / 2, cy: 380, color: '#6366F1', label: 'Battery' },
+  ev:       { cx: 55,    cy: 380, color: '#10B981', label: 'EV' },
 };
 
 const MODE_LABELS: Record<string, string> = {
@@ -212,7 +221,7 @@ function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
 // Component
 // ---------------------------------------------------------------------------
 
-function EnergyFlowDiagramInner({ snapshot: s }: Props) {
+function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false, evcConnected = false, showEvc = false }: Props) {
   const isCharging = s.battery_state === 'charging';
   const isDischarging = s.battery_state === 'discharging';
   const isExporting = s.grid_power > 0;
@@ -238,6 +247,8 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
       : curMin >= startMin || curMin < endMin;
   });
 
+  const evcActive = showEvc && evcPower > 0;
+
   const flows: FlowDef[] = [
     // Solar → Inverter (always top→centre)
     {
@@ -248,7 +259,7 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
       power: s.solar_power,
       labelSide: 'right',
     },
-    // Inverter → Home (always centre→right)
+    // Inverter → Home (always centre→left)
     {
       id: 'home',
       from: NODES.inverter,
@@ -257,7 +268,7 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
       power: s.home_power,
       labelSide: 'below',
     },
-    // Grid → Inverter (importing, left→centre)
+    // Grid → Inverter (importing, right→centre)
     {
       id: 'import',
       from: NODES.grid,
@@ -266,7 +277,7 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
       power: Math.abs(s.grid_power),
       labelSide: 'above',
     },
-    // Inverter → Grid (exporting, centre→left)
+    // Inverter → Grid (exporting, centre→right)
     {
       id: 'export',
       from: NODES.inverter,
@@ -295,6 +306,20 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
     },
   ];
 
+  // EV flow: Home → EV (energy flows from house to car)
+  if (showEvc) {
+    flows.push({
+      id: 'ev',
+      from: NODES.home,
+      to: NODES.ev,
+      active: evcActive,
+      power: evcPower,
+      labelSide: 'right',
+    });
+  }
+
+  const maxPower = Math.max(...flows.map(x => x.power), 1);
+
   return (
     <div className="flex justify-center">
       <svg
@@ -309,7 +334,7 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
 
         {/* Layer 2: All animated cyan flows (on top of all tracks) */}
         {flows.map((f) => (
-          <FlowAnimation key={`anim-${f.id}`} flow={f} maxPower={Math.max(...flows.map(x => x.power), 1)} />
+          <FlowAnimation key={`anim-${f.id}`} flow={f} maxPower={maxPower} />
         ))}
 
         {/* Layer 3: Nodes (on top of everything) */}
@@ -360,6 +385,15 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
           value={formatTemp(s.inverter_temperature)}
           unit={s.device_type_display || '—'}
         />
+
+        {/* EV Charger node — only when configured */}
+        {showEvc && (
+          <FlowNode
+            {...NODES.ev}
+            value={formatPower(evcPower)}
+            unit={evcCharging ? 'Charging' : evcConnected ? 'Connected' : 'Disconnected'}
+          />
+        )}
       </svg>
     </div>
   );

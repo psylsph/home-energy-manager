@@ -6,7 +6,7 @@
 
 #![cfg(test)]
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 /// Global mutex that serializes all tests touching `GIVENERGY_LOCAL_CONFIG_DIR`.
 /// Uses `tokio::sync::Mutex` so async tests can hold the guard across `.await`.

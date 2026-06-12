@@ -256,6 +256,13 @@ pub struct Settings {
     #[serde(default)]
     pub hidden_panels: Vec<String>,
 
+    /// EV Charger IP address (standard Modbus TCP, port 502).
+    #[serde(default)]
+    pub evc_host: String,
+    /// EV Charger Modbus port (default 502 — standard Modbus, not proprietary).
+    #[serde(default = "default_evc_port")]
+    pub evc_port: u16,
+
     /// Full import tariff config with peak/off-peak rates and times.
     /// Falls back to legacy `import_tariff` if `None`.
     #[serde(default)]
@@ -268,6 +275,10 @@ pub struct Settings {
 
 fn default_http_port() -> u16 {
     7337
+}
+
+fn default_evc_port() -> u16 {
+    502
 }
 
 fn default_ll_threshold() -> u32 {
@@ -319,6 +330,8 @@ impl Default for Settings {
             serial: String::new(),
             poll_interval: 60,
             http_port: default_http_port(),
+            evc_host: String::new(),
+            evc_port: default_evc_port(),
             auto_connect: true,
             import_tariff: default_import_tariff(),
             export_tariff: default_export_tariff(),
@@ -461,6 +474,8 @@ mod tests {
         assert_eq!(s.poll_interval, 60);
         assert_eq!(s.http_port, 7337);
         assert!(s.auto_connect);
+        assert!(s.evc_host.is_empty());
+        assert_eq!(s.evc_port, 502);
         assert!(!s.auto_winter_enabled);
         assert_eq!(s.auto_winter_cold_threshold, 8.0);
         assert_eq!(s.auto_winter_recovery_threshold, 12.0);
@@ -502,6 +517,8 @@ mod tests {
             load_limiter_end_hour: 20,
             load_limiter_end_minute: 0,
             load_limiter_active_persisted: false,
+            evc_host: String::new(),
+            evc_port: default_evc_port(),
             import_tariff_config: None,
             export_tariff_config: None,
             agile_enabled: true,
@@ -566,6 +583,8 @@ mod tests {
             load_limiter_end_hour: 0,
             load_limiter_end_minute: 0,
             load_limiter_active_persisted: false,
+            evc_host: "192.168.1.200".to_string(),
+            evc_port: 502,
             import_tariff_config: None,
             export_tariff_config: None,
             agile_enabled: false,
@@ -584,6 +603,8 @@ mod tests {
         let json = serde_json::to_string_pretty(&s).unwrap();
         assert!(json.contains("192.168.1.99"));
         assert!(json.contains("TEST99"));
+        assert!(json.contains("192.168.1.200"));
+        assert!(json.contains("\"evc_port\": 502"));
     }
 
     /// Roundtrip for cosy charging config — written by POST /api/cosy
