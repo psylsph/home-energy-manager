@@ -3,8 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>GivEnergy Local — Monitor your solar inverter locally</title>
-  <meta name="description" content="Desktop app for monitoring and controlling GivEnergy solar inverters over your local network — no cloud account needed.">
+  <title>Home Energy Manager — Monitor your GivEnergy solar & battery system locally</title>
+  <meta name="description" content="Desktop app for monitoring and controlling GivEnergy solar inverters over your local network — no cloud account needed. Works with every GivEnergy model.">
+  <meta property="og:title" content="Home Energy Manager">
+  <meta property="og:description" content="Monitor and control your GivEnergy solar & battery system — no cloud account needed.">
+  <meta property="og:image" content="screenshots/status.png">
+  <meta name="twitter:card" content="summary_large_image">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -16,6 +20,7 @@
     a { color: #58a6ff; text-decoration: none; }
     a:hover { text-decoration: underline; }
 
+    /* Hero */
     .hero {
       max-width: 800px;
       margin: 0 auto;
@@ -29,6 +34,7 @@
       background: linear-gradient(135deg, #58a6ff, #3fb950);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
+      background-clip: text;
     }
     .hero p {
       font-size: 1.25rem;
@@ -58,14 +64,64 @@
       box-shadow: 0 8px 24px rgba(35, 134, 54, 0.4);
       text-decoration: none;
     }
+    .cta-secondary {
+      display: inline-block;
+      padding: 12px 24px;
+      background: #21262d;
+      border: 1px solid #30363d;
+      color: #e6edf3;
+      font-size: 1rem;
+      font-weight: 500;
+      border-radius: 8px;
+      margin-left: 12px;
+      transition: transform 0.15s, border-color 0.15s;
+    }
+    .cta-secondary:hover {
+      transform: translateY(-2px);
+      border-color: #58a6ff;
+      text-decoration: none;
+    }
+    .hero-buttons { margin-bottom: 12px; }
 
+    /* Quick start */
+    .quickstart {
+      max-width: 700px;
+      margin: 0 auto;
+      padding: 20px 24px 60px;
+      text-align: center;
+    }
+    .quickstart h2 {
+      font-size: 1.6rem;
+      margin-bottom: 24px;
+    }
+    .quickstart ol {
+      text-align: left;
+      max-width: 500px;
+      margin: 0 auto;
+      padding-left: 20px;
+    }
+    .quickstart li {
+      margin-bottom: 12px;
+      color: #b1bac4;
+      font-size: 1.05rem;
+    }
+    .quickstart li strong { color: #e6edf3; }
+
+    /* Features */
     .features {
-      max-width: 900px;
+      max-width: 1000px;
       margin: 0 auto;
       padding: 40px 24px 60px;
+    }
+    .features h2 {
+      text-align: center;
+      font-size: 2rem;
+      margin-bottom: 40px;
+    }
+    .features-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-      gap: 24px;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 20px;
     }
     .feature {
       background: #161b22;
@@ -73,9 +129,11 @@
       border-radius: 12px;
       padding: 24px;
     }
+    .feature .icon { font-size: 1.6rem; margin-bottom: 8px; }
     .feature h3 { color: #58a6ff; margin-bottom: 8px; font-size: 1.1rem; }
     .feature p { color: #8b949e; font-size: 0.95rem; }
 
+    /* Screenshots */
     .screenshots {
       max-width: 1100px;
       margin: 0 auto;
@@ -113,6 +171,57 @@
       text-align: center;
     }
 
+    /* Compatibility */
+    .compat {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px 24px 60px;
+      text-align: center;
+    }
+    .compat h2 { font-size: 1.6rem; margin-bottom: 16px; }
+    .compat p { color: #8b949e; font-size: 1.05rem; margin-bottom: 12px; }
+    .compat .model-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      justify-content: center;
+    }
+    .compat .model-list span {
+      background: #161b22;
+      border: 1px solid #30363d;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 0.9rem;
+      color: #b1bac4;
+    }
+
+    /* Platforms */
+    .platforms {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px 24px 80px;
+      text-align: center;
+    }
+    .platforms h2 { font-size: 1.6rem; margin-bottom: 16px; }
+    .platform-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      justify-content: center;
+      margin-top: 20px;
+    }
+    .platform-card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      padding: 20px 28px;
+      text-align: center;
+    }
+    .platform-card .icon { font-size: 2rem; }
+    .platform-card .name { font-weight: 600; margin-top: 8px; }
+    .platform-card .detail { font-size: 0.85rem; color: #8b949e; margin-top: 4px; }
+
+    /* Footer */
     .footer {
       text-align: center;
       padding: 40px 24px;
@@ -126,46 +235,99 @@
       .hero h1 { font-size: 2rem; }
       .hero p { font-size: 1rem; }
       .gallery { grid-template-columns: 1fr; }
+      .cta-secondary { margin-left: 0; margin-top: 12px; }
+      .hero-buttons { display: flex; flex-direction: column; align-items: center; }
     }
   </style>
 </head>
 <body>
 
   <section class="hero">
-    <h1>GivEnergy Local</h1>
-    <p>Monitor and control your GivEnergy solar inverter over your local network.<br>No cloud account needed.</p>
+    <h1>Home Energy Manager</h1>
+    <p>Monitor and control your GivEnergy solar &amp; battery system from your own computer.<br>No cloud account needed. Your data stays on your network.</p>
     <div class="badges">
-      <img src="https://img.shields.io/github/license/psylsph/givenergy-local?style=flat-square" alt="License">
-      <img src="https://img.shields.io/github/v/release/psylsph/givenergy-local?style=flat-square" alt="Release">
-      <img src="https://img.shields.io/github/downloads/psylsph/givenergy-local/total?style=flat-square" alt="Downloads">
+      <img src="https://img.shields.io/github/license/psylsph/home-energy-manager?style=flat-square" alt="License">
+      <img src="https://img.shields.io/github/v/release/psylsph/home-energy-manager?style=flat-square" alt="Release">
+      <img src="https://img.shields.io/github/downloads/psylsph/home-energy-manager/total?style=flat-square" alt="Downloads">
     </div>
-    <a class="cta" href="https://github.com/psylsph/givenergy-local/releases/latest">Download Latest Release</a>
+    <div class="hero-buttons">
+      <a class="cta" href="https://github.com/psylsph/home-energy-manager/releases/latest">Download Free</a>
+      <a class="cta-secondary" href="https://github.com/psylsph/home-energy-manager">Source Code</a>
+    </div>
+  </section>
+
+  <section class="quickstart">
+    <h2>Get started in 30 seconds</h2>
+    <ol>
+      <li><strong>Download</strong> the app for your computer from the link above</li>
+      <li><strong>Enter your inverter's IP address</strong> in Settings (or click <strong>Scan Network</strong> to find it automatically)</li>
+      <li><strong>Click Connect</strong> — live data appears immediately</li>
+    </ol>
   </section>
 
   <section class="features">
-    <div class="feature">
-      <h3>Real-time Dashboard</h3>
-      <p>See solar generation, battery charge, grid import/export, and home consumption updating live.</p>
-    </div>
-    <div class="feature">
-      <h3>Energy Flow Diagram</h3>
-      <p>Visual animation showing where power is flowing — solar, battery, home, grid.</p>
-    </div>
-    <div class="feature">
-      <h3>Battery Details</h3>
-      <p>Individual cell voltages, temperatures, and health per battery module.</p>
-    </div>
-    <div class="feature">
-      <h3>Charge Schedules</h3>
-      <p>Set time slots for when your battery charges from the grid or discharges to power your home.</p>
-    </div>
-    <div class="feature">
-      <h3>Mode Switching</h3>
-      <p>Eco, Timed Demand, Timed Export, and Pause modes — one click away.</p>
-    </div>
-    <div class="feature">
-      <h3>Auto-Discovery</h3>
-      <p>Enter your inverter's IP address and the serial number is detected automatically.</p>
+    <h2>Everything you need</h2>
+    <div class="features-grid">
+      <div class="feature">
+        <div class="icon">📊</div>
+        <h3>Real-time Dashboard</h3>
+        <p>Solar generation, battery charge, grid import/export, and home consumption — updating live every few seconds.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">⚡</div>
+        <h3>Energy Flow Diagram</h3>
+        <p>Animated visual showing where your power is flowing right now — solar, battery, home, grid.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">🔋</div>
+        <h3>Battery Detail</h3>
+        <p>Cell voltages, temperatures, and health for every battery module. Cold battery warnings included.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">📅</div>
+        <h3>Charge Schedules</h3>
+        <p>Up to 10 charge and 10 discharge time slots. Switch between Eco, Timed Discharge, and Pause modes.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">🛡️</div>
+        <h3>Manual Overrides</h3>
+        <p>Force Charge and Force Discharge buttons for instant control. Click to start, click again to stop.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">📈</div>
+        <h3>History &amp; Costs</h3>
+        <p>Charts from 15 minutes to 7 days. Enter your tariffs to see real-time cost estimates. Export to CSV.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">🐙</div>
+        <h3>Octopus Cosy (beta)</h3>
+        <p>Enter your three cheap-rate windows and the app automatically charges your battery during each one.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">💷</div>
+        <h3>Octopus Agile (beta)</h3>
+        <p>Set price thresholds and the app charges when prices are low, discharges when high, with a live 24-hour forecast.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">❄️</div>
+        <h3>Auto Winter Mode</h3>
+        <p>Protects your battery from cold by automatically charging it from the grid when the temperature drops.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">☀️</div>
+        <h3>Solar Monitoring</h3>
+        <p>Voltage, current, and power for each solar string. Supports dual-string systems.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">📐</div>
+        <h3>Meters Page</h3>
+        <p>External meter readings with per-phase data and CT clamp status card.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">📱</div>
+        <h3>Access From Anywhere</h3>
+        <p>Works as a headless server on a Raspberry Pi. Access from your phone via Tailscale — no cloud needed.</p>
+      </div>
     </div>
   </section>
 
@@ -173,16 +335,40 @@
     <h2>Screenshots</h2>
     <div class="gallery">
       <div class="shot">
-        <img src="screenshots/status.png" alt="Status Dashboard — real-time power monitoring">
+        <img src="screenshots/status.png" alt="Status Dashboard — real-time power monitoring with energy flow diagram">
         <div class="caption">Status Dashboard</div>
+      </div>
+      <div class="shot">
+        <img src="screenshots/control-2.png" alt="Energy Flow Diagram — animated power flow visualisation">
+        <div class="caption">Energy Flow Diagram</div>
+      </div>
+      <div class="shot">
+        <img src="screenshots/control-1.png" alt="Power Chart — live time-series power chart">
+        <div class="caption">Power Chart</div>
       </div>
       <div class="shot">
         <img src="screenshots/history.png" alt="Energy History — daily generation and consumption charts">
         <div class="caption">Energy History</div>
       </div>
       <div class="shot">
+        <img src="screenshots/history-solar.png" alt="Solar History — solar generation breakdown">
+        <div class="caption">History — Solar</div>
+      </div>
+      <div class="shot">
+        <img src="screenshots/history-home.png" alt="Home Energy — home consumption breakdown">
+        <div class="caption">History — Home</div>
+      </div>
+      <div class="shot">
         <img src="screenshots/battery.png" alt="Battery Detail — cell voltages and temperatures">
         <div class="caption">Battery Detail</div>
+      </div>
+      <div class="shot">
+        <img src="screenshots/inverter.png" alt="Inverter Info — model, firmware, and electrical readings">
+        <div class="caption">Inverter Info</div>
+      </div>
+      <div class="shot">
+        <img src="screenshots/meters.png" alt="Meters — external meter and CT clamp data">
+        <div class="caption">Meters</div>
       </div>
       <div class="shot">
         <img src="screenshots/control.png" alt="Control Panel — schedules, modes, and SOC limits">
@@ -192,16 +378,74 @@
         <img src="screenshots/settings.png" alt="Settings — connection configuration">
         <div class="caption">Settings</div>
       </div>
+      <div class="shot">
+        <img src="screenshots/status-mobile.png" alt="Mobile view — responsive layout on phone">
+        <div class="caption">Mobile View</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="compat">
+    <h2>Works with your inverter</h2>
+    <p>Home Energy Manager supports every known GivEnergy model.</p>
+    <div class="model-list">
+      <span>Gen 1</span>
+      <span>Gen 2</span>
+      <span>Gen 3</span>
+      <span>Gen 4</span>
+      <span>Three Phase</span>
+      <span>AC Three Phase</span>
+      <span>HV Gen 3</span>
+      <span>All-in-One</span>
+      <span>AIO Hybrid</span>
+      <span>AIO Commercial</span>
+      <span>PV Inverter</span>
+      <span>AC Coupled</span>
+    </div>
+  </section>
+
+  <section class="platforms">
+    <h2>Available on your platform</h2>
+    <div class="platform-grid">
+      <div class="platform-card">
+        <div class="icon">🪟</div>
+        <div class="name">Windows</div>
+        <div class="detail">.msi installer</div>
+      </div>
+      <div class="platform-card">
+        <div class="icon">🍎</div>
+        <div class="name">macOS</div>
+        <div class="detail">Apple Silicon &amp; Intel</div>
+      </div>
+      <div class="platform-card">
+        <div class="icon">🐧</div>
+        <div class="name">Linux</div>
+        <div class="detail">.deb &amp; .rpm</div>
+      </div>
+      <div class="platform-card">
+        <div class="icon">🍓</div>
+        <div class="name">Raspberry Pi</div>
+        <div class="detail">64-bit ARM</div>
+      </div>
+      <div class="platform-card">
+        <div class="icon">📱</div>
+        <div class="name">Phone / Tablet</div>
+        <div class="detail">via browser</div>
+      </div>
     </div>
   </section>
 
   <footer class="footer">
     <p>
-      <a href="https://github.com/psylsph/givenergy-local">GitHub</a> ·
-      <a href="https://github.com/psylsph/givenergy-local/releases">Releases</a> ·
-      <a href="https://github.com/psylsph/givenergy-local/blob/master/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/psylsph/home-energy-manager">GitHub</a> ·
+      <a href="https://github.com/psylsph/home-energy-manager/releases">Releases</a> ·
+      <a href="https://github.com/psylsph/home-energy-manager/blob/master/CHANGELOG.md">Changelog</a> ·
+      <a href="https://github.com/psylsph/home-energy-manager/blob/master/FAQ.md">FAQ</a>
     </p>
-    <p style="margin-top: 8px;">MIT License · Not affiliated with GivEnergy</p>
+    <p style="margin-top: 8px;">
+      MIT License · Not affiliated with GivEnergy ·
+      Built with <a href="https://v2.tauri.app/">Tauri</a>
+    </p>
   </footer>
 
 </body>

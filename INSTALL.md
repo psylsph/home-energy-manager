@@ -1,81 +1,148 @@
-# Installation & Advanced Setup
+# Installation Guide
 
-Detailed instructions for building, running, and deploying Home Energy Manager.
+How to install, update, and run Home Energy Manager on different platforms. For advanced setups (headless server, Docker, unRAID, multi-instance), see the relevant section below.
 
 ---
 
-## Development
+## Quick Install
+
+### Windows
+
+1. Download the `.msi` file from the [**Releases page**](https://github.com/psylsph/home-energy-manager/releases/latest)
+2. Double-click it to run the installer
+3. Follow the prompts — the app installs like any other Windows program
+4. Launch **Home Energy Manager** from your Start menu
+
+### macOS
+
+1. Download the `.dmg` file from the [**Releases page**](https://github.com/psylsph/home-energy-manager/releases/latest)
+   - **Apple Silicon** (M1/M2/M3/M4): download the file with `aarch64` in the name
+   - **Intel**: download the file with `x64` in the name
+2. Open the `.dmg` and drag the app to your **Desktop** or **Home folder**
+   - ⚠️ Do **not** drag it to `/Applications` — macOS blocks unsigned apps there
+3. On first launch, right-click the app → **Open** → **Open** to bypass Gatekeeper
+4. After the first launch, you can open it normally
+
+> See the [FAQ](./FAQ.md) for help with macOS-specific issues.
+
+### Linux
+
+**Ubuntu / Debian / Raspberry Pi OS:**
+
+1. Download the `.deb` file from the [**Releases page**](https://github.com/psylsph/home-energy-manager/releases/latest)
+   - Most computers: the file with `amd64` in the name
+   - Raspberry Pi (64-bit OS only): the file with `arm64` in the name
+2. Install it:
+   ```bash
+   sudo apt install ./home-energy-manager_*_amd64.deb
+   ```
+3. Launch from your app menu, or run `givenergy-local` in a terminal
+
+**Fedora / openSUSE:**
+
+1. Download the `.rpm` file from the [**Releases page**](https://github.com/psylsph/home-energy-manager/releases/latest)
+2. Install it:
+   ```bash
+   sudo dnf install ./home-energy-manager-*.rpm    # Fedora
+   sudo zypper install ./home-energy-manager-*.rpm  # openSUSE
+   ```
+
+#### Linux system requirements
+
+On some Linux distributions you may need to install two system libraries first:
 
 ```bash
-# 1. Install dependencies
-npm install
-cargo install tauri-cli
-
-# 2. Build the frontend first (creates dist/)
-npm run build
-
-# 3. Build and Run the Rust backend
-cd src-tauri && cargo tauri dev
+sudo apt install libwebkit2gtk-4.1-0 librsvg2-2
 ```
 
-## Running Headless (Native)
+Recent `.deb` packages install these automatically, but older builds don't — if the app fails to launch, try running this command.
+
+> **Raspberry Pi** users: you need a **64-bit operating system** (Raspberry Pi OS 64-bit, Ubuntu Server 64-bit, etc.). The 32-bit OS is not supported.
+
+### Updating
+
+To update, simply download and install the latest version from the [**Releases page**](https://github.com/psylsph/home-energy-manager/releases/latest) — your settings and history are preserved automatically.
+
+### Uninstalling
+
+**Linux (`.deb`):**
+```bash
+sudo apt purge home-energy-manager
+```
+
+This removes the app but keeps your data. To delete your settings and history as well:
+```bash
+rm -rf ~/.givenergy-local
+```
+
+⚠️ **This permanently deletes all your recorded energy history and settings.**
+
+**Windows:** Use **Settings → Apps → Installed apps** to uninstall.
+
+**macOS:** Drag the app to the Bin.
+
+---
+
+## Running Headless (as a Background Service)
+
+You can run Home Energy Manager without a desktop window — it serves the full web UI to any browser on your network. This is ideal for a Raspberry Pi or always-on server.
+
+### Option 1: Native
+
+Build from source and run in the background:
 
 ```bash
-# 1. Install dependencies
+# 1. Install build dependencies
 npm install
 cargo install tauri-cli
 
-# 2. Build the frontend first (creates dist/)
+# 2. Build the frontend
 npm run build
 
-# 3. Build the Rust backend
+# 3. Build the app
 cd src-tauri && cargo build --release
 
-# 4. Run headless (no GUI window)
+# 4. Run headless
 nohup ./target/release/givenergy-local --headless > givenergy-local.log 2>&1 &
 ```
 
-> The frontend (`dist/`) must be built before the Rust binary, otherwise
-> the server won't have any UI files to serve. Alternatively, use `--dist`
-> to point to an existing build:
->
-> ```bash
-> ./target/release/givenergy-local --headless --dist /path/to/dist
-> ```
+Then open `http://your-machine-ip:7337` in any browser on your network.
 
-## Running Headless (Docker)
+If you already have a built `dist/` folder from a previous build, you can point to it:
 
 ```bash
-# Build and start with docker compose
+./target/release/givenergy-local --headless --dist /path/to/dist
+```
+
+### Option 2: Docker
+
+The quickest way to get started with Docker:
+
+```bash
+# Build and start
 docker compose up -d
 
 # Rebuild after code changes
 docker compose build && docker compose up -d
 ```
 
-**Persistent data** (settings + history DB) lives in `${HOME}/.givenergy-local` and
-is mounted into the container at `/root/.givenergy-local`. This survives restarts.
+Your settings and history are stored in `~/.givenergy-local` on the host machine and survive container restarts.
 
-## Running on unRAID
+### Option 3: unRAID
 
-Community contributor instructions for running Home Energy Manager as a Docker container on unRAID.
+If you use unRAID, you can run Home Energy Manager as a Docker container:
 
-### 1. Create a folder
+**1. Set up the project folder**
 
 Open the unRAID terminal (Main UI → top-right >_ Terminal):
 
 ```bash
 mkdir -p /mnt/user/appdata/givenergy-local
 cd /mnt/user/appdata/givenergy-local
-```
-
-### 2. Download the project
-
-```bash
 git clone https://github.com/psylsph/home-energy-manager.git .
 ```
 
-### 3. Create a Dockerfile
+**2. Create a Dockerfile**
 
 ```bash
 nano Dockerfile
@@ -126,15 +193,11 @@ CMD ["/app/givenergy-local", "--headless"]
 
 Save with `Ctrl+O` → `Enter` → `Ctrl+X`.
 
-### 4. Build the image
-
-This will take a few minutes on first run.
+**3. Build and run**
 
 ```bash
 docker build --no-cache -t givenergy-local .
 ```
-
-### 5. Run the container
 
 ```bash
 docker run -d \
@@ -145,37 +208,27 @@ docker run -d \
   givenergy-local
 ```
 
-Check the logs:
+Check it's running:
 
 ```bash
 docker logs -f givenergy-local
 ```
 
-Visit `http://[YOUR UNRAID IP]:7337` in a browser to verify it's running.
+Visit `http://[YOUR UNRAID IP]:7337` in a browser.
 
-### 6. Add to the unRAID Docker UI
+**4. Add to the unRAID Docker UI**
 
-To make the container manageable from the unRAID Docker page, first remove the manually created one:
+To manage it from the unRAID web interface:
 
-```bash
-docker rm -f givenergy-local
-```
+1. Remove the container created above: `docker rm -f givenergy-local`
+2. Go to the unRAID **Docker** page → **Add Container** → **Advanced Mode**
+3. Set **Repository** to `givenergy-local`
+4. Set **Icon URL** to `https://avatars.githubusercontent.com/u/84566103?s=200&v=4`
+5. Set **Web UI** to `http://[IP]:7337`
+6. Set **Network Type** to **Host**
+7. Add a **Container Path** of `/root/.givenergy-local` with **Host Path** `/mnt/user/appdata/givenergy-local/data`
 
-Then in the unRAID **Docker** page:
-
-1. Click **Add Container** → select **Advanced Mode**
-2. Set **Repository** to `givenergy-local`
-3. Set **Icon URL** to `https://avatars.githubusercontent.com/u/84566103?s=200&v=4`
-4. Set **Web UI** to `http://[IP]:7337`
-5. Set **Network Type** to `Host`
-6. Add a **Container Path** of `/root/.givenergy-local`
-7. Set the corresponding **Host Path** to `/mnt/user/appdata/givenergy-local/data`
-
-The container will persist data (settings + history) across stop/start cycles.
-
-### 7. Updating
-
-To update to the latest version, pull the latest code and rebuild:
+**5. Updating**
 
 ```bash
 cd /mnt/user/appdata/givenergy-local
@@ -190,70 +243,64 @@ docker run -d \
   givenergy-local
 ```
 
-Your settings and history are preserved in the mounted volume — only the binary is replaced.
+Your settings and history are preserved — only the app binary is replaced.
+
+---
 
 ## Running Multiple Instances
 
-You can run multiple copies of the app to control different inverters. Each instance
-needs its own **config directory** and **HTTP port**.
+If you have more than one inverter, you can run multiple copies of the app. Each one needs its own config directory and HTTP port.
 
-### Step 1: Separate config directory
+### Separate config directory
 
-Set `GIVENERGY_LOCAL_CONFIG_DIR` to a different directory for each instance so they
-don't share `settings.json` and `history.db`:
+Set `GIVENERGY_LOCAL_CONFIG_DIR` to a different path for each inverter:
 
 **Linux / macOS:**
-
 ```bash
-# Default (uses ~/.givenergy-local/)
+# First inverter (default)
 ./givenergy-local
 
-# Second instance with its own config and history
+# Second inverter
 GIVENERGY_LOCAL_CONFIG_DIR=~/givenergy-instance2 ./givenergy-local
 ```
 
 **Windows (PowerShell):**
-
 ```powershell
-# Second instance
 $env:GIVENERGY_LOCAL_CONFIG_DIR = "C:\Users\You\givenergy-config-2"
 .\givenergy-local.exe
 ```
 
-**Windows (Command Prompt):**
+### Separate HTTP port
 
-```cmd
-set GIVENERGY_LOCAL_CONFIG_DIR=C:\Users\You\givenergy-config-2
-givenergy-local.exe
-```
+Each instance needs a different port (default is 7337).
 
-### Step 2: Separate HTTP port
+**Desktop app:** Change the port in **Settings → HTTP Port**, then restart.
 
-Each instance must use a different HTTP port (default 7337).
-
-**Desktop app:** Change the port in **Settings → HTTP Port**, then restart the app.
-Alternatively, edit `http_port` directly in the `settings.json` file in the config
-directory before launching the second instance:
-
-```json
-{
-  "http_port": 8080,
-  ...
-}
-```
-
-**Headless server:** Use the `--port` flag:
-
+**Headless:** Use the `--port` flag:
 ```bash
 GIVENERGY_LOCAL_CONFIG_DIR=~/givenergy-server ./givenergy-local --headless --port 8080
 ```
 
-**Docker:** Edit `http_port` in the mounted `settings.json`, or use `--port` in the
-container command.
-
-If two instances share the same port, the second one will fail to start its web
-server and the app window will show a blank page.
+If two instances share the same port, the second one will fail to start. Change the port before launching.
 
 ---
+
+## Building from Source (for Developers)
+
+If you want to contribute or build from source:
+
+```bash
+# 1. Install dependencies
+npm install
+cargo install tauri-cli
+
+# 2. Build the frontend
+npm run build
+
+# 3. Build and run
+cd src-tauri && cargo tauri dev
+```
+
+The frontend must be built before the Rust binary — the server needs the `dist/` folder to serve the UI.
 
 See [DESIGN.md](./DESIGN.md) for full architecture documentation.
