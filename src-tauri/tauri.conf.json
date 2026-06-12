@@ -27,9 +27,17 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "appimage", "rpm"],
+    "targets": ["deb", "appimage", "rpm", "msix"],
     "resources": {
       "../dist": "dist"
+    },
+    "windows": {
+      "msix": {
+        "language": "en-US",
+        "languages": ["en-US"],
+        "capabilities": ["internetClientServer", "privateNetworkClientServer"],
+        "signing": false
+      }
     },
     "icon": [
       "icons/32x32.png",
