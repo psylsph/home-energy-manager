@@ -77,8 +77,8 @@ jobs:
           MSIX_PUBLISHER: ${{ vars.MSIX_PUBLISHER }}
           MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}
         run: |
-          $appVersion = (Get-Content package.json | ConvertFrom-Json).version
-          ./scripts/package-msix.ps1 -Target "${{ matrix.target }}" -Version $appVersion
+          $version = (Get-Content "${{ github.workspace }}\package.json" | ConvertFrom-Json).version
+          & "${{ github.workspace }}\scripts\package-msix.ps1" -Target "${{ matrix.target }}" -Version $version
 
       - name: Build Tauri app (Linux)
         if: matrix.platform == 'ubuntu-22.04' || matrix.platform == 'ubuntu-24.04-arm'
