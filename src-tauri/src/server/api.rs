@@ -852,16 +852,50 @@ pub async fn set_active_power_rate(
     }
 }
 
-/// POST /api/control/pause — pause the battery.
+/// POST /api/control/pause — pause the battery (restore to Eco mode).
 ///
-/// Disables charge and discharge. For three-phase models, also clears
-/// the three-phase force discharge and force charge enable flags.
+/// Disables discharge, restores self-consumption mode, clears any stale
+/// discharge slot registers, and re-enables charge so solar can charge
+/// the battery. This safely cancels an active ForceDischarge or ForceCharge
+/// and returns the inverter to normal Eco self-consumption mode.
+///
+/// For three-phase models, also clears the three-phase force discharge
+/// and force charge enable flags.
 pub async fn pause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let is_three_phase = is_three_phase_limit_snapshot(&state).await;
     let mut writes = match ControlCommand::PauseBattery.encode() {
         Ok(w) => w,
         Err(e) => return error_response(&format!("Validation error: {}", e)),
     };
+
+    // Restore self-consumption (Eco) mode so the inverter doesn't stay
+    // in export mode after a force discharge is cancelled.
+    writes.push(crate::inverter::encoder::RegisterWrite {
+        address: crate::modbus::registers::HR_BATTERY_POWER_MODE,
+        value: 1,
+    });
+
+    // Clear stale discharge slot registers to prevent Gen3 inverter
+    // firmware from auto-re-enabling enable_discharge (the Gen3 keeps
+    // HR59=1 when non-zero slot registers are present, which would
+    // counteract the eco mode switch). Same pattern as set_mode("eco").
+    writes.push(crate::inverter::encoder::RegisterWrite {
+        address: crate::modbus::registers::HR_DISCHARGE_SLOT_2_START,
+        value: 0,
+    });
+    writes.push(crate::inverter::encoder::RegisterWrite {
+        address: crate::modbus::registers::HR_DISCHARGE_SLOT_2_END,
+        value: 0,
+    });
+    writes.push(crate::inverter::encoder::RegisterWrite {
+        address: crate::modbus::registers::HR_DISCHARGE_SLOT_1_START,
+        value: 0,
+    });
+    writes.push(crate::inverter::encoder::RegisterWrite {
+        address: crate::modbus::registers::HR_DISCHARGE_SLOT_1_END,
+        value: 0,
+    });
+
     if is_three_phase {
         // Also clear three-phase-specific force discharge/charge flags
         use crate::modbus::registers::{

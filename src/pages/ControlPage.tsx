@@ -1852,7 +1852,7 @@ export default function ControlPage() {
                 setForceChargeLoading(true);
                 try {
                   if (forceChargeActive) {
-                    await apiPost('/api/control/pause');
+                    await apiPost('/api/control/mode', { mode: 'eco' });
                     setLocalForceChargeOverride(false);
                   } else {
                     await apiPost('/api/control/force-charge', { minutes: 30 });
@@ -1884,7 +1884,7 @@ export default function ControlPage() {
                 setForceDischargeLoading(true);
                 try {
                   if (forceDischargeActive) {
-                    await apiPost('/api/control/pause');
+                    await apiPost('/api/control/mode', { mode: 'eco' });
                     setLocalForceDischargeOverride(false);
                   } else {
                     await apiPost('/api/control/force-discharge');
