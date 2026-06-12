@@ -69,17 +69,6 @@ jobs:
         if: matrix.platform == 'windows-latest'
         run: cargo tauri build --target ${{ matrix.target }} --bundles msi
 
-      - name: Build Windows MSIX package
-        if: matrix.platform == 'windows-latest'
-        shell: pwsh
-        env:
-          MSIX_IDENTITY_NAME: ${{ vars.MSIX_IDENTITY_NAME }}
-          MSIX_PUBLISHER: ${{ vars.MSIX_PUBLISHER }}
-          MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}
-        run: |
-          $version = (Get-Content "${{ github.workspace }}\package.json" | ConvertFrom-Json).version
-          & "${{ github.workspace }}\scripts\package-msix.ps1" -Target "${{ matrix.target }}" -Version $version
-
       - name: Build Tauri app (Linux)
         if: matrix.platform == 'ubuntu-22.04' || matrix.platform == 'ubuntu-24.04-arm'
         run: cargo tauri build --target ${{ matrix.target }} --bundles deb,rpm
@@ -206,10 +195,7 @@ jobs:
                   return f"macOS-Intel-{product}-{version}.dmg"
               if ext_lower == ".msi":
                   return f"Windows-MSI-{product}-{version}.msi"
-              if ext_lower == ".msix":
-                  return f"Windows-MSIX-{product}-{version}.msix"
-              if ext_lower == ".msixupload":
-                  return f"Windows-Store-MSIXUpload-{product}-{version}.msixupload"
+
               if ext_lower == ".deb":
                   return f"Linux-Debian-{arch}-{product}-{version}.deb"
               if ext_lower == ".rpm":
@@ -220,7 +206,7 @@ jobs:
           for path in bundle_dir.rglob("*"):
               if not path.is_file():
                   continue
-              if path.suffix.lower() not in {".dmg", ".deb", ".rpm", ".msi", ".msix", ".msixupload", ".exe"}:
+              if path.suffix.lower() not in {".dmg", ".deb", ".rpm", ".msi", ".exe"}:
                   continue
               dest = out_dir / friendly_name(path)
               if " " in dest.name:
@@ -298,7 +284,7 @@ jobs:
             | `macOS-Apple-Silicon-...dmg` | **macOS** — Apple Silicon (M1/M2/M3/M4) |
             | `macOS-Intel-...dmg` | **macOS** — Intel |
             | `Windows-MSI-...msi` | **Windows** — MSI installer |
-            | `Windows-MSIX-...msix` / `Windows-Store-MSIXUpload-...msixupload` | **Windows** — MSIX package / Microsoft Store upload package |
+
             | `Linux-Debian-...deb` | **Linux** — Debian/Ubuntu |
             | `Linux-RPM-...rpm` | **Linux** — RHEL/Fedora/openSUSE, not macOS |
             | — | AppImage temporarily disabled — GitHub asset returns 504 |
