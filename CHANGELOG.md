@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0] - 2026-06-12
+
+### Added
+
+- **Grid loss / inverter fault detection** — The Rust decoder now reads
+  IR(40) fault/status bits 8 (`grid_loss` / No Utility) and 9
+  (`inverter_trip` / Inverter fault) and exposes `grid_loss` and
+  `inverter_trip` booleans on the snapshot.
+- **Battery over-temperature detection** — Decodes IR(40) bit 1 and
+  IR(57) charger warning register into a `battery_over_temp` flag.
+- **Grid fault notification system** — A new Settings toggle requests
+  browser notification permission and triggers local device notifications
+  on grid loss, inverter trip, or battery over-temperature, with
+  kind-aware restoration messages.
+- **Global grid fault banner** — A persistent red banner across the top of
+  the app warns of grid loss, inverter fault, or battery over-temperature
+  regardless of which page is open.
+
+### Changed
+
+- **Status page warning** — The inline grid-loss card now covers all three
+  fault types (grid loss, inverter trip, battery over-temp) with
+  appropriate advice text.
+- **Shared fault helpers** — Added `src/lib/gridFault.ts` with
+  `hasGridFault()`, `gridFaultTitle()`, `gridFaultReason()`, and
+  `gridFaultAdvice()` for consistent UI across the app.
+
 ## [0.22.1] - 2026-06-12
 
 ### Added
