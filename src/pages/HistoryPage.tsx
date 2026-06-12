@@ -757,7 +757,7 @@ export default function HistoryPage() {
         </button>
         <span className="w-px h-4 bg-white/10 mx-1" />
         <button
-          onClick={() => exportCSV(charts, data, range, offset, () => setCsvToast('CSV exported — ' + formatWindowLabel(range, offset)))}
+          onClick={() => exportCSV(charts, data, range, offset, () => setCsvToast('CSV downloaded to your Downloads folder — ' + formatWindowLabel(range, offset)))}
           disabled={!hasData}
           className="shrink-0 text-text-secondary hover:text-text-primary text-xs font-sans px-2 py-1 rounded-lg hover:bg-bg-elevated transition-colors disabled:opacity-30 flex items-center gap-1"
         >

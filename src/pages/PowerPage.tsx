@@ -10,7 +10,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { fetchHistory } from '../lib/api';
+import { fetchHistory, isTauri } from '../lib/api';
 import {
   HISTORY_CHART_GRID_PROPS,
   HISTORY_RANGES,
@@ -712,7 +712,7 @@ function socLowHighlight(buckets: PowerBucket[]): string {
   return `<div class="highlight"><span>Lowest SOC</span><strong>${escapeHtml(low.label)} · ${low.socMin!.toFixed(0)}%</strong></div>`;
 }
 
-function exportPowerPDF(report: PowerReport, rows: PowerRow[]) {
+function exportPowerPDF(report: PowerReport, rows: PowerRow[]): 'opened' | 'downloaded' {
   const s = report.summary;
   const solarToHomeEstimate = Math.max(0, s.solarKwh - s.exportKwh - s.batteryChargeKwh);
   const batteryToHomeEstimate = Math.min(s.batteryDischargeKwh, Math.max(0, s.homeKwh - s.importKwh - solarToHomeEstimate));
@@ -720,7 +720,7 @@ function exportPowerPDF(report: PowerReport, rows: PowerRow[]) {
 <html>
 <head>
 <meta charset="utf-8" />
-<title>Power Report - ${escapeHtml(s.periodLabel)}</title>
+<title>Consumption Report - ${escapeHtml(s.periodLabel)}</title>
 <style>
   :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
   body { margin: 0; background: #f3f4f6; color: #0f172a; }
@@ -763,7 +763,7 @@ function exportPowerPDF(report: PowerReport, rows: PowerRow[]) {
 <div class="page">
   <header>
     <div>
-      <h1>Power Report</h1>
+      <h1>Consumption Report</h1>
       <div class="muted">Home Energy Manager · ${escapeHtml(s.periodLabel)} · Generated ${escapeHtml(s.generatedAt.toLocaleString())}</div>
       <div class="muted">Energy totals are estimated from the currently displayed Power samples.</div>
     </div>
@@ -844,15 +844,22 @@ function exportPowerPDF(report: PowerReport, rows: PowerRow[]) {
 </body>
 </html>`;
 
+  const fileName = `givenergy_consumption_${exportFileSafeLabel(s.periodLabel)}.html`;
+  if (isTauri) {
+    downloadTextFile(reportHtml, fileName, 'text/html;charset=utf-8;');
+    return 'downloaded';
+  }
+
   const win = window.open('', '_blank');
   if (!win) {
-    downloadTextFile(reportHtml, `givenergy_power_${exportFileSafeLabel(s.periodLabel)}.html`, 'text/html;charset=utf-8;');
-    return;
+    downloadTextFile(reportHtml, fileName, 'text/html;charset=utf-8;');
+    return 'downloaded';
   }
   win.document.open();
   win.document.write(reportHtml);
   win.document.close();
   win.focus();
+  return 'opened';
 }
 
 export default function PowerPage() {
@@ -1006,7 +1013,7 @@ export default function PowerPage() {
             type="button"
             onClick={() => {
               exportPowerCSV(calculatePowerReport(rows, range, displayDomain), rows);
-              setExportToast('CSV exported — ' + report.summary.periodLabel);
+              setExportToast('CSV downloaded to your Downloads folder — ' + report.summary.periodLabel);
             }}
             disabled={loading || !hasData || Boolean(error)}
             className="shrink-0 text-text-secondary hover:text-text-primary text-xs font-sans px-3 py-1.5 rounded-lg bg-bg-elevated hover:bg-bg-elevated/80 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
@@ -1016,13 +1023,17 @@ export default function PowerPage() {
           <button
             type="button"
             onClick={() => {
-              exportPowerPDF(calculatePowerReport(rows, range, displayDomain), rows);
-              setExportToast('PDF report opened — ' + report.summary.periodLabel);
+              const result = exportPowerPDF(calculatePowerReport(rows, range, displayDomain), rows);
+              setExportToast(
+                result === 'downloaded'
+                  ? 'Consumption report downloaded to your Downloads folder — ' + report.summary.periodLabel
+                  : 'Consumption report opened in a new window — ' + report.summary.periodLabel,
+              );
             }}
             disabled={loading || !hasData || Boolean(error)}
             className="shrink-0 text-text-secondary hover:text-text-primary text-xs font-sans px-3 py-1.5 rounded-lg bg-bg-elevated hover:bg-bg-elevated/80 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
           >
-            PDF
+            Consumption Report
           </button>
         </div>
       </div>
