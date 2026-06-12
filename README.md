@@ -70,6 +70,13 @@ Go to the [**Releases page**](https://github.com/psylsph/home-energy-manager/rel
 | 🐧 **Linux** (Fedora, openSUSE, etc.) | `.rpm` |
 | 🍓 **Raspberry Pi** (64-bit OS only) | `.deb` with `arm64` in the name |
 
+**Windows users** — Windows may show "Windows protected your PC" / SmartScreen when you try to run the `.msi`. This is because the app isn't code-signed (code signing certificates cost hundreds per year). It's safe — it's open-source software you can inspect on GitHub. To run it:
+
+1. Click **"More info"** on the SmartScreen screen
+2. Click **"Run anyway"**
+
+If the installer itself won't open, right-click the `.msi` → **Properties** → check the **"Unblock"** box → **OK**, then run it again.
+
 **Mac users** — after opening the `.dmg`, drag the app to your **Desktop** or **Home folder** (not `/Applications`). On first launch, right-click the app → **Open** → **Open** to bypass Gatekeeper. See the [FAQ](./FAQ.md) if you get stuck.
 
 **Linux users** — you may need to install two system libraries first. See [INSTALL.md](./INSTALL.md#linux-system-requirements) for details.
