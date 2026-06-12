@@ -9,6 +9,7 @@ interface InverterState {
   connectedHost: string | null;
   developerMode: boolean;
   themeMode: ThemeMode;
+  gridOutageNotificationsEnabled: boolean;
   /** Panels hidden from the bottom navigation. */
   hiddenPanels: string[];
   /** Shared time range used by Power and History charts. */
@@ -28,6 +29,7 @@ interface InverterState {
   setConnection: (state: ConnectionState, host?: string) => void;
   setDeveloperMode: (enabled: boolean) => void;
   setThemeMode: (mode: ThemeMode) => void;
+  setGridOutageNotificationsEnabled: (enabled: boolean) => void;
   setChartRange: (range: HistoryRange) => void;
   setPendingDischargeSlots: (slots: Record<number, ScheduleSlot>) => void;
   clearPendingDischargeSlots: () => void;
@@ -67,6 +69,14 @@ function loadChartRange(): HistoryRange {
   }
 }
 
+function loadGridOutageNotificationsEnabled(): boolean {
+  try {
+    return localStorage.getItem('gridOutageNotificationsEnabled') === 'true';
+  } catch {
+    return false;
+  }
+}
+
 function loadThemeMode(): ThemeMode {
   try {
     const stored = localStorage.getItem('themeMode');
@@ -96,6 +106,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   connectedHost: null,
   developerMode: loadDeveloperMode(),
   themeMode: loadThemeMode(),
+  gridOutageNotificationsEnabled: loadGridOutageNotificationsEnabled(),
   hiddenPanels: [],
   chartRange: loadChartRange(),
   pendingDischargeSlots: loadPendingDischargeSlots(),
@@ -117,6 +128,12 @@ export const useInverterStore = create<InverterState>((set) => ({
       localStorage.setItem('themeMode', mode);
     } catch { /* ignore */ }
     set({ themeMode: mode });
+  },
+  setGridOutageNotificationsEnabled: (enabled) => {
+    try {
+      localStorage.setItem('gridOutageNotificationsEnabled', String(enabled));
+    } catch { /* ignore */ }
+    set({ gridOutageNotificationsEnabled: enabled });
   },
   setChartRange: (range) => {
     try {

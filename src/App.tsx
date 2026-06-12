@@ -2,8 +2,11 @@ import { useEffect } from 'react';
 import MetersPage from './pages/MetersPage';
 import { HashRouter, Routes, Route, NavLink, Navigate } from 'react-router-dom';
 import { useWebSocket } from './hooks/useWebSocket';
+import { useGridOutageNotifications } from './hooks/useGridOutageNotifications';
 import type { PollSettings } from './lib/types';
 import { apiGet } from './lib/api';
+import { formatPercent } from './lib/format';
+import { gridFaultReason, gridFaultTitle, hasGridFault } from './lib/gridFault';
 import { useInverterStore } from './store/useInverterStore';
 import StatusPage from './pages/StatusPage';
 import BatteryPage from './pages/BatteryPage';
@@ -31,6 +34,23 @@ function ThemeToggle() {
       <span aria-hidden="true">{isLight ? '☀️' : '🌙'}</span>
       <span className="hidden sm:inline">{isLight ? 'Light' : 'Dark'}</span>
     </button>
+  );
+}
+
+function GridFaultBanner() {
+  const snapshot = useInverterStore((state) => state.snapshot);
+  if (!snapshot || !hasGridFault(snapshot)) return null;
+
+  return (
+    <div className="bg-red-950/90 border-b border-red-500/40 px-4 py-2 text-red-100 text-sm">
+      <div className="max-w-4xl mx-auto flex items-center gap-2">
+        <span aria-hidden="true">⚠️</span>
+        <strong>{gridFaultTitle(snapshot)}</strong>
+        <span className="text-red-100/85">
+          {gridFaultReason(snapshot)} · Battery {formatPercent(snapshot.soc)}
+        </span>
+      </div>
+    </div>
   );
 }
 
@@ -152,6 +172,7 @@ function LogsIcon() {
 
 function Layout() {
   useWebSocket();
+  useGridOutageNotifications();
   const { developerMode, themeMode, hiddenPanels, setHiddenPanels, setEvcHost } = useInverterStore();
 
   // Load hidden panels from settings on mount
@@ -204,6 +225,8 @@ function Layout() {
           <ConnectionIndicator />
         </div>
       </header>
+
+      <GridFaultBanner />
 
       {/* Content */}
       <main className="flex-1 overflow-auto px-4 py-6 md:px-6 md:py-8 pb-safe">

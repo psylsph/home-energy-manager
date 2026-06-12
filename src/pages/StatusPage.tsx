@@ -2,6 +2,8 @@ import { useInverterStore } from '../store/useInverterStore';
 import EnergyFlowDiagram from '../components/EnergyFlowDiagram';
 import BatteryPanel from '../components/BatteryPanel';
 import SummaryTiles from '../components/SummaryTiles';
+import { formatPercent, formatPower } from '../lib/format';
+import { gridFaultAdvice, gridFaultReason, gridFaultTitle, hasGridFault } from '../lib/gridFault';
 
 export default function StatusPage() {
   const { snapshot, connectionState, evcHost, evcPower, evcCharging, evcConnected } = useInverterStore();
@@ -29,6 +31,24 @@ export default function StatusPage() {
 
   return (
     <div className="flex flex-col gap-4 max-w-4xl mx-auto">
+      {hasGridFault(snapshot) && (
+        <section className="rounded-2xl border border-red-500/40 bg-red-950/50 px-4 py-3 text-red-100 shadow-lg shadow-red-950/20">
+          <div className="flex items-start gap-3">
+            <span className="text-2xl" aria-hidden="true">⚠️</span>
+            <div className="flex flex-col gap-1">
+              <h2 className="text-sm font-semibold uppercase tracking-wide">
+                {gridFaultTitle(snapshot)}
+              </h2>
+              <p className="text-sm text-red-100/90">
+                The inverter is reporting <strong>{gridFaultReason(snapshot)}</strong>.
+                Battery SOC is {formatPercent(snapshot.soc)}
+                {snapshot.battery_power < 0 ? ` and the battery is discharging at ${formatPower(Math.abs(snapshot.battery_power))}` : ''}.{gridFaultAdvice(snapshot)}
+              </p>
+            </div>
+          </div>
+        </section>
+      )}
+
       {/* Energy flow diagram — full width card */}
       <section className="bg-bg-surface rounded-2xl p-4">
         <EnergyFlowDiagram

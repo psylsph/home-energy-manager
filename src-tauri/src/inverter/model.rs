@@ -584,6 +584,22 @@ fn default_soc_reserve() -> u8 {
     4
 }
 
+fn default_grid_online() -> bool {
+    true
+}
+
+fn default_grid_loss() -> bool {
+    false
+}
+
+fn default_inverter_trip() -> bool {
+    false
+}
+
+fn default_battery_over_temp() -> bool {
+    false
+}
+
 impl Default for ScheduleSlot {
     fn default() -> Self {
         Self {
@@ -629,6 +645,23 @@ pub struct InverterSnapshot {
     // -- Grid details --
     pub grid_voltage: f32,
     pub grid_frequency: f32,
+    /// True when the inverter reports a live grid AC reference.
+    ///
+    /// Kept separate from the sanitized voltage/frequency values so a genuine
+    /// power cut is not hidden by corruption filtering that carries previous
+    /// readings forward.
+    #[serde(default = "default_grid_online")]
+    pub grid_online: bool,
+    /// True when the inverter fault/status word reports grid loss (`No Utility`).
+    #[serde(default = "default_grid_loss")]
+    pub grid_loss: bool,
+    /// True when the inverter fault/status word reports an inverter trip/fault.
+    #[serde(default = "default_inverter_trip")]
+    pub inverter_trip: bool,
+    /// True when the inverter reports battery over-temperature
+    /// (IR(40) bit 1 fault or IR(57) == 1 charger warning).
+    #[serde(default = "default_battery_over_temp")]
+    pub battery_over_temp: bool,
 
     // -- Inverter --
     pub inverter_temperature: f32,

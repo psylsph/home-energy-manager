@@ -1265,44 +1265,52 @@ fn sanitize_snapshot(
         sanitized = true;
     }
 
-    // Grid voltage:
-    //   Single-phase: UK nominal 230V ±10% (207–253V), anything outside 180–280V
-    //     is clearly corrupt register data.
-    //   Three-phase (line-to-line): UK nominal 415V ±10% (373–456V), match the
-    //     reference library's v_ac1 bounds of 0–500V (IR(1061)).
-    let (v_min, v_max) = if snap.device_type.needs_three_phase_input_blocks() {
-        (0.0, 500.0)
+    if !snap.grid_online {
+        // The inverter fault/status word is authoritative for grid loss. Do not
+        // let the normal range checks carry forward the last healthy voltage /
+        // frequency and accidentally hide the outage state in the UI.
+        snap.grid_voltage = snap.grid_voltage.max(0.0);
+        snap.grid_frequency = snap.grid_frequency.max(0.0);
     } else {
-        (180.0, 280.0)
-    };
-    if snap.grid_voltage < v_min || snap.grid_voltage > v_max {
-        if let Some(p) = prev {
-            tracing::warn!(
-                raw = snap.grid_voltage,
-                prev = p.grid_voltage,
-                "Grid voltage out of range — using previous"
-            );
-            snap.grid_voltage = p.grid_voltage;
+        // Grid voltage:
+        //   Single-phase: UK nominal 230V ±10% (207–253V), anything outside 180–280V
+        //     is clearly corrupt register data.
+        //   Three-phase (line-to-line): UK nominal 415V ±10% (373–456V), match the
+        //     reference library's v_ac1 bounds of 0–500V (IR(1061)).
+        let (v_min, v_max) = if snap.device_type.needs_three_phase_input_blocks() {
+            (0.0, 500.0)
         } else {
-            snap.grid_voltage = 230.0; // nominal
+            (180.0, 280.0)
+        };
+        if snap.grid_voltage < v_min || snap.grid_voltage > v_max {
+            if let Some(p) = prev {
+                tracing::warn!(
+                    raw = snap.grid_voltage,
+                    prev = p.grid_voltage,
+                    "Grid voltage out of range — using previous"
+                );
+                snap.grid_voltage = p.grid_voltage;
+            } else {
+                snap.grid_voltage = 230.0; // nominal
+            }
+            sanitized = true;
         }
-        sanitized = true;
-    }
 
-    // Grid frequency: UK is nominally 50 Hz ±1% (49.5–50.5 Hz).
-    // Anything outside 45–55 Hz is clearly corrupt.
-    if snap.grid_frequency < 45.0 || snap.grid_frequency > 55.0 {
-        if let Some(p) = prev {
-            tracing::warn!(
-                raw = snap.grid_frequency,
-                prev = p.grid_frequency,
-                "Grid frequency out of range — using previous"
-            );
-            snap.grid_frequency = p.grid_frequency;
-        } else {
-            snap.grid_frequency = 50.0; // nominal
+        // Grid frequency: UK is nominally 50 Hz ±1% (49.5–50.5 Hz).
+        // Anything outside 45–55 Hz is clearly corrupt.
+        if snap.grid_frequency < 45.0 || snap.grid_frequency > 55.0 {
+            if let Some(p) = prev {
+                tracing::warn!(
+                    raw = snap.grid_frequency,
+                    prev = p.grid_frequency,
+                    "Grid frequency out of range — using previous"
+                );
+                snap.grid_frequency = p.grid_frequency;
+            } else {
+                snap.grid_frequency = 50.0; // nominal
+            }
+            sanitized = true;
         }
-        sanitized = true;
     }
 
     // Battery module voltage: reject impossible values.

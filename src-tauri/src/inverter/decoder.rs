@@ -194,6 +194,10 @@ struct RawConfig {
 pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
     let mut snap = InverterSnapshot {
         timestamp: chrono::Utc::now().timestamp(),
+        grid_online: true,
+        grid_loss: false,
+        inverter_trip: false,
+        battery_over_temp: false,
         ..Default::default()
     };
     let mut raw = RawConfig {
@@ -318,6 +322,16 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
 // ---------------------------------------------------------------------------
 
 /// Decode input registers 0-59 (telemetry).
+const GRID_LOSS_MASK_IR40: u16 = 1 << 8;
+const INVERTER_TRIP_MASK_IR40: u16 = 1 << 9;
+const BATTERY_OVER_TEMP_MASK_IR40: u16 = 1 << 1;
+
+fn grid_online_from_ac(voltage: f32, frequency: f32) -> bool {
+    // Fallback for models/blocks that do not expose the single-phase IR(40)
+    // status word. GivEnergy reports the grid AC reference near zero during an outage.
+    voltage > 50.0 && frequency > 1.0
+}
+
 fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     // -- PV --
     snap.pv1_power = get_reg(data, 18) as i32; // IR(18): p_pv1 (W)
@@ -343,6 +357,17 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.grid_power = signed(get_reg(data, 30)); // IR(30): p_grid_out (int16 W, +exporting/-importing)
     snap.grid_voltage = get_reg(data, 5) as f32 * 0.1; // IR(5):  v_ac1 (/10 V)
     snap.grid_frequency = get_reg(data, 13) as f32 * 0.01; // IR(13): f_ac1 (/100 Hz)
+    // IR(40) fault/status bits:
+    //   bit 1 = battery over-temperature fault
+    //   bit 8 = `grid_loss` / "No Utility"
+    //   bit 9 = `inverter_trip` / "Inverter fault"
+    let fault_word = get_reg(data, 40);
+    let battery_ot_fault = (fault_word & BATTERY_OVER_TEMP_MASK_IR40) != 0;
+    let battery_ot_warning = get_reg(data, 57) == 1; // IR(57): charger warning code
+    snap.battery_over_temp = battery_ot_fault || battery_ot_warning;
+    snap.grid_loss = (fault_word & GRID_LOSS_MASK_IR40) != 0;
+    snap.inverter_trip = (fault_word & INVERTER_TRIP_MASK_IR40) != 0;
+    snap.grid_online = !snap.grid_loss;
 
     // -- Inverter --
     snap.inverter_temperature = get_reg(data, 41) as f32 * 0.1; // IR(41): t_inverter_heatsink (/10 °C)
@@ -795,6 +820,8 @@ fn decode_input_1060_1119(data: &[u16], snap: &mut InverterSnapshot) {
     let v3 = get_reg(data, 3) as f32 * 0.1;
     snap.grid_voltage = v1;
     snap.grid_frequency = get_reg(data, 7) as f32 * 0.01;
+    let max_grid_voltage = v1.max(v2).max(v3);
+    snap.grid_online = grid_online_from_ac(max_grid_voltage, snap.grid_frequency);
 
     let i1 = get_reg(data, 4) as f32 * 0.1;
     let i2 = get_reg(data, 5) as f32 * 0.1;
@@ -1535,6 +1562,9 @@ mod tests {
         assert_eq!(snap.grid_power, 100);
         assert!((snap.grid_voltage - 241.0).abs() < 0.1);
         assert!((snap.grid_frequency - 50.02).abs() < 0.01);
+        assert!(snap.grid_online);
+        assert!(!snap.grid_loss);
+        assert!(!snap.inverter_trip);
 
         // Inverter
         assert!((snap.inverter_temperature - 42.5).abs() < 0.1);
@@ -1608,6 +1638,30 @@ mod tests {
         assert_eq!(snap.discharge_slots[1].start_hour, 17);
         assert_eq!(snap.discharge_slots[1].end_hour, 20);
         assert!(!snap.enable_discharge, "enable_discharge flag is false");
+    }
+
+    #[test]
+    fn decode_grid_loss_bit_marks_grid_offline() {
+        let mut blocks = test_blocks();
+        blocks[0].data[40] = GRID_LOSS_MASK_IR40; // IR(40) bit 8: grid_loss / No Utility
+
+        let snap = decode_snapshot(&blocks);
+
+        assert!(snap.grid_loss);
+        assert!(!snap.inverter_trip);
+        assert!(!snap.grid_online);
+    }
+
+    #[test]
+    fn decode_inverter_trip_bit_marks_trip() {
+        let mut blocks = test_blocks();
+        blocks[0].data[40] = INVERTER_TRIP_MASK_IR40; // IR(40) bit 9: inverter_trip / Inverter fault
+
+        let snap = decode_snapshot(&blocks);
+
+        assert!(!snap.grid_loss);
+        assert!(snap.inverter_trip);
+        assert!(snap.grid_online);
     }
 
     #[test]

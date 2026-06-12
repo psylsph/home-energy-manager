@@ -17,6 +17,10 @@ export interface InverterSnapshot {
   grid_power: number;
   grid_voltage: number;
   grid_frequency: number;
+  grid_online: boolean;
+  grid_loss: boolean;
+  inverter_trip: boolean;
+  battery_over_temp: boolean;
   home_power: number;
   inverter_temperature: number;
   today_solar_kwh: number;

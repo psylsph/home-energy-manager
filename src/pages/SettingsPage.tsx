@@ -37,7 +37,14 @@ function DevTools() {
 }
 
 export default function SettingsPage() {
-  const { connectionState, connectedHost, developerMode, setDeveloperMode } = useInverterStore();
+  const {
+    connectionState,
+    connectedHost,
+    developerMode,
+    setDeveloperMode,
+    gridOutageNotificationsEnabled,
+    setGridOutageNotificationsEnabled,
+  } = useInverterStore();
 
   // Connection fields
   const [host, setHost] = useState('');
@@ -83,6 +90,9 @@ const VALID_INTERVALS = [5, 10, 15, 20];
   const [clients, setClients] = useState<string[]>([]);
   const [hiddenPanels, setHiddenPanels] = useState<string[]>([]);
   const [panelSaving, setPanelSaving] = useState(false);
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>(() => (
+    'Notification' in window ? Notification.permission : 'denied'
+  ));
 
   const flash = useCallback((text: string, ok: boolean) => {
     setMessage({ text, ok });
@@ -231,6 +241,34 @@ const VALID_INTERVALS = [5, 10, 15, 20];
       flash('Failed to save tariffs', false);
     }
     setSaving(false);
+  };
+
+  const handleGridOutageNotifications = async (enabled: boolean) => {
+    if (!('Notification' in window)) {
+      flash('This platform does not support browser notifications', false);
+      setGridOutageNotificationsEnabled(false);
+      return;
+    }
+
+    if (!enabled) {
+      setGridOutageNotificationsEnabled(false);
+      flash('Grid outage notifications disabled', true);
+      return;
+    }
+
+    let permission = Notification.permission;
+    if (permission === 'default') {
+      permission = await Notification.requestPermission();
+      setNotificationPermission(permission);
+    }
+
+    if (permission === 'granted') {
+      setGridOutageNotificationsEnabled(true);
+      flash('Grid outage notifications enabled', true);
+    } else {
+      setGridOutageNotificationsEnabled(false);
+      flash('Notifications are blocked — enable them in your browser or OS settings', false);
+    }
   };
 
   // Save panel visibility
@@ -558,7 +596,29 @@ const VALID_INTERVALS = [5, 10, 15, 20];
         )}
       </section>
 
-      {/* ─── Section 3: Refresh Interval ─── */}
+      {/* ─── Section 3: Alerts ─── */}
+      <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-3">
+        <h2 className="text-text-primary text-lg font-semibold font-sans">Alerts</h2>
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex flex-col gap-1">
+            <span className="text-text-primary text-sm font-sans">Grid outage notifications</span>
+            <span className="text-text-secondary text-xs font-sans">
+              Notify this device immediately when the inverter reports grid loss / No Utility, no live grid AC reference, or inverter trip.
+            </span>
+            {notificationPermission === 'denied' && (
+              <span className="text-yellow-300 text-xs font-sans">
+                Notifications are blocked in this browser or operating system.
+              </span>
+            )}
+          </div>
+          <Toggle
+            checked={gridOutageNotificationsEnabled && notificationPermission === 'granted'}
+            onChange={handleGridOutageNotifications}
+          />
+        </div>
+      </section>
+
+      {/* ─── Section 4: Refresh Interval ─── */}
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-3">
         <h2 className="text-text-primary text-lg font-semibold font-sans">Refresh Interval</h2>
 
