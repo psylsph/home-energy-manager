@@ -707,22 +707,34 @@ export default function HistoryPage() {
       </div>
 
       {/* Time range */}
-      <div className="flex items-center gap-2 bg-bg-surface rounded-xl p-2 overflow-x-auto">
-        {HISTORY_RANGES.map((r) => (
-          <button
-            key={r.key}
-            type="button"
-            aria-pressed={range === r.key}
-            onClick={() => handleRangeChange(r.key)}
-            className={`shrink-0 px-3 py-1.5 rounded-lg text-xs font-sans font-medium transition-colors ${
-              range === r.key
-                ? 'bg-flow-active text-bg-base'
-                : 'bg-bg-elevated text-text-secondary hover:text-text-primary'
-            }`}
-          >
-            {r.label}
-          </button>
-        ))}
+      <div className="bg-bg-surface rounded-xl p-2 min-w-0">
+        <select
+          value={range}
+          onChange={(e) => handleRangeChange(e.target.value as HistoryRange)}
+          className="sm:hidden w-full bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-sans font-medium outline-none border border-white/10"
+          aria-label="Select time range"
+        >
+          {HISTORY_RANGES.map((r) => (
+            <option key={r.key} value={r.key}>{r.label}</option>
+          ))}
+        </select>
+        <div className="hidden sm:flex items-center gap-2 overflow-x-auto">
+          {HISTORY_RANGES.map((r) => (
+            <button
+              key={r.key}
+              type="button"
+              aria-pressed={range === r.key}
+              onClick={() => handleRangeChange(r.key)}
+              className={`shrink-0 px-3 py-1.5 rounded-lg text-xs font-sans font-medium transition-colors ${
+                range === r.key
+                  ? 'bg-flow-active text-bg-base'
+                  : 'bg-bg-elevated text-text-secondary hover:text-text-primary'
+              }`}
+            >
+              {r.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Navigation */}

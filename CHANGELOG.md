@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.1] - 2026-06-12
+
+### Added
+
+- **Power page CSV export** — The combined Power view can now export the
+  selected range to CSV, including report metadata, summary totals,
+  bucketed breakdown rows, and detailed transformed samples. Battery and
+  grid values use the same signs as the chart: battery positive means
+  discharge, grid positive means import.
+- **Printable Power PDF report** — The Power page now opens a polished
+  printable report for the selected range, with KPI cards, the combined
+  power chart, solar/home, grid import/export, and battery activity bar
+  charts, donut summaries, highlights, and a bucket table.
+- **Power period totals for exports** — CSV and PDF reports include estimated
+  kWh totals for solar generation, home load, grid import/export, battery
+  charge/discharge, net grid use, peak power values, and SOC statistics.
+
+### Changed
+
+- **Mobile time range picker** — Power and History now use a compact dropdown
+  for time ranges on mobile while keeping the existing pill buttons on wider
+  screens, preventing the controls from overflowing with the extra export
+  actions.
+
 ## [0.19.0] - 2026-06-11
 
 ### Added

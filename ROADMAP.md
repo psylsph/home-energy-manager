@@ -4,6 +4,137 @@ Planned and under-investigation items for Home Energy Manager. This is not a
 release commitment; items may change as hardware access, simulator support, and
 user reports improve.
 
+## Power page CSV/PDF exports and period summaries
+
+**Status**: In progress.
+
+Users have requested export from the **Power** panel specifically. This is the
+combined view that overlays all key feeds in one place, not the individual
+History tabs. Export output should be based on the same selected Power range
+(`1h`, `6h`, `12h`, `24h`, `Today`, `7d`, `30d`, `Month`, `6m`, `1y`) and should
+include both detailed samples and useful period summaries.
+
+### Export scope
+
+The Power panel currently combines:
+
+- Combined PV generation (`solar_power` → displayed as positive W)
+- Battery power (`battery_power` → inverted so positive means discharge and
+  negative means charge)
+- Grid power (`grid_power` → inverted so positive means import and negative
+  means export)
+- Home/load power (`home_power` → displayed as positive W)
+- Battery state of charge (`soc`)
+
+Exports should use these transformed display semantics so CSV/PDF values match
+what users see on the Power chart.
+
+### CSV requirements
+
+CSV export should include three sections:
+
+1. **Report metadata and summary totals**
+   - Report name, selected period label, generated timestamp
+   - Total solar generation kWh
+   - Total home/load kWh
+   - Total grid import kWh
+   - Total grid export kWh
+   - Net grid kWh (`import - export`)
+   - Battery charged kWh
+   - Battery discharged kWh
+   - Peak solar W, peak home W, peak grid import/export W
+   - Minimum, maximum, and average SOC
+   - Solar coverage percentage (`solar kWh / home kWh`)
+   - Grid dependency percentage (`import kWh / home kWh`)
+
+2. **Bucketed breakdown for charting/spreadsheets**
+   - Hourly buckets for sub-day and `Today` ranges
+   - Daily buckets for `7d`, `30d`, and `Month`
+   - Monthly buckets for `6m` and `1y`
+   - Columns: bucket label, solar kWh, home kWh, import kWh, export kWh,
+     battery charge kWh, battery discharge kWh, min/avg/max SOC
+
+3. **Detailed transformed samples**
+   - Timestamp ISO, local timestamp
+   - Solar W
+   - Battery W and direction (`Charging`, `Discharging`, `Idle`)
+   - Grid W and direction (`Importing`, `Exporting`, `Idle`)
+   - Home/load W
+   - SOC %
+
+CSV exports should include all Power series for the selected range, regardless
+of legend-muted visual state. Muting is a chart display preference, not a data
+filter.
+
+### PDF requirements
+
+PDF output should be a polished printable Power report using the same selected
+range and transformed data. The first implementation can use a printable report
+window (`window.print()` / save as PDF) to avoid a heavy PDF dependency; a direct
+PDF writer can be added later if required.
+
+Suggested layout:
+
+1. **Summary dashboard**
+   - Header: Home Energy Manager, Power Report, selected period, generated time
+   - KPI cards for solar generated, home consumed, grid imported, grid exported,
+     net grid, battery charged/discharged, solar coverage, grid dependency,
+     peak load, and SOC range
+
+2. **Combined Power view**
+   - A chart equivalent to the Power panel: PV, battery charge/discharge, grid
+     import/export, home/load, and SOC context
+
+3. **Period breakdown bar charts**
+   - For `Month`, show a bar per day
+   - For `7d`/`30d`, show daily bars
+   - For `6m`/`1y`, show monthly bars
+   - For sub-day/Today, show hourly bars
+   - Use separate, readable charts rather than a crowded single chart:
+     - Solar vs home/load
+     - Grid import vs export
+     - Battery charge vs discharge
+
+4. **Pie/donut charts**
+   - Grid balance: import vs export
+   - Battery activity: charge vs discharge
+   - Estimated solar destination: used locally, charged to battery, exported
+     (clearly labelled as estimated where exact routing is not available)
+
+5. **Highlights and table**
+   - Best solar bucket/day
+   - Highest home/load bucket/day
+   - Highest import bucket/day
+   - Highest export bucket/day
+   - Lowest SOC bucket/day
+   - Compact bucket table with kWh and SOC values
+
+### Implementation detail
+
+- Keep implementation frontend-only initially in `src/pages/PowerPage.tsx`.
+- Reuse the existing Power history fetch and transformed `PowerRow` model.
+- Add `calculatePowerReport()` helper that integrates displayed power samples
+  over time to estimate kWh totals for the selected period.
+- Skip unusually large gaps when integrating so offline periods do not create
+  inflated totals.
+- Add bucket aggregation helper with bucket size selected from the active range.
+- Add `exportPowerCSV()` for metadata, bucket rows, and detailed sample rows.
+- Add `exportPowerPDF()` that creates a printable report window with inline CSS
+  and lightweight SVG bar/pie charts.
+- Preserve Power page chart behaviour and avoid changing Modbus/backend history
+  storage for this first iteration.
+
+### Future improvements
+
+- Offer “summary only” vs “detailed” PDF modes.
+- Add direct PDF generation if print-to-PDF is not acceptable.
+- Optionally include cost summaries using import/export tariff settings.
+- Consider exact cumulative-counter totals where available, while keeping the
+  displayed Power-row totals as the visible-data baseline.
+- Add scheduled monthly report generation once manual exports settle.
+
+---
+
 ### HV battery capacity — nominal vs usable
 
 **Status**: Data available but frontend displays nominal, not usable.

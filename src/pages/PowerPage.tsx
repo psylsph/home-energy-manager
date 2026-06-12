@@ -56,6 +56,49 @@ interface PowerHistoryState {
 const HISTORY_FIELDS = ['solar_power', 'battery_power', 'grid_power', 'home_power', 'soc'];
 const EMPTY_HISTORY_DATA: Record<string, TimePoint[]> = {};
 
+interface PowerBucket {
+  start: number;
+  label: string;
+  solarKwh: number;
+  homeKwh: number;
+  importKwh: number;
+  exportKwh: number;
+  batteryChargeKwh: number;
+  batteryDischargeKwh: number;
+  socMin: number | null;
+  socMax: number | null;
+  socSum: number;
+  socCount: number;
+}
+
+interface PowerReportSummary {
+  periodLabel: string;
+  generatedAt: Date;
+  solarKwh: number;
+  homeKwh: number;
+  importKwh: number;
+  exportKwh: number;
+  netGridKwh: number;
+  batteryChargeKwh: number;
+  batteryDischargeKwh: number;
+  peakSolarW: number;
+  peakHomeW: number;
+  peakGridImportW: number;
+  peakGridExportW: number;
+  peakBatteryChargeW: number;
+  peakBatteryDischargeW: number;
+  socMin: number | null;
+  socMax: number | null;
+  socAvg: number | null;
+  solarCoveragePct: number | null;
+  gridDependencyPct: number | null;
+}
+
+interface PowerReport {
+  summary: PowerReportSummary;
+  buckets: PowerBucket[];
+}
+
 const POWER_SERIES: { key: PowerSeriesKey; label: string; color: string }[] = [
   { key: 'solarPower', label: 'Combined PV', color: '#F59E0B' },
   { key: 'batteryPower', label: 'Battery', color: '#22C55E' },
@@ -190,6 +233,628 @@ function PowerStat({ label, value, color, direction, waiting }: {
   );
 }
 
+function formatKwh(value: number): string {
+  return `${value.toFixed(value >= 100 ? 0 : 1)} kWh`;
+}
+
+function formatPercentValue(value: number | null): string {
+  return value == null ? '—' : `${Math.round(value)}%`;
+}
+
+function formatWatts(value: number): string {
+  return formatPower(value);
+}
+
+function formatLocalDateTime(ts: number): string {
+  return new Date(ts).toLocaleString();
+}
+
+function csvCell(value: string | number | null | undefined): string {
+  if (value == null) return '';
+  const text = String(value);
+  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function downloadTextFile(content: string, fileName: string, mimeType: string) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, 1000);
+}
+
+function reportRangeLabel(range: HistoryRange, domain: [number, number]): string {
+  const start = new Date(domain[0]);
+  const end = new Date(domain[1]);
+  if (range === 'today') return 'Today';
+  if (range === 'month') {
+    return start.toLocaleDateString([], { month: 'long', year: 'numeric' });
+  }
+  const label = HISTORY_RANGES.find((r) => r.key === range)?.label ?? range;
+  if (range === '1h' || range === '6h' || range === '12h' || range === '24h') {
+    return `Last ${label}`;
+  }
+  return `${start.toLocaleDateString()} – ${end.toLocaleDateString()}`;
+}
+
+function exportFileSafeLabel(label: string): string {
+  return label.replace(/[^\w-]+/g, '_').replace(/^_+|_+$/g, '').toLowerCase();
+}
+
+function batteryDirection(value: number | null): string {
+  if (value == null || Math.abs(value) < 1) return 'Idle';
+  return value > 0 ? 'Discharging' : 'Charging';
+}
+
+function gridDirection(value: number | null): string {
+  if (value == null || Math.abs(value) < 1) return 'Idle';
+  return value > 0 ? 'Importing' : 'Exporting';
+}
+
+function medianIntervalMs(rows: PowerRow[]): number | null {
+  const intervals = rows
+    .slice(1)
+    .map((row, i) => row.t - rows[i].t)
+    .filter((dt) => dt > 0)
+    .sort((a, b) => a - b);
+  if (intervals.length === 0) return null;
+  return intervals[Math.floor(intervals.length / 2)];
+}
+
+function positivePart(value: number | null | undefined): number {
+  return Math.max(value ?? 0, 0);
+}
+
+function negativeMagnitude(value: number | null | undefined): number {
+  return Math.max(-(value ?? 0), 0);
+}
+
+function integratePair(
+  a: number | null,
+  b: number | null,
+  hours: number,
+  transform: (value: number | null | undefined) => number,
+): number {
+  if (a == null && b == null) return 0;
+  if (a == null) return transform(b) * hours / 1000;
+  if (b == null) return transform(a) * hours / 1000;
+  return ((transform(a) + transform(b)) / 2) * hours / 1000;
+}
+
+function bucketGranularity(range: HistoryRange): 'hour' | 'day' | 'month' {
+  if (range === '6m' || range === '1y') return 'month';
+  if (range === '7d' || range === '30d' || range === 'month') return 'day';
+  return 'hour';
+}
+
+function bucketStartMs(ts: number, range: HistoryRange): number {
+  const d = new Date(ts);
+  switch (bucketGranularity(range)) {
+    case 'month':
+      return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+    case 'day':
+      return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    case 'hour':
+      return new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours()).getTime();
+  }
+}
+
+function bucketLabel(start: number, range: HistoryRange): string {
+  const d = new Date(start);
+  switch (bucketGranularity(range)) {
+    case 'month':
+      return d.toLocaleDateString([], { month: 'short', year: 'numeric' });
+    case 'day':
+      if (range === 'month') return String(d.getDate());
+      return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    case 'hour':
+      return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit' });
+  }
+}
+
+function emptyBucket(start: number, range: HistoryRange): PowerBucket {
+  return {
+    start,
+    label: bucketLabel(start, range),
+    solarKwh: 0,
+    homeKwh: 0,
+    importKwh: 0,
+    exportKwh: 0,
+    batteryChargeKwh: 0,
+    batteryDischargeKwh: 0,
+    socMin: null,
+    socMax: null,
+    socSum: 0,
+    socCount: 0,
+  };
+}
+
+function addSoc(bucket: PowerBucket, soc: number | null) {
+  if (soc == null) return;
+  bucket.socMin = bucket.socMin == null ? soc : Math.min(bucket.socMin, soc);
+  bucket.socMax = bucket.socMax == null ? soc : Math.max(bucket.socMax, soc);
+  bucket.socSum += soc;
+  bucket.socCount += 1;
+}
+
+function bucketSocAvg(bucket: PowerBucket): number | null {
+  return bucket.socCount > 0 ? bucket.socSum / bucket.socCount : null;
+}
+
+function calculatePowerReport(rows: PowerRow[], range: HistoryRange, domain: [number, number]): PowerReport {
+  const buckets = new Map<number, PowerBucket>();
+  const getBucket = (ts: number) => {
+    const start = bucketStartMs(ts, range);
+    const existing = buckets.get(start);
+    if (existing) return existing;
+    const created = emptyBucket(start, range);
+    buckets.set(start, created);
+    return created;
+  };
+
+  const sortedRows = rows.filter((row) => row.t >= domain[0] && row.t <= domain[1]).sort((a, b) => a.t - b.t);
+  const medianMs = medianIntervalMs(sortedRows);
+  const maxGapMs = medianMs == null ? Infinity : medianMs * 3.5;
+
+  let solarKwh = 0;
+  let homeKwh = 0;
+  let importKwh = 0;
+  let exportKwh = 0;
+  let batteryChargeKwh = 0;
+  let batteryDischargeKwh = 0;
+
+  for (let i = 0; i < sortedRows.length - 1; i++) {
+    const a = sortedRows[i];
+    const b = sortedRows[i + 1];
+    const rawDt = b.t - a.t;
+    if (rawDt <= 0 || rawDt > maxGapMs) continue;
+    const start = Math.max(a.t, domain[0]);
+    const end = Math.min(b.t, domain[1]);
+    const hours = (end - start) / 3600000;
+    if (hours <= 0) continue;
+
+    const solar = integratePair(a.solarPower, b.solarPower, hours, positivePart);
+    const home = integratePair(a.homePower, b.homePower, hours, positivePart);
+    const gridImport = integratePair(a.gridPower, b.gridPower, hours, positivePart);
+    const gridExport = integratePair(a.gridPower, b.gridPower, hours, negativeMagnitude);
+    const batteryCharge = integratePair(a.batteryPower, b.batteryPower, hours, negativeMagnitude);
+    const batteryDischarge = integratePair(a.batteryPower, b.batteryPower, hours, positivePart);
+
+    solarKwh += solar;
+    homeKwh += home;
+    importKwh += gridImport;
+    exportKwh += gridExport;
+    batteryChargeKwh += batteryCharge;
+    batteryDischargeKwh += batteryDischarge;
+
+    const midpoint = start + (end - start) / 2;
+    const bucket = getBucket(midpoint);
+    bucket.solarKwh += solar;
+    bucket.homeKwh += home;
+    bucket.importKwh += gridImport;
+    bucket.exportKwh += gridExport;
+    bucket.batteryChargeKwh += batteryCharge;
+    bucket.batteryDischargeKwh += batteryDischarge;
+  }
+
+  for (const row of sortedRows) {
+    addSoc(getBucket(row.t), row.soc);
+  }
+
+  const socValues = sortedRows.map((row) => row.soc).filter((soc): soc is number => soc != null);
+  const socMin = socValues.length ? Math.min(...socValues) : null;
+  const socMax = socValues.length ? Math.max(...socValues) : null;
+  const socAvg = socValues.length ? socValues.reduce((acc, soc) => acc + soc, 0) / socValues.length : null;
+
+  const summary: PowerReportSummary = {
+    periodLabel: reportRangeLabel(range, domain),
+    generatedAt: new Date(),
+    solarKwh,
+    homeKwh,
+    importKwh,
+    exportKwh,
+    netGridKwh: importKwh - exportKwh,
+    batteryChargeKwh,
+    batteryDischargeKwh,
+    peakSolarW: Math.max(0, ...sortedRows.map((row) => positivePart(row.solarPower))),
+    peakHomeW: Math.max(0, ...sortedRows.map((row) => positivePart(row.homePower))),
+    peakGridImportW: Math.max(0, ...sortedRows.map((row) => positivePart(row.gridPower))),
+    peakGridExportW: Math.max(0, ...sortedRows.map((row) => negativeMagnitude(row.gridPower))),
+    peakBatteryChargeW: Math.max(0, ...sortedRows.map((row) => negativeMagnitude(row.batteryPower))),
+    peakBatteryDischargeW: Math.max(0, ...sortedRows.map((row) => positivePart(row.batteryPower))),
+    socMin,
+    socMax,
+    socAvg,
+    solarCoveragePct: homeKwh > 0 ? solarKwh / homeKwh * 100 : null,
+    gridDependencyPct: homeKwh > 0 ? importKwh / homeKwh * 100 : null,
+  };
+
+  return {
+    summary,
+    buckets: [...buckets.values()].sort((a, b) => a.start - b.start),
+  };
+}
+
+function exportPowerCSV(report: PowerReport, rows: PowerRow[]) {
+  const s = report.summary;
+  const sections: string[][] = [];
+
+  sections.push(
+    ['Report', 'Power'],
+    ['Period', s.periodLabel],
+    ['Generated', s.generatedAt.toLocaleString()],
+    ['Total Solar Generation kWh', s.solarKwh.toFixed(3)],
+    ['Total Home Load kWh', s.homeKwh.toFixed(3)],
+    ['Total Grid Import kWh', s.importKwh.toFixed(3)],
+    ['Total Grid Export kWh', s.exportKwh.toFixed(3)],
+    ['Net Grid kWh', s.netGridKwh.toFixed(3)],
+    ['Total Battery Charge kWh', s.batteryChargeKwh.toFixed(3)],
+    ['Total Battery Discharge kWh', s.batteryDischargeKwh.toFixed(3)],
+    ['Peak Solar W', Math.round(s.peakSolarW).toString()],
+    ['Peak Home Load W', Math.round(s.peakHomeW).toString()],
+    ['Peak Grid Import W', Math.round(s.peakGridImportW).toString()],
+    ['Peak Grid Export W', Math.round(s.peakGridExportW).toString()],
+    ['Peak Battery Charge W', Math.round(s.peakBatteryChargeW).toString()],
+    ['Peak Battery Discharge W', Math.round(s.peakBatteryDischargeW).toString()],
+    ['Minimum SOC %', s.socMin == null ? '' : s.socMin.toFixed(1)],
+    ['Maximum SOC %', s.socMax == null ? '' : s.socMax.toFixed(1)],
+    ['Average SOC %', s.socAvg == null ? '' : s.socAvg.toFixed(1)],
+    ['Solar Coverage %', s.solarCoveragePct == null ? '' : s.solarCoveragePct.toFixed(1)],
+    ['Grid Dependency %', s.gridDependencyPct == null ? '' : s.gridDependencyPct.toFixed(1)],
+    [],
+    ['Bucket Breakdown'],
+    ['Bucket', 'Solar kWh', 'Home Load kWh', 'Grid Import kWh', 'Grid Export kWh', 'Battery Charge kWh', 'Battery Discharge kWh', 'Min SOC %', 'Avg SOC %', 'Max SOC %'],
+  );
+
+  for (const bucket of report.buckets) {
+    sections.push([
+      bucket.label,
+      bucket.solarKwh.toFixed(3),
+      bucket.homeKwh.toFixed(3),
+      bucket.importKwh.toFixed(3),
+      bucket.exportKwh.toFixed(3),
+      bucket.batteryChargeKwh.toFixed(3),
+      bucket.batteryDischargeKwh.toFixed(3),
+      bucket.socMin == null ? '' : bucket.socMin.toFixed(1),
+      bucketSocAvg(bucket) == null ? '' : bucketSocAvg(bucket)!.toFixed(1),
+      bucket.socMax == null ? '' : bucket.socMax.toFixed(1),
+    ]);
+  }
+
+  sections.push(
+    [],
+    ['Detailed Samples'],
+    ['Timestamp ISO', 'Timestamp Local', 'Solar W', 'Battery W', 'Battery Direction', 'Grid W', 'Grid Direction', 'Home Load W', 'SOC %'],
+  );
+
+  for (const row of rows) {
+    sections.push([
+      new Date(row.t).toISOString(),
+      formatLocalDateTime(row.t),
+      row.solarPower == null ? '' : Math.round(row.solarPower).toString(),
+      row.batteryPower == null ? '' : Math.round(row.batteryPower).toString(),
+      batteryDirection(row.batteryPower),
+      row.gridPower == null ? '' : Math.round(row.gridPower).toString(),
+      gridDirection(row.gridPower),
+      row.homePower == null ? '' : Math.round(row.homePower).toString(),
+      row.soc == null ? '' : row.soc.toFixed(1),
+    ]);
+  }
+
+  const csv = sections.map((row) => row.map(csvCell).join(',')).join('\n');
+  const fileName = `givenergy_power_${exportFileSafeLabel(s.periodLabel)}.csv`;
+  downloadTextFile(csv, fileName, 'text/csv;charset=utf-8;');
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function renderBarChart(title: string, buckets: PowerBucket[], series: { key: keyof PowerBucket; label: string; color: string }[]): string {
+  const width = 920;
+  const height = 280;
+  const left = 54;
+  const right = 18;
+  const top = 36;
+  const bottom = 54;
+  const chartW = width - left - right;
+  const chartH = height - top - bottom;
+  const maxVal = Math.max(
+    0.1,
+    ...buckets.flatMap((bucket) => series.map((s) => Number(bucket[s.key]) || 0)),
+  );
+  const groupW = chartW / Math.max(1, buckets.length);
+  const barW = Math.max(2, Math.min(18, groupW / (series.length + 1)));
+  const labelEvery = Math.max(1, Math.ceil(buckets.length / 12));
+
+  const bars = buckets.flatMap((bucket, bucketIndex) => series.map((item, seriesIndex) => {
+    const value = Number(bucket[item.key]) || 0;
+    const barH = value / maxVal * chartH;
+    const x = left + bucketIndex * groupW + (groupW - barW * series.length) / 2 + seriesIndex * barW;
+    const y = top + chartH - barH;
+    return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${barH.toFixed(1)}" rx="2" fill="${item.color}" />`;
+  })).join('');
+
+  const labels = buckets.map((bucket, index) => {
+    if (index % labelEvery !== 0 && index !== buckets.length - 1) return '';
+    const x = left + index * groupW + groupW / 2;
+    return `<text x="${x.toFixed(1)}" y="${height - 18}" text-anchor="middle" class="axis-label">${escapeHtml(bucket.label)}</text>`;
+  }).join('');
+
+  const grid = [0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+    const y = top + chartH - ratio * chartH;
+    const val = maxVal * ratio;
+    return `<line x1="${left}" x2="${width - right}" y1="${y}" y2="${y}" class="grid" />`
+      + `<text x="${left - 8}" y="${y + 4}" text-anchor="end" class="axis-label">${val.toFixed(maxVal >= 10 ? 0 : 1)}</text>`;
+  }).join('');
+
+  const legend = series.map((item, index) => {
+    const x = left + index * 150;
+    return `<g><rect x="${x}" y="14" width="10" height="10" rx="2" fill="${item.color}" />`
+      + `<text x="${x + 16}" y="23" class="legend-label">${escapeHtml(item.label)}</text></g>`;
+  }).join('');
+
+  return `<section class="chart-card"><h2>${escapeHtml(title)}</h2><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(title)}">${legend}${grid}${bars}${labels}</svg></section>`;
+}
+
+function renderCombinedPowerChart(rows: PowerRow[]): string {
+  const width = 920;
+  const height = 300;
+  const left = 54;
+  const right = 54;
+  const top = 40;
+  const bottom = 48;
+  const chartW = width - left - right;
+  const chartH = height - top - bottom;
+  const filteredRows = rows.filter((row) => row.solarPower != null || row.batteryPower != null || row.gridPower != null || row.homePower != null || row.soc != null);
+  if (filteredRows.length < 2) {
+    return '<section class="chart-card"><h2>Combined Power Flow</h2><p class="muted">Not enough data for a combined power chart.</p></section>';
+  }
+  const minT = filteredRows[0].t;
+  const maxT = filteredRows[filteredRows.length - 1].t;
+  const maxPower = Math.max(
+    1000,
+    ...filteredRows.flatMap((row) => [
+      Math.abs(row.solarPower ?? 0),
+      Math.abs(row.batteryPower ?? 0),
+      Math.abs(row.gridPower ?? 0),
+      Math.abs(row.homePower ?? 0),
+    ]),
+  );
+  const yMax = Math.ceil(maxPower / 1000) * 1000;
+  const xFor = (t: number) => left + ((t - minT) / Math.max(1, maxT - minT)) * chartW;
+  const yForPower = (v: number) => top + chartH / 2 - (v / yMax) * (chartH / 2);
+  const yForSoc = (v: number) => top + chartH - (v / 100) * chartH;
+  const series = [
+    { key: 'solarPower' as const, label: 'Solar', color: '#F59E0B', dash: '' },
+    { key: 'batteryPower' as const, label: 'Battery', color: '#22C55E', dash: '' },
+    { key: 'gridPower' as const, label: 'Grid', color: '#EF4444', dash: '' },
+    { key: 'homePower' as const, label: 'Home/load', color: '#14B8A6', dash: '' },
+  ];
+  const polylines = series.map((item) => {
+    const points = filteredRows
+      .filter((row) => row[item.key] != null)
+      .map((row) => `${xFor(row.t).toFixed(1)},${yForPower(row[item.key] ?? 0).toFixed(1)}`)
+      .join(' ');
+    return `<polyline points="${points}" fill="none" stroke="${item.color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />`;
+  }).join('');
+  const socPoints = filteredRows
+    .filter((row) => row.soc != null)
+    .map((row) => `${xFor(row.t).toFixed(1)},${yForSoc(row.soc ?? 0).toFixed(1)}`)
+    .join(' ');
+  const socLine = socPoints
+    ? `<polyline points="${socPoints}" fill="none" stroke="#A78BFA" stroke-width="2" stroke-dasharray="5 4" stroke-linecap="round" stroke-linejoin="round" />`
+    : '';
+  const grid = [-1, -0.5, 0, 0.5, 1].map((ratio) => {
+    const y = top + chartH / 2 - ratio * chartH / 2;
+    const value = yMax * ratio;
+    return `<line x1="${left}" x2="${width - right}" y1="${y}" y2="${y}" class="grid" />`
+      + `<text x="${left - 8}" y="${y + 4}" text-anchor="end" class="axis-label">${formatAxisWatts(value)}</text>`;
+  }).join('');
+  const socAxis = [0, 50, 100].map((value) => {
+    const y = yForSoc(value);
+    return `<text x="${width - right + 8}" y="${y + 4}" class="axis-label">${value}%</text>`;
+  }).join('');
+  const legendItems = [
+    ...series,
+    { key: 'soc' as const, label: 'SOC', color: '#A78BFA', dash: '5 4' },
+  ].map((item, index) => {
+    const x = left + index * 135;
+    return `<g><line x1="${x}" x2="${x + 20}" y1="18" y2="18" stroke="${item.color}" stroke-width="3" stroke-dasharray="${item.dash}" />`
+      + `<text x="${x + 28}" y="22" class="legend-label">${escapeHtml(item.label)}</text></g>`;
+  }).join('');
+  const startLabel = new Date(minT).toLocaleDateString();
+  const endLabel = new Date(maxT).toLocaleDateString();
+  return `<section class="chart-card"><h2>Combined Power Flow</h2><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Combined Power Flow">${legendItems}${grid}<line x1="${left}" x2="${left}" y1="${top}" y2="${top + chartH}" class="grid" /><line x1="${width - right}" x2="${width - right}" y1="${top}" y2="${top + chartH}" class="grid" />${polylines}${socLine}${socAxis}<text x="${left}" y="${height - 16}" class="axis-label">${escapeHtml(startLabel)}</text><text x="${width - right}" y="${height - 16}" text-anchor="end" class="axis-label">${escapeHtml(endLabel)}</text></svg></section>`;
+}
+
+function renderDonut(title: string, items: { label: string; value: number; color: string }[]): string {
+  const total = items.reduce((acc, item) => acc + Math.max(item.value, 0), 0);
+  let cursor = 0;
+  const stops = total > 0 ? items.map((item) => {
+    const start = cursor;
+    const degrees = Math.max(item.value, 0) / total * 360;
+    cursor += degrees;
+    return `${item.color} ${start.toFixed(1)}deg ${cursor.toFixed(1)}deg`;
+  }).join(', ') : '#30363d 0deg 360deg';
+  const legend = items.map((item) => (
+    `<div class="donut-legend-row"><span class="swatch" style="background:${item.color}"></span>`
+    + `<span>${escapeHtml(item.label)}</span><strong>${formatKwh(item.value)}</strong></div>`
+  )).join('');
+  return `<section class="donut-card"><h2>${escapeHtml(title)}</h2><div class="donut-wrap"><div class="donut" style="background: conic-gradient(${stops});"><span>${formatKwh(total)}</span></div><div class="donut-legend">${legend}</div></div></section>`;
+}
+
+function bucketHighlight(buckets: PowerBucket[], field: keyof PowerBucket, label: string): string {
+  const best = buckets.reduce<PowerBucket | null>((current, bucket) => {
+    if (current == null) return bucket;
+    return Number(bucket[field]) > Number(current[field]) ? bucket : current;
+  }, null);
+  if (best == null) return '';
+  return `<div class="highlight"><span>${escapeHtml(label)}</span><strong>${escapeHtml(best.label)} · ${formatKwh(Number(best[field]) || 0)}</strong></div>`;
+}
+
+function socLowHighlight(buckets: PowerBucket[]): string {
+  const lows = buckets.filter((bucket) => bucket.socMin != null);
+  if (lows.length === 0) return '';
+  const low = lows.reduce((current, bucket) => (bucket.socMin! < current.socMin! ? bucket : current));
+  return `<div class="highlight"><span>Lowest SOC</span><strong>${escapeHtml(low.label)} · ${low.socMin!.toFixed(0)}%</strong></div>`;
+}
+
+function exportPowerPDF(report: PowerReport, rows: PowerRow[]) {
+  const s = report.summary;
+  const solarToHomeEstimate = Math.max(0, s.solarKwh - s.exportKwh - s.batteryChargeKwh);
+  const batteryToHomeEstimate = Math.min(s.batteryDischargeKwh, Math.max(0, s.homeKwh - s.importKwh - solarToHomeEstimate));
+  const reportHtml = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Power Report - ${escapeHtml(s.periodLabel)}</title>
+<style>
+  :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  body { margin: 0; background: #f3f4f6; color: #0f172a; }
+  .page { max-width: 980px; margin: 0 auto; padding: 28px; }
+  header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
+  h1 { margin: 0 0 6px; font-size: 30px; letter-spacing: -0.04em; }
+  h2 { margin: 0 0 14px; font-size: 17px; }
+  .muted { color: #64748b; font-size: 13px; }
+  .actions { display: flex; gap: 8px; }
+  button { border: 0; background: #0ea5e9; color: white; border-radius: 999px; padding: 9px 14px; font-weight: 700; cursor: pointer; }
+  .grid-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 18px; }
+  .card, .chart-card, .donut-card, .table-card, .highlight { background: white; border: 1px solid #e2e8f0; border-radius: 18px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06); }
+  .card { padding: 15px; }
+  .card span { display: block; color: #64748b; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; font-weight: 800; }
+  .card strong { display: block; margin-top: 7px; font-size: 22px; letter-spacing: -0.04em; }
+  .chart-card, .donut-card, .table-card { padding: 18px; margin-bottom: 16px; page-break-inside: avoid; }
+  .charts-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  .donut-wrap { display: flex; align-items: center; gap: 18px; }
+  .donut { width: 132px; height: 132px; border-radius: 50%; display: grid; place-items: center; position: relative; flex: 0 0 auto; }
+  .donut::after { content: ''; position: absolute; inset: 26px; background: white; border-radius: 50%; }
+  .donut span { position: relative; z-index: 1; font-size: 13px; font-weight: 800; text-align: center; }
+  .donut-legend { flex: 1; display: flex; flex-direction: column; gap: 7px; font-size: 12px; }
+  .donut-legend-row { display: grid; grid-template-columns: 12px 1fr auto; align-items: center; gap: 8px; }
+  .swatch { width: 10px; height: 10px; border-radius: 3px; }
+  .grid { stroke: #e2e8f0; stroke-width: 1; }
+  .axis-label { fill: #64748b; font-size: 10px; font-weight: 700; }
+  .legend-label { fill: #334155; font-size: 12px; font-weight: 700; }
+  .highlights { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 16px; }
+  .highlight { padding: 12px; }
+  .highlight span { display:block; color: #64748b; font-size: 11px; font-weight: 800; text-transform: uppercase; }
+  .highlight strong { display:block; margin-top: 5px; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  th, td { padding: 7px 6px; border-bottom: 1px solid #e2e8f0; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: #475569; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
+  @media print { body { background: white; } .page { max-width: none; padding: 0; } .actions { display: none; } .card, .chart-card, .donut-card, .table-card, .highlight { box-shadow: none; } }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <div>
+      <h1>Power Report</h1>
+      <div class="muted">Home Energy Manager · ${escapeHtml(s.periodLabel)} · Generated ${escapeHtml(s.generatedAt.toLocaleString())}</div>
+      <div class="muted">Energy totals are estimated from the currently displayed Power samples.</div>
+    </div>
+    <div class="actions"><button onclick="window.print()">Save as PDF</button></div>
+  </header>
+
+  <section class="grid-cards">
+    <div class="card"><span>Solar generated</span><strong style="color:#d97706">${formatKwh(s.solarKwh)}</strong></div>
+    <div class="card"><span>Home consumed</span><strong style="color:#0f766e">${formatKwh(s.homeKwh)}</strong></div>
+    <div class="card"><span>Grid import</span><strong style="color:#dc2626">${formatKwh(s.importKwh)}</strong></div>
+    <div class="card"><span>Grid export</span><strong style="color:#0284c7">${formatKwh(s.exportKwh)}</strong></div>
+    <div class="card"><span>Net grid</span><strong>${formatKwh(s.netGridKwh)}</strong></div>
+    <div class="card"><span>Battery charged</span><strong style="color:#7c3aed">${formatKwh(s.batteryChargeKwh)}</strong></div>
+    <div class="card"><span>Battery discharged</span><strong style="color:#16a34a">${formatKwh(s.batteryDischargeKwh)}</strong></div>
+    <div class="card"><span>SOC range</span><strong>${formatPercentValue(s.socMin)} – ${formatPercentValue(s.socMax)}</strong></div>
+    <div class="card"><span>Solar coverage</span><strong>${formatPercentValue(s.solarCoveragePct)}</strong></div>
+    <div class="card"><span>Grid dependency</span><strong>${formatPercentValue(s.gridDependencyPct)}</strong></div>
+    <div class="card"><span>Peak home load</span><strong>${formatWatts(s.peakHomeW)}</strong></div>
+    <div class="card"><span>Peak import/export</span><strong>${formatWatts(s.peakGridImportW)} / ${formatWatts(s.peakGridExportW)}</strong></div>
+  </section>
+
+  ${renderCombinedPowerChart(rows)}
+  ${renderBarChart('Solar generation vs home load', report.buckets, [
+    { key: 'solarKwh', label: 'Solar', color: '#F59E0B' },
+    { key: 'homeKwh', label: 'Home/load', color: '#14B8A6' },
+  ])}
+  ${renderBarChart('Grid import vs export', report.buckets, [
+    { key: 'importKwh', label: 'Import', color: '#EF4444' },
+    { key: 'exportKwh', label: 'Export', color: '#38BDF8' },
+  ])}
+  ${renderBarChart('Battery charge vs discharge', report.buckets, [
+    { key: 'batteryChargeKwh', label: 'Charge', color: '#8B5CF6' },
+    { key: 'batteryDischargeKwh', label: 'Discharge', color: '#22C55E' },
+  ])}
+
+  <section class="charts-2">
+    ${renderDonut('Grid balance', [
+      { label: 'Import', value: s.importKwh, color: '#EF4444' },
+      { label: 'Export', value: s.exportKwh, color: '#38BDF8' },
+    ])}
+    ${renderDonut('Battery activity', [
+      { label: 'Charge', value: s.batteryChargeKwh, color: '#8B5CF6' },
+      { label: 'Discharge', value: s.batteryDischargeKwh, color: '#22C55E' },
+    ])}
+  </section>
+  <section class="charts-2">
+    ${renderDonut('Estimated solar destination', [
+      { label: 'Used locally', value: solarToHomeEstimate, color: '#14B8A6' },
+      { label: 'Charged battery', value: s.batteryChargeKwh, color: '#8B5CF6' },
+      { label: 'Exported', value: s.exportKwh, color: '#38BDF8' },
+    ])}
+    ${renderDonut('Estimated home source', [
+      { label: 'Grid import', value: s.importKwh, color: '#EF4444' },
+      { label: 'Battery discharge', value: batteryToHomeEstimate, color: '#22C55E' },
+      { label: 'Direct solar / other', value: Math.max(0, s.homeKwh - s.importKwh - batteryToHomeEstimate), color: '#F59E0B' },
+    ])}
+  </section>
+
+  <section class="highlights">
+    ${bucketHighlight(report.buckets, 'solarKwh', 'Best solar')}
+    ${bucketHighlight(report.buckets, 'homeKwh', 'Highest load')}
+    ${bucketHighlight(report.buckets, 'importKwh', 'Highest import')}
+    ${bucketHighlight(report.buckets, 'exportKwh', 'Highest export')}
+    ${socLowHighlight(report.buckets)}
+  </section>
+
+  <section class="table-card">
+    <h2>Bucket breakdown</h2>
+    <table>
+      <thead><tr><th>Bucket</th><th>Solar</th><th>Home</th><th>Import</th><th>Export</th><th>Charge</th><th>Discharge</th><th>Avg SOC</th></tr></thead>
+      <tbody>
+        ${report.buckets.map((bucket) => `<tr><td>${escapeHtml(bucket.label)}</td><td>${bucket.solarKwh.toFixed(2)}</td><td>${bucket.homeKwh.toFixed(2)}</td><td>${bucket.importKwh.toFixed(2)}</td><td>${bucket.exportKwh.toFixed(2)}</td><td>${bucket.batteryChargeKwh.toFixed(2)}</td><td>${bucket.batteryDischargeKwh.toFixed(2)}</td><td>${bucketSocAvg(bucket) == null ? '—' : bucketSocAvg(bucket)!.toFixed(0) + '%'}</td></tr>`).join('')}
+      </tbody>
+    </table>
+  </section>
+</div>
+<script>setTimeout(() => window.print(), 500);</script>
+</body>
+</html>`;
+
+  const win = window.open('', '_blank');
+  if (!win) {
+    downloadTextFile(reportHtml, `givenergy_power_${exportFileSafeLabel(s.periodLabel)}.html`, 'text/html;charset=utf-8;');
+    return;
+  }
+  win.document.open();
+  win.document.write(reportHtml);
+  win.document.close();
+  win.focus();
+}
+
 export default function PowerPage() {
   const snapshot = useInverterStore((state) => state.snapshot);
   const range = useInverterStore((state) => state.chartRange);
@@ -203,6 +868,7 @@ export default function PowerPage() {
     error: '',
   });
   const [mutedSeries, setMutedSeries] = useState<Partial<Record<PowerChartKey, boolean>>>({});
+  const [exportToast, setExportToast] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -238,11 +904,18 @@ export default function PowerPage() {
     [data, range, xDomain],
   );
   const yDomain = useMemo(() => calculateDomain(rows), [rows]);
+  const report = useMemo(() => calculatePowerReport(rows, range, displayDomain), [rows, range, displayDomain]);
   const hasData = rows.length > 0;
   const waitingForLiveData = snapshot == null;
   const toggleSeries = (key: PowerChartKey) => {
     setMutedSeries((current) => ({ ...current, [key]: !current[key] }));
   };
+
+  useEffect(() => {
+    if (!exportToast) return;
+    const id = setTimeout(() => setExportToast(null), 3000);
+    return () => clearTimeout(id);
+  }, [exportToast]);
 
   const currentSolar = Math.max(snapshot?.solar_power ?? 0, 0);
   const currentBattery = snapshot?.battery_power ?? 0;
@@ -298,23 +971,70 @@ export default function PowerPage() {
         />
       </div>
 
-      <div className="flex items-center gap-2 bg-bg-surface rounded-xl p-2 overflow-x-auto">
-        {HISTORY_RANGES.map((r) => (
-          <button
-            key={r.key}
-            type="button"
-            aria-pressed={range === r.key}
-            onClick={() => setRange(r.key)}
-            className={`shrink-0 px-3 py-1.5 rounded-lg text-xs font-sans font-medium transition-colors ${
-              range === r.key
-                ? 'bg-flow-active text-bg-base'
-                : 'bg-bg-elevated text-text-secondary hover:text-text-primary'
-            }`}
+      <div className="flex flex-col gap-2">
+        <div className="bg-bg-surface rounded-xl p-2 min-w-0">
+          <select
+            value={range}
+            onChange={(e) => setRange(e.target.value as HistoryRange)}
+            className="sm:hidden w-full bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-sans font-medium outline-none border border-white/10"
+            aria-label="Select time range"
           >
-            {r.label}
+            {HISTORY_RANGES.map((r) => (
+              <option key={r.key} value={r.key}>{r.label}</option>
+            ))}
+          </select>
+          <div className="hidden sm:flex items-center gap-2 overflow-x-auto">
+            {HISTORY_RANGES.map((r) => (
+              <button
+                key={r.key}
+                type="button"
+                aria-pressed={range === r.key}
+                onClick={() => setRange(r.key)}
+                className={`shrink-0 px-3 py-1.5 rounded-lg text-xs font-sans font-medium transition-colors ${
+                  range === r.key
+                    ? 'bg-flow-active text-bg-base'
+                    : 'bg-bg-elevated text-text-secondary hover:text-text-primary'
+                }`}
+              >
+                {r.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="flex items-center justify-end gap-2 bg-bg-surface rounded-xl p-2">
+          <button
+            type="button"
+            onClick={() => {
+              exportPowerCSV(calculatePowerReport(rows, range, displayDomain), rows);
+              setExportToast('CSV exported — ' + report.summary.periodLabel);
+            }}
+            disabled={loading || !hasData || Boolean(error)}
+            className="shrink-0 text-text-secondary hover:text-text-primary text-xs font-sans px-3 py-1.5 rounded-lg bg-bg-elevated hover:bg-bg-elevated/80 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+          >
+            CSV
           </button>
-        ))}
+          <button
+            type="button"
+            onClick={() => {
+              exportPowerPDF(calculatePowerReport(rows, range, displayDomain), rows);
+              setExportToast('PDF report opened — ' + report.summary.periodLabel);
+            }}
+            disabled={loading || !hasData || Boolean(error)}
+            className="shrink-0 text-text-secondary hover:text-text-primary text-xs font-sans px-3 py-1.5 rounded-lg bg-bg-elevated hover:bg-bg-elevated/80 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+          >
+            PDF
+          </button>
+        </div>
       </div>
+
+      {exportToast && (
+        <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 bg-bg-surface border border-battery/30 rounded-xl px-4 py-2.5 shadow-lg text-sm text-text-primary font-sans flex items-center gap-2 animate-in fade-in slide-in-from-bottom-2 duration-200">
+          <svg className="w-4 h-4 text-battery shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          {exportToast}
+        </div>
+      )}
 
       <div className="bg-bg-elevated rounded-xl p-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3">
