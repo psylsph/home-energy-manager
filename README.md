@@ -14,6 +14,10 @@
 
 </div>
 
+## Important Information about the GivEnergy-Local Renaming
+
+The user-facing name is changing to **Home Energy Manager**. The Linux package/launcher and macOS/Windows app names now use the new name, while the executable remains `givenergy-local` and existing settings/history stay in `~/.givenergy-local` (or `%USERPROFILE%\.givenergy-local` on Windows), so upgrades continue to use the same `settings.json` and `history.db`.
+
 ## 🚀 Getting Started
 
 ### 1. Download and install
@@ -144,36 +148,88 @@ The user-facing name is changing to **Home Energy Manager**. The Linux package/l
 <table>
   <tr>
     <td align="center"><b>Status Dashboard</b><br><img src=".github/screenshots/status.png" width="400"></td>
+    <td align="center"><b>Status — Mobile</b><br><img src=".github/screenshots/status-mobile.png" width="200"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Power Chart</b><br><img src=".github/screenshots/control-1.png" width="400"></td>
+    <td align="center"><b>Energy Flow Diagram</b><br><img src=".github/screenshots/control-2.png" width="400"></td>
+  </tr>
+  <tr>
     <td align="center"><b>Energy History</b><br><img src=".github/screenshots/history.png" width="400"></td>
+    <td align="center"><b>History — Solar</b><br><img src=".github/screenshots/history-solar.png" width="400"></td>
   </tr>
   <tr>
+    <td align="center"><b>History — Home</b><br><img src=".github/screenshots/history-home.png" width="400"></td>
     <td align="center"><b>Battery Detail</b><br><img src=".github/screenshots/battery.png" width="400"></td>
-    <td align="center"><b>Control Panel</b><br><img src=".github/screenshots/control.png" width="400"></td>
   </tr>
   <tr>
+    <td align="center"><b>Inverter Info</b><br><img src=".github/screenshots/inverter.png" width="400"></td>
+    <td align="center"><b>Meters</b><br><img src=".github/screenshots/meters.png" width="400"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Control Panel</b><br><img src=".github/screenshots/control.png" width="400"></td>
     <td align="center"><b>Settings</b><br><img src=".github/screenshots/settings.png" width="400"></td>
+  </tr>
+  <tr>
     <td align="center"><b>Developer Console</b><br><img src=".github/screenshots/developer-mode.png" width="400"></td>
+    <td></td>
   </tr>
 </table>
 
-## What it does
+## Features
 
-Home Energy Manager connects directly to your inverter's WiFi or Ethernet data adapter over your home network. It shows you what's happening right now and lets you change settings without needing a GivEnergy Cloud account or portal login.
+Home Energy Manager connects directly to your inverter's WiFi or Ethernet data adapter over your local network using the Modbus TCP protocol. It never connects to the internet or sends your data anywhere else. No GivEnergy Cloud account or portal login required.
 
-- **Real-time dashboard** — see solar generation, battery charge level, grid import/export, and home consumption updating live
-- **Energy flow diagram** — visual animation showing where power is flowing right now (solar → battery → home → grid)
-- **Battery details** — individual cell voltages, temperatures and health per battery module
+### Monitoring
+
+- **Real-time status dashboard** — see solar generation, battery charge level, grid import/export, and home consumption updating live every few seconds
+- **Energy flow diagram** — animated visual showing exactly where power is flowing right now (solar → battery → home → grid), with flow lines that thicken proportionally to power
+- **Power chart** — live time-series chart tracking solar, battery, grid, and home power with 7 selectable time ranges (15 min to 7 days) and clickable legends to mute individual series
+- **Battery detail** — individual cell voltages, temperatures, and health per battery module, with SOC from BMS or inverter register with automatic fallback
+- **Solar page** — per-PV-string voltage, current, and power breakdown with support for dual-string systems
+- **Inverter page** — device model, firmware versions, serial number, operating temperatures, frequency, and all electrical readings at a glance
+- **Meters page** — external meter data with per-phase voltage, current, power, and frequency readings, plus a CT clamp configuration card showing meter enable/reversed/type status
+- **Cold battery warning** — prominent alert when battery temperature drops near freezing, so you know to act before damage occurs
+
+### History & Cost Tracking
+
+- **7 time-range charts** — from 15 minutes to 7 days for solar generation, battery charge/discharge, grid import/export, and home consumption
+- **Energy breakdown views** — separate charts for solar, home, grid, and battery energy with shared time-range selection across pages
+- **Month calendar view** — daily energy totals at a glance for the whole month
+- **Configurable tariffs** — set import and export tariffs to see real-time cost estimates on your history charts
+- **CSV export** — download your energy history as a spreadsheet for further analysis
+
+### Control
+
 - **Charge & discharge schedules** — set time slots for when your battery charges from the grid or discharges to power your home (up to **10 slots** on supported models)
-- **Battery modes** — Eco, Timed Discharge, and Pause, plus **Force Charge** / **Force Discharge** override buttons for instant manual control
+- **Battery modes** — switch between Eco (self-consumption), Timed Discharge, and Pause modes
+- **Force Charge / Force Discharge** — one-click override buttons for instant manual control, with toggle behaviour (click to start, click again to stop)
 - **SOC control** — adjust battery reserve level, charge/discharge power limits, and charge target
-- **Octopus Cosy automation** (beta) — enter your three Cosy cheap-rate windows and the app force-charges the battery through each one, then returns the inverter to Eco mode in between. Survives an app restart mid-slot.
-- **Octopus Agile automation** (beta) — enter your postcode to auto-detect your Octopus region, set charge and discharge price thresholds, and the app force-charges when Agile prices are low, force-discharges when they're high, and sits in Eco mode the rest of the time. Includes a live 24-hour price forecast grid.
-- **Auto Winter Mode** — a local re-implementation of GivEnergy Cloud's winter mode: force-charges the battery from the grid when its temperature drops, to protect it from the cold. (Note: this is independent of the cloud's winter mode — the inverter has no built-in winter capability, it's entirely cloud/app-driven.)
+- **Battery calibration** — start calibration from the app when connected to a Gen1/Gen2 battery that needs manual calibration (auto-detected via BMS firmware version)
+- **Load Discharge Limiter** — prevent excessive discharge during high-demand periods by setting a power threshold and delay timer, active during configurable hours
+
+### Automation
+
+- **Octopus Cosy automation** (beta) — enter your three Cosy cheap-rate windows and the app force-charges the battery through each one, then returns the inverter to Eco mode in between. Schedule slots are written directly into the inverter registers, so it survives an app restart mid-slot.
+- **Octopus Agile automation** (beta) — enter your postcode to auto-detect your Octopus region, set charge and discharge price thresholds, and the app force-charges when Agile prices are low, force-discharges when they're high, and sits in Eco mode the rest of the time. Includes a live 24-hour price forecast grid colour-coded by action with daily savings estimates.
+- **Auto Winter Mode** — a local re-implementation of GivEnergy Cloud's winter mode: force-charges the battery from the grid when its temperature drops below a threshold, to protect it from the cold. Fully configurable thresholds, target SOC, and debounce count. (Note: this is independent of the cloud's winter mode — the inverter has no built-in winter capability, it's entirely cloud/app-driven.)
+
+### Compatibility
+
+- **All GivEnergy inverter models** — Gen 1, Gen 2, Gen 3, Gen 4, Three Phase (GIV-3HY), AC Three Phase, HV Gen 3, All-in-One, AIO Hybrid, and AIO Commercial
 - **Three-phase, HV and commercial inverters** — full support for the GIV-3HY family, AC three-phase, HV Gen 3, and All-in-One commercial units, reading their 1000-range register layout and writing their native schedule/limit registers
-- **Auto-discovery** — just enter your inverter's IP address; the serial number is detected automatically
-- **History & cost tracking** — 7 time-range charts for solar, battery, grid, and home energy, plus a month calendar view, with configurable import/export tariffs (peak/off-peak) and CSV export
-- **Multi-instance** — run several copies against different inverters, each with its own config directory and HTTP port
+- **Smart external meter detection** — persistent retry for LoRA-linked meters and slow-to-respond CT clamps, so nothing gets missed at startup
+
+### Deployment & Access
+
+- **Auto-discovery** — enter your inverter's IP address and the serial number is detected automatically; or use the built-in network scanner to find GivEnergy adapters on your LAN
 - **Headless server mode** — runs as a pure background service on a Raspberry Pi or always-on server, serving the UI over HTTP/WebSocket to any browser on your LAN
+- **Docker support** — pre-built Dockerfile and `docker compose` configuration for containerised deployment
+- **unRAID support** — step-by-step guide for running as a Docker container on unRAID
+- **Multi-instance** — run several copies against different inverters, each with its own config directory and HTTP port
+- **Mobile-friendly** — responsive layout with safe-area insets for modern phones, installable as a PWA on iOS and Android
+- **Light & dark themes** — toggle between light and dark mode, with all charts and components fully theme-aware
+- **Panel visibility toggles** — hide pages you don't use (Solar, Meters, History, etc.) from the navigation bar to declutter the interface
 - **Developer console** — live log viewer for diagnostics, with adjustable capture level (enable in Settings)
 
 ---
@@ -259,6 +315,62 @@ aggregate value.
 Built with [Tauri 2](https://v2.tauri.app/) (Rust + React), Axum, and TypeScript. See [DESIGN.md](./DESIGN.md) for architecture details and the register map. Planned and under-investigation work is tracked in [ROADMAP.md](./ROADMAP.md).
 
 For build instructions, Docker setup, unRAID deployment, and multi-instance configuration, see [**INSTALL.md**](./INSTALL.md).
+
+## 📱 Using Home Energy Manager as a Mobile App Away From Home
+
+Home Energy Manager runs a built-in web server (port **7337** by default). Combined with [**Tailscale**](https://tailscale.com) (a free, zero-config VPN), you can access it from anywhere on your phone — no cloud dependency, no public port forwarding, no static IP required.
+
+### How it works
+
+1. **Install Tailscale** on the machine running Home Energy Manager (e.g. a Raspberry Pi or always-on PC) and on your phone.
+2. Both devices join the same **Tailnet** (your private mesh network).
+3. Open your phone browser to `http://<tailscale-ip>:7337` or save it as a home-screen PWA.
+
+Tailscale encrypts traffic end-to-end using WireGuard, so your inverter data never touches the public internet in plain text.
+
+### Quick start
+
+```bash
+# Install Tailscale on Linux (server)
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+
+# Make a note of the Tailscale IP shown after login
+# (or find it later with: tailscale ip -4)
+```
+
+Then on your phone:
+1. Install the **Tailscale** app from the App Store / Play Store
+2. Log in to the same Tailscale account — your devices appear automatically
+3. Open Safari / Chrome and go to `http://<tailscale-ip>:7337`
+4. Tap **Share → Add to Home Screen** for a native-app-like icon
+
+> 💡 **Tip**: Make sure the Home Energy Manager machine is set to run on boot (`Settings → Startup` or a systemd service) so you don't need to log in remotely to start it.
+
+### Alternative: Tailscale Funnel (no client needed on the phone)
+
+If you don't want Tailscale installed on your phone, you can use **Tailscale Funnel** to expose the web UI via a public `.ts.net` URL:
+
+```bash
+# After Tailscale is installed and logged in:
+sudo tailscale serve --bg --https 443 127.0.0.1:7337
+sudo tailscale funnel --bg 443
+```
+
+Your app will be available at `https://<machine-name>.<tailnet-name>.ts.net` — accessible from any browser, with Tailscale handling TLS termination. Note that Funnel is a Tailscale **paid feature** (Free tier has limited quota).
+
+### Why this beats the cloud
+
+| | Cloud portal | Tailscale + HEM |
+|---|---|---|
+| **Latency** | ~1–3s delayed | Real-time (local LAN speed)|
+| **Internet required?** | Always | Only when away from home |
+| **Cloud dependency** | Full (GE servers) | None |
+| **Data privacy** | Via GivEnergy | End-to-end encrypted |
+| **Cost** | Free | Free (HEM + Tailscale)
+
+---
+
 
 ## Credits
 
