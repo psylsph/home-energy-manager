@@ -63,14 +63,14 @@ Go to the [**Releases page**](https://github.com/psylsph/home-energy-manager/rel
 
 | Your computer | Download the file ending in |
 |---|---|
-| 🪟 **Windows** | `.msi` |
+| 🪟 **Windows** | `.msi` (or `.msix` for Store/sideload packaging) |
 | 🍎 **Mac with Apple Silicon** (M1/M2/M3/M4) | `.dmg` with `aarch64` in the name |
 | 🍎 **Mac with Intel processor** | `.dmg` with `x64` in the name |
 | 🐧 **Linux** (Ubuntu, Debian, etc.) | `.deb` |
 | 🐧 **Linux** (Fedora, openSUSE, etc.) | `.rpm` |
 | 🍓 **Raspberry Pi** (64-bit OS only) | `.deb` with `arm64` in the name |
 
-**Windows users** — Windows may show "Windows protected your PC" / SmartScreen when you try to run the `.msi`. This is because the app isn't code-signed (code signing certificates cost hundreds per year). It's safe — it's open-source software you can inspect on GitHub. To run it:
+**Windows users** — Windows may show "Windows protected your PC" / SmartScreen when you try to run the `.msi`. This is because the app isn't code-signed (code signing certificates cost hundreds per year). It's safe — it's open-source software you can inspect on GitHub. The `.msix` / `.msixupload` assets are primarily for Microsoft Store submission and MSIX sideload packaging. To run the MSI:
 
 1. Click **"More info"** on the SmartScreen screen
 2. Click **"Run anyway"**
