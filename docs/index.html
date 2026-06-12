@@ -221,6 +221,56 @@
     .platform-card .name { font-weight: 600; margin-top: 8px; }
     .platform-card .detail { font-size: 0.85rem; color: #8b949e; margin-top: 4px; }
 
+    /* Support */
+    .support {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 40px 24px 60px;
+      text-align: center;
+    }
+    .support h2 {
+      font-size: 2rem;
+      margin-bottom: 24px;
+    }
+    .support-content {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 24px;
+    }
+    .support-links {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      padding: 24px;
+      text-align: left;
+      max-width: 520px;
+      width: 100%;
+    }
+    .support-links h3 {
+      color: #e6edf3;
+      margin-bottom: 12px;
+      font-size: 1.05rem;
+    }
+    .support-links ul {
+      list-style: none;
+      padding: 0;
+    }
+    .support-links li {
+      color: #b1bac4;
+      font-size: 0.95rem;
+      margin-bottom: 8px;
+    }
+    .support-links li strong {
+      color: #e6edf3;
+    }
+    .support-note {
+      color: #484f58;
+      font-size: 0.85rem;
+      margin-top: 12px;
+      margin-bottom: 0;
+    }
+
     /* Footer */
     .footer {
       text-align: center;
@@ -294,9 +344,14 @@
         <p>Force Charge and Force Discharge buttons for instant control. Click to start, click again to stop.</p>
       </div>
       <div class="feature">
+        <div class="icon">📄</div>
+        <h3>PDF Consumption Reports</h3>
+        <p>Generate formatted A4 PDF reports with charts, summary tables, and cost breakdowns — one click from the History page.</p>
+      </div>
+      <div class="feature">
         <div class="icon">📈</div>
         <h3>History &amp; Costs</h3>
-        <p>Charts from 15 minutes to 7 days. Enter your tariffs to see real-time cost estimates. Export to CSV.</p>
+        <p>Charts from 15 minutes to 7 days. Enter your tariffs to see real-time cost estimates. Export to CSV or PDF.</p>
       </div>
       <div class="feature">
         <div class="icon">🐙</div>
@@ -339,24 +394,8 @@
         <div class="caption">Status Dashboard</div>
       </div>
       <div class="shot">
-        <img src="screenshots/control-2.png" alt="Energy Flow Diagram — animated power flow visualisation">
-        <div class="caption">Energy Flow Diagram</div>
-      </div>
-      <div class="shot">
-        <img src="screenshots/control-1.png" alt="Power Chart — live time-series power chart">
+        <img src="screenshots/power.png" alt="Power Chart — live time-series power chart">
         <div class="caption">Power Chart</div>
-      </div>
-      <div class="shot">
-        <img src="screenshots/history.png" alt="Energy History — daily generation and consumption charts">
-        <div class="caption">Energy History</div>
-      </div>
-      <div class="shot">
-        <img src="screenshots/history-solar.png" alt="Solar History — solar generation breakdown">
-        <div class="caption">History — Solar</div>
-      </div>
-      <div class="shot">
-        <img src="screenshots/history-home.png" alt="Home Energy — home consumption breakdown">
-        <div class="caption">History — Home</div>
       </div>
       <div class="shot">
         <img src="screenshots/battery.png" alt="Battery Detail — cell voltages and temperatures">
@@ -371,7 +410,23 @@
         <div class="caption">Meters</div>
       </div>
       <div class="shot">
-        <img src="screenshots/control.png" alt="Control Panel — schedules, modes, and SOC limits">
+        <img src="screenshots/history.png" alt="Energy History — daily generation and consumption charts">
+        <div class="caption">Energy History</div>
+      </div>
+      <div class="shot">
+        <img src="screenshots/history-solar.png" alt="Solar History — solar generation breakdown">
+        <div class="caption">History — Solar</div>
+      </div>
+      <div class="shot">
+        <img src="screenshots/history-home.png" alt="Home Energy — home consumption breakdown">
+        <div class="caption">History — Home</div>
+      </div>
+      <div class="shot">
+        <img src="screenshots/control-1.png" alt="Control Panel — schedules, modes, and SOC limits">
+        <div class="caption">Control Panel</div>
+      </div>
+      <div class="shot">
+        <img src="screenshots/control-2.png" alt="Control Panel — schedules, modes, and SOC limits">
         <div class="caption">Control Panel</div>
       </div>
       <div class="shot">
@@ -379,8 +434,26 @@
         <div class="caption">Settings</div>
       </div>
       <div class="shot">
+        <img src="screenshots/developer-mode.png" alt="Developer Console — advanced configuration options">
+        <div class="caption">Developer Console</div>
+      </div>
+      <div class="shot">
         <img src="screenshots/status-mobile.png" alt="Mobile view — responsive layout on phone">
         <div class="caption">Mobile View</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="screenshots">
+    <h2>Consumption Reports</h2>
+    <div class="gallery">
+      <div class="shot">
+        <img src="screenshots/power-reports-1.png" alt="Status Dashboard — real-time power monitoring with energy flow diagram">
+        <div class="caption">Consumption Reports</div>
+      </div>
+      <div class="shot">
+        <img src="screenshots/power-reports-2.png" alt="Power Chart — live time-series power chart">
+        <div class="caption">Consumption Reports</div>
       </div>
     </div>
   </section>
@@ -431,6 +504,25 @@
         <div class="icon">📱</div>
         <div class="name">Phone / Tablet</div>
         <div class="detail">via browser</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="support">
+    <h2>Support This Project</h2>
+    <div class="support-content">
+      <a href="https://www.buymeacoffee.com/psylsph" target="_blank" rel="noopener noreferrer">
+        <img src="https://cdn.buymeacoffee.com/buttons/v2/default-blue.png" alt="Buy Me a Coffee" style="height: 48px; width: 173px;">
+      </a>
+      <div class="support-links">
+        <h3>Need Help or Have Ideas?</h3>
+        <ul>
+          <li>❓ <strong>Questions</strong> — Open a <a href="https://github.com/psylsph/home-energy-manager/discussions">Discussion</a> on GitHub</li>
+          <li>💡 <strong>Feature Requests</strong> — Submit an <a href="https://github.com/psylsph/home-energy-manager/issues/new?labels=enhancement">Enhancement Issue</a></li>
+          <li>🐛 <strong>Bug Reports</strong> — File a <a href="https://github.com/psylsph/home-energy-manager/issues/new?labels=bug">Bug Report</a></li>
+          <li>💬 <strong>Chat</strong> — Join the conversation in <a href="https://github.com/psylsph/home-energy-manager/discussions">GitHub Discussions</a></li>
+        </ul>
+        <p class="support-note">If you find this project useful, consider buying me a coffee to support ongoing development. ☕</p>
       </div>
     </div>
   </section>

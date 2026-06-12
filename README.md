@@ -23,27 +23,32 @@ Home Energy Manager connects directly to your inverter over your home network an
     <td align="center"><b>Status — Mobile</b><br><img src=".github/screenshots/status-mobile.png" width="200"></td>
   </tr>
   <tr>
-    <td align="center"><b>Power Chart</b><br><img src=".github/screenshots/control-1.png" width="400"></td>
-    <td align="center"><b>Energy Flow Diagram</b><br><img src=".github/screenshots/control-2.png" width="400"></td>
+    <td align="center"><b>Power Chart</b><br><img src=".github/screenshots/power.png" width="400"></td>
+    <td align="center"><b>Battery Detail</b><br><img src=".github/screenshots/battery.png" width="400"></td>
   </tr>
+    <tr>
+    <td align="center"><b>Inverter Info</b><br><img src=".github/screenshots/inverter.png" width="400"></td>
+    <td align="center"><b>Meters</b><br><img src=".github/screenshots/meters.png" width="400"></td>
+  </tr>
+
   <tr>
     <td align="center"><b>Energy History</b><br><img src=".github/screenshots/history.png" width="400"></td>
     <td align="center"><b>History — Solar</b><br><img src=".github/screenshots/history-solar.png" width="400"></td>
   </tr>
   <tr>
     <td align="center"><b>History — Home</b><br><img src=".github/screenshots/history-home.png" width="400"></td>
-    <td align="center"><b>Battery Detail</b><br><img src=".github/screenshots/battery.png" width="400"></td>
-  </tr>
-  <tr>
-    <td align="center"><b>Inverter Info</b><br><img src=".github/screenshots/inverter.png" width="400"></td>
-    <td align="center"><b>Meters</b><br><img src=".github/screenshots/meters.png" width="400"></td>
-  </tr>
+</tr>
+
   <tr>
     <td align="center"><b>Control Panel</b><br><img src=".github/screenshots/control.png" width="400"></td>
     <td align="center"><b>Settings</b><br><img src=".github/screenshots/settings.png" width="400"></td>
   </tr>
   <tr>
     <td align="center"><b>Developer Console</b><br><img src=".github/screenshots/developer-mode.png" width="400"></td>
+    <td align="center"><b>Consumption Reports</b><br><img src=".github/screenshots/power-reports-1.png" width="400"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Consumption Report (PDF)</b><br><img src=".github/screenshots/power-reports-2.png" width="400"></td>
     <td></td>
   </tr>
 </table>
@@ -113,6 +118,8 @@ Home Energy Manager connects directly to your inverter over your home network. I
 - **Month calendar view** — daily energy totals at a glance for the whole month
 - **Cost tracking** — enter your import and export tariffs to see running cost estimates on your charts
 - **CSV export** — download your energy history as a spreadsheet
+- **PDF consumption reports** — generate formatted A4 PDF reports with charts and summary tables for each energy metric (solar, home, grid, battery). Includes min/max/average values and cost breakdowns. One click from the History page.
+- **Consumption Reports** — summary statistics for any time range including total energy, peak power, solar coverage percentage, and grid dependency, with time-bucketed breakdowns exportable as CSV
 
 ### Control
 
@@ -193,20 +200,6 @@ The app also runs as a **headless server** — a background service with no wind
 
 ---
 
-## How it works
-
-```
-┌─────────────────┐                ┌──────────────┐              ┌───────────┐
-│   This app       │                │  Data adapter │              │ Inverter   │
-│   on your        │ ◄── network ──► │  (the dongle) │ ◄── cable ──► │ + Battery  │
-│   computer/phone  │                │               │              │            │
-└─────────────────┘                └──────────────┘              └───────────┘
-```
-
-The app talks to the small WiFi or Ethernet dongle connected to your inverter over your home network. It reads live data and sends your settings changes directly — no internet connection needed, no data leaves your home.
-
----
-
 ## 📱 Using on Your Phone Away From Home
 
 Home Energy Manager has a built-in web server, so you can access it from your phone's browser. Combined with [**Tailscale**](https://tailscale.com) (a free, zero-config VPN), you can check your system from anywhere — no cloud dependency, no port forwarding, no static IP.
@@ -232,6 +225,7 @@ sudo tailscale up
 ```
 
 Then on your phone:
+
 1. Install the **Tailscale** app from the App Store / Play Store
 2. Log in to the same account — your devices appear automatically
 3. Open Safari / Chrome and go to `http://<tailscale-ip>:7337`
