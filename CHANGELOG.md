@@ -5,17 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.23.1] - 2026-06-12
-
-### Fixed
-
-- **Force discharge fails to stop properly** — The Stop Discharge and Stop
-  Charge buttons now restore Eco mode instead of calling Pause Battery, which
-  left the inverter in export mode with charging disabled (solar continued to
-  be exported to the grid). Also added a safety net in the backend pause
-  handler to always clear discharge slot registers and restore self-consumption
-  mode. Fixes [#72](https://github.com/psylsph/home-energy-manager/issues/72).
-
 ## [0.23.0] - 2026-06-12
 
 ### Added
@@ -42,6 +31,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Shared fault helpers** — Added `src/lib/gridFault.ts` with
   `hasGridFault()`, `gridFaultTitle()`, `gridFaultReason()`, and
   `gridFaultAdvice()` for consistent UI across the app.
+- **Windows release assets** — Dropped the experimental MSIX packaging path;
+  Windows releases now publish the supported MSI installer only.
+
+### Fixed
+
+- **Force discharge fails to stop properly** — The Stop Discharge and Stop
+  Charge buttons now restore Eco mode instead of calling Pause Battery, which
+  left the inverter in export mode with charging disabled (solar continued to
+  be exported to the grid). Also added a safety net in the backend pause
+  handler to always clear discharge slot registers and restore self-consumption
+  mode. Fixes [#72](https://github.com/psylsph/home-energy-manager/issues/72).
 
 ## [0.22.1] - 2026-06-12
 
