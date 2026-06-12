@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0] - 2026-06-12
+
+### Fixed
+
+- **Windows release build** — Removed the unsupported MSIX bundle target and
+  configuration, keeping Windows releases on Tauri's supported MSI target so
+  CI can build installers again.
+
 ## [0.21.0] - 2026-06-12
 
 ### Added
