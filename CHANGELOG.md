@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.0] - 2026-06-13
+
+### Changed
+
+- **SOC=100 threshold raised** — The sanitizer now only rejects SOC=100
+  when battery charging power exceeds 2000 W (was 500 W). Top-balancing
+  at gentle trickle rates (~500 W) during a full charge cycle is normal
+  behaviour for many BMS firmware versions, and was producing false
+  positives.
+
+### Fixed
+
+- **Repetitive daily-energy corruption warnings** — When the dongle gets
+  stuck returning a corrupted cumulative counter value, the first 3
+  occurrences still log at WARN level, but subsequent consecutive
+  corrections are downgraded to DEBUG to avoid log spam (~9 identical
+  WARNs in 23 s). A final INFO is logged on release when the baseline
+  is accepted after 10 consecutive corrections. Applied to both daily
+  energy and lifetime total delta checks.
+
 ## [0.23.0] - 2026-06-12
 
 ### Added

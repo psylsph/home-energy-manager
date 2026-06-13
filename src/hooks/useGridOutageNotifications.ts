@@ -33,7 +33,8 @@ function classifyFault(snapshot: ReturnType<typeof useInverterStore.getState>['s
 
 export function useGridOutageNotifications() {
   const snapshot = useInverterStore((state) => state.snapshot);
-  const enabled = useInverterStore((state) => state.gridOutageNotificationsEnabled);
+  // Grid outage notifications are always enabled.
+  const enabled = true;
   const previousKind = useRef<FaultKind>('none');
   const notifiedForCurrentOutage = useRef(false);
 

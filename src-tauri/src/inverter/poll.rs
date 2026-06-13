@@ -1081,6 +1081,11 @@ struct DeltaCorrectionCounts(HashMap<&'static str, u8>);
 /// raw value is correct and the baseline was wrong.
 const DELTA_CORRECTION_RELEASE_THRESHOLD: u8 = 10;
 
+/// After this many consecutive corrections for the same field, downgrade the
+/// WARN to DEBUG to avoid log spam when the dongle is stuck on a corrupted
+/// value. A final INFO is logged on release (when the threshold is reached).
+const RATE_LIMIT_AFTER: u8 = 3;
+
 /// Tracks how many consecutive poll cycles each absolute-range-checked field
 /// has been out of range (exceeding its threshold). If a field persistently
 /// reports the same out-of-range value for `SUSPECT_RELEASE_THRESHOLD` cycles,
@@ -1220,11 +1225,11 @@ fn sanitize_snapshot(
     }
 
     // SOC: if 100 but battery is actively charging at high power, impossible
-    if snap.soc == 100 && snap.battery_power > 500 {
+    if snap.soc == 100 && snap.battery_power > 2000 {
         if let Some(p) = prev {
             tracing::warn!(
                 prev_soc = p.soc,
-                "SOC=100 while charging >500W — using previous SOC"
+                "SOC=100 while charging >2000W — using previous SOC"
             );
             snap.soc = p.soc;
             sanitized = true;
@@ -1563,6 +1568,14 @@ fn sanitize_snapshot(
                         $value = raw;
                         delta_corrections.0.remove($name);
                         // Don't set sanitized=true — we're accepting raw, not rejecting it
+                    } else if *count >= RATE_LIMIT_AFTER {
+                        tracing::debug!(
+                            field = $name, raw, prev = prev_val,
+                            count = *count,
+                            "Daily energy decreased (register corruption, repeated) — using previous",
+                        );
+                        $value = prev_val;
+                        sanitized = true;
                     } else {
                         tracing::warn!(
                             field = $name, raw, prev = prev_val,
@@ -1672,6 +1685,14 @@ fn sanitize_snapshot(
                         );
                         $value = raw;
                         delta_corrections.0.remove($name);
+                    } else if *count >= RATE_LIMIT_AFTER {
+                        tracing::debug!(
+                            field = $name, raw, prev = prev_val,
+                            count = *count,
+                            "Lifetime total decreased (register corruption, repeated) — using previous",
+                        );
+                        $value = prev_val;
+                        sanitized = true;
                     } else {
                         tracing::warn!(
                             field = $name, raw, prev = prev_val,
