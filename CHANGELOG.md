@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.1] - 2026-06-13
+
+### Fixed
+
+- **Negative sign on exporting Grid/Battery values** — The Status page
+  energy flow diagram now shows a `-` prefix on the Grid node value when
+  exporting to the grid, and on the Battery node value when the battery
+  is discharging. Previously both displayed the magnitude only
+  (`Math.abs`), giving no indication of flow direction. Also fixes a
+  double-minus (`--XW`) that appeared on the Battery value when
+  discharging, since `battery_power` is itself negative when
+  discharging.
+
 ## [0.24.0] - 2026-06-13
 
 ### Changed
