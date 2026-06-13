@@ -345,7 +345,7 @@ function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false
         />
         <FlowNode
           {...NODES.grid}
-          value={formatPower(Math.abs(s.grid_power))}
+          value={`${isExporting ? '-' : ''}${formatPower(s.grid_power)}`}
           unit={isImporting ? 'Import' : isExporting ? 'Export' : 'Idle'}
         />
         <FlowNode
@@ -355,7 +355,7 @@ function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false
         />
         <FlowNode
           {...NODES.battery}
-          value={formatPower(Math.abs(s.battery_power))}
+          value={`${isDischarging ? '-' : ''}${formatPower(s.battery_power)}`}
           unit={formatPercent(s.soc)}
         />
         {/* Battery mode label */}
