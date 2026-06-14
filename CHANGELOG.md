@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.2] - 2026-06-14
+
+### Changed
+
+- **Energy flow diagram redesigned for mobile legibility** — The Status
+  page diagram now uses an X-shaped layout (Inverter hub at centre, four
+  primary nodes — Solar, Grid, Home, Battery — in the corners) instead of
+  the old + (cardinal) layout. The nodes are now lozenge-shaped (rounded
+  rectangles) rather than circles, giving more horizontal room for text
+  without growing the overall footprint.
+- **Mobile-responsive sizing** — Symbols and fonts are now larger on mobile
+  via a new `useIsMobile` hook (matches the Tailwind `md` breakpoint at
+  768px). Desktop keeps standard sizing. A `-` prefix is shown on Grid
+  (exporting) and Battery (discharging) values to indicate flow direction.
+- **Battery mode merged into SOC row** — The battery mode label (Eco /
+  Timed / Cosy / Override) is now combined with the SOC percentage in a
+  single row (e.g. `62% · Eco`) for a cleaner 3-row layout matching the
+  other symbols. Row spacing has been normalised across all nodes.
+- **Larger Apply button** — The Charging Mode Apply button on the Control
+  page is now larger to match the adjacent mode selector.
+- **Removed data-accuracy notice** — The "Data is polled from the inverter…"
+  footer on the Status page has been removed to save vertical space.
+
+### Fixed
+
+- **grid_power false rejections on EV-charging imports** — The grid_power
+  sanitizer ceiling has been raised from ±10 kW to ±15 kW. The old limit
+  was too low for real UK single-phase installations (100A fuse ≈ 23 kW);
+  imports above 10 kW are routine with EV charging and were being
+  rejected, causing constant log spam and stale readings on 9 of every 10
+  polls.
+
 ## [0.24.1] - 2026-06-13
 
 ### Fixed

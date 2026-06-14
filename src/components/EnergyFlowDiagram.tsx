@@ -1,4 +1,5 @@
 import { memo } from 'react';
+import { useIsMobile } from '../hooks/useIsMobile';
 import type { InverterSnapshot } from '../lib/types';
 import { formatPower, formatPercent, formatCurrent, formatTemp, formatVoltage } from '../lib/format';
 
@@ -14,17 +15,22 @@ interface Props {
   showEvc?: boolean;
 }
 
-// Radial layout — Inverter hub at centre, four nodes at cardinal points.
-const W = 520;
-const H = 440;
+// X layout — Inverter hub at centre, four primary nodes in the corners
+// (Solar TL, Grid TR, Home BL, Battery BR), EV charger centred along the
+// bottom when configured. The corner arrangement gives each node more room
+// than the old + (cardinal) layout, so the circles and text can be slightly
+// larger and still legible when the SVG scales down on mobile. The canvas is
+// also near-square so it fills more vertical space on narrow screens.
+const W = 460;
+const H = 470;
 
 const NODES = {
-  inverter: { cx: W / 2, cy: 222, color: '#22D3EE', label: 'Inverter' },
-  solar:    { cx: W / 2, cy: 65,  color: '#F59E0B', label: 'Solar' },
-  home:     { cx: 55,    cy: 222, color: '#14B8A6', label: 'Home' },
-  grid:     { cx: W - 55, cy: 222, color: '#EF4444', label: 'Grid' },
-  battery:  { cx: W / 2, cy: 380, color: '#6366F1', label: 'Battery' },
-  ev:       { cx: 55,    cy: 380, color: '#10B981', label: 'EV' },
+  inverter: { cx: W / 2, cy: 233,    color: '#22D3EE', label: 'Inverter' },
+  solar:    { cx: 80,    cy: 80,     color: '#F59E0B', label: 'Solar' },
+  grid:     { cx: W - 80, cy: 80,    color: '#EF4444', label: 'Grid' },
+  home:     { cx: 80,    cy: 386,    color: '#14B8A6', label: 'Home' },
+  battery:  { cx: W - 80, cy: 386,   color: '#6366F1', label: 'Battery' },
+  ev:       { cx: W / 2, cy: 386,    color: '#10B981', label: 'EV' },
 };
 
 const MODE_LABELS: Record<string, string> = {
@@ -164,28 +170,44 @@ interface NodeProps {
   value: string;
   unit: string;
   hub?: boolean;
+  /** Override the auto-computed lozenge width. */
+  width?: number;
+  /** Override the auto-computed lozenge height. */
+  height?: number;
+  /** When true, use larger mobile font sizing. */
+  mobile?: boolean;
 }
 
-function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
-  const r = hub ? 56 : 50;
+function FlowNode({ cx, cy, color, label, value, unit, hub, width, height, mobile }: NodeProps) {
+  // Lozenge (rounded-rectangle) dimensions — wider than tall so multi-char
+  // values/units fit without growing the overall footprint. Same box size on
+  // mobile and desktop: legibility on phones comes from the responsive font
+  // bump plus the extra horizontal room the lozenge gives over a circle.
+  const baseW = hub ? 156 : 132;
+  const baseH = hub ? 100 : 84;
+  const w = width ?? baseW;
+  const h = height ?? baseH;
+  const cornerR = Math.min(w, h) * 0.22;
   // Guard against non-string props that would crash React (<text> children
   // must be strings or numbers — objects cause React error #31).
   const safeLabel = typeof label === 'string' ? label : String(label ?? '');
   const safeValue = typeof value === 'string' || typeof value === 'number' ? value : String(value ?? '');
   const safeUnit = typeof unit === 'string' || typeof unit === 'number' ? unit : String(unit ?? '');
   const safeColor = typeof color === 'string' ? color : '#888';
+  const nx = cx - w / 2;
+  const ny = cy - h / 2;
   return (
     <g>
       {/* Subtle outer glow */}
-      <circle cx={cx} cy={cy} r={r + 5} fill="none" stroke={safeColor} strokeWidth={1} opacity={0.15} />
-      {/* Main circle */}
-      <circle cx={cx} cy={cy} r={r} fill="#0D1117" stroke={safeColor} strokeWidth={hub ? 2.5 : 2} />
+      <rect x={nx - 4} y={ny - 4} width={w + 8} height={h + 8} rx={cornerR + 4} ry={cornerR + 4} fill="none" stroke={safeColor} strokeWidth={1} opacity={0.15} />
+      {/* Main lozenge */}
+      <rect x={nx} y={ny} width={w} height={h} rx={cornerR} ry={cornerR} fill="#0D1117" stroke={safeColor} strokeWidth={hub ? 2.5 : 2} />
       {/* Label */}
       <text
-        x={cx} y={cy - 17}
+        x={cx} y={cy - 20}
         textAnchor="middle"
         fill={safeColor}
-        fontSize={hub ? 11 : 11.5}
+        fontSize={hub ? (mobile ? 11.5 : 11) : (mobile ? 12 : 11.5)}
         fontWeight="700"
         fontFamily="var(--font-sans, sans-serif)"
         letterSpacing="0.6"
@@ -194,10 +216,10 @@ function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
       </text>
       {/* Value */}
       <text
-        x={cx} y={cy + 4}
+        x={cx} y={cy + 2}
         textAnchor="middle"
         fill="#F0F6FC"
-        fontSize="18"
+        fontSize={mobile ? 20 : 18}
         fontWeight="700"
         fontFamily="var(--font-mono, monospace)"
       >
@@ -208,7 +230,7 @@ function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
         x={cx} y={cy + 20}
         textAnchor="middle"
         fill="#8B949E"
-        fontSize="11"
+        fontSize={hub ? (mobile ? 12 : 11) : (mobile ? 13 : 12)}
         fontFamily="var(--font-mono, monospace)"
       >
         {safeUnit}
@@ -222,6 +244,7 @@ function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
 // ---------------------------------------------------------------------------
 
 function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false, evcConnected = false, showEvc = false }: Props) {
+  const mobile = useIsMobile();
   const isCharging = s.battery_state === 'charging';
   const isDischarging = s.battery_state === 'discharging';
   const isExporting = s.grid_power > 0;
@@ -248,6 +271,11 @@ function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false
   });
 
   const evcActive = showEvc && evcPower > 0;
+
+  const modeLabel = modeDisplayLabel(
+    s.battery_mode, s.cosy_active, s.cosy_enabled,
+    s.enable_charge, s.enable_discharge, chargeSlotActive, dischargeSlotActive,
+  );
 
   const flows: FlowDef[] = [
     // Solar → Inverter (always top→centre)
@@ -325,7 +353,7 @@ function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false
       <svg
         viewBox={`0 0 ${W} ${H}`}
         className="w-full"
-        style={{ maxWidth: '560px', fontFamily: 'var(--font-sans, sans-serif)' }}
+        style={{ maxWidth: '500px', fontFamily: 'var(--font-sans, sans-serif)' }}
       >
         {/* Layer 1: All gray tracks (behind everything) */}
         {flows.map((f) => (
@@ -340,38 +368,32 @@ function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false
         {/* Layer 3: Nodes (on top of everything) */}
         <FlowNode
           {...NODES.solar}
+          mobile={mobile}
           value={formatPower(s.solar_power)}
           unit={`${formatVoltage(s.pv1_voltage)}/${formatCurrent(s.pv1_current + s.pv2_current)}`}
         />
         <FlowNode
           {...NODES.grid}
+          mobile={mobile}
           value={`${isExporting ? '-' : ''}${formatPower(Math.abs(s.grid_power))}`}
           unit={isImporting ? 'Import' : isExporting ? 'Export' : 'Idle'}
         />
         <FlowNode
           {...NODES.home}
+          mobile={mobile}
           value={formatPower(s.home_power)}
           unit="Consumption"
         />
         <FlowNode
           {...NODES.battery}
+          mobile={mobile}
           value={`${isDischarging ? '-' : ''}${formatPower(Math.abs(s.battery_power))}`}
-          unit={formatPercent(s.soc)}
+          unit={`${formatPercent(s.soc)} · ${modeLabel}`}
         />
-        {/* Battery mode label */}
-        <text
-          x={W / 2}
-          y={413}
-          textAnchor="middle"
-          fill="#8B949E"
-          style={{ fontSize: 10, fontFamily: 'sans-serif' }}
->
-          {modeDisplayLabel(s.battery_mode, s.cosy_active, s.cosy_enabled, s.enable_charge, s.enable_discharge, chargeSlotActive, dischargeSlotActive)}
-        </text>
         {s.agile_active && (
           <text
             x={W / 2}
-            y={432}
+            y={325}
             textAnchor="middle"
             fill="#F59E0B"
             style={{ fontSize: 9, fontFamily: 'sans-serif' }}
@@ -381,6 +403,7 @@ function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false
         )}
         <FlowNode
           {...NODES.inverter}
+          mobile={mobile}
           hub
           value={formatTemp(s.inverter_temperature)}
           unit={s.device_type_display || '—'}
@@ -390,6 +413,9 @@ function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false
         {showEvc && (
           <FlowNode
             {...NODES.ev}
+            mobile={mobile}
+            width={116}
+            height={76}
             value={formatPower(evcPower)}
             unit={evcCharging ? 'Charging' : evcConnected ? 'Connected' : 'Disconnected'}
           />

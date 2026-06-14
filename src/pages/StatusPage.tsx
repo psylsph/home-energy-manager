@@ -50,7 +50,7 @@ export default function StatusPage() {
       )}
 
       {/* Energy flow diagram — full width card */}
-      <section className="bg-bg-surface rounded-2xl p-4">
+      <section className="bg-bg-surface rounded-2xl p-2">
         <EnergyFlowDiagram
           snapshot={snapshot}
           evcPower={evcPower}
@@ -66,11 +66,6 @@ export default function StatusPage() {
         <SummaryTiles snapshot={snapshot} />
       </div>
 
-      {/* Data accuracy warning */}
-      <p className="text-text-secondary/40 text-xs text-center leading-relaxed mx-auto">
-        Data is polled from the inverter based on the Refresh Interval on the Settings pane. The app attempts to filter out
-        erroneous values, which can slow updates.
-      </p>
     </div>
   );
 }

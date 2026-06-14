@@ -508,7 +508,7 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: 'standa
               setTimeout(() => setSaveFeedback(null), 2000);
             }}
             disabled={saving}
-            className="text-xs font-medium px-2.5 py-1 rounded-lg bg-battery/20 text-battery hover:bg-battery/30 transition disabled:opacity-50"
+            className="text-sm font-medium px-4 py-1.5 rounded-lg bg-battery/20 text-battery hover:bg-battery/30 transition disabled:opacity-50"
           >
             {saveFeedback === 'saved' ? '✓' : saveFeedback === 'error' ? '!' : saving ? '...' : 'Apply'}
           </button>
