@@ -450,9 +450,9 @@ const VALID_INTERVALS = [5, 10, 15, 20];
         )}
       </section>
 
-      {/* ─── Section 2: Inverter Network Access ─── */}
+      {/* ─── Section 2: Remote / Mobile Network Access ─── */}
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-3">
-        <h2 className="text-text-primary text-lg font-semibold font-sans">Inverter Network Access</h2>
+        <h2 className="text-text-primary text-lg font-semibold font-sans">Remote / Mobile Network Access</h2>
 
         <div className="flex items-center gap-3">
           <code className="bg-bg-elevated text-flow-active rounded-lg px-4 py-2 text-sm font-mono flex-1 min-w-0 select-all overflow-hidden text-ellipsis whitespace-nowrap">

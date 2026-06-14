@@ -201,7 +201,7 @@ function FlowNode({ cx, cy, color, label, value, unit, hub, width, height, mobil
       {/* Subtle outer glow */}
       <rect x={nx - 4} y={ny - 4} width={w + 8} height={h + 8} rx={cornerR + 4} ry={cornerR + 4} fill="none" stroke={safeColor} strokeWidth={1} opacity={0.15} />
       {/* Main lozenge */}
-      <rect x={nx} y={ny} width={w} height={h} rx={cornerR} ry={cornerR} fill="#0D1117" stroke={safeColor} strokeWidth={hub ? 2.5 : 2} />
+      <rect x={nx} y={ny} width={w} height={h} rx={cornerR} ry={cornerR} fill="var(--app-bg-elevated)" stroke={safeColor} strokeWidth={hub ? 2.5 : 2} />
       {/* Label */}
       <text
         x={cx} y={cy - 20}
@@ -218,7 +218,7 @@ function FlowNode({ cx, cy, color, label, value, unit, hub, width, height, mobil
       <text
         x={cx} y={cy + 2}
         textAnchor="middle"
-        fill="#F0F6FC"
+        fill="var(--app-text-primary)"
         fontSize={mobile ? 20 : 18}
         fontWeight="700"
         fontFamily="var(--font-mono, monospace)"
@@ -229,7 +229,7 @@ function FlowNode({ cx, cy, color, label, value, unit, hub, width, height, mobil
       <text
         x={cx} y={cy + 20}
         textAnchor="middle"
-        fill="#8B949E"
+        fill="var(--app-text-secondary)"
         fontSize={hub ? (mobile ? 12 : 11) : (mobile ? 13 : 12)}
         fontFamily="var(--font-mono, monospace)"
       >

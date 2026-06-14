@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.3] - 2026-06-14
+
+### Changed
+
+- **Energy flow symbols respect light mode** — The symbol background,
+  value text (row 2), and unit text (row 3) were previously hardcoded to
+  dark-mode colours and stayed dark when light mode was enabled. They now
+  use the CSS theme variables, so in light mode the symbol backgrounds
+  become light and the row 2/3 text becomes black/dark grey automatically.
+- **Renamed Settings section** — "Inverter Network Access" is now
+  "Remote / Mobile Network Access" to better describe remote/multi-network
+  reachability.
+
 ## [0.24.2] - 2026-06-14
 
 ### Changed
