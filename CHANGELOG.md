@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.5] - 2026-06-14
+
+### Fixed
+
+- **Reduced false daily-consumption corruption warnings** — Single-phase
+  `today_consumption_kwh` is derived from multiple cumulative registers,
+  which can legitimately wobble by one or two 0.1 kWh ticks when the
+  registers update out of phase. The sanitizer now treats small decreases
+  up to 0.25 kWh as read noise and carries the previous monotonic value
+  forward without warning or forcing a re-poll.
+- **Fixed near-zero daily-energy clamp baseline** — When a near-zero daily
+  counter jumped above the time-aware ceiling, the sanitizer incorrectly
+  added the previous value to the ceiling. This could create an inflated
+  baseline and trigger repeated follow-on decrease warnings. It now clamps
+  directly to the ceiling.
+
 ## [0.24.4] - 2026-06-14
 
 ### Changed

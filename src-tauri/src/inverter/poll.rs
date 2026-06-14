@@ -1499,11 +1499,14 @@ fn sanitize_snapshot(
             let elapsed_secs = (snap.timestamp - p.timestamp).max(0) as f32;
             let max_increase_kwh = (elapsed_secs / 3600.0) * 10.0 + 1.0;
             // Daily energy registers are typically 0.1 kWh resolution, and
-            // derived counters can wobble by one tick due to read timing or
-            // float representation (e.g. 7.6 → 7.5). Treat tiny decreases as
-            // reading noise: keep the displayed/history value monotonic, but
-            // don't warn or trigger an immediate re-poll.
-            let decrease_noise_tolerance_kwh = 0.15;
+            // today_consumption_kwh is derived from several independently-read
+            // cumulative counters on single-phase models. If one term updates a
+            // poll before another, the derived value can wobble by one or two
+            // ticks (e.g. 1.6 → 1.4) even though the underlying registers are
+            // healthy. Treat small decreases as reading noise: keep the
+            // displayed/history value monotonic, but don't warn or trigger an
+            // immediate re-poll.
+            let decrease_noise_tolerance_kwh = 0.25;
 
             macro_rules! check_energy_delta {
             ($name:literal, $value:expr, $prev:expr) => {
@@ -1531,7 +1534,7 @@ fn sanitize_snapshot(
                             elapsed_secs, max_increase_kwh,
                             "Daily energy jumped from near-zero baseline — clamping to max_increase",
                         );
-                        $value = prev_val + max_increase_kwh;
+                        $value = max_increase_kwh;
                         sanitized = true;
                     }
                     // Otherwise accept raw (plausible increase from 0)
@@ -4612,6 +4615,85 @@ mod tests {
             "noise tolerance must not force immediate re-poll"
         );
         assert_eq!(snap.today_consumption_kwh, prev.today_consumption_kwh);
+    }
+
+    #[test]
+    fn daily_energy_two_tick_derived_decrease_is_noise_not_repoll() {
+        let prev = InverterSnapshot {
+            timestamp: 100,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            battery_reserve: 4,
+            today_consumption_kwh: 1.6,
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            timestamp: 104,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            battery_reserve: 4,
+            today_consumption_kwh: 1.4,
+            ..Default::default()
+        };
+        let mut pending_mode = None;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+
+        let sanitized = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+        );
+
+        assert!(
+            !sanitized,
+            "two-tick derived consumption wobble must not force immediate re-poll"
+        );
+        assert_eq!(snap.today_consumption_kwh, prev.today_consumption_kwh);
+    }
+
+    #[test]
+    fn daily_energy_near_zero_clamp_does_not_add_previous_twice() {
+        let prev = InverterSnapshot {
+            timestamp: 100,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            battery_reserve: 4,
+            today_consumption_kwh: 0.9,
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            timestamp: 113,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            battery_reserve: 4,
+            today_consumption_kwh: 1.1,
+            ..Default::default()
+        };
+        let mut pending_mode = None;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+
+        let sanitized = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+        );
+
+        assert!(sanitized);
+        let expected_ceiling = (13.0 / 3600.0) * 10.0 + 1.0;
+        assert!((snap.today_consumption_kwh - expected_ceiling).abs() < 0.0001);
+        assert!(snap.today_consumption_kwh < 1.1);
     }
 
     #[test]
