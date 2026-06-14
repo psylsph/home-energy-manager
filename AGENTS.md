@@ -141,7 +141,7 @@ Applied on EVERY reading regardless of previous state:
 |---|---|---|
 | `today_*_kwh` | 0–200 kWh | Residential daily ceiling; catches 245, 275, 879, 1010 spikes |
 | Battery power | ±10 kW | Residential battery limit |
-| Grid power | ±10 kW | UK single-phase supply limit |
+| Grid power | ±15 kW | UK single-phase import can exceed 10 kW with EV charging (100A fuse ≈ 23 kW) |
 | Solar power | 0–10 kW | Residential PV limit |
 | Home power | 0–15 kW | Includes EV charging margin |
 | Grid voltage | 180–280 V | UK nominal 230V ± extended range |

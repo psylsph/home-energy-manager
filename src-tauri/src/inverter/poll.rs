@@ -1159,7 +1159,7 @@ fn sanitize_snapshot(
 ) -> bool {
     let mut sanitized = false;
     let max_battery_power: i32 = 10_000; // 10 kW — residential battery limit
-    let max_grid_power: i32 = 10_000; // 10 kW — typical UK single-phase supply
+    let max_grid_power: i32 = 15_000; // 15 kW — UK single-phase import can exceed 10 kW with EV charging (100A fuse ≈ 23 kW); matches max_home_power which carries the same EV-charging margin. Corruption spikes (e.g. ±32767) are still well above this.
     let max_solar_power: i32 = 10_000; // 10 kW — residential PV limit
     let max_home_power: i32 = 15_000; // 15 kW — includes EV charging margin
 
