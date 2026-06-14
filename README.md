@@ -70,12 +70,14 @@ Go to the [**Releases page**](https://github.com/psylsph/home-energy-manager/rel
 | 🐧 **Linux** (Fedora, openSUSE, etc.) | `.rpm` |
 | 🍓 **Raspberry Pi** (64-bit OS only) | `.deb` with `arm64` in the name |
 
-**Windows users** — Windows may show "Windows protected your PC" / SmartScreen when you try to run the `.msi`. This is because the app isn't code-signed (code signing certificates cost hundreds per year). It's safe — it's open-source software you can inspect on GitHub. The `.msix` / `.msixupload` assets are primarily for Microsoft Store submission and MSIX sideload packaging. To run the MSI:
+**Windows users** — Windows SmartScreen may show "Windows protected your PC", and Microsoft Defender has recently false-flagged the unsigned `.msi` as `Trojan:Script/Wacatac.C!ml` on some systems. VirusTotal scans are clean and the exact installer has been submitted to Microsoft as a false positive. This is open-source software you can inspect on GitHub, and future Windows builds will use SignPath Foundation code signing as required.
+
+To run the MSI if SmartScreen appears:
 
 1. Click **"More info"** on the SmartScreen screen
 2. Click **"Run anyway"**
 
-If the installer itself won't open, right-click the `.msi` → **Properties** → check the **"Unblock"** box → **OK**, then run it again.
+If the installer itself won't open, right-click the `.msi` → **Properties** → check the **"Unblock"** box → **OK**, then run it again. The `.msix` / `.msixupload` assets are primarily for Microsoft Store submission and MSIX sideload packaging.
 
 **Mac users** — after opening the `.dmg`, drag the app to your **Desktop** or **Home folder** (not `/Applications`). On first launch, right-click the app → **Open** → **Open** to bypass Gatekeeper. See the [FAQ](./FAQ.md) if you get stuck.
 

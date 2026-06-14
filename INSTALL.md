@@ -8,6 +8,8 @@ How to install, update, and run Home Energy Manager on different platforms. For 
 
 ### Windows
 
+> **Windows security notice:** Windows SmartScreen may warn that the app is from an unknown publisher, and Microsoft Defender has recently false-flagged the unsigned `.msi` as `Trojan:Script/Wacatac.C!ml` on some systems. VirusTotal scans are clean and the exact installer has been submitted to Microsoft as a false positive. Future Windows builds will use SignPath Foundation code signing as required.
+
 1. Download the `.msi` file from the [**Releases page**](https://github.com/psylsph/home-energy-manager/releases/latest)
 2. Double-click it to run the installer
 3. Follow the prompts — the app installs like any other Windows program

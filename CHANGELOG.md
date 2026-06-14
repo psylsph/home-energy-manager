@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.4] - 2026-06-14
+
+### Changed
+
+- **Windows installer security notice** — Added README, install guide,
+  GitHub Pages, and release-page warnings explaining the current unsigned
+  MSI SmartScreen warning and recent Microsoft Defender false positive
+  (`Trojan:Script/Wacatac.C!ml`). The exact installer has been submitted
+  to Microsoft as a false positive, VirusTotal scans are clean, and future
+  Windows builds will use SignPath Foundation code signing as required.
+
 ## [0.24.3] - 2026-06-14
 
 ### Changed

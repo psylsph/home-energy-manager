@@ -48,7 +48,21 @@
       flex-wrap: wrap;
       margin-bottom: 32px;
     }
-    .hero .badges img { height: 24px; }
+    .hero .badge {
+      display: inline-flex;
+      align-items: center;
+      height: 24px;
+      padding: 0 9px;
+      border-radius: 4px;
+      background: #21262d;
+      border: 1px solid #30363d;
+      color: #e6edf3;
+      font-size: 0.78rem;
+      line-height: 1;
+    }
+    .hero .badge-blue { background: #1f6feb; border-color: #1f6feb; }
+    .hero .badge-green { background: #238636; border-color: #238636; }
+    .hero .badge-purple { background: #8957e5; border-color: #8957e5; }
     .cta {
       display: inline-block;
       padding: 14px 32px;
@@ -220,6 +234,25 @@
     .platform-card .icon { font-size: 2rem; }
     .platform-card .name { font-weight: 600; margin-top: 8px; }
     .platform-card .detail { font-size: 0.85rem; color: #8b949e; margin-top: 4px; }
+    .signing-note {
+      max-width: 640px;
+      margin: 20px auto 0;
+      color: #8b949e;
+      font-size: 0.95rem;
+    }
+    .signing-note strong { color: #e6edf3; }
+    .windows-warning {
+      max-width: 760px;
+      margin: 20px auto 0;
+      padding: 16px 18px;
+      background: rgba(187, 128, 9, 0.14);
+      border: 1px solid rgba(187, 128, 9, 0.45);
+      border-radius: 12px;
+      color: #d0d7de;
+      font-size: 0.95rem;
+      text-align: left;
+    }
+    .windows-warning strong { color: #f2cc60; }
 
     /* Support */
     .support {
@@ -295,10 +328,10 @@
   <section class="hero">
     <h1>Home Energy Manager</h1>
     <p>Monitor and control your GivEnergy solar &amp; battery system from your own computer.<br>No cloud account needed. Your data stays on your network.</p>
-    <div class="badges">
-      <img src="https://img.shields.io/github/license/psylsph/home-energy-manager?style=flat-square" alt="License">
-      <img src="https://img.shields.io/github/v/release/psylsph/home-energy-manager?style=flat-square" alt="Release">
-      <img src="https://img.shields.io/github/downloads/psylsph/home-energy-manager/total?style=flat-square" alt="Downloads">
+    <div class="badges" aria-label="Project badges">
+      <span class="badge badge-blue">license MIT</span>
+      <span class="badge badge-green">release latest</span>
+      <span class="badge badge-purple">downloads GitHub Releases</span>
     </div>
     <div class="hero-buttons">
       <a class="cta" href="https://github.com/psylsph/home-energy-manager/releases/latest">Download Free</a>
@@ -505,6 +538,8 @@
         <div class="detail">via browser</div>
       </div>
     </div>
+    <p class="signing-note"><strong>Windows code signing:</strong> Home Energy Manager will use the <a href="https://signpath.org/" target="_blank" rel="noopener noreferrer">SignPath Foundation</a> for code signing as required.</p>
+    <p class="windows-warning"><strong>Windows security notice:</strong> SmartScreen may warn that the MSI is from an unknown publisher, and Microsoft Defender has recently false-flagged the unsigned Windows installer as <code>Trojan:Script/Wacatac.C!ml</code> on some systems. VirusTotal scans are clean and the exact installer has been submitted to Microsoft as a false positive.</p>
   </section>
 
   <section class="support">
