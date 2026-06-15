@@ -2,6 +2,7 @@ import { useInverterStore } from '../store/useInverterStore';
 import EnergyFlowDiagram from '../components/EnergyFlowDiagram';
 import BatteryPanel from '../components/BatteryPanel';
 import SummaryTiles from '../components/SummaryTiles';
+import ColdBatteryWarning from '../components/ColdBatteryWarning';
 import { formatPercent, formatPower } from '../lib/format';
 import { gridFaultAdvice, gridFaultReason, gridFaultTitle, hasGridFault } from '../lib/gridFault';
 
@@ -62,7 +63,10 @@ export default function StatusPage() {
 
       {/* Battery + Summary side by side on md+ */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <BatteryPanel snapshot={snapshot} />
+        <div className="flex flex-col gap-4">
+          <ColdBatteryWarning />
+          <BatteryPanel snapshot={snapshot} />
+        </div>
         <SummaryTiles snapshot={snapshot} />
       </div>
 

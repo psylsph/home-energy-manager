@@ -129,6 +129,27 @@ fn decode_timeslot(data: &[u16], start_idx: usize, end_idx: usize) -> ScheduleSl
     }
 }
 
+/// Decode the inverter wall-clock registers HR(35-40).
+///
+/// The inverter stores a naive wall-clock time (no timezone/DST metadata), so
+/// this formats exactly the register values as a local-looking timestamp and
+/// deliberately performs no timezone conversion.
+fn decode_system_time(data: &[u16]) -> String {
+    let year = get_reg(data, 35);
+    let month = get_reg(data, 36);
+    let day = get_reg(data, 37);
+    let hour = get_reg(data, 38);
+    let minute = get_reg(data, 39);
+    let second = get_reg(data, 40);
+
+    if month == 0 || month > 12 || day == 0 || day > 31 || hour > 23 || minute > 59 || second > 59 {
+        return String::new();
+    }
+
+    let full_year = if year < 100 { 2000 + year } else { year };
+    format!("{full_year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
+}
+
 /// Decode a serial number from consecutive registers.
 ///
 /// Each register holds 2 Latin-1 characters (high byte first, low byte second).
@@ -357,6 +378,7 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.grid_power = signed(get_reg(data, 30)); // IR(30): p_grid_out (int16 W, +exporting/-importing)
     snap.grid_voltage = get_reg(data, 5) as f32 * 0.1; // IR(5):  v_ac1 (/10 V)
     snap.grid_frequency = get_reg(data, 13) as f32 * 0.01; // IR(13): f_ac1 (/100 Hz)
+
     // IR(40) fault/status bits:
     //   bit 1 = battery over-temperature fault
     //   bit 8 = `grid_loss` / "No Utility"
@@ -461,6 +483,10 @@ fn decode_holding_0_59(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawC
     snap.device_type_display = snap.device_type.display_name().to_string();
     snap.max_ac_power_w =
         DeviceType::max_ac_power_for_dtc(dtc_raw, snap.device_type.max_ac_power_w());
+
+    // Inverter wall-clock time: HR(35-40), displayed exactly as read with no
+    // timezone conversion.
+    snap.inverter_time = decode_system_time(data);
 
     // Battery capacity in kWh = HR(55) × nominal_voltage / 1000
     // HR(55) reports total system Ah (inverter firmware accounts for all modules).

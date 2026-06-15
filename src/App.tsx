@@ -55,18 +55,26 @@ function GridFaultBanner() {
 }
 
 function ConnectionIndicator() {
-  const { connectionState, connectedHost } = useInverterStore();
+  const { connectionState, connectedHost, snapshot } = useInverterStore();
   const colors: Record<string, string> = {
     connected: 'bg-green-500',
     reconnecting: 'bg-yellow-500 animate-pulse',
     disconnected: 'bg-gray-500',
   };
+  const inverterTime = snapshot?.inverter_time;
   return (
-    <div className="flex items-center gap-2 text-text-secondary text-xs">
-      <div className={`w-2 h-2 rounded-full ${colors[connectionState] || 'bg-gray-500'}`} />
-      <span className="capitalize">
-        {connectionState === 'connected' ? `Connected${connectedHost ? ` · ${connectedHost}` : ''}` : connectionState}
-      </span>
+    <div className="flex items-start gap-2 text-text-secondary text-xs">
+      <div className={`mt-1.5 w-2 h-2 rounded-full ${colors[connectionState] || 'bg-gray-500'}`} />
+      <div className="flex flex-col items-start leading-tight">
+        <span className="capitalize">
+          {connectionState === 'connected' ? `Connected${connectedHost ? ` · ${connectedHost}` : ''}` : connectionState}
+        </span>
+        {connectionState === 'connected' && inverterTime ? (
+          <span className="font-mono normal-case text-[10px] text-text-secondary/80">
+            Inverter Time: {inverterTime}
+          </span>
+        ) : null}
+      </div>
     </div>
   );
 }

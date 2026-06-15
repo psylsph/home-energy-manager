@@ -13,14 +13,20 @@ import {
 import { fetchHistory, isTauri } from '../lib/api';
 import {
   HISTORY_CHART_GRID_PROPS,
+  HISTORY_RANGE_MS,
   HISTORY_RANGES,
   getHistoryRangeDomain,
   getHistoryXAxisMinTickGap,
   getHistoryXAxisTicks,
   formatHistoryXAxisTick,
+  getHistoryPickerMax,
+  getHistoryPickerValue,
+  historyPickerInputType,
+  historyPickerValueToOffset,
   isRollingHistoryRange,
   shouldRefreshHistoryRange,
   shouldTrimHistoryRangeLeadingGap,
+  supportsHistoryDate,
   trimDomainStartToFirstDataPoint,
 } from '../lib/historyRangeConfig';
 import { formatPower } from '../lib/format';
@@ -270,18 +276,38 @@ function downloadTextFile(content: string, fileName: string, mimeType: string) {
   }, 1000);
 }
 
-function reportRangeLabel(range: HistoryRange, domain: [number, number]): string {
-  const start = new Date(domain[0]);
-  const end = new Date(domain[1]);
-  if (range === 'today') return 'Today';
+// Label for the selected period, mirroring the History tab's window label so
+// the Power and History switchers stay in sync. Offset-aware so older periods
+// are described by their date(s) instead of always "Today" / "Now".
+function powerWindowLabel(range: HistoryRange, offset: number): string {
   if (range === 'month') {
-    return start.toLocaleDateString([], { month: 'long', year: 'numeric' });
+    const now = new Date();
+    let targetMonth = now.getMonth() - offset;
+    let targetYear = now.getFullYear();
+    while (targetMonth < 0) {
+      targetMonth += 12;
+      targetYear -= 1;
+    }
+    const d = new Date(targetYear, targetMonth, 1);
+    return d.toLocaleDateString([], { month: 'long', year: 'numeric' });
   }
-  const label = HISTORY_RANGES.find((r) => r.key === range)?.label ?? range;
-  if (range === '1h' || range === '6h' || range === '12h' || range === '24h') {
-    return `Last ${label}`;
+  if (range === 'today') {
+    if (offset === 0) return 'Today';
+    const now = new Date();
+    const target = new Date(now.getFullYear(), now.getMonth(), now.getDate() - offset);
+    return target.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
   }
-  return `${start.toLocaleDateString()} – ${end.toLocaleDateString()}`;
+  if (offset === 0) return 'Now';
+  const ms = HISTORY_RANGE_MS[range] ?? HISTORY_RANGE_MS['24h'] ?? 86400000;
+  const end = new Date(Date.now() - offset * ms);
+  const start = new Date(end.getTime() - ms);
+  const fmt = (d: Date) =>
+    range === '1h' || range === '6h' || range === '12h' || range === '24h'
+      ? d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      : range === '6m' || range === '1y'
+        ? d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })
+        : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  return `${fmt(start)} – ${fmt(end)}`;
 }
 
 function exportFileSafeLabel(label: string): string {
@@ -388,7 +414,7 @@ function bucketSocAvg(bucket: PowerBucket): number | null {
   return bucket.socCount > 0 ? bucket.socSum / bucket.socCount : null;
 }
 
-function calculatePowerReport(rows: PowerRow[], range: HistoryRange, domain: [number, number]): PowerReport {
+function calculatePowerReport(rows: PowerRow[], range: HistoryRange, domain: [number, number], offset: number): PowerReport {
   const buckets = new Map<number, PowerBucket>();
   const getBucket = (ts: number) => {
     const start = bucketStartMs(ts, range);
@@ -454,7 +480,7 @@ function calculatePowerReport(rows: PowerRow[], range: HistoryRange, domain: [nu
   const socAvg = socValues.length ? socValues.reduce((acc, soc) => acc + soc, 0) / socValues.length : null;
 
   const summary: PowerReportSummary = {
-    periodLabel: reportRangeLabel(range, domain),
+    periodLabel: powerWindowLabel(range, offset),
     generatedAt: new Date(),
     solarKwh,
     homeKwh,
@@ -868,7 +894,8 @@ export default function PowerPage() {
   const setRange = useInverterStore((state) => state.setChartRange);
   const now = useNow();
   const rolling = isRollingHistoryRange(range);
-  const refreshKey = shouldRefreshHistoryRange(range) ? now : 0;
+  const [offset, setOffset] = useState(0);
+  const refreshKey = shouldRefreshHistoryRange(range, offset) ? now : 0;
   const [history, setHistory] = useState<PowerHistoryState>({
     range: null,
     data: {},
@@ -877,9 +904,14 @@ export default function PowerPage() {
   const [mutedSeries, setMutedSeries] = useState<Partial<Record<PowerChartKey, boolean>>>({});
   const [exportToast, setExportToast] = useState<string | null>(null);
 
+  const handleRangeChange = (r: HistoryRange) => {
+    setRange(r);
+    setOffset(0);
+  };
+
   useEffect(() => {
     let cancelled = false;
-    fetchHistory(range, HISTORY_FIELDS, 0, rolling)
+    fetchHistory(range, HISTORY_FIELDS, offset, rolling)
       .then((result) => {
         if (cancelled) return;
         const cleaned: Record<string, TimePoint[]> = {};
@@ -899,19 +931,19 @@ export default function PowerPage() {
     return () => {
       cancelled = true;
     };
-  }, [range, refreshKey, rolling]);
+  }, [range, offset, refreshKey, rolling]);
 
   const loading = history.range !== range;
   const data = loading ? EMPTY_HISTORY_DATA : history.data;
   const error = loading ? '' : history.error;
   const rows = useMemo(() => buildPowerRows(data), [data]);
-  const xDomain = useMemo(() => getHistoryRangeDomain(range, 0, now), [range, now]);
+  const xDomain = useMemo(() => getHistoryRangeDomain(range, offset, now), [range, offset, now]);
   const displayDomain = useMemo(
     () => shouldTrimHistoryRangeLeadingGap(range) ? trimDomainStartToFirstDataPoint(xDomain, data) : xDomain,
     [data, range, xDomain],
   );
   const yDomain = useMemo(() => calculateDomain(rows), [rows]);
-  const report = useMemo(() => calculatePowerReport(rows, range, displayDomain), [rows, range, displayDomain]);
+  const report = useMemo(() => calculatePowerReport(rows, range, displayDomain, offset), [rows, range, displayDomain, offset]);
   const hasData = rows.length > 0;
   const waitingForLiveData = snapshot == null;
   const toggleSeries = (key: PowerChartKey) => {
@@ -982,7 +1014,7 @@ export default function PowerPage() {
         <div className="bg-bg-surface rounded-xl p-2 min-w-0">
           <select
             value={range}
-            onChange={(e) => setRange(e.target.value as HistoryRange)}
+            onChange={(e) => handleRangeChange(e.target.value as HistoryRange)}
             className="sm:hidden w-full bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-sans font-medium outline-none border border-white/10"
             aria-label="Select time range"
           >
@@ -996,7 +1028,7 @@ export default function PowerPage() {
                 key={r.key}
                 type="button"
                 aria-pressed={range === r.key}
-                onClick={() => setRange(r.key)}
+                onClick={() => handleRangeChange(r.key)}
                 className={`shrink-0 px-3 py-1.5 rounded-lg text-xs font-sans font-medium transition-colors ${
                   range === r.key
                     ? 'bg-flow-active text-bg-base'
@@ -1008,11 +1040,40 @@ export default function PowerPage() {
             ))}
           </div>
         </div>
+        <div className="flex items-center justify-center gap-1 bg-bg-surface rounded-xl p-1.5">
+          <button
+            onClick={() => setOffset((o) => o + 1)}
+            className="shrink-0 text-text-secondary hover:text-text-primary text-sm font-sans px-2.5 py-1.5 rounded-lg hover:bg-bg-elevated transition-colors"
+          >
+            ◀ Older
+          </button>
+          {supportsHistoryDate(range) ? (
+            <input
+              type={historyPickerInputType(range)}
+              value={getHistoryPickerValue(range, offset)}
+              max={getHistoryPickerMax(range)}
+              onChange={(e) => setOffset(historyPickerValueToOffset(range, e.target.value))}
+              aria-label="Select period date"
+              className="bg-transparent text-text-primary text-sm font-sans text-center px-1 py-0.5 rounded-md outline-none cursor-pointer hover:bg-bg-elevated transition-colors"
+            />
+          ) : (
+            <span className="text-text-secondary text-sm font-sans text-center truncate px-1">
+              {powerWindowLabel(range, offset)}
+            </span>
+          )}
+          <button
+            onClick={() => setOffset((o) => Math.max(0, o - 1))}
+            disabled={offset === 0}
+            className="shrink-0 text-text-secondary hover:text-text-primary text-sm font-sans px-2.5 py-1.5 rounded-lg hover:bg-bg-elevated transition-colors disabled:opacity-30"
+          >
+            Newer ▶
+          </button>
+        </div>
         <div className="flex items-center justify-end gap-2 bg-bg-surface rounded-xl p-2">
           <button
             type="button"
             onClick={() => {
-              exportPowerCSV(calculatePowerReport(rows, range, displayDomain), rows);
+              exportPowerCSV(calculatePowerReport(rows, range, displayDomain, offset), rows);
               setExportToast('CSV downloaded to your Downloads folder — ' + report.summary.periodLabel);
             }}
             disabled={loading || !hasData || Boolean(error)}
@@ -1023,7 +1084,7 @@ export default function PowerPage() {
           <button
             type="button"
             onClick={() => {
-              const result = exportPowerPDF(calculatePowerReport(rows, range, displayDomain), rows);
+              const result = exportPowerPDF(calculatePowerReport(rows, range, displayDomain, offset), rows);
               setExportToast(
                 result === 'downloaded'
                   ? 'Consumption report downloaded to your Downloads folder — ' + report.summary.periodLabel

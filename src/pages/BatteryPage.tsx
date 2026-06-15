@@ -1,39 +1,8 @@
 import { useState } from 'react';
 import { useInverterStore } from '../store/useInverterStore';
-import { formatPower, formatPercent, formatVoltage, formatCurrent, formatTemp, formatEnergy } from '../lib/format';
+import { formatPercent, formatVoltage, formatTemp } from '../lib/format';
 import ColdBatteryWarning from '../components/ColdBatteryWarning';
-
-function socColor(soc: number): string {
-  if (soc < 20) return '#EF4444';
-  if (soc < 50) return '#F59E0B';
-  return '#22C55E';
-}
-
-function stateLabel(state: string): string {
-  switch (state) {
-    case 'charging': return 'Charging';
-    case 'discharging': return 'Discharging';
-    case 'idle': return 'Idle';
-    default: return state;
-  }
-}
-
-function stateColor(state: string): string {
-  switch (state) {
-    case 'charging': return '#22C55E';
-    case 'discharging': return '#F59E0B';
-    default: return '#8B949E';
-  }
-}
-
-const BATTERY_MODE_LABELS: Record<string, string> = {
-  unknown: 'Unknown',
-  eco: 'Eco',
-  eco_paused: 'Eco Paused',
-  timed_demand: 'Timed Demand',
-  timed_export: 'Timed Export',
-  export_paused: 'Export Paused',
-};
+import BatteryPanel from '../components/BatteryPanel';
 
 const BMS_REGISTER_LABELS = ['IR90', 'IR91', 'IR92', 'IR93', 'IR94'];
 const BMS_STATUS_LABELS = ['status_1', 'status_2', 'status_3', 'status_4', 'status_5', 'status_6', 'status_7'];
@@ -41,26 +10,6 @@ const BMS_WARNING_LABELS = ['warning_1', 'warning_2'];
 
 function formatHex(value: number, width: number): string {
   return `0x${Math.trunc(value).toString(16).toUpperCase().padStart(width, '0')}`;
-}
-
-/** Override mode label when cosy mode is enabled, or "Override" when */
-/** force charge or force discharge is active.                         */
-function modeDisplayLabel(
-  mode: string, cosyActive: boolean, cosyEnabled: boolean,
-  enableCharge: boolean, enableDischarge: boolean, inChargeWindow: boolean, inDischargeWindow: boolean,
-): string {
-  if (cosyActive) return 'Cosy';
-  if (cosyEnabled && (mode === 'eco' || mode === 'eco_paused')) return 'Cosy';
-  // Force charge is active only when the master charge-enable flag is set
-  // AND the current time falls within an active charge slot window. The
-  // enable_charge register (HR 96 / HR 1123) is a sticky schedule-enable
-  // flag, not an instantaneous "charging now" signal.
-  const forceChargeActive = enableCharge && inChargeWindow;
-  // Same logic for discharge: the enable_discharge flag (HR 59) enables
-  // timed slots; force discharge is only active when inside a window.
-  const forceDischargeActive = enableDischarge && inDischargeWindow;
-  if (forceChargeActive || forceDischargeActive) return 'Override';
-  return BATTERY_MODE_LABELS[mode] ?? mode;
 }
 
 export default function BatteryPage() {
@@ -81,108 +30,12 @@ export default function BatteryPage() {
   }
 
   const s = snapshot;
-  const color = socColor(s.soc);
-  const storedKwh = (s.soc / 100) * s.battery_capacity_kwh;
-  const chargeSlotActive = (s.charge_slots ?? []).some(slot => {
-    if (!slot.enabled) return false;
-    const now = new Date();
-    const curMin = now.getHours() * 60 + now.getMinutes();
-    const startMin = slot.start_hour * 60 + slot.start_minute;
-    const endMin = slot.end_hour * 60 + slot.end_minute;
-    return startMin < endMin
-      ? curMin >= startMin && curMin < endMin
-      : curMin >= startMin || curMin < endMin;
-  });
-  const dischargeSlotActive = (s.discharge_slots ?? []).some(slot => {
-    if (!slot.enabled) return false;
-    const now = new Date();
-    const curMin = now.getHours() * 60 + now.getMinutes();
-    const startMin = slot.start_hour * 60 + slot.start_minute;
-    const endMin = slot.end_hour * 60 + slot.end_minute;
-    return startMin < endMin
-      ? curMin >= startMin && curMin < endMin
-      : curMin >= startMin || curMin < endMin;
-  });
 
   return (
     <div className="flex flex-col gap-6 max-w-2xl mx-auto">
       <ColdBatteryWarning />
       {/* SOC overview card */}
-      <section className="bg-bg-surface rounded-2xl p-6 flex flex-col sm:flex-row items-center gap-6">
-        <div className="relative w-32 h-32 shrink-0">
-          <svg viewBox="0 0 100 100" className="w-full h-full -rotate-90">
-            <circle cx="50" cy="50" r="42" fill="none" stroke="#21262D" strokeWidth="8" />
-            <circle
-              cx="50" cy="50" r="42"
-              fill="none"
-              stroke={color}
-              strokeWidth="8"
-              strokeLinecap="round"
-              strokeDasharray={`${(s.soc / 100) * 264} 264`}
-              className="transition-all duration-700"
-            />
-          </svg>
-          <div className="absolute inset-0 flex flex-col items-center justify-center">
-            <span className="text-text-primary text-2xl font-bold font-mono leading-none">
-              {formatPercent(s.soc)}
-            </span>
-          </div>
-        </div>
-        <div className="flex flex-col gap-2 flex-1">
-          <div className="flex items-center gap-3">
-            <h2 className="text-text-primary text-lg font-semibold">Battery</h2>
-            <span
-              className="text-xs font-semibold px-2.5 py-1 rounded-full"
-              style={{
-                backgroundColor: stateColor(s.battery_state) + '20',
-                color: stateColor(s.battery_state),
-              }}
-            >
-              {stateLabel(s.battery_state)}
-            </span>
-          </div>
-          <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm">
-            <span className="text-text-secondary">Power</span>
-            <span className="text-text-primary font-mono text-right">
-              {s.battery_state === 'discharging' ? '−' : s.battery_state === 'charging' ? '+' : ''}
-              {formatPower(Math.abs(s.battery_power))}
-            </span>
-            <span className="text-text-secondary">Voltage</span>
-            <span className="text-text-primary font-mono text-right">{formatVoltage(s.battery_voltage)}</span>
-            <span className="text-text-secondary">Current</span>
-            <span className="text-text-primary font-mono text-right">{formatCurrent(s.battery_current)}</span>
-            <span className="text-text-secondary">Temperature</span>
-            <span className="text-text-primary font-mono text-right">{formatTemp(s.battery_temperature)}</span>
-            <span className="text-text-secondary">Mode</span>
-            <span className="text-text-primary font-mono text-right">{modeDisplayLabel(s.battery_mode, s.cosy_active, s.cosy_enabled, s.enable_charge, s.enable_discharge, chargeSlotActive, dischargeSlotActive)}</span>
-            <span className="text-text-secondary">Reserve</span>
-            <span className="text-text-primary font-mono text-right">{formatPercent(s.battery_reserve)}</span>
-            <span className="text-text-secondary">Charged Today</span>
-            <span className="text-text-primary font-mono text-right">{formatEnergy(s.today_charge_kwh)}</span>
-            <span className="text-text-secondary">Discharged Today</span>
-            <span className="text-text-primary font-mono text-right">{formatEnergy(s.today_discharge_kwh)}</span>
-          </div>
-        </div>
-      </section>
-
-      {/* Stored energy bar */}
-      <section className="bg-bg-surface rounded-2xl p-6 space-y-3">
-        <h3 className="text-text-primary text-sm font-semibold tracking-wide">Stored Energy</h3>
-        <div className="flex justify-between text-sm">
-          <span className="text-text-secondary">Capacity</span>
-          <span className="text-text-primary font-mono">{formatEnergy(s.battery_capacity_kwh)}</span>
-        </div>
-        <div className="flex justify-between text-sm">
-          <span className="text-text-secondary">Available</span>
-          <span className="text-text-primary font-mono">{formatEnergy(storedKwh)}</span>
-        </div>
-        <div className="h-2 bg-bg-elevated rounded-full overflow-hidden">
-          <div
-            className="h-full rounded-full transition-all duration-500"
-            style={{ width: `${s.soc}%`, backgroundColor: color }}
-          />
-        </div>
-      </section>
+      <BatteryPanel snapshot={s} />
 
       {/* Battery modules */}
       {s.battery_modules.length > 0 && (

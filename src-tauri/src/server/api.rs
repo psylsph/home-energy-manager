@@ -988,11 +988,15 @@ pub struct HistoryQuery {
     pub offset: Option<i64>,
     /// Use a rolling [now - range, now] window instead of an aligned bucket.
     pub rolling: Option<bool>,
+    /// Explicit UTC epoch millisecond start boundary supplied by the browser.
+    pub start_ms: Option<i64>,
+    /// Explicit UTC epoch millisecond end boundary supplied by the browser.
+    pub end_ms: Option<i64>,
 }
 
 /// GET /api/history — aggregated time-series data for charts.
 ///
-/// Query params: `range`, `fields`, `offset`, `rolling`.
+/// Query params: `range`, `fields`, `offset`, `rolling`, optional `start_ms`/`end_ms`.
 /// Returns `{ok: true, data: {field: [{t, v}, ...]}}`.
 pub async fn get_history(
     State(state): State<Arc<AppState>>,
@@ -1022,7 +1026,18 @@ pub async fn get_history(
     };
 
     let explicit_window: Option<(i64, i64)> =
-        if rolling && range_str != "month" && range_str != "today" {
+        if let (Some(start_ms), Some(end_ms)) = (params.start_ms, params.end_ms) {
+            if start_ms >= end_ms {
+                return error_response("Invalid history window: start_ms must be before end_ms");
+            }
+            // Convert browser-supplied UTC epoch milliseconds to the seconds used
+            // by the SQLite readings table. The frontend computes calendar-day
+            // boundaries in the user's local timezone and sends the absolute epoch
+            // window so backend/server timezone cannot shift "Today" by an hour.
+            let start_ts = start_ms.div_euclid(1000);
+            let end_ts = (end_ms + 999).div_euclid(1000);
+            Some((start_ts, end_ts))
+        } else if rolling && range_str != "month" && range_str != "today" {
             let end_ts = chrono::Utc::now().timestamp() - offset * range_secs;
             Some((end_ts - range_secs, end_ts))
         } else if range_str == "today" {

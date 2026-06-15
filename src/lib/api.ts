@@ -97,6 +97,17 @@ export async function fetchHistory(
   if (rolling) {
     params.set('rolling', 'true');
   }
+  if (range === 'today') {
+    // Calendar-day ranges are defined by the user's local browser timezone.
+    // Send the exact UTC epoch boundaries so a remote/headless backend (for
+    // example a Docker container running UTC) queries the same window that the
+    // chart axis displays.
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - offset, 0, 0, 0, 0);
+    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() - offset + 1, 0, 0, 0, 0);
+    params.set('start_ms', String(start.getTime()));
+    params.set('end_ms', String(end.getTime()));
+  }
   const res = await apiGet<{ ok: boolean; data: Record<string, Array<{ t: number; v: number }>> }>(
     `/api/history?${params}`,
   );

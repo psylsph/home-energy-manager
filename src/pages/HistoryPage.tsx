@@ -17,9 +17,14 @@ import {
   getHistoryXAxisMinTickGap,
   getHistoryXAxisTicks,
   formatHistoryXAxisTick,
+  getHistoryPickerMax,
+  getHistoryPickerValue,
+  historyPickerInputType,
+  historyPickerValueToOffset,
   isRollingHistoryRange,
   shouldRefreshHistoryRange,
   shouldTrimHistoryRangeLeadingGap,
+  supportsHistoryDate,
   trimDomainStartToFirstDataPoint,
 } from '../lib/historyRangeConfig';
 import { getSeriesOpacity } from '../lib/chartSeries';
@@ -745,9 +750,20 @@ export default function HistoryPage() {
         >
           ◀ Older
         </button>
-        <span className="text-text-secondary text-sm font-sans text-center truncate px-1">
-          {formatWindowLabel(range, offset)}
-        </span>
+        {supportsHistoryDate(range) ? (
+          <input
+            type={historyPickerInputType(range)}
+            value={getHistoryPickerValue(range, offset)}
+            max={getHistoryPickerMax(range)}
+            onChange={(e) => setOffset(historyPickerValueToOffset(range, e.target.value))}
+            aria-label="Select period date"
+            className="bg-transparent text-text-primary text-sm font-sans text-center px-1 py-0.5 rounded-md outline-none cursor-pointer hover:bg-bg-elevated transition-colors"
+          />
+        ) : (
+          <span className="text-text-secondary text-sm font-sans text-center truncate px-1">
+            {formatWindowLabel(range, offset)}
+          </span>
+        )}
         <button
           onClick={() => setOffset((o) => Math.max(0, o - 1))}
           disabled={offset === 0}

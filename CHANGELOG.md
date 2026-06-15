@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0] - 2026-06-15
+
+### Added
+
+- **Inverter Time display** — The inverter's wall-clock time (read directly
+  from holding registers HR 35–40) now appears under the `Connected · <ip>`
+  status in the top bar. It is shown exactly as the inverter reports it, with
+  no timezone conversion, so you can spot a clock drift or DST mismatch at a
+  glance.
+- **Power tab period navigation** — The Power page now has the same Older /
+  Newer period switcher as the History page, so you can step back through
+  previous hours, days, weeks, and months.
+- **Date picker for the selected period** — On both Power and History, the
+  period label is now a native date picker for the calendar-aligned ranges
+  (`Today`, `Month`), letting you jump straight to a specific day or month.
+  Rolling ranges keep the textual label.
+
+### Fixed
+
+- **History "Today" no longer starts at 1am** — The "Today" chart window was
+  computed on the backend using the server's local timezone, while the chart
+  axis used the browser's local timezone. On a remote/headless backend (for
+  example a Docker container running UTC) viewed from a BST browser this made
+  every "Today" view start at 01:00 instead of 00:00. The browser now sends
+  the exact local-day UTC epoch boundaries (`start_ms` / `end_ms`) and the
+  backend queries those, so the data window always matches the displayed
+  axis regardless of server timezone.
+
+### Changed
+
+- **Battery page uses the shared BatteryPanel component** — The Battery page
+  now renders the same `BatteryPanel` component as the Status page instead of
+  a duplicated inline layout.
+- **Cold battery warning on the Status page** — The Status page now shows the
+  cold-battery warning above the battery panel.
+- **Default window height** adjusted.
+
 ## [0.24.5] - 2026-06-14
 
 ### Fixed

@@ -665,6 +665,10 @@ pub struct InverterSnapshot {
 
     // -- Inverter --
     pub inverter_temperature: f32,
+    /// Inverter wall-clock time read directly from HR(35-40), formatted as
+    /// `YYYY-MM-DD HH:MM:SS` without applying any timezone conversion.
+    #[serde(default)]
+    pub inverter_time: String,
 
     // -- Energy totals (kWh) --
     pub today_solar_kwh: f32,

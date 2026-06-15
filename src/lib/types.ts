@@ -23,6 +23,7 @@ export interface InverterSnapshot {
   battery_over_temp: boolean;
   home_power: number;
   inverter_temperature: number;
+  inverter_time: string;
   today_solar_kwh: number;
   today_import_kwh: number;
   today_export_kwh: number;

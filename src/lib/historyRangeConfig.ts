@@ -198,3 +198,80 @@ export function trimDomainStartToFirstDataPoint<T extends { t: number }>(
 
   return firstTs - domain[0] > minGapMs ? [firstTs, domain[1]] : domain;
 }
+
+// ---------------------------------------------------------------------------
+// Period date picker helpers
+// ---------------------------------------------------------------------------
+//
+// The Older/Newer switcher steps the selected period back/forward by one
+// window. For calendar-aligned ranges ("today", "month") a period maps to an
+// exact calendar day/month, so we expose a native date/month picker so users
+// can jump straight to a date. Rolling ranges (1h, 6h, 24h, 7d, …) are
+// anchored at "now" and step by a fixed window size, so a picked date has no
+// unambiguous mapping — those keep the textual label.
+
+/** Format a Date as a local `YYYY-MM-DD` string (no timezone conversion). */
+function toLocalDateString(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+/** Format a Date as a local `YYYY-MM` string (no timezone conversion). */
+function toLocalMonthString(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+/**
+ * Whether the period switcher should render a native date/month picker for the
+ * given range. Only calendar-aligned ranges ("today", "month") map cleanly to
+ * a picked date; rolling ranges keep the textual label.
+ */
+export function supportsHistoryDate(range: HistoryRange): boolean {
+  return range === 'today' || range === 'month';
+}
+
+/** Native input type to render for the picker: `'month'` for month ranges, else `'date'`. */
+export function historyPickerInputType(range: HistoryRange): 'month' | 'date' {
+  return range === 'month' ? 'month' : 'date';
+}
+
+/** The picker value (`YYYY-MM-DD` or `YYYY-MM`) for the current offset. */
+export function getHistoryPickerValue(range: HistoryRange, offset: number, nowMs: number = Date.now()): string {
+  const now = new Date(nowMs);
+  if (range === 'month') {
+    let m = now.getMonth() - offset;
+    let y = now.getFullYear();
+    while (m < 0) {
+      m += 12;
+      y -= 1;
+    }
+    return toLocalMonthString(new Date(y, m, 1));
+  }
+  // 'today' — calendar day
+  return toLocalDateString(new Date(now.getFullYear(), now.getMonth(), now.getDate() - offset));
+}
+
+/** Newest selectable value (today's day, or the current month). */
+export function getHistoryPickerMax(range: HistoryRange, nowMs: number = Date.now()): string {
+  const now = new Date(nowMs);
+  return range === 'month' ? toLocalMonthString(now) : toLocalDateString(now);
+}
+
+/** Convert a picked picker value back to a non-negative offset. */
+export function historyPickerValueToOffset(range: HistoryRange, value: string, nowMs: number = Date.now()): number {
+  if (range === 'month') {
+    const [yStr, mStr] = value.split('-');
+    const now = new Date(nowMs);
+    const months = (now.getFullYear() - Number(yStr)) * 12 + (now.getMonth() - (Number(mStr) - 1));
+    return Math.max(0, months);
+  }
+  // 'today'
+  const now = new Date(nowMs);
+  const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const [yStr, mStr, dStr] = value.split('-');
+  const pickedMidnight = new Date(Number(yStr), Number(mStr) - 1, Number(dStr));
+  const days = Math.round((todayMidnight.getTime() - pickedMidnight.getTime()) / 86400000);
+  return Math.max(0, days);
+}
