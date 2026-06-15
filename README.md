@@ -147,7 +147,7 @@ Home Energy Manager connects directly to your inverter over your home network. I
 
 ### Compatibility
 
-- **Works with every GivEnergy inverter model** — Gen 1, Gen 2, Gen 3, Gen 4, Three Phase, AC Three Phase, HV Gen 3, All-in-One, AIO Hybrid, and AIO Commercial
+- **Works with every GivEnergy inverter model** — Gen 1, Gen 2, Gen 3, Gen 4, Three Phase, AC Three Phase, HV Gen 3, All-in-One, AIO Hybrid, AIO Commercial, and **Gateway**
 - **Three-phase and commercial systems** — fully supported, including the GIV-3HY family and All-in-One units
 - **Smart meter detection** — handles LoRA-linked meters and slow-responding CT clamps so nothing gets missed at startup
 
@@ -171,6 +171,7 @@ Home Energy Manager works with all known GivEnergy inverter models. Real-time mo
 | **All-in-One** (3.6kW/5kW/6kW) | Commercial all-in-one units |
 | **All-in-One Hybrid** | Combined hybrid + AIO |
 | **AIO Commercial** | Commercial three-phase variant |
+| **Gateway** | System controller / AC hub for 1–3 AIO units. Full schedule, mode, and rate-limit control via the three-phase register set. |
 
 ### 2-slot schedules ✅
 

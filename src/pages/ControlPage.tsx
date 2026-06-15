@@ -1588,6 +1588,7 @@ export default function ControlPage() {
     && (snapshot.device_type_code.startsWith('40')
       || snapshot.device_type_code.startsWith('41')
       || snapshot.device_type_code.startsWith('60')
+      || snapshot.device_type_code.startsWith('70')
       || snapshot.device_type_code.startsWith('81')
       || snapshot.device_type_code.startsWith('82'));
   // Three-phase-bank models use HR1113-1121 for charge/discharge schedules;

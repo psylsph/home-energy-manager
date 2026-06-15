@@ -94,6 +94,13 @@ fn model_specific_blocks_in_poll_order(
         blocks.extend(super::registers::THREE_PHASE_INPUT_BLOCKS.iter());
     }
 
+    // Gateway aggregation telemetry (IR 1600-1859) — all live measurements for
+    // the Gateway live here; the standard IR 0-59 / IR 1000-1414 ranges are
+    // unmapped on the Gateway. Read before optional config blocks.
+    if device_type.needs_gateway_input_blocks() {
+        blocks.extend(super::registers::GATEWAY_INPUT_BLOCKS.iter());
+    }
+
     blocks.extend(device_type.extra_poll_blocks().iter());
     blocks
 }
@@ -1101,11 +1108,14 @@ impl ModbusClient {
     ) -> Result<Vec<BlockRead>, ClientError> {
         // Three-phase models read all real-time telemetry from the
         // IR(1000-1414) range, making input_0_59 and input_180_239
-        // redundant. Use the leaner block set to save ~300 ms per cycle
-        // and reduce timeout exposure. On the first poll (device_type
-        // is None) the full STANDARD_POLL_BLOCKS set is used so that
-        // model detection (from HR(0)) can proceed.
-        let standard_blocks = if device_type.is_some_and(|dt| dt.needs_three_phase_input_blocks()) {
+        // redundant. The Gateway likewise reads all telemetry from its own
+        // IR(1600-1859) aggregation bank. Both use the lean HR-only standard
+        // set to save ~300 ms per cycle and reduce timeout exposure. On the
+        // first poll (device_type is None) the full STANDARD_POLL_BLOCKS set
+        // is used so that model detection (from HR(0)) can proceed.
+        let standard_blocks = if device_type.is_some_and(|dt| {
+            dt.needs_three_phase_input_blocks() || dt.needs_gateway_input_blocks()
+        }) {
             STANDARD_POLL_BLOCKS_3PH
         } else {
             STANDARD_POLL_BLOCKS

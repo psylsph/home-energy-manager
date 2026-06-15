@@ -331,6 +331,7 @@ impl DeviceType {
                 | Self::AioCommercial
                 | Self::HybridHvGen3
                 | Self::AllInOneHybrid
+                | Self::Gateway
         )
     }
 
@@ -390,7 +391,8 @@ impl DeviceType {
         };
         match self {
             Self::ACThreePhase => AC_EXTENDED_AND_THREE_PHASE_BLOCKS,
-            Self::HybridHvGen3 | Self::AllInOneHybrid | Self::ThreePhase | Self::AioCommercial => {
+            Self::HybridHvGen3 | Self::AllInOneHybrid | Self::ThreePhase | Self::AioCommercial
+            | Self::Gateway => {
                 EXTENDED_AND_THREE_PHASE_BLOCKS
             }
             Self::AllInOne6kW | Self::AllInOne3_6kW | Self::AllInOne5kW => {
@@ -443,7 +445,7 @@ impl DeviceType {
     pub fn supports_schedule_slots(&self) -> bool {
         !matches!(
             self,
-            Self::Ems | Self::EmsCommercial | Self::Gateway | Self::PvInverter
+            Self::Ems | Self::EmsCommercial | Self::PvInverter
         )
     }
 
@@ -457,6 +459,34 @@ impl DeviceType {
             Self::ACCoupled | Self::ACCoupledMk2 | Self::Gen1Hybrid => 0x31,
             _ => 0x11,
         }
+    }
+
+    /// Whether this device is the GivEnergy Gateway (system controller / AC
+    /// distribution hub for one or more All-in-One units).
+    ///
+    /// Mirrors `givenergy-modbus` `PlantCapabilities.is_gateway`: the Gateway
+    /// exposes a unique aggregation Input Register bank at IR 1600–1859 (grid,
+    /// PV, load, per-AIO battery SOC/power/energy, faults) instead of the
+    /// standard IR 0-59 / IR 1000-1414 telemetry ranges used by hybrids and
+    /// three-phase models. Detection is by DTC family 0x70xx (HR(0)) confirmed
+    /// by a `GW`-prefixed serial on HR(13-17).
+    pub fn needs_gateway_input_blocks(&self) -> bool {
+        matches!(self, Self::Gateway)
+    }
+
+    /// Whether this device has no directly-attached battery.
+    ///
+    /// Used to skip the LV pack BMS read (slave 0x32) and the HV BCU/BMU stack
+    /// probe (0xA0/0x70/0x50), which serve nothing meaningful on these models
+    /// and only burn poll-cycle time. The Gateway aggregates battery data from
+    /// its child AIO(s) in its own register bank; EMS/PvInverter simply have no
+    /// battery. `Unknown` is intentionally excluded so an unidentified device
+    /// still gets the standard LV probe during detection.
+    pub fn is_batteryless(&self) -> bool {
+        matches!(
+            self,
+            Self::Gateway | Self::Ems | Self::EmsCommercial | Self::PvInverter
+        )
     }
 }
 
@@ -808,6 +838,50 @@ pub struct InverterSnapshot {
     /// Detected external clamp meters (device addresses 0x01-0x08).
     #[serde(default)]
     pub meters: Vec<MeterData>,
+
+    // -- Gateway-specific (unpopulated on every other device) --
+    //
+    // The GivEnergy Gateway (DTC 0x70xx) aggregates telemetry from its child
+    // All-in-One unit(s) in a dedicated Input Register bank (IR 1600–1859).
+    // These fields are populated only for `DeviceType::Gateway`; all default
+    // to empty/zero otherwise. See `gateway-design/gateway-register-reference.md`.
+    /// Number of AIOs configured in the stack (1–3) — IR(1700).
+    #[serde(default)]
+    pub parallel_aio_count: u8,
+    /// Number of AIOs currently online — IR(1701).
+    #[serde(default)]
+    pub parallel_aio_online: u8,
+    /// Per-AIO state of charge % — IR(1801-1803). 0 if the slot is absent.
+    #[serde(default)]
+    pub per_aio_soc: [u16; 3],
+    /// Per-AIO inverter power (W, GivEnergy sign: + = discharging/out).
+    /// IR(1816-1818). 0 if the slot is absent.
+    #[serde(default)]
+    pub per_aio_power: [i32; 3],
+    /// Per-AIO battery charge energy today (kWh) — IR(1705/1708/1711).
+    #[serde(default)]
+    pub per_aio_charge_today_kwh: [f32; 3],
+    /// Per-AIO battery discharge energy today (kWh) — IR(1750/1753/1756).
+    #[serde(default)]
+    pub per_aio_discharge_today_kwh: [f32; 3],
+    /// Per-AIO serial number (Latin-1) — IR(1831+/1841+, variant-dependent).
+    #[serde(default)]
+    pub per_aio_serial: [String; 3],
+    /// Gateway firmware version string (e.g. "GA000009") — IR(1600-1603).
+    #[serde(default)]
+    pub gateway_software_version: String,
+    /// Gateway firmware variant flag: true when IR(1603) >= 10 (GA000010+).
+    #[serde(default)]
+    pub gateway_is_v2: bool,
+    /// Gateway work mode enum (2 = On Grid) — IR(1604).
+    #[serde(default)]
+    pub gateway_work_mode: u16,
+    /// Decoded gateway fault names from the 32-bit bitmask — IR(1622-1623).
+    #[serde(default)]
+    pub gateway_fault_codes: Vec<String>,
+    /// Serial of the primary (master) AIO — IR(1627-1631).
+    #[serde(default)]
+    pub first_inverter_serial: String,
 }
 
 // ===========================================================================
@@ -1127,6 +1201,7 @@ mod tests {
             DeviceType::ACThreePhase,
             DeviceType::HybridHvGen3,
             DeviceType::AllInOneHybrid,
+            DeviceType::Gateway,
         ] {
             assert!(
                 dt.supports_schedule_slots(),
@@ -1240,5 +1315,34 @@ mod tests {
         // AIO Commercial (0x41xx) resolves to its own specific model, not the
         // coarse HV family 4 — excluded per the reference.
         assert!(!DeviceType::AioCommercial.uses_hv_battery());
+    }
+
+    #[test]
+    fn needs_gateway_input_blocks_only_for_gateway() {
+        assert!(DeviceType::Gateway.needs_gateway_input_blocks());
+        // No other device family should request the gateway aggregation bank.
+        assert!(!DeviceType::Gen3Hybrid.needs_gateway_input_blocks());
+        assert!(!DeviceType::ThreePhase.needs_gateway_input_blocks());
+        assert!(!DeviceType::AllInOne6kW.needs_gateway_input_blocks());
+        assert!(!DeviceType::Ems.needs_gateway_input_blocks());
+    }
+
+    #[test]
+    fn is_batteryless_covers_batteryless_models() {
+        // Gateway aggregates battery data from child AIOs — no direct battery.
+        assert!(DeviceType::Gateway.is_batteryless());
+        assert!(DeviceType::Ems.is_batteryless());
+        assert!(DeviceType::EmsCommercial.is_batteryless());
+        assert!(DeviceType::PvInverter.is_batteryless());
+
+        // Devices with attached batteries must NOT be flagged batteryless.
+        assert!(!DeviceType::Gen3Hybrid.is_batteryless());
+        assert!(!DeviceType::AllInOne6kW.is_batteryless());
+        assert!(!DeviceType::ThreePhase.is_batteryless());
+        assert!(!DeviceType::ACCoupled.is_batteryless());
+
+        // Unknown is intentionally excluded so detection still probes the
+        // standard LV BMS at 0x32.
+        assert!(!DeviceType::Unknown(0).is_batteryless());
     }
 }

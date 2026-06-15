@@ -674,6 +674,67 @@ pub const AC_EXTENDED_AND_THREE_PHASE_BLOCKS: &[RegisterBlock] = &[
     THREE_PHASE_CONFIG_BLOCK,
 ];
 
+/// Gateway aggregation Input Register blocks — IR 1600–1859.
+///
+/// The GivEnergy Gateway (DTC family 0x70xx) is an AC distribution / control
+/// hub that aggregates telemetry from its child All-in-One (AIO) unit(s). All
+/// of its live measurements live in a unique Input Register bank at IR
+/// 1600–1859 (system state, grid/PV/load power, daily + lifetime energy,
+/// per-AIO SOC/power/energy/serials, faults). This bank replaces the standard
+/// IR 0-59 / IR 1000-1414 telemetry ranges used by hybrids and three-phase
+/// models — those ranges are unmapped on the Gateway and reading them only
+/// wastes poll-cycle time / invites timeouts.
+///
+/// Sourced from `dewet22/givenergy-modbus` `client/commands.py` `refresh()`
+/// (reads IR 1600–1859 in 60-register chunks) and `model/gateway.py`. The
+/// chunking deliberately swallows the unmapped gaps (e.g. 1605–1607,
+/// 1632–1639) as zeros — the decoders read only specific offsets, so the gaps
+/// are harmless. See `gateway-design/gateway-register-reference.md` §4.
+pub const GATEWAY_INPUT_BLOCK_1: RegisterBlock = RegisterBlock {
+    start: 1600,
+    count: 60,
+    register_type: RegisterType::Input,
+    name: "input_1600_1659",
+};
+pub const GATEWAY_INPUT_BLOCK_2: RegisterBlock = RegisterBlock {
+    start: 1660,
+    count: 60,
+    register_type: RegisterType::Input,
+    name: "input_1660_1719",
+};
+pub const GATEWAY_INPUT_BLOCK_3: RegisterBlock = RegisterBlock {
+    start: 1720,
+    count: 60,
+    register_type: RegisterType::Input,
+    name: "input_1720_1779",
+};
+pub const GATEWAY_INPUT_BLOCK_4: RegisterBlock = RegisterBlock {
+    start: 1780,
+    count: 51,
+    register_type: RegisterType::Input,
+    name: "input_1780_1830",
+};
+/// Block 5 starts at IR 1831 (not 1840) so that the V1 AIO serial addresses
+/// (aio1 @ 1831-1835, aio2 @ 1838-1842, aio3 @ 1845-1849) — which straddle the
+/// 1839/1840 boundary under plain 60-register chunking — are fully contained
+/// within a single block's data slice. V2 serials (1841+) fall here too.
+pub const GATEWAY_INPUT_BLOCK_5: RegisterBlock = RegisterBlock {
+    start: 1831,
+    count: 29,
+    register_type: RegisterType::Input,
+    name: "input_1831_1859",
+};
+
+/// All five Gateway aggregation Input Register blocks, in poll order
+/// (ascending IR address).
+pub const GATEWAY_INPUT_BLOCKS: &[RegisterBlock] = &[
+    GATEWAY_INPUT_BLOCK_1,
+    GATEWAY_INPUT_BLOCK_2,
+    GATEWAY_INPUT_BLOCK_3,
+    GATEWAY_INPUT_BLOCK_4,
+    GATEWAY_INPUT_BLOCK_5,
+];
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

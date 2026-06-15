@@ -15,6 +15,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hidden behind the taskbar on 1080p displays. Also requests focus so the
   window appears in front of other windows when launched. (#79)
 
+## [0.26.0] - 2026-06-15
+
+### Added
+
+- **GivEnergy Gateway support** — full first-class support for the
+  GivEnergy Gateway (DTC 0x7001, serial prefix `GW`), a system controller
+  / AC distribution hub that manages up to 3 All-in-One battery units.
+  - **Polling & decoding**: reads the Gateway's unique Input Register bank
+    (IR 1600-1859) for grid voltage, PV generation, house load (excl. EV
+    charger), aggregate battery SOC/power/energy, and per-AIO detail.
+  - **Power-flow diagram**: integrates into the existing live flow diagram
+    with correct sign conventions, including grid power derived from energy
+    balance (the Gateway has no direct grid-power register).
+  - **Identity & diagnostics**: device detail card showing software version
+    (GA000009+), V1/V2 firmware variant, work mode, configured vs online
+    AIOs, per-AIO SOC/power/serial/energy, and decoded fault codes.
+  - **Control path**: full schedule, mode, and rate-limit control via the
+    three-phase register set (HR 1110/1108/1109/1111, HR 1113-1121,
+    HR 1122/1123) — matching the GivTCP reference implementation.
+  - **10-slot scheduling**: support for extended charge/discharge schedules
+    with per-slot target SOCs (slots 3-10 via HR 240-299).
+  - **History**: daily and lifetime energy totals chart correctly via the
+    Gateway's authoritative registers.
+  - **Smart features**: Agile Octopus and Cosy tariff integrations both
+    route through the correct three-phase force-charge/discharge registers.
+  - **UI indicators**: "house load excludes EV" hint on the consumption tile;
+    battery temperature and per-cell data noted as unavailable (requires
+    direct AIO connection, not yet supported).
+
+### Changed
+
+- **`supports_schedule_slots()`** — Gateway now returns `true` (was in the
+  batteryless exclusion set), enabling schedule-slot configuration.
+- **`uses_three_phase_schedule_slots()`** — now includes Gateway, routing
+  all slot, force-charge, and rate-limit commands through the three-phase
+  register map.
+
+### Fixed
+
+- **`formatFrequency`** — now returns `—` (em dash) for NaN / Infinity
+  values instead of displaying "NaN Hz".
+
 ## [0.25.2] - 2026-06-15
 
 ### Fixed

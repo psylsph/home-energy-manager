@@ -53,6 +53,95 @@ export default function InverterPage() {
         </div>
       </section>
 
+      {/* Gateway detail — only for Gateway devices */}
+      {s.device_type_code.startsWith('70') && (
+        <section className="bg-bg-surface rounded-2xl p-5">
+          <div className="flex items-center gap-3 mb-4">
+            <h2 className="text-text-primary font-semibold text-lg">Gateway</h2>
+            <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-flow-active/20 text-flow-active">
+              {s.gateway_is_v2 ? 'V2' : 'V1'}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
+            <span className="text-text-secondary">Software Version</span>
+            <span className="text-text-primary font-mono text-right">{s.gateway_software_version || '—'}</span>
+            <span className="text-text-secondary">Work Mode</span>
+            <span className="text-text-primary font-mono text-right">{s.gateway_work_mode === 2 ? 'On Grid' : s.gateway_work_mode || '—'}</span>
+            {s.first_inverter_serial && (
+              <>
+                <span className="text-text-secondary">Primary AIO</span>
+                <span className="text-text-primary font-mono text-right">{s.first_inverter_serial}</span>
+              </>
+            )}
+            <span className="text-text-secondary">AIOs Configured</span>
+            <span className="text-text-primary font-mono text-right">{s.parallel_aio_count ?? '—'}</span>
+            <span className="text-text-secondary">AIOs Online</span>
+            <span className={`font-mono text-right ${(s.parallel_aio_online ?? 0) === (s.parallel_aio_count ?? 0) && (s.parallel_aio_online ?? 0) > 0 ? 'text-battery' : 'text-warning'}`}>
+              {s.parallel_aio_online ?? '—'}
+            </span>
+          </div>
+
+          {/* Per-AIO rows */}
+          {(s.parallel_aio_count ?? 0) > 0 && (
+            <div className="mt-4 space-y-2">
+              <h3 className="text-text-primary text-sm font-semibold tracking-wide">Connected AIOs</h3>
+              {Array.from({ length: s.parallel_aio_count! }).map((_, i) => (
+                <div key={i} className="bg-bg-elevated rounded-xl p-4 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-text-secondary text-xs font-medium">AIO #{i + 1}</span>
+                    {s.per_aio_serial?.[i] && (
+                      <span className="text-text-primary font-mono text-xs">{s.per_aio_serial[i]}</span>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                    <div>
+                      <span className="text-text-secondary">SOC </span>
+                      <span className="text-text-primary font-mono">{formatPercent(s.per_aio_soc?.[i] ?? 0)}</span>
+                    </div>
+                    <div>
+                      <span className="text-text-secondary">Power </span>
+                      <span className="text-text-primary font-mono">{formatPower(s.per_aio_power?.[i] ?? 0)}</span>
+                    </div>
+                    <div>
+                      <span className="text-text-secondary">Charge Today </span>
+                      <span className="text-text-primary font-mono">{formatEnergy(s.per_aio_charge_today_kwh?.[i] ?? 0)}</span>
+                    </div>
+                    <div>
+                      <span className="text-text-secondary">Discharge Today </span>
+                      <span className="text-text-primary font-mono">{formatEnergy(s.per_aio_discharge_today_kwh?.[i] ?? 0)}</span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Faults */}
+          {s.gateway_fault_codes && s.gateway_fault_codes.length > 0 && (
+            <div className="mt-4">
+              <h3 className="text-warning text-sm font-semibold tracking-wide mb-2">Faults</h3>
+              <ul className="space-y-1">
+                {s.gateway_fault_codes.map((fault, i) => (
+                  <li key={i} className="bg-warning/10 text-warning rounded-lg px-3 py-1.5 text-xs font-mono">{fault}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {s.gateway_fault_codes && s.gateway_fault_codes.length === 0 && (
+            <div className="mt-4 bg-bg-elevated rounded-lg px-3 py-2">
+              <span className="text-battery text-xs font-medium">✓ No faults</span>
+            </div>
+          )}
+
+          <div className="mt-4 bg-bg-elevated/50 rounded-lg px-3 py-2">
+            <p className="text-text-secondary text-xs">
+              Battery cell-level data requires a direct connection to each AIO (not yet supported).
+              The Gateway aggregates battery data — only SOC, power, and energy totals are shown here.
+            </p>
+          </div>
+        </section>
+      )}
+
       {/* Inverter Metrics */}
       <section className="bg-bg-surface rounded-2xl p-5">
         <h2 className="text-text-primary font-semibold text-lg mb-4">Inverter</h2>
@@ -152,6 +241,17 @@ export default function InverterPage() {
           <span className="text-text-primary font-mono text-right">{formatEnergy(s.today_discharge_kwh)}</span>
         </div>
       </section>
+
+      {/* Gateway battery note */}
+      {s.device_type_code.startsWith('70') && (
+        <div className="bg-bg-surface rounded-2xl p-5">
+          <p className="text-text-secondary text-xs">
+            Battery cell data not available on the Gateway. The Gateway aggregates battery telemetry
+            from its child AIO(s) — only aggregate SOC, power and energy totals are reported.
+            Per-cell voltages and module temperatures require a direct connection to each AIO (not yet supported).
+          </p>
+        </div>
+      )}
 
       {/* Features & Status */}
       <section className="bg-bg-surface rounded-2xl p-5">

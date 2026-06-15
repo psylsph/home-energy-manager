@@ -19,6 +19,9 @@ export function formatVoltage(v: number): string {
 }
 
 export function formatFrequency(f: number): string {
+  if (!Number.isFinite(f)) {
+    return '—';
+  }
   return `${f.toFixed(2)}Hz`;
 }
 

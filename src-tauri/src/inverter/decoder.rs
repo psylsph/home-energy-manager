@@ -192,6 +192,12 @@ fn block_key(block: &crate::modbus::registers::RegisterBlock) -> &'static str {
         (RegisterType::Input, 1300) => "input_1300_1359",
         (RegisterType::Input, 1360) => "input_1360_1413",
         (RegisterType::Input, 180) => "input_180_239",
+        // Gateway aggregation bank (IR 1600-1859) — see GATEWAY_INPUT_BLOCKS.
+        (RegisterType::Input, 1600) => "input_1600_1659",
+        (RegisterType::Input, 1660) => "input_1660_1719",
+        (RegisterType::Input, 1720) => "input_1720_1779",
+        (RegisterType::Input, 1780) => "input_1780_1830",
+        (RegisterType::Input, 1831) => "input_1831_1859",
         _ => "unknown",
     }
 }
@@ -247,6 +253,12 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
             "input_1300_1359" => decode_input_1300_1359(data, &mut snap),
             "input_1360_1413" => decode_input_1360_1413(data, &mut snap),
             "input_180_239" => decode_input_180_239(data, &mut snap),
+            // Gateway aggregation bank decoders.
+            "input_1600_1659" => decode_gateway_1600_1659(data, &mut snap),
+            "input_1660_1719" => decode_gateway_1660_1719(data, &mut snap),
+            "input_1720_1779" => decode_gateway_1720_1779(data, &mut snap),
+            "input_1780_1830" => decode_gateway_1780_1830(data, &mut snap),
+            "input_1831_1859" => decode_gateway_1831_1859(data, &mut snap),
             _ => {
                 log::warn!("Unknown block '{}' in decode_snapshot", key);
             }
@@ -262,8 +274,29 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
     //   = solar - battery_power - grid_power
     // Three-phase models expose direct total load at IR(1089-1090); keep that
     // authoritative value when present, otherwise fall back to the derived formula.
-    if !(snap.device_type.needs_three_phase_input_blocks() && snap.home_power > 0) {
+    // The Gateway likewise exposes an authoritative, EV-excluding house load
+    // (`p_load`, IR 1618) — keep it when present.
+    let has_direct_home_power = (snap
+        .device_type
+        .needs_three_phase_input_blocks()
+        || snap.device_type.needs_gateway_input_blocks())
+        && snap.home_power > 0;
+    if !has_direct_home_power {
         snap.home_power = snap.solar_power - snap.battery_power - snap.grid_power;
+    }
+
+    // Gateway: derive grid power from the energy balance. The gateway measures
+    // solar (`p_pv`) and house load (`p_load`, excludes EV) directly, plus
+    // battery power (`p_aio_total`, GE sign: + = discharge). Grid power has no
+    // dedicated register — it is the residual that balances the equation:
+    //   grid_export(HEM, +) = solar + battery_discharge - home
+    //                        = solar - battery_power(HEM +charge) - home
+    // (algebra: grid_import - export = home - p_aio_total_ge - pv → solved for
+    // HEM's +export convention; see gateway-design/IMPLEMENTATION-PLAN.md §5.)
+    if snap.device_type.needs_gateway_input_blocks()
+        && gateway_is_valid(&snap.gateway_software_version)
+    {
+        snap.grid_power = snap.solar_power - snap.battery_power - snap.home_power;
     }
 
     // Populate the synthetic built-in grid CT meter (address 0x00) with
@@ -1329,6 +1362,245 @@ pub fn validate_hv_bcu(data: &[u16]) -> bool {
     let version = decode_gateway_version(data, 0);
     let trimmed = version.trim();
     !trimmed.is_empty() && !trimmed.chars().all(|c| c == '0')
+}
+
+// ===========================================================================
+// Gateway (DTC 0x70xx) aggregation bank decode — IR 1600-1859
+// ===========================================================================
+//
+// The GivEnergy Gateway is a system controller / AC hub for one or more
+// All-in-One (AIO) units. ALL of its live measurements live in a dedicated
+// Input Register bank (IR 1600-1859), distinct from every other GivEnergy
+// device. Register map, scalings and the V1/V2 variant contract are from
+// `dewet22/givenergy-modbus` `model/gateway.py`; see
+// `gateway-design/gateway-register-reference.md` for the authoritative
+// byte-level reference.
+//
+// CRITICAL — sign conventions differ from the rest of the codebase:
+//   * Battery / AIO power (`p_aio_total`, `p_aio*_inverter`) is signed with
+//     the GivEnergy wire convention: **+ = discharging (out), − = charging
+//     (in)**. HEM's internal convention is the OPPOSITE (+ = charge), so these
+//     are negated when mapped onto `battery_power`.
+//   * Grid power has no dedicated register — it is derived in `decode_snapshot`
+//     from the energy balance (solar + battery_discharge − home).
+//
+// V1/V2 variant: selected by IR(1603) (the last register of the version
+// string). `< 10` → V1 (uint32 totals high-register-first, AIO serials @
+// 1831+); `>= 10` → V2 (totals low-register-first / swapped, serials @ 1841+).
+// The simulator emits V1 only; the V2 path is shipped for real hardware on
+// GA000010+ firmware.
+
+/// Whether a decoded gateway software-version string indicates a real,
+/// present gateway.
+///
+/// Mirrors `givenergy-modbus` `gateway.is_valid()`: the version (IR 1600-1603)
+/// must decode to a non-trivial string. An all-zero bank (non-gateway device,
+// or a failed read) decodes to `"00000000"` — treated as absent so gateway
+// widgets are never rendered against a hybrid/AIO.
+pub fn gateway_is_valid(version: &str) -> bool {
+    let trimmed = version.trim();
+    !trimmed.is_empty() && !trimmed.chars().all(|c| c == '0')
+}
+
+/// Decode a variant-aware uint32 energy total from two registers.
+///
+/// `hi_off` / `lo_off` are the V1 (high, low) register offsets within the
+/// block. V2 swaps the interpretation (low register is the high word).
+fn gw_u32(data: &[u16], hi_off: usize, lo_off: usize, is_v2: bool) -> u32 {
+    let hi = get_reg(data, hi_off);
+    let lo = get_reg(data, lo_off);
+    if is_v2 {
+        uint32(lo, hi) // V2: low register first (byte order swapped)
+    } else {
+        uint32(hi, lo) // V1: high register first
+    }
+}
+
+/// Gateway fault-bitmask → human-readable names.
+///
+/// 32-bit MSB-first bitmask at IR(1622-1623): table bit 0 = bit 31 of the
+/// u32 (MSB), table bit 31 = bit 0 (LSB). Source: `model/gateway.py`
+/// `_gateway_fault_code`. Empty entries are reserved/unused.
+const GATEWAY_FAULT_NAMES: [&str; 32] = [
+    "Relay 1&2 bonding",        // 0
+    "Relay 3&4 bonding",        // 1
+    "Relay 1&2 disconnect",     // 2
+    "Relay 3&4 disconnect",     // 3
+    "AC over frequency 1",      // 4
+    "AC under frequency 1",     // 5
+    "AC over voltage 1",        // 6
+    "AC under voltage 1",       // 7
+    "AC over frequency 2",      // 8
+    "AC under frequency 2",     // 9
+    "AC over voltage 2",        // 10
+    "AC under voltage 2",       // 11
+    "",                          // 12 (reserved)
+    "No zero-point protection", // 13
+    "Over quarter AC voltage",  // 14
+    "Under quarter AC voltage", // 15
+    "Over AC voltage long-time",// 16
+    "AC over frequency constant",   // 17
+    "AC under frequency constant",  // 18
+    "AC over voltage constant",     // 19
+    "", "", "", "", "", "", "", "", "", "", "", // 20-30 (reserved)
+    "Grid mode Off",            // 31
+];
+
+fn decode_gateway_faults(raw: u32) -> Vec<String> {
+    let mut faults = Vec::new();
+    for (i, name) in GATEWAY_FAULT_NAMES.iter().enumerate() {
+        if name.is_empty() {
+            continue;
+        }
+        // Bit 0 = MSB (bit 31 of u32), bit 31 = LSB.
+        if (raw >> (31 - i)) & 1 == 1 {
+            faults.push((*name).to_string());
+        }
+    }
+    faults
+}
+
+/// IR 1600-1659: identity, version/variant, instantaneous power, faults,
+/// daily + lifetime energy totals.
+fn decode_gateway_1600_1659(data: &[u16], snap: &mut InverterSnapshot) {
+    // --- Identity & variant ---
+    snap.gateway_software_version = decode_gateway_version(data, 0); // IR 1600-1603
+    let is_v2 = get_reg(data, 3) >= 10; // IR(1603): last version reg selects V1/V2
+    snap.gateway_is_v2 = is_v2;
+    snap.gateway_work_mode = get_reg(data, 4); // IR 1604
+    snap.first_inverter_serial = decode_serial(data, 27, 5); // IR 1627-1631
+
+    // --- Faults ---
+    let fault_raw = (get_reg(data, 22) as u32) << 16 | get_reg(data, 23) as u32; // IR 1622-1623
+    snap.gateway_fault_codes = decode_gateway_faults(fault_raw);
+
+    // --- Instantaneous power (mapped to standard snapshot fields) ---
+    // IR(1608) v_grid ÷10 V. Grid frequency is not available in the gateway
+    // bank — leave it NaN so the sanitizer's [45,55] range check is skipped
+    // (NaN comparisons are always false in Rust).
+    snap.grid_voltage = get_reg(data, 8) as f32 * 0.1;
+    snap.grid_frequency = f32::NAN;
+    snap.grid_online = snap.grid_voltage > 50.0;
+
+    // Battery temperature is not available in the Gateway bank (the
+    // Gateway aggregates SOC/power/energy but does not expose per-pack
+    // temperature — that lives on each AIO's own BMS). Set to NaN so
+    // the frontend displays "—" rather than "0.0°C".
+    snap.battery_temperature = f32::NAN;
+
+    // IR(1617) p_pv — unsigned total PV generation.
+    let p_pv = get_reg(data, 17) as i32;
+    snap.solar_power = p_pv;
+    snap.pv1_power = p_pv;
+
+    // IR(1618) p_load — house load, EXCLUDES the EV charger (gateway defining
+    // property). This is the authoritative home_power; decode_snapshot keeps
+    // it and derives grid_power from the energy balance instead.
+    snap.home_power = get_reg(data, 18) as i32;
+
+    // --- Daily energy totals (÷10 kWh) ---
+    snap.today_import_kwh = get_reg(data, 40) as f32 * 0.1; // e_grid_import_today
+    snap.today_solar_kwh = get_reg(data, 43) as f32 * 0.1; // e_pv_today
+    snap.today_export_kwh = get_reg(data, 46) as f32 * 0.1; // e_grid_export_today
+    snap.today_charge_kwh = get_reg(data, 49) as f32 * 0.1; // e_aio_charge_today
+    snap.today_discharge_kwh = get_reg(data, 52) as f32 * 0.1; // e_aio_discharge_today
+    snap.today_consumption_kwh = get_reg(data, 55) as f32 * 0.1; // e_load_today
+
+    // --- Lifetime energy totals (uint32 ÷10 kWh, V1/V2 byte order) ---
+    snap.total_import_kwh = gw_u32(data, 41, 42, is_v2) as f32 * 0.1; // e_grid_import_total
+    snap.total_export_kwh = gw_u32(data, 47, 48, is_v2) as f32 * 0.1; // e_grid_export_total
+    snap.total_charge_kwh = gw_u32(data, 50, 51, is_v2) as f32 * 0.1; // e_aio_charge_total
+    snap.total_discharge_kwh = gw_u32(data, 53, 54, is_v2) as f32 * 0.1; // e_aio_discharge_total
+}
+
+/// IR 1660-1719: AIO stack summary (count, aggregate power, state) + per-AIO
+/// charge energy.
+fn decode_gateway_1660_1719(data: &[u16], snap: &mut InverterSnapshot) {
+    snap.parallel_aio_count = get_reg(data, 40) as u8; // IR 1700
+    snap.parallel_aio_online = get_reg(data, 41) as u8; // IR 1701
+
+    // IR(1702) p_aio_total — aggregate AIO inverter power, signed (GE: +=discharge).
+    // Map to battery_power with HEM convention (+ = charge): NEGATE.
+    let p_aio_total = signed(get_reg(data, 42));
+    snap.battery_power = -p_aio_total;
+    snap.battery_state = BatteryState::from_power(snap.battery_power);
+
+    // Capacity / max power scale with the configured AIO count (per GivTCP
+    // getInvModel: 13.5 kWh × n, 6000 W × n). Guard against a zero/missing
+    // count so the UI never shows a zero-power battery.
+    let n = snap.parallel_aio_count.max(1) as u32;
+    snap.battery_capacity_kwh = 13.5 * n as f32;
+    snap.max_battery_power_w = 6000 * n;
+
+    // Per-AIO charge today (÷10 kWh).
+    snap.per_aio_charge_today_kwh = [
+        get_reg(data, 45) as f32 * 0.1, // IR 1705
+        get_reg(data, 48) as f32 * 0.1, // IR 1708
+        get_reg(data, 51) as f32 * 0.1, // IR 1711
+    ];
+}
+
+/// IR 1720-1779: per-AIO discharge energy.
+fn decode_gateway_1720_1779(data: &[u16], snap: &mut InverterSnapshot) {
+    snap.per_aio_discharge_today_kwh = [
+        get_reg(data, 30) as f32 * 0.1, // IR 1750
+        get_reg(data, 33) as f32 * 0.1, // IR 1753
+        get_reg(data, 36) as f32 * 0.1, // IR 1756
+    ];
+}
+
+/// IR 1780-1830: aggregate battery energy, per-AIO SOC, per-AIO inverter power.
+fn decode_gateway_1780_1830(data: &[u16], snap: &mut InverterSnapshot) {
+    // Per-AIO SOC % — IR 1801-1803.
+    snap.per_aio_soc = [
+        get_reg(data, 21), // IR 1801
+        get_reg(data, 22), // IR 1802
+        get_reg(data, 23), // IR 1803
+    ];
+
+    // Aggregate SOC: average of online AIOs with a non-zero SOC. Falls back to
+    // AIO1 for a single-AIO install.
+    let count = snap.parallel_aio_online.max(1) as usize;
+    let soc_vals: Vec<u16> = snap
+        .per_aio_soc
+        .iter()
+        .take(count)
+        .copied()
+        .filter(|&s| s > 0)
+        .collect();
+    let soc_sum: u32 = soc_vals.iter().map(|&s| s as u32).sum();
+    if !soc_vals.is_empty() {
+        snap.soc = (soc_sum / soc_vals.len() as u32).min(100) as u8;
+    } else {
+        snap.soc = snap.per_aio_soc[0].min(100) as u8;
+    }
+
+    // Per-AIO inverter power — IR 1816-1818, signed (GE: + = discharge).
+    // Stored verbatim in per_aio_power (the field documents the GE sign).
+    snap.per_aio_power = [
+        signed(get_reg(data, 36)), // IR 1816
+        signed(get_reg(data, 37)), // IR 1817
+        signed(get_reg(data, 38)), // IR 1818
+    ];
+}
+
+/// IR 1831-1859: per-AIO serial numbers (addresses differ by firmware variant).
+fn decode_gateway_1831_1859(data: &[u16], snap: &mut InverterSnapshot) {
+    if snap.gateway_is_v2 {
+        // V2 (GA000010+): aio1 @ 1841-1845, aio2 @ 1848-1852, aio3 @ 1855-1859.
+        snap.per_aio_serial = [
+            decode_serial(data, 10, 5),
+            decode_serial(data, 17, 5),
+            decode_serial(data, 24, 5),
+        ];
+    } else {
+        // V1 (GA000009 and earlier): aio1 @ 1831-1835, aio2 @ 1838-1842, aio3 @ 1845-1849.
+        snap.per_aio_serial = [
+            decode_serial(data, 0, 5),
+            decode_serial(data, 7, 5),
+            decode_serial(data, 14, 5),
+        ];
+    }
 }
 
 // ===========================================================================
@@ -2569,5 +2841,282 @@ mod tests {
         let (valid, v1) = validate_meter_data(&[9999]); // 999.9V
         assert!(!valid);
         assert!((v1 - 999.9).abs() < 0.1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Gateway (DTC 0x70xx) aggregation bank decode
+    // -----------------------------------------------------------------------
+
+    /// Build the five gateway input blocks with the given register data
+    /// (60 or 29 regs each).
+    fn gateway_block1(data_1600_1659: [u16; 60]) -> BlockRead {
+        make_block(RegisterType::Input, 1600, 60, "input_1600_1659", data_1600_1659.to_vec())
+    }
+    fn gateway_block2(data_1660_1719: [u16; 60]) -> BlockRead {
+        make_block(RegisterType::Input, 1660, 60, "input_1660_1719", data_1660_1719.to_vec())
+    }
+    fn gateway_block3(data_1720_1779: [u16; 60]) -> BlockRead {
+        make_block(RegisterType::Input, 1720, 60, "input_1720_1779", data_1720_1779.to_vec())
+    }
+    fn gateway_block4(data_1780_1830: [u16; 51]) -> BlockRead {
+        make_block(RegisterType::Input, 1780, 51, "input_1780_1830", data_1780_1830.to_vec())
+    }
+    fn gateway_block5_v1(data_1831_1859: [u16; 29]) -> BlockRead {
+        make_block(RegisterType::Input, 1831, 29, "input_1831_1859", data_1831_1859.to_vec())
+    }
+    /// Holding register 0-59 block with DTC 0x7001 (Gateway).
+    fn gateway_holding_block() -> BlockRead {
+        let mut h = [0u16; 60];
+        h[0] = 0x7001; // DeviceType::Gateway
+        make_block(RegisterType::Holding, 0, 60, "holding_0_59", h.to_vec())
+    }
+
+    fn gateway_fixture_blocks_v1() -> Vec<BlockRead> {
+        let mut b1 = [0u16; 60];
+        // Identity: "GA000009" → V1.
+        b1[0] = 0x4741; // 'G','A'
+        b1[1] = 0x3030; // '0','0'
+        b1[2] = 0x0000; // 0,0
+        b1[3] = 0x0009; // 9 (last digit) — V1 (IR(1603) < 10)
+        b1[4] = 2; // work_mode = On Grid
+        // Grid: v_grid = 2410 → 241.0 V
+        b1[8] = 2410;
+        // PV: p_pv = 3500 W
+        b1[17] = 3500;
+        // Load: p_load = 1200 W
+        b1[18] = 1200;
+        // AIO power: p_ac1 = -500 W (charging in GE sign)
+        b1[16] = (-500i16) as u16;
+        // First AIO serial "SA24230001" (5 regs).
+        b1[27] = 0x5341; // 'S','A'
+        b1[28] = 0x3234; // '2','4'
+        b1[29] = 0x3233; // '2','3'
+        b1[30] = 0x3030; // '0','0'
+        b1[31] = 0x3031; // '0','1'
+        // Energy today: import=12.3, solar=45.6, export=3.4, charge=20.0, discharge=18.5, load=30.0
+        b1[40] = 123; // e_grid_import_today
+        b1[43] = 456; // e_pv_today
+        b1[46] = 34;  // e_grid_export_today
+        b1[49] = 200; // e_aio_charge_today
+        b1[52] = 185; // e_aio_discharge_today
+        b1[55] = 300; // e_load_today
+        // Lifetime totals (V1 hi/lo): import=12345.6, export=543.2, charge=8000.0, discharge=7500.0
+        // e_grid_import_total: IR(1641)=0x0001, IR(1642)=0xE240 → (1<<16)|57856 = 123392 /10 = 12339.2
+        // Actually use clean values: 1234 = 0x04D2 high, 5678 = 0x162E low → uint32=80913222 /10 ≈ 8091322.2 no
+        // Let's use: hi=0x0001=1, lo=0x0000=0 → 65536 /10 = 6553.6
+        b1[41] = 1; b1[42] = 0;   // e_grid_import_total high, low
+        b1[44] = 0; b1[45] = 1000; // e_pv_total = 1000 /10 = 100.0
+        b1[47] = 0; b1[48] = 500;  // e_grid_export_total = 500/10 = 50.0
+        b1[50] = 2; b1[51] = 0;    // e_aio_charge_total = 131072/10 = 13107.2
+        b1[53] = 1; b1[54] = 5000; // e_aio_discharge_total = (1<<16)|5000 = 70536/10 = 7053.6
+
+        let mut b2 = [0u16; 60];
+        b2[40] = 1; // parallel_aio_num = 1
+        b2[41] = 1; // parallel_aio_online = 1
+        b2[42] = (-800i16) as u16; // p_aio_total = -800 W (charging in GE sign)
+        b2[43] = 1; // aio_state = 1 (charging)
+        b2[45] = 200; // e_aio1_charge_today = 20.0 kWh
+
+        let mut b3 = [0u16; 60];
+        b3[30] = 185; // e_aio1_discharge_today = 18.5 kWh
+
+        let mut b4 = [0u16; 51];
+        b4[21] = 75; // aio1_soc = 75%
+        b4[36] = 800i16 as u16; // p_aio1_inverter = 800 W (discharging in GE sign)
+
+        let mut b5 = [0u16; 29];
+        // V1: aio1 serial @ 1831-1835 (offsets 0-4)
+        b5[0] = 0x5341; // 'S','A'
+        b5[1] = 0x3234; // '2','4'
+        b5[2] = 0x3233; // '2','3'
+        b5[3] = 0x3030; // '0','0'
+        b5[4] = 0x3031; // '0','1'
+
+        vec![
+            gateway_holding_block(),
+            gateway_block1(b1),
+            gateway_block2(b2),
+            gateway_block3(b3),
+            gateway_block4(b4),
+            gateway_block5_v1(b5),
+        ]
+    }
+
+    #[test]
+    fn gateway_validates_version() {
+        // All-zero bank (non-gateway device or failed read) → not valid.
+        assert!(!gateway_is_valid("00000000"));
+        assert!(!gateway_is_valid(""));
+        assert!(!gateway_is_valid("   "));
+        // Real gateway version → valid.
+        assert!(gateway_is_valid("GA000009"));
+        assert!(gateway_is_valid("GA000010"));
+    }
+
+    #[test]
+    fn gateway_decode_identity_and_faults() {
+        let mut b1 = [0u16; 60];
+        b1[0] = 0x4741; // 'G','A'
+        b1[1] = 0x3030; // '0','0'
+        b1[2] = 0x0000;
+        b1[3] = 0x000A; // 10 = V2 (GA000010)
+        b1[4] = 2; // work_mode = On Grid
+
+        // Set a fault bitmask with bit 0 (Relay 1&2 bonding) and bit 31 (Grid mode Off).
+        // Bit 0 = MSB (bit 31 of u32), bit 31 = LSB (bit 0 of u32).
+        // Fault bit 0 = 1 → u32 bit 31 = 1 → IR(1622) bit 15 = 1 → IR1622 = 0x8000
+        // Fault bit 31 = 1 → u32 bit 0 = 1 → IR(1623) bit 0 = 1 → IR1623 = 0x0001
+        b1[22] = 0x8000; // IR 1622 high word
+        b1[23] = 0x0001; // IR 1623 low word
+
+        let blocks = vec![
+            gateway_holding_block(),
+            gateway_block1(b1),
+            gateway_block2([0u16; 60]),
+            gateway_block3([0u16; 60]),
+            gateway_block4([0u16; 51]),
+            gateway_block5_v1([0u16; 29]),
+        ];
+        let snap = decode_snapshot(&blocks);
+
+        assert_eq!(snap.gateway_software_version, "GA0000010");
+        assert!(snap.gateway_is_v2);
+        assert_eq!(snap.gateway_work_mode, 2);
+        assert!(snap.gateway_fault_codes.iter().any(|f| f == "Relay 1&2 bonding"));
+        assert!(snap.gateway_fault_codes.iter().any(|f| f == "Grid mode Off"));
+        assert!(!snap.gateway_fault_codes.iter().any(|f| f == "Relay 3&4 bonding"));
+        assert!(gateway_is_valid(&snap.gateway_software_version));
+    }
+
+    #[test]
+    fn gateway_decode_power_flow_sign_conventions() {
+        let blocks = gateway_fixture_blocks_v1();
+        let snap = decode_snapshot(&blocks);
+
+        // solar_power: p_pv = 3500 W (unsigned, direct)
+        assert_eq!(snap.solar_power, 3500);
+        assert_eq!(snap.pv1_power, 3500);
+
+        // home_power: p_load = 1200 W (authoritative, excludes EV)
+        assert_eq!(snap.home_power, 1200);
+
+        // battery_power: -p_aio_total = -(-800) = 800 W (HEM: + = charge)
+        assert_eq!(snap.battery_power, 800);
+        assert_eq!(snap.battery_state, BatteryState::Charging);
+
+        // grid_power (derived): solar - battery - home = 3500 - 800 - 1200 = 1500 W
+        // Positive = export (solar charges battery AND exports to grid)
+        assert_eq!(snap.grid_power, 1500);
+
+        // grid_voltage from v_grid = 241.0 V
+        assert!((snap.grid_voltage - 241.0).abs() < 0.1);
+
+        // grid_frequency is NaN (not available in gateway bank)
+        assert!(snap.grid_frequency.is_nan());
+
+        // Capacities from parallel_aio_num
+        assert!((snap.battery_capacity_kwh - 13.5).abs() < 0.01);
+        assert_eq!(snap.max_battery_power_w, 6000);
+    }
+
+    #[test]
+    fn gateway_decode_today_energy_v1_byte_order() {
+        let blocks = gateway_fixture_blocks_v1();
+        let snap = decode_snapshot(&blocks);
+
+        assert!((snap.today_solar_kwh - 45.6).abs() < 0.01);
+        assert!((snap.today_import_kwh - 12.3).abs() < 0.01);
+        assert!((snap.today_export_kwh - 3.4).abs() < 0.01);
+        assert!((snap.today_charge_kwh - 20.0).abs() < 0.01);
+        assert!((snap.today_discharge_kwh - 18.5).abs() < 0.01);
+        assert!((snap.today_consumption_kwh - 30.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn gateway_decode_lifetime_energy_v1_byte_order() {
+        let blocks = gateway_fixture_blocks_v1();
+        let snap = decode_snapshot(&blocks);
+
+        // e_grid_import_total: hi=1, lo=0 → (1<<16)|0 = 65536 → /10 = 6553.6
+        assert!((snap.total_import_kwh - 6553.6).abs() < 0.1);
+        // e_pv_total: hi=0, lo=1000 → 1000/10 = 100.0
+        assert!((snap.total_export_kwh - 50.0).abs() < 0.01);
+        // e_aio_charge_total: hi=2, lo=0 → 131072/10 = 13107.2
+        assert!((snap.total_charge_kwh - 13107.2).abs() < 0.1);
+        // e_aio_discharge_total: hi=1, lo=5000 → 70536/10 = 7053.6
+        assert!((snap.total_discharge_kwh - 7053.6).abs() < 0.1);
+    }
+
+    #[test]
+    fn gateway_decode_per_aio_fields_v1() {
+        let blocks = gateway_fixture_blocks_v1();
+        let snap = decode_snapshot(&blocks);
+
+        assert_eq!(snap.parallel_aio_count, 1);
+        assert_eq!(snap.parallel_aio_online, 1);
+        assert_eq!(snap.soc, 75); // aggregate SOC = AIO1
+        assert_eq!(snap.per_aio_soc[0], 75);
+        assert_eq!(snap.per_aio_soc[1], 0);
+        assert_eq!(snap.per_aio_soc[2], 0);
+
+        // Per-AIO power (GE sign): p_aio1_inverter = 800 W (discharge) → per_aio_power = 800
+        assert_eq!(snap.per_aio_power[0], 800);
+
+        // Per-AIO charge/discharge today
+        assert!((snap.per_aio_charge_today_kwh[0] - 20.0).abs() < 0.01);
+        assert!((snap.per_aio_discharge_today_kwh[0] - 18.5).abs() < 0.01);
+
+        // Serial: "SA24230001"
+        assert_eq!(snap.per_aio_serial[0], "SA24230001");
+        assert_eq!(snap.first_inverter_serial, "SA24230001");
+    }
+
+    #[test]
+    fn gateway_decode_v2_uint32_byte_order() {
+        let mut b1 = [0u16; 60];
+        b1[0] = 0x4741; // 'G','A'
+        b1[1] = 0x3030;
+        b1[2] = 0x0000;
+        b1[3] = 0x000A; // 10 → V2 (GA000010)
+        // V2 byte order: uint32 is (low << 16) | high, so hi_off and lo_off swap.
+        // For e_grid_import_total: V2 expects IR(1642) as high, IR(1641) as low.
+        // The fixture has hi=1@41, lo=0@42. gw_u32 swaps: uint32(lo=0, hi=1) = (0<<16)|1 = 1.
+        b1[41] = 1; b1[42] = 0; // hi@41=1, lo@42=0 → V2 reads lo=0 as hi → (0<<16)|1 = 1
+
+        let mut b5 = [0u16; 29];
+        // V2: aio1 serial @ 1841-1845 (offsets 10-14)
+        b5[10] = 0x5632; // 'V','2'  — to distinguish from V1 serial position
+        b5[11] = 0x4149;
+        b5[12] = 0x4F31;
+        b5[13] = 0x3030;
+        b5[14] = 0x3031;
+
+        let blocks = vec![
+            gateway_holding_block(),
+            gateway_block1(b1),
+            gateway_block2([0u16; 60]),
+            gateway_block3([0u16; 60]),
+            gateway_block4([0u16; 51]),
+            gateway_block5_v1(b5),
+        ];
+        let snap = decode_snapshot(&blocks);
+
+        assert!(snap.gateway_is_v2);
+        // V2: (0<<16)|1 = 1, /10 = 0.1
+        assert!((snap.total_import_kwh - 0.1).abs() < 0.01);
+        // Serial should be at V2 offsets: "V2AIO10001"
+        assert_eq!(snap.per_aio_serial[0], "V2AIO10001");
+    }
+
+    #[test]
+    fn gateway_no_blocks_produces_default_snapshot() {
+        // Empty blocks (no gateway data) should produce default values.
+        let snap = decode_snapshot(&[]);
+        assert!(snap.gateway_software_version.is_empty());
+        assert_eq!(snap.parallel_aio_count, 0);
+        assert_eq!(snap.soc, 0);
+        assert_eq!(snap.battery_power, 0);
+        assert_eq!(snap.grid_power, 0);
+        assert_eq!(snap.home_power, 0);
     }
 }

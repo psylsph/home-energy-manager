@@ -453,6 +453,7 @@ fn is_block_suspicious(data: &[u16]) -> bool {
 fn should_repoll_after_model_detection(device_type: DeviceType, current_slave: u8) -> bool {
     device_type.preferred_read_slave_address() != current_slave
         || !device_type.extra_poll_blocks().is_empty()
+        || device_type.needs_gateway_input_blocks()
 }
 
 /// Whether to probe for external CT clamp meters on this cycle.
@@ -476,11 +477,14 @@ fn should_probe_external_meters(
 ) -> bool {
     // Never probe until model is known and three-phase models skip external
     // meters (they use the inverter's internal grid CT at IR 1079-1082).
+    // Batteryless devices (Gateway / EMS / PvInverter) also skip — the Gateway
+    // has its own built-in grid meter (IR 1609); EMS/PvInverter have no battery
+    // bus to instrument.
     let dt = match known_device_type {
         Some(dt) => dt,
         None => return false,
     };
-    if dt.needs_three_phase_input_blocks() {
+    if dt.needs_three_phase_input_blocks() || dt.is_batteryless() {
         return false;
     }
 
@@ -815,6 +819,13 @@ fn derive_battery_fields_from_bms(
     snap: &mut InverterSnapshot,
     hv_cluster: Option<&crate::inverter::decoder::HvBcuCluster>,
 ) {
+    // Batteryless devices (Gateway, EMS, PvInverter) have no directly-attached
+    // battery — battery fields are set by the Gateway aggregation bank decoder
+    // or are zero for EMS/PvInverter. Nothing to derive from BMS data.
+    if snap.device_type.is_batteryless() {
+        return;
+    }
+
     let is_three_phase = snap.device_type.needs_three_phase_input_blocks();
 
     // --- Temperature: always from BMS module average when available ---
@@ -1163,6 +1174,16 @@ fn sanitize_snapshot(
     let max_solar_power: i32 = 10_000; // 10 kW — residential PV limit
     let max_home_power: i32 = 15_000; // 15 kW — includes EV charging margin
 
+    // Gateway systems aggregate up to 3 AIO units (up to ~18 kW PV / 18 kW load
+    // / 18 kW battery). Use higher ceilings so legitimate multi-AIO totals are
+    // not discarded as corrupt.
+    let (max_battery_power, max_grid_power, max_solar_power, max_home_power) =
+        if snap.device_type.needs_gateway_input_blocks() {
+            (20_000, 25_000, 25_000, 25_000)
+        } else {
+            (max_battery_power, max_grid_power, max_solar_power, max_home_power)
+        };
+
     // Power fields: apply the 10-readings suspect-count method.
     // On first out-of-range encounter, fall back to previous (safe).
     // If the value persists for SUSPECT_RELEASE_THRESHOLD cycles,
@@ -1282,7 +1303,11 @@ fn sanitize_snapshot(
         //     is clearly corrupt register data.
         //   Three-phase (line-to-line): UK nominal 415V ±10% (373–456V), match the
         //     reference library's v_ac1 bounds of 0–500V (IR(1061)).
-        let (v_min, v_max) = if snap.device_type.needs_three_phase_input_blocks() {
+        //   Gateway: v_grid (IR 1608) is a single-phase measurement (0–500V int16/deci);
+        //     accept the wider 0–500V range to match real measurements.
+        let (v_min, v_max) = if snap.device_type.needs_three_phase_input_blocks()
+            || snap.device_type.needs_gateway_input_blocks()
+        {
             (0.0, 500.0)
         } else {
             (180.0, 280.0)
@@ -1370,7 +1395,11 @@ fn sanitize_snapshot(
     // the next reading sees prev < 1.0 and skips the delta check, allowing
     // a corrupted value through and causing massive cost spikes.
     {
-        let max_daily_kwh: f32 = 200.0; // hard ceiling: 10kW × 20h theoretical max
+        let max_daily_kwh: f32 = if snap.device_type.needs_gateway_input_blocks() {
+            500.0 // Gateway systems can do ~18 kW × 20h = 360 kWh; allow generous margin.
+        } else {
+            200.0 // hard ceiling: 10kW × 20h theoretical max
+        };
 
         macro_rules! check_energy_field {
             ($name:literal, $value:expr, $prev_val:expr) => {
@@ -2925,6 +2954,13 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     snapshot.max_discharge_slots = kdt.max_discharge_slots();
                                 }
 
+                                // Populated by the HV battery path below; consumed by
+                                // derive_battery_fields_from_bms(). Hoisted here so it
+                                // is available after the batteryless-skip block.
+                                let mut hv_cluster: Option<
+                                    crate::inverter::decoder::HvBcuCluster,
+                                > = None;
+
                                 // --- Battery BMS module reads ---
                                 //
                                 // Two distinct battery protocols exist in the GivEnergy
@@ -2935,15 +2971,17 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 //
                                 // HV stackable batteries (e.g. GIV-BAT-3.4-HV modules) do NOT
                                 // answer at 0x32. Device type decides which path runs.
+                                // Batteryless devices (Gateway, EMS, PvInverter) skip entirely
+                                // — they have no directly-attached battery to probe.
+                                if known_device_type.is_some_and(|dt| dt.is_batteryless()) {
+                                    // Batteryless device (Gateway / EMS / PvInverter):
+                                    // no directly-attached battery to probe. The Gateway
+                                    // aggregation bank decoder populates battery fields;
+                                    // EMS/PvInverter have none.
+                                } else {
                                 let is_hv = known_device_type
                                     .map(|dt| dt.uses_hv_battery())
                                     .unwrap_or(false);
-                                // Populated by the HV path below; consumed by
-                                // derive_battery_fields_from_bms().
-                                let mut hv_cluster: Option<
-                                    crate::inverter::decoder::HvBcuCluster,
-                                > = None;
-
                                 if is_hv {
                                     // --- HV battery: BCU cluster read ---
                                     //
@@ -3260,6 +3298,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             }
                                         }
                                     }
+                                }
                                 }
 
                                 // --- External CT meter reads ---

@@ -263,6 +263,21 @@ export default function BatteryPage() {
           </div>
         </section>
       )}
+      {/* No battery modules — show explanation for batteryless devices */}
+      {s.battery_modules.length === 0 && (
+        <section className="bg-bg-surface rounded-2xl p-6">
+          <div className="bg-bg-elevated/50 rounded-lg px-4 py-3">
+            <p className="text-text-secondary text-sm">
+              No battery module data available.
+            </p>
+            <p className="text-text-secondary/60 text-xs mt-2">
+              {s.device_type_code?.startsWith('70')
+                ? 'The Gateway does not expose per-cell telemetry. Battery cell data requires a direct connection to each AIO unit (not yet supported).'
+                : 'Battery module data will appear once detected by the inverter.'}
+            </p>
+          </div>
+        </section>
+      )}
     </div>
   );
 }

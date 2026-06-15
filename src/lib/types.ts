@@ -68,6 +68,20 @@ export interface InverterSnapshot {
   enable_reversed_ct_clamp: boolean;
   meter_type: number;
   supports_battery_calibration: boolean;
+
+  // -- Gateway-specific (absent on every other device; optional for backward compat) --
+  parallel_aio_count?: number;
+  parallel_aio_online?: number;
+  per_aio_soc?: number[];
+  per_aio_power?: number[];
+  per_aio_charge_today_kwh?: number[];
+  per_aio_discharge_today_kwh?: number[];
+  per_aio_serial?: string[];
+  gateway_software_version?: string;
+  gateway_is_v2?: boolean;
+  gateway_work_mode?: number;
+  gateway_fault_codes?: string[];
+  first_inverter_serial?: string;
 }
 
 export interface BatteryModule {
