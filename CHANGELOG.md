@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.2] - 2026-06-15
+
+### Fixed
+
+- **Stale frontend after upgrade** — `index.html` and other non-hashed
+  static files now include `Cache-Control: no-cache` headers, so the
+  embedded WebView always revalidates before serving cached content.
+  Previously the absence of any caching directive allowed the WebView's
+  heuristic cache to reuse a stale `index.html` across app restarts after
+  an upgrade, which pointed at the old version's hashed asset names and
+  showed the previous UI until the user force-refreshed (Ctrl+F5). Vite
+  content-hashed assets under `/assets/` are marked `immutable` with a
+  year-long expiry since their filenames change whenever the content does.
+  (#80)
+- **Date picker closes when a day is selected** — on both the History and
+  Power pages, the native date/month picker now auto-dismisses as soon as
+  you pick a day, but stays open while browsing months or years (the old
+  blanket blur closed it during navigation as well).
+
 ## [0.25.1] - 2026-06-15
 
 ### Changed

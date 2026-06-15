@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Area,
   CartesianGrid,
@@ -895,6 +895,7 @@ export default function PowerPage() {
   const now = useNow();
   const rolling = isRollingHistoryRange(range);
   const [offset, setOffset] = useState(0);
+  const lastDateRef = useRef(getHistoryPickerValue(range, offset));
   const refreshKey = shouldRefreshHistoryRange(range, offset) ? now : 0;
   const [history, setHistory] = useState<PowerHistoryState>({
     range: null,
@@ -1052,7 +1053,21 @@ export default function PowerPage() {
               type={historyPickerInputType(range)}
               value={getHistoryPickerValue(range, offset)}
               max={getHistoryPickerMax(range)}
-              onChange={(e) => setOffset(historyPickerValueToOffset(range, e.target.value))}
+              onChange={(e) => {
+                const newVal = e.target.value;
+                const oldVal = lastDateRef.current;
+                lastDateRef.current = newVal;
+                setOffset(historyPickerValueToOffset(range, newVal));
+                // Only blur on an actual day change — not when the user is
+                // browsing months/years in the native picker (which can fire
+                // onChange on some platforms). Month-type inputs have no day
+                // component so any change is a deliberate selection.
+                const isDate = newVal.split('-').length === 3;
+                const dayChanged = !isDate || newVal.split('-')[2] !== oldVal.split('-')[2];
+                if (dayChanged) {
+                  e.target.blur();
+                }
+              }}
               aria-label="Select period date"
               className="bg-transparent text-text-primary text-sm font-sans text-center px-1 py-0.5 rounded-md outline-none cursor-pointer hover:bg-bg-elevated transition-colors"
             />
