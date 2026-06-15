@@ -171,7 +171,7 @@ Home Energy Manager works with all known GivEnergy inverter models. Real-time mo
 | **All-in-One** (3.6kW/5kW/6kW) | Commercial all-in-one units |
 | **All-in-One Hybrid** | Combined hybrid + AIO |
 | **AIO Commercial** | Commercial three-phase variant |
-| **Gateway** | System controller / AC hub for 1–3 AIO units. Full schedule, mode, and rate-limit control via the three-phase register set. |
+| **Gateway** _(experimental)_ | System controller / AC hub for 1–3 AIO units. Full schedule, mode, and rate-limit control via the three-phase register set. |
 
 ### 2-slot schedules ✅
 
