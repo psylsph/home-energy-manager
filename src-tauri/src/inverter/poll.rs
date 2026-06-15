@@ -4583,6 +4583,12 @@ mod tests {
             DeviceType::ThreePhase,
             0x11
         ));
+        // Gateway needs an immediate re-poll to request the IR 1600+ blocks
+        // and the HR1080-1124 three-phase config block.
+        assert!(should_repoll_after_model_detection(
+            DeviceType::Gateway,
+            0x11
+        ));
     }
 
     #[test]
@@ -4608,6 +4614,37 @@ mod tests {
         ));
         assert!(should_probe_external_meters(
             Some(DeviceType::ACCoupledMk2),
+            false,
+            false,
+            0,
+            0,
+            0,
+        ));
+    }
+
+    #[test]
+    fn external_meter_probe_skips_batteryless_gateway() {
+        // Batteryless devices (Gateway, EMS, PvInverter) should never probe
+        // for external CT meters — they have their own built-in metering.
+        // The scan should not run even on the very first cycle after detection.
+        assert!(!should_probe_external_meters(
+            Some(DeviceType::Gateway),
+            false,
+            false,
+            0,
+            0,
+            0,
+        ));
+        assert!(!should_probe_external_meters(
+            Some(DeviceType::Ems),
+            false,
+            false,
+            0,
+            0,
+            0,
+        ));
+        assert!(!should_probe_external_meters(
+            Some(DeviceType::PvInverter),
             false,
             false,
             0,

@@ -1448,6 +1448,50 @@ mod tests {
     }
 
     #[test]
+    fn gateway_model_specific_poll_order_reads_gateway_blocks_first() {
+        use crate::inverter::model::DeviceType;
+
+        let blocks = model_specific_blocks_in_poll_order(&DeviceType::Gateway);
+        let names: Vec<&str> = blocks.iter().map(|b| b.name).collect();
+
+        // The gateway aggregation blocks are dashboard-critical and should
+        // appear before optional HR config/schedule blocks.
+        assert!(names.starts_with(&[
+            "input_1600_1659",
+            "input_1660_1719",
+            "input_1720_1779",
+            "input_1780_1830",
+            "input_1831_1859",
+        ]));
+        // Should also poll three-phase config (HR 1080-1124) for write registers
+        // and extended slots (HR 240-299) for slots 3-10.
+        assert!(names.iter().any(|name| *name == "holding_240_299"));
+        assert!(names.iter().any(|name| *name == "holding_1080_1124"));
+    }
+
+    #[test]
+    fn gateway_read_all_with_extras_uses_lean_standard_blocks() {
+        use crate::inverter::model::DeviceType;
+
+        // For Gateway, read_all_with_extras should use STANDARD_POLL_BLOCKS_3PH
+        // (HR-only) rather than the full set, because IR 0-59 and IR 180-239
+        // are unmapped on the Gateway.
+        // We can't easily test the runtime switch, but we can verify the
+        // condition function produces the right result.
+        assert!(DeviceType::Gateway.needs_gateway_input_blocks());
+        assert!(!DeviceType::Gateway.needs_three_phase_input_blocks());
+
+        // Both three-phase and gateway should trigger the lean block selection
+        // via the condition in read_all_with_extras.
+        let condition_3ph = DeviceType::ThreePhase.needs_three_phase_input_blocks()
+            || DeviceType::ThreePhase.needs_gateway_input_blocks();
+        assert!(condition_3ph);
+
+        let condition_gw = DeviceType::Gateway.needs_three_phase_input_blocks()
+            || DeviceType::Gateway.needs_gateway_input_blocks();
+        assert!(condition_gw);
+    }
+    #[test]
     fn ac_coupled_model_specific_poll_order_still_reads_ac_config() {
         use crate::inverter::model::DeviceType;
 

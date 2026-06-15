@@ -415,25 +415,33 @@ pub async fn set_mode(
             // to prevent Gen3 inverter firmware from auto-re-enabling
             // enable_discharge. The Gen3 keeps HR59=1 when discharge slot
             // registers are non-zero, making it impossible to stay in Eco.
+            // Three-phase models and Gateway use different slot addresses
+            // (HR 1118-1121) than single-phase (HR 44-45/56-57).
             if mode_str == "eco" || mode_str == "eco_paused" {
-                // Discharge slot 2: HR44-45
-                writes.push(RegisterWrite {
-                    address: 44,
-                    value: 0,
-                });
-                writes.push(RegisterWrite {
-                    address: 45,
-                    value: 0,
-                });
-                // Discharge slot 1: HR56-57
-                writes.push(RegisterWrite {
-                    address: 56,
-                    value: 0,
-                });
-                writes.push(RegisterWrite {
-                    address: 57,
-                    value: 0,
-                });
+                let is_3ph = state
+                    .latest_snapshot
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map(|s| s.device_type.uses_three_phase_schedule_slots())
+                    .unwrap_or(false);
+                if is_3ph {
+                    use crate::modbus::registers::{
+                        HR_3PH_DISCHARGE_SLOT_1_START, HR_3PH_DISCHARGE_SLOT_1_END,
+                        HR_3PH_DISCHARGE_SLOT_2_START, HR_3PH_DISCHARGE_SLOT_2_END,
+                    };
+                    writes.push(RegisterWrite { address: HR_3PH_DISCHARGE_SLOT_1_START, value: 0 });
+                    writes.push(RegisterWrite { address: HR_3PH_DISCHARGE_SLOT_1_END, value: 0 });
+                    writes.push(RegisterWrite { address: HR_3PH_DISCHARGE_SLOT_2_START, value: 0 });
+                    writes.push(RegisterWrite { address: HR_3PH_DISCHARGE_SLOT_2_END, value: 0 });
+                } else {
+                    // Discharge slot 2: HR44-45
+                    writes.push(RegisterWrite { address: 44, value: 0 });
+                    writes.push(RegisterWrite { address: 45, value: 0 });
+                    // Discharge slot 1: HR56-57
+                    writes.push(RegisterWrite { address: 56, value: 0 });
+                    writes.push(RegisterWrite { address: 57, value: 0 });
+                }
             }
 
             // When switching to Timed mode, the frontend may include
