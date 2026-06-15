@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.3] - 2026-06-15
+
+### Fixed
+
+- **Window opens at the top of the screen** — the app no longer centres
+  itself on an OS-calculated screen position. Instead it opens at the
+  top-left of the primary monitor, preventing the bottom edge from being
+  hidden behind the taskbar on 1080p displays. Also requests focus so the
+  window appears in front of other windows when launched. (#79)
+
 ## [0.25.2] - 2026-06-15
 
 ### Fixed

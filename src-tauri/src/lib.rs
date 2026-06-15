@@ -241,6 +241,10 @@ pub fn run() {
                                 format!("window.location.replace('http://127.0.0.1:{}')", bound_port)
                                     .as_str(),
                             );
+                            // Bring the window to the top of the screen and
+                            // request focus so it appears in front of other
+                            // windows when launched. (#79)
+                            let _ = window.set_focus();
                         }
                         Ok(Err(e)) => {
                             tracing::error!("Embedded HTTP server failed to start: {e}");
