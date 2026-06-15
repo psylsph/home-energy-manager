@@ -61,12 +61,11 @@ export default function StatusPage() {
         />
       </section>
 
+      <ColdBatteryWarning />
+
       {/* Battery + Summary side by side on md+ */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="flex flex-col gap-4">
-          <ColdBatteryWarning />
-          <BatteryPanel snapshot={snapshot} />
-        </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-stretch">
+        <BatteryPanel snapshot={snapshot} />
         <SummaryTiles snapshot={snapshot} />
       </div>
 

@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.1] - 2026-06-15
+
+### Changed
+
+- **Inverter clock moved to the Inverter tab** — the inverter's wall-clock
+  time has moved out of the top bar and into the bottom of the Device Info
+  panel on the Inverter tab, where it sits next to the other device details.
+- **Status page battery panel now matches the Battery tab** — the Status
+  page battery card is now the same detailed panel used at the top of the
+  Battery page (power, voltage, current, temperature, mode, reserve, and
+  today's charge/discharge energy).
+- **Battery and Today cards are now equal height** on the Status page when
+  shown side by side.
+- **Top bar content is now vertically centred.**
+
+### Fixed
+
+- **"Discharged Today" no longer wraps** in the battery panel — the label
+  column now sizes to fit.
+- **Tighter energy flow diagram** — cropped the empty space above and below
+  the power-flow symbols on the Status page.
+
 ## [0.25.0] - 2026-06-15
 
 ### Added

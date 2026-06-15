@@ -24,6 +24,12 @@ interface Props {
 const W = 460;
 const H = 470;
 
+// The node layout leaves empty margins at the top (~34px) and bottom
+// (~38px) of the viewBox. Cropping them here makes the rendered diagram
+// vertically tighter when embedded in a panel.
+const VIEW_TOP = 16;
+const VIEW_BOTTOM = 24;
+
 const NODES = {
   inverter: { cx: W / 2, cy: 233,    color: '#22D3EE', label: 'Inverter' },
   solar:    { cx: 80,    cy: 80,     color: '#F59E0B', label: 'Solar' },
@@ -351,7 +357,7 @@ function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false
   return (
     <div className="flex justify-center">
       <svg
-        viewBox={`0 0 ${W} ${H}`}
+        viewBox={`0 ${VIEW_TOP} ${W} ${H - VIEW_TOP - VIEW_BOTTOM}`}
         className="w-full"
         style={{ maxWidth: '500px', fontFamily: 'var(--font-sans, sans-serif)' }}
       >

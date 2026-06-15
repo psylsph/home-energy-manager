@@ -48,6 +48,8 @@ export default function InverterPage() {
           <span className="text-text-primary font-mono text-right">{formatPower(s.max_ac_power_w)}</span>
           <span className="text-text-secondary">Battery Capacity</span>
           <span className="text-text-primary font-mono text-right">{s.battery_capacity_kwh.toFixed(1)} kWh</span>
+          <span className="text-text-secondary">Inverter Time</span>
+          <span className="text-text-primary font-mono text-right">{s.inverter_time || '—'}</span>
         </div>
       </section>
 

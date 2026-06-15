@@ -83,7 +83,7 @@ function BatteryPanelInner({ snapshot: s }: Props) {
   const dischargeSlotActive = isAnySlotActive(s.discharge_slots ?? []);
 
   return (
-    <section className="bg-bg-surface rounded-2xl p-6 flex flex-col sm:flex-row items-center gap-6">
+    <section className="bg-bg-surface rounded-2xl p-6 h-full flex flex-col sm:flex-row items-center gap-6">
       <div className="relative w-32 h-32 shrink-0">
         <svg viewBox="0 0 100 100" className="w-full h-full -rotate-90">
           <circle cx="50" cy="50" r="42" fill="none" stroke="#21262D" strokeWidth="8" />

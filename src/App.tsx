@@ -55,26 +55,18 @@ function GridFaultBanner() {
 }
 
 function ConnectionIndicator() {
-  const { connectionState, connectedHost, snapshot } = useInverterStore();
+  const { connectionState, connectedHost } = useInverterStore();
   const colors: Record<string, string> = {
     connected: 'bg-green-500',
     reconnecting: 'bg-yellow-500 animate-pulse',
     disconnected: 'bg-gray-500',
   };
-  const inverterTime = snapshot?.inverter_time;
   return (
-    <div className="flex items-start gap-2 text-text-secondary text-xs">
-      <div className={`mt-1.5 w-2 h-2 rounded-full ${colors[connectionState] || 'bg-gray-500'}`} />
-      <div className="flex flex-col items-start leading-tight">
-        <span className="capitalize">
-          {connectionState === 'connected' ? `Connected${connectedHost ? ` · ${connectedHost}` : ''}` : connectionState}
-        </span>
-        {connectionState === 'connected' && inverterTime ? (
-          <span className="font-mono normal-case text-[10px] text-text-secondary/80">
-            Inverter Time: {inverterTime}
-          </span>
-        ) : null}
-      </div>
+    <div className="flex items-center gap-2 text-text-secondary text-xs">
+      <div className={`w-2 h-2 rounded-full ${colors[connectionState] || 'bg-gray-500'}`} />
+      <span className="capitalize">
+        {connectionState === 'connected' ? `Connected${connectedHost ? ` · ${connectedHost}` : ''}` : connectionState}
+      </span>
     </div>
   );
 }
@@ -219,7 +211,7 @@ function Layout() {
   return (
     <div className="min-h-screen bg-bg-base flex flex-col">
       {/* Header */}
-      <header className="bg-bg-surface/80 backdrop-blur-md border-b border-white/5 px-6 pt-safe py-3 flex items-center justify-between sticky top-0 z-30">
+      <header className="bg-bg-surface/80 backdrop-blur-md border-b border-white/5 px-6 pt-[calc(env(safe-area-inset-top,0px)+0.75rem)] pb-3 flex items-center justify-between sticky top-0 z-30">
         <div>
           <h1 className="text-base font-bold text-text-primary tracking-tight">
             Home Energy Manager  <span className="text-text-secondary font-mono text-xs font-normal">v{__APP_VERSION__}</span>
