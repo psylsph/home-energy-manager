@@ -5,18 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.28.1] - 2026-06-16
-
-### Fixed
-
-- **AC-coupled inverters show false "Grid power lost" alert** — v0.26.3
-  switched grid-loss detection to use the `system_mode` register (IR 49), which
-  is correct for hybrid inverters but causes AC-coupled models to falsely
-  report grid offline during normal operation. AC-coupled now uses the actual
-  AC voltage and frequency readings to determine grid presence, matching the
-  same approach used by three-phase models.
-  ([#83](https://github.com/psylsph/home-energy-manager/issues/83))
-
 ## [0.28.2] - 2026-06-16
 
 ### Added
@@ -52,6 +40,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   readings must agree before grid loss is reported. This aligns the single-phase
   path with how three-phase and Gateway models already work, and mirrors the
   AC-coupled voltage/frequency approach.
+
+## [0.28.1] - 2026-06-16
+
+### Fixed
+
+- **AC-coupled inverters show false "Grid power lost" alert** — v0.26.3
+  switched grid-loss detection to use the `system_mode` register (IR 49), which
+  is correct for hybrid inverters but causes AC-coupled models to falsely
+  report grid offline during normal operation. AC-coupled now uses the actual
+  AC voltage and frequency readings to determine grid presence, matching the
+  same approach used by three-phase models.
+  ([#83](https://github.com/psylsph/home-energy-manager/issues/83))
 
 ## [0.28.0] - 2026-06-16
 
