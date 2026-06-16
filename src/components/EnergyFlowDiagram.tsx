@@ -222,7 +222,7 @@ function FlowNode({ cx, cy, color, label, value, unit, hub, width, height, mobil
       </text>
       {/* Value */}
       <text
-        x={cx} y={cy + 2}
+        x={cx} y={cy + 5}
         textAnchor="middle"
         fill="var(--app-text-primary)"
         fontSize={mobile ? 20 : 18}
