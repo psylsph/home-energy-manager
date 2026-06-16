@@ -14,6 +14,10 @@ interface InverterState {
   hiddenPanels: string[];
   /** Shared time range used by Power and History charts. */
   chartRange: HistoryRange;
+  /** Whether the trend charts on the Battery/Solar tabs are shown. */
+  panelGraphsEnabled: boolean;
+  /** Time scale for the trend charts on the Battery/Solar tabs. */
+  panelGraphsScale: 'today' | '24h';
   /** Discharge slots configured locally in Eco mode, not yet written to the inverter. */
   pendingDischargeSlots: Record<number, ScheduleSlot>;
   /** EV Charger host — non-empty when configured in Settings. */
@@ -31,6 +35,8 @@ interface InverterState {
   setThemeMode: (mode: ThemeMode) => void;
 
   setChartRange: (range: HistoryRange) => void;
+  setPanelGraphsEnabled: (enabled: boolean) => void;
+  setPanelGraphsScale: (scale: 'today' | '24h') => void;
   setPendingDischargeSlots: (slots: Record<number, ScheduleSlot>) => void;
   clearPendingDischargeSlots: () => void;
   setHiddenPanels: (panels: string[]) => void;
@@ -78,6 +84,24 @@ function loadThemeMode(): ThemeMode {
   }
 }
 
+function loadPanelGraphsEnabled(): boolean {
+  try {
+    const stored = localStorage.getItem('panelGraphsEnabled');
+    // Default to showing graphs when the key is absent.
+    return stored === null ? true : stored === 'true';
+  } catch {
+    return true;
+  }
+}
+
+function loadPanelGraphsScale(): 'today' | '24h' {
+  try {
+    return localStorage.getItem('panelGraphsScale') === '24h' ? '24h' : 'today';
+  } catch {
+    return 'today';
+  }
+}
+
 function loadPendingDischargeSlots(): Record<number, ScheduleSlot> {
   try {
     const stored = localStorage.getItem('pendingDischargeSlots');
@@ -101,6 +125,8 @@ export const useInverterStore = create<InverterState>((set) => ({
 
   hiddenPanels: [],
   chartRange: loadChartRange(),
+  panelGraphsEnabled: loadPanelGraphsEnabled(),
+  panelGraphsScale: loadPanelGraphsScale(),
   pendingDischargeSlots: loadPendingDischargeSlots(),
   evcHost: '',
   evcPower: 0,
@@ -127,6 +153,18 @@ export const useInverterStore = create<InverterState>((set) => ({
       localStorage.setItem('chartRange', range);
     } catch { /* ignore */ }
     set({ chartRange: range });
+  },
+  setPanelGraphsEnabled: (enabled) => {
+    try {
+      localStorage.setItem('panelGraphsEnabled', String(enabled));
+    } catch { /* ignore */ }
+    set({ panelGraphsEnabled: enabled });
+  },
+  setPanelGraphsScale: (scale) => {
+    try {
+      localStorage.setItem('panelGraphsScale', scale);
+    } catch { /* ignore */ }
+    set({ panelGraphsScale: scale });
   },
   setPendingDischargeSlots: (slots) => {
     savePendingDischargeSlots(slots);

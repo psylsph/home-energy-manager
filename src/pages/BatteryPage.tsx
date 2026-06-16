@@ -14,7 +14,7 @@ function formatHex(value: number, width: number): string {
 }
 
 export default function BatteryPage() {
-  const { snapshot, developerMode } = useInverterStore();
+  const { snapshot, developerMode, panelGraphsEnabled } = useInverterStore();
   const [expandedModule, setExpandedModule] = useState<number | null>(null);
 
   if (!snapshot) {
@@ -280,9 +280,10 @@ export default function BatteryPage() {
         </section>
       )}
 
-      {/* Today's SOC trend — replicates the History → Battery "SOC %" chart
-          so the Battery tab is self-contained (issue #81). */}
-      <BatterySocChart />
+      {/* SOC trend — replicates the History → Battery "SOC %" chart
+          so the Battery tab is self-contained (issue #81). Hidden when the
+          user disables the "Panel Graphs" toggle in Settings. */}
+      {panelGraphsEnabled && <BatterySocChart />}
     </div>
   );
 }

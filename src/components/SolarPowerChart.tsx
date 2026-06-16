@@ -16,22 +16,28 @@ import {
   getHistoryRangeDomain,
   getHistoryXAxisMinTickGap,
   getHistoryXAxisTicks,
+  isRollingHistoryRange,
   shouldRefreshHistoryRange,
 } from '../lib/historyRangeConfig';
+import { useInverterStore } from '../store/useInverterStore';
 import type { TimePoint } from '../lib/types';
 
 // "PV Power (W)" chart from the History → Solar tab, replicated on the Solar
-// tab and pinned to today so the tab carries its own solar-output trend
-// (issue #81). Same fetch path, spike filter, and axis helpers as the History
-// charts — the Power/History solar graphs are left untouched ("repeat, not
-// move"). PV2 renders only when today's pv2_power history has any non-zero
-// sample, matching the page's live auto-detect.
+// tab so the tab carries its own solar-output trend (issue #81). The time
+// scale follows the user's "Panel Graphs" preference (Today or Rolling 24H).
+// Same fetch path, spike filter, and axis helpers as the History charts — the
+// Power/History solar graphs are left untouched ("repeat, not move"). PV2
+// renders only when the solar history has any non-zero pv2_power sample,
+// matching the page's live auto-detect.
 
 const PV1_COLOR = '#F59E0B';
 const PV2_COLOR = '#3B82F6';
-const RANGE = 'today' as const;
 const PV1_FIELD = 'pv1_power';
 const PV2_FIELD = 'pv2_power';
+
+function chartTitle(scale: 'today' | '24h'): string {
+  return scale === '24h' ? 'Solar Power — Last 24h' : 'Solar Power Today';
+}
 
 interface PvRow {
   t: number;
@@ -49,15 +55,18 @@ function useNow(): number {
 }
 
 export default function SolarPowerChart() {
+  const scale = useInverterStore((state) => state.panelGraphsScale);
+  const range = scale;
+  const rolling = isRollingHistoryRange(range);
   const now = useNow();
-  const refreshKey = shouldRefreshHistoryRange(RANGE, 0) ? now : 0;
+  const refreshKey = shouldRefreshHistoryRange(range, 0) ? now : 0;
   const [pv1, setPv1] = useState<TimePoint[] | null>(null);
   const [pv2, setPv2] = useState<TimePoint[]>([]);
   const [error, setError] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    fetchHistory(RANGE, [PV1_FIELD, PV2_FIELD], 0, false)
+    fetchHistory(range, [PV1_FIELD, PV2_FIELD], 0, rolling)
       .then((result) => {
         if (cancelled) return;
         setPv1(removeSpikes(result[PV1_FIELD] ?? [], PV1_FIELD));
@@ -73,7 +82,7 @@ export default function SolarPowerChart() {
     return () => {
       cancelled = true;
     };
-  }, [refreshKey]);
+  }, [range, rolling, refreshKey]);
 
   // Merge PV1 + PV2 by timestamp into chart rows.
   const rows: PvRow[] = useMemo(() => {
@@ -93,14 +102,14 @@ export default function SolarPowerChart() {
   }, [pv1, pv2]);
 
   const hasPv2 = pv2.some((p) => p.v > 0);
-  const domain = getHistoryRangeDomain(RANGE, 0, now);
-  const ticks = getHistoryXAxisTicks(RANGE, domain);
+  const domain = getHistoryRangeDomain(range, 0, now);
+  const ticks = getHistoryXAxisTicks(range, domain);
   const hasData = rows.length > 0;
 
   return (
     <section className="bg-bg-surface rounded-2xl p-5">
       <h3 className="text-text-primary text-sm font-semibold tracking-wide mb-3">
-        Solar Power Today
+        {chartTitle(scale)}
       </h3>
       {pv1 === null ? (
         <div className="flex items-center justify-center h-[180px]">
@@ -136,12 +145,12 @@ export default function SolarPowerChart() {
               type="number"
               domain={domain}
               ticks={ticks}
-              tickFormatter={(v: number) => formatHistoryXAxisTick(v, RANGE)}
+              tickFormatter={(v: number) => formatHistoryXAxisTick(v, range)}
               stroke="#8B949E"
               tick={{ fontSize: 11, style: { fontWeight: 700 } }}
               tickLine={false}
               axisLine={false}
-              minTickGap={getHistoryXAxisMinTickGap(RANGE)}
+              minTickGap={getHistoryXAxisMinTickGap(range)}
             />
             <YAxis
               stroke="#8B949E"

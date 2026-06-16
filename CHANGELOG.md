@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.0] - 2026-06-16
+
+### Added
+
+- **Panel Graphs controls in Settings** — the Settings page's "Panel
+  Visibility" section is now a broader "Panel Controls" section with two
+  sub-sections. The existing nav-panel visibility checkboxes move under a
+  "Panel Visibility" heading, and a new "Panel Graphs" sub-section adds:
+  - A **Show Graphs** toggle that hides/shows the trend charts on the
+    Battery and Solar tabs.
+  - A **Time Scale** selector (Today / Rolling 24H) that switches those
+    same charts between a calendar-day view and a rolling last-24-hours
+    view.
+  Both preferences are remembered per-device (localStorage) and apply
+  instantly — no restart or save needed.
+  ([#81](https://github.com/psylsph/home-energy-manager/issues/81))
+
+### Changed
+
+- **Battery/Solar tab charts honour the new Panel Graphs settings** —
+  `BatterySocChart` and `SolarPowerChart` now read their time scale from the
+  store (Today vs Rolling 24H) instead of being hardcoded to today, and
+  query the history backend with the appropriate rolling flag. Their titles
+  update to match (e.g. "SOC Today" / "SOC — Last 24h"). The Power and
+  History graphs are untouched.
+
 ## [0.27.0] - 2026-06-16
 
 ### Added

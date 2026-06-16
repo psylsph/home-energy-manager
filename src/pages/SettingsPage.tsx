@@ -42,6 +42,10 @@ export default function SettingsPage() {
     connectedHost,
     developerMode,
     setDeveloperMode,
+    panelGraphsEnabled,
+    setPanelGraphsEnabled,
+    panelGraphsScale,
+    setPanelGraphsScale,
 
   } = useInverterStore();
 
@@ -611,43 +615,89 @@ const VALID_INTERVALS = [5, 10, 15, 20];
         </div>
       </section>
 
-      {/* ─── Section 3.5: Panel Visibility ─── */}
+      {/* ─── Section 3.5: Panel Controls ─── */}
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
-        <h2 className="text-text-primary text-lg font-semibold font-sans">Panel Visibility</h2>
-        <p className="text-text-secondary text-xs font-sans">
-          Hide panels you don't use from the bottom navigation bar
-        </p>
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-          {([
-            ['power', 'Power'],
-            ['battery', 'Battery'],
-            ['solar', 'Solar'],
-            ['meters', 'Meters'],
-            ['history', 'History'],
-          ] as const).map(([key, label]) => (
-            <label key={key} className="flex items-center gap-2 cursor-pointer select-none bg-bg-elevated rounded-xl px-4 py-3 border border-white/5 hover:border-white/10 transition-colors">
-              <input
-                type="checkbox"
-                checked={!hiddenPanels.includes(key)}
-                onChange={() => {
-                  setHiddenPanels(prev =>
-                    prev.includes(key)
-                      ? prev.filter(p => p !== key)
-                      : [...prev, key]
-                  );
-                }}
-                className="w-4 h-4 accent-battery rounded"
-              />
-              <span className="text-text-primary text-sm font-sans">{label}</span>
-            </label>
-          ))}
+        <h2 className="text-text-primary text-lg font-semibold font-sans">Panel Controls</h2>
+
+        {/* ── Sub-section: Panel Visibility ── */}
+        <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
+          <h3 className="text-text-primary text-sm font-sans font-medium">Panel Visibility</h3>
+          <p className="text-text-secondary text-xs font-sans">
+            Hide panels you don't use from the bottom navigation bar
+          </p>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            {([
+              ['power', 'Power'],
+              ['battery', 'Battery'],
+              ['solar', 'Solar'],
+              ['meters', 'Meters'],
+              ['history', 'History'],
+            ] as const).map(([key, label]) => (
+              <label key={key} className="flex items-center gap-2 cursor-pointer select-none bg-bg-elevated rounded-xl px-4 py-3 border border-white/5 hover:border-white/10 transition-colors">
+                <input
+                  type="checkbox"
+                  checked={!hiddenPanels.includes(key)}
+                  onChange={() => {
+                    setHiddenPanels(prev =>
+                      prev.includes(key)
+                        ? prev.filter(p => p !== key)
+                        : [...prev, key]
+                    );
+                  }}
+                  className="w-4 h-4 accent-battery rounded"
+                />
+                <span className="text-text-primary text-sm font-sans">{label}</span>
+              </label>
+            ))}
+          </div>
+          <button
+            onClick={handlePanelSave}
+            className="self-start bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
+          >
+            {panelSaving ? 'Saving…' : 'Save Panel Visibility'}
+          </button>
         </div>
-        <button
-          onClick={handlePanelSave}
-          className="self-start bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
-        >
-          {panelSaving ? 'Saving…' : 'Save Panel Visibility'}
-        </button>
+
+        {/* ── Sub-section: Panel Graphs ── */}
+        <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
+          <h3 className="text-text-primary text-sm font-sans font-medium">Panel Graphs</h3>
+          <p className="text-text-secondary text-xs font-sans">
+            Toggle the trend charts on the Battery and Solar tabs, and choose their time scale
+          </p>
+
+          {/* Show graphs toggle */}
+          <div className="flex items-center justify-between">
+            <span className="text-text-primary text-sm font-sans">Show Graphs</span>
+            <Toggle
+              checked={panelGraphsEnabled}
+              onChange={setPanelGraphsEnabled}
+            />
+          </div>
+
+          {/* Time scale selector — disabled when graphs are off */}
+          <div className={`flex flex-col gap-2 transition-opacity ${panelGraphsEnabled ? '' : 'opacity-40 pointer-events-none'}`}>
+            <span className="text-text-secondary text-xs font-sans">Time Scale</span>
+            <div className="flex gap-2">
+              {([
+                ['today', 'Today'],
+                ['24h', 'Rolling 24H'],
+              ] as const).map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setPanelGraphsScale(key)}
+                  className={`flex-1 py-2 rounded-lg text-sm font-sans transition ${
+                    panelGraphsScale === key
+                      ? 'bg-flow-active text-white font-semibold'
+                      : 'bg-bg-elevated text-text-primary hover:bg-bg-elevated/80'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
       </section>
 
       {/* ─── Section 4: Energy Tariffs ─── */}

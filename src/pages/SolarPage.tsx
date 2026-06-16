@@ -7,7 +7,7 @@ function pvColor(pv: number): string {
 }
 
 export default function SolarPage() {
-  const { snapshot, connectionState } = useInverterStore();
+  const { snapshot, connectionState, panelGraphsEnabled } = useInverterStore();
 
   if (!snapshot) {
     return (
@@ -29,8 +29,6 @@ export default function SolarPage() {
   }
 
   const hasPv2 = snapshot.pv2_voltage > 0 || snapshot.pv2_power > 0;
-  const pv1Bar = snapshot.solar_power > 0 ? (snapshot.pv1_power / snapshot.solar_power) * 100 : 0;
-  const pv2Bar = snapshot.solar_power > 0 ? (snapshot.pv2_power / snapshot.solar_power) * 100 : 0;
 
   return (
     <div className="flex flex-col gap-4 max-w-4xl mx-auto">
@@ -42,43 +40,6 @@ export default function SolarPage() {
         <p className="text-text-secondary text-xs">Total Solar Power</p>
       </section>
 
-      {/* Production breakdown — horizontal bars (x-axis = watts).
-          Each string's bar fills proportional to its share of total solar
-          power, so the two lengths are directly comparable on a shared
-          watt scale. */}
-      <section className="bg-bg-surface rounded-2xl p-5">
-        <h2 className="text-text-primary font-semibold text-lg mb-4">Input Breakdown</h2>
-        <div className="flex flex-col gap-3">
-          <div className="flex items-center gap-3">
-            <span className="text-text-secondary text-xs w-8 shrink-0">PV1</span>
-            <div className="flex-1 h-5 bg-bg-elevated/60 rounded-full overflow-hidden">
-              <div
-                className="h-full rounded-full transition-all duration-500"
-                style={{
-                  width: `${Math.max(pv1Bar, 2)}%`,
-                  backgroundColor: pvColor(1),
-                }}
-              />
-            </div>
-            <span className="text-text-primary text-sm font-mono w-20 text-right shrink-0">{formatPower(snapshot.pv1_power)}</span>
-          </div>
-          {hasPv2 && (
-            <div className="flex items-center gap-3">
-              <span className="text-text-secondary text-xs w-8 shrink-0">PV2</span>
-              <div className="flex-1 h-5 bg-bg-elevated/60 rounded-full overflow-hidden">
-                <div
-                  className="h-full rounded-full transition-all duration-500"
-                  style={{
-                    width: `${Math.max(pv2Bar, 2)}%`,
-                    backgroundColor: pvColor(2),
-                  }}
-                />
-              </div>
-              <span className="text-text-primary text-sm font-mono w-20 text-right shrink-0">{formatPower(snapshot.pv2_power)}</span>
-            </div>
-          )}
-        </div>
-      </section>
 
       {/* Detail cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -119,9 +80,10 @@ export default function SolarPage() {
         )}
       </div>
 
-      {/* Today's PV power trend — replicates the History → Solar "PV Power"
-          chart so the Solar tab is self-contained (issue #81). */}
-      <SolarPowerChart />
+      {/* Solar power trend — replicates the History → Solar "PV Power"
+          chart so the Solar tab is self-contained (issue #81). Hidden when the
+          user disables the "Panel Graphs" toggle in Settings. */}
+      {panelGraphsEnabled && <SolarPowerChart />}
 
     </div>
   );

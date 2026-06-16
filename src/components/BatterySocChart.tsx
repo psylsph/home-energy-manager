@@ -16,18 +16,24 @@ import {
   getHistoryRangeDomain,
   getHistoryXAxisMinTickGap,
   getHistoryXAxisTicks,
+  isRollingHistoryRange,
   shouldRefreshHistoryRange,
 } from '../lib/historyRangeConfig';
+import { useInverterStore } from '../store/useInverterStore';
 import type { TimePoint } from '../lib/types';
 
 // "SOC %" chart from the History → Battery tab, replicated on the Battery tab
-// and pinned to today so the Battery tab carries its own SOC-over-time trend
-// (something the Status page does not show). Same fetch path, spike filter,
-// and axis helpers as the History charts — no parallel data pipeline.
+// so the Battery tab carries its own SOC-over-time trend (something the Status
+// page does not show). The time scale follows the user's "Panel Graphs"
+// preference (Today or Rolling 24H). Same fetch path, spike filter, and axis
+// helpers as the History charts — no parallel data pipeline.
 
 const SOC_COLOR = '#6366F1';
-const RANGE = 'today' as const;
 const FIELD = 'soc';
+
+function chartTitle(scale: 'today' | '24h'): string {
+  return scale === '24h' ? 'SOC — Last 24h' : 'SOC Today';
+}
 
 function useNow(): number {
   const [now, setNow] = useState(() => Date.now());
@@ -39,14 +45,17 @@ function useNow(): number {
 }
 
 export default function BatterySocChart() {
+  const scale = useInverterStore((state) => state.panelGraphsScale);
+  const range = scale;
+  const rolling = isRollingHistoryRange(range);
   const now = useNow();
-  const refreshKey = shouldRefreshHistoryRange(RANGE, 0) ? now : 0;
+  const refreshKey = shouldRefreshHistoryRange(range, 0) ? now : 0;
   const [points, setPoints] = useState<TimePoint[] | null>(null);
   const [error, setError] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    fetchHistory(RANGE, [FIELD], 0, false)
+    fetchHistory(range, [FIELD], 0, rolling)
       .then((result) => {
         if (cancelled) return;
         const raw = result[FIELD] ?? [];
@@ -61,16 +70,16 @@ export default function BatterySocChart() {
     return () => {
       cancelled = true;
     };
-  }, [refreshKey]);
+  }, [range, rolling, refreshKey]);
 
-  const domain = getHistoryRangeDomain(RANGE, 0, now);
-  const ticks = getHistoryXAxisTicks(RANGE, domain);
+  const domain = getHistoryRangeDomain(range, 0, now);
+  const ticks = getHistoryXAxisTicks(range, domain);
   const hasData = (points?.length ?? 0) > 0;
 
   return (
     <section className="bg-bg-surface rounded-2xl p-5">
       <h3 className="text-text-primary text-sm font-semibold tracking-wide mb-3">
-        SOC Today
+        {chartTitle(scale)}
       </h3>
       {points === null ? (
         <div className="flex items-center justify-center h-[180px]">
@@ -102,12 +111,12 @@ export default function BatterySocChart() {
               type="number"
               domain={domain}
               ticks={ticks}
-              tickFormatter={(v: number) => formatHistoryXAxisTick(v, RANGE)}
+              tickFormatter={(v: number) => formatHistoryXAxisTick(v, range)}
               stroke="#8B949E"
               tick={{ fontSize: 11, style: { fontWeight: 700 } }}
               tickLine={false}
               axisLine={false}
-              minTickGap={getHistoryXAxisMinTickGap(RANGE)}
+              minTickGap={getHistoryXAxisMinTickGap(range)}
             />
             <YAxis
               stroke="#8B949E"
