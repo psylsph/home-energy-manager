@@ -43,26 +43,46 @@ fn server_error(error: &str) -> (StatusCode, Json<Value>) {
     )
 }
 
-/// Return true when the latest snapshot is from an AC-coupled inverter.
-async fn is_ac_coupled_snapshot(state: &Arc<AppState>) -> bool {
-    let snapshot = state.latest_snapshot.lock().await;
-    snapshot
+/// Lock the latest snapshot once and resolve the current [`DeviceType`].
+///
+/// Every control handler that routes behaviour on device type MUST obtain it
+/// through this helper (or [`device_type_flags`]) so each derived flag comes
+/// from a single consistent view of the snapshot. Locking the snapshot
+/// independently per check — e.g. once for AC-coupled, again for three-phase —
+/// lets the poll loop update the snapshot between the two locks, so the flags
+/// can disagree (both `false` on a race, or both `true` across a device-type
+/// change) and the handler picks the wrong command/register set.
+///
+/// Defaults to [`DeviceType::Gen2Hybrid`] when no snapshot is available yet,
+/// which preserves the previous "no snapshot → neither AC-coupled nor
+/// three-phase" behaviour (`Gen2Hybrid` satisfies neither predicate).
+async fn latest_device_type(state: &Arc<AppState>) -> DeviceType {
+    state
+        .latest_snapshot
+        .lock()
+        .await
         .as_ref()
-        .map(|s| {
-            matches!(
-                s.device_type,
-                DeviceType::ACCoupled | DeviceType::ACCoupledMk2
-            )
-        })
-        .unwrap_or(false)
+        .map(|s| s.device_type)
+        .unwrap_or(DeviceType::Gen2Hybrid)
 }
 
-async fn is_three_phase_limit_snapshot(state: &Arc<AppState>) -> bool {
-    let snapshot = state.latest_snapshot.lock().await;
-    snapshot
-        .as_ref()
-        .map(|s| s.device_type.uses_three_phase_schedule_slots())
-        .unwrap_or(false)
+/// Resolve the AC-coupled and three-phase routing flags from a single lock,
+/// returning `(is_ac_coupled, is_three_phase)`.
+///
+/// `is_three_phase` takes priority over `is_ac_coupled` in the command
+/// selection (matching the original `if is_three_phase { … } else if
+/// is_ac_coupled { … }` ordering) — no real device is both, but computing them
+/// from one locked view guarantees they can never transiently disagree.
+///
+/// Handlers that need the full [`DeviceType`] (e.g. for
+/// `clear_discharge_slot_writes`) should call [`latest_device_type`] directly
+/// instead of discarding the enum.
+async fn device_type_flags(state: &Arc<AppState>) -> (bool, bool) {
+    let dt = latest_device_type(state).await;
+    (
+        matches!(dt, DeviceType::ACCoupled | DeviceType::ACCoupledMk2),
+        dt.uses_three_phase_schedule_slots(),
+    )
 }
 
 fn charge_slot_command_for_device(
@@ -449,13 +469,7 @@ pub async fn set_mode(
                 // (HR 44-45/56-57). Routed through the encoder's
                 // whitelist-validated SetDischargeSlot* commands (00:00–00:00
                 // = disabled) rather than raw writes.
-                let device_type = state
-                    .latest_snapshot
-                    .lock()
-                    .await
-                    .as_ref()
-                    .map(|s| s.device_type)
-                    .unwrap_or(DeviceType::Gen2Hybrid);
+                let device_type = latest_device_type(&state).await;
                 writes.extend(clear_discharge_slot_writes(device_type));
             }
 
@@ -465,13 +479,7 @@ pub async fn set_mode(
             // inverter never sees HR59=1 without slot constraints.
             if is_timed {
                 if let Some(slots) = body["discharge_slots"].as_array() {
-                    let device_type = state
-                        .latest_snapshot
-                        .lock()
-                        .await
-                        .as_ref()
-                        .map(|s| s.device_type)
-                        .unwrap_or(DeviceType::Gen2Hybrid);
+                    let device_type = latest_device_type(&state).await;
 
                     // Prepend slot writes before the mode writes.
                     let mut slot_writes = Vec::new();
@@ -567,13 +575,7 @@ pub async fn set_charge_slot(
         Some(s) => s,
         None => return error_response("Missing 'slot' field (1-2)"),
     };
-    let device_type = state
-        .latest_snapshot
-        .lock()
-        .await
-        .as_ref()
-        .map(|s| s.device_type)
-        .unwrap_or(DeviceType::Gen2Hybrid);
+    let device_type = latest_device_type(&state).await;
     // AC Coupled and Gen1 Hybrid only support charge slot 1 (HR 94-95).
     let max_slots = device_type.max_charge_slots();
     if slot_raw > u8::MAX as u64 {
@@ -686,13 +688,7 @@ pub async fn set_discharge_slot(
         Some(s) => s,
         None => return error_response("Missing 'slot' field (1-2)"),
     };
-    let device_type = state
-        .latest_snapshot
-        .lock()
-        .await
-        .as_ref()
-        .map(|s| s.device_type)
-        .unwrap_or(DeviceType::Gen2Hybrid);
+    let device_type = latest_device_type(&state).await;
     // Check model support — AC Coupled/Gen1 only have 1 discharge slot.
     let max_slots = device_type.max_discharge_slots();
     if slot_raw > u8::MAX as u64 {
@@ -773,7 +769,9 @@ pub async fn set_reserve(
         None => return error_response("Missing 'soc' field (4-100)"),
     };
 
-    let is_three_phase = is_three_phase_limit_snapshot(&state).await;
+    let is_three_phase = latest_device_type(&state)
+        .await
+        .uses_three_phase_schedule_slots();
     let cmd = if is_three_phase {
         ControlCommand::SetThreePhaseBatterySocReserve { reserve: soc }
     } else {
@@ -799,8 +797,7 @@ pub async fn set_charge_rate(
         None => return error_response("Missing 'limit' field (0-50)"),
     };
 
-    let is_ac_coupled = is_ac_coupled_snapshot(&state).await;
-    let is_three_phase = is_three_phase_limit_snapshot(&state).await;
+    let (is_ac_coupled, is_three_phase) = device_type_flags(&state).await;
     let cmd = if is_three_phase {
         ControlCommand::SetThreePhaseChargeLimit { limit }
     } else if is_ac_coupled {
@@ -835,8 +832,7 @@ pub async fn set_discharge_rate(
         None => return error_response("Missing 'limit' field (0-50)"),
     };
 
-    let is_ac_coupled = is_ac_coupled_snapshot(&state).await;
-    let is_three_phase = is_three_phase_limit_snapshot(&state).await;
+    let (is_ac_coupled, is_three_phase) = device_type_flags(&state).await;
     let cmd = if is_three_phase {
         ControlCommand::SetThreePhaseDischargeLimit { limit }
     } else if is_ac_coupled {
@@ -892,14 +888,12 @@ pub async fn set_active_power_rate(
 /// For three-phase models, also clears the three-phase force discharge
 /// and force charge enable flags.
 pub async fn pause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
-    let is_three_phase = is_three_phase_limit_snapshot(&state).await;
-    let device_type = state
-        .latest_snapshot
-        .lock()
-        .await
-        .as_ref()
-        .map(|s| s.device_type)
-        .unwrap_or(DeviceType::Gen2Hybrid);
+    // Resolve the device type with a single lock so `is_three_phase` and the
+    // `device_type` used below are derived from the same snapshot view (a
+    // previous version locked twice here — once for the flag and again for the
+    // enum — which could race with the poll loop and disagree).
+    let device_type = latest_device_type(&state).await;
+    let is_three_phase = device_type.uses_three_phase_schedule_slots();
     let mut writes = match ControlCommand::PauseBattery.encode() {
         Ok(w) => w,
         Err(e) => return error_response(&format!("Validation error: {}", e)),
@@ -938,7 +932,9 @@ pub async fn pause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, J
 /// Uses three-phase registers (HR 1123/1111) for three-phase, commercial,
 /// and HV hybrid inverters; single-phase registers (HR 96/116) for all others.
 pub async fn force_charge(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
-    let is_three_phase = is_three_phase_limit_snapshot(&state).await;
+    let is_three_phase = latest_device_type(&state)
+        .await
+        .uses_three_phase_schedule_slots();
     let cmd = if is_three_phase {
         ControlCommand::ThreePhaseForceCharge { target_soc: 100 }
     } else {
@@ -959,7 +955,9 @@ pub async fn force_charge(State(state): State<Arc<AppState>>) -> (StatusCode, Js
 /// Uses three-phase register (HR 1122) for three-phase, commercial,
 /// and HV hybrid inverters; single-phase register (HR 59 + slots) for all others.
 pub async fn force_discharge(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
-    let is_three_phase = is_three_phase_limit_snapshot(&state).await;
+    let is_three_phase = latest_device_type(&state)
+        .await
+        .uses_three_phase_schedule_slots();
     let cmd = if is_three_phase {
         ControlCommand::ThreePhaseForceDischarge
     } else {
@@ -1864,6 +1862,248 @@ mod tests {
             assert!(
                 writes.iter().any(|w| w.address == HR_3PH_AC_CHARGE_ENABLE && w.value == 0),
                 "three-phase pause must clear AC charge flag"
+            );
+        })
+        .await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Device-type routing: every control handler must derive its AC-coupled /
+    // three-phase flags from a SINGLE locked view of the snapshot (via
+    // latest_device_type / device_type_flags) rather than two independent
+    // locks that can race with the poll loop. These tests lock in the routing
+    // per device family end-to-end and cover the helper defaults.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn latest_device_type_defaults_to_gen2hybrid_with_no_snapshot() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            // No snapshot seeded.
+            assert_eq!(
+                latest_device_type(&state).await,
+                DeviceType::Gen2Hybrid,
+                "no-snapshot default must be Gen2Hybrid (neither AC nor 3-phase)"
+            );
+            // The flags derived from that default are both false.
+            let (ac, tp) = device_type_flags(&state).await;
+            assert!(!ac);
+            assert!(!tp);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn device_type_flags_matches_each_device_family() {
+        with_isolated_config_dir_async(|| async {
+            // (device, is_ac_coupled, is_three_phase)
+            let cases = [
+                (DeviceType::Gen2Hybrid, false, false),
+                (DeviceType::Gen3Hybrid, false, false),
+                (DeviceType::Gen1Hybrid, false, false),
+                (DeviceType::ACCoupled, true, false),
+                (DeviceType::ACCoupledMk2, true, false),
+                (DeviceType::ThreePhase, false, true),
+                (DeviceType::ACThreePhase, false, true),
+                (DeviceType::AioCommercial, false, true),
+                (DeviceType::HybridHvGen3, false, true),
+                (DeviceType::AllInOneHybrid, false, true),
+                (DeviceType::Gateway, false, true),
+            ];
+            for (dt, want_ac, want_tp) in cases {
+                let state = make_state_with_device(dt).await;
+                let (ac, tp) = device_type_flags(&state).await;
+                assert_eq!(
+                    (ac, tp),
+                    (want_ac, want_tp),
+                    "device_type_flags wrong for {:?}",
+                    dt
+                );
+                // Consistency: the helper's flag must equal deriving it from
+                // the same single-locked device type.
+                let resolved = latest_device_type(&state).await;
+                assert_eq!(ac, matches!(resolved, DeviceType::ACCoupled | DeviceType::ACCoupledMk2));
+                assert_eq!(tp, resolved.uses_three_phase_schedule_slots());
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_charge_rate_routes_to_correct_register_per_device() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_3PH_BATTERY_CHARGE_LIMIT, HR_AC_BATTERY_CHARGE_LIMIT, HR_BATTERY_CHARGE_LIMIT,
+            };
+            // (device, expected register) — three-phase wins over AC priority.
+            let cases = [
+                (DeviceType::Gen2Hybrid, HR_BATTERY_CHARGE_LIMIT),
+                (DeviceType::Gen3Hybrid, HR_BATTERY_CHARGE_LIMIT),
+                (DeviceType::ACCoupled, HR_AC_BATTERY_CHARGE_LIMIT),
+                (DeviceType::ACCoupledMk2, HR_AC_BATTERY_CHARGE_LIMIT),
+                (DeviceType::ThreePhase, HR_3PH_BATTERY_CHARGE_LIMIT),
+                (DeviceType::HybridHvGen3, HR_3PH_BATTERY_CHARGE_LIMIT),
+            ];
+            for (dt, want_reg) in cases {
+                let state = make_state_with_device(dt).await;
+                let body = serde_json::json!({ "limit": 30 });
+                let _ = set_charge_rate(State(state.clone()), Json(body)).await;
+                let writes = drain_pending_writes(&state).await;
+                assert_all_whitelisted(&writes);
+                assert_eq!(writes.len(), 1, "one register write expected for {:?}", dt);
+                assert_eq!(
+                    writes[0].address, want_reg,
+                    "charge-rate routed to wrong register for {:?}",
+                    dt
+                );
+                assert_eq!(writes[0].value, 30);
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_discharge_rate_routes_to_correct_register_per_device() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_3PH_BATTERY_DISCHARGE_LIMIT, HR_AC_BATTERY_DISCHARGE_LIMIT,
+                HR_BATTERY_DISCHARGE_LIMIT,
+            };
+            let cases = [
+                (DeviceType::Gen2Hybrid, HR_BATTERY_DISCHARGE_LIMIT),
+                (DeviceType::Gen3Hybrid, HR_BATTERY_DISCHARGE_LIMIT),
+                (DeviceType::ACCoupled, HR_AC_BATTERY_DISCHARGE_LIMIT),
+                (DeviceType::ACCoupledMk2, HR_AC_BATTERY_DISCHARGE_LIMIT),
+                (DeviceType::ThreePhase, HR_3PH_BATTERY_DISCHARGE_LIMIT),
+                (DeviceType::AllInOneHybrid, HR_3PH_BATTERY_DISCHARGE_LIMIT),
+            ];
+            for (dt, want_reg) in cases {
+                let state = make_state_with_device(dt).await;
+                let body = serde_json::json!({ "limit": 25 });
+                let _ = set_discharge_rate(State(state.clone()), Json(body)).await;
+                let writes = drain_pending_writes(&state).await;
+                assert_all_whitelisted(&writes);
+                assert_eq!(writes.len(), 1, "one register write expected for {:?}", dt);
+                assert_eq!(writes[0].address, want_reg, "wrong discharge-rate register for {:?}", dt);
+                assert_eq!(writes[0].value, 25);
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_reserve_routes_single_phase_vs_three_phase() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{HR_3PH_BATTERY_SOC_RESERVE, HR_BATTERY_SOC_RESERVE};
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let _ = set_reserve(State(state.clone()), Json(json!({ "soc": 20 }))).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_eq!(writes[0].address, HR_BATTERY_SOC_RESERVE);
+
+            let state = make_state_with_device(DeviceType::ThreePhase).await;
+            let _ = set_reserve(State(state.clone()), Json(json!({ "soc": 20 }))).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_eq!(writes[0].address, HR_3PH_BATTERY_SOC_RESERVE);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_routes_single_phase_vs_three_phase() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{HR_3PH_CHARGE_TARGET_SOC, HR_CHARGE_TARGET_SOC};
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let _ = force_charge(State(state.clone())).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert!(
+                writes.iter().any(|w| w.address == HR_CHARGE_TARGET_SOC),
+                "single-phase force charge must target HR_CHARGE_TARGET_SOC"
+            );
+
+            let state = make_state_with_device(DeviceType::ThreePhase).await;
+            let _ = force_charge(State(state.clone())).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert!(
+                writes.iter().any(|w| w.address == HR_3PH_CHARGE_TARGET_SOC),
+                "three-phase force charge must target HR_3PH_CHARGE_TARGET_SOC"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_discharge_routes_single_phase_vs_three_phase() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_3PH_FORCE_DISCHARGE_ENABLE, HR_ENABLE_DISCHARGE,
+            };
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let _ = force_discharge(State(state.clone())).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert!(
+                writes.iter().any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 1),
+                "single-phase force discharge must set HR_ENABLE_DISCHARGE=1"
+            );
+
+            let state = make_state_with_device(DeviceType::ThreePhase).await;
+            let _ = force_discharge(State(state.clone())).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert!(
+                writes.iter().any(|w| w.address == HR_3PH_FORCE_DISCHARGE_ENABLE && w.value == 1),
+                "three-phase force discharge must set HR_3PH_FORCE_DISCHARGE_ENABLE=1"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pause_battery_uses_consistent_device_type_for_slot_and_mode() {
+        // Regression guard for the pause_battery race: the discharge-slot
+        // clearing and the three-phase vs single-phase mode restore must both
+        // come from the SAME locked device-type view. We assert the
+        // single-phase and three-phase paths each produce a self-consistent
+        // batch (correct slot-clear registers AND the correct power-mode path).
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_3PH_DISCHARGE_SLOT_1_START, HR_BATTERY_POWER_MODE,
+                HR_DISCHARGE_SLOT_1_START,
+            };
+            // Single-phase: classic slots cleared + eco power mode restored.
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            let _ = pause_battery(State(state.clone())).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert!(
+                writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_1_START && w.value == 0),
+                "single-phase pause clears HR 56 slot 1"
+            );
+            assert!(
+                writes.iter().any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1),
+                "single-phase pause restores eco power mode"
+            );
+
+            // Three-phase: HR 1118 slots cleared (NOT the single-phase HR 56) —
+            // proves the slot-clear and the mode-restore saw the same device
+            // type rather than disagreeing.
+            let state = make_state_with_device(DeviceType::ThreePhase).await;
+            let _ = pause_battery(State(state.clone())).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert!(
+                writes.iter().any(|w| w.address == HR_3PH_DISCHARGE_SLOT_1_START && w.value == 0),
+                "three-phase pause clears HR 1118 slot 1"
+            );
+            assert!(
+                !writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_1_START),
+                "three-phase pause must NOT touch single-phase slot registers"
+            );
+            assert!(
+                writes.iter().any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1),
+                "three-phase pause restores eco power mode"
             );
         })
         .await;

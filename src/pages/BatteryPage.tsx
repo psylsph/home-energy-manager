@@ -3,6 +3,7 @@ import { useInverterStore } from '../store/useInverterStore';
 import { formatPercent, formatVoltage, formatTemp } from '../lib/format';
 import ColdBatteryWarning from '../components/ColdBatteryWarning';
 import BatteryPanel from '../components/BatteryPanel';
+import BatterySocChart from '../components/BatterySocChart';
 
 const BMS_REGISTER_LABELS = ['IR90', 'IR91', 'IR92', 'IR93', 'IR94'];
 const BMS_STATUS_LABELS = ['status_1', 'status_2', 'status_3', 'status_4', 'status_5', 'status_6', 'status_7'];
@@ -278,6 +279,10 @@ export default function BatteryPage() {
           </div>
         </section>
       )}
+
+      {/* Today's SOC trend — replicates the History → Battery "SOC %" chart
+          so the Battery tab is self-contained (issue #81). */}
+      <BatterySocChart />
     </div>
   );
 }

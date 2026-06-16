@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.0] - 2026-06-16
+
+### Added
+
+- **Solar Power Today chart on the Solar tab** — replicates the History →
+  Solar "PV Power (W)" chart, pinned to today, so the Solar tab now carries
+  its own solar-output trend. PV2 auto-detects from history (no second
+  string shown for single-string owners). The Power and History solar
+  graphs are untouched. ([#81](https://github.com/psylsph/home-energy-manager/issues/81))
+- **SOC Today chart on the Battery tab** — replicates the History → Battery
+  "SOC %" chart, pinned to today, giving the Battery tab a SOC-over-time
+  trend that the Status page doesn't have. ([#81](https://github.com/psylsph/home-energy-manager/issues/81))
+- **Shared post-query spike filter** — `removeSpikes` and
+  `SPIKE_THRESHOLDS` (previously module-local in `HistoryPage.tsx`) moved to
+  `src/lib/chartSeries.ts` so every chart that renders raw polled series
+  applies identical spike filtering.
+
+### Changed
+
+- **Bottom navigation order** — Solar now appears before Inverter, matching
+  the left-to-right status-gathering flow. ([#81](https://github.com/psylsph/home-energy-manager/issues/81))
+- **Default window width** reduced from 980 to 850 px.
+
+### Fixed
+
+- **Register-corruption saturation values are never released** — the
+  register sanitizer now treats int16-saturation power readings (|v| ≥
+  32 000, the documented dongle memory-leak fingerprint of ±32767) as never
+  legitimate: they're always replaced with the previous reading (or
+  sign-preserved clamped to the limit if there is none) and never accepted
+  after the 10-cycle suspect window. Previously a stuck `32767` would be
+  permanently accepted after ~10 min and poison the history database and
+  UI. Complements the existing block-level fingerprint check.
+- **Control commands route from a single consistent device-type view** —
+  every control handler (charge/discharge rate, reserve, force
+  charge/discharge, pause, slot set) now derives its AC-coupled vs
+  three-phase routing flags from one locked snapshot view via new
+  `latest_device_type` / `device_type_flags` helpers, instead of locking
+  the snapshot twice independently. The previous double-lock could race
+  with the poll loop (the snapshot updates between the two locks) and pick
+  the wrong register set, writing to single-phase registers on a
+  three-phase unit or vice versa.
+
 ## [0.26.3] - 2026-06-16
 
 ### Fixed

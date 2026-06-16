@@ -11,36 +11,72 @@ So each bottom-nav tab should be **self-contained** — a user should be able to
 
 ---
 
-## Workstream A — Battery SOC at the bottom of the Battery page
+## Workstream A — Make the Battery tab overview hideable via a Settings toggle
 
-### What was asked
+> **Reframed 2026-06-16** based on the comment thread on issue #81. Originally scoped as "add a SOC footer at the bottom of the Battery page"; the conversation clarified the reporter's actual intent (see below).
+
+### Original request (for context)
 
 > "Is it possible to have the battery SOC included at the bottom of the battery page or a switch to enable it? It does not matter if it scrolls off the bottom if you open the battery details module?"
 
+### Update (2026-06-16 — issue comments)
+
+A 3-comment thread today clarified the real intent:
+
+1. **@psylsph**: pushed back on adding a second SOC display — "The battery SOC is already shown at the top of the page why do you want at the bottom? I was actually thinking of removing the overview from the Battery tab and just leaving the module data as it's just a repeat of what's on the Status page anyway."
+2. **@gagenp01**: confirmed that was exactly their idea — quoted the maintainer's "remove the overview" line and attached a screenshot labelled "This is my idea. If you have something else then fine on that too."
+3. **@psylsph**: "got you, will have a look — will probably make it a toggle option under settings." (+1)
+
+**Net effect:** the reporter doesn't want a *second* SOC card at the bottom. They agree the Battery tab overview duplicates the Status page and want the **option to hide it**, leaving just the per-module battery detail. The agreed plan is a **Settings toggle**.
+
 ### Current behaviour
 
-`src/pages/BatteryPage.tsx` renders the `BatteryPanel` (SOC ring + power/voltage/temp/mode/reserve/charged-discharged) **once, at the top**. When a module is expanded and the page scrolls, that SOC card scrolls out of view. There is no bottom reference.
+`src/pages/BatteryPage.tsx` renders the `BatteryPanel` (SOC ring + power/voltage/temp/mode/reserve/charged-discharged) **once, at the top**. This overview duplicates most of the Status page's battery summary.
 
 `src/components/BatteryPanel.tsx` is a `memo`-ised component that already takes a `snapshot` and renders the full SOC card.
 
-### Proposed approach
+### Revised approach
 
-Add a **compact, always-visible SOC footer** on the Battery page (and a Settings toggle to hide it for people who don't want it). Compact = SOC % + state badge + maybe power, not the whole card — to avoid a wall of duplicate text.
+Two complementary pieces. **A2 is the active direction** (maintainer, 2026-06-16); A1 is an optional companion.
+
+#### A1 (optional / companion) — Settings toggle to hide the overview card
+
+Add a **Settings toggle that hides the Battery tab overview** (`BatteryPanel` at the top), so the page shows only the per-module cell detail. Default **on** (overview shown) to preserve current behaviour; users who find it redundant can turn it off.
+
+#### A2 (primary, current direction) — "Today's SOC" chart at the bottom of the Battery page
+
+Replicate the History → Battery → "SOC %" chart on the Battery tab, pinned to **today**. This gives the Battery tab something the Status page *doesn't* have (a SOC-over-time trend), serving the reporter's "self-contained tab" goal — and if A1 later hides the overview card, this chart becomes the on-tab SOC reference (resolving the original request cleanly).
+
+"SOC %" chart definition to replicate (from `HistoryPage.tsx`):
+`{ field: 'soc', color: '#6366F1', yDomain: [0,100], unit: '%' }`, fetched via `fetchHistory('today', ['soc'], 0, false)`.
 
 ### Tasks
 
-- [ ] Decide footer content: SOC % + state (charging/discharging/idle) + power. Keep it one line.
-- [ ] Add a Zustand-persisted boolean `showBatterySocFooter` (default **on**), mirroring the pattern used for `developerMode` / `chartRange` in `src/store/useInverterStore.ts`.
-- [ ] In `BatteryPage.tsx`, render the compact footer at the end of the page (after the modules section / the "no battery modules" section) gated on the new flag.
-- [ ] (Optional polish) Make the footer `sticky bottom` within the scroll container so it stays on screen while scrolling module details — confirm it doesn't fight the global bottom nav (`pb-safe`).
-- [ ] Add a Settings toggle under a new "Battery" or "Display" section in `src/pages/SettingsPage.tsx` (reuse the existing `Toggle` component).
-- [ ] Manually verify: expand a module, scroll, confirm SOC stays readable; toggle off in Settings, confirm footer disappears.
-- [ ] `npm run lint` + `npm run build` clean.
+**A1 (optional):**
+
+- [ ] Add a Zustand-persisted boolean `showBatteryOverview` (default **on**) to `src/store/useInverterStore.ts`, mirroring the `developerMode` / `chartRange` pattern.
+- [ ] In `src/pages/BatteryPage.tsx`, gate the top `BatteryPanel` render on the new flag.
+- [ ] Add the toggle under a "Battery" or "Display" section in `src/pages/SettingsPage.tsx`, reusing the existing `Toggle` component.
+
+**A2 (primary):**
+
+- [ ] New component `src/components/BatterySocChart.tsx` (no props): fetches `fetchHistory('today', ['soc'], 0, false)`, SOC spike-filters the series, renders a Recharts `AreaChart` (stroke `#6366F1`, gradient fill, `yDomain={[0,100]}`, height ~180px). States: loading / empty / error (mirror History/Power pages).
+- [ ] Refresh: `useNow()` (60s) + `refreshKey = shouldRefreshHistoryRange('today', 0) ? now : 0` in the fetch effect deps — identical to History/Power pages.
+- [ ] Reuse from `historyRangeConfig.ts`: `getHistoryRangeDomain('today',0,now)`, `getHistoryXAxisTicks`, `formatHistoryXAxisTick`, `getHistoryXAxisMinTickGap`, `HISTORY_CHART_GRID_PROPS`, `shouldRefreshHistoryRange`. No new patterns.
+- [ ] SOC spike filter: **recommend** extracting `removeSpikes` + `SPIKE_THRESHOLDS` (currently module-local in `HistoryPage.tsx`) into `src/lib/chartSeries.ts` and reusing from both; minimal alternative is an inline SOC-only filter (threshold 15).
+- [ ] Insert `<BatterySocChart />` into `BatteryPage.tsx` at the bottom of the page (after the modules / no-modules section). Decision pending: bottom-of-page (recommended) vs directly under the `BatteryPanel` overview card.
+
+**Both:**
+
+- [ ] Manually verify (A2): chart fills in over the day, refreshes each minute, shows the empty state on a fresh install; disconnected/no-battery states render sensibly.
+- [ ] `npm run lint` + `npm run lint:md` + `npm run build` clean.
 
 ### Notes / decisions to make
 
-- Reporter explicitly accepts the footer scrolling off "if you open the battery details module" — so a plain bottom card is acceptable; sticky is a bonus, not required.
-- Don't duplicate the *entire* `BatteryPanel` at the bottom (too noisy) — just SOC + state.
+- The original "SOC footer chip" idea is **dropped** — replaced by the richer A2 SOC chart.
+- A2 placement: **bottom-of-page** (recommended, additive, matches the Solar-wishlist bottom-graph pattern) vs **under the overview card** (groups SOC-now + SOC-today).
+- A1 default: keep overview **on** (safe) vs **off** (matches the maintainer's lean toward removing it). A2 makes the overview less redundant, so **on** is the safer default.
+- No backend/Modbus changes for either — `soc` is already recorded in history; the toggle is pure frontend state.
 
 ---
 

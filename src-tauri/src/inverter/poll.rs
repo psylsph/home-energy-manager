@@ -7,7 +7,7 @@
 //! ## Architecture
 //!
 //! The [`AppState`] struct is the central shared object. It holds:
-//! - The latest [`InverterSnapshot`] behind an `Arc<Mutex<…>>`
+//! - The latest [`InverterSnapshot`] behind an `Arc<Mutex<...>>`
 //! - The current [`ConnectionState`]
 //! - A [`broadcast::Sender`] that pushes snapshot and connection-state
 //!   updates to all active WebSocket clients
@@ -114,7 +114,7 @@ pub struct PollSettings {
     pub serial: String,
     /// Seconds between successive poll cycles.
     pub interval_secs: u64,
-    /// Monotonically increasing version — bumped by the settings API
+    /// Monotonically increasing version - bumped by the settings API
     /// so the poll loop can detect that a reconnect is needed.
     pub version: u32,
     /// EV Charger IP address (standard Modbus TCP).
@@ -164,7 +164,7 @@ pub enum AutoWinterState {
 /// Configuration for auto winter mode.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AutoWinterConfig {
-    /// Master toggle — must be on for automatic winter mode to function.
+    /// Master toggle - must be on for automatic winter mode to function.
     pub enabled: bool,
     /// Temperature below which winter mode should activate (°C).
     pub cold_threshold: f32,
@@ -209,7 +209,7 @@ pub struct AutoWinterSaved {
 /// mode (auto-winter, Cosy, Agile) is active.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub enum LoadLimiterState {
-    /// Limiter idle — not monitoring.
+    /// Limiter idle - not monitoring.
     #[default]
     Idle,
     /// Home load above threshold, counting towards trigger delay.
@@ -217,9 +217,9 @@ pub enum LoadLimiterState {
         /// Consecutive polls where home_power was above threshold.
         consecutive: u32,
     },
-    /// Limiter active — battery discharge is paused (Eco Paused).
+    /// Limiter active - battery discharge is paused (Eco Paused).
     Paused,
-    /// Restored from persistence after a crash — first poll will check
+    /// Restored from persistence after a crash - first poll will check
     /// load and immediately restore Eco if already below threshold.
     PausedFromRestart,
     /// Home load dropped below threshold, counting towards restore.
@@ -268,7 +268,7 @@ pub struct AppState {
     pub latest_snapshot: Arc<Mutex<Option<InverterSnapshot>>>,
     /// Current connection state (read by the status endpoint).
     pub connection_state: Arc<Mutex<ConnectionState>>,
-    /// Broadcast sender — every poll cycle sends a [`PollMessage::Snapshot`]
+    /// Broadcast sender - every poll cycle sends a [`PollMessage::Snapshot`]
     /// and connection-state changes send [`PollMessage::Connection`].
     pub tx: broadcast::Sender<PollMessage>,
     /// Runtime configuration (host, serial, interval, etc.).
@@ -394,7 +394,7 @@ impl AppState {
 ///    with exponential back-off (5 s → 60 s cap).
 ///
 /// If `settings.serial` is empty the dongle serial is auto-discovered from
-/// the first response frame header and persisted to settings — only the host
+/// the first response frame header and persisted to settings - only the host
 /// IP is required to connect.
 /// Check whether raw register data matches the known GivEnergy dongle memory-leak
 /// corruption fingerprint (ported from givenergy-modbus `read_registers.py:is_suspicious()`).
@@ -403,7 +403,7 @@ impl AppState {
 /// (TCP/IP stack, DHCP lease data, network interface names) instead of actual
 /// inverter register values. This manifests as specific hex values at characteristic
 /// offsets within a 60-register block (e.g. `0xC0A8` = `192.168` at offset 41/43
-/// — the dongle's IP address leaking into register space).
+/// - the dongle's IP address leaking into register space).
 ///
 /// The fingerprint was established empirically from the givenergy-modbus reference
 /// library. If more than 5 of the known-leaked values appear at their characteristic
@@ -460,13 +460,13 @@ fn should_repoll_after_model_detection(device_type: DeviceType, current_slave: u
 ///
 /// The discovery policy is:
 /// - **First scan** (after model detection, before any probe): always runs.
-/// - **If meters were found**: done — no further probing.
+/// - **If meters were found**: done - no further probing.
 /// - **If no meters found AND `enable_ammeter` or EM115 is configured**:
 ///   retry every `METER_RETRY_INTERVAL` cycles, up to `METER_MAX_RETRIES`
 ///   times, because the meter may be slow to respond (e.g. LoRA-linked
 ///   EM115).
 /// - **If no meters found AND ammeter is not configured**: one-shot scan,
-///   then stop — nothing to find.
+///   then stop - nothing to find.
 fn should_probe_external_meters(
     known_device_type: Option<DeviceType>,
     meter_probe_done: bool,
@@ -477,7 +477,7 @@ fn should_probe_external_meters(
 ) -> bool {
     // Never probe until model is known and three-phase models skip external
     // meters (they use the inverter's internal grid CT at IR 1079-1082).
-    // Batteryless devices (Gateway / EMS / PvInverter) also skip — the Gateway
+    // Batteryless devices (Gateway / EMS / PvInverter) also skip - the Gateway
     // has its own built-in grid meter (IR 1609); EMS/PvInverter have no battery
     // bus to instrument.
     let dt = match known_device_type {
@@ -488,12 +488,12 @@ fn should_probe_external_meters(
         return false;
     }
 
-    // First scan — always run.
+    // First scan - always run.
     if !meter_probe_done {
         return true;
     }
 
-    // Ammeter is expected but no meters found yet — retry on cadence.
+    // Ammeter is expected but no meters found yet - retry on cadence.
     let ammeter_expected = enable_ammeter || meter_type == 1; // EM115 == 1
     if ammeter_expected
         && meter_retry_count < METER_MAX_RETRIES
@@ -529,7 +529,7 @@ fn should_probe_hv_stacks(known_device_type: Option<DeviceType>, hv_probe_done: 
 /// The first few reads after a TCP reconnect are the dongle's most corruption-
 /// prone window. A single plausible-but-wrong value (e.g. `today_consumption_kwh
 /// = 44.5` when the real reading is `~43.4`) that lands during the grace period
-/// is only checked against the loose 0–200 kWh absolute range, so it sails
+/// is only checked against the loose 0-200 kWh absolute range, so it sails
 /// through and becomes the delta-check baseline. Every subsequent correct
 /// reading is then rejected as a "decrease" until real consumption climbs back
 /// above the poisoned baseline.
@@ -628,7 +628,7 @@ impl GraceCumulativeSamples {
     fn median(samples: &[Self]) -> Self {
         debug_assert!(!samples.is_empty());
         // For each field, drop None/NaN samples, sort what remains, and take
-        // the middle. An all-NaN field yields None ("skip — keep last reading").
+        // the middle. An all-NaN field yields None ("skip - keep last reading").
         macro_rules! median_field {
             ($field:ident) => {{
                 let mut v: Vec<f32> = samples
@@ -684,7 +684,7 @@ fn carry_forward_optional_block_values(
             tracing::warn!(
                 charge_prev = prev.charge_rate,
                 discharge_prev = prev.discharge_rate,
-                "AC config block missing — carrying forward AC charge/discharge limits"
+                "AC config block missing - carrying forward AC charge/discharge limits"
             );
             snap.charge_rate = prev.charge_rate;
             snap.discharge_rate = prev.discharge_rate;
@@ -736,7 +736,7 @@ fn carry_forward_optional_block_values(
             discharge_prev = prev.discharge_rate,
             reserve_prev = prev.battery_reserve,
             target_prev = prev.target_soc,
-            "Three-phase config block missing — carrying forward previous limits/reserve"
+            "Three-phase config block missing - carrying forward previous limits/reserve"
         );
         snap.charge_rate = prev.charge_rate;
         snap.discharge_rate = prev.discharge_rate;
@@ -777,7 +777,7 @@ fn carry_forward_optional_block_values(
         }
         if changed {
             tracing::warn!(
-                "Extended schedule block missing — carrying forward previous extended slot data"
+                "Extended schedule block missing - carrying forward previous extended slot data"
             );
         }
     }
@@ -795,7 +795,7 @@ fn carry_forward_battery_modules_with(
             if snap.battery_modules.is_empty() {
                 tracing::debug!(
                     count = prev.len(),
-                    "Battery modules empty this cycle — carrying forward from previous"
+                    "Battery modules empty this cycle - carrying forward from previous"
                 );
                 snap.battery_modules = prev.to_vec();
                 return;
@@ -816,7 +816,7 @@ fn carry_forward_battery_modules_with(
                     if !present.contains(&prev_mod.index) {
                         tracing::debug!(
                             index = prev_mod.index,
-                            "Battery module missing this cycle — carrying forward"
+                            "Battery module missing this cycle - carrying forward"
                         );
                         snap.battery_modules.push(prev_mod.clone());
                     }
@@ -832,7 +832,7 @@ fn carry_forward_battery_modules_with(
 /// commercial inverters from the BMS data.
 ///
 /// The three-phase inverter register blocks (IR 1000-1413, HR 1080-1124) do
-/// NOT expose battery pack temperature or capacity — only converter heatsink
+/// NOT expose battery pack temperature or capacity - only converter heatsink
 /// temperatures (`t_inverter`/`t_boost`/`t_buck_boost`) and SOC/power/current.
 /// Single-phase gets these from IR(56) and HR(55), but those registers are not
 /// populated on three-phase hardware, so `decode_input_0_59` /
@@ -842,7 +842,7 @@ fn carry_forward_battery_modules_with(
 /// per-module cell temperature probes, averaged across all modules. This
 /// is more reliable than the BCU cluster's IR(68) register (which can
 /// return stale or garbage values on some battery firmware versions, e.g.
-/// DA0.011 — see #48) and far more reliable than the inverter's IR(56).
+/// DA0.011 - see #48) and far more reliable than the inverter's IR(56).
 /// Capacity, voltage, current, and SOC for three-phase/HV still come from
 /// the BCU cluster when available, as the BMU blocks don't expose those.
 ///
@@ -850,7 +850,7 @@ fn carry_forward_battery_modules_with(
 ///
 /// The inverter register block IR(56) frequently carries stale or garbage
 /// data even on single-phase inverters (#48). The BMS module temperatures
-/// are the authoritative source — their per-module cell-group maxima are
+/// are the authoritative source - their per-module cell-group maxima are
 /// always more accurate than the inverter's single register.
 ///
 /// For three-phase / HV / commercial inverters, also derives battery
@@ -862,7 +862,7 @@ fn derive_battery_fields_from_bms(
     hv_cluster: Option<&crate::inverter::decoder::HvBcuCluster>,
 ) {
     // Batteryless devices (Gateway, EMS, PvInverter) have no directly-attached
-    // battery — battery fields are set by the Gateway aggregation bank decoder
+    // battery - battery fields are set by the Gateway aggregation bank decoder
     // or are zero for EMS/PvInverter. Nothing to derive from BMS data.
     if snap.device_type.is_batteryless() {
         return;
@@ -872,7 +872,7 @@ fn derive_battery_fields_from_bms(
 
     // --- Temperature: always from BMS module average when available ---
     // The BCU cluster IR(68) and inverter IR(56) are both unreliable
-    // (stale/garbage on some firmware versions, e.g. DA0.011 — #48).
+    // (stale/garbage on some firmware versions, e.g. DA0.011 - #48).
     // The per-module cell temperature probes are the authoritative source.
     if !snap.battery_modules.is_empty() {
         let count = snap.battery_modules.len() as f32;
@@ -992,7 +992,7 @@ fn persist_agile_state_sync(label: String) {
 /// When `active` is true (slot is currently running), writes the slot times,
 /// enables charging, and sets the target SOC. When `active` is false (preloading
 /// the next slot), writes only the slot times so the inverter has them ready
-/// for when the slot starts — but does NOT enable charging.
+/// for when the slot starts - but does NOT enable charging.
 ///
 /// For three-phase models, uses the three-phase charge slot 1 registers.
 /// For Gen3+ models, also writes the per-slot target SOC in the HR 240-299 block.
@@ -1140,19 +1140,49 @@ const DELTA_CORRECTION_RELEASE_THRESHOLD: u8 = 10;
 const RATE_LIMIT_AFTER: u8 = 3;
 
 /// Tracks how many consecutive poll cycles each absolute-range-checked field
-/// has been out of range (exceeding its threshold). If a field persistently
-/// reports the same out-of-range value for `SUSPECT_RELEASE_THRESHOLD` cycles,
-/// we accept it as legitimate — the threshold was too conservative for this
-/// installation (e.g. home power >15 kW on a three-phase inverter).
+/// has been out of range (exceeding its soft limit). If a field persistently
+/// reports a value *between* its soft limit and [`HARD_CORRUPTION_CEILING`]
+/// for `SUSPECT_RELEASE_THRESHOLD` cycles, we accept it as legitimate — the
+/// soft limit was too conservative for this installation (e.g. home power
+/// >15 kW on a three-phase inverter, or grid import >15 kW on a 100 A supply).
+///
+/// Values at or above [`HARD_CORRUPTION_CEILING`] are never released: they
+/// are the dongle's memory-leak corruption fingerprint and stay replaced with
+/// the previous reading no matter how long they persist.
 #[derive(Default)]
 struct ConsecutiveSuspectCounts(HashMap<&'static str, u8>);
 
 /// Number of consecutive out-of-range readings before we release the clamp
-/// and accept the raw value as legitimate.
+/// and accept the raw value as legitimate. Only applies to values *below*
+/// [`HARD_CORRUPTION_CEILING`] — corruption-signature values are never
+/// released.
 const SUSPECT_RELEASE_THRESHOLD: u8 = 10;
+
+/// Absolute ceiling above which a power reading is treated as memory-leak
+/// corruption regardless of how long it persists.
+///
+/// The GivEnergy dongle's known corruption fingerprint saturates a 16-bit
+/// register to its boundary value (±32767) when the TCP/IP stack buffer leaks
+/// into register space. No legitimate reading on any supported installation
+/// approaches this — the largest, a 3×AIO gateway, peaks around 25 kW — so a
+/// value at or above the ceiling is never accepted, even after the
+/// [`SUSPECT_RELEASE_THRESHOLD`] persistence window. Without this guard the
+/// suspect-release mechanism would permanently accept a stuck `32767` after
+/// 10 cycles (~10 min), poisoning the history database and UI. Complements the
+/// block-level [`is_block_suspicious`] fingerprint check.
+///
+/// [`is_block_suspicious`]: is_block_suspicious
+const HARD_CORRUPTION_CEILING: i32 = 32_000;
 
 /// Apply the 10-readings suspect-count method to a signed power field.
 /// Returns `true` if the value was sanitized (replaced with previous).
+///
+/// Values at or above [`HARD_CORRUPTION_CEILING`] (the int16-saturation
+/// corruption fingerprint) are never released — they are always replaced with
+/// the previous reading (or sign-preserved clamped to `limit` if there is no
+/// previous) no matter how many cycles they persist. Values merely over `limit`
+/// but below the ceiling may be released after [`SUSPECT_RELEASE_THRESHOLD`]
+/// cycles (the limit was just conservative for this install).
 fn check_power_field(
     raw_value: i32,
     prev_value: Option<i32>,
@@ -1163,6 +1193,38 @@ fn check_power_field(
     if raw_value.abs() <= limit {
         suspect_counts.0.remove(label);
         return (raw_value, false);
+    }
+
+    // Memory-leak corruption fingerprint: the value has saturated a 16-bit
+    // register (±32767). This is never legitimate on any supported install, so
+    // it is never released — not after the suspect window, not ever. Fall back
+    // to the previous reading (or clamp to the limit if there is none) and keep
+    // the suspect counter at zero so a subsequent merely-over-`limit` value
+    // starts a clean persistence window rather than inheriting corruption
+    // cycles.
+    if raw_value.abs() >= HARD_CORRUPTION_CEILING {
+        suspect_counts.0.insert(label, 0);
+        return match prev_value {
+            Some(pv) => {
+                tracing::warn!(
+                    raw = raw_value,
+                    prev = pv,
+                    "{label} at int16 saturation ({}) — memory-leak corruption fingerprint, using previous",
+                    raw_value
+                );
+                (pv, true)
+            }
+            None => {
+                let clamped = limit * raw_value.signum();
+                tracing::warn!(
+                    raw = raw_value,
+                    clamped,
+                    "{label} at int16 saturation ({}) with no previous — clamping to limit",
+                    raw_value
+                );
+                (clamped, true)
+            }
+        };
     }
 
     // If the previous value was also out-of-range and matches raw,
@@ -1180,7 +1242,7 @@ fn check_power_field(
         tracing::info!(
             raw = raw_value,
             count = *count,
-            "{label} persistently out of range — accepting as legitimate"
+            "{label} persistently out of range - accepting as legitimate"
         );
         suspect_counts.0.remove(label);
         (raw_value, false)
@@ -1189,14 +1251,14 @@ fn check_power_field(
             raw = raw_value,
             prev = pv,
             count = *count,
-            "{label} out of range — using previous"
+            "{label} out of range - using previous"
         );
         (pv, true)
     } else {
         tracing::debug!(
             raw = raw_value,
             count = *count,
-            "{label} out of range — no previous, accepting raw"
+            "{label} out of range - no previous, accepting raw"
         );
         (raw_value, false)
     }
@@ -1211,10 +1273,10 @@ fn sanitize_snapshot(
     suspect_counts: &mut ConsecutiveSuspectCounts,
 ) -> bool {
     let mut sanitized = false;
-    let max_battery_power: i32 = 10_000; // 10 kW — residential battery limit
-    let max_grid_power: i32 = 15_000; // 15 kW — UK single-phase import can exceed 10 kW with EV charging (100A fuse ≈ 23 kW); matches max_home_power which carries the same EV-charging margin. Corruption spikes (e.g. ±32767) are still well above this.
-    let max_solar_power: i32 = 10_000; // 10 kW — residential PV limit
-    let max_home_power: i32 = 15_000; // 15 kW — includes EV charging margin
+    let max_battery_power: i32 = 10_000; // 10 kW - residential battery limit
+    let max_grid_power: i32 = 15_000; // 15 kW - UK single-phase import can exceed 10 kW with EV charging (100A fuse ≈ 23 kW); matches max_home_power which carries the same EV-charging margin. Corruption spikes (e.g. ±32767) are still well above this.
+    let max_solar_power: i32 = 10_000; // 10 kW - residential PV limit
+    let max_home_power: i32 = 15_000; // 15 kW - includes EV charging margin
 
     // Gateway systems aggregate up to 3 AIO units (up to ~18 kW PV / 18 kW load
     // / 18 kW battery). Use higher ceilings so legitimate multi-AIO totals are
@@ -1230,7 +1292,7 @@ fn sanitize_snapshot(
     // On first out-of-range encounter, fall back to previous (safe).
     // If the value persists for SUSPECT_RELEASE_THRESHOLD cycles,
     // accept it as legitimate (conservative threshold was wrong for
-    // this installation — e.g. 100 A supply, three-phase, commercial).
+    // this installation - e.g. 100 A supply, three-phase, commercial).
     let prev_battery = prev.map(|p| p.battery_power);
     let (val, was_sanitized) = check_power_field(
         snap.battery_power,
@@ -1280,7 +1342,7 @@ fn sanitize_snapshot(
         if let Some(p) = prev {
             tracing::warn!(
                 prev_soc = p.soc,
-                "SOC=0 with live power — using previous SOC"
+                "SOC=0 with live power - using previous SOC"
             );
             snap.soc = p.soc;
             sanitized = true;
@@ -1292,7 +1354,7 @@ fn sanitize_snapshot(
         if let Some(p) = prev {
             tracing::warn!(
                 prev_soc = p.soc,
-                "SOC=100 while charging >2000W — using previous SOC"
+                "SOC=100 while charging >2000W - using previous SOC"
             );
             snap.soc = p.soc;
             sanitized = true;
@@ -1307,7 +1369,7 @@ fn sanitize_snapshot(
             tracing::warn!(
                 raw = snap.inverter_temperature,
                 prev = p.inverter_temperature,
-                "Inverter temperature out of range — using previous"
+                "Inverter temperature out of range - using previous"
             );
             snap.inverter_temperature = p.inverter_temperature;
         } else {
@@ -1324,7 +1386,7 @@ fn sanitize_snapshot(
             tracing::warn!(
                 raw = snap.battery_temperature,
                 prev = p.battery_temperature,
-                "Battery temperature out of range — using previous"
+                "Battery temperature out of range - using previous"
             );
             snap.battery_temperature = p.battery_temperature;
         } else {
@@ -1341,12 +1403,12 @@ fn sanitize_snapshot(
         snap.grid_frequency = snap.grid_frequency.max(0.0);
     } else {
         // Grid voltage:
-        //   Single-phase: UK nominal 230V ±10% (207–253V), anything outside 180–280V
+        //   Single-phase: UK nominal 230V ±10% (207-253V), anything outside 180-280V
         //     is clearly corrupt register data.
-        //   Three-phase (line-to-line): UK nominal 415V ±10% (373–456V), match the
-        //     reference library's v_ac1 bounds of 0–500V (IR(1061)).
-        //   Gateway: v_grid (IR 1608) is a single-phase measurement (0–500V int16/deci);
-        //     accept the wider 0–500V range to match real measurements.
+        //   Three-phase (line-to-line): UK nominal 415V ±10% (373-456V), match the
+        //     reference library's v_ac1 bounds of 0-500V (IR(1061)).
+        //   Gateway: v_grid (IR 1608) is a single-phase measurement (0-500V int16/deci);
+        //     accept the wider 0-500V range to match real measurements.
         let (v_min, v_max) = if snap.device_type.needs_three_phase_input_blocks()
             || snap.device_type.needs_gateway_input_blocks()
         {
@@ -1359,7 +1421,7 @@ fn sanitize_snapshot(
                 tracing::warn!(
                     raw = snap.grid_voltage,
                     prev = p.grid_voltage,
-                    "Grid voltage out of range — using previous"
+                    "Grid voltage out of range - using previous"
                 );
                 snap.grid_voltage = p.grid_voltage;
             } else {
@@ -1368,14 +1430,14 @@ fn sanitize_snapshot(
             sanitized = true;
         }
 
-        // Grid frequency: UK is nominally 50 Hz ±1% (49.5–50.5 Hz).
-        // Anything outside 45–55 Hz is clearly corrupt.
+        // Grid frequency: UK is nominally 50 Hz ±1% (49.5-50.5 Hz).
+        // Anything outside 45-55 Hz is clearly corrupt.
         if snap.grid_frequency < 45.0 || snap.grid_frequency > 55.0 {
             if let Some(p) = prev {
                 tracing::warn!(
                     raw = snap.grid_frequency,
                     prev = p.grid_frequency,
-                    "Grid frequency out of range — using previous"
+                    "Grid frequency out of range - using previous"
                 );
                 snap.grid_frequency = p.grid_frequency;
             } else {
@@ -1395,7 +1457,7 @@ fn sanitize_snapshot(
                     tracing::warn!(
                         raw = module.voltage,
                         prev = prev_mod.voltage,
-                        "Battery module {} voltage out of range — using previous",
+                        "Battery module {} voltage out of range - using previous",
                         module.index
                     );
                     module.voltage = prev_mod.voltage;
@@ -1413,7 +1475,7 @@ fn sanitize_snapshot(
     // monotonically increase from 0 and reset to 0 at midnight.
     //
     // Sanitization rules (applied ALWAYS, even on first reading):
-    //   0. Value must be in [0, 100] kWh — a residential system can't
+    //   0. Value must be in [0, 100] kWh - a residential system can't
     //      consume/generate more than 100 kWh in a single day.
     //      This catches the common corruption patterns (245, 275, 311, 1010).
     //
@@ -1429,7 +1491,7 @@ fn sanitize_snapshot(
     // IMPORTANT: the absolute range check (rule 0) runs REGARDLESS of
     // whether prev exists. Previously it was gated behind `if let Some(p)
     // = prev`, which meant the first reading after every reconnect had
-    // zero validation — corrupted values like 1010 kWh passed through
+    // zero validation - corrupted values like 1010 kWh passed through
     // and became the "previous" reference, poisoning all subsequent reads.
     //
     // When the value is out of range, we use the previous reading's value
@@ -1451,13 +1513,13 @@ fn sanitize_snapshot(
                     if let Some(pv) = prev_v {
                         tracing::warn!(
                             field = $name, raw, max = max_daily_kwh, prev = pv,
-                            "Daily energy out of plausible daily range — using previous",
+                            "Daily energy out of plausible daily range - using previous",
                         );
                         $value = pv;
                     } else {
                         tracing::warn!(
                             field = $name, raw, max = max_daily_kwh,
-                            "Daily energy out of plausible daily range — no previous, clamping to 0",
+                            "Daily energy out of plausible daily range - no previous, clamping to 0",
                         );
                         $value = 0.0;
                     }
@@ -1521,13 +1583,13 @@ fn sanitize_snapshot(
                     if let Some(pv) = prev_v {
                         tracing::warn!(
                             field = $name, raw, max = max_lifetime_kwh, prev = pv,
-                            "Lifetime total energy out of plausible range — using previous",
+                            "Lifetime total energy out of plausible range - using previous",
                         );
                         $value = pv;
                     } else {
                         tracing::warn!(
                             field = $name, raw, max = max_lifetime_kwh,
-                            "Lifetime total energy out of plausible range — no previous, clamping to 0",
+                            "Lifetime total energy out of plausible range - no previous, clamping to 0",
                         );
                         $value = 0.0;
                     }
@@ -1558,9 +1620,9 @@ fn sanitize_snapshot(
         );
     }
 
-    // Delta checks — only when we have a previous reading AND we're past
+    // Delta checks - only when we have a previous reading AND we're past
     // the grace period after connect. During the grace period, only the
-    // absolute range check applies — the dongle can return plausible-but-wrong
+    // absolute range check applies - the dongle can return plausible-but-wrong
     // values that would poison the delta baseline.
     if !skip_delta {
         if let Some(p) = prev {
@@ -1596,14 +1658,14 @@ fn sanitize_snapshot(
                 // the 200 kWh daily max, so we only need to catch jumps
                 // that are plausible daily values but implausible deltas.
                 if prev_val < 1.0 {
-                    // prev is unreliable — apply a tighter max-increase check.
+                    // prev is unreliable - apply a tighter max-increase check.
                     // Since prev could be a genuine start-of-day 0, accept
                     // raw only if it's a plausible single-interval increase.
                     if raw > max_increase_kwh {
                         tracing::warn!(
                             field = $name, raw, prev = prev_val,
                             elapsed_secs, max_increase_kwh,
-                            "Daily energy jumped from near-zero baseline — clamping to max_increase",
+                            "Daily energy jumped from near-zero baseline - clamping to max_increase",
                         );
                         $value = max_increase_kwh;
                         sanitized = true;
@@ -1613,7 +1675,7 @@ fn sanitize_snapshot(
                 // Midnight rollover: counter legitimately reset to ~0.
                 // Allow if raw is small and prev was large.
                 else if raw < prev_val && raw < 5.0 && prev_val > 5.0 {
-                    // Legitimate midnight reset — accept raw as-is
+                    // Legitimate midnight reset - accept raw as-is
                     delta_corrections.0.remove($name);
                 }
                 // Tiny one-tick decreases are normal read noise; carry the
@@ -1623,13 +1685,13 @@ fn sanitize_snapshot(
                     tracing::debug!(
                         field = $name, raw, prev = prev_val,
                         tolerance_kwh = decrease_noise_tolerance_kwh,
-                        "Daily energy decreased within noise tolerance — carrying forward previous",
+                        "Daily energy decreased within noise tolerance - carrying forward previous",
                     );
                     $value = prev_val;
                 }
                 // Counter must not decrease materially (register corruption).
                 // However, if the inverter consistently reports the same lower
-                // value for many cycles, the baseline was likely wrong — release.
+                // value for many cycles, the baseline was likely wrong - release.
                 else if raw < prev_val {
                     let count = delta_corrections.0.entry($name).or_insert(0);
                     *count += 1;
@@ -1637,23 +1699,23 @@ fn sanitize_snapshot(
                         tracing::info!(
                             field = $name, raw, prev = prev_val,
                             count = *count,
-                            "Daily energy consistently lower — accepting raw, baseline was likely wrong",
+                            "Daily energy consistently lower - accepting raw, baseline was likely wrong",
                         );
                         $value = raw;
                         delta_corrections.0.remove($name);
-                        // Don't set sanitized=true — we're accepting raw, not rejecting it
+                        // Don't set sanitized=true - we're accepting raw, not rejecting it
                     } else if *count >= RATE_LIMIT_AFTER {
                         tracing::debug!(
                             field = $name, raw, prev = prev_val,
                             count = *count,
-                            "Daily energy decreased (register corruption, repeated) — using previous",
+                            "Daily energy decreased (register corruption, repeated) - using previous",
                         );
                         $value = prev_val;
                         sanitized = true;
                     } else {
                         tracing::warn!(
                             field = $name, raw, prev = prev_val,
-                            "Daily energy decreased (register corruption) — using previous",
+                            "Daily energy decreased (register corruption) - using previous",
                         );
                         $value = prev_val;
                         sanitized = true;
@@ -1664,13 +1726,13 @@ fn sanitize_snapshot(
                     tracing::warn!(
                         field = $name, raw, prev = prev_val,
                         elapsed_secs, max_increase_kwh,
-                        "Daily energy jumped too fast — using previous",
+                        "Daily energy jumped too fast - using previous",
                     );
                     $value = prev_val;
                     sanitized = true;
                 }
                 else {
-                    // Normal increase within rate limit — raw accepted, reset counter
+                    // Normal increase within rate limit - raw accepted, reset counter
                     delta_corrections.0.remove($name);
                 }
             };
@@ -1709,7 +1771,7 @@ fn sanitize_snapshot(
             );
 
             // Lifetime total energy delta check:
-            // Lifetime counters are STRICTLY monotonically increasing — they
+            // Lifetime counters are STRICTLY monotonically increasing - they
             // NEVER reset (unlike daily counters which reset at midnight).
             // Any decrease is register corruption. The same elapsed-time
             // rate limit applies, with a slightly more generous headroom
@@ -1728,13 +1790,13 @@ fn sanitize_snapshot(
                         tracing::warn!(
                             field = $name, raw, prev = prev_val,
                             elapsed_secs, max = max_lifetime_increase_kwh,
-                            "Lifetime total jumped from near-zero baseline — clamping",
+                            "Lifetime total jumped from near-zero baseline - clamping",
                         );
                         $value = prev_val + max_lifetime_increase_kwh;
                         sanitized = true;
                     }
                 }
-                // Lifetime counters NEVER reset — any decrease is corruption.
+                // Lifetime counters NEVER reset - any decrease is corruption.
                 // (No midnight rollover check needed.)
                 // Tiny one-tick decreases are normal read noise; carry
                 // previous value forward silently.
@@ -1742,7 +1804,7 @@ fn sanitize_snapshot(
                     tracing::debug!(
                         field = $name, raw, prev = prev_val,
                         tolerance_kwh = decrease_noise_tolerance_kwh,
-                        "Lifetime total decreased within noise tolerance — carrying forward",
+                        "Lifetime total decreased within noise tolerance - carrying forward",
                     );
                     $value = prev_val;
                 }
@@ -1755,7 +1817,7 @@ fn sanitize_snapshot(
                         tracing::info!(
                             field = $name, raw, prev = prev_val,
                             count = *count,
-                            "Lifetime total consistently lower — accepting raw, baseline was likely wrong",
+                            "Lifetime total consistently lower - accepting raw, baseline was likely wrong",
                         );
                         $value = raw;
                         delta_corrections.0.remove($name);
@@ -1763,14 +1825,14 @@ fn sanitize_snapshot(
                         tracing::debug!(
                             field = $name, raw, prev = prev_val,
                             count = *count,
-                            "Lifetime total decreased (register corruption, repeated) — using previous",
+                            "Lifetime total decreased (register corruption, repeated) - using previous",
                         );
                         $value = prev_val;
                         sanitized = true;
                     } else {
                         tracing::warn!(
                             field = $name, raw, prev = prev_val,
-                            "Lifetime total decreased (register corruption) — using previous",
+                            "Lifetime total decreased (register corruption) - using previous",
                         );
                         $value = prev_val;
                         sanitized = true;
@@ -1781,13 +1843,13 @@ fn sanitize_snapshot(
                     tracing::warn!(
                         field = $name, raw, prev = prev_val,
                         elapsed_secs, max = max_lifetime_increase_kwh,
-                        "Lifetime total jumped too fast — using previous",
+                        "Lifetime total jumped too fast - using previous",
                     );
                     $value = prev_val;
                     sanitized = true;
                 }
                 else {
-                    // Normal increase within rate limit — raw accepted, reset counter
+                    // Normal increase within rate limit - raw accepted, reset counter
                     delta_corrections.0.remove($name);
                 }
             };
@@ -1838,7 +1900,7 @@ fn sanitize_snapshot(
                     prev_start =
                         format!("{:02}:{:02}", prev_slot.start_hour, prev_slot.start_minute),
                     prev_end = format!("{:02}:{:02}", prev_slot.end_hour, prev_slot.end_minute),
-                    "Charge slot times suspiciously small — carrying forward previous"
+                    "Charge slot times suspiciously small - carrying forward previous"
                 );
                 snap.charge_slots[i] = prev_slot.clone();
                 sanitized = true;
@@ -1859,7 +1921,7 @@ fn sanitize_snapshot(
                     prev_start =
                         format!("{:02}:{:02}", prev_slot.start_hour, prev_slot.start_minute),
                     prev_end = format!("{:02}:{:02}", prev_slot.end_hour, prev_slot.end_minute),
-                    "Discharge slot times suspiciously small — carrying forward previous"
+                    "Discharge slot times suspiciously small - carrying forward previous"
                 );
                 snap.discharge_slots[i] = prev_slot.clone();
                 sanitized = true;
@@ -1883,7 +1945,7 @@ fn sanitize_snapshot(
                 if snap.charge_rate == 0 && p.charge_rate > 0 {
                     tracing::warn!(
                         prev = p.charge_rate,
-                        "AC charge limit missing/zero — carrying forward previous value"
+                        "AC charge limit missing/zero - carrying forward previous value"
                     );
                     snap.charge_rate = p.charge_rate;
                     sanitized = true;
@@ -1891,7 +1953,7 @@ fn sanitize_snapshot(
                 if snap.discharge_rate == 0 && p.discharge_rate > 0 {
                     tracing::warn!(
                         prev = p.discharge_rate,
-                        "AC discharge limit missing/zero — carrying forward previous value"
+                        "AC discharge limit missing/zero - carrying forward previous value"
                     );
                     snap.discharge_rate = p.discharge_rate;
                     sanitized = true;
@@ -1923,7 +1985,7 @@ fn sanitize_snapshot(
             tracing::warn!(
                 raw = snap.battery_voltage,
                 prev = p.battery_voltage,
-                "Battery voltage out of range — using previous"
+                "Battery voltage out of range - using previous"
             );
             snap.battery_voltage = p.battery_voltage;
         } else {
@@ -1938,28 +2000,28 @@ fn sanitize_snapshot(
     // to flicker for one poll cycle.
     if let Some(p) = prev {
         if snap.battery_mode != p.battery_mode {
-            // Mode changed — is this a confirmation of a pending change?
+            // Mode changed - is this a confirmation of a pending change?
             if let Some(pm) = pending_mode {
                 if *pm == snap.battery_mode {
-                    // Second consecutive reading with the same new mode — accept it.
+                    // Second consecutive reading with the same new mode - accept it.
                     *pending_mode = None;
                     tracing::debug!(
                         new_mode = ?snap.battery_mode,
                         "Battery mode change confirmed after debounce"
                     );
                 } else {
-                    // Different transient mode — still pending, revert.
+                    // Different transient mode - still pending, revert.
                     tracing::warn!(
                         new_mode = ?snap.battery_mode,
                         prev_mode = ?p.battery_mode,
                         pending = ?pm,
-                        "Battery mode flicker (3rd different value) — keeping previous"
+                        "Battery mode flicker (3rd different value) - keeping previous"
                     );
                     snap.battery_mode = p.battery_mode;
                     sanitized = true;
                 }
             } else {
-                // First reading with a different mode — don't accept yet, pend it.
+                // First reading with a different mode - don't accept yet, pend it.
                 tracing::debug!(
                     new_mode = ?snap.battery_mode,
                     prev_mode = ?p.battery_mode,
@@ -1970,8 +2032,8 @@ fn sanitize_snapshot(
                 sanitized = true;
             }
         } else if pending_mode.is_some() {
-            // Mode reverted back to previous — the pending change was a glitch.
-            tracing::debug!("Battery mode reverted — pending change was a glitch");
+            // Mode reverted back to previous - the pending change was a glitch.
+            tracing::debug!("Battery mode reverted - pending change was a glitch");
             *pending_mode = None;
         }
     }
@@ -1982,14 +2044,14 @@ fn sanitize_snapshot(
     // so a single corrupted register read doesn't flip the UI.
     //
     // Enable_charge and enable_discharge flips are flagged for re-read but
-    // NOT reverted — intentional changes from the control API must propagate.
+    // NOT reverted - intentional changes from the control API must propagate.
     // The immediate re-read confirms the change on the next poll cycle.
     if let Some(p) = prev {
         if snap.enable_charge != p.enable_charge {
             tracing::debug!(
                 raw = snap.enable_charge,
                 prev = p.enable_charge,
-                "enable_charge changed — re-reading to confirm"
+                "enable_charge changed - re-reading to confirm"
             );
             sanitized = true;
         }
@@ -1997,18 +2059,18 @@ fn sanitize_snapshot(
             tracing::debug!(
                 raw = snap.enable_discharge,
                 prev = p.enable_discharge,
-                "enable_discharge changed — re-reading to confirm"
+                "enable_discharge changed - re-reading to confirm"
             );
             sanitized = true;
         }
 
-        // Slot times are user-configured holding registers — they only change
+        // Slot times are user-configured holding registers - they only change
         // when the user explicitly writes them. A delta check would incorrectly
         // reject legitimate overnight transitions (e.g. start jumping from 00:00
         // to 23:00). The existing decode_timeslot already returns disabled when
         // start==end, guarding against partial-write reads. We only sanity-check
         // the enabled/times consistency (enabled toggled without times).
-        // Slot times only change via explicit user writes — the encode path
+        // Slot times only change via explicit user writes - the encode path
         // validates HHMM values and the decode_timeslot guard (disabled when
         // start==end) handles partial-write reads. No revert needed.
         for i in 0..snap.charge_slots.len().min(p.charge_slots.len()) {
@@ -2025,7 +2087,7 @@ fn sanitize_snapshot(
             }
         }
 
-        // Discharge slots — same reasoning as charge slots above.
+        // Discharge slots - same reasoning as charge slots above.
         for i in 0..snap.discharge_slots.len().min(p.discharge_slots.len()) {
             if snap.discharge_slots[i].enabled != p.discharge_slots[i].enabled
                 && (snap.discharge_slots[i].start_hour != p.discharge_slots[i].start_hour
@@ -2046,7 +2108,7 @@ fn sanitize_snapshot(
             tracing::warn!(
                 raw = snap.target_soc,
                 prev = p.target_soc,
-                "Target SOC out of range — using previous"
+                "Target SOC out of range - using previous"
             );
             snap.target_soc = p.target_soc;
             sanitized = true;
@@ -2057,7 +2119,7 @@ fn sanitize_snapshot(
             tracing::warn!(
                 raw = snap.battery_reserve,
                 prev = p.battery_reserve,
-                "Battery reserve out of range — using previous"
+                "Battery reserve out of range - using previous"
             );
             snap.battery_reserve = p.battery_reserve.clamp(4, 100);
             sanitized = true;
@@ -2065,7 +2127,7 @@ fn sanitize_snapshot(
     } else if !(4..=100).contains(&snap.battery_reserve) {
         tracing::warn!(
             raw = snap.battery_reserve,
-            "Battery reserve out of range — clamping to valid range"
+            "Battery reserve out of range - clamping to valid range"
         );
         snap.battery_reserve = snap.battery_reserve.clamp(4, 100);
         sanitized = true;
@@ -2083,8 +2145,8 @@ fn sanitize_snapshot(
 /// or disabling winter mode).
 ///
 /// The state machine uses two temperature thresholds with hysteresis:
-///   * `cold_threshold` — temperature below which we start counting
-///   * `recovery_threshold` — temperature above which we start counting
+///   * `cold_threshold` - temperature below which we start counting
+///   * `recovery_threshold` - temperature above which we start counting
 ///
 /// To prevent a single corrupt temperature reading from triggering a
 /// transition, the state machine requires `debounce_readings` consecutive
@@ -2110,7 +2172,7 @@ fn check_auto_winter(
                 tracing::info!(
                     temp,
                     cold = config.cold_threshold,
-                    "Auto winter: battery cold — counting",
+                    "Auto winter: battery cold - counting",
                 );
                 *state = AutoWinterState::ColdPending { consecutive: 1 };
             }
@@ -2125,7 +2187,7 @@ fn check_auto_winter(
                         config.target_soc,
                     );
                     // Don't overwrite saved values that were restored from
-                    // disk after a restart — those reflect the original state
+                    // disk after a restart - those reflect the original state
                     // before winter mode first activated.
                     if saved.is_none() {
                         *saved = Some(AutoWinterSaved {
@@ -2154,7 +2216,7 @@ fn check_auto_winter(
                 tracing::info!(
                     temp,
                     recovery = config.recovery_threshold,
-                    "Auto winter: battery warming — counting",
+                    "Auto winter: battery warming - counting",
                 );
                 *state = AutoWinterState::WarmPending { consecutive: 1 };
             }
@@ -2215,12 +2277,12 @@ fn check_load_limiter(
     }
 
     // Only operate when battery is in Eco or EcoPaused mode.
-    // EcoPaused is what the limiter sets when it pauses discharge — it
+    // EcoPaused is what the limiter sets when it pauses discharge - it
     // must be accepted so the recovery countdown can proceed.
     // No other automated modes should be active.
     if snap.battery_mode != BatteryMode::Eco && snap.battery_mode != BatteryMode::EcoPaused {
         // If we're Paused but the battery mode isn't one we manage,
-        // someone changed it externally — return to Idle without writing.
+        // someone changed it externally - return to Idle without writing.
         if matches!(*state, LoadLimiterState::Paused)
             || matches!(*state, LoadLimiterState::PausedFromRestart)
             || matches!(*state, LoadLimiterState::LowLoadPending { .. })
@@ -2256,7 +2318,7 @@ fn check_load_limiter(
     };
 
     if !in_window {
-        // Outside window — if we're Paused, restore Eco.
+        // Outside window - if we're Paused, restore Eco.
         if matches!(*state, LoadLimiterState::Paused)
             || matches!(*state, LoadLimiterState::PausedFromRestart)
         {
@@ -2294,7 +2356,7 @@ fn check_load_limiter(
                 tracing::info!(
                     home_power,
                     threshold,
-                    "Load limiter: home load above threshold — counting"
+                    "Load limiter: home load above threshold - counting"
                 );
                 *state = LoadLimiterState::HighLoadPending { consecutive: 1 };
             }
@@ -2339,7 +2401,7 @@ fn check_load_limiter(
                 tracing::info!(
                     home_power,
                     threshold,
-                    "Load limiter: load below threshold — counting"
+                    "Load limiter: load below threshold - counting"
                 );
                 *state = LoadLimiterState::LowLoadPending { consecutive: 1 };
             }
@@ -2350,7 +2412,7 @@ fn check_load_limiter(
         LoadLimiterState::PausedFromRestart => {
             if home_power <= threshold {
                 tracing::info!(
-                    "Load limiter: post-crash — load below threshold, restoring Eco immediately"
+                    "Load limiter: post-crash - load below threshold, restoring Eco immediately"
                 );
                 *state = LoadLimiterState::Idle;
                 return Some(vec![
@@ -2371,7 +2433,7 @@ fn check_load_limiter(
                 tracing::info!(
                     home_power,
                     threshold,
-                    "Load limiter: post-crash — load still high, staying Paused"
+                    "Load limiter: post-crash - load still high, staying Paused"
                 );
                 *state = LoadLimiterState::Paused;
             }
@@ -2382,7 +2444,7 @@ fn check_load_limiter(
                 if *consecutive >= debounce_count {
                     tracing::info!(
                         consecutive,
-                        "Load limiter: restoring Eco mode — load below threshold for full delay"
+                        "Load limiter: restoring Eco mode - load below threshold for full delay"
                     );
                     *state = LoadLimiterState::Idle;
                     return Some(vec![
@@ -2406,7 +2468,7 @@ fn check_load_limiter(
                     tracing::info!(
                         consecutive,
                         debounce_count,
-                        "Load limiter: counting down — {}/{} polls remaining",
+                        "Load limiter: counting down - {}/{} polls remaining",
                         debounce_count - *consecutive,
                         debounce_count
                     );
@@ -2433,15 +2495,15 @@ fn check_load_limiter(
 /// a real battery. The SOC check (`soc > 0 && soc <= 100`) isn't sufficient
 /// because garbage data can produce a non-zero SOC. This function checks:
 ///
-/// 1. **Serial number** (IR 110-114, 5 regs) — must contain printable ASCII
+/// 1. **Serial number** (IR 110-114, 5 regs) - must contain printable ASCII
 ///    characters (not all whitespace). A non-existent battery produces empty
 ///    or non-printable serials.
 ///
-/// 2. **Module voltage** (IR 82-83, uint32 mV) — must be 30-65V. LV batteries
+/// 2. **Module voltage** (IR 82-83, uint32 mV) - must be 30-65V. LV batteries
 ///    typically operate at 45-58V. Garbage from non-existent batteries produces
 ///    either 0V or extreme values.
 ///
-/// 3. **Calibrated capacity** (IR 84-85, uint32 0.01 Ah) — must be > 0.
+/// 3. **Calibrated capacity** (IR 84-85, uint32 0.01 Ah) - must be > 0.
 ///    A non-existent battery returns 0.
 fn validate_battery_bms(data: &[u16]) -> bool {
     // 1. Serial number must be printable and non-empty
@@ -2480,7 +2542,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
         // ---- Read current settings ----
         let settings = state.settings.lock().await.clone();
 
-        // Wait until a host is configured. Serial may be empty — it will be
+        // Wait until a host is configured. Serial may be empty - it will be
         // auto-discovered from the first response.
         if settings.host.is_empty() {
             tracing::debug!("Poll loop: waiting for host setting");
@@ -2515,26 +2577,26 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 tokio::time::sleep(Duration::from_millis(500)).await;
 
                 // Drain any stale data the dongle buffered from a previous
-                // session — without this, cached responses corrupt the
+                // session - without this, cached responses corrupt the
                 // request-response pairing for the first poll.
 
                 // Warmup reads: discard the first register reads after connect.
                 // The dongle's internal state can be stale after a TCP reconnect,
                 // causing the first reads to return garbage values (e.g.
                 // today_import_kwh = 0.6 when the real value is 39.0). We do
-                // multiple warmup reads because a single discard isn't enough —
+                // multiple warmup reads because a single discard isn't enough -
                 // the dongle can return corrupted data for several reads.
                 for i in 0..3 {
                     match client.read_all_standard().await {
                         Ok(blocks) => {
                             tracing::debug!(
-                                "Warmup read {}/3 — OK ({} blocks)",
+                                "Warmup read {}/3 - OK ({} blocks)",
                                 i + 1,
                                 blocks.len()
                             );
                         }
                         Err(e) => {
-                            tracing::warn!("Warmup read {}/3 — FAILED: {e}", i + 1,);
+                            tracing::warn!("Warmup read {}/3 - FAILED: {e}", i + 1,);
                         }
                     }
                     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -2543,7 +2605,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // Clear any previous snapshot so the next reading is accepted
                 // without delta sanitization. After a reconnect, the previous
                 // snapshot may contain stale or corrupted values from the old
-                // session. The absolute range check (0–200 kWh) still applies.
+                // session. The absolute range check (0-200 kWh) still applies.
                 {
                     let mut latest = state.latest_snapshot.lock().await;
                     *latest = None;
@@ -2563,7 +2625,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // → sleep → 3 failures → sleep forever. Now we break out to
                 // reconnect immediately on the 3rd consecutive failure.
                 // Track consecutive dongle memory-leak fingerprint hits.
-                // After MAX_SUSPICIOUS_CYCLES, break to reconnect — persistent
+                // After MAX_SUSPICIOUS_CYCLES, break to reconnect - persistent
                 // corruption means the dongle has probably crashed.
                 let mut consecutive_suspicious: u8 = 0;
                 const MAX_SUSPICIOUS_CYCLES: u8 = 6;
@@ -2617,14 +2679,14 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                             crate::settings::cosy_active_slot(now_minutes, &settings.cosy_slots);
                         if in_slot.is_some() {
                             tracing::info!(
-                                "Cosy: restart detected inside slot — force-charge will be re-sent on next poll"
+                                "Cosy: restart detected inside slot - force-charge will be re-sent on next poll"
                             );
                             // Reset the in-memory flag so the entry logic
                             // re-fires and re-sends the force-charge writes.
                             *state.cosy_active.lock().await = false;
                         } else {
                             tracing::info!(
-                                "Cosy: restart detected AFTER slot ended — CosyExit will be sent on next poll to restore Eco mode"
+                                "Cosy: restart detected AFTER slot ended - CosyExit will be sent on next poll to restore Eco mode"
                             );
                         }
                     }
@@ -2640,7 +2702,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     {
                         tracing::info!(
                             persisted = %settings.agile_state_persisted,
-                            "Agile: restart detected with active persisted state — will re-evaluate current price and re-send command on first poll"
+                            "Agile: restart detected with active persisted state - will re-evaluate current price and re-send command on first poll"
                         );
                     }
                 }
@@ -2661,7 +2723,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     // If version changed since we last connected, break immediately.
                     if current_version != settings_version_at_connect {
                         tracing::info!(
-                            "Settings changed (v{} → v{}) — reconnecting",
+                            "Settings changed (v{} → v{}) - reconnecting",
                             current_version,
                             settings_version_at_connect
                         );
@@ -2702,7 +2764,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                         }
                     }
 
-                    // The consumer task handles stale frames — unmatched
+                    // The consumer task handles stale frames - unmatched
                     // responses (including duplicate write ACKs) are silently
                     // dropped during the read cycle. No explicit flush needed.
 
@@ -2714,7 +2776,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 // Check all 60-register blocks against the known dongle
                                 // memory-leak corruption fingerprint. If the dongle serves
                                 // its own TCP/IP memory instead of register values, the
-                                // entire poll cycle is suspect — trigger a re-poll.
+                                // entire poll cycle is suspect - trigger a re-poll.
                                 let block_suspicious = blocks
                                     .iter()
                                     .any(|b| b.block.start % 60 == 0 && b.block.count == 60 && is_block_suspicious(&b.data));
@@ -2724,7 +2786,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             tracing::warn!(
                                                 block = br.block.name,
                                                 start = br.block.start,
-                                                "Block matched dongle memory-leak fingerprint — re-polling",
+                                                "Block matched dongle memory-leak fingerprint - re-polling",
                                             );
                                         }
                                     }
@@ -2735,13 +2797,13 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         tracing::warn!(
                                             suspicious = consecutive_suspicious,
                                             max = MAX_SUSPICIOUS_CYCLES,
-                                            "Persistent fingerprint corruption — reconnecting"
+                                            "Persistent fingerprint corruption - reconnecting"
                                         );
                                     } else {
                                         tracing::warn!(
                                             suspicious = consecutive_suspicious,
                                             max = MAX_SUSPICIOUS_CYCLES,
-                                            "Dongle memory-leak corruption detected — skipping broadcast, waiting for next poll cycle"
+                                            "Dongle memory-leak corruption detected - skipping broadcast, waiting for next poll cycle"
                                         );
                                     }
                                     return (true, false, false);
@@ -2771,7 +2833,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     tracing::info!(
                                         device_type = ?snapshot.device_type,
                                         extra_blocks = ?snapshot.device_type.extra_poll_blocks().iter().map(|b| b.name).collect::<Vec<_>>(),
-                                        "Device model identified — enabling model-aware polling"
+                                        "Device model identified - enabling model-aware polling"
                                     );
                                     let preferred_slave = snapshot.device_type.preferred_read_slave_address();
                                     let slave_changed = preferred_slave != client.slave_address();
@@ -2793,7 +2855,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     // overwhelming the dongle's slow processor.
                                     if snapshot.device_type.needs_three_phase_input_blocks() {
                                         tracing::info!(
-                                            "Three-phase model detected — increasing inter-request delay to {}ms",
+                                            "Three-phase model detected - increasing inter-request delay to {}ms",
                                             ModbusClient::INTER_REQUEST_DELAY_3PH.as_millis()
                                         );
                                         client.set_inter_request_delay(
@@ -2813,7 +2875,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         tracing::info!(
                                             slave_changed,
                                             has_extra_blocks,
-                                            "Model-specific poll enabled — re-reading immediately"
+                                            "Model-specific poll enabled - re-reading immediately"
                                         );
                                         return (true, true, false);
                                     }
@@ -2822,14 +2884,14 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     // Lock the device type to prevent dongle register corruption
                                     // (especially HR(21) arm_firmware_version) from flipping the
                                     // displayed model on a subsequent poll. Once identified, the
-                                    // snapshot always carries the cached type — the decoder still
+                                    // snapshot always carries the cached type - the decoder still
                                     // runs for the raw DTC and firmware string, but the refinement
                                     // result is ignored in favour of the known-good detection.
                                     if snapshot.device_type != cached_type {
                                         tracing::debug!(
                                             decoded = ?snapshot.device_type,
                                             cached = ?cached_type,
-                                            "Device type mismatch — locking to cached value"
+                                            "Device type mismatch - locking to cached value"
                                         );
                                         snapshot.device_type = cached_type;
                                         snapshot.device_type_display = cached_type.display_name().to_string();
@@ -2900,11 +2962,11 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                     snapshot.meters.push(meter);
                                                 } else if v1 > 0.0 {
                                                     tracing::debug!(
-                                                        "Meter addr 0x{addr:02X}: responded with implausible voltage ({v1:.1}V) — rejected"
+                                                        "Meter addr 0x{addr:02X}: responded with implausible voltage ({v1:.1}V) - rejected"
                                                     );
                                                 } else {
                                                     tracing::debug!(
-                                                        "Meter addr 0x{addr:02X}: responded with zero voltage — no meter present"
+                                                        "Meter addr 0x{addr:02X}: responded with zero voltage - no meter present"
                                                     );
                                                 }
                                             }
@@ -2934,7 +2996,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         meter_probe_done = true;
                                         if ammeter_expected {
                                             tracing::info!(
-                                                "No external CT meters detected on first scan — will retry (ammeter expected)"
+                                                "No external CT meters detected on first scan - will retry (ammeter expected)"
                                             );
                                             // Don't increment retry_count yet; the first
                                             // retry happens after METER_RETRY_INTERVAL cycles.
@@ -2949,13 +3011,13 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         if meter_retry_count >= METER_MAX_RETRIES {
                                             tracing::warn!(
                                                 retries = meter_retry_count,
-                                                "Meter discovery exhausted all retries — external ammeter configured but no meter responding"
+                                                "Meter discovery exhausted all retries - external ammeter configured but no meter responding"
                                             );
                                         } else {
                                             tracing::info!(
                                                 retry = meter_retry_count,
                                                 max = METER_MAX_RETRIES,
-                                                "No external CT meters found — will retry"
+                                                "No external CT meters found - will retry"
                                             );
                                         }
                                     }
@@ -2981,7 +3043,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     }
                                 } else if client.serial_is_suspect() {
                                     tracing::warn!(
-                                        "Auto-discovered serial is suspect (truncated frame) — keeping empty serial for all requests. If the connection fails, try setting the serial manually in Settings."
+                                        "Auto-discovered serial is suspect (truncated frame) - keeping empty serial for all requests. If the connection fails, try setting the serial manually in Settings."
                                     );
                                 }
 
@@ -3014,7 +3076,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 // HV stackable batteries (e.g. GIV-BAT-3.4-HV modules) do NOT
                                 // answer at 0x32. Device type decides which path runs.
                                 // Batteryless devices (Gateway, EMS, PvInverter) skip entirely
-                                // — they have no directly-attached battery to probe.
+                                // - they have no directly-attached battery to probe.
                                 if known_device_type.is_some_and(|dt| dt.is_batteryless()) {
                                     // Batteryless device (Gateway / EMS / PvInverter):
                                     // no directly-attached battery to probe. The Gateway
@@ -3072,7 +3134,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                                 bcu_offset = offset,
                                                                 modules = cluster.number_of_modules,
                                                                 version = %cluster.pack_software_version,
-                                                                "HV BCU at 0x{bcu_addr:02X} — {} modules",
+                                                                "HV BCU at 0x{bcu_addr:02X} - {} modules",
                                                                 cluster.number_of_modules
                                                             );
                                                             found.push((
@@ -3083,7 +3145,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                         Ok(_) => {
                                                             tracing::debug!(
                                                                 bcu_offset = offset,
-                                                                "BCU 0x{bcu_addr:02X} probe: invalid version — no stack"
+                                                                "BCU 0x{bcu_addr:02X} probe: invalid version - no stack"
                                                             );
                                                         }
                                                         Err(e) => {
@@ -3098,7 +3160,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             }
                                             Err(e) => {
                                                 tracing::debug!(
-                                                    "BMS 0xA0 probe failed: {e} — falling back to direct BCU 0x70 probe"
+                                                    "BMS 0xA0 probe failed: {e} - falling back to direct BCU 0x70 probe"
                                                 );
                                                 // Fallback: probe BCU 0x70 directly (single-stack
                                                 // installs where the BMS aggregation isn't exposed).
@@ -3223,7 +3285,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                     tracing::debug!(
                                                         bcu_offset = offset,
                                                         bmu = bmu_num,
-                                                        "HV BMU 0x{bmu_addr:02X}: invalid serial — not present"
+                                                        "HV BMU 0x{bmu_addr:02X}: invalid serial - not present"
                                                     );
                                                 }
                                                 Err(e) => {
@@ -3240,7 +3302,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     }
 
                                     // HV BMU modules do not expose a per-module SOC register
-                                    // (confirmed against GivTCP's hvbmu.py — the BMU bank is
+                                    // (confirmed against GivTCP's hvbmu.py - the BMU bank is
                                     // cell voltages, cell temps and serial only). The BCU
                                     // cluster reports the stack-wide SOC spread and per-module
                                     // Ah capacity, which we backfill onto each module so the
@@ -3257,7 +3319,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     //
                                     // Per givenergy-modbus reference, LV batteries expose BMS
                                     // data on the inverter's IR 60-119 at device address 0x32
-                                    // (battery #1) and additional batteries at 0x33, 0x34, … 0x37.
+                                    // (battery #1) and additional batteries at 0x33, 0x34, ... 0x37.
                                     // Battery #1 IR 60-119 is NOT part of the standard poll
                                     // blocks (those only read IR 0-59), so we issue a separate
                                     // read here. Additional batteries also need separate reads
@@ -3325,7 +3387,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                     );
                                                 } else {
                                                     tracing::debug!(
-                                                        "Battery addr 0x{:02X}: SOC={} — not present",
+                                                        "Battery addr 0x{:02X}: SOC={} - not present",
                                                         addr, soc
                                                     );
                                                     break;
@@ -3384,7 +3446,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         let agg = (total_rem / total_cap * 100.0).round() as u8;
                                         snapshot.soc = agg.min(100);
                                         tracing::debug!(
-                                            "Inverter SOC was 0 — aggregate from {} modules: {}%",
+                                            "Inverter SOC was 0 - aggregate from {} modules: {}%",
                                             snapshot.battery_modules.len(),
                                             snapshot.soc
                                         );
@@ -3392,7 +3454,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 }
 
                                 // Override battery temperature from BMS data for all
-                                // device types (IR(56) is frequently garbage — #48).
+                                // device types (IR(56) is frequently garbage - #48).
                                 // For three-phase inverters, also derives battery capacity
                                 // and max power from the BMS data since those are absent
                                 // from the inverter register blocks entirely.
@@ -3409,11 +3471,11 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         bms.bms_firmware < 3000
                                     } else {
                                         // No BMS firmware reported (HV stacks, or read failed).
-                                        // Fall back to device type — Gen3+ types don't need it.
+                                        // Fall back to device type - Gen3+ types don't need it.
                                         snapshot.device_type.supports_manual_battery_calibration()
                                     }
                                 } else {
-                                    false // No battery modules — no calibration
+                                    false // No battery modules - no calibration
                                 };
 
                                 // Store latest snapshot.
@@ -3457,7 +3519,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                 .map(|s| s.today_consumption_kwh)
                                                 .collect::<Vec<_>>(),
                                             median_consumption = median.today_consumption_kwh,
-                                            "Grace period complete — cumulative baseline set to median of grace readings"
+                                            "Grace period complete - cumulative baseline set to median of grace readings"
                                         );
                                         median.apply_to(&mut snapshot);
                                     }
@@ -3471,7 +3533,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         solar_w = snapshot.solar_power,
                                         battery_w = snapshot.battery_power,
                                         grid_w = snapshot.grid_power,
-                                        "First poll read after connect — data is flowing"
+                                        "First poll read after connect - data is flowing"
                                     );
                                 }
                                 // Load settings from disk on a blocking thread
@@ -3507,7 +3569,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 
                                     // Persist saved values to disk so they survive a
                                     // restart. When winter mode deactivates, saved
-                                    // becomes None — this clears the persisted values.
+                                    // becomes None - this clears the persisted values.
                                     let persist_saved = saved.clone();
                                     drop(config);
                                     drop(aw_state);
@@ -3651,7 +3713,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             // Mark the preloaded slot as stale since we're now active.
                                             cosy_last_preloaded_slot = None;
                                         } else {
-                                            tracing::warn!("Cosy: enter writes failed — will retry on next poll");
+                                            tracing::warn!("Cosy: enter writes failed - will retry on next poll");
                                         }
                                     } else if *cosy_active && !in_slot {
                                         // ---- Exiting a cosy slot ----
@@ -3701,11 +3763,11 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                     next_slot, snapshot.device_type, false,
                                                 ));
                                             } else {
-                                                tracing::info!("Cosy: no upcoming slot — clearing charge slot registers");
+                                                tracing::info!("Cosy: no upcoming slot - clearing charge slot registers");
                                                 writes.extend(clear_cosy_slot_registers(snapshot.device_type));
                                             }
                                         } else {
-                                            // Cosy mode was disabled while active — clear registers.
+                                            // Cosy mode was disabled while active - clear registers.
                                             writes.extend(clear_cosy_slot_registers(snapshot.device_type));
                                         }
 
@@ -3725,7 +3787,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                 None
                                             };
                                         } else {
-                                            tracing::warn!("Cosy: exit writes failed — will retry on next poll");
+                                            tracing::warn!("Cosy: exit writes failed - will retry on next poll");
                                         }
                                     } else if !in_slot && !*cosy_active {
                                         // ---- Idle: ensure the next upcoming slot is preloaded ----
@@ -3757,9 +3819,9 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                         cosy_last_preloaded_slot = Some(next_idx);
                                                     }
                                                 } else {
-                                                    // No upcoming slot — clear registers if they were set.
+                                                    // No upcoming slot - clear registers if they were set.
                                                     if cosy_last_preloaded_slot.is_some() {
-                                                        tracing::info!("Cosy: no upcoming slot — clearing charge slot registers");
+                                                        tracing::info!("Cosy: no upcoming slot - clearing charge slot registers");
                                                         let writes = clear_cosy_slot_registers(snapshot.device_type);
                                                         let ok = write_registers_to_inverter(
                                                             &mut client, &writes, "Cosy clear",
@@ -3772,7 +3834,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             }
                                         }
                                     } else {
-                                        // Already in an active cosy slot — nothing to do.
+                                        // Already in an active cosy slot - nothing to do.
                                         drop(cosy_active);
                                     }
                                 }
@@ -3789,12 +3851,12 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         let price = if current_price.is_some() {
                                             current_price
                                         } else {
-                                            // Cache miss — fetch fresh prices from Octopus API.
+                                            // Cache miss - fetch fresh prices from Octopus API.
                                             // Anchor to the start of TODAY (UTC) so the response always
                                             // includes the current slot. The Agile endpoint returns
                                             // results newest-first, so a bare page_size=48 returns
                                             // tomorrow's slots once they're published (~1pm) and the
-                                            // current slot drops out of the window — which silently
+                                            // current slot drops out of the window - which silently
                                             // leaves the state machine Idle and never discharges.
                                             drop(prices);
                                             let region = &settings.agile_region;
@@ -3861,7 +3923,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             if price <= charge_threshold {
                                                 if *ag_state != AgileState::Charging {
                                                     // Enter charge mode
-                                                                                    tracing::info!("Agile: price {price}p ≤ {charge_threshold}p — force charging");
+                                                                                    tracing::info!("Agile: price {price}p ≤ {charge_threshold}p - force charging");
                                                     drop(ag_state);
                                                     let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
                                                     let cmd = if use_3ph {
@@ -3889,7 +3951,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             } else if price >= discharge_threshold {
                                                 if *ag_state != AgileState::Discharging {
                                                     // Enter discharge mode
-                                                                                    tracing::info!("Agile: price {price}p ≥ {discharge_threshold}p — force discharging");
+                                                                                    tracing::info!("Agile: price {price}p ≥ {discharge_threshold}p - force discharging");
                                                     drop(ag_state);
                                                     let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
                                                     let cmd = if use_3ph {
@@ -3915,7 +3977,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                     }
                                                 }
                                             } else {
-                                                // Hold — price between thresholds: revert to Eco mode
+                                                // Hold - price between thresholds: revert to Eco mode
                                                 if *ag_state != AgileState::Idle {
                                                                                     tracing::info!("Agile: hold (price {price}p), reverting to Eco");
                                                     drop(ag_state);
@@ -3963,7 +4025,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             }
                                         }
                                     } else {
-                                        // Agile mode disabled — if we were actively
+                                        // Agile mode disabled - if we were actively
                                         // charging/discharging, revert to Eco so the
                                         // inverter doesn't stay force-charging after a
                                         // switch to Standard mode.
@@ -3978,18 +4040,18 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         let was_state = *ag_state;
                                         if *ag_state != AgileState::Idle {
                                             if *state.cosy_active.lock().await {
-                                                // Cosy is in control — just clear the
+                                                // Cosy is in control - just clear the
                                                 // agile flag, don't send CosyExit
                                                 // (which would stop the cosy charge).
                                                 drop(ag_state);
                                                 *state.agile_state.lock().await = AgileState::Idle;
                                                 persist_agile_state(AgileState::Idle);
                                                 tracing::info!(
-                                                    "Agile: disabled while {:?} but cosy is active — cleared flag without reverting",
+                                                    "Agile: disabled while {:?} but cosy is active - cleared flag without reverting",
                                                     was_state
                                                 );
                                             } else {
-                                                tracing::info!("Agile: mode disabled while {:?} — reverting to Eco", was_state);
+                                                tracing::info!("Agile: mode disabled while {:?} - reverting to Eco", was_state);
                                                 drop(ag_state);
                                                 let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
                                                 let cmd = if use_3ph {
@@ -4013,7 +4075,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                     *state.agile_state.lock().await = AgileState::Idle;
                                                     persist_agile_state(AgileState::Idle);
                                                 } else {
-                                                    tracing::warn!("Agile: exit writes failed — will retry on next poll");
+                                                    tracing::warn!("Agile: exit writes failed - will retry on next poll");
                                                 }
                                             }
                                         }
@@ -4024,7 +4086,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 // AFTER the cosy state machine has run. Without this,
                                 // the broadcast snapshot would carry the previous
                                 // cycle's value for one poll after a slot transition
-                                // — e.g. showing "Cosy Active" for an extra poll
+                                // - e.g. showing "Cosy Active" for an extra poll
                                 // after the slot actually ended.
                                 snapshot.cosy_active = *state.cosy_active.lock().await;
                                 let ag = state.agile_state.lock().await;
@@ -4061,7 +4123,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 if connection_lost {
                                     tracing::warn!(
                                         error = %e,
-                                        "Poll read failed — connection lost, reconnecting"
+                                        "Poll read failed - connection lost, reconnecting"
                                     );
                                 } else {
                                     tracing::warn!(
@@ -4097,12 +4159,12 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 meter_cycle_since_last += 1;
                             }
 
-                            // Sanitization was applied — corrupted register data
+                            // Sanitization was applied - corrupted register data
                             // detected. Re-poll immediately instead of waiting
                             // for the next interval, so the frontend gets a
                             // fresh reading as soon as possible.
                             if sanitized {
-                                tracing::debug!("Corrupted data detected — re-reading immediately");
+                                tracing::debug!("Corrupted data detected - re-reading immediately");
                                 continue;
                             }
                         }
@@ -4115,15 +4177,15 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 tracing::warn!(
                                     consecutive_failures,
                                     max = MAX_CONSECUTIVE_FAILURES,
-                                    "Poll read failed 3× — reconnecting"
+                                    "Poll read failed 3× - reconnecting"
                                 );
                                 break;
-                                // of breaking out of the inner loop — staying connected
+                                // of breaking out of the inner loop - staying connected
                                 // avoids the warmup + grace period on the next poll.
                             } else {
-                                // Transient error — retry after a short pause
+                                // Transient error - retry after a short pause
                                 tracing::debug!(
-                                    "Poll read failed ({}/{}) — retrying",
+                                    "Poll read failed ({}/{}) - retrying",
                                     consecutive_failures,
                                     MAX_CONSECUTIVE_FAILURES,
                                 );
@@ -4141,7 +4203,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                         tracing::warn!(
                             suspicious = consecutive_suspicious,
                             max = MAX_SUSPICIOUS_CYCLES,
-                            "Persistent fingerprint corruption — disconnecting"
+                            "Persistent fingerprint corruption - disconnecting"
                         );
                         break;
                     }
@@ -4151,7 +4213,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     //   • new writes were queued (apply immediately)
                     //
                     // NOTE: current_version was captured at the TOP of this
-                    // iteration (before the poll). Do NOT re-capture here —
+                    // iteration (before the poll). Do NOT re-capture here -
                     // the sleep loop compares against the PRE-POLL version
                     // so it detects version bumps that happened during the poll.
                     let interval_secs = state.settings.lock().await.interval_secs;
@@ -4161,7 +4223,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                         // Wait up to 1 second, or until writes are queued
                         tokio::select! {
                             _ = state.write_notify.notified() => {
-                                // Writes queued — wake immediately
+                                // Writes queued - wake immediately
                                 tracing::debug!("Write notification received, waking early");
                                 break;
                             }
@@ -4173,7 +4235,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                         let cur = state.settings.lock().await;
                         if cur.version != current_version {
                             tracing::info!(
-                                "Settings changed (v{} → v{}) — reconnecting",
+                                "Settings changed (v{} → v{}) - reconnecting",
                                 current_version,
                                 cur.version
                             );
@@ -4195,7 +4257,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     host = %settings.host,
                     consecutive_failures,
                     max_failures = MAX_CONSECUTIVE_FAILURES,
-                    "Disconnecting from inverter — will reconnect"
+                    "Disconnecting from inverter - will reconnect"
                 );
                 client.disconnect().await;
 
@@ -4207,7 +4269,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     *latest = None;
                 }
 
-                tracing::debug!("Disconnected — entering reconnect cycle");
+                tracing::debug!("Disconnected - entering reconnect cycle");
 
                 {
                     let mut cs = state.connection_state.lock().await;
@@ -4358,7 +4420,7 @@ mod tests {
         // HV stack: 5 modules × 51Ah at 76.8V nominal (three-phase) = 19.58 kWh.
         // Matches a GIV-BAT-17.0-HV (5 × GIV-BAT-3.4-HV) on a GIV-3HY-11.
         // Temperature comes from BMU module average, NOT the BCU cluster IR(68)
-        // (which can return stale/garbage values on some firmware — #48).
+        // (which can return stale/garbage values on some firmware - #48).
         use crate::inverter::decoder::HvBcuCluster;
         let cluster = HvBcuCluster {
             pack_software_version: "GA000005".to_string(),
@@ -4430,7 +4492,7 @@ mod tests {
 
     #[test]
     fn derive_battery_fields_from_bms_hv_cluster_no_modules() {
-        // HV cluster available but BMU reads failed — no modules.
+        // HV cluster available but BMU reads failed - no modules.
         // Temperature is NaN (don't trust stale IR(68)), but capacity/
         // voltage/current/SOC still derived from the cluster.
         use crate::inverter::decoder::HvBcuCluster;
@@ -4460,7 +4522,7 @@ mod tests {
         snap.max_battery_power_w = 0;
         snap.battery_modules = vec![];
         derive_battery_fields_from_bms(&mut snap, Some(&cluster));
-        // Temperature: NaN — no modules to average, and IR(68) is untrusted.
+        // Temperature: NaN - no modules to average, and IR(68) is untrusted.
         assert!(
             snap.battery_temperature.is_nan(),
             "expected NaN when no modules available, got {}",
@@ -4597,7 +4659,7 @@ mod tests {
     #[test]
     fn grace_median_skips_nan_per_field_independently() {
         // One field all-NaN (keep last reading) while another field has real
-        // samples (median applied) — the skip must be per-field.
+        // samples (median applied) - the skip must be per-field.
         let mk = |solar: f32, import: f32| GraceCumulativeSamples {
             today_solar_kwh: Some(solar),
             today_import_kwh: Some(import),
@@ -4614,13 +4676,118 @@ mod tests {
         assert_eq!(median.today_import_kwh, Some(5.1));
 
         let mut snap = InverterSnapshot {
-            today_solar_kwh: 12.0, // last reading — must survive
+            today_solar_kwh: 12.0, // last reading - must survive
             today_import_kwh: 0.0,
             ..Default::default()
         };
         median.apply_to(&mut snap);
         assert_eq!(snap.today_solar_kwh, 12.0, "all-NaN field keeps last reading");
         assert_eq!(snap.today_import_kwh, 5.1, "normal field gets its median");
+    }
+
+    // ---------------------------------------------------------------------
+    // check_power_field — suspect-release + hard corruption ceiling
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn check_power_field_in_range_value_is_accepted_and_resets_counter() {
+        let mut counts = ConsecutiveSuspectCounts::default();
+        counts.0.insert("grid_power", 5);
+        let (val, sanitized) = check_power_field(3000, Some(2900), 15_000, "grid_power", &mut counts);
+        assert_eq!(val, 3000);
+        assert!(!sanitized);
+        assert!(!counts.0.contains_key("grid_power"), "in-range reading resets the counter");
+    }
+
+    #[test]
+    fn check_power_field_soft_over_limit_uses_previous_then_releases() {
+        // A value merely over the soft limit (16 kW vs 15 kW, e.g. a 100 A
+        // supply) must still be released after the suspect window — this is
+        // legitimate behaviour for an oversized install and must not regress.
+        let mut counts = ConsecutiveSuspectCounts::default();
+        // Cycles 1..9: replaced with previous.
+        for _ in 1..SUSPECT_RELEASE_THRESHOLD {
+            let (val, sanitized) =
+                check_power_field(16_000, Some(12_000), 15_000, "grid_power", &mut counts);
+            assert_eq!(val, 12_000, "over-limit value uses previous during suspect window");
+            assert!(sanitized);
+        }
+        // 10th cycle: released (accepted as legitimate).
+        let (val, sanitized) =
+            check_power_field(16_000, Some(12_000), 15_000, "grid_power", &mut counts);
+        assert_eq!(val, 16_000, "persistent over-limit value is released at threshold");
+        assert!(!sanitized);
+        assert!(!counts.0.contains_key("grid_power"), "counter cleared on release");
+    }
+
+    #[test]
+    fn check_power_field_corruption_ceiling_is_never_released() {
+        // The core bug this guards against: a stuck int16-saturation value
+        // (32767, the documented memory-leak fingerprint) must NEVER be
+        // accepted, no matter how many cycles it persists.
+        let mut counts = ConsecutiveSuspectCounts::default();
+        for _ in 0..(SUSPECT_RELEASE_THRESHOLD * 3) {
+            let (val, sanitized) =
+                check_power_field(32_767, Some(12_000), 15_000, "grid_power", &mut counts);
+            assert_eq!(val, 12_000, "32767 corruption must always fall back to previous");
+            assert!(sanitized, "32767 must always be flagged as sanitized");
+        }
+        // Counter never reaches the release threshold for corruption.
+        assert_eq!(
+            counts.0.get("grid_power").copied(),
+            Some(0),
+            "corruption cycles must not count toward the release window"
+        );
+    }
+
+    #[test]
+    fn check_power_field_corruption_with_no_previous_is_clamped_not_accepted() {
+        // First-ever reading is the corruption signature: clamp to the limit
+        // (sign-preserved) rather than writing 32767 into the snapshot/history.
+        let mut counts = ConsecutiveSuspectCounts::default();
+        let (val, sanitized) =
+            check_power_field(32_767, None, 15_000, "grid_power", &mut counts);
+        assert_eq!(val, 15_000, "positive corruption with no previous clamps to +limit");
+        assert!(sanitized);
+
+        // Negative saturation clamps to -limit.
+        let (val, sanitized) =
+            check_power_field(-32_768, None, 15_000, "grid_power", &mut counts);
+        assert_eq!(val, -15_000, "negative corruption with no previous clamps to -limit");
+        assert!(sanitized);
+    }
+
+    #[test]
+    fn check_power_field_value_just_below_ceiling_still_releases_normally() {
+        // A genuinely-high-but-plausible reading (e.g. 30 kW on a big
+        // three-phase supply) sits below the hard ceiling, so it must still go
+        // through the normal suspect window and be released — no false
+        // positive from the corruption guard.
+        let mut counts = ConsecutiveSuspectCounts::default();
+        for _ in 1..SUSPECT_RELEASE_THRESHOLD {
+            check_power_field(30_000, Some(12_000), 15_000, "grid_power", &mut counts);
+        }
+        let (val, sanitized) =
+            check_power_field(30_000, Some(12_000), 15_000, "grid_power", &mut counts);
+        assert_eq!(val, 30_000, "below-ceiling value is released normally");
+        assert!(!sanitized);
+    }
+
+    #[test]
+    fn check_power_field_corruption_then_legit_over_limit_starts_fresh_window() {
+        // Corruption resets the counter to 0, so a subsequent merely-over-limit
+        // value starts its own clean 10-cycle persistence window rather than
+        // being released immediately on the back of corruption cycles.
+        let mut counts = ConsecutiveSuspectCounts::default();
+        // A corruption cycle (resets counter to 0).
+        check_power_field(32_767, Some(12_000), 15_000, "grid_power", &mut counts);
+        assert_eq!(counts.0.get("grid_power").copied(), Some(0));
+        // Now a 16 kW reading: only the 2nd over-limit cycle (1 after reset).
+        let (val, sanitized) =
+            check_power_field(16_000, Some(12_000), 15_000, "grid_power", &mut counts);
+        assert_eq!(val, 12_000, "legit over-limit value not yet released");
+        assert!(sanitized);
+        assert_eq!(counts.0.get("grid_power").copied(), Some(1));
     }
 
     #[test]
@@ -4745,7 +4912,7 @@ mod tests {
     #[test]
     fn external_meter_probe_skips_batteryless_gateway() {
         // Batteryless devices (Gateway, EMS, PvInverter) should never probe
-        // for external CT meters — they have their own built-in metering.
+        // for external CT meters - they have their own built-in metering.
         // The scan should not run even on the very first cycle after detection.
         assert!(!should_probe_external_meters(
             Some(DeviceType::Gateway),
@@ -4976,7 +5143,7 @@ mod tests {
                     i
                 );
             } else {
-                // On threshold cycle: accept raw — the baseline was wrong
+                // On threshold cycle: accept raw - the baseline was wrong
                 assert_eq!(
                     snap.today_consumption_kwh, raw_consumption,
                     "cycle {}: should accept raw value after threshold",
@@ -5065,7 +5232,7 @@ mod tests {
 
     #[test]
     fn external_meter_probe_is_single_shot_without_ammeter() {
-        // No ammeter configured, first scan already done — no further probing.
+        // No ammeter configured, first scan already done - no further probing.
         assert!(!should_probe_external_meters(
             Some(DeviceType::ACCoupled),
             true,  // meter_probe_done
@@ -5096,7 +5263,7 @@ mod tests {
     #[test]
     fn meter_retry_fires_when_ammeter_expected() {
         // EM115 configured (meter_type=1), first scan done, no meters found,
-        // enough cycles have passed — should retry.
+        // enough cycles have passed - should retry.
         assert!(should_probe_external_meters(
             Some(DeviceType::Gen3Hybrid),
             true,                 // meter_probe_done
@@ -5109,7 +5276,7 @@ mod tests {
 
     #[test]
     fn meter_retry_respects_cadence() {
-        // EM115 configured but not enough cycles since last attempt — skip.
+        // EM115 configured but not enough cycles since last attempt - skip.
         assert!(!should_probe_external_meters(
             Some(DeviceType::Gen3Hybrid),
             true,
