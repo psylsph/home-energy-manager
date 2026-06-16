@@ -1488,6 +1488,25 @@ fn decode_gateway_1600_1659(data: &[u16], snap: &mut InverterSnapshot) {
     // the frontend displays "—" rather than "0.0°C".
     snap.battery_temperature = f32::NAN;
 
+    // Inverter temperature is also not available — the Gateway measures
+    // AC system data but has no inverter heatsink sensor to report.
+    snap.inverter_temperature = f32::NAN;
+
+    // Battery voltage and current are not available on the Gateway —
+    // these live on each AIO's own BMS. Set to NaN so the frontend
+    // shows "—" instead of "0.0V" / "0.0A" on the Status, Battery,
+    // and Inverter pages.
+    snap.battery_voltage = f32::NAN;
+    snap.battery_current = f32::NAN;
+
+    // PV voltage is not available on the Gateway (no per-string meter).
+    // Set to NaN so the frontend shows "—" instead of "0.0V".
+    snap.pv1_voltage = f32::NAN;
+    snap.pv2_voltage = f32::NAN;
+    // PV current `i_pv` (IR 1612) IS available — set it so the solar
+    // node shows a meaningful current rather than "0.0A".
+    snap.pv1_current = signed(get_reg(data, 12)) as f32 * 0.1;
+
     // IR(1617) p_pv — unsigned total PV generation.
     let p_pv = get_reg(data, 17) as i32;
     snap.solar_power = p_pv;

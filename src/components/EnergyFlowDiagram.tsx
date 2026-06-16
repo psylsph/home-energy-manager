@@ -377,7 +377,7 @@ function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false
           {...NODES.solar}
           mobile={mobile}
           value={formatPower(s.solar_power)}
-          unit={`${formatVoltage(s.pv1_voltage)}/${formatCurrent(s.pv1_current + s.pv2_current)}`}
+          unit={s.pv1_voltage > 0 ? `${formatVoltage(s.pv1_voltage)}/${formatCurrent(s.pv1_current + s.pv2_current)}` : formatCurrent(s.pv1_current + s.pv2_current)}
         />
         <FlowNode
           {...NODES.grid}

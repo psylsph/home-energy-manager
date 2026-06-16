@@ -15,6 +15,9 @@ export function formatPercent(pct: number): string {
 }
 
 export function formatVoltage(v: number): string {
+  if (!Number.isFinite(v)) {
+    return '—';
+  }
   return `${v.toFixed(1)}V`;
 }
 
@@ -33,5 +36,8 @@ export function formatTemp(c: number): string {
 }
 
 export function formatCurrent(a: number): string {
+  if (!Number.isFinite(a)) {
+    return '—';
+  }
   return `${a.toFixed(1)}A`;
 }

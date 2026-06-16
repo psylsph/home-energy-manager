@@ -234,7 +234,7 @@ export default function InverterPage() {
           <span className="text-text-secondary">Enable Discharge</span>
           <span className={`font-mono text-right ${s.enable_discharge ? 'text-battery' : 'text-text-secondary'}`}>{s.enable_discharge ? 'Yes' : 'No'}</span>
           <span className="text-text-secondary">Modules</span>
-          <span className="text-text-primary font-mono text-right">{s.battery_modules.length}</span>
+          <span className="text-text-primary font-mono text-right">{s.battery_modules.length > 0 ? s.battery_modules.length : '—'}</span>
           <span className="text-text-secondary">Charge Today</span>
           <span className="text-text-primary font-mono text-right">{formatEnergy(s.today_charge_kwh)}</span>
           <span className="text-text-secondary">Discharge Today</span>
