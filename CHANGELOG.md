@@ -17,6 +17,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same approach used by three-phase models.
   ([#83](https://github.com/psylsph/home-energy-manager/issues/83))
 
+## [0.28.2] - 2026-06-16
+
+### Added
+
+- **Unit-test infrastructure for React hooks** — `vitest` + `@testing-library/react`
+  + `jsdom` for component-level unit tests. Run with `npm test` (`vitest run`)
+  or `npm run test:watch`. Separate `vitest.config.ts` keeps the production Vite
+  config untouched.
+  - First test suite: `src/hooks/useAction.test.tsx` with 9 tests covering
+    loading/success/error timing, render stability, cycle repeats, and the
+    timeout cleanup behaviours below.
+
+### Fixed
+
+- **Uncontrolled timeout in `useAction()` hook** — the feedback-clearing
+  `setTimeout` was not tracked, causing:
+  - Stacking on rapid button clicks (multiple timeouts racing to update state).
+  - `setState` on an unmounted component if the component unmounted while a
+    timeout was pending.
+  
+  The hook now uses a `useRef`-tracked timer that is cleared on every new
+  request and on unmount (`useEffect` cleanup, which only calls `clearTimeout`
+  — never `setState` — so it does not trip the `react-hooks/set-state-in-effect`
+  lint rule). Extracted to `src/hooks/useAction.ts` for testability.
+
+- **Gen3 Hybrid (0x20xx) false positive grid-loss detection** — the standard
+  detection path used OR logic (`system_mode == OffGrid || no_utility_bit`),
+  causing transient register fluctuations to trigger false `grid_loss = true`
+  even when grid AC voltage/frequency readings showed the grid was present.
+  
+  All non-AC device types now use the actual grid voltage/frequency readings
+  as a corroborating AND check: both the software register(s) AND the electrical
+  readings must agree before grid loss is reported. This aligns the single-phase
+  path with how three-phase and Gateway models already work, and mirrors the
+  AC-coupled voltage/frequency approach.
+
 ## [0.28.0] - 2026-06-16
 
 ### Added

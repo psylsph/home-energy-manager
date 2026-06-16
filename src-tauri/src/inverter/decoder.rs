@@ -438,20 +438,37 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     //   • inverter_trip:     IR(0) `status` == FAULT (the inverter's own flag).
     //   • battery_over_temp: IR(57) `charger_warning_code` == 1 (device-reported).
     //
-    // AC-coupled inverters use a different system_mode convention — IR(49) can
-    // report OffGrid (1) during normal grid-connected operation. Use the actual
-    // AC voltage/frequency reading instead, same as the three-phase path does.
+    // Every device type uses the actual grid AC voltage/frequency as the
+    // primary grid-presence signal. GivEnergy hardware reports both near zero
+    // during a genuine outage, so `grid_online_from_ac()` is the authoritative
+    // electrical ground truth regardless of the software `system_mode` register.
+    //
+    // AC-coupled inverters (ACCoupled / ACCoupledMk2) treat voltage/frequency
+    // as the sole signal because their system_mode register (IR(49)) can report
+    // OffGrid during normal grid-connected operation.
+    //
+    // For all other device types the system_mode register (IR 49) and the
+    // IR(40) bit-7 "No Utility" fault bit are used as corroborating signals —
+    // grid loss is only reported when BOTH the electrical readings AND the
+    // software register(s) agree. This prevents false positives from transient
+    // system_mode / fault-bit fluctuations reported by some firmware versions
+    // (Gen3 Hybrid devices, notably) while still recognising genuine outages.
     let status = get_reg(data, 0); // IR(0): inverter status (Status enum)
     let system_mode = get_reg(data, 49); // IR(49): system/work mode (WorkMode enum)
     let no_utility = (get_reg(data, 40) & GRID_LOSS_MASK_IR40) != 0; // bit 7
+    let ac_present = grid_online_from_ac(snap.grid_voltage, snap.grid_frequency);
     if matches!(
         snap.device_type,
         DeviceType::ACCoupled | DeviceType::ACCoupledMk2
     ) {
-        snap.grid_online = grid_online_from_ac(snap.grid_voltage, snap.grid_frequency);
-        snap.grid_loss = !snap.grid_online;
+        snap.grid_online = ac_present;
+        snap.grid_loss = !ac_present;
     } else {
-        snap.grid_loss = system_mode == SYSTEM_MODE_OFF_GRID || no_utility;
+        // Corroborate the software signals against the actual electrical
+        // readings. Both must indicate grid loss for it to be reported,
+        // avoiding false positives from transient register fluctuations.
+        snap.grid_loss =
+            (system_mode == SYSTEM_MODE_OFF_GRID || no_utility) && !ac_present;
         snap.grid_online = !snap.grid_loss;
     }
     snap.inverter_trip = status == STATUS_FAULT;
@@ -1992,7 +2009,10 @@ mod tests {
 
     #[test]
     fn decode_grid_loss_bit_marks_grid_offline() {
+        // A genuine outage: voltage/frequency near zero AND the fault bit set.
         let mut blocks = test_blocks();
+        blocks[0].data[5] = 0; // IR(5):  grid_voltage = 0.0 V
+        blocks[0].data[13] = 0; // IR(13): grid_frequency = 0.00 Hz
         blocks[0].data[40] = GRID_LOSS_MASK_IR40; // IR(40) bit 7: "No Utility" fault
 
         let snap = decode_snapshot(&blocks);
@@ -2004,9 +2024,10 @@ mod tests {
 
     #[test]
     fn decode_offgrid_system_mode_marks_grid_offline() {
-        // IR(49) system_mode = OFF_GRID (1) is the primary, authoritative
-        // grid-loss signal — no IR(40) fault bit needs to be set.
+        // A genuine outage: voltage/frequency near zero AND system_mode=OffGrid.
         let mut blocks = test_blocks();
+        blocks[0].data[5] = 0; // IR(5):  grid_voltage = 0.0 V
+        blocks[0].data[13] = 0; // IR(13): grid_frequency = 0.00 Hz
         blocks[0].data[49] = SYSTEM_MODE_OFF_GRID; // IR(49): OffGrid
 
         let snap = decode_snapshot(&blocks);
@@ -2024,6 +2045,35 @@ mod tests {
 
         assert!(!snap.grid_loss);
         assert!(snap.grid_online);
+    }
+
+    #[test]
+    fn gen3_false_positive_system_mode_offgrid_with_normal_voltage() {
+        // Gen3 Hybrid (and similar firmware) can transiently report
+        // system_mode=OffGrid while the grid is actually present. If voltage
+        // and frequency are normal, grid_loss must stay false.
+        let mut blocks = test_blocks();
+        blocks[0].data[49] = SYSTEM_MODE_OFF_GRID; // IR(49): OffGrid (transient)
+        // Voltage/frequency already at default 241.0V / 50.02 Hz
+
+        let snap = decode_snapshot(&blocks);
+
+        assert!(snap.grid_online, "voltage is normal — grid must be reported as online");
+        assert!(!snap.grid_loss, "must NOT false-positive on transient OffGrid");
+    }
+
+    #[test]
+    fn gen3_false_positive_no_utility_bit_with_normal_voltage() {
+        // Same scenario via the IR(40) "No Utility" fault bit: the bit is set
+        // transiently but voltage/frequency remain normal.
+        let mut blocks = test_blocks();
+        blocks[0].data[40] = GRID_LOSS_MASK_IR40; // IR(40) bit 7: "No Utility"
+        // Voltage/frequency already at default 241.0V / 50.02 Hz
+
+        let snap = decode_snapshot(&blocks);
+
+        assert!(snap.grid_online, "voltage is normal — grid must be reported as online");
+        assert!(!snap.grid_loss, "must NOT false-positive on transient No Utility bit");
     }
 
     #[test]

@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useInverterStore } from '../store/useInverterStore';
+import { useAction } from '../hooks/useAction';
 import { apiPost, apiGet } from '../lib/api';
 import type { ScheduleSlot } from '../lib/types';
 
@@ -19,37 +20,6 @@ type ModeCategory = 'eco' | 'timed';
 
 function modeToCategory(mode: BatteryMode): ModeCategory {
   return mode === 'eco' || mode === 'eco_paused' ? 'eco' : 'timed';
-}
-
-interface ActionState {
-  loading: boolean;
-  success: boolean;
-  error: string | null;
-}
-
-function useAction() {
-  const [state, setState] = useState<ActionState>({
-    loading: false,
-    success: false,
-    error: null,
-  });
-
-  const execute = useCallback(
-    async (path: string, body?: unknown) => {
-      setState({ loading: true, success: false, error: null });
-      try {
-        await apiPost(path, body);
-        setState({ loading: false, success: true, error: null });
-        setTimeout(() => setState((s) => (s.success ? { ...s, success: false } : s)), 2000);
-      } catch (e) {
-        setState({ loading: false, success: false, error: (e as Error).message });
-        setTimeout(() => setState((s) => (s.error ? { ...s, error: null } : s)), 3000);
-      }
-    },
-    [],
-  );
-
-  return { ...state, execute };
 }
 
 function ActionButton({
