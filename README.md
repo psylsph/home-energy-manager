@@ -61,14 +61,15 @@ Home Energy Manager connects directly to your inverter over your home network an
 
 Go to the [**Releases page**](https://github.com/psylsph/home-energy-manager/releases/latest) and download the file for your system:
 
-| Your computer | Download the file ending in |
+| Your computer | Look for the file name containing |
 |---|---|
-| 🪟 **Windows** | `.msi` (or `.msix` for Store/sideload packaging) |
-| 🍎 **Mac with Apple Silicon** (M1/M2/M3/M4) | `.dmg` with `aarch64` in the name |
-| 🍎 **Mac with Intel processor** | `.dmg` with `x64` in the name |
-| 🐧 **Linux** (Ubuntu, Debian, etc.) | `.deb` |
-| 🐧 **Linux** (Fedora, openSUSE, etc.) | `.rpm` |
-| 🍓 **Raspberry Pi** (64-bit OS only) | `.deb` with `arm64` in the name |
+| 🪟 **Windows** | `Windows-MSI-...msi` |
+| 🍎 **Mac with Apple Silicon** (M1/M2/M3/M4) | `macOS-Apple-Silicon-...dmg` |
+| 🍎 **Mac with Intel processor** | `macOS-Intel-...dmg` |
+| 🐧 **Linux x86_64** (Ubuntu, Debian, etc.) | `Linux-Debian-x86_64-...deb` |
+| 🐧 **Linux x86_64** (Fedora, openSUSE, etc.) | `Linux-RPM-x86_64-...rpm` |
+| 🍓 **Raspberry Pi / ARM64 Linux** (Ubuntu, Debian) | `Linux-Debian-ARM64-...deb` |
+| 🍓 **Raspberry Pi / ARM64 Linux** (Fedora, openSUSE) | `Linux-RPM-ARM64-...rpm` |
 
 **Windows users** — Windows SmartScreen may show "Windows protected your PC", and Microsoft Defender has recently false-flagged the unsigned `.msi` as `Trojan:Script/Wacatac.C!ml` on some systems. VirusTotal scans are clean and the exact installer has been submitted to Microsoft as a false positive. This is open-source software you can inspect on GitHub, and future Windows builds will use SignPath Foundation code signing as required.
 
