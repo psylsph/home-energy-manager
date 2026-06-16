@@ -2093,7 +2093,12 @@ export default function ControlPage() {
                   slotIndex={i}
                   slot={slot}
                   onSave={handleSlotSave}
-                  showTargetSoc={true}
+                  // Only show target SOC slider on models that support
+                  // extended schedule slots (Gen3+ hybrid, three-phase,
+                  // AIO, HV Gen3, Gen4). On AC-coupled/Gen1/Gen2 there
+                  // is no register to write a per-slot or global discharge
+                  // target SOC — the slider would silently do nothing.
+                  showTargetSoc={maxDischargeSlots > 2}
                   apiPath="/api/control/discharge-slot"
                 />
               </>

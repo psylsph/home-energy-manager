@@ -631,16 +631,42 @@ pub async fn set_charge_slot(
             // to show as true when the user simply configured a schedule slot.
             if enabled {
                 if !device_type.uses_three_phase_schedule_slots() {
-                    // Clear the force-charge target flag (HR 20 = 0) so a stale
-                    // flag from a previous operation doesn't keep
-                    // snapshotForceCharge (enable_charge && enable_charge_target)
-                    // asserted. Routed through the encoder so the address is
-                    // checked against SAFE_WRITE_REGS, matching the invariant
-                    // that *all* register writes are validated by the encoder.
-                    if let Ok(flag_writes) =
-                        (ControlCommand::ClearChargeTargetFlag).encode()
-                    {
-                        writes.extend(flag_writes);
+                    if device_type.uses_extended_schedule_slots() || target_soc >= 100 {
+                        // Clear the force-charge target flag (HR 20 = 0) so a
+                        // stale force-charge flag from a previous operation
+                        // doesn't keep snapshotForceCharge
+                        // (enable_charge && enable_charge_target) asserted.
+                        //
+                        // For extended-slot models (Gen3+ hybrid, AIO, HV Gen3):
+                        // per-slot target SOCs are managed in the HR240-299
+                        // extended block, so the global HR20 flag is unused.
+                        //
+                        // For all models when target SOC is 100% ("charge to
+                        // full" / default): no target limit is needed, so the
+                        // flag is cleared. The battery charges to 100% during
+                        // the slot window.
+                        if let Ok(flag_writes) =
+                            (ControlCommand::ClearChargeTargetFlag).encode()
+                        {
+                            writes.extend(flag_writes);
+                        }
+                    } else {
+                        // Non-extended-slot models (AC-coupled, Gen1/Gen2
+                        // hybrid) with an explicit target SOC < 100%: write
+                        // the target to the standard HR116 register and enable
+                        // the charge target flag. Without this, the user's
+                        // target SOC slider value is silently dropped — the
+                        // battery would charge to 100% regardless of what
+                        // target they set. SetChargeTargetSoc encodes both
+                        // HR20=1 (enable_charge_target) and HR116=<soc>.
+                        if let Ok(target_writes) =
+                            (ControlCommand::SetChargeTargetSoc {
+                                soc: target_soc as u16,
+                            })
+                            .encode()
+                        {
+                            writes.extend(target_writes);
+                        }
                     }
                     if let Ok(enable_writes) =
                         (ControlCommand::SetEnableCharge { enabled: true }).encode()

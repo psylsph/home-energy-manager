@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.3] - 2026-06-16
+
+### Fixed
+
+- **Charge slot target SOC silently dropped on AC-coupled/Gen1/Gen2 inverters**
+  — the per-slot `target_soc` slider in the Charge Schedule editor was only
+  persisted to the inverter on models with extended schedule slots (Gen3+
+  hybrid, three-phase, AIO, HV Gen3). On AC-coupled, Gen1, and Gen2 models
+  the value was accepted by the UI and the response was "Saved", but neither
+  `enable_charge_target` (HR20) nor `charge_target_soc` (HR116) were ever
+  written — the battery would always charge to 100% regardless of the slider
+  position.
+  
+  The backend now writes the target SOC to the standard HR116 register and
+  sets `enable_charge_target=1` when saving a charge slot with an explicit
+  target below 100% on these models. For `target_soc=100` ("charge to full")
+  the existing behaviour is preserved (flag cleared, no write).
+  ([#82](https://github.com/psylsph/home-energy-manager/issues/82))
+
+- **Discharge slot target SOC slider shown on unsupported models** — the
+  target SOC control in the Discharge Schedule editor was displayed on all
+  models, but only takes effect on inverters with extended schedule slots
+  (Gen3+ hybrid, three-phase, AIO, HV Gen3, Gen4). On AC-coupled, Gen1, and
+  Gen2 inverters there is no register to write a per-slot or global discharge
+  target SOC, so the slider was silently inoperative. It is now hidden on
+  models where `max_discharge_slots <= 2`.
+
 ## [0.28.2] - 2026-06-16
 
 ### Added
