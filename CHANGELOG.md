@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.3] - 2026-06-16
+
+### Fixed
+
+- **Inverter fault detection uses authoritative registers** — grid loss,
+  inverter trip, and battery over-temperature are now decoded from the
+  inverter's self-declared status registers instead of the unverified
+  IR(40) fault-word bits (whose bit layout givenergy-modbus documents
+  as "not verified against official firmware docs"). The previous
+  implementation keyed on the wrong bits (bit 8 = "Inverter Current
+  Fault" rather than bit 7 = "No Utility", etc.).
+  - `grid_loss` now uses **IR(49) `system_mode` == OFF_GRID** (the
+    `WorkMode` enum) as the primary signal, corroborated by the IR(40)
+    bit 7 "No Utility" fault bit.
+  - `inverter_trip` now uses **IR(0) `status` == FAULT** (the `Status`
+    enum).
+  - `battery_over_temp` now uses **IR(57) `charger_warning_code` == 1**.
+- **All register writes routed through the encoder whitelist** — the
+  Eco-mode and PauseBattery discharge-slot clearing, and the charge-slot
+  force-charge-flag clearing, now go through the encoder's
+  `SAFE_WRITE_REGS`-validated commands instead of constructing raw
+  `RegisterWrite` structs that bypassed the security invariant. A new
+  `ClearChargeTargetFlag` command and `clear_discharge_slot_writes()`
+  helper centralise this.
+- **Configuring a charge schedule slot no longer leaves force-charge
+  asserted** — clearing the stale charge-target flag (HR 20) when a
+  schedule charge slot is enabled prevents `snapshotForceCharge`
+  (`enable_charge && enable_charge_target`) from staying asserted.
+- **Three-phase PauseBattery now fully resets export state** — clears
+  force charge/discharge + AC charge flags and restores Eco power mode
+  in a single validated `ThreePhaseCosyExit` batch (previously left the
+  `HR_BATTERY_POWER_MODE` write and three-phase flag clearing as
+  separate raw writes).
+- **Grace-period baseline survives all-NaN readings** —
+  `GraceCumulativeSamples` cumulative-counter fields are now `Option<f32>`;
+  fields whose median can't be computed (every grace sample was `NaN`)
+  are left untouched instead of poisoning the delta-check baseline with
+  `NaN`.
+
+### Changed
+
+- **Deduplicated app startup** — extracted shared `init_tracing()` and
+  `initialize_app_state()` helpers so the Tauri-windowed `run()` and
+  headless `run_headless()` paths can no longer diverge (they had
+  already started to, e.g. `blocking_lock()` vs `.lock().await`).
+- **Solar page PV layout** — the PV1 card now spans the full width when
+  no PV2 string is connected, instead of rendering an empty "No PV2
+  input detected" placeholder card.
+
+### Removed
+
+- Obsolete ADR `why-gateway-is-not-the-right-approach-for-parallel-aios.md`.
+
 ## [0.26.2] - 2026-06-16
 
 ### Fixed

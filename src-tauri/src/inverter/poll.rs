@@ -541,65 +541,107 @@ fn should_probe_hv_stacks(known_device_type: Option<DeviceType>, hv_probe_done: 
 /// true value, instead of trusting whichever reading happened to land first.
 #[derive(Clone, Copy, Default)]
 struct GraceCumulativeSamples {
-    today_solar_kwh: f32,
-    today_import_kwh: f32,
-    today_export_kwh: f32,
-    today_charge_kwh: f32,
-    today_discharge_kwh: f32,
-    today_consumption_kwh: f32,
-    today_ac_charge_kwh: f32,
-    total_import_kwh: f32,
-    total_export_kwh: f32,
-    total_charge_kwh: f32,
-    total_discharge_kwh: f32,
+    today_solar_kwh: Option<f32>,
+    today_import_kwh: Option<f32>,
+    today_export_kwh: Option<f32>,
+    today_charge_kwh: Option<f32>,
+    today_discharge_kwh: Option<f32>,
+    today_consumption_kwh: Option<f32>,
+    today_ac_charge_kwh: Option<f32>,
+    total_import_kwh: Option<f32>,
+    total_export_kwh: Option<f32>,
+    total_charge_kwh: Option<f32>,
+    total_discharge_kwh: Option<f32>,
 }
 
 impl GraceCumulativeSamples {
     /// Capture the cumulative counters from a sanitized snapshot.
     fn from_snapshot(s: &InverterSnapshot) -> Self {
         Self {
-            today_solar_kwh: s.today_solar_kwh,
-            today_import_kwh: s.today_import_kwh,
-            today_export_kwh: s.today_export_kwh,
-            today_charge_kwh: s.today_charge_kwh,
-            today_discharge_kwh: s.today_discharge_kwh,
-            today_consumption_kwh: s.today_consumption_kwh,
-            today_ac_charge_kwh: s.today_ac_charge_kwh,
-            total_import_kwh: s.total_import_kwh,
-            total_export_kwh: s.total_export_kwh,
-            total_charge_kwh: s.total_charge_kwh,
-            total_discharge_kwh: s.total_discharge_kwh,
+            today_solar_kwh: Some(s.today_solar_kwh),
+            today_import_kwh: Some(s.today_import_kwh),
+            today_export_kwh: Some(s.today_export_kwh),
+            today_charge_kwh: Some(s.today_charge_kwh),
+            today_discharge_kwh: Some(s.today_discharge_kwh),
+            today_consumption_kwh: Some(s.today_consumption_kwh),
+            today_ac_charge_kwh: Some(s.today_ac_charge_kwh),
+            total_import_kwh: Some(s.total_import_kwh),
+            total_export_kwh: Some(s.total_export_kwh),
+            total_charge_kwh: Some(s.total_charge_kwh),
+            total_discharge_kwh: Some(s.total_discharge_kwh),
         }
     }
 
     /// Overwrite a snapshot's cumulative counters with the median values.
+    ///
+    /// Fields whose median could not be computed (because every grace sample
+    /// was `NaN`) are left untouched, preserving the snapshot's current value
+    /// (the last grace reading) rather than poisoning it with `NaN`.
     fn apply_to(&self, s: &mut InverterSnapshot) {
-        s.today_solar_kwh = self.today_solar_kwh;
-        s.today_import_kwh = self.today_import_kwh;
-        s.today_export_kwh = self.today_export_kwh;
-        s.today_charge_kwh = self.today_charge_kwh;
-        s.today_discharge_kwh = self.today_discharge_kwh;
-        s.today_consumption_kwh = self.today_consumption_kwh;
-        s.today_ac_charge_kwh = self.today_ac_charge_kwh;
-        s.total_import_kwh = self.total_import_kwh;
-        s.total_export_kwh = self.total_export_kwh;
-        s.total_charge_kwh = self.total_charge_kwh;
-        s.total_discharge_kwh = self.total_discharge_kwh;
+        if let Some(v) = self.today_solar_kwh {
+            s.today_solar_kwh = v;
+        }
+        if let Some(v) = self.today_import_kwh {
+            s.today_import_kwh = v;
+        }
+        if let Some(v) = self.today_export_kwh {
+            s.today_export_kwh = v;
+        }
+        if let Some(v) = self.today_charge_kwh {
+            s.today_charge_kwh = v;
+        }
+        if let Some(v) = self.today_discharge_kwh {
+            s.today_discharge_kwh = v;
+        }
+        if let Some(v) = self.today_consumption_kwh {
+            s.today_consumption_kwh = v;
+        }
+        if let Some(v) = self.today_ac_charge_kwh {
+            s.today_ac_charge_kwh = v;
+        }
+        if let Some(v) = self.total_import_kwh {
+            s.total_import_kwh = v;
+        }
+        if let Some(v) = self.total_export_kwh {
+            s.total_export_kwh = v;
+        }
+        if let Some(v) = self.total_charge_kwh {
+            s.total_charge_kwh = v;
+        }
+        if let Some(v) = self.total_discharge_kwh {
+            s.total_discharge_kwh = v;
+        }
     }
 
     /// Compute the per-field median across grace samples.
     ///
-    /// For an odd sample count this is the middle element; for an even count it
-    /// is the lower-middle (we only ever collect 3 samples, so the standard
-    /// odd-count median applies). Requires at least one sample.
+    /// `NaN` samples are filtered out *before* the median is taken, so a mix
+    /// like `[NaN, 5.0, 5.1]` yields the median of `[5.0, 5.1]` rather than
+    /// `NaN`. If **every** sample of a field is `NaN` (e.g. the BMS was
+    /// unreachable for all grace reads), that field's median is `None` and
+    /// [`apply_to`](Self::apply_to) leaves the snapshot's existing value
+    /// untouched (the last reading) instead of overwriting it with `NaN`.
+    ///
+    /// For an odd non-NaN sample count this is the middle element; for an even
+    /// count it is the upper-middle (`v[len/2]`). Requires at least one sample
+    /// (asserted).
     fn median(samples: &[Self]) -> Self {
         debug_assert!(!samples.is_empty());
-        // Collect each field into its own Vec, sort, and take the middle.
+        // For each field, drop None/NaN samples, sort what remains, and take
+        // the middle. An all-NaN field yields None ("skip — keep last reading").
         macro_rules! median_field {
             ($field:ident) => {{
-                let mut v: Vec<f32> = samples.iter().map(|s| s.$field).collect();
-                v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                v[v.len() / 2]
+                let mut v: Vec<f32> = samples
+                    .iter()
+                    .filter_map(|s| s.$field)
+                    .filter(|x| !x.is_nan())
+                    .collect();
+                if v.is_empty() {
+                    None
+                } else {
+                    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    Some(v[v.len() / 2])
+                }
             }};
         }
         Self {
@@ -4453,26 +4495,26 @@ mod tests {
         // The median of the three grace readings picks the true value.
         let mk = |consumption: f32| {
             let mut s = GraceCumulativeSamples::default();
-            s.today_consumption_kwh = consumption;
+            s.today_consumption_kwh = Some(consumption);
             s
         };
         let samples = [mk(43.4), mk(44.5), mk(43.5)];
         let median = GraceCumulativeSamples::median(&samples);
         // Sorted: [43.4, 43.5, 44.5] -> middle is 43.5, the true reading.
-        assert_eq!(median.today_consumption_kwh, 43.5);
+        assert_eq!(median.today_consumption_kwh, Some(43.5));
 
         // A single low outlier is also rejected.
         let samples = [mk(44.5), mk(10.0), mk(44.6)];
         let median = GraceCumulativeSamples::median(&samples);
-        assert_eq!(median.today_consumption_kwh, 44.5);
+        assert_eq!(median.today_consumption_kwh, Some(44.5));
     }
 
     #[test]
     fn grace_median_handles_all_cumulative_fields_independently() {
         let mk = |consumption: f32, import: f32, total_import: f32| GraceCumulativeSamples {
-            today_consumption_kwh: consumption,
-            today_import_kwh: import,
-            total_import_kwh: total_import,
+            today_consumption_kwh: Some(consumption),
+            today_import_kwh: Some(import),
+            total_import_kwh: Some(total_import),
             ..Default::default()
         };
         let samples = [
@@ -4481,16 +4523,16 @@ mod tests {
             mk(43.5, 5.1, 1000.1),
         ];
         let median = GraceCumulativeSamples::median(&samples);
-        assert_eq!(median.today_consumption_kwh, 43.5);
-        assert_eq!(median.today_import_kwh, 5.1);
-        assert_eq!(median.total_import_kwh, 1000.0);
+        assert_eq!(median.today_consumption_kwh, Some(43.5));
+        assert_eq!(median.today_import_kwh, Some(5.1));
+        assert_eq!(median.total_import_kwh, Some(1000.0));
     }
 
     #[test]
     fn grace_median_apply_writes_all_fields_back() {
         let median = GraceCumulativeSamples {
-            today_consumption_kwh: 43.5,
-            total_import_kwh: 1000.0,
+            today_consumption_kwh: Some(43.5),
+            total_import_kwh: Some(1000.0),
             ..Default::default()
         };
         let mut snap = InverterSnapshot {
@@ -4501,6 +4543,84 @@ mod tests {
         median.apply_to(&mut snap);
         assert_eq!(snap.today_consumption_kwh, 43.5);
         assert_eq!(snap.total_import_kwh, 1000.0);
+    }
+
+    #[test]
+    fn grace_median_filters_nan_and_uses_remaining_samples() {
+        // A single NaN sample (e.g. a transient BMS decode artifact) must be
+        // dropped *before* taking the median, so the two real readings are
+        // used instead of poisoning the result with NaN.
+        let mk = |solar: f32| GraceCumulativeSamples {
+            today_solar_kwh: Some(solar),
+            ..Default::default()
+        };
+        // After filtering: [5.0, 5.0] -> median v[2/2] = v[1] = 5.0.
+        let samples = [mk(f32::NAN), mk(5.0), mk(5.0)];
+        let median = GraceCumulativeSamples::median(&samples);
+        assert_eq!(median.today_solar_kwh, Some(5.0));
+
+        // Two NaN + one real -> the single real reading wins.
+        let samples = [mk(f32::NAN), mk(f32::NAN), mk(7.3)];
+        let median = GraceCumulativeSamples::median(&samples);
+        assert_eq!(median.today_solar_kwh, Some(7.3));
+    }
+
+    #[test]
+    fn grace_median_all_nan_yields_none_and_keeps_last_reading() {
+        // If every grace sample of a field is NaN (BMS unreachable for all grace
+        // reads), the median must be None so apply_to() leaves the snapshot's
+        // last reading untouched instead of overwriting it with NaN.
+        let mk = |consumption: f32| GraceCumulativeSamples {
+            today_consumption_kwh: Some(consumption),
+            ..Default::default()
+        };
+        let samples = [mk(f32::NAN), mk(f32::NAN), mk(f32::NAN)];
+        let median = GraceCumulativeSamples::median(&samples);
+        assert!(median.today_consumption_kwh.is_none());
+
+        // The snapshot keeps its pre-existing value (the last grace reading).
+        let mut snap = InverterSnapshot {
+            today_consumption_kwh: 43.5,
+            ..Default::default()
+        };
+        median.apply_to(&mut snap);
+        assert_eq!(
+            snap.today_consumption_kwh, 43.5,
+            "all-NaN field must keep the snapshot's last reading"
+        );
+        assert!(
+            !snap.today_consumption_kwh.is_nan(),
+            "NaN must never overwrite a snapshot field"
+        );
+    }
+
+    #[test]
+    fn grace_median_skips_nan_per_field_independently() {
+        // One field all-NaN (keep last reading) while another field has real
+        // samples (median applied) — the skip must be per-field.
+        let mk = |solar: f32, import: f32| GraceCumulativeSamples {
+            today_solar_kwh: Some(solar),
+            today_import_kwh: Some(import),
+            ..Default::default()
+        };
+        // solar: all NaN -> None. import: [5.0, 50.0, 5.1] -> median 5.1.
+        let samples = [
+            mk(f32::NAN, 5.0),
+            mk(f32::NAN, 50.0),
+            mk(f32::NAN, 5.1),
+        ];
+        let median = GraceCumulativeSamples::median(&samples);
+        assert!(median.today_solar_kwh.is_none());
+        assert_eq!(median.today_import_kwh, Some(5.1));
+
+        let mut snap = InverterSnapshot {
+            today_solar_kwh: 12.0, // last reading — must survive
+            today_import_kwh: 0.0,
+            ..Default::default()
+        };
+        median.apply_to(&mut snap);
+        assert_eq!(snap.today_solar_kwh, 12.0, "all-NaN field keeps last reading");
+        assert_eq!(snap.today_import_kwh, 5.1, "normal field gets its median");
     }
 
     #[test]

@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use crate::inverter::encoder::{ControlCommand, RegisterWrite};
 use crate::inverter::model::DeviceType;
 use crate::inverter::poll::{AppState, PollSettings};
-use crate::modbus::registers::{encode_hhmm, HR_ENABLE_CHARGE_TARGET};
+use crate::modbus::registers::encode_hhmm;
 
 // ---------------------------------------------------------------------------
 // Helper: standard JSON response
@@ -113,6 +113,29 @@ fn discharge_slot_command_for_device(
         (_, 3..=10) => Ok(ControlCommand::SetDischargeSlotN { slot, start, end }),
         (_, _) => Err(format!("Unsupported discharge slot {}", slot)),
     }
+}
+
+/// Produce whitelist-validated register writes that clear both standard
+/// discharge slots (1 and 2) by setting them to 00:00–00:00 (disabled).
+///
+/// Routes through the encoder's `SetDischargeSlot*` commands so every target
+/// address is checked against `SAFE_WRITE_REGS`. Three-phase models write
+/// HR 1118-1121; all others write the classic HR 44-45/56-57 pair. Use this
+/// instead of constructing raw `RegisterWrite` structs, which would bypass
+/// the encoder's whitelist validation (the security invariant that *all*
+/// register writes must be validated by the encoder).
+fn clear_discharge_slot_writes(device_type: DeviceType) -> Vec<RegisterWrite> {
+    let mut out = Vec::new();
+    for slot in [1u8, 2u8] {
+        match discharge_slot_command_for_device(device_type, slot, false, 0, 0) {
+            Ok(cmd) => match cmd.encode() {
+                Ok(mut w) => out.append(&mut w),
+                Err(e) => tracing::warn!("Failed to encode discharge slot {} clear: {}", slot, e),
+            },
+            Err(e) => tracing::warn!("Unsupported discharge slot {} on this model: {}", slot, e),
+        }
+    }
+    out
 }
 
 /// Queue register writes for execution by the poll loop.
@@ -418,30 +441,22 @@ pub async fn set_mode(
             // Three-phase models and Gateway use different slot addresses
             // (HR 1118-1121) than single-phase (HR 44-45/56-57).
             if mode_str == "eco" || mode_str == "eco_paused" {
-                let is_3ph = state
+                // Clear ALL discharge slot registers to prevent Gen3 inverter
+                // firmware from auto-re-enabling enable_discharge. The Gen3
+                // keeps HR59=1 when discharge slot registers are non-zero,
+                // making it impossible to stay in Eco. Three-phase models use
+                // different slot addresses (HR 1118-1121) than single-phase
+                // (HR 44-45/56-57). Routed through the encoder's
+                // whitelist-validated SetDischargeSlot* commands (00:00–00:00
+                // = disabled) rather than raw writes.
+                let device_type = state
                     .latest_snapshot
                     .lock()
                     .await
                     .as_ref()
-                    .map(|s| s.device_type.uses_three_phase_schedule_slots())
-                    .unwrap_or(false);
-                if is_3ph {
-                    use crate::modbus::registers::{
-                        HR_3PH_DISCHARGE_SLOT_1_START, HR_3PH_DISCHARGE_SLOT_1_END,
-                        HR_3PH_DISCHARGE_SLOT_2_START, HR_3PH_DISCHARGE_SLOT_2_END,
-                    };
-                    writes.push(RegisterWrite { address: HR_3PH_DISCHARGE_SLOT_1_START, value: 0 });
-                    writes.push(RegisterWrite { address: HR_3PH_DISCHARGE_SLOT_1_END, value: 0 });
-                    writes.push(RegisterWrite { address: HR_3PH_DISCHARGE_SLOT_2_START, value: 0 });
-                    writes.push(RegisterWrite { address: HR_3PH_DISCHARGE_SLOT_2_END, value: 0 });
-                } else {
-                    // Discharge slot 2: HR44-45
-                    writes.push(RegisterWrite { address: 44, value: 0 });
-                    writes.push(RegisterWrite { address: 45, value: 0 });
-                    // Discharge slot 1: HR56-57
-                    writes.push(RegisterWrite { address: 56, value: 0 });
-                    writes.push(RegisterWrite { address: 57, value: 0 });
-                }
+                    .map(|s| s.device_type)
+                    .unwrap_or(DeviceType::Gen2Hybrid);
+                writes.extend(clear_discharge_slot_writes(device_type));
             }
 
             // When switching to Timed mode, the frontend may include
@@ -614,10 +629,17 @@ pub async fn set_charge_slot(
             // to show as true when the user simply configured a schedule slot.
             if enabled {
                 if !device_type.uses_three_phase_schedule_slots() {
-                    writes.push(RegisterWrite {
-                        address: HR_ENABLE_CHARGE_TARGET,
-                        value: 0,
-                    });
+                    // Clear the force-charge target flag (HR 20 = 0) so a stale
+                    // flag from a previous operation doesn't keep
+                    // snapshotForceCharge (enable_charge && enable_charge_target)
+                    // asserted. Routed through the encoder so the address is
+                    // checked against SAFE_WRITE_REGS, matching the invariant
+                    // that *all* register writes are validated by the encoder.
+                    if let Ok(flag_writes) =
+                        (ControlCommand::ClearChargeTargetFlag).encode()
+                    {
+                        writes.extend(flag_writes);
+                    }
                     if let Ok(enable_writes) =
                         (ControlCommand::SetEnableCharge { enabled: true }).encode()
                     {
@@ -871,56 +893,40 @@ pub async fn set_active_power_rate(
 /// and force charge enable flags.
 pub async fn pause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let is_three_phase = is_three_phase_limit_snapshot(&state).await;
+    let device_type = state
+        .latest_snapshot
+        .lock()
+        .await
+        .as_ref()
+        .map(|s| s.device_type)
+        .unwrap_or(DeviceType::Gen2Hybrid);
     let mut writes = match ControlCommand::PauseBattery.encode() {
         Ok(w) => w,
         Err(e) => return error_response(&format!("Validation error: {}", e)),
     };
 
-    // Restore self-consumption (Eco) mode so the inverter doesn't stay
-    // in export mode after a force discharge is cancelled.
-    writes.push(crate::inverter::encoder::RegisterWrite {
-        address: crate::modbus::registers::HR_BATTERY_POWER_MODE,
-        value: 1,
-    });
-
     // Clear stale discharge slot registers to prevent Gen3 inverter
     // firmware from auto-re-enabling enable_discharge (the Gen3 keeps
     // HR59=1 when non-zero slot registers are present, which would
     // counteract the eco mode switch). Same pattern as set_mode("eco").
-    writes.push(crate::inverter::encoder::RegisterWrite {
-        address: crate::modbus::registers::HR_DISCHARGE_SLOT_2_START,
-        value: 0,
-    });
-    writes.push(crate::inverter::encoder::RegisterWrite {
-        address: crate::modbus::registers::HR_DISCHARGE_SLOT_2_END,
-        value: 0,
-    });
-    writes.push(crate::inverter::encoder::RegisterWrite {
-        address: crate::modbus::registers::HR_DISCHARGE_SLOT_1_START,
-        value: 0,
-    });
-    writes.push(crate::inverter::encoder::RegisterWrite {
-        address: crate::modbus::registers::HR_DISCHARGE_SLOT_1_END,
-        value: 0,
-    });
+    // Routed through the encoder's whitelist-validated SetDischargeSlot*
+    // commands (00:00–00:00 = disabled) rather than raw writes.
+    writes.extend(clear_discharge_slot_writes(device_type));
 
     if is_three_phase {
-        // Also clear three-phase-specific force discharge/charge flags
-        use crate::modbus::registers::{
-            HR_3PH_AC_CHARGE_ENABLE, HR_3PH_FORCE_CHARGE_ENABLE, HR_3PH_FORCE_DISCHARGE_ENABLE,
-        };
-        writes.push(crate::inverter::encoder::RegisterWrite {
-            address: HR_3PH_FORCE_DISCHARGE_ENABLE,
-            value: 0,
-        });
-        writes.push(crate::inverter::encoder::RegisterWrite {
-            address: HR_3PH_FORCE_CHARGE_ENABLE,
-            value: 0,
-        });
-        writes.push(crate::inverter::encoder::RegisterWrite {
-            address: HR_3PH_AC_CHARGE_ENABLE,
-            value: 0,
-        });
+        // Three-phase: clear force charge/discharge + AC charge flags and
+        // restore eco (self-consumption) power mode in one validated batch
+        // (ThreePhaseCosyExit encodes HR 1123/1112/1122 + HR 27). Avoids a
+        // redundant HR 27 write that a separate SetBatteryPowerMode would add.
+        writes.extend(ControlCommand::ThreePhaseCosyExit.encode().unwrap_or_default());
+    } else {
+        // Restore self-consumption (Eco) mode so the inverter doesn't stay
+        // in export mode after a force discharge is cancelled.
+        writes.extend(
+            ControlCommand::SetBatteryPowerMode { mode: 1 }
+                .encode()
+                .unwrap_or_default(),
+        );
     }
     tracing::info!("PauseBattery encoded: {:?}", writes);
     queue_writes(&state, writes).await;
@@ -1599,6 +1605,52 @@ mod tests {
         ));
     }
 
+    /// `clear_discharge_slot_writes` must produce ONLY whitelist-validated
+    /// register addresses (the security invariant fixed by routing the
+    /// Eco/Pause slot-clearing through the encoder instead of raw writes).
+    /// It must clear exactly the model-appropriate discharge slot pair.
+    #[test]
+    fn clear_discharge_slots_only_emits_whitelisted_addresses() {
+        use crate::modbus::registers::{
+            HR_3PH_DISCHARGE_SLOT_1_END, HR_3PH_DISCHARGE_SLOT_1_START,
+            HR_3PH_DISCHARGE_SLOT_2_END, HR_3PH_DISCHARGE_SLOT_2_START,
+            HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END,
+            HR_DISCHARGE_SLOT_2_START, SAFE_WRITE_REGS,
+        };
+
+        // Single-phase: classic HR 44-45 (slot 2) + HR 56-57 (slot 1).
+        let writes = clear_discharge_slot_writes(DeviceType::Gen2Hybrid);
+        assert_eq!(writes.len(), 4, "single-phase clears 2 slots x start/end");
+        for w in &writes {
+            assert_eq!(w.value, 0);
+            assert!(
+                SAFE_WRITE_REGS.contains(&w.address),
+                "address {} must be whitelisted",
+                w.address
+            );
+        }
+        // Length is 4 and all 4 distinct single-phase slot registers are
+        // present, so the set is exactly {44, 45, 56, 57}.
+        let addrs: Vec<u16> = writes.iter().map(|w| w.address).collect();
+        assert!(addrs.contains(&HR_DISCHARGE_SLOT_1_START));
+        assert!(addrs.contains(&HR_DISCHARGE_SLOT_1_END));
+        assert!(addrs.contains(&HR_DISCHARGE_SLOT_2_START));
+        assert!(addrs.contains(&HR_DISCHARGE_SLOT_2_END));
+
+        // Three-phase: HR 1118-1121.
+        let writes = clear_discharge_slot_writes(DeviceType::ThreePhase);
+        assert_eq!(writes.len(), 4, "three-phase clears 2 slots x start/end");
+        for w in &writes {
+            assert_eq!(w.value, 0);
+            assert!(SAFE_WRITE_REGS.contains(&w.address));
+        }
+        let addrs: Vec<u16> = writes.iter().map(|w| w.address).collect();
+        assert!(addrs.contains(&HR_3PH_DISCHARGE_SLOT_1_START));
+        assert!(addrs.contains(&HR_3PH_DISCHARGE_SLOT_1_END));
+        assert!(addrs.contains(&HR_3PH_DISCHARGE_SLOT_2_START));
+        assert!(addrs.contains(&HR_3PH_DISCHARGE_SLOT_2_END));
+    }
+
     /// Changing only the refresh rate must NOT bump the settings version —
     /// that would force a full TCP reconnect. The poll loop's sleep watcher
     /// picks up interval changes without dropping the connection.
@@ -1656,6 +1708,162 @@ mod tests {
                 s.version,
                 version_before.wrapping_add(1),
                 "host change must bump version (poll loop should reconnect)"
+            );
+        })
+        .await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Security invariant: every register write queued by the control API
+    // must be validated against SAFE_WRITE_REGS by the encoder. These tests
+    // drive the handlers end-to-end and assert no raw (unvalidated) writes
+    // slip through — covering the Eco/Pause discharge-slot clearing and the
+    // charge-slot force-charge-flag clearing.
+    // -----------------------------------------------------------------------
+
+    /// Seed `latest_snapshot` with a snapshot carrying the given device type
+    /// and return a fresh `AppState` for exercising a control handler.
+    async fn make_state_with_device(device_type: DeviceType) -> Arc<AppState> {
+        let state = Arc::new(AppState::new());
+        let snapshot = crate::inverter::model::InverterSnapshot {
+            device_type,
+            ..Default::default()
+        };
+        *state.latest_snapshot.lock().await = Some(snapshot);
+        state
+    }
+
+    /// Drain the pending-writes queue and flatten the batches into one vec.
+    async fn drain_pending_writes(state: &Arc<AppState>) -> Vec<RegisterWrite> {
+        let mut pw = state.pending_writes.lock().await;
+        let batches = std::mem::take(&mut *pw);
+        drop(pw);
+        batches.into_iter().flatten().collect()
+    }
+
+    fn assert_all_whitelisted(writes: &[RegisterWrite]) {
+        use crate::modbus::registers::SAFE_WRITE_REGS;
+        assert!(!writes.is_empty(), "handler should queue at least one write");
+        for w in writes {
+            assert!(
+                SAFE_WRITE_REGS.contains(&w.address),
+                "address {} not whitelisted (encoder bypass)",
+                w.address
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn set_charge_slot_only_emits_whitelisted_writes() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET};
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let body = serde_json::json!({
+                "slot": 1,
+                "start_hour": 6, "start_minute": 0,
+                "end_hour": 10, "end_minute": 0,
+                "enabled": true,
+            });
+            let _ = set_charge_slot(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            // Enabling a single-phase charge slot must clear the stale
+            // force-charge flag (HR_ENABLE_CHARGE_TARGET=0, via the encoder)
+            // and set enable_charge=1 — both whitelisted.
+            let target = writes.iter().find(|w| w.address == HR_ENABLE_CHARGE_TARGET);
+            assert!(target.is_some(), "must clear HR_ENABLE_CHARGE_TARGET");
+            assert_eq!(target.unwrap().value, 0);
+            let enable = writes.iter().find(|w| w.address == HR_ENABLE_CHARGE);
+            assert!(enable.is_some(), "must set HR_ENABLE_CHARGE");
+            assert_eq!(enable.unwrap().value, 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_eco_mode_only_emits_whitelisted_writes() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START,
+                HR_DISCHARGE_SLOT_2_END, HR_DISCHARGE_SLOT_2_START,
+            };
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let body = serde_json::json!({ "mode": "eco", "soc_reserve": 10 });
+            let _ = set_mode(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            // Eco mode clears all standard discharge slots via the encoder.
+            for reg in [
+                HR_DISCHARGE_SLOT_1_START,
+                HR_DISCHARGE_SLOT_1_END,
+                HR_DISCHARGE_SLOT_2_START,
+                HR_DISCHARGE_SLOT_2_END,
+            ] {
+                let w = writes.iter().find(|w| w.address == reg);
+                assert!(w.is_some(), "eco mode must clear discharge slot register {}", reg);
+                assert_eq!(w.unwrap().value, 0);
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pause_battery_single_phase_only_emits_whitelisted_writes() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_BATTERY_POWER_MODE, HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_START,
+            };
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            let _ = pause_battery(State(state.clone())).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            // Pause clears discharge slots and restores eco power mode.
+            assert!(
+                writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_1_START && w.value == 0),
+                "pause must clear discharge slot 1"
+            );
+            assert!(
+                writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_2_START && w.value == 0),
+                "pause must clear discharge slot 2"
+            );
+            assert!(
+                writes.iter().any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1),
+                "pause must restore eco power mode"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pause_battery_three_phase_only_emits_whitelisted_writes() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_3PH_AC_CHARGE_ENABLE, HR_3PH_DISCHARGE_SLOT_1_START,
+                HR_3PH_FORCE_CHARGE_ENABLE, HR_3PH_FORCE_DISCHARGE_ENABLE,
+            };
+            let state = make_state_with_device(DeviceType::ThreePhase).await;
+            let _ = pause_battery(State(state.clone())).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            // Three-phase pause clears the HR 1118-1121 discharge slots via
+            // the encoder and clears force flags via ThreePhaseCosyExit.
+            assert!(
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_3PH_DISCHARGE_SLOT_1_START && w.value == 0),
+                "three-phase pause must clear discharge slot 1"
+            );
+            assert!(
+                writes.iter().any(|w| w.address == HR_3PH_FORCE_CHARGE_ENABLE && w.value == 0),
+                "three-phase pause must clear force charge flag"
+            );
+            assert!(
+                writes.iter().any(|w| w.address == HR_3PH_FORCE_DISCHARGE_ENABLE && w.value == 0),
+                "three-phase pause must clear force discharge flag"
+            );
+            assert!(
+                writes.iter().any(|w| w.address == HR_3PH_AC_CHARGE_ENABLE && w.value == 0),
+                "three-phase pause must clear AC charge flag"
             );
         })
         .await;

@@ -682,14 +682,16 @@ pub struct InverterSnapshot {
     /// readings forward.
     #[serde(default = "default_grid_online")]
     pub grid_online: bool,
-    /// True when the inverter fault/status word reports grid loss (`No Utility`).
+    /// True when grid power is lost: the inverter's `system_mode` (IR(49))
+    /// reports OFF_GRID, and/or the fault/status word reports `No Utility`.
     #[serde(default = "default_grid_loss")]
     pub grid_loss: bool,
-    /// True when the inverter fault/status word reports an inverter trip/fault.
+    /// True when the inverter reports itself in a fault/trip state
+    /// (IR(0) `status` == FAULT).
     #[serde(default = "default_inverter_trip")]
     pub inverter_trip: bool,
     /// True when the inverter reports battery over-temperature
-    /// (IR(40) bit 1 fault or IR(57) == 1 charger warning).
+    /// (IR(57) `charger_warning_code` == 1).
     #[serde(default = "default_battery_over_temp")]
     pub battery_over_temp: bool,
 

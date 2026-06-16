@@ -75,7 +75,7 @@ export default function SolarPage() {
       {/* Detail cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {/* PV1 Card */}
-        <section className="bg-bg-surface rounded-2xl p-5">
+        <section className={`bg-bg-surface rounded-2xl p-5 ${hasPv2 ? '' : 'md:col-span-2'}`}>
           <div className="flex items-center gap-2 mb-4">
             <div className="w-3 h-3 rounded-full" style={{ backgroundColor: pvColor(1) }} />
             <h2 className="text-text-primary font-semibold text-lg">PV1</h2>
@@ -93,7 +93,7 @@ export default function SolarPage() {
         </section>
 
         {/* PV2 Card */}
-        {hasPv2 ? (
+        {hasPv2 && (
           <section className="bg-bg-surface rounded-2xl p-5">
             <div className="flex items-center gap-2 mb-4">
               <div className="w-3 h-3 rounded-full" style={{ backgroundColor: pvColor(2) }} />
@@ -107,10 +107,6 @@ export default function SolarPage() {
               <span className="text-text-secondary">Current</span>
               <span className="text-text-primary font-mono text-right">{formatCurrent(snapshot.pv2_current)}</span>
             </div>
-          </section>
-        ) : (
-          <section className="bg-bg-surface rounded-2xl p-5 flex items-center justify-center">
-            <p className="text-text-secondary/50 text-sm">No PV2 input detected</p>
           </section>
         )}
       </div>

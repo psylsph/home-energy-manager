@@ -40,35 +40,149 @@ fn html_escape(input: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+/// Initialise the global tracing subscriber.
+///
+/// Two layers are installed:
+/// * a `fmt` layer to stdout/stderr (default level **WARN**, override with
+///   `RUST_LOG`), and
+/// * a `LogCaptureLayer` feeding the in-memory ring buffer that backs the
+///   developer console (LogsPage).
+///
+/// The two layers filter independently. Shared by the Tauri-windowed `run()`
+/// and headless `run_headless()` so the tracing setup can never drift between
+/// the two startup paths.
+fn init_tracing(log_ring: &Arc<LogRing>) {
+    use tracing_subscriber::prelude::*;
+    let capture_layer = LogCaptureLayer::new(log_ring.clone());
+    // Default console (stdout/stderr) level is WARN. INFO floods the
+    // terminal/journal when running headless — most INFO lines are routine
+    // (first poll, grace-period summary, write confirmations) and only
+    // matter when debugging. The in-memory LogRing that backs the developer
+    // console (LogsPage) is a SEPARATE layer with its own runtime min_level,
+    // so this default does not affect it. Override for a session with
+    // RUST_LOG=info (or =debug).
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .with_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        );
+    tracing_subscriber::registry()
+        .with(fmt_layer)
+        .with(capture_layer)
+        .init();
+}
+
+/// Build the shared [`AppState`] from persisted settings.
+///
+/// Applies the saved poll settings, auto-winter config, load-limiter config,
+/// restored load-limiter state, persisted auto-winter saved register values,
+/// and opens the history database — i.e. every piece of startup state that is
+/// identical between the Tauri-windowed and headless code paths. Both `run()`
+/// and `run_headless()` call this so the initialisation sequence cannot
+/// diverge (previously it was duplicated ~verbatim and had already started
+/// to, with `run()` using `blocking_lock()` while `run_headless()` used
+/// `.lock().await`).
+///
+/// Returns `None` (after logging) if the history database cannot be opened —
+/// matching the previous abort-on-failure behaviour of both callers.
+async fn initialize_app_state(
+    app_settings: Settings,
+    log_ring: Arc<LogRing>,
+) -> Option<Arc<AppState>> {
+    let state = Arc::new(AppState::with_log_ring(log_ring));
+
+    // Apply saved settings to poll settings
+    {
+        let mut ps = state.settings.lock().await;
+        ps.host = app_settings.host.clone();
+        ps.port = app_settings.port;
+        ps.serial = app_settings.serial.clone();
+        ps.interval_secs = app_settings.poll_interval;
+        ps.evc_host = app_settings.evc_host.clone();
+        ps.evc_port = app_settings.evc_port;
+    }
+
+    // Apply saved auto-winter config
+    {
+        let mut aw = state.auto_winter_config.lock().await;
+        aw.enabled = app_settings.auto_winter_enabled;
+        aw.cold_threshold = app_settings.auto_winter_cold_threshold;
+        aw.recovery_threshold = app_settings.auto_winter_recovery_threshold;
+        aw.target_soc = app_settings.auto_winter_target_soc;
+        aw.debounce_readings = app_settings.auto_winter_debounce_readings;
+    }
+
+    // Apply saved load limiter config
+    {
+        let mut ll = state.load_limiter_config.lock().await;
+        ll.enabled = app_settings.load_limiter_enabled;
+        ll.threshold_w = app_settings.load_limiter_threshold_w;
+        ll.trigger_delay_minutes = app_settings.load_limiter_trigger_delay_minutes;
+        ll.start_hour = app_settings.load_limiter_start_hour;
+        ll.start_minute = app_settings.load_limiter_start_minute;
+        ll.end_hour = app_settings.load_limiter_end_hour;
+        ll.end_minute = app_settings.load_limiter_end_minute;
+    }
+
+    // If the load limiter was active when the app last ran, mark the state as
+    // PausedFromRestart so the first poll immediately restores Eco if the load
+    // has already dropped below threshold while the app was down.
+    if app_settings.load_limiter_active_persisted {
+        let mut ll_state = state.load_limiter_state.lock().await;
+        *ll_state = crate::inverter::poll::LoadLimiterState::PausedFromRestart;
+        tracing::info!("Restored load limiter state: PausedFromRestart (post-crash)");
+    }
+
+    // Load persisted auto-winter saved values (original register values
+    // captured before winter mode activated).
+    {
+        let mut saved = state.auto_winter_saved.lock().await;
+        if let (Some(enable_target), Some(target_soc)) = (
+            app_settings.auto_winter_saved_enable_target,
+            app_settings.auto_winter_saved_target_soc,
+        ) {
+            *saved = Some(crate::inverter::poll::AutoWinterSaved {
+                enable_charge_target: enable_target,
+                target_soc: target_soc as u8,
+            });
+            tracing::info!(
+                "Restored auto-winter saved state: enable={}, target_soc={}",
+                enable_target,
+                target_soc,
+            );
+        }
+    }
+
+    // Open history database
+    let config_dir = crate::settings::Settings::settings_dir();
+    let db_path = config_dir.join("history.db");
+    let history_db = match HistoryDb::open(&db_path) {
+        Ok(db) => Arc::new(db),
+        Err(e) => {
+            tracing::error!("Failed to open history database: {e}");
+            return None;
+        }
+    };
+    {
+        let mut h = state.history.lock().await;
+        *h = Some(history_db);
+    }
+
+    Some(state)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     use tauri::Manager;
 
     tauri::Builder::default()
         .setup(|app| {
-            // Set up tracing with log capture layer for developer console
+            // Set up tracing with log capture layer for developer console.
+            // Shared with `run_headless()` via `init_tracing()` so the tracing
+            // configuration can never drift between the two startup paths.
             let log_ring = Arc::new(LogRing::new(2000));
-            {
-                use tracing_subscriber::prelude::*;
-                let capture_layer = LogCaptureLayer::new(log_ring.clone());
-                // Default console (stdout/stderr) level is WARN. INFO floods the
-                // terminal/journal when running headless — most INFO lines are
-                // routine (first poll, grace-period summary, write confirmations)
-                // and only matter when debugging. The in-memory LogRing that
-                // backs the developer console (LogsPage) is a SEPARATE layer with
-                // its own runtime min_level, so this default does not affect it.
-                // Override for a session with RUST_LOG=info (or =debug).
-                let fmt_layer = tracing_subscriber::fmt::layer()
-                    .with_target(false)
-                    .with_filter(
-                        tracing_subscriber::EnvFilter::try_from_default_env()
-                            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"))
-                    );
-                tracing_subscriber::registry()
-                    .with(fmt_layer)
-                    .with(capture_layer)
-                    .init();
-            }
+            init_tracing(&log_ring);
 
             if cfg!(debug_assertions) {
                 let _ = app.handle().plugin(
@@ -88,87 +202,21 @@ pub fn run() {
                 app_settings.serial
             );
 
-            // Create shared app state with log ring
-            let state = Arc::new(AppState::with_log_ring(log_ring));
-            {
-                // Apply saved settings to poll settings
-                let mut ps = state.settings.blocking_lock();
-                ps.host = app_settings.host.clone();
-                ps.port = app_settings.port;
-                ps.serial = app_settings.serial.clone();
-                ps.interval_secs = app_settings.poll_interval;
-                ps.evc_host = app_settings.evc_host.clone();
-                ps.evc_port = app_settings.evc_port;
-            }
-
-            // Apply saved auto-winter config
-            {
-                let mut aw = state.auto_winter_config.blocking_lock();
-                aw.enabled = app_settings.auto_winter_enabled;
-                aw.cold_threshold = app_settings.auto_winter_cold_threshold;
-                aw.recovery_threshold = app_settings.auto_winter_recovery_threshold;
-                aw.target_soc = app_settings.auto_winter_target_soc;
-                aw.debounce_readings = app_settings.auto_winter_debounce_readings;
-            }
-
-            // Apply saved load limiter config
-            {
-                let mut ll = state.load_limiter_config.blocking_lock();
-                ll.enabled = app_settings.load_limiter_enabled;
-                ll.threshold_w = app_settings.load_limiter_threshold_w;
-                ll.trigger_delay_minutes = app_settings.load_limiter_trigger_delay_minutes;
-                ll.start_hour = app_settings.load_limiter_start_hour;
-                ll.start_minute = app_settings.load_limiter_start_minute;
-                ll.end_hour = app_settings.load_limiter_end_hour;
-                ll.end_minute = app_settings.load_limiter_end_minute;
-            }
-
-            // If the load limiter was active when the app last ran, mark the
-            // state as PausedFromRestart so the first poll immediately restores
-            // Eco if the load has already dropped below threshold while the app
-            // was down.
-            if app_settings.load_limiter_active_persisted {
-                let mut ll_state = state.load_limiter_state.blocking_lock();
-                *ll_state = crate::inverter::poll::LoadLimiterState::PausedFromRestart;
-                tracing::info!("Restored load limiter state: PausedFromRestart (post-crash)");
-            }
-
-            // Load persisted auto-winter saved values (original register
-            // values captured before winter mode activated).
-            {
-                let mut saved = state.auto_winter_saved.blocking_lock();
-                if let (Some(enable_target), Some(target_soc)) = (
-                    app_settings.auto_winter_saved_enable_target,
-                    app_settings.auto_winter_saved_target_soc,
-                ) {
-                    *saved = Some(crate::inverter::poll::AutoWinterSaved {
-                        enable_charge_target: enable_target,
-                        target_soc: target_soc as u8,
-                    });
-                    tracing::info!(
-                        "Restored auto-winter saved state: enable={}, target_soc={}",
-                        enable_target, target_soc,
-                    );
-                }
-            }
-
-            // Open history database
-            let config_dir = crate::settings::Settings::settings_dir();
-            let db_path = config_dir.join("history.db");
-            let history_db = match HistoryDb::open(&db_path) {
-                Ok(db) => Arc::new(db),
-                Err(e) => {
-                    tracing::error!("Failed to open history database: {e}");
-                    return Ok(());
-                }
-            };
-            {
-                let mut h = state.history.blocking_lock();
-                *h = Some(history_db.clone());
-            }
-
-            // Spawn the HTTP server on LAN interface.
+            // Initialise shared app state: apply persisted poll/auto-winter/load
+            // limiter settings and open the history database. Identical to the
+            // headless path via `initialize_app_state()`, so the two startup
+            // sequences cannot diverge. `http_port` is captured first because
+            // `app_settings` is moved into the helper.
             let http_port = app_settings.http_port;
+            let state = match tauri::async_runtime::block_on(initialize_app_state(
+                app_settings,
+                log_ring,
+            )) {
+                Some(s) => s,
+                None => return Ok(()),
+            };
+
+            // Spawn the HTTP server on LAN interfaces.
             let server_state = state.clone();
             if cfg!(debug_assertions) {
                 // Dev mode: Vite serves the frontend on :5173 for the Tauri
@@ -378,29 +426,9 @@ fn resolve_dist_dir(args: &[String]) -> Option<String> {
 ///
 /// Usage: `givenergy-local --headless [--port 7337] [--dist /path/to/dist]`
 pub fn run_headless(args: &[String]) {
-    // Set up tracing with log capture
+    // Set up tracing with log capture. Shared with `run()` via `init_tracing()`.
     let log_ring = Arc::new(LogRing::new(2000));
-    {
-        use tracing_subscriber::prelude::*;
-        let capture_layer = LogCaptureLayer::new(log_ring.clone());
-        // Default console (stdout/stderr) level is WARN. INFO floods the
-        // terminal/journal when running headless — most INFO lines are routine
-        // (first poll, grace-period summary, write confirmations) and only
-        // matter when debugging. The in-memory LogRing that backs the developer
-        // console (LogsPage) is a SEPARATE layer with its own runtime min_level,
-        // so this default does not affect it. Override for a session with
-        // RUST_LOG=info (or =debug).
-        let fmt_layer = tracing_subscriber::fmt::layer()
-            .with_target(false)
-            .with_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-            );
-        tracing_subscriber::registry()
-            .with(fmt_layer)
-            .with(capture_layer)
-            .init();
-    }
+    init_tracing(&log_ring);
 
     let cli_port = parse_port(args);
     // Load settings
@@ -424,83 +452,12 @@ pub fn run_headless(args: &[String]) {
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
 
     rt.block_on(async {
-        // Create shared app state with log ring
-        let state = Arc::new(AppState::with_log_ring(log_ring));
-        {
-            let mut ps = state.settings.lock().await;
-            ps.host = app_settings.host.clone();
-            ps.port = app_settings.port;
-            ps.serial = app_settings.serial.clone();
-            ps.interval_secs = app_settings.poll_interval;
-            ps.evc_host = app_settings.evc_host.clone();
-            ps.evc_port = app_settings.evc_port;
-        }
-
-        // Apply saved auto-winter config
-        {
-            let mut aw = state.auto_winter_config.lock().await;
-            aw.enabled = app_settings.auto_winter_enabled;
-            aw.cold_threshold = app_settings.auto_winter_cold_threshold;
-            aw.recovery_threshold = app_settings.auto_winter_recovery_threshold;
-            aw.target_soc = app_settings.auto_winter_target_soc;
-            aw.debounce_readings = app_settings.auto_winter_debounce_readings;
-        }
-
-        // Apply saved load limiter config
-        {
-            let mut ll = state.load_limiter_config.lock().await;
-            ll.enabled = app_settings.load_limiter_enabled;
-            ll.threshold_w = app_settings.load_limiter_threshold_w;
-            ll.trigger_delay_minutes = app_settings.load_limiter_trigger_delay_minutes;
-            ll.start_hour = app_settings.load_limiter_start_hour;
-            ll.start_minute = app_settings.load_limiter_start_minute;
-            ll.end_hour = app_settings.load_limiter_end_hour;
-            ll.end_minute = app_settings.load_limiter_end_minute;
-        }
-
-        // If the load limiter was active when the app last ran, mark the
-        // state as PausedFromRestart so the first poll immediately restores
-        // Eco if the load has already dropped below threshold while the app
-        // was down.
-        if app_settings.load_limiter_active_persisted {
-            let mut ll_state = state.load_limiter_state.lock().await;
-            *ll_state = crate::inverter::poll::LoadLimiterState::PausedFromRestart;
-            tracing::info!("Restored load limiter state: PausedFromRestart (post-crash)");
-        }
-
-        // Load persisted auto-winter saved values
-        {
-            let mut saved = state.auto_winter_saved.lock().await;
-            if let (Some(enable_target), Some(target_soc)) = (
-                app_settings.auto_winter_saved_enable_target,
-                app_settings.auto_winter_saved_target_soc,
-            ) {
-                *saved = Some(crate::inverter::poll::AutoWinterSaved {
-                    enable_charge_target: enable_target,
-                    target_soc: target_soc as u8,
-                });
-                tracing::info!(
-                    "Restored auto-winter saved state: enable={}, target_soc={}",
-                    enable_target,
-                    target_soc,
-                );
-            }
-        }
-
-        // Open history database
-        let config_dir = crate::settings::Settings::settings_dir();
-        let db_path = config_dir.join("history.db");
-        let history_db = match HistoryDb::open(&db_path) {
-            Ok(db) => Arc::new(db),
-            Err(e) => {
-                tracing::error!("Failed to open history database: {e}");
-                return;
-            }
+        // Initialise shared app state: identical to the Tauri-windowed path
+        // via `initialize_app_state()`, so the startup sequence cannot diverge.
+        let state = match initialize_app_state(app_settings, log_ring).await {
+            Some(s) => s,
+            None => return,
         };
-        {
-            let mut h = state.history.lock().await;
-            *h = Some(history_db);
-        }
 
         // Spawn the poll loop
         let poll_state = state.clone();
@@ -530,4 +487,140 @@ pub fn run_headless(args: &[String]) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inverter::poll::LoadLimiterState;
+    use crate::test_util::with_isolated_config_dir_async;
+
+    /// `initialize_app_state` must apply every persisted field to the live
+    /// `AppState`: poll settings, auto-winter config, load-limiter config, the
+    /// restored load-limiter state, persisted auto-winter saved values, and the
+    /// history database. This is the shared initialisation path that both
+    /// `run()` and `run_headless()` depend on, so locking its behaviour here
+    /// protects both startup paths from regression.
+    #[tokio::test]
+    async fn initialize_app_state_applies_all_persisted_settings() {
+        with_isolated_config_dir_async(|| async {
+            // Persist distinctive, non-default values through settings.json so
+            // we exercise the real Settings::load() round-trip that both
+            // startup paths use.
+            let mut s = Settings::load();
+            s.host = "10.0.0.99".to_string();
+            s.port = 1234;
+            s.serial = "SN-INIT-TEST".to_string();
+            s.poll_interval = 42;
+            s.evc_host = "evc.local".to_string();
+            s.evc_port = 5020;
+            s.auto_winter_enabled = true;
+            s.auto_winter_cold_threshold = 1.0;
+            s.auto_winter_recovery_threshold = 9.0;
+            s.auto_winter_target_soc = 55;
+            s.auto_winter_debounce_readings = 7;
+            s.load_limiter_enabled = true;
+            s.load_limiter_threshold_w = 3000;
+            s.load_limiter_trigger_delay_minutes = 12;
+            s.load_limiter_start_hour = 7;
+            s.load_limiter_start_minute = 8;
+            s.load_limiter_end_hour = 9;
+            s.load_limiter_end_minute = 10;
+            s.load_limiter_active_persisted = true;
+            s.auto_winter_saved_enable_target = Some(true);
+            s.auto_winter_saved_target_soc = Some(77);
+            s.save().expect("settings save");
+
+            let loaded = Settings::load();
+            let log_ring = Arc::new(LogRing::new(64));
+            let state = initialize_app_state(loaded, log_ring)
+                .await
+                .expect("history db should open in isolated dir");
+
+            // Poll settings
+            {
+                let ps = state.settings.lock().await;
+                assert_eq!(ps.host, "10.0.0.99");
+                assert_eq!(ps.port, 1234);
+                assert_eq!(ps.serial, "SN-INIT-TEST");
+                assert_eq!(ps.interval_secs, 42);
+                assert_eq!(ps.evc_host, "evc.local");
+                assert_eq!(ps.evc_port, 5020);
+            }
+
+            // Auto-winter config
+            {
+                let aw = state.auto_winter_config.lock().await;
+                assert!(aw.enabled);
+                assert_eq!(aw.cold_threshold, 1.0);
+                assert_eq!(aw.recovery_threshold, 9.0);
+                assert_eq!(aw.target_soc, 55);
+                assert_eq!(aw.debounce_readings, 7);
+            }
+
+            // Load limiter config
+            {
+                let ll = state.load_limiter_config.lock().await;
+                assert!(ll.enabled);
+                assert_eq!(ll.threshold_w, 3000);
+                assert_eq!(ll.trigger_delay_minutes, 12);
+                assert_eq!(
+                    (ll.start_hour, ll.start_minute, ll.end_hour, ll.end_minute),
+                    (7, 8, 9, 10)
+                );
+            }
+
+            // Load limiter state restored to PausedFromRestart
+            {
+                let ll_state = state.load_limiter_state.lock().await;
+                assert!(
+                    matches!(*ll_state, LoadLimiterState::PausedFromRestart),
+                    "load limiter state should be restored to PausedFromRestart"
+                );
+            }
+
+            // Auto-winter saved register values
+            {
+                let saved = state.auto_winter_saved.lock().await;
+                let saved = saved
+                    .as_ref()
+                    .expect("auto-winter saved should be restored");
+                assert!(saved.enable_charge_target);
+                assert_eq!(saved.target_soc, 77);
+            }
+
+            // History database opened
+            assert!(
+                state.history.lock().await.is_some(),
+                "history db should be opened"
+            );
+        })
+        .await;
+    }
+
+    /// With no persisted auto-winter/load-limiter state, `initialize_app_state`
+    /// leaves the saved register slot `None` and the limiter state at its
+    /// default `Idle` rather than populating garbage.
+    #[tokio::test]
+    async fn initialize_app_state_leaves_defaults_when_unset() {
+        with_isolated_config_dir_async(|| async {
+            let s = Settings::load();
+            let log_ring = Arc::new(LogRing::new(64));
+            let state = initialize_app_state(s, log_ring)
+                .await
+                .expect("history db should open");
+
+            assert!(
+                state.auto_winter_saved.lock().await.is_none(),
+                "auto-winter saved should stay None"
+            );
+            let ll_state = state.load_limiter_state.lock().await;
+            assert!(
+                matches!(*ll_state, LoadLimiterState::Idle),
+                "load limiter state should stay Idle"
+            );
+            assert!(state.history.lock().await.is_some());
+        })
+        .await;
+    }
 }

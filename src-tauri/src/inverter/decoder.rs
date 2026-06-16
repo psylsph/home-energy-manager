@@ -375,10 +375,26 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
 // Per-block decoders
 // ---------------------------------------------------------------------------
 
-/// Decode input registers 0-59 (telemetry).
-const GRID_LOSS_MASK_IR40: u16 = 1 << 8;
-const INVERTER_TRIP_MASK_IR40: u16 = 1 << 9;
-const BATTERY_OVER_TEMP_MASK_IR40: u16 = 1 << 1;
+// IR(0) `status` follows the givenergy-modbus `Status` enum:
+//   0 = Waiting, 1 = Normal, 2 = Warning, 3 = Fault, 4 = Flashing update.
+// FAULT is the inverter's authoritative self-declared fault/trip state.
+const STATUS_FAULT: u16 = 3;
+
+// IR(49) `system_mode` follows the givenergy-modbus `WorkMode` enum:
+//   0 = Initialising, 1 = OffGrid (islanded / grid lost), 2 = OnGrid,
+//   3 = Fault, 4 = Update. OFF_GRID is the inverter's authoritative
+//   self-declared "grid lost" state and the primary grid-loss signal.
+const SYSTEM_MODE_OFF_GRID: u16 = 1;
+
+// IR(40) is the low word of the 32-bit `fault_code` packed at IR(39)+IR(40)
+// (`uint32 = (IR39 << 16) + IR40`). Bit meanings per the givenergy-modbus
+// `_inverter_fault_code` table (inverter.py), documented there as "not verified
+// against official firmware docs". Only the "No Utility" bit is used — as a
+// corroborating signal for grid_loss (system_mode is authoritative). There is
+// no "inverter trip" or "battery over temperature" bit in the table, so those
+// two conditions are taken from the `status` and `charger_warning_code`
+// registers respectively instead of fault bits.
+const GRID_LOSS_MASK_IR40: u16 = 1 << 7; // bit 7 = "No Utility" (grid loss)
 
 fn grid_online_from_ac(voltage: f32, frequency: f32) -> bool {
     // Fallback for models/blocks that do not expose the single-phase IR(40)
@@ -412,16 +428,21 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.grid_voltage = get_reg(data, 5) as f32 * 0.1; // IR(5):  v_ac1 (/10 V)
     snap.grid_frequency = get_reg(data, 13) as f32 * 0.01; // IR(13): f_ac1 (/100 Hz)
 
-    // IR(40) fault/status bits:
-    //   bit 1 = battery over-temperature fault
-    //   bit 8 = `grid_loss` / "No Utility"
-    //   bit 9 = `inverter_trip` / "Inverter fault"
-    let fault_word = get_reg(data, 40);
-    let battery_ot_fault = (fault_word & BATTERY_OVER_TEMP_MASK_IR40) != 0;
-    let battery_ot_warning = get_reg(data, 57) == 1; // IR(57): charger warning code
-    snap.battery_over_temp = battery_ot_fault || battery_ot_warning;
-    snap.grid_loss = (fault_word & GRID_LOSS_MASK_IR40) != 0;
-    snap.inverter_trip = (fault_word & INVERTER_TRIP_MASK_IR40) != 0;
+    // -- Fault / status detection --
+    // Each condition uses its authoritative self-declared register rather than
+    // the unverified IR(40) fault-word bits (whose layout givenergy-modbus marks
+    // "not verified against official firmware docs"):
+    //   • grid_loss:         IR(49) `system_mode` == OFF_GRID, corroborated by
+    //                         the IR(40) bit 7 "No Utility" fault bit (helps
+    //                         during boot before system_mode is populated).
+    //   • inverter_trip:     IR(0) `status` == FAULT (the inverter's own flag).
+    //   • battery_over_temp: IR(57) `charger_warning_code` == 1 (device-reported).
+    let status = get_reg(data, 0); // IR(0): inverter status (Status enum)
+    let system_mode = get_reg(data, 49); // IR(49): system/work mode (WorkMode enum)
+    let no_utility = (get_reg(data, 40) & GRID_LOSS_MASK_IR40) != 0; // bit 7
+    snap.grid_loss = system_mode == SYSTEM_MODE_OFF_GRID || no_utility;
+    snap.inverter_trip = status == STATUS_FAULT;
+    snap.battery_over_temp = get_reg(data, 57) == 1; // IR(57): charger warning code
     snap.grid_online = !snap.grid_loss;
 
     // -- Inverter --
@@ -1960,7 +1981,7 @@ mod tests {
     #[test]
     fn decode_grid_loss_bit_marks_grid_offline() {
         let mut blocks = test_blocks();
-        blocks[0].data[40] = GRID_LOSS_MASK_IR40; // IR(40) bit 8: grid_loss / No Utility
+        blocks[0].data[40] = GRID_LOSS_MASK_IR40; // IR(40) bit 7: "No Utility" fault
 
         let snap = decode_snapshot(&blocks);
 
@@ -1970,15 +1991,51 @@ mod tests {
     }
 
     #[test]
-    fn decode_inverter_trip_bit_marks_trip() {
+    fn decode_offgrid_system_mode_marks_grid_offline() {
+        // IR(49) system_mode = OFF_GRID (1) is the primary, authoritative
+        // grid-loss signal — no IR(40) fault bit needs to be set.
         let mut blocks = test_blocks();
-        blocks[0].data[40] = INVERTER_TRIP_MASK_IR40; // IR(40) bit 9: inverter_trip / Inverter fault
+        blocks[0].data[49] = SYSTEM_MODE_OFF_GRID; // IR(49): OffGrid
+
+        let snap = decode_snapshot(&blocks);
+
+        assert!(snap.grid_loss);
+        assert!(!snap.grid_online);
+    }
+
+    #[test]
+    fn decode_on_grid_system_mode_no_grid_loss() {
+        let mut blocks = test_blocks();
+        blocks[0].data[49] = 2; // IR(49): OnGrid
 
         let snap = decode_snapshot(&blocks);
 
         assert!(!snap.grid_loss);
-        assert!(snap.inverter_trip);
         assert!(snap.grid_online);
+    }
+
+    #[test]
+    fn decode_inverter_fault_status_marks_trip() {
+        let mut blocks = test_blocks();
+        blocks[0].data[0] = STATUS_FAULT; // IR(0): status = Fault
+
+        let snap = decode_snapshot(&blocks);
+
+        assert!(snap.inverter_trip);
+        assert!(!snap.grid_loss);
+        assert!(snap.grid_online); // a fault status does not imply grid loss
+    }
+
+    #[test]
+    fn decode_charger_warning_marks_battery_over_temp() {
+        let mut blocks = test_blocks();
+        blocks[0].data[57] = 1; // IR(57): charger warning code = battery over temp
+
+        let snap = decode_snapshot(&blocks);
+
+        assert!(snap.battery_over_temp);
+        assert!(!snap.grid_loss);
+        assert!(!snap.inverter_trip);
     }
 
     #[test]

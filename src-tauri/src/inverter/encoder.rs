@@ -142,6 +142,11 @@ pub enum ControlCommand {
     SetBatterySocReserve { reserve: u16 },
     /// Set charge target SOC (4-100).
     SetChargeTargetSoc { soc: u16 },
+    /// Clear the charge-target enable flag (HR 20 = 0). Used when configuring
+    /// a schedule charge slot so a stale force-charge flag doesn't keep
+    /// snapshotForceCharge asserted. Standalone enable (HR 20 = 1) always
+    /// pairs with a target SOC via ForceCharge / SetChargeTargetSoc.
+    ClearChargeTargetFlag,
     /// Exit cosy mode: disable charge, disable charge target, disable timed
     /// discharge, and restore eco power mode. Puts the inverter back to normal
     /// Eco self-consumption after a cosy force-charge slot ends.
@@ -269,6 +274,9 @@ impl ControlCommand {
                     rw(HR_ENABLE_CHARGE_TARGET, enable),
                     rw(HR_CHARGE_TARGET_SOC, *soc),
                 ]
+            }
+            ControlCommand::ClearChargeTargetFlag => {
+                vec![rw(HR_ENABLE_CHARGE_TARGET, 0)]
             }
             ControlCommand::SetChargeSlot1 { start, end } => {
                 validate_hhmm(*start, "charge slot 1 start")?;
@@ -720,6 +728,15 @@ mod tests {
     }
 
     #[test]
+    fn clear_charge_target_flag_encodes() {
+        let writes = ControlCommand::ClearChargeTargetFlag.encode().unwrap();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].address, HR_ENABLE_CHARGE_TARGET);
+        assert_eq!(writes[0].value, 0);
+        assert!(SAFE_WRITE_REGS.contains(&HR_ENABLE_CHARGE_TARGET));
+    }
+
+    #[test]
     fn set_charge_slot() {
         let cmd = ControlCommand::SetChargeSlot1 {
             start: 600,
@@ -858,6 +875,7 @@ mod tests {
             ControlCommand::SetEnableCharge { enabled: true },
             ControlCommand::SetBatterySocReserve { reserve: 50 },
             ControlCommand::SetChargeTargetSoc { soc: 80 },
+            ControlCommand::ClearChargeTargetFlag,
             ControlCommand::SetChargeSlot1 {
                 start: 600,
                 end: 1000,
