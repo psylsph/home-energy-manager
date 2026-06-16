@@ -65,8 +65,8 @@ export default function StatusPage() {
 
       {/* Battery + Summary side by side on md+ */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-stretch">
-        <BatteryPanel snapshot={snapshot} />
         <SummaryTiles snapshot={snapshot} />
+        <BatteryPanel snapshot={snapshot} />
       </div>
 
     </div>

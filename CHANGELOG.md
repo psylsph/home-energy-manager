@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.1] - 2026-06-16
+
+### Changed
+
+- **Battery node colour reflects SOC** on the energy flow diagram — the
+  battery lozenge border and its SOC/mode text now change colour based on
+  battery level: green (≥50%), amber (20-49%), red (<20%).
+- **Status page layout** — Today summary panel moved to the left, Battery
+  panel to the right (swapped positions).
+- **Energy flow node unit text** — third row (unit/device type) made bold
+  and slightly larger; dropped down 4px for better spacing. Unit text
+  colour now matches the node accent colour instead of secondary grey.
+
 ## [0.26.0] - 2026-06-15
 
 ### Added

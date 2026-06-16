@@ -233,10 +233,11 @@ function FlowNode({ cx, cy, color, label, value, unit, hub, width, height, mobil
       </text>
       {/* Unit / secondary info */}
       <text
-        x={cx} y={cy + 20}
+        x={cx} y={cy + 24}
         textAnchor="middle"
-        fill="var(--app-text-secondary)"
-        fontSize={hub ? (mobile ? 12 : 11) : (mobile ? 13 : 12)}
+        fill={hub ? "var(--app-text-secondary)" : safeColor}
+        fontSize={hub ? (mobile ? 13 : 12) : (mobile ? 14 : 13)}
+        fontWeight="700"
         fontFamily="var(--font-mono, monospace)"
       >
         {safeUnit}
@@ -395,6 +396,7 @@ function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false
           mobile={mobile}
           value={`${isDischarging ? '-' : ''}${formatPower(Math.abs(s.battery_power))}`}
           unit={`${formatPercent(s.soc)} · ${modeLabel}`}
+          color={s.soc < 20 ? '#EF4444' : s.soc < 50 ? '#F59E0B' : '#22C55E'}
         />
         {s.agile_active && (
           <text
