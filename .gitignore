@@ -40,3 +40,7 @@ CODE_REVIEW.md
 # E2E test results
 test-results/
 .playwright/
+
+# GitHub Pages screenshots — regenerated from .github/screenshots/ on every Pages deploy
+# (see .github/workflows/pages.yml "Copy latest screenshots into docs")
+docs/screenshots/
