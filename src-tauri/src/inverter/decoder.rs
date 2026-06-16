@@ -437,13 +437,25 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     //                         during boot before system_mode is populated).
     //   • inverter_trip:     IR(0) `status` == FAULT (the inverter's own flag).
     //   • battery_over_temp: IR(57) `charger_warning_code` == 1 (device-reported).
+    //
+    // AC-coupled inverters use a different system_mode convention — IR(49) can
+    // report OffGrid (1) during normal grid-connected operation. Use the actual
+    // AC voltage/frequency reading instead, same as the three-phase path does.
     let status = get_reg(data, 0); // IR(0): inverter status (Status enum)
     let system_mode = get_reg(data, 49); // IR(49): system/work mode (WorkMode enum)
     let no_utility = (get_reg(data, 40) & GRID_LOSS_MASK_IR40) != 0; // bit 7
-    snap.grid_loss = system_mode == SYSTEM_MODE_OFF_GRID || no_utility;
+    if matches!(
+        snap.device_type,
+        DeviceType::ACCoupled | DeviceType::ACCoupledMk2
+    ) {
+        snap.grid_online = grid_online_from_ac(snap.grid_voltage, snap.grid_frequency);
+        snap.grid_loss = !snap.grid_online;
+    } else {
+        snap.grid_loss = system_mode == SYSTEM_MODE_OFF_GRID || no_utility;
+        snap.grid_online = !snap.grid_loss;
+    }
     snap.inverter_trip = status == STATUS_FAULT;
     snap.battery_over_temp = get_reg(data, 57) == 1; // IR(57): charger warning code
-    snap.grid_online = !snap.grid_loss;
 
     // -- Inverter --
     snap.inverter_temperature = get_reg(data, 41) as f32 * 0.1; // IR(41): t_inverter_heatsink (/10 °C)
