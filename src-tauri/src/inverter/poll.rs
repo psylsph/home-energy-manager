@@ -220,6 +220,8 @@ pub struct AppState {
     pub alert_config: Arc<Mutex<crate::settings::AlertsConfig>>,
     /// Email alert debounce tracker (in-memory only).
     pub alert_debounce: Arc<Mutex<crate::alerts::AlertDebounce>>,
+    /// WhatsApp bot state.
+    pub whatsapp: crate::alerts::whatsapp::WhatsAppState,
     /// Last date a daily consumption report was sent.
     pub last_report_date: Arc<Mutex<Option<chrono::NaiveDate>>>,
 }
@@ -255,6 +257,7 @@ impl AppState {
                 crate::settings::Settings::load().alerts_config,
             )),
             alert_debounce: Arc::new(Mutex::new(crate::alerts::AlertDebounce::new())),
+            whatsapp: crate::alerts::whatsapp::WhatsAppState::new(),
             last_report_date: Arc::new(Mutex::new(None)),
             latest_evc: Arc::new(Mutex::new(None)),
         }
@@ -297,6 +300,7 @@ impl AppState {
                 crate::settings::Settings::load().alerts_config,
             )),
             alert_debounce: Arc::new(Mutex::new(crate::alerts::AlertDebounce::new())),
+            whatsapp: crate::alerts::whatsapp::WhatsAppState::new(),
             last_report_date: Arc::new(Mutex::new(None)),
             latest_evc: Arc::new(Mutex::new(None)),
         }
@@ -410,6 +414,9 @@ fn should_probe_hv_stacks(known_device_type: Option<DeviceType>, hv_probe_done: 
 pub async fn run_poll_loop(state: Arc<AppState>) {
     // Start the Telegram /status command poller
     crate::alerts::spawn_telegram_poller(state.clone());
+
+    // Start the WhatsApp bot (QR pairing)
+    state.whatsapp.start().await;
 
     let mut backoff = Duration::from_secs(5);
 
@@ -2004,25 +2011,19 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                 }
                                             });
 
-                                            // Also send to WhatsApp if configured
-                                            let wa_phone = config.whatsapp_phone.clone();
-                                            let wa_api_key = config.whatsapp_api_key.clone();
-                                            if !wa_phone.is_empty() && !wa_api_key.is_empty() {
-                                                tokio::task::spawn_blocking(move || {
-                                                    match crate::alerts::send_whatsapp_message(
-                                                        &wa_phone,
-                                                        &wa_api_key,
-                                                        &wa_text,
-                                                    ) {
-                                                        Ok(()) => tracing::info!(
-                                                            "WhatsApp alert sent"
-                                                        ),
-                                                        Err(e) => tracing::warn!(
-                                                            "Failed to send WhatsApp alert: {e}"
-                                                        ),
-                                                    }
-                                                });
-                                            }
+                                            // Also send via WhatsApp if paired + recipient configured
+                                            let wa_recipient = config.whatsapp_recipient.clone();
+                                            let wa_state = state.clone();
+                                            tokio::task::spawn(async move {
+                                                if wa_recipient.is_empty() {
+                                                    return; // No recipient configured
+                                                }
+                                                if let Err(e) = wa_state.whatsapp.send_message(&wa_recipient, &wa_text).await {
+                                                    tracing::warn!("WhatsApp alert failed: {e}");
+                                                } else {
+                                                    tracing::info!("WhatsApp alert sent");
+                                                }
+                                            });
                                         }
                                     }
                                     drop(settings_cfg);

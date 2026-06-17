@@ -13,22 +13,67 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
   );
 }
 
-function WhatsAppQrCode() {
+function StoreQr({ url, alt }: { url: string; alt: string }) {
   const [dataUrl, setDataUrl] = useState('');
   useEffect(() => {
     let cancelled = false;
     import('qrcode').then((qr) => {
-      qr.toString(
-        'https://wa.me/34684770005?text=I%20allow%20callmebot%20to%20call%20me',
-        { type: 'svg', width: 180, margin: 1, color: { dark: '#4ade80', light: '#1a1a2e' } },
-      ).then((svg) => {
-        if (!cancelled) setDataUrl('data:image/svg+xml;utf8,' + encodeURIComponent(svg));
-      });
+      qr.toString(url, { type: 'svg', width: 120, margin: 1, color: { dark: '#4ade80', light: '#1a1a2e' } })
+        .then((svg) => { if (!cancelled) setDataUrl('data:image/svg+xml;utf8,' + encodeURIComponent(svg)); });
     }).catch(() => {});
     return () => { cancelled = true; };
   }, []);
-  if (!dataUrl) return <div className="w-[180px] h-[180px] bg-bg-elevated rounded-lg animate-pulse" />;
-  return <img src={dataUrl} alt="WhatsApp QR code" className="w-[180px] h-[180px] rounded-lg" />;
+  if (!dataUrl) return <div className="w-[120px] h-[120px] bg-bg-elevated rounded-lg animate-pulse" />;
+  return <img src={dataUrl} alt={alt} className="w-[120px] h-[120px] rounded-lg" />;
+}
+
+function WhatsAppPairing() {
+  const [state, setState] = useState<'idle' | 'waiting' | 'paired' | 'error'>('idle');
+  const [qrData, setQrData] = useState('');
+  const [qrSvg, setQrSvg] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch(`${getApiBase()}/api/whatsapp/status`);
+        const data = await res.json();
+        if (cancelled) return;
+        setState(data.state);
+        setQrData(data.qr || '');
+      } catch { /* ignore */ }
+    };
+    poll();
+    const interval = setInterval(poll, 3000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
+
+  // Render QR code SVG when we have the pairing data
+  useEffect(() => {
+    if (!qrData || state !== 'waiting') { return; }
+    let cancelled = false;
+    import('qrcode').then((qr) => {
+      qr.toString(qrData, { type: 'svg', width: 200, margin: 1, color: { dark: '#000000', light: '#ffffff' } })
+        .then((svg) => { if (!cancelled) setQrSvg('data:image/svg+xml;utf8,' + encodeURIComponent(svg)); });
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [qrData, state]);
+
+  if (state === 'paired') {
+    return <span className="text-flow-active text-sm font-sans">✅ WhatsApp connected</span>;
+  }
+  if (state === 'error') {
+    return <span className="text-red-400 text-xs font-sans">Connection error — will retry automatically</span>;
+  }
+  if (state === 'waiting' && qrSvg) {
+    return (
+      <div className="flex flex-col items-center gap-2">
+        <img src={qrSvg} alt="WhatsApp QR" className="w-[200px] h-[200px] rounded-lg bg-white p-1" />
+        <span className="text-text-secondary text-xs font-sans">Scan with WhatsApp → Linked Devices</span>
+      </div>
+    );
+  }
+  return <span className="text-text-secondary text-xs font-sans animate-pulse">Waiting for QR code...</span>;
 }
 
 export default function SettingsPage() {
@@ -93,12 +138,12 @@ const VALID_INTERVALS = [5, 10, 15, 20];
   // Email alerts
   const [alertsConfig, setAlertsConfig] = useState({
     enabled: false, telegram_bot_token: '', telegram_chat_id: '',
-    whatsapp_phone: '', whatsapp_api_key: '',
     cooldown_minutes: 30,
     batt_temp_min: 0, batt_temp_max: 0,
-    soc_min: 0, soc_max: 100,
+    soc_min: 4, soc_max: 100,
     solar_clipping_enabled: false, pv_string_loss_enabled: false,
     grid_offline_enabled: false, battery_over_temp_enabled: false,
+    whatsapp_recipient: '',
     daily_report_enabled: false, daily_report_hour: 8, daily_report_minute: 0,
   });
   const [alertsSaving, setAlertsSaving] = useState(false);
@@ -298,7 +343,7 @@ const VALID_INTERVALS = [5, 10, 15, 20];
       const res = await apiPost('/api/alerts/test', {}) as { ok: boolean; message: string };
       flash(res.message, res.ok);
     } catch {
-      flash('Failed to send test email — check API key and email settings', false);
+      flash('Failed to Send Message — check API key and settings', false);
     }
     setAlertsTesting(false);
   };
@@ -920,81 +965,94 @@ const VALID_INTERVALS = [5, 10, 15, 20];
                   className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
                 />
               </label>
+              <div className="flex justify-center gap-4 mt-1">
+                <div className="flex flex-col items-center gap-1">
+                  <StoreQr url="https://play.google.com/store/apps/details?id=org.telegram.messenger" alt="Telegram Android" />
+                  <span className="text-text-secondary text-[10px] font-sans">Android</span>
+                </div>
+                <div className="flex flex-col items-center gap-1">
+                  <StoreQr url="https://apps.apple.com/app/telegram/id686449807" alt="Telegram iOS" />
+                  <span className="text-text-secondary text-[10px] font-sans">iOS</span>
+                </div>
+              </div>
             </div>
 
             {/* WhatsApp */}
             <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
-              <h3 className="text-text-primary text-sm font-sans font-medium">WhatsApp (CallMeBot)</h3>
+              <h3 className="text-text-primary text-sm font-sans font-medium">WhatsApp</h3>
               <p className="text-text-secondary text-xs font-sans">
-                Scan the QR code below with your phone to open WhatsApp and pre-fill the authorisation message. Just tap send, then enter the API key you receive. If the QR doesn't work, add +34 684 770 005 to your contacts and send "I allow callmebot to call me" to that number.
+                Pair your WhatsApp account to send alerts. On your phone, open WhatsApp Settings, tap "Linked Devices", then "Link a Device" and scan the QR code below. Then enter the phone number that should <strong>receive</strong> the alerts — this must be a different number from the linked account (you cannot message yourself).
               </p>
-              <div className="flex justify-center my-2">
-                <WhatsAppQrCode />
+              <div className="flex flex-col gap-2">
+                <label className="flex flex-col gap-1">
+                  <span className="text-text-secondary text-xs font-sans">Recipient phone (digits only, intl format, e.g. 447700900123)</span>
+                  <input
+                    type="tel"
+                    value={alertsConfig.whatsapp_recipient}
+                    onChange={(e) => setAlertsConfig((p) => ({ ...p, whatsapp_recipient: e.target.value.replace(/\D/g, '') }))}
+                    placeholder="447700900123"
+                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                  />
+                </label>
               </div>
-              <label className="flex flex-col gap-1">
-                <span className="text-text-secondary text-xs font-sans">Phone (international format)</span>
-                <input
-                  type="text" placeholder="441234567890"
-                  value={alertsConfig.whatsapp_phone}
-                  onChange={(e) => setAlertsConfig((p) => ({ ...p, whatsapp_phone: e.target.value }))}
-                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-text-secondary text-xs font-sans">CallMeBot API Key</span>
-                <input
-                  type="password" placeholder="123456"
-                  value={alertsConfig.whatsapp_api_key}
-                  onChange={(e) => setAlertsConfig((p) => ({ ...p, whatsapp_api_key: e.target.value }))}
-                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                />
-              </label>
+              <div id="whatsapp-pairing" className="flex items-center justify-center py-4">
+                <WhatsAppPairing />
+              </div>
             </div>
 
-            {/* Battery temperature */}
+            {/* Battery temperature & SOC thresholds */}
             <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
-              <h3 className="text-text-primary text-sm font-sans font-medium">Battery Temperature</h3>
-              <label className="flex flex-col gap-1">
-                <span className="text-text-secondary text-xs font-sans">Alert if below (°C, 0 = disabled)</span>
-                <input
-                  type="number" step="0.5" min="0" max="50"
-                  value={alertsConfig.batt_temp_min}
-                  onChange={(e) => setAlertsConfig((p) => ({ ...p, batt_temp_min: Number(e.target.value) }))}
-                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-text-secondary text-xs font-sans">Alert if above (°C, 0 = disabled)</span>
-                <input
-                  type="number" step="0.5" min="0" max="80"
-                  value={alertsConfig.batt_temp_max}
-                  onChange={(e) => setAlertsConfig((p) => ({ ...p, batt_temp_max: Number(e.target.value) }))}
-                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                />
-              </label>
-            </div>
-
-            {/* SOC thresholds */}
-            <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
-              <h3 className="text-text-primary text-sm font-sans font-medium">Battery SOC</h3>
-              <label className="flex flex-col gap-1">
-                <span className="text-text-secondary text-xs font-sans">Alert if below %</span>
-                <input
-                  type="number" min="0" max="100"
-                  value={alertsConfig.soc_min}
-                  onChange={(e) => setAlertsConfig((p) => ({ ...p, soc_min: Number(e.target.value) }))}
-                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-text-secondary text-xs font-sans">Alert if above % (100 = disabled)</span>
-                <input
-                  type="number" min="0" max="100"
-                  value={alertsConfig.soc_max}
-                  onChange={(e) => setAlertsConfig((p) => ({ ...p, soc_max: Number(e.target.value) }))}
-                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                />
-              </label>
+              <h3 className="text-text-primary text-sm font-sans font-medium">Battery Temperature &amp; SOC</h3>
+              <div className="grid grid-cols-2 gap-4">
+                {/* Temperature pair */}
+                <div className="border border-white/5 rounded-lg p-3 flex flex-col gap-2">
+                  <span className="text-text-secondary text-xs font-sans font-medium">Temperature (°C)</span>
+                  <div className="flex items-center gap-2">
+                    <label className="flex flex-col gap-1">
+                      <span className="text-text-secondary text-xs font-sans">below (0 = off)</span>
+                      <input
+                        type="number" step="0.5" min="0" max="50"
+                        value={alertsConfig.batt_temp_min}
+                        onChange={(e) => setAlertsConfig((p) => ({ ...p, batt_temp_min: Number(e.target.value) }))}
+                        className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-24 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-text-secondary text-xs font-sans">above (0 = off)</span>
+                      <input
+                        type="number" step="0.5" min="0" max="80"
+                        value={alertsConfig.batt_temp_max}
+                        onChange={(e) => setAlertsConfig((p) => ({ ...p, batt_temp_max: Number(e.target.value) }))}
+                        className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-24 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                      />
+                    </label>
+                  </div>
+                </div>
+                {/* SOC pair */}
+                <div className="border border-white/5 rounded-lg p-3 flex flex-col gap-2">
+                  <span className="text-text-secondary text-xs font-sans font-medium">SOC (%)</span>
+                  <div className="flex items-center gap-2">
+                    <label className="flex flex-col gap-1">
+                      <span className="text-text-secondary text-xs font-sans">below</span>
+                      <input
+                        type="number" min="0" max="100"
+                        value={alertsConfig.soc_min}
+                        onChange={(e) => setAlertsConfig((p) => ({ ...p, soc_min: Number(e.target.value) }))}
+                        className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-24 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-text-secondary text-xs font-sans">above (100 = off)</span>
+                      <input
+                        type="number" min="0" max="100"
+                        value={alertsConfig.soc_max}
+                        onChange={(e) => setAlertsConfig((p) => ({ ...p, soc_max: Number(e.target.value) }))}
+                        className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-24 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                      />
+                    </label>
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* Toggle alerts */}
@@ -1034,7 +1092,7 @@ const VALID_INTERVALS = [5, 10, 15, 20];
             <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
               <h3 className="text-text-primary text-sm font-sans font-medium">Daily Consumption Report</h3>
               <div className="flex items-center justify-between">
-                <span className="text-text-primary text-sm font-sans">Send daily report</span>
+                <span className="text-text-primary text-sm font-sans">Send Daily Report</span>
                 <Toggle
                   checked={alertsConfig.daily_report_enabled}
                   onChange={(v) => setAlertsConfig((p) => ({ ...p, daily_report_enabled: v }))}

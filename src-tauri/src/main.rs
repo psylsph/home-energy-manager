@@ -4,8 +4,8 @@
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--headless") {
-        app_lib::run_headless(&args);
+        givenergy_local::run_headless(&args);
     } else {
-        app_lib::run();
+        givenergy_local::run();
     }
 }

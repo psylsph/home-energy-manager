@@ -6,6 +6,7 @@
 //! Also handles daily consumption report generation and sending.
 
 pub mod report;
+pub mod whatsapp;
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -58,12 +59,15 @@ impl AlertType {
 pub struct AlertDebounce {
     /// Map from alert type to the last time it was sent.
     last_sent: HashMap<AlertType, Instant>,
+    /// Set of alert types currently in an active (fired) state.
+    active: std::collections::HashSet<AlertType>,
 }
 
 impl AlertDebounce {
     pub fn new() -> Self {
         Self {
             last_sent: HashMap::new(),
+            active: std::collections::HashSet::new(),
         }
     }
 
@@ -74,9 +78,21 @@ impl AlertDebounce {
             Some(last) if last.elapsed() < cooldown => false,
             _ => {
                 self.last_sent.insert(alert_type, Instant::now());
+                self.active.insert(alert_type);
                 true
             }
         }
+    }
+
+    /// Compute which previously-active alerts are no longer triggered,
+    /// and remove them from the active set.
+    pub fn extract_cleared(&mut self, currently_triggered: &[AlertType]) -> Vec<AlertType> {
+        let triggered_set: std::collections::HashSet<_> = currently_triggered.iter().copied().collect();
+        let cleared: Vec<_> = self.active.difference(&triggered_set).copied().collect();
+        for c in &cleared {
+            self.active.remove(c);
+        }
+        cleared
     }
 
     /// Number of entries in the debounce map (for API display).
@@ -107,9 +123,7 @@ pub fn evaluate_alerts(snapshot: &InverterSnapshot, config: &AlertsConfig) -> Ve
     }
     let has_telegram =
         !config.telegram_bot_token.is_empty() && !config.telegram_chat_id.is_empty();
-    let has_whatsapp =
-        !config.whatsapp_phone.is_empty() && !config.whatsapp_api_key.is_empty();
-    if !has_telegram && !has_whatsapp {
+    if !has_telegram {
         return Vec::new();
     }
 
@@ -251,51 +265,6 @@ pub fn send_telegram_message(
     }
 }
 
-/// Send a WhatsApp notification via CallMeBot.
-///
-/// Uses `ureq` (synchronous) — call from `tokio::task::spawn_blocking`.
-pub fn send_whatsapp_message(phone: &str, api_key: &str, text: &str) -> Result<(), String> {
-    let url = format!(
-        "https://api.callmebot.com/whatsapp.php?phone={}&text={}&apikey={}",
-        phone,
-        urlencoding(text),
-        api_key,
-    );
-
-    match ureq::get(&url).call() {
-        Ok(r) => {
-            let status = r.status();
-            if status.is_success() {
-                Ok(())
-            } else {
-                let body = r.into_body().read_to_string().unwrap_or_default();
-                Err(format!("CallMeBot API {}: {}", status, body))
-            }
-        }
-        Err(ureq::Error::StatusCode(code)) => {
-            Err(format!("CallMeBot API {} (check phone and API key)", code))
-        }
-        Err(e) => Err(format!("HTTP transport error: {e}")),
-    }
-}
-
-/// URL-encode a string for use in query parameters.
-fn urlencoding(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for byte in s.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char);
-            }
-            b' ' => out.push_str("%20"),
-            _ => {
-                out.push_str(&format!("%{:02X}", byte));
-            }
-        }
-    }
-    out
-}
-
 // ---------------------------------------------------------------------------
 // Telegram command polling (e.g., /status)
 // ---------------------------------------------------------------------------
@@ -393,8 +362,9 @@ pub fn spawn_telegram_poller(state: std::sync::Arc<crate::inverter::poll::AppSta
                 if *update_id >= offset {
                     offset = update_id + 1;
                 }
-                if text.eq_ignore_ascii_case("/status") || text.eq_ignore_ascii_case("/start") {
-                    if *chat_id != 0 {
+                if *chat_id != 0
+                    && (text.eq_ignore_ascii_case("/status") || text.eq_ignore_ascii_case("/start"))
+                {
                         let snapshot = state.latest_snapshot.lock().await;
                         let reply = if let Some(ref snap) = *snapshot {
                             build_status_message(snap)
@@ -412,7 +382,6 @@ pub fn spawn_telegram_poller(state: std::sync::Arc<crate::inverter::poll::AppSta
                             }
                         });
                     }
-                }
             }
         }
     });
@@ -460,6 +429,7 @@ mod tests {
             pv_string_loss_enabled: false,
             grid_offline_enabled: false,
             battery_over_temp_enabled: false,
+            whatsapp_recipient: String::new(),
             daily_report_enabled: false,
             daily_report_hour: 8,
             daily_report_minute: 0,

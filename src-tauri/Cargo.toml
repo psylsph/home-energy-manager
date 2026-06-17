@@ -1,19 +1,9 @@
 [package]
 name = "givenergy-local"
 version = "0.28.6"
-description = "Local monitoring and control for GivEnergy solar/battery inverters"
+description = "Home Energy Manager — Monitor and control GivEnergy inverters"
 authors = ["Stuart Harding"]
-license = "MIT"
-repository = "https://github.com/psylsph/home-energy-manager"
 edition = "2021"
-rust-version = "1.77.2"
-
-[lib]
-name = "app_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
-
-[build-dependencies]
-tauri-build = { version = "2.6.2", features = [] }
 
 [dependencies]
 serde_json = "1.0"
@@ -22,6 +12,15 @@ log = "0.4.31"
 tauri = { version = "2.11.2", features = ["image-png"] }
 tauri-plugin-log = "2"
 tauri-plugin-opener = "2"
+
+# WhatsApp Web client (native Rust, QR pairing)
+# WhatsApp Web client (native Rust, QR pairing)
+# In-memory backend only — sqlite-storage uses diesel+r2d2 which conflicts
+# with rusqlite (disk I/O errors). Session is ephemeral; re-pair on restart.
+whatsapp-rust = { version = "0.6", default-features = false, features = ["tokio-runtime", "tokio-transport", "ureq-client", "signal"] }
+whatsapp-rust-tokio-transport = "0.6"
+whatsapp-rust-ureq-http-client = "0.6"
+wacore = "0.6"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -55,7 +54,7 @@ futures-util = "0.3"
 local-ip-address = "0.6"
 
 # SQLite for history storage
-rusqlite = { version = "0.40.0", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Efficient mutex for log ring
 parking_lot = "0.12"
@@ -64,3 +63,6 @@ parking_lot = "0.12"
 socket2 = { version = "0.6.4", features = ["all"] }
 dirs = "6"
 tokio-modbus = "0.17.0"
+
+[build-dependencies]
+tauri-build = { version = "2.6.2", features = [] }

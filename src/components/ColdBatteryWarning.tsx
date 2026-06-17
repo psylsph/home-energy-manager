@@ -5,31 +5,45 @@ import { apiGet } from '../lib/api';
 
 interface AutoWinterConfig {
   enabled: boolean;
-  cold_threshold: number;
+}
+
+interface AlertsConfig {
+  batt_temp_min: number;
 }
 
 export default function ColdBatteryWarning() {
   const { snapshot, developerMode } = useInverterStore();
-  const [config, setConfig] = useState<AutoWinterConfig | null>(null);
+  const [autoWinter, setAutoWinter] = useState<AutoWinterConfig | null>(null);
+  const [alerts, setAlerts] = useState<AlertsConfig | null>(null);
 
   useEffect(() => {
     (async () => {
       try {
         const res = await apiGet<{ ok: boolean; data: { config: AutoWinterConfig } }>('/api/auto-winter');
-        if (res.ok) setConfig(res.data.config);
+        if (res.ok) setAutoWinter(res.data.config);
+      } catch { /* ignore */ }
+      try {
+        const res = await apiGet<{ ok: boolean; data: { config: AlertsConfig } }>('/api/alerts');
+        if (res.ok) setAlerts(res.data.config);
       } catch { /* ignore */ }
     })();
   }, []);
 
-  if (!snapshot || !config) return null;
+  if (!snapshot) return null;
 
+  const threshold = alerts?.batt_temp_min ?? 0;
   const forceShow =
     developerMode && localStorage.getItem('dev_force_cold_warning') === 'true';
 
   if (!forceShow) {
-    if (config.enabled) return null;
-    // Don't show on startup before real data arrives (temp would be 0)
-    if (snapshot.battery_temperature < 0.1 || snapshot.battery_temperature >= config.cold_threshold) return null;
+    // Notifications "Alert if below" threshold; 0 = disabled.
+    if (threshold <= 0) return null;
+    // Auto Winter already warming the cells — no need to nag.
+    if (autoWinter?.enabled) return null;
+    // Don't show on startup before real data arrives (temp would be 0).
+    if (snapshot.battery_temperature < 0.1) return null;
+    // Only warn when actually below the configured alert threshold.
+    if (snapshot.battery_temperature >= threshold) return null;
   }
 
   const tempDisplay = forceShow

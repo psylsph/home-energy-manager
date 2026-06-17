@@ -80,6 +80,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Email alerts
         .route("/api/alerts", get(api::get_alerts).post(api::set_alerts))
         .route("/api/alerts/test", post(api::test_alerts))
+        .route("/api/whatsapp/status", get(api::whatsapp_status))
         // Discovery
         .route("/api/discover", get(api::discover))
         .route("/api/evc/discover", get(api::evc_discover))

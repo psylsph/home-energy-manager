@@ -342,12 +342,6 @@ pub struct AlertsConfig {
     /// Telegram chat ID to send alerts to.
     #[serde(default)]
     pub telegram_chat_id: String,
-    /// WhatsApp phone number (international format, e.g. 441234567890).
-    #[serde(default)]
-    pub whatsapp_phone: String,
-    /// CallMeBot WhatsApp API key.
-    #[serde(default)]
-    pub whatsapp_api_key: String,
     /// Minimum cooldown between same-type alerts (minutes).
     pub cooldown_minutes: u32,
 
@@ -369,6 +363,12 @@ pub struct AlertsConfig {
     /// Alert on battery over-temperature flag.
     pub battery_over_temp_enabled: bool,
 
+    /// Target WhatsApp phone number to receive alerts (digits only, international
+    /// format, e.g. "34684770005"). Must be a different number from the linked
+    /// WhatsApp account — you cannot send to yourself.
+    #[serde(default)]
+    pub whatsapp_recipient: String,
+
     // -- Daily consumption report --
     /// Whether to send a daily consumption report.
     pub daily_report_enabled: bool,
@@ -384,17 +384,16 @@ impl Default for AlertsConfig {
             enabled: false,
             telegram_bot_token: String::new(),
             telegram_chat_id: String::new(),
-            whatsapp_phone: String::new(),
-            whatsapp_api_key: String::new(),
             cooldown_minutes: 30,
             batt_temp_min: 0.0,
             batt_temp_max: 0.0,
-            soc_min: 0,
+            soc_min: 4,
             soc_max: 100,
             solar_clipping_enabled: false,
             pv_string_loss_enabled: false,
             grid_offline_enabled: false,
             battery_over_temp_enabled: false,
+            whatsapp_recipient: String::new(),
             daily_report_enabled: false,
             daily_report_hour: 8,
             daily_report_minute: 0,

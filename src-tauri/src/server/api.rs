@@ -1323,12 +1323,6 @@ pub async fn set_alerts(
     if let Some(v) = body.get("telegram_chat_id").and_then(|v| v.as_str()) {
         config.telegram_chat_id = v.to_string();
     }
-    if let Some(v) = body.get("whatsapp_phone").and_then(|v| v.as_str()) {
-        config.whatsapp_phone = v.to_string();
-    }
-    if let Some(v) = body.get("whatsapp_api_key").and_then(|v| v.as_str()) {
-        config.whatsapp_api_key = v.to_string();
-    }
     if let Some(v) = body.get("cooldown_minutes").and_then(|v| v.as_u64()) {
         config.cooldown_minutes = v.clamp(1, 1440) as u32;
     }
@@ -1355,6 +1349,9 @@ pub async fn set_alerts(
     }
     if let Some(v) = body.get("battery_over_temp_enabled").and_then(|v| v.as_bool()) {
         config.battery_over_temp_enabled = v;
+    }
+    if let Some(v) = body.get("whatsapp_recipient").and_then(|v| v.as_str()) {
+        config.whatsapp_recipient = v.to_string();
     }
     if let Some(v) = body.get("daily_report_enabled").and_then(|v| v.as_bool()) {
         config.daily_report_enabled = v;
@@ -1388,13 +1385,15 @@ pub async fn test_alerts(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
 
     let has_telegram =
         !config.telegram_bot_token.is_empty() && !config.telegram_chat_id.is_empty();
-    let has_whatsapp =
-        !config.whatsapp_phone.is_empty() && !config.whatsapp_api_key.is_empty();
+    let wa_paired = matches!(
+        *state.whatsapp.pairing_state.lock().await,
+        crate::alerts::whatsapp::PairingState::Paired
+    );
 
-    if !has_telegram && !has_whatsapp {
+    if !has_telegram && !wa_paired {
         return (StatusCode::BAD_REQUEST, Json(json!({
             "ok": false,
-            "message": "No notification channels configured. Set up Telegram or WhatsApp and save first."
+            "message": "No notification channels configured. Set up Telegram or pair WhatsApp first."
         })));
     }
 
@@ -1418,21 +1417,15 @@ pub async fn test_alerts(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
         }
     }
 
-    if has_whatsapp {
-        let phone = config.whatsapp_phone.clone();
-        let api_key = config.whatsapp_api_key.clone();
-        let r = tokio::task::spawn_blocking(move || {
-            crate::alerts::send_whatsapp_message(
-                &phone,
-                &api_key,
-                "HEM Test Alert - This is a test from Home Energy Manager.",
-            )
-        })
-        .await;
-        match r {
-            Ok(Ok(())) => results.push("WhatsApp: OK".into()),
-            Ok(Err(e)) => results.push(format!("WhatsApp: {e}")),
-            Err(_) => results.push("WhatsApp: internal error".into()),
+    if wa_paired {
+        let recipient = config.whatsapp_recipient.clone();
+        if recipient.is_empty() {
+            results.push("WhatsApp: no recipient configured".into());
+        } else {
+            match state.whatsapp.send_message(&recipient, "✅ *Test Alert*\n\nThis is a test from Home Energy Manager.").await {
+                Ok(()) => results.push("WhatsApp: OK".into()),
+                Err(e) => results.push(format!("WhatsApp: {e}")),
+            }
         }
     }
 
@@ -1447,6 +1440,22 @@ pub async fn test_alerts(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
             "message": joined
         })))
     }
+}
+
+// ---------------------------------------------------------------------------
+// WhatsApp pairing
+// ---------------------------------------------------------------------------
+
+/// GET /api/whatsapp/status — returns the current WhatsApp pairing state.
+pub async fn whatsapp_status(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let ps = state.whatsapp.pairing_state.lock().await;
+    let (state_str, qr) = match &*ps {
+        crate::alerts::whatsapp::PairingState::Idle => ("idle", None),
+        crate::alerts::whatsapp::PairingState::WaitingForScan(code) => ("waiting", Some(code.clone())),
+        crate::alerts::whatsapp::PairingState::Paired => ("paired", None),
+        crate::alerts::whatsapp::PairingState::Error(msg) => ("error", Some(msg.clone())),
+    };
+    (StatusCode::OK, Json(json!({ "state": state_str, "qr": qr })))
 }
 
 // ---------------------------------------------------------------------------
