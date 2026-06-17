@@ -5,17 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.28.7] - 2026-06-17
+
+### Added
+
+- **Telegram Bot /status command** — send `/status` in your Telegram chat
+  and the app replies with a live snapshot of your system (battery charge,
+  solar generation, grid power, home usage).
+- **WhatsApp notifications via CallMeBot** — a QR code on the Settings page
+  lets you authorise the free CallMeBot gateway. Scan it with WhatsApp to
+  receive alerts at the number you set up.
+- **WhatsApp native client (experimental)** — the app can now pair directly
+  with your WhatsApp account (like WhatsApp Web). QR code in Settings, alerts
+  delivered directly through WhatsApp. Note: you'll need to re-pair after
+  every restart for now.
+- **Choose where WhatsApp alerts go** — you now enter the phone number that
+  should receive alerts (a different number from the linked account). Previously
+  the app tried to send to itself, which silently failed.
+- **"All clear" notifications** — when a triggered alert (e.g. high battery
+  temperature) returns to normal, you'll get a resolution notification.
+
+### Changed
+
+- **Updated CallMeBot number** to `+34 684 770 005` (the old number was full).
+
+### Removed
+
+- **Daily Consumption Report** — the toggle and schedule settings have been
+  removed from the Settings page for now. Will return in a future update.
 
 ### Fixed
 
-- **Battery SOC chart showing 0–5000 scale instead of 0–100** — the
-  shared Y-axis lock feature (added in 0.28.5) was applied to *every* history
-  chart, overriding the SOC chart's fixed `[0, 100]` domain with a shared
-  ceiling computed from the largest value across all charts (e.g. battery
-  power in watts ≈ 5000). The lock is now scoped to the Solar PV chart only,
-  matching the documented intent; SOC stays fixed at `[0, 100]` and all other
-  history charts fall back to Recharts auto-scaling.
+- **Battery SOC chart scale** — the battery charge chart was sometimes showing
+  a 0–5000 scale instead of the correct 0–100%. This happened because a recent
+  feature that locks the Y-axis on the solar chart was accidentally applying to
+  all charts. It's now restricted to the solar chart only.
+- **WhatsApp messages going nowhere** — the app was trying to send alert
+  messages to its own WhatsApp account, which doesn't work (the encryption
+  handshake hasn't completed for the freshly-linked device). Now messages go
+  to the phone number you specify in Settings.
+- **Reduced noise in the logs** — harmless WhatsApp encryption warnings
+  ("Failed to encrypt for device") are now suppressed from the console output.
+  They're expected behaviour with an in-memory session store.
 
 ## [0.28.6] - 2026-06-17
 

@@ -37,6 +37,9 @@ COPY src-tauri/ ./src-tauri/
 # Copy the frontend dist so the build has it available (for bundled resources)
 COPY --from=frontend /app/dist/ ./dist/
 
+# Switch to nightly toolchain (required by wacore-binary portable_simd feature)
+RUN rustup toolchain install nightly && rustup default nightly
+
 # Build release binary
 RUN cargo build --release --manifest-path src-tauri/Cargo.toml && \
     cp src-tauri/target/release/givenergy-local /usr/local/bin/givenergy-local
