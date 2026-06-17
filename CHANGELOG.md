@@ -12,9 +12,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Telegram Bot /status command** — send `/status` in your Telegram chat
   and the app replies with a live snapshot of your system (battery charge,
   solar generation, grid power, home usage).
-- **WhatsApp notifications via CallMeBot** — a QR code on the Settings page
-  lets you authorise the free CallMeBot gateway. Scan it with WhatsApp to
-  receive alerts at the number you set up.
 - **WhatsApp native client (experimental)** — the app can now pair directly
   with your WhatsApp account (like WhatsApp Web). QR code in Settings, alerts
   delivered directly through WhatsApp. Note: you'll need to re-pair after
@@ -24,15 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the app tried to send to itself, which silently failed.
 - **"All clear" notifications** — when a triggered alert (e.g. high battery
   temperature) returns to normal, you'll get a resolution notification.
-
-### Changed
-
-- **Updated CallMeBot number** to `+34 684 770 005` (the old number was full).
-
-### Removed
-
-- **Daily Consumption Report** — the toggle and schedule settings have been
-  removed from the Settings page for now. Will return in a future update.
 
 ### Fixed
 
