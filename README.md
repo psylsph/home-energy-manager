@@ -145,6 +145,7 @@ Home Energy Manager connects directly to your inverter over your home network. I
 - **Octopus Cosy** (beta) — enter your three Cosy cheap-rate windows and the app automatically charges your battery during each one, switching back to Eco mode in between. Survives an app restart mid-slot.
 - **Octopus Agile** (beta) — enter your postcode and price thresholds. The app charges when Agile prices are low, discharges when they're high, and stays in Eco the rest of the time. Includes a live 24-hour price forecast grid with daily savings estimates.
 - **Auto Winter Mode** — protects your battery from cold by automatically charging it from the grid when the temperature drops. You set the temperature threshold and target charge level. Works the same way as GivEnergy Cloud's winter mode, but runs entirely on your own machine.
+- **Alert notifications (Telegram & WhatsApp)** — set thresholds for battery temperature, SOC, solar clipping, grid offline, and battery over-temp. Get an alert message when something's wrong — and another when it's back to normal. Send `/status` in your Telegram chat for a live system snapshot. Choose between Telegram bot, WhatsApp (via QR pairing), or both.
 
 ### Compatibility
 
@@ -172,7 +173,7 @@ Home Energy Manager works with all known GivEnergy inverter models. Real-time mo
 | **All-in-One** (3.6kW/5kW/6kW) | Commercial all-in-one units |
 | **All-in-One Hybrid** | Combined hybrid + AIO |
 | **AIO Commercial** | Commercial three-phase variant |
-| **Gateway** _(experimental)_ | System controller / AC hub for 1–3 AIO units. Full schedule, mode, and rate-limit control via the three-phase register set. |
+| **Gateway** *(experimental)* | System controller / AC hub for 1–3 AIO units. Full schedule, mode, and rate-limit control via the three-phase register set. |
 
 ### 2-slot schedules ✅
 
