@@ -57,6 +57,8 @@ jobs:
 
       - name: Install Tauri CLI
         run: cargo install tauri-cli --locked
+        env:
+          RUSTC_BOOTSTRAP: 1
 
       - name: Build frontend
         run: npm run build
@@ -336,6 +338,8 @@ jobs:
 
       - name: Install Tauri CLI
         run: cargo install tauri-cli --locked
+        env:
+          RUSTC_BOOTSTRAP: 1
 
       - name: Initialize Android project
         run: cargo tauri android init --ci
