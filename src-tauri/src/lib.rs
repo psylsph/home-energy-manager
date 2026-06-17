@@ -66,7 +66,13 @@ fn init_tracing(log_ring: &Arc<LogRing>) {
         .with_target(false)
         .with_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+                .unwrap_or_else(|_| {
+                    // Downgrade wacore WARN noise: the "Failed to encrypt for
+                    // device ... Skipping" warnings are expected with
+                    // InMemoryBackend (ephemeral Signal sessions). The message
+                    // still gets sent to whatever devices have sessions.
+                    tracing_subscriber::EnvFilter::new("warn,wacore=error")
+                }),
         );
     tracing_subscriber::registry()
         .with(fmt_layer)

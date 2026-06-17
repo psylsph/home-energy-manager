@@ -144,7 +144,6 @@ const VALID_INTERVALS = [5, 10, 15, 20];
     solar_clipping_enabled: false, pv_string_loss_enabled: false,
     grid_offline_enabled: false, battery_over_temp_enabled: false,
     whatsapp_recipient: '',
-    daily_report_enabled: false, daily_report_hour: 8, daily_report_minute: 0,
   });
   const [alertsSaving, setAlertsSaving] = useState(false);
   const [alertsTesting, setAlertsTesting] = useState(false);
@@ -980,6 +979,11 @@ const VALID_INTERVALS = [5, 10, 15, 20];
             {/* WhatsApp */}
             <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
               <h3 className="text-text-primary text-sm font-sans font-medium">WhatsApp</h3>
+              <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
+                <p className="text-amber-400 text-xs font-sans font-medium">
+                  ⚠️ You must re-pair WhatsApp after every app restart. The session is not persisted yet.
+                </p>
+              </div>
               <p className="text-text-secondary text-xs font-sans">
                 Pair your WhatsApp account to send alerts. On your phone, open WhatsApp Settings, tap "Linked Devices", then "Link a Device" and scan the QR code below. Then enter the phone number that should <strong>receive</strong> the alerts — this must be a different number from the linked account (you cannot message yourself).
               </p>
@@ -1086,40 +1090,6 @@ const VALID_INTERVALS = [5, 10, 15, 20];
                   onChange={(v) => setAlertsConfig((p) => ({ ...p, battery_over_temp_enabled: v }))}
                 />
               </div>
-            </div>
-
-            {/* Daily report */}
-            <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
-              <h3 className="text-text-primary text-sm font-sans font-medium">Daily Consumption Report</h3>
-              <div className="flex items-center justify-between">
-                <span className="text-text-primary text-sm font-sans">Send Daily Report</span>
-                <Toggle
-                  checked={alertsConfig.daily_report_enabled}
-                  onChange={(v) => setAlertsConfig((p) => ({ ...p, daily_report_enabled: v }))}
-                />
-              </div>
-              {alertsConfig.daily_report_enabled && (
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="flex flex-col gap-1">
-                    <span className="text-text-secondary text-xs font-sans">Send at (hour 0-23)</span>
-                    <input
-                      type="number" min="0" max="23"
-                      value={alertsConfig.daily_report_hour}
-                      onChange={(e) => setAlertsConfig((p) => ({ ...p, daily_report_hour: Number(e.target.value) }))}
-                      className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-20 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                    />
-                  </label>
-                  <label className="flex flex-col gap-1">
-                    <span className="text-text-secondary text-xs font-sans">Minute</span>
-                    <input
-                      type="number" min="0" max="59"
-                      value={alertsConfig.daily_report_minute}
-                      onChange={(e) => setAlertsConfig((p) => ({ ...p, daily_report_minute: Number(e.target.value) }))}
-                      className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-20 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                    />
-                  </label>
-                </div>
-              )}
             </div>
 
             <div className="flex items-center gap-3">
