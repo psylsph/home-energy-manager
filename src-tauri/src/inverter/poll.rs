@@ -216,6 +216,12 @@ pub struct AppState {
     pub cached_agile_prices: Arc<Mutex<Vec<PriceSlot>>>,
     /// Most recently decoded EV charger snapshot.
     pub latest_evc: Arc<Mutex<Option<crate::evc::EvcSnapshot>>>,
+    /// Email alert configuration.
+    pub alert_config: Arc<Mutex<crate::settings::AlertsConfig>>,
+    /// Email alert debounce tracker (in-memory only).
+    pub alert_debounce: Arc<Mutex<crate::alerts::AlertDebounce>>,
+    /// Last date a daily consumption report was sent.
+    pub last_report_date: Arc<Mutex<Option<chrono::NaiveDate>>>,
 }
 
 impl AppState {
@@ -245,6 +251,11 @@ impl AppState {
             )),
             agile_state: Arc::new(Mutex::new(AgileState::Idle)),
             cached_agile_prices: Arc::new(Mutex::new(Vec::new())),
+            alert_config: Arc::new(Mutex::new(
+                crate::settings::Settings::load().alerts_config,
+            )),
+            alert_debounce: Arc::new(Mutex::new(crate::alerts::AlertDebounce::new())),
+            last_report_date: Arc::new(Mutex::new(None)),
             latest_evc: Arc::new(Mutex::new(None)),
         }
     }
@@ -282,6 +293,11 @@ impl AppState {
             )),
             agile_state: Arc::new(Mutex::new(AgileState::Idle)),
             cached_agile_prices: Arc::new(Mutex::new(Vec::new())),
+            alert_config: Arc::new(Mutex::new(
+                crate::settings::Settings::load().alerts_config,
+            )),
+            alert_debounce: Arc::new(Mutex::new(crate::alerts::AlertDebounce::new())),
+            last_report_date: Arc::new(Mutex::new(None)),
             latest_evc: Arc::new(Mutex::new(None)),
         }
     }
@@ -392,6 +408,9 @@ fn should_probe_hv_stacks(known_device_type: Option<DeviceType>, hv_probe_done: 
 /// the first response frame header and persisted to settings - only the host
 /// IP is required to connect.
 pub async fn run_poll_loop(state: Arc<AppState>) {
+    // Start the Telegram /status command poller
+    crate::alerts::spawn_telegram_poller(state.clone());
+
     let mut backoff = Duration::from_secs(5);
 
     loop {
@@ -1932,6 +1951,140 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                     persist_agile_state(AgileState::Idle);
                                                 } else {
                                                     tracing::warn!("Agile: exit writes failed - will retry on next poll");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // ---- Email alerts ----
+                                //
+                                // Evaluate the sanitized snapshot against user-
+                                // configured thresholds and send email via Brevo
+                                // if any alerts are triggered (debounced).
+                                {
+                                    let settings_cfg = state.alert_config.lock().await;
+                                    let config = settings_cfg.clone();
+                                    if config.enabled {
+                                        let triggered =
+                                            crate::alerts::evaluate_alerts(&snapshot, &config);
+                                        let mut debounce =
+                                            state.alert_debounce.lock().await;
+                                        let to_send: Vec<crate::alerts::AlertType> = triggered
+                                            .iter()
+                                            .filter(|a| {
+                                                debounce.should_fire(**a, config.cooldown_minutes)
+                                            })
+                                            .copied()
+                                            .collect();
+                                        let _cooldown = config.cooldown_minutes;
+                                        drop(debounce);
+
+                                        if !to_send.is_empty() {
+                                            let text = crate::alerts::build_alert_message(
+                                                &snapshot, &to_send,
+                                            );
+                                            let token = config.telegram_bot_token.clone();
+                                            let chat_id = config.telegram_chat_id.clone();
+                                            let wa_text = text.clone();
+
+                                            tokio::task::spawn_blocking(move || {
+                                                match crate::alerts::send_telegram_message(
+                                                    &token,
+                                                    &chat_id,
+                                                    &text,
+                                                ) {
+                                                    Ok(()) => tracing::info!(
+                                                        "Alert sent: {:?}",
+                                                        to_send
+                                                    ),
+                                                    Err(e) => tracing::warn!(
+                                                        "Failed to send alert: {e}"
+                                                    ),
+                                                }
+                                            });
+
+                                            // Also send to WhatsApp if configured
+                                            let wa_phone = config.whatsapp_phone.clone();
+                                            let wa_api_key = config.whatsapp_api_key.clone();
+                                            if !wa_phone.is_empty() && !wa_api_key.is_empty() {
+                                                tokio::task::spawn_blocking(move || {
+                                                    match crate::alerts::send_whatsapp_message(
+                                                        &wa_phone,
+                                                        &wa_api_key,
+                                                        &wa_text,
+                                                    ) {
+                                                        Ok(()) => tracing::info!(
+                                                            "WhatsApp alert sent"
+                                                        ),
+                                                        Err(e) => tracing::warn!(
+                                                            "Failed to send WhatsApp alert: {e}"
+                                                        ),
+                                                    }
+                                                });
+                                            }
+                                        }
+                                    }
+                                    drop(settings_cfg);
+                                }
+
+                                // ---- Daily consumption report ----
+                                {
+                                    let settings_cfg = state.alert_config.lock().await;
+                                    let config = settings_cfg.clone();
+                                    drop(settings_cfg);
+
+                                    if config.daily_report_enabled {
+                                        let today = chrono::Local::now().date_naive();
+                                        let mut last_sent = state.last_report_date.lock().await;
+                                        if *last_sent != Some(today) {
+                                            let now = chrono::Local::now();
+                                            let minutes_since_midnight =
+                                                now.hour() * 60 + now.minute();
+                                            let send_minutes = config.daily_report_hour as u32 * 60
+                                                + config.daily_report_minute as u32;
+
+                                            if minutes_since_midnight >= send_minutes {
+                                                let yesterday = today
+                                                    .checked_sub_signed(
+                                                        chrono::Duration::days(1),
+                                                    )
+                                                    .unwrap_or(today);
+                                                let db_guard = state.history.lock().await;
+                                                let db = db_guard.clone();
+                                                drop(db_guard);
+
+                                                if let Some(ref db) = db {
+                                                    match db.get_readings_for_date(yesterday) {
+                                                        Ok(rows) => {
+                                                            let date_str = yesterday
+                                                                .format("%A %d %B %Y")
+                                                                .to_string();
+                                                            let html = crate::alerts::report::
+                                                                generate_daily_report_html(
+                                                                    &rows, &date_str,
+                                                                );
+                                                            if let Some(_report_body) = html {
+                                                                // Daily report skipped for Telegram — the HTML report
+                                                                // is too large and complex for Telegram's message format.
+                                                                // A plain-text summary can be added later.
+                                                                tracing::debug!(
+                                                                    "Daily report generated for {}, skipped (Telegram)", date_str
+                                                                );
+                                                                *last_sent = Some(today);
+                                                            } else {
+                                                                tracing::debug!(
+                                                                    "Daily report: insufficient data for {yesterday}",
+                                                                );
+                                                                *last_sent = Some(today);
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            tracing::warn!(
+                                                                "Failed to query history for daily report: {e}"
+                                                            );
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }

@@ -77,6 +77,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/api/load-limiter",
             get(api::get_load_limiter).post(api::set_load_limiter),
         )
+        // Email alerts
+        .route("/api/alerts", get(api::get_alerts).post(api::set_alerts))
+        .route("/api/alerts/test", post(api::test_alerts))
         // Discovery
         .route("/api/discover", get(api::discover))
         .route("/api/evc/discover", get(api::evc_discover))

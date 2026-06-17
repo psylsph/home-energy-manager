@@ -271,6 +271,11 @@ pub struct Settings {
     /// Falls back to legacy `export_tariff` if `None`.
     #[serde(default)]
     pub export_tariff_config: Option<TariffConfig>,
+
+    // -- Email alerts config --
+    /// Alert thresholds and Brevo email integration.
+    #[serde(default)]
+    pub alerts_config: AlertsConfig,
 }
 
 fn default_http_port() -> u16 {
@@ -322,6 +327,81 @@ fn default_agile_discharge_threshold() -> f64 {
     30.0
 }
 
+// ===========================================================================
+// Email alerts config
+// ===========================================================================
+
+/// Threshold configuration for email alerts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertsConfig {
+    /// Master toggle for all alerts.
+    pub enabled: bool,
+    /// Telegram bot token (from @BotFather).
+    #[serde(default)]
+    pub telegram_bot_token: String,
+    /// Telegram chat ID to send alerts to.
+    #[serde(default)]
+    pub telegram_chat_id: String,
+    /// WhatsApp phone number (international format, e.g. 441234567890).
+    #[serde(default)]
+    pub whatsapp_phone: String,
+    /// CallMeBot WhatsApp API key.
+    #[serde(default)]
+    pub whatsapp_api_key: String,
+    /// Minimum cooldown between same-type alerts (minutes).
+    pub cooldown_minutes: u32,
+
+    // -- Thresholds --
+    /// Battery temperature alert minimum (°C). 0 = disabled.
+    pub batt_temp_min: f32,
+    /// Battery temperature alert maximum (°C). 0 = disabled.
+    pub batt_temp_max: f32,
+    /// Battery SOC alert minimum (%). 0 = disabled.
+    pub soc_min: u8,
+    /// Battery SOC alert maximum (%). 100 = disabled.
+    pub soc_max: u8,
+    /// Alert when solar power exceeds 95% of inverter max AC capacity.
+    pub solar_clipping_enabled: bool,
+    /// Alert when a PV string drops to near zero while the other produces.
+    pub pv_string_loss_enabled: bool,
+    /// Alert on grid loss.
+    pub grid_offline_enabled: bool,
+    /// Alert on battery over-temperature flag.
+    pub battery_over_temp_enabled: bool,
+
+    // -- Daily consumption report --
+    /// Whether to send a daily consumption report.
+    pub daily_report_enabled: bool,
+    /// Hour to send the daily report (0-23, local time).
+    pub daily_report_hour: u8,
+    /// Minute to send the daily report (0-59, local time).
+    pub daily_report_minute: u8,
+}
+
+impl Default for AlertsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            telegram_bot_token: String::new(),
+            telegram_chat_id: String::new(),
+            whatsapp_phone: String::new(),
+            whatsapp_api_key: String::new(),
+            cooldown_minutes: 30,
+            batt_temp_min: 0.0,
+            batt_temp_max: 0.0,
+            soc_min: 0,
+            soc_max: 100,
+            solar_clipping_enabled: false,
+            pv_string_loss_enabled: false,
+            grid_offline_enabled: false,
+            battery_over_temp_enabled: false,
+            daily_report_enabled: false,
+            daily_report_hour: 8,
+            daily_report_minute: 0,
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -361,6 +441,7 @@ impl Default for Settings {
             cosy_active_persisted: false,
             agile_state_persisted: String::new(),
             hidden_panels: Vec::new(),
+            alerts_config: AlertsConfig::default(),
         }
     }
 }
@@ -530,6 +611,7 @@ mod tests {
             cosy_active_persisted: false,
             agile_state_persisted: "discharging".to_string(),
             hidden_panels: Vec::new(),
+            alerts_config: AlertsConfig::default(),
         };
         let json = serde_json::to_string(&s).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
@@ -596,6 +678,7 @@ mod tests {
             cosy_active_persisted: false,
             agile_state_persisted: String::new(),
             hidden_panels: Vec::new(),
+            alerts_config: AlertsConfig::default(),
         };
 
         // We can't easily override the settings path for testing,

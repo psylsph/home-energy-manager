@@ -1,3 +1,4 @@
+pub mod alerts;
 pub mod evc;
 pub mod history;
 pub mod inverter;
@@ -190,6 +191,7 @@ pub fn run() {
                         .level(log::LevelFilter::Info)
                         .build(),
                 );
+                let _ = app.handle().plugin(tauri_plugin_opener::init());
             }
 
             // Load persisted settings (or use defaults)

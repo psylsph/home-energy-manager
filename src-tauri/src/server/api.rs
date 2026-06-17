@@ -1286,6 +1286,170 @@ pub async fn set_auto_winter(
 }
 
 // ---------------------------------------------------------------------------
+// Email alerts endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /api/alerts — current alert config and debounce status.
+pub async fn get_alerts(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let config = state.alert_config.lock().await.clone();
+    let debounce_count = state.alert_debounce.lock().await.len();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "data": {
+                "config": config,
+                "debounce_entries": debounce_count,
+            }
+        })),
+    )
+}
+
+/// POST /api/alerts — update alert config.
+///
+/// All body fields are optional — only provided fields are updated.
+pub async fn set_alerts(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<Value>) {
+    let mut config = state.alert_config.lock().await;
+
+    if let Some(v) = body.get("enabled").and_then(|v| v.as_bool()) {
+        config.enabled = v;
+    }
+    if let Some(v) = body.get("telegram_bot_token").and_then(|v| v.as_str()) {
+        config.telegram_bot_token = v.to_string();
+    }
+    if let Some(v) = body.get("telegram_chat_id").and_then(|v| v.as_str()) {
+        config.telegram_chat_id = v.to_string();
+    }
+    if let Some(v) = body.get("whatsapp_phone").and_then(|v| v.as_str()) {
+        config.whatsapp_phone = v.to_string();
+    }
+    if let Some(v) = body.get("whatsapp_api_key").and_then(|v| v.as_str()) {
+        config.whatsapp_api_key = v.to_string();
+    }
+    if let Some(v) = body.get("cooldown_minutes").and_then(|v| v.as_u64()) {
+        config.cooldown_minutes = v.clamp(1, 1440) as u32;
+    }
+    if let Some(v) = body.get("batt_temp_min").and_then(|v| v.as_f64()) {
+        config.batt_temp_min = v as f32;
+    }
+    if let Some(v) = body.get("batt_temp_max").and_then(|v| v.as_f64()) {
+        config.batt_temp_max = v as f32;
+    }
+    if let Some(v) = body.get("soc_min").and_then(|v| v.as_u64()) {
+        config.soc_min = v.min(100) as u8;
+    }
+    if let Some(v) = body.get("soc_max").and_then(|v| v.as_u64()) {
+        config.soc_max = v.min(100) as u8;
+    }
+    if let Some(v) = body.get("solar_clipping_enabled").and_then(|v| v.as_bool()) {
+        config.solar_clipping_enabled = v;
+    }
+    if let Some(v) = body.get("pv_string_loss_enabled").and_then(|v| v.as_bool()) {
+        config.pv_string_loss_enabled = v;
+    }
+    if let Some(v) = body.get("grid_offline_enabled").and_then(|v| v.as_bool()) {
+        config.grid_offline_enabled = v;
+    }
+    if let Some(v) = body.get("battery_over_temp_enabled").and_then(|v| v.as_bool()) {
+        config.battery_over_temp_enabled = v;
+    }
+    if let Some(v) = body.get("daily_report_enabled").and_then(|v| v.as_bool()) {
+        config.daily_report_enabled = v;
+    }
+    if let Some(v) = body.get("daily_report_hour").and_then(|v| v.as_u64()) {
+        config.daily_report_hour = v.min(23) as u8;
+    }
+    if let Some(v) = body.get("daily_report_minute").and_then(|v| v.as_u64()) {
+        config.daily_report_minute = v.min(59) as u8;
+    }
+
+    tracing::info!("Alert config updated");
+
+    // Persist to settings.json
+    let mut app_settings = crate::settings::Settings::load();
+    app_settings.alerts_config = config.clone();
+    drop(config);
+    if let Err(e) = app_settings.save() {
+        tracing::warn!("Failed to persist alert config: {e}");
+        return server_error(&format!("Failed to save: {e}"));
+    }
+
+    ok_response("Alert config updated")
+}
+
+/// POST /api/alerts/test — send a test notification using the current alert config.
+///
+/// Uses whatever credentials are currently saved.
+pub async fn test_alerts(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let config = state.alert_config.lock().await.clone();
+
+    let has_telegram =
+        !config.telegram_bot_token.is_empty() && !config.telegram_chat_id.is_empty();
+    let has_whatsapp =
+        !config.whatsapp_phone.is_empty() && !config.whatsapp_api_key.is_empty();
+
+    if !has_telegram && !has_whatsapp {
+        return (StatusCode::BAD_REQUEST, Json(json!({
+            "ok": false,
+            "message": "No notification channels configured. Set up Telegram or WhatsApp and save first."
+        })));
+    }
+
+    let mut results: Vec<String> = Vec::new();
+
+    if has_telegram {
+        let token = config.telegram_bot_token.clone();
+        let chat_id = config.telegram_chat_id.clone();
+        let r = tokio::task::spawn_blocking(move || {
+            crate::alerts::send_telegram_message(
+                &token,
+                &chat_id,
+                "✅ <b>Test Alert</b>\n\nThis is a test from Home Energy Manager.",
+            )
+        })
+        .await;
+        match r {
+            Ok(Ok(())) => results.push("Telegram: OK".into()),
+            Ok(Err(e)) => results.push(format!("Telegram: {e}")),
+            Err(_) => results.push("Telegram: internal error".into()),
+        }
+    }
+
+    if has_whatsapp {
+        let phone = config.whatsapp_phone.clone();
+        let api_key = config.whatsapp_api_key.clone();
+        let r = tokio::task::spawn_blocking(move || {
+            crate::alerts::send_whatsapp_message(
+                &phone,
+                &api_key,
+                "HEM Test Alert - This is a test from Home Energy Manager.",
+            )
+        })
+        .await;
+        match r {
+            Ok(Ok(())) => results.push("WhatsApp: OK".into()),
+            Ok(Err(e)) => results.push(format!("WhatsApp: {e}")),
+            Err(_) => results.push("WhatsApp: internal error".into()),
+        }
+    }
+
+    let all_ok = results.iter().all(|r| r.contains("OK"));
+    let joined = results.join("; ");
+    tracing::info!("Test notification: {joined}");
+    if all_ok {
+        ok_response(&format!("Sent! {joined}"))
+    } else {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+            "ok": false,
+            "message": joined
+        })))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Discovery endpoint
 // ---------------------------------------------------------------------------
 

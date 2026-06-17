@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { apiGet, apiPost, getApiBase, getServerPort } from '../lib/api';
+import { openExternal } from '../lib/openExternal';
 import type { PollSettings, DiscoveredInverter, DiscoveredEvc, TariffConfig } from '../lib/types';
 import { useInverterStore } from '../store/useInverterStore';
 
@@ -12,29 +13,7 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
   );
 }
 
-function DevTools() {
-  const [forced, setForced] = useState(
-    () => localStorage.getItem('dev_force_cold_warning') === 'true'
-  );
 
-  return (
-    <div className="flex items-center justify-between pt-2 border-t border-white/5">
-      <div className="flex flex-col gap-0.5">
-        <span className="text-text-primary text-sm font-sans">Test Cold Battery Warning</span>
-        <span className="text-text-secondary text-xs font-sans">
-          Force the warning banner to show on Status / Battery pages
-        </span>
-      </div>
-      <Toggle
-        checked={forced}
-        onChange={(v) => {
-          localStorage.setItem('dev_force_cold_warning', String(v));
-          setForced(v);
-        }}
-      />
-    </div>
-  );
-}
 
 export default function SettingsPage() {
   const {
@@ -95,6 +74,20 @@ const VALID_INTERVALS = [5, 10, 15, 20];
   const [hiddenPanels, setHiddenPanels] = useState<string[]>([]);
   const [panelSaving, setPanelSaving] = useState(false);
 
+  // Email alerts
+  const [alertsConfig, setAlertsConfig] = useState({
+    enabled: false, telegram_bot_token: '', telegram_chat_id: '',
+    whatsapp_phone: '', whatsapp_api_key: '',
+    cooldown_minutes: 30,
+    batt_temp_min: 0, batt_temp_max: 0,
+    soc_min: 0, soc_max: 100,
+    solar_clipping_enabled: false, pv_string_loss_enabled: false,
+    grid_offline_enabled: false, battery_over_temp_enabled: false,
+    daily_report_enabled: false, daily_report_hour: 8, daily_report_minute: 0,
+  });
+  const [alertsSaving, setAlertsSaving] = useState(false);
+  const [alertsTesting, setAlertsTesting] = useState(false);
+
   const flash = useCallback((text: string, ok: boolean) => {
     setMessage({ text, ok });
     setTimeout(() => setMessage(null), 4000);
@@ -133,6 +126,18 @@ const VALID_INTERVALS = [5, 10, 15, 20];
       } catch (e: unknown) {
         console.warn('Failed to load settings:', e);
         setSettingsLoaded(true);
+      }
+    })();
+
+    // Load alert config
+    (async () => {
+      try {
+        const res = await apiGet<{ ok: boolean; data: { config: typeof alertsConfig } }>('/api/alerts');
+        if (res.ok && res.data?.config) {
+          setAlertsConfig(res.data.config);
+        }
+      } catch (e: unknown) {
+        console.warn('Failed to load alerts config:', e);
       }
     })();
 
@@ -256,6 +261,30 @@ const VALID_INTERVALS = [5, 10, 15, 20];
       flash('Failed to save panel visibility', false);
     }
     setPanelSaving(false);
+  };
+
+  // Save email alerts
+  const handleAlertsSave = async () => {
+    setAlertsSaving(true);
+    try {
+      const res = await apiPost('/api/alerts', alertsConfig) as { message: string; ok: boolean };
+      flash(res.message, res.ok);
+    } catch {
+      flash('Failed to save alert settings', false);
+    }
+    setAlertsSaving(false);
+  };
+
+  // Send a test email
+  const handleAlertsTest = async () => {
+    setAlertsTesting(true);
+    try {
+      const res = await apiPost('/api/alerts/test', {}) as { ok: boolean; message: string };
+      flash(res.message, res.ok);
+    } catch {
+      flash('Failed to send test email — check API key and email settings', false);
+    }
+    setAlertsTesting(false);
   };
 
   // Discover
@@ -824,6 +853,220 @@ const VALID_INTERVALS = [5, 10, 15, 20];
         </button>
       </section>
 
+      {/* ─── Section 4.5: Notifications ─── */}
+      <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
+        <h2 className="text-text-primary text-lg font-semibold font-sans">Notifications</h2>
+        <p className="text-text-secondary text-xs font-sans">
+          Send Telegram alerts when critical conditions are detected, plus a daily consumption report. Create a bot via{' '}
+          <button onClick={() => openExternal('https://t.me/botfather')} className="text-flow-active underline hover:opacity-80 inline">@BotFather</button> on Telegram, get your bot token, then send /start to your bot and get your chat ID from{' '}
+          <button onClick={() => openExternal('https://t.me/userinfobot')} className="text-flow-active underline hover:opacity-80 inline">@userinfobot</button>.
+        </p>
+
+        <div className="flex items-center justify-between">
+          <div className="flex flex-col gap-0.5">
+            <span className="text-text-primary text-sm font-sans">Enable Alerts</span>
+          </div>
+          <Toggle
+            checked={alertsConfig.enabled}
+            onChange={(v) => setAlertsConfig((p) => ({ ...p, enabled: v }))}
+          />
+        </div>
+
+        {alertsConfig.enabled && (
+          <div className="flex flex-col gap-4">
+            {/* Credentials */}
+            <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
+              <h3 className="text-text-primary text-sm font-sans font-medium">Telegram Configuration</h3>
+              <label className="flex flex-col gap-1">
+                <span className="text-text-secondary text-xs font-sans">Bot Token (from @BotFather)</span>
+                <input
+                  type="password" placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+                  value={alertsConfig.telegram_bot_token}
+                  onChange={(e) => setAlertsConfig((p) => ({ ...p, telegram_bot_token: e.target.value }))}
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-text-secondary text-xs font-sans">Chat ID (from @userinfobot)</span>
+                <input
+                  type="text" placeholder="123456789"
+                  value={alertsConfig.telegram_chat_id}
+                  onChange={(e) => setAlertsConfig((p) => ({ ...p, telegram_chat_id: e.target.value }))}
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-text-secondary text-xs font-sans">Cooldown (minutes between alerts)</span>
+                <input
+                  type="number" min={1} max={1440}
+                  value={alertsConfig.cooldown_minutes}
+                  onChange={(e) => setAlertsConfig((p) => ({ ...p, cooldown_minutes: Number(e.target.value) }))}
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                />
+              </label>
+            </div>
+
+            {/* WhatsApp */}
+            <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
+              <h3 className="text-text-primary text-sm font-sans font-medium">WhatsApp (CallMeBot)</h3>
+              <p className="text-text-secondary text-xs font-sans">
+                Send "I allow callmebot to send me messages" to{' '}
+                <button onClick={() => openExternal('https://wa.me/34603212597')} className="text-flow-active underline hover:opacity-80 inline">+34 603 21 25 97</button>{' '}
+                on WhatsApp once, then enter your details below.
+              </p>
+              <label className="flex flex-col gap-1">
+                <span className="text-text-secondary text-xs font-sans">Phone (international format)</span>
+                <input
+                  type="text" placeholder="441234567890"
+                  value={alertsConfig.whatsapp_phone}
+                  onChange={(e) => setAlertsConfig((p) => ({ ...p, whatsapp_phone: e.target.value }))}
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-text-secondary text-xs font-sans">CallMeBot API Key</span>
+                <input
+                  type="password" placeholder="123456"
+                  value={alertsConfig.whatsapp_api_key}
+                  onChange={(e) => setAlertsConfig((p) => ({ ...p, whatsapp_api_key: e.target.value }))}
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                />
+              </label>
+            </div>
+
+            {/* Battery temperature */}
+            <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
+              <h3 className="text-text-primary text-sm font-sans font-medium">Battery Temperature</h3>
+              <label className="flex flex-col gap-1">
+                <span className="text-text-secondary text-xs font-sans">Alert if below (°C, 0 = disabled)</span>
+                <input
+                  type="number" step="0.5" min="0" max="50"
+                  value={alertsConfig.batt_temp_min}
+                  onChange={(e) => setAlertsConfig((p) => ({ ...p, batt_temp_min: Number(e.target.value) }))}
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-text-secondary text-xs font-sans">Alert if above (°C, 0 = disabled)</span>
+                <input
+                  type="number" step="0.5" min="0" max="80"
+                  value={alertsConfig.batt_temp_max}
+                  onChange={(e) => setAlertsConfig((p) => ({ ...p, batt_temp_max: Number(e.target.value) }))}
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                />
+              </label>
+            </div>
+
+            {/* SOC thresholds */}
+            <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
+              <h3 className="text-text-primary text-sm font-sans font-medium">Battery SOC</h3>
+              <label className="flex flex-col gap-1">
+                <span className="text-text-secondary text-xs font-sans">Alert if below %</span>
+                <input
+                  type="number" min="0" max="100"
+                  value={alertsConfig.soc_min}
+                  onChange={(e) => setAlertsConfig((p) => ({ ...p, soc_min: Number(e.target.value) }))}
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-text-secondary text-xs font-sans">Alert if above % (100 = disabled)</span>
+                <input
+                  type="number" min="0" max="100"
+                  value={alertsConfig.soc_max}
+                  onChange={(e) => setAlertsConfig((p) => ({ ...p, soc_max: Number(e.target.value) }))}
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                />
+              </label>
+            </div>
+
+            {/* Toggle alerts */}
+            <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
+              <h3 className="text-text-primary text-sm font-sans font-medium">Other Alerts</h3>
+              <div className="flex items-center justify-between">
+                <span className="text-text-primary text-sm font-sans">Solar Clipping</span>
+                <Toggle
+                  checked={alertsConfig.solar_clipping_enabled}
+                  onChange={(v) => setAlertsConfig((p) => ({ ...p, solar_clipping_enabled: v }))}
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-text-primary text-sm font-sans">PV String Loss</span>
+                <Toggle
+                  checked={alertsConfig.pv_string_loss_enabled}
+                  onChange={(v) => setAlertsConfig((p) => ({ ...p, pv_string_loss_enabled: v }))}
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-text-primary text-sm font-sans">Grid Offline</span>
+                <Toggle
+                  checked={alertsConfig.grid_offline_enabled}
+                  onChange={(v) => setAlertsConfig((p) => ({ ...p, grid_offline_enabled: v }))}
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-text-primary text-sm font-sans">Battery Over-Temperature</span>
+                <Toggle
+                  checked={alertsConfig.battery_over_temp_enabled}
+                  onChange={(v) => setAlertsConfig((p) => ({ ...p, battery_over_temp_enabled: v }))}
+                />
+              </div>
+            </div>
+
+            {/* Daily report */}
+            <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
+              <h3 className="text-text-primary text-sm font-sans font-medium">Daily Consumption Report</h3>
+              <div className="flex items-center justify-between">
+                <span className="text-text-primary text-sm font-sans">Send daily report</span>
+                <Toggle
+                  checked={alertsConfig.daily_report_enabled}
+                  onChange={(v) => setAlertsConfig((p) => ({ ...p, daily_report_enabled: v }))}
+                />
+              </div>
+              {alertsConfig.daily_report_enabled && (
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="flex flex-col gap-1">
+                    <span className="text-text-secondary text-xs font-sans">Send at (hour 0-23)</span>
+                    <input
+                      type="number" min="0" max="23"
+                      value={alertsConfig.daily_report_hour}
+                      onChange={(e) => setAlertsConfig((p) => ({ ...p, daily_report_hour: Number(e.target.value) }))}
+                      className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-20 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-text-secondary text-xs font-sans">Minute</span>
+                    <input
+                      type="number" min="0" max="59"
+                      value={alertsConfig.daily_report_minute}
+                      onChange={(e) => setAlertsConfig((p) => ({ ...p, daily_report_minute: Number(e.target.value) }))}
+                      className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-20 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                    />
+                  </label>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleAlertsSave}
+                disabled={alertsSaving}
+                className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 transition-opacity"
+              >
+                {alertsSaving ? 'Saving…' : 'Save Notification Settings'}
+              </button>
+              <button
+                onClick={handleAlertsTest}
+                disabled={alertsTesting || !alertsConfig.telegram_bot_token || !alertsConfig.telegram_chat_id}
+                className="bg-bg-elevated text-text-primary font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-80 disabled:opacity-40 transition-opacity border border-white/5"
+              >
+                {alertsTesting ? 'Sending…' : 'Send Test Notification'}
+              </button>
+            </div>
+          </div>
+        )}
+      </section>
+
       {/* ─── Section 5: Developer Mode ─── */}
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-3">
         <h2 className="text-text-primary text-lg font-semibold font-sans">Developer</h2>
@@ -833,9 +1076,7 @@ const VALID_INTERVALS = [5, 10, 15, 20];
           </div>
           <Toggle checked={developerMode} onChange={setDeveloperMode} />
         </div>
-        {developerMode && (
-          <DevTools />
-        )}
+        {developerMode}
       </section>
 
       {/* ─── Section 7: About ─── */}

@@ -473,6 +473,71 @@ impl HistoryDb {
 
         Ok(result)
     }
+
+    /// Fetch all readings for a given local date (midnight-to-midnight).
+    /// Returns rows ordered by timestamp ascending.
+    pub fn get_readings_for_date(
+        &self,
+        date: chrono::NaiveDate,
+    ) -> Result<Vec<crate::alerts::report::ReadingRow>, String> {
+        let local_tz = chrono::Local;
+        let midnight_start = match local_tz
+            .from_local_datetime(&date.and_hms_opt(0, 0, 0).unwrap())
+            .earliest()
+        {
+            Some(dt) => dt,
+            None => return Ok(Vec::new()),
+        };
+        let next_day = date
+            .checked_add_signed(chrono::Duration::days(1))
+            .unwrap_or(date);
+        let midnight_end = match local_tz
+            .from_local_datetime(&next_day.and_hms_opt(0, 0, 0).unwrap())
+            .earliest()
+        {
+            Some(dt) => dt,
+            None => return Ok(Vec::new()),
+        };
+
+        let start_ts = midnight_start.timestamp();
+        let end_ts = midnight_end.timestamp();
+
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp, solar_power, pv1_power, pv2_power, \
+                 battery_power, grid_power, home_power, soc \
+                 FROM readings \
+                 WHERE timestamp >= ?1 AND timestamp < ?2 \
+                 ORDER BY timestamp",
+            )
+            .map_err(|e| format!("Failed to prepare query: {e}"))?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![start_ts, end_ts], |row| {
+                Ok(crate::alerts::report::ReadingRow {
+                    timestamp: row.get(0)?,
+                    solar_power: row.get::<_, Option<f64>>(1)?.map(|v| v as i32),
+                    pv1_power: row.get::<_, Option<f64>>(2)?.map(|v| v as i32),
+                    pv2_power: row.get::<_, Option<f64>>(3)?.map(|v| v as i32),
+                    battery_power: row.get::<_, Option<f64>>(4)?.map(|v| v as i32),
+                    grid_power: row.get::<_, Option<f64>>(5)?.map(|v| v as i32),
+                    home_power: row.get::<_, Option<f64>>(6)?.map(|v| v as i32),
+                    soc: row.get::<_, Option<f64>>(7)?.map(|v| v as f32),
+                })
+            })
+            .map_err(|e| format!("Failed to query readings: {e}"))?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(|e| format!("Failed to read row: {e}"))?);
+        }
+        Ok(result)
+    }
 }
 
 // ---------------------------------------------------------------------------
