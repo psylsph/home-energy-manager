@@ -6,7 +6,7 @@ use std::sync::Arc;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
-use chrono::{Datelike, TimeZone};
+use chrono::{Datelike, Duration as ChronoDuration, Local, TimeZone, Timelike};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -156,6 +156,24 @@ fn clear_discharge_slot_writes(device_type: DeviceType) -> Vec<RegisterWrite> {
         }
     }
     out
+}
+
+fn reserve_writes_for_device(device_type: DeviceType, reserve: u16) -> Result<Vec<RegisterWrite>, String> {
+    let cmd = if device_type.uses_three_phase_schedule_slots() {
+        ControlCommand::SetThreePhaseBatterySocReserve { reserve }
+    } else {
+        ControlCommand::SetBatterySocReserve { reserve }
+    };
+    cmd.encode()
+}
+
+fn force_charge_slot_writes(device_type: DeviceType, minutes: u64) -> Result<Vec<RegisterWrite>, String> {
+    let minutes = minutes.clamp(1, 1439);
+    let start = Local::now();
+    let end = start + ChronoDuration::minutes(minutes as i64);
+    let start_hhmm = encode_hhmm(start.hour() as u8, start.minute() as u8);
+    let end_hhmm = encode_hhmm(end.hour() as u8, end.minute() as u8);
+    charge_slot_command_for_device(device_type, 1, true, start_hhmm, end_hhmm)?.encode()
 }
 
 /// Queue register writes for execution by the poll loop.
@@ -948,6 +966,11 @@ pub async fn pause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, J
                 .unwrap_or_default(),
         );
     }
+    // Set SOC reserve to 100 so Eco Paused actually prevents discharge
+    // (the inverter otherwise continues exporting at the previous reserve rate).
+    if let Ok(mut reserve_writes) = reserve_writes_for_device(device_type, 100) {
+        writes.append(&mut reserve_writes);
+    }
     tracing::info!("PauseBattery encoded: {:?}", writes);
     queue_writes(&state, writes).await;
     ok_response("Battery paused")
@@ -957,17 +980,37 @@ pub async fn pause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, J
 ///
 /// Uses three-phase registers (HR 1123/1111) for three-phase, commercial,
 /// and HV hybrid inverters; single-phase registers (HR 96/116) for all others.
-pub async fn force_charge(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
-    let is_three_phase = latest_device_type(&state)
-        .await
-        .uses_three_phase_schedule_slots();
+/// When a JSON body with `minutes` is provided, also writes a charge slot
+/// covering now → now + minutes so the inverter has an active charging window
+/// (matching GivTCP's forceCharge behaviour).
+pub async fn force_charge(
+    State(state): State<Arc<AppState>>,
+    body: Option<Json<serde_json::Value>>,
+) -> (StatusCode, Json<Value>) {
+    let device_type = latest_device_type(&state).await;
+    let is_three_phase = device_type.uses_three_phase_schedule_slots();
+    let mut writes = Vec::new();
+
+    // If minutes provided, write a charge slot first (now → now+minutes).
+    let minutes = body
+        .as_ref()
+        .and_then(|j| j.0.get("minutes").and_then(|v| v.as_u64()));
+    if let Some(minutes) = minutes {
+        match force_charge_slot_writes(device_type, minutes) {
+            Ok(mut slot_writes) => writes.append(&mut slot_writes),
+            Err(e) => return error_response(&format!("Failed to encode charge slot: {}", e)),
+        }
+    }
+
+    // Then set the force-charge flags (enable_charge + target_soc).
     let cmd = if is_three_phase {
         ControlCommand::ThreePhaseForceCharge { target_soc: 100 }
     } else {
         ControlCommand::ForceCharge { target_soc: 100 }
     };
     match cmd.encode() {
-        Ok(writes) => {
+        Ok(mut cmd_writes) => {
+            writes.append(&mut cmd_writes);
             tracing::info!("ForceCharge encoded: {:?}", writes);
             queue_writes(&state, writes).await;
             ok_response("Force charge enabled")
@@ -1835,7 +1878,8 @@ mod tests {
     async fn pause_battery_single_phase_only_emits_whitelisted_writes() {
         with_isolated_config_dir_async(|| async {
             use crate::modbus::registers::{
-                HR_BATTERY_POWER_MODE, HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_START,
+                HR_BATTERY_POWER_MODE, HR_BATTERY_SOC_RESERVE, HR_DISCHARGE_SLOT_1_START,
+                HR_DISCHARGE_SLOT_2_START,
             };
             let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
             let _ = pause_battery(State(state.clone())).await;
@@ -1853,6 +1897,10 @@ mod tests {
             assert!(
                 writes.iter().any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1),
                 "pause must restore eco power mode"
+            );
+            assert!(
+                writes.iter().any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 100),
+                "pause must set SOC reserve to 100 so Eco Paused actually pauses discharge"
             );
         })
         .await;
@@ -2039,7 +2087,7 @@ mod tests {
         with_isolated_config_dir_async(|| async {
             use crate::modbus::registers::{HR_3PH_CHARGE_TARGET_SOC, HR_CHARGE_TARGET_SOC};
             let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
-            let _ = force_charge(State(state.clone())).await;
+            let _ = force_charge(State(state.clone()), None).await;
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
             assert!(
@@ -2048,13 +2096,48 @@ mod tests {
             );
 
             let state = make_state_with_device(DeviceType::ThreePhase).await;
-            let _ = force_charge(State(state.clone())).await;
+            let _ = force_charge(State(state.clone()), None).await;
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
             assert!(
                 writes.iter().any(|w| w.address == HR_3PH_CHARGE_TARGET_SOC),
                 "three-phase force charge must target HR_3PH_CHARGE_TARGET_SOC"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_with_minutes_writes_charge_slot_before_enable() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_ENABLE_CHARGE,
+            };
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let _ = force_charge(
+                State(state.clone()),
+                Some(Json(json!({ "minutes": 30 }))),
+            )
+            .await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+
+            let start_idx = writes
+                .iter()
+                .position(|w| w.address == HR_CHARGE_SLOT_1_START)
+                .expect("force charge must write charge slot start");
+            let end_idx = writes
+                .iter()
+                .position(|w| w.address == HR_CHARGE_SLOT_1_END)
+                .expect("force charge must write charge slot end");
+            let enable_idx = writes
+                .iter()
+                .position(|w| w.address == HR_ENABLE_CHARGE)
+                .expect("force charge must enable charge after slot is present");
+
+            assert!(start_idx < enable_idx, "slot start must be written before HR96=1");
+            assert!(end_idx < enable_idx, "slot end must be written before HR96=1");
+            assert_ne!(writes[start_idx].value, writes[end_idx].value);
         })
         .await;
     }

@@ -98,6 +98,23 @@ fn uint32(hi: u16, lo: u16) -> u32 {
     ((hi as u32) << 16) | (lo as u32)
 }
 
+/// Decode a lifetime energy total from two registers as deci-kWh.
+///
+/// Returns 0.0 if the combined value is obviously corrupted (hi register
+/// beyond any possible residential installation). At 0.1 kWh resolution,
+/// a hi value of 1000 corresponds to 6.5 GWh — impossible for residential.
+/// The sanitizer's `check_total_energy_field!` provides the production
+/// fallback logic (prev-value, delta checks); this is a hard floor to
+/// prevent enormous f32 values from entering the decode pipeline.
+fn decode_lifetime_total_kwh(hi: u16, lo: u16) -> f32 {
+    // hi > 1000 means >6.5 GWh lifetime → must be dongle corruption.
+    // Genuine residential lifetime would be at most ~200 MWh (hi ≈ 30).
+    if hi > 1000 {
+        return 0.0;
+    }
+    uint32(hi, lo) as f32 * 0.1
+}
+
 /// Decode a timeslot from 2 registers (start HHMM, end HHMM).
 ///
 /// Per the givenergy-modbus reference library, a value of 60 means the slot
@@ -512,8 +529,8 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
         - snap.today_export_kwh
         - snap.today_ac_charge_kwh)
         .max(0.0);
-    snap.total_export_kwh = uint32(get_reg(data, 21), get_reg(data, 22)) as f32 * 0.1; // IR(21-22): e_grid_out_total
-    snap.total_import_kwh = uint32(get_reg(data, 32), get_reg(data, 33)) as f32 * 0.1;
+    snap.total_export_kwh = decode_lifetime_total_kwh(get_reg(data, 21), get_reg(data, 22)); // IR(21-22): e_grid_out_total
+    snap.total_import_kwh = decode_lifetime_total_kwh(get_reg(data, 32), get_reg(data, 33));
     // IR(32-33): e_grid_in_total // keep raw IR(35) for energy balance
 }
 
@@ -1096,10 +1113,10 @@ fn decode_input_1360_1413(data: &[u16], snap: &mut InverterSnapshot) {
     snap.today_discharge_kwh = uint32(get_reg(data, 28), get_reg(data, 29)) as f32 * 0.1;
     snap.today_consumption_kwh = uint32(get_reg(data, 36), get_reg(data, 37)) as f32 * 0.1;
     snap.today_ac_charge_kwh = uint32(get_reg(data, 16), get_reg(data, 17)) as f32 * 0.1;
-    snap.total_import_kwh = uint32(get_reg(data, 22), get_reg(data, 23)) as f32 * 0.1; // IR(1382-1383): e_import_total
-    snap.total_export_kwh = uint32(get_reg(data, 26), get_reg(data, 27)) as f32 * 0.1; // IR(1386-1387): e_export_total
-    snap.total_charge_kwh = uint32(get_reg(data, 34), get_reg(data, 35)) as f32 * 0.1; // IR(1394-1395): e_battery_charge_total
-    snap.total_discharge_kwh = uint32(get_reg(data, 30), get_reg(data, 31)) as f32 * 0.1;
+    snap.total_import_kwh = decode_lifetime_total_kwh(get_reg(data, 22), get_reg(data, 23)); // IR(1382-1383): e_import_total
+    snap.total_export_kwh = decode_lifetime_total_kwh(get_reg(data, 26), get_reg(data, 27)); // IR(1386-1387): e_export_total
+    snap.total_charge_kwh = decode_lifetime_total_kwh(get_reg(data, 34), get_reg(data, 35)); // IR(1394-1395): e_battery_charge_total
+    snap.total_discharge_kwh = decode_lifetime_total_kwh(get_reg(data, 30), get_reg(data, 31));
     // IR(1390-1391): e_battery_discharge_total
 }
 
@@ -1576,10 +1593,17 @@ fn decode_gateway_1600_1659(data: &[u16], snap: &mut InverterSnapshot) {
     snap.today_consumption_kwh = get_reg(data, 55) as f32 * 0.1; // e_load_today
 
     // --- Lifetime energy totals (uint32 ÷10 kWh, V1/V2 byte order) ---
-    snap.total_import_kwh = gw_u32(data, 41, 42, is_v2) as f32 * 0.1; // e_grid_import_total
-    snap.total_export_kwh = gw_u32(data, 47, 48, is_v2) as f32 * 0.1; // e_grid_export_total
-    snap.total_charge_kwh = gw_u32(data, 50, 51, is_v2) as f32 * 0.1; // e_aio_charge_total
-    snap.total_discharge_kwh = gw_u32(data, 53, 54, is_v2) as f32 * 0.1; // e_aio_discharge_total
+    // Decode with V1/V2 awareness, then apply plausibility check on the result.
+    let total_import_u32 = gw_u32(data, 41, 42, is_v2);
+    let total_export_u32 = gw_u32(data, 47, 48, is_v2);
+    let total_charge_u32 = gw_u32(data, 50, 51, is_v2);
+    let total_discharge_u32 = gw_u32(data, 53, 54, is_v2);
+    // Plausibility: the hi word of a genuine residential lifetime total never
+    // exceeds ~30 (200 MWh). hi > 1000 (>6.5 GWh) is impossible corruption.
+    snap.total_import_kwh = if (total_import_u32 >> 16) > 1000 { 0.0 } else { total_import_u32 as f32 * 0.1 };
+    snap.total_export_kwh = if (total_export_u32 >> 16) > 1000 { 0.0 } else { total_export_u32 as f32 * 0.1 };
+    snap.total_charge_kwh = if (total_charge_u32 >> 16) > 1000 { 0.0 } else { total_charge_u32 as f32 * 0.1 };
+    snap.total_discharge_kwh = if (total_discharge_u32 >> 16) > 1000 { 0.0 } else { total_discharge_u32 as f32 * 0.1 };
 }
 
 /// IR 1660-1719: AIO stack summary (count, aggregate power, state) + per-AIO

@@ -20,6 +20,7 @@
  *   HR 112 = battery_discharge_limit
  *   HR 116 = charge_target_soc
  *   HR 163 = inverter_reboot (write 100)
+ *   HR 242 = charge_slot_1_target_soc
  */
 
 import { test, expect } from './fixture.js';
@@ -407,7 +408,7 @@ test.describe('API Control Endpoints', () => {
     expect(findWrite(writes, 57)!.value).toBe(1900);  // 19:00
   });
 
-  test('POST /api/control/force-charge sends correct writes', async ({
+  test('POST /api/control/force-charge with minutes writes slot before enable', async ({
     baseUrl,
     drainModbusWrites,
     peekModbusWrites,
@@ -421,12 +422,29 @@ test.describe('API Control Endpoints', () => {
     });
     expect((await resp.json()).ok).toBe(true);
 
-    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 5, 20_000);
+    // With minutes: slot writes (HR94, HR95) + force-charge flags = ~7 writes
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 7, 20_000);
+
+    // Slot registers must be present and non-zero
+    const slotStart = findWrite(writes, 94);
+    const slotEnd = findWrite(writes, 95);
+    expect(slotStart).toBeDefined();
+    expect(slotEnd).toBeDefined();
+    expect(slotStart!.value).not.toBe(0);
+    expect(slotEnd!.value).not.toBe(0);
+    expect(slotStart!.value).not.toBe(slotEnd!.value);
+
+    // Force-charge flags
     expect(findWrite(writes, 27)!.value).toBe(1);    // eco mode
     expect(findWrite(writes, 59)!.value).toBe(0);    // clear stale discharge
     expect(findWrite(writes, 96)!.value).toBe(1);    // enable_charge
     expect(findWrite(writes, 20)!.value).toBe(1);    // enable_charge_target
     expect(findWrite(writes, 116)!.value).toBe(100); // target SOC
+
+    // Slot registers must appear before enable_charge (HR96)
+    const enableIdx = writes.findIndex((w) => w.address === 96);
+    expect(writes.indexOf(slotStart!)).toBeLessThan(enableIdx);
+    expect(writes.indexOf(slotEnd!)).toBeLessThan(enableIdx);
   });
 
   test('POST /api/control/force-discharge sends correct writes', async ({
@@ -454,7 +472,7 @@ test.describe('API Control Endpoints', () => {
     expect(findWrite(writes, 45)!.value).toBe(0);     // slot2 end
   });
 
-  test('POST /api/control/pause sends HR 110=100', async ({
+  test('POST /api/control/pause sends HR 110=100 (SOC reserve) and clears charge/discharge', async ({
     baseUrl,
     drainModbusWrites,
     peekModbusWrites,
@@ -464,13 +482,17 @@ test.describe('API Control Endpoints', () => {
     const resp = await fetch(`${baseUrl}/api/control/pause`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ minutes: 30 }),
     });
     expect((await resp.json()).ok).toBe(true);
 
-    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 2, 15_000);
-    expect(findWrite(writes, 96)!.value).toBe(0);    // disable charge
-    expect(findWrite(writes, 59)!.value).toBe(0);    // disable discharge
+    // PauseBattery now writes: charge clear, discharge clear, slot clears,
+    // eco mode, and SOC reserve=100 = ~8 writes
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 6, 15_000);
+
+    expect(findWrite(writes, 96)!.value).toBe(0);     // disable charge
+    expect(findWrite(writes, 59)!.value).toBe(0);     // disable discharge
+    expect(findWrite(writes, 27)!.value).toBe(1);     // eco mode
+    expect(findWrite(writes, 110)!.value).toBe(100);  // SOC reserve=100 to pause
   });
 
   test('POST /api/control/sync-clock sends time registers', async ({

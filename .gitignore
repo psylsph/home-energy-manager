@@ -30,6 +30,7 @@ settings.json
 *.njsproj
 *.sln
 *.sw?
+docs/*.md
 
 # OS files
 Thumbs.db

@@ -2052,7 +2052,7 @@ export default function ControlPage() {
           <h2 className="text-text-primary font-semibold text-lg">Discharge Schedule</h2>
           {!isTimedMode && (
             <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-text-primary">
-              Configure your discharge slots here, then switch to <strong>Timed</strong> mode to activate them. Slots are saved to the inverter when you switch.
+              Configure your discharge slots here, then switch to <strong>Timed</strong> mode to activate them. Slots are saved only to this device/client until you switch.
             </div>
           )}
           {isTimedMode && (

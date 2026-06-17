@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.4] - 2026-06-17
+
+### Fixed
+
+- **Full-day discharge slots (00:00–23:59) incorrectly treated as "suspiciously
+  small" and replaced with previous slot values** — the slot sanitizer was
+  checking only whether the start time was ≤ 00:10, not the actual duration.
+  A valid force-discharge or timed-export window spanning the full day was
+  overwritten with the previous slot, making force discharge look like it
+  briefly applied then reverted. Now checks duration (must be ≤ 10 minutes)
+  in addition to start time. ([#82](https://github.com/psylsph/home-energy-manager/issues/82))
+
+- **Pause Battery button showed success but inverter kept exporting** — the
+  "Eco Paused" action was clearing charge/discharge flags and restoring eco
+  mode, but never raising the SOC reserve to 100%. The inverter returned to
+  eco mode with a 4% reserve and continued discharging. Now writes reserve=100
+  so the battery actually stops exporting. ([#82](https://github.com/psylsph/home-energy-manager/issues/82))
+
+### Changed
+
+- **Force Charge now writes an active charge slot when minutes are provided**
+  — matching GivTCP's working implementation, the backend accepts an optional
+  `{ minutes: N }` body and writes a charge slot covering now → now+N minutes
+  before setting the enable charge flags. Without a slot, some hardware would
+  show the button state as active but never actually begin charging.
+  ([#82](https://github.com/psylsph/home-energy-manager/issues/82))
+
+- **Discharge slot hint now clarifies client-local storage** — the yellow
+  callout in Eco mode now says "Slots are saved only to this device/client
+  until you switch" instead of "saved to the inverter", since edits are held
+  in browser localStorage until Timed mode is activated.
+  ([#82](https://github.com/psylsph/home-energy-manager/issues/82))
+
 ## [0.28.3] - 2026-06-16
 
 ### Fixed
