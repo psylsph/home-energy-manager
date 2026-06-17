@@ -54,8 +54,29 @@ function useNow(): number {
   return now;
 }
 
+/** Find the maximum power value across PV1 (and PV2 if present) in chart rows.
+ *  Rounds up to a generous coarse ceiling (every 5kW) so the Y-axis stays
+ *  stable across time ranges that have different AVG bucket sizes.
+ */
+function computeYMax(rows: PvRow[], hasPv2: boolean): number {
+  let max = 0;
+  for (const r of rows) {
+    if (r.pv1_power !== null && r.pv1_power > max) max = r.pv1_power;
+    if (hasPv2 && r.pv2_power !== null && r.pv2_power > max) max = r.pv2_power;
+  }
+  // Round up to next 5kW to give a stable ceiling across range switches.
+  // Past 10kW, round to next 10kW. This avoids the Y-axis jumping when
+  // switching ranges (different time-bucket AVG sizes produce different
+  // data max values from the same underlying readings).
+  if (max <= 10000) return Math.ceil(max / 5000) * 5000 || 5000;
+  return Math.ceil(max / 10000) * 10000;
+}
+
 export default function SolarPowerChart() {
   const scale = useInverterStore((state) => state.panelGraphsScale);
+  const yLock = useInverterStore((state) => state.panelGraphsYLock);
+  const yLockMax = useInverterStore((state) => state.panelGraphsYLockMax);
+  const setYLockMax = useInverterStore((state) => state.setPanelGraphsYLockMax);
   const range = scale;
   const rolling = isRollingHistoryRange(range);
   const now = useNow();
@@ -105,6 +126,15 @@ export default function SolarPowerChart() {
   const domain = getHistoryRangeDomain(range, 0, now);
   const ticks = getHistoryXAxisTicks(range, domain);
   const hasData = rows.length > 0;
+  // Locked Y-axis ceiling: compute from data, share via store so all range
+  // switches use the highest ceiling seen this session.
+  const yDomain: [number, number] | undefined = useMemo(() => {
+    if (!yLock || rows.length === 0) return undefined;
+    const ceiling = computeYMax(rows, hasPv2);
+    const shared = Math.max(yLockMax, ceiling);
+    if (shared > yLockMax) setYLockMax(shared);
+    return [0, shared];
+  }, [rows, hasPv2, yLock, yLockMax, setYLockMax]);
 
   return (
     <section className="bg-bg-surface rounded-2xl p-5">
@@ -157,6 +187,7 @@ export default function SolarPowerChart() {
               tick={{ fontSize: 11, style: { fontWeight: 700 } }}
               tickLine={false}
               axisLine={false}
+              domain={yDomain}
               tickFormatter={(v: number) => `${Math.round(v)}`}
             />
             <Tooltip

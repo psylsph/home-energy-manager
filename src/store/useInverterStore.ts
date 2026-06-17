@@ -18,6 +18,10 @@ interface InverterState {
   panelGraphsEnabled: boolean;
   /** Time scale for the trend charts on the Battery/Solar tabs. */
   panelGraphsScale: 'today' | '24h';
+  /** Lock chart Y-axis to inverter's rated power. */
+  panelGraphsYLock: boolean;
+  /** Highest Y-axis ceiling seen this session when lock is enabled (0 = unset). */
+  panelGraphsYLockMax: number;
   /** Discharge slots configured locally in Eco mode, not yet written to the inverter. */
   pendingDischargeSlots: Record<number, ScheduleSlot>;
   /** EV Charger host — non-empty when configured in Settings. */
@@ -37,6 +41,8 @@ interface InverterState {
   setChartRange: (range: HistoryRange) => void;
   setPanelGraphsEnabled: (enabled: boolean) => void;
   setPanelGraphsScale: (scale: 'today' | '24h') => void;
+  setPanelGraphsYLock: (enabled: boolean) => void;
+  setPanelGraphsYLockMax: (max: number) => void;
   setPendingDischargeSlots: (slots: Record<number, ScheduleSlot>) => void;
   clearPendingDischargeSlots: () => void;
   setHiddenPanels: (panels: string[]) => void;
@@ -102,6 +108,16 @@ function loadPanelGraphsScale(): 'today' | '24h' {
   }
 }
 
+function loadPanelGraphsYLock(): boolean {
+  try {
+    const stored = localStorage.getItem('panelGraphsYLock');
+    // Default to locked (true) when the key is absent.
+    return stored === null ? true : stored === 'true';
+  } catch {
+    return true;
+  }
+}
+
 function loadPendingDischargeSlots(): Record<number, ScheduleSlot> {
   try {
     const stored = localStorage.getItem('pendingDischargeSlots');
@@ -127,6 +143,8 @@ export const useInverterStore = create<InverterState>((set) => ({
   chartRange: loadChartRange(),
   panelGraphsEnabled: loadPanelGraphsEnabled(),
   panelGraphsScale: loadPanelGraphsScale(),
+  panelGraphsYLock: loadPanelGraphsYLock(),
+  panelGraphsYLockMax: 0,
   pendingDischargeSlots: loadPendingDischargeSlots(),
   evcHost: '',
   evcPower: 0,
@@ -166,6 +184,13 @@ export const useInverterStore = create<InverterState>((set) => ({
     } catch { /* ignore */ }
     set({ panelGraphsScale: scale });
   },
+  setPanelGraphsYLock: (enabled) => {
+    try {
+      localStorage.setItem('panelGraphsYLock', String(enabled));
+    } catch { /* ignore */ }
+    set({ panelGraphsYLock: enabled, panelGraphsYLockMax: 0 });
+  },
+  setPanelGraphsYLockMax: (max) => set({ panelGraphsYLockMax: max }),
   setPendingDischargeSlots: (slots) => {
     savePendingDischargeSlots(slots);
     set({ pendingDischargeSlots: slots });

@@ -2217,4 +2217,325 @@ mod tests {
         })
         .await;
     }
+
+    // -----------------------------------------------------------------------
+    // Additional device-type routing tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn pause_battery_gen2_hybrid_only_emits_whitelisted_writes() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_BATTERY_POWER_MODE, HR_BATTERY_SOC_RESERVE, HR_DISCHARGE_SLOT_1_START,
+                HR_DISCHARGE_SLOT_2_START,
+            };
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let _ = pause_battery(State(state.clone())).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert!(
+                writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_1_START && w.value == 0),
+                "gen2 pause must clear discharge slot 1"
+            );
+            assert!(
+                writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_2_START && w.value == 0),
+                "gen2 pause must clear discharge slot 2"
+            );
+            assert!(
+                writes.iter().any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1),
+                "gen2 pause must restore eco power mode"
+            );
+            assert!(
+                writes.iter().any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 100),
+                "gen2 pause must set SOC reserve to 100"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pause_battery_ac_coupled_only_emits_whitelisted_writes() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_BATTERY_POWER_MODE, HR_BATTERY_SOC_RESERVE, HR_DISCHARGE_SLOT_1_START,
+            };
+            let state = make_state_with_device(DeviceType::ACCoupled).await;
+            let _ = pause_battery(State(state.clone())).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            // AC Coupled only has 1 discharge slot, but clear_discharge_slot_writes
+            // still writes both slots (HR 56-57 pair), so slot 1 gets cleared.
+            assert!(
+                writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_1_START && w.value == 0),
+                "ac pause must clear discharge slot 1"
+            );
+            assert!(
+                writes.iter().any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1),
+                "ac pause must restore eco power mode"
+            );
+            assert!(
+                writes.iter().any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 100),
+                "ac pause must set SOC reserve to 100"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_ac_coupled_uses_ac_registers() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_ENABLE_DISCHARGE;
+            let state = make_state_with_device(DeviceType::ACCoupled).await;
+            let _ = force_charge(State(state.clone()), None).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            // AC Coupled is not three-phase, so uses single-phase force charge.
+            // Force charge writes: eco mode (HR27=1), clear discharge (HR59=0),
+            // enable charge (HR96=1), enable charge target (HR20=1), target SOC (HR116=100).
+            assert!(
+                writes.iter().any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0),
+                "AC force charge must clear discharge"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_with_edge_minutes_0_uses_clamp() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_CHARGE_SLOT_1_START;
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let _ = force_charge(
+                State(state.clone()),
+                Some(Json(json!({ "minutes": 0 }))),
+            )
+            .await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            // minutes=0 is clamped to 1, so a charge slot should be written.
+            assert!(
+                writes.iter().any(|w| w.address == HR_CHARGE_SLOT_1_START),
+                "force charge with minutes=0 should still write charge slot (clamped to 1)"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_with_edge_minutes_1439() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{HR_CHARGE_SLOT_1_START, HR_CHARGE_SLOT_1_END};
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let _ = force_charge(
+                State(state.clone()),
+                Some(Json(json!({ "minutes": 1439 }))),
+            )
+            .await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert!(
+                writes.iter().any(|w| w.address == HR_CHARGE_SLOT_1_START),
+                "force charge with minutes=1439 should write charge slot"
+            );
+            assert!(
+                writes.iter().any(|w| w.address == HR_CHARGE_SLOT_1_END),
+                "force charge with minutes=1439 should write charge slot end"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_ac_coupled_without_body_backward_compat() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{HR_CHARGE_SLOT_1_START, HR_ENABLE_CHARGE};
+            let state = make_state_with_device(DeviceType::ACCoupled).await;
+            // No body at all — backward-compatible force charge without minutes.
+            let _ = force_charge(State(state.clone()), None).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            // No charge slot writes since no minutes provided.
+            let has_slot = writes.iter().any(|w| w.address == HR_CHARGE_SLOT_1_START);
+            assert!(
+                !has_slot,
+                "force charge without body should not write charge slot"
+            );
+            // But force charge flags must be present.
+            assert!(
+                writes.iter().any(|w| w.address == HR_ENABLE_CHARGE && w.value == 1),
+                "force charge without body must enable charge"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_ac_coupled_with_minutes() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_CHARGE_SLOT_1_START;
+            let state = make_state_with_device(DeviceType::ACCoupled).await;
+            let _ = force_charge(
+                State(state.clone()),
+                Some(Json(json!({ "minutes": 30 }))),
+            )
+            .await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert!(
+                writes.iter().any(|w| w.address == HR_CHARGE_SLOT_1_START),
+                "AC force charge with minutes must write charge slot"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_discharge_for_each_device_family() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_3PH_FORCE_DISCHARGE_ENABLE, HR_ENABLE_DISCHARGE,
+            };
+
+            // Gen2: single-phase force discharge
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let _ = force_discharge(State(state.clone())).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert!(
+                writes.iter().any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 1),
+                "Gen2 force discharge must set HR_ENABLE_DISCHARGE=1"
+            );
+
+            // Gen3: single-phase force discharge
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            let _ = force_discharge(State(state.clone())).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert!(
+                writes.iter().any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 1),
+                "Gen3 force discharge must set HR_ENABLE_DISCHARGE=1"
+            );
+
+            // AC Coupled: single-phase force discharge
+            let state = make_state_with_device(DeviceType::ACCoupled).await;
+            let _ = force_discharge(State(state.clone())).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert!(
+                writes.iter().any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 1),
+                "AC force discharge must set HR_ENABLE_DISCHARGE=1"
+            );
+
+            // ThreePhase: three-phase force discharge
+            let state = make_state_with_device(DeviceType::ThreePhase).await;
+            let _ = force_discharge(State(state.clone())).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert!(
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_3PH_FORCE_DISCHARGE_ENABLE && w.value == 1),
+                "ThreePhase force discharge must set HR_3PH_FORCE_DISCHARGE_ENABLE=1"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn reserve_writes_for_device_single_phase_vs_three_phase() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{HR_3PH_BATTERY_SOC_RESERVE, HR_BATTERY_SOC_RESERVE};
+
+            let writes = reserve_writes_for_device(DeviceType::Gen2Hybrid, 30).unwrap();
+            assert_eq!(writes[0].address, HR_BATTERY_SOC_RESERVE);
+            assert_eq!(writes[0].value, 30);
+
+            let writes = reserve_writes_for_device(DeviceType::ThreePhase, 30).unwrap();
+            assert_eq!(writes[0].address, HR_3PH_BATTERY_SOC_RESERVE);
+            assert_eq!(writes[0].value, 30);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn clear_discharge_slot_writes_three_phase() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_3PH_DISCHARGE_SLOT_1_END, HR_3PH_DISCHARGE_SLOT_1_START,
+                HR_3PH_DISCHARGE_SLOT_2_END, HR_3PH_DISCHARGE_SLOT_2_START, SAFE_WRITE_REGS,
+            };
+
+            let writes = clear_discharge_slot_writes(DeviceType::ThreePhase);
+            assert_eq!(writes.len(), 4, "three-phase clears 2 slots x start/end");
+            for w in &writes {
+                assert_eq!(w.value, 0);
+                assert!(SAFE_WRITE_REGS.contains(&w.address));
+            }
+            let addrs: Vec<u16> = writes.iter().map(|w| w.address).collect();
+            assert!(addrs.contains(&HR_3PH_DISCHARGE_SLOT_1_START));
+            assert!(addrs.contains(&HR_3PH_DISCHARGE_SLOT_1_END));
+            assert!(addrs.contains(&HR_3PH_DISCHARGE_SLOT_2_START));
+            assert!(addrs.contains(&HR_3PH_DISCHARGE_SLOT_2_END));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_charge_slot_2_non_gen3_uses_classic_hr31_32() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_CHARGE_SLOT_2_END, HR_CHARGE_SLOT_2_START,
+            };
+            // Gen3PlusHybrid supports 2 charge slots via classic HR31-32
+            // (not gen3-extended).
+            let state = make_state_with_device(DeviceType::Gen3PlusHybrid).await;
+            let body = serde_json::json!({
+                "slot": 2,
+                "start_hour": 23, "start_minute": 0,
+                "end_hour": 1, "end_minute": 0,
+                "enabled": true,
+            });
+            let _ = set_charge_slot(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert!(
+                writes.iter().any(|w| w.address == HR_CHARGE_SLOT_2_START && w.value == 2300),
+                "Non-gen3 charge slot 2 must write classic HR31"
+            );
+            assert!(
+                writes.iter().any(|w| w.address == HR_CHARGE_SLOT_2_END && w.value == 100),
+                "Non-gen3 charge slot 2 must write classic HR32"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_charge_slot_2_gen3_uses_extended_hr243_244() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_CHARGE_SLOT_2_GEN3_END, HR_CHARGE_SLOT_2_GEN3_START,
+            };
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            let body = serde_json::json!({
+                "slot": 2,
+                "start_hour": 3, "start_minute": 15,
+                "end_hour": 4, "end_minute": 15,
+                "enabled": true,
+            });
+            let _ = set_charge_slot(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert!(
+                writes.iter().any(|w| w.address == HR_CHARGE_SLOT_2_GEN3_START && w.value == 315),
+                "Gen3 charge slot 2 must write extended HR243"
+            );
+            assert!(
+                writes.iter().any(|w| w.address == HR_CHARGE_SLOT_2_GEN3_END && w.value == 415),
+                "Gen3 charge slot 2 must write extended HR244"
+            );
+        })
+        .await;
+    }
+
 }

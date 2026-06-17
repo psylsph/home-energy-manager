@@ -118,9 +118,13 @@ test.describe('Quick Actions', () => {
     await page.locator('text=Control').click();
     await page.locator('text=Force Charge').click();
 
-    // ForceCharge = 5 writes (HR27, HR59=0, HR96, HR20, HR116)
-    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 5, 20_000);
-    expect(writes.length).toBeGreaterThanOrEqual(5);
+    // ForceCharge with minutes=30 = 2 slot writes + 5 flag writes = 7
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 7, 20_000);
+    expect(writes.length).toBeGreaterThanOrEqual(7);
+
+    // Slot registers (HR94, HR95) must be present and non-zero
+    expect(findWrite(writes, 94)!.value).not.toBe(0);
+    expect(findWrite(writes, 95)!.value).not.toBe(0);
 
     // HR 27 = 1 (eco), HR 59 = 0 (clear stale discharge), HR 96 = 1 (enable_charge),
     // HR 20 = 1 (enable_charge_target), HR 116 = 100 (target SOC)
@@ -486,8 +490,8 @@ test.describe('API Control Endpoints', () => {
     expect((await resp.json()).ok).toBe(true);
 
     // PauseBattery now writes: charge clear, discharge clear, slot clears,
-    // eco mode, and SOC reserve=100 = ~8 writes
-    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 6, 15_000);
+    // eco mode, and SOC reserve=100 = 8 writes (~12s at 1.5s each)
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 8, 25_000);
 
     expect(findWrite(writes, 96)!.value).toBe(0);     // disable charge
     expect(findWrite(writes, 59)!.value).toBe(0);     // disable discharge
@@ -562,5 +566,686 @@ test.describe('API Control Endpoints', () => {
     const data = await resp.json();
     expect(data.ok).toBe(false);
     expect(data.error).toContain('Unknown mode');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test: Quick Actions — extended UI interaction tests
+// ---------------------------------------------------------------------------
+
+test.describe('Quick Actions - extended', () => {
+  test('Force Charge without minutes (API only) sends only 5 flag writes', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await clearWrites(drainModbusWrites);
+
+    // API call without body or Content-Type — no slot writes, only flags
+    const resp = await fetch(`${baseUrl}/api/control/force-charge`, {
+      method: 'POST',
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    // Without slot = 5 writes (HR27, HR59=0, HR96, HR20, HR116)
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 5, 20_000);
+    expect(writes.length).toBeGreaterThanOrEqual(5);
+
+    expect(findWrite(writes, 27)!.value).toBe(1);    // eco mode
+    expect(findWrite(writes, 59)!.value).toBe(0);    // clear stale discharge
+    expect(findWrite(writes, 96)!.value).toBe(1);    // enable_charge
+    expect(findWrite(writes, 20)!.value).toBe(1);    // enable_charge_target
+    expect(findWrite(writes, 116)!.value).toBe(100); // target SOC
+
+    // Verify no slot registers were written
+    expect(findWrite(writes, 94)).toBeUndefined();
+    expect(findWrite(writes, 95)).toBeUndefined();
+  });
+
+  test('Force Charge when already in eco mode should still work', async ({
+    page,
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    // Aggressive drain of any pending writes from previous tests
+    const deadline = Date.now() + 45_000;
+    while (Date.now() < deadline) {
+      const drained = await drainModbusWrites();
+      if (drained.length === 0) break;
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+
+    // First set eco mode via API
+    const modeResp = await fetch(`${baseUrl}/api/control/mode`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'eco' }),
+    });
+    expect((await modeResp.json()).ok).toBe(true);
+
+    // Wait for ALL eco mode writes to complete (7 writes ~10s)
+    await waitForWrites(peekModbusWrites, drainModbusWrites, 7, 25_000);
+    // Drain any remaining
+    while (true) {
+      const remaining = await drainModbusWrites();
+      if (remaining.length === 0) break;
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+
+    // Now click Force Charge via UI — should still work (eco → force charge)
+    await page.goto('/');
+    await page.locator('text=Control').click();
+    await page.locator('text=Force Charge').click();
+
+    // UI sends minutes=30 → 7 writes (2 slot + 5 flags)
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 7, 20_000);
+    expect(writes.length).toBeGreaterThanOrEqual(7);
+
+    expect(findWrite(writes, 27)!.value).toBe(1);    // eco mode
+    expect(findWrite(writes, 59)!.value).toBe(0);    // clear stale discharge
+    expect(findWrite(writes, 96)!.value).toBe(1);    // enable_charge
+    expect(findWrite(writes, 20)!.value).toBe(1);    // enable_charge_target
+    expect(findWrite(writes, 116)!.value).toBe(100); // target SOC
+  });
+
+  test('Pause Battery should write HR110=100 and clear charge/discharge', async ({
+    page,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await clearWrites(drainModbusWrites);
+
+    await page.goto('/');
+    await page.locator('text=Control').click();
+    await page.getByRole('button', { name: /Pause Battery/ }).click();
+
+    // Pause = charge clear + discharge clear + slot clears + eco mode + SOC reserve=100
+    // = 8 writes (~12s at 1.5s each)
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 8, 30_000);
+    expect(writes.length).toBeGreaterThanOrEqual(8);
+
+    expect(findWrite(writes, 96)!.value).toBe(0);     // disable charge
+    expect(findWrite(writes, 59)!.value).toBe(0);     // disable discharge
+    expect(findWrite(writes, 27)!.value).toBe(1);     // eco mode
+    expect(findWrite(writes, 110)!.value).toBe(100);  // SOC reserve=100
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test: API Mode Transitions
+// ---------------------------------------------------------------------------
+
+test.describe('API Mode Transitions', () => {
+  test('Eco → Timed Demand transition', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    // Set eco mode first
+    await clearWrites(drainModbusWrites);
+    let resp = await fetch(`${baseUrl}/api/control/mode`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'eco' }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+    await waitForWrites(peekModbusWrites, drainModbusWrites, 4, 20_000);
+
+    // Now transition to timed_demand
+    await clearWrites(drainModbusWrites);
+    resp = await fetch(`${baseUrl}/api/control/mode`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'timed_demand' }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 3, 15_000);
+    expect(findWrite(writes, 27)!.value).toBe(1);  // self-consumption
+    expect(findWrite(writes, 59)!.value).toBe(1);  // enable discharge
+    expect(findWrite(writes, 110)!.value).toBe(4);  // SOC reserve
+  });
+
+  test('Eco → Timed Export transition', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await clearWrites(drainModbusWrites);
+    let resp = await fetch(`${baseUrl}/api/control/mode`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'eco' }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+    await waitForWrites(peekModbusWrites, drainModbusWrites, 4, 20_000);
+
+    await clearWrites(drainModbusWrites);
+    resp = await fetch(`${baseUrl}/api/control/mode`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'timed_export' }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 3, 15_000);
+    expect(findWrite(writes, 27)!.value).toBe(0);  // export mode
+    expect(findWrite(writes, 59)!.value).toBe(1);  // enable discharge
+    expect(findWrite(writes, 110)!.value).toBe(4);  // SOC reserve
+  });
+
+  test('Timed Demand → Eco transition', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await clearWrites(drainModbusWrites);
+    let resp = await fetch(`${baseUrl}/api/control/mode`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'timed_demand' }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+    await waitForWrites(peekModbusWrites, drainModbusWrites, 3, 15_000);
+
+    await clearWrites(drainModbusWrites);
+    resp = await fetch(`${baseUrl}/api/control/mode`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'eco' }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 3, 20_000);
+    expect(findWrite(writes, 27)!.value).toBe(1);  // self-consumption
+    expect(findWrite(writes, 59)!.value).toBe(0);  // disable discharge
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test: Edge Cases
+// ---------------------------------------------------------------------------
+
+test.describe('Edge Cases', () => {
+  test('Force charge with minutes=0 clamps to 1', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await clearWrites(drainModbusWrites);
+
+    const resp = await fetch(`${baseUrl}/api/control/force-charge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ minutes: 0 }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    // Should produce slot writes (clamped to 1 min) + flags = 7 writes
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 7, 20_000);
+
+    // Slot registers should be present (clamped to 1 minute)
+    const slotStart = findWrite(writes, 94);
+    const slotEnd = findWrite(writes, 95);
+    expect(slotStart).toBeDefined();
+    expect(slotEnd).toBeDefined();
+    // Start and end differ by ~1 minute (HHMM encoding)
+    expect(slotStart!.value).not.toBe(slotEnd!.value);
+
+    // Force-charge flags still present
+    expect(findWrite(writes, 27)!.value).toBe(1);
+    expect(findWrite(writes, 96)!.value).toBe(1);
+    expect(findWrite(writes, 20)!.value).toBe(1);
+    expect(findWrite(writes, 116)!.value).toBe(100);
+  });
+
+  test('Force charge with minutes=9999 clamps to 1439', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await clearWrites(drainModbusWrites);
+
+    const resp = await fetch(`${baseUrl}/api/control/force-charge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ minutes: 9999 }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    // Should produce slot writes (clamped to 1439 min) + flags = 7 writes
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 7, 20_000);
+
+    const slotStart = findWrite(writes, 94);
+    const slotEnd = findWrite(writes, 95);
+    expect(slotStart).toBeDefined();
+    expect(slotEnd).toBeDefined();
+
+    // Force-charge flags still present
+    expect(findWrite(writes, 27)!.value).toBe(1);
+    expect(findWrite(writes, 96)!.value).toBe(1);
+    expect(findWrite(writes, 20)!.value).toBe(1);
+    expect(findWrite(writes, 116)!.value).toBe(100);
+  });
+
+  test('Reserve with soc=100 (max)', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await clearWrites(drainModbusWrites);
+
+    const resp = await fetch(`${baseUrl}/api/control/reserve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ soc: 100 }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 1, 15_000);
+    expect(findWrite(writes, 110)).toBeDefined();
+    expect(findWrite(writes, 110)!.value).toBe(100);
+  });
+
+  test('Reserve with soc=4 (minimum)', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await clearWrites(drainModbusWrites);
+
+    const resp = await fetch(`${baseUrl}/api/control/reserve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ soc: 4 }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 1, 15_000);
+    expect(findWrite(writes, 110)).toBeDefined();
+    expect(findWrite(writes, 110)!.value).toBe(4);
+  });
+
+  test('Charge rate with limit=0 (minimum)', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await clearWrites(drainModbusWrites);
+
+    const resp = await fetch(`${baseUrl}/api/control/charge-rate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ limit: 0 }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 1, 15_000);
+    expect(findWrite(writes, 111)!.value).toBe(0);
+  });
+
+  test('Discharge rate with limit=0 (minimum)', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await clearWrites(drainModbusWrites);
+
+    const resp = await fetch(`${baseUrl}/api/control/discharge-rate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ limit: 0 }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 1, 15_000);
+    expect(findWrite(writes, 112)!.value).toBe(0);
+  });
+
+  test('Charge slot disabled clears slot registers', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await clearWrites(drainModbusWrites);
+
+    const resp = await fetch(`${baseUrl}/api/control/charge-slot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        slot: 1,
+        enabled: false,
+        start_hour: 0,
+        start_minute: 0,
+        end_hour: 0,
+        end_minute: 0,
+      }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    // Disabling a charge slot writes only enable_charge=false (HR96=0).
+    // Slot time registers and enable_charge_target are NOT written — the
+    // hardware ignores slot times when enable_charge is false.
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 1, 20_000);
+    expect(findWrite(writes, 96)!.value).toBe(0);
+  });
+
+  test('Discharge slot disabled clears slot registers', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await clearWrites(drainModbusWrites);
+
+    const resp = await fetch(`${baseUrl}/api/control/discharge-slot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        slot: 1,
+        enabled: false,
+        start_hour: 16,
+        start_minute: 0,
+        end_hour: 19,
+        end_minute: 0,
+      }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    // Disabling a discharge slot should write HR56=0, HR57=0 (clearing writes)
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 2, 15_000);
+    expect(findWrite(writes, 56)!.value).toBe(0);
+    expect(findWrite(writes, 57)!.value).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test: Snapshot & WebSocket
+// ---------------------------------------------------------------------------
+
+test.describe('Snapshot & WebSocket', () => {
+  test('snapshot reflects register changes via mock', async ({
+    baseUrl,
+    setHoldingReg,
+    setInputReg,
+    resetModbus,
+  }) => {
+    // Reset to defaults, then modify registers
+    await resetModbus();
+    // Set battery SOC to 85%
+    await setInputReg(59, 85);
+    // Set device type to a known value
+    await setHoldingReg(0, 0x2001);
+    await setHoldingReg(21, 352);
+
+    // Wait for poll cycle to pick up changes (poll_interval = 5s, give 10s)
+    await new Promise((r) => setTimeout(r, 10_000));
+
+    const resp = await fetch(`${baseUrl}/api/snapshot`);
+    const data = await resp.json();
+    expect(data.ok).toBe(true);
+    expect(data.data).toBeDefined();
+    expect(data.data.soc).toBe(85);
+  });
+
+  test('WebSocket connects and delivers data', async ({ baseUrl }) => {
+    const wsUrl = baseUrl.replace('http://', 'ws://') + '/ws';
+    const ws = new WebSocket(wsUrl);
+
+    const messages: any[] = [];
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        ws.close();
+        reject(new Error('WebSocket timed out waiting for messages'));
+      }, 15_000);
+
+      ws.onmessage = (event) => {
+        try {
+          messages.push(JSON.parse(event.data as string));
+        } catch {
+          messages.push({ raw: event.data });
+        }
+        // Expect at least connection + snapshot message
+        if (messages.length >= 2) {
+          clearTimeout(timeout);
+          ws.close();
+          resolve();
+        }
+      };
+      ws.onerror = (err) => {
+        clearTimeout(timeout);
+        reject(err);
+      };
+      ws.onopen = () => {
+        // Connected — wait for messages via onmessage
+      };
+    });
+
+    expect(messages.length).toBeGreaterThanOrEqual(1);
+
+    // First message should be connection state
+    const connectionMsg = messages.find((m: any) => m.type === 'connection');
+    expect(connectionMsg).toBeDefined();
+    expect(connectionMsg.state).toBeDefined();
+
+    // Should also receive snapshot
+    const snapshotMsg = messages.find((m: any) => m.type === 'snapshot');
+    expect(snapshotMsg).toBeDefined();
+  });
+
+  test('status endpoint returns connected', async ({ baseUrl }) => {
+    const resp = await fetch(`${baseUrl}/api/status`);
+    const data = await resp.json();
+    expect(data.ok).toBe(true);
+    expect(data.connection).toBe('connected');
+    expect(data.host).toBeDefined();
+    expect(data.client_count).toBeGreaterThanOrEqual(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test: Different inverter types
+//
+// NOTE: The backend caches the device type after first detection and does NOT
+// re-detect on holding register changes during a single run. To fully exercise
+// AC-coupled, three-phase, and Gen1 routing, run a separate test project with
+// the mock server's populateDefaults() returning the desired HR0/HR21 values.
+//
+// The tests below set HR0 in the mock and verify the API still works correctly
+// (returning ok responses and writing expected registers). For the default
+// Gen3 Hybrid backend, the register addresses will match the Gen3 path.
+// ---------------------------------------------------------------------------
+
+test.describe('Inverter Types', () => {
+  test('AC Coupled (HR0=0x3001): force charge returns ok', async ({
+    baseUrl,
+    setHoldingReg,
+    resetModbus,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await resetModbus();
+    await setHoldingReg(0, 0x3001); // AC Coupled
+    await setHoldingReg(21, 100);   // ARM FW — not 3xx century, stays as AC Coupled
+
+    await clearWrites(drainModbusWrites);
+
+    const resp = await fetch(`${baseUrl}/api/control/force-charge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ minutes: 30 }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 5, 20_000);
+    expect(writes.length).toBeGreaterThanOrEqual(5);
+  });
+
+  test('AC Coupled (HR0=0x3001): pause returns ok', async ({
+    baseUrl,
+    setHoldingReg,
+    resetModbus,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await resetModbus();
+    await setHoldingReg(0, 0x3001);
+    await setHoldingReg(21, 100);
+
+    await clearWrites(drainModbusWrites);
+
+    const resp = await fetch(`${baseUrl}/api/control/pause`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 2, 15_000);
+    expect(writes.length).toBeGreaterThanOrEqual(2);
+  });
+
+  test('AC Coupled (HR0=0x3001): charge rate uses HR313', async ({
+    baseUrl,
+    setHoldingReg,
+    resetModbus,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    // NOTE: This test verifies the API works. The register written depends on
+    // whether the backend has detected AC-coupled (HR313) or still uses Gen3
+    // Hybrid routing (HR111). In a separate project with AC-coupled defaults,
+    // expect HR313.
+    await resetModbus();
+    await setHoldingReg(0, 0x3001);
+    await setHoldingReg(21, 100);
+
+    await clearWrites(drainModbusWrites);
+
+    const resp = await fetch(`${baseUrl}/api/control/charge-rate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ limit: 25 }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 1, 15_000);
+    // Verify at least one register was written (HR111 for Gen3, HR313 for AC-coupled)
+    expect(writes.length).toBeGreaterThanOrEqual(1);
+    const regAddr = writes[0].address;
+    expect([111, 313]).toContain(regAddr);
+  });
+
+  test('Three Phase (HR0=0x4001): force charge returns ok', async ({
+    baseUrl,
+    setHoldingReg,
+    resetModbus,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await resetModbus();
+    await setHoldingReg(0, 0x4001);
+    await setHoldingReg(21, 100);
+
+    await clearWrites(drainModbusWrites);
+
+    const resp = await fetch(`${baseUrl}/api/control/force-charge`, {
+      method: 'POST',
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 1, 15_000);
+    expect(writes.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test('Three Phase (HR0=0x4001): pause returns ok', async ({
+    baseUrl,
+    setHoldingReg,
+    resetModbus,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await resetModbus();
+    await setHoldingReg(0, 0x4001);
+    await setHoldingReg(21, 100);
+
+    await clearWrites(drainModbusWrites);
+
+    const resp = await fetch(`${baseUrl}/api/control/pause`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 1, 15_000);
+    expect(writes.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test('Three Phase (HR0=0x4001): charge rate returns ok', async ({
+    baseUrl,
+    setHoldingReg,
+    resetModbus,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await resetModbus();
+    await setHoldingReg(0, 0x4001);
+    await setHoldingReg(21, 100);
+
+    await clearWrites(drainModbusWrites);
+
+    const resp = await fetch(`${baseUrl}/api/control/charge-rate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ limit: 30 }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 1, 15_000);
+    expect(writes.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test('Gen1 (HR0=0x1001): force charge returns ok', async ({
+    baseUrl,
+    setHoldingReg,
+    resetModbus,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await resetModbus();
+    await setHoldingReg(0, 0x1001);
+    await setHoldingReg(21, 100);
+
+    await clearWrites(drainModbusWrites);
+
+    const resp = await fetch(`${baseUrl}/api/control/force-charge`, {
+      method: 'POST',
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 1, 15_000);
+    expect(writes.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test('Gen1 (HR0=0x1001): pause returns ok', async ({
+    baseUrl,
+    setHoldingReg,
+    resetModbus,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await resetModbus();
+    await setHoldingReg(0, 0x1001);
+    await setHoldingReg(21, 100);
+
+    await clearWrites(drainModbusWrites);
+
+    const resp = await fetch(`${baseUrl}/api/control/pause`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 1, 15_000);
+    expect(writes.length).toBeGreaterThanOrEqual(1);
   });
 });

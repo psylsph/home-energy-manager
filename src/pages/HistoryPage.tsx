@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect } from 'react';
+import { useRef, useState, useEffect, useMemo } from 'react';
 import {
   AreaChart,
   Area,
@@ -285,12 +285,13 @@ function formatWindowLabel(range: HistoryRange, offset: number): string {
 // Single chart component
 // ---------------------------------------------------------------------------
 
-function ChartCard({ chart, data, range, domain, ticks }: {
+function ChartCard({ chart, data, range, domain, ticks, yLock }: {
   chart: ChartDef;
   data: Record<string, TimePoint[]>;
   range: HistoryRange;
   domain: [number, number];
   ticks?: number[];
+  yLock: boolean;
 }) {
   const [mutedSeries, setMutedSeries] = useState<Partial<Record<string, boolean>>>({});
   const allFields = [...chart.fields.map((f) => f.field), ...(chart.requires ?? [])];
@@ -345,6 +346,26 @@ function ChartCard({ chart, data, range, domain, ticks }: {
     return out;
   });
 
+  // When Y-axis lock is enabled, compute a data-driven ceiling and share it
+  // via the store so all range switches use the highest ceiling seen this session.
+  const yLockMax = useInverterStore((state) => state.panelGraphsYLockMax);
+  const setYLockMax = useInverterStore((state) => state.setPanelGraphsYLockMax);
+  const yDomain: [number, number] | undefined = useMemo(() => {
+    if (!yLock) return chart.yDomain;
+    let max = 0;
+    for (const row of seriesData) {
+      for (const name of seriesNames) {
+        const v = row[name];
+        if (v !== null && Math.abs(v) > max) max = Math.abs(v);
+      }
+    }
+    if (max === 0) return chart.yDomain;
+    const ceiling = max <= 10000 ? Math.ceil(max / 5000) * 5000 : Math.ceil(max / 10000) * 10000;
+    const shared = Math.max(yLockMax, ceiling);
+    if (shared > yLockMax) setYLockMax(shared);
+    return chart.unit === '%' ? [0, shared] : [0, shared];
+  }, [chart, seriesData, seriesNames, yLock, yLockMax, setYLockMax]);
+
   return (
     <div className="bg-bg-elevated rounded-xl p-4 relative">
       <div className="flex items-center justify-between mb-3 gap-2">
@@ -381,7 +402,7 @@ function ChartCard({ chart, data, range, domain, ticks }: {
             tick={{ fontSize: 11, style: { fontWeight: 700 } }}
             tickLine={false}
             axisLine={false}
-            domain={chart.yDomain}
+            domain={yDomain ?? chart.yDomain}
             tickFormatter={(v: number) =>
               chart.unit === '£' ? `£${v.toFixed(2)}` : `${Math.round(v)}`
             }
@@ -554,6 +575,7 @@ export default function HistoryPage() {
   const [tab, setTab] = useState<MetricTab>('battery');
   const range = useInverterStore((state) => state.chartRange);
   const setChartRange = useInverterStore((state) => state.setChartRange);
+  const yLock = useInverterStore((state) => state.panelGraphsYLock);
   const [offset, setOffset] = useState(0);
   const lastDateRef = useRef(getHistoryPickerValue(range, offset));
   const [data, setData] = useState<Record<string, TimePoint[]>>({});
@@ -775,6 +797,7 @@ export default function HistoryPage() {
               range={range}
               domain={displayDomain}
               ticks={getHistoryXAxisTicks(range, displayDomain)}
+              yLock={yLock}
             />
           ))}
         </div>

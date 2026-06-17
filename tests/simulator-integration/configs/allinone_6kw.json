@@ -1,0 +1,92 @@
+{
+  "plant": {
+    "timestamp": "2025-06-15T12:00:00",
+    "inverter": {
+      "mode_state": {
+        "effective": "Eco",
+        "source": "User",
+        "scheduled_mode": null
+      },
+      "ac_power_w": 0.0,
+      "export_limit_w": 4320.0,
+      "temperature_celsius": 35.0,
+      "dsp_firmware_version": 1010,
+      "arm_firmware_version": 0,
+      "work_time_hours": 1000.0,
+      "battery_self_heating": false,
+      "manual_battery_heater": false
+    },
+    "battery": {
+      "soc_percent": 60.0,
+      "capacity_kwh": 9.5,
+      "nominal_capacity_kwh": 9.5,
+      "max_charge_kw": 6.0,
+      "max_discharge_kw": 6.0,
+      "min_soc": 4.0,
+      "max_soc": 100.0,
+      "power_kw": 0.0,
+      "charge_efficiency": 0.95,
+      "discharge_efficiency": 0.95,
+      "temperature_celsius": 25.0,
+      "throughput_kwh": 100.0,
+      "soh": 1.0,
+      "cycle_count": 10.0,
+      "voltage_v": 48.0,
+      "current_a": 0.0
+    },
+    "batteries": [
+      {
+        "soc_percent": 60.0,
+        "capacity_kwh": 9.5,
+        "nominal_capacity_kwh": 9.5,
+        "max_charge_kw": 6.0,
+        "max_discharge_kw": 6.0,
+        "min_soc": 4.0,
+        "max_soc": 100.0,
+        "power_kw": 0.0,
+        "charge_efficiency": 0.95,
+        "discharge_efficiency": 0.95,
+        "temperature_celsius": 25.0,
+        "throughput_kwh": 100.0,
+        "soh": 1.0,
+        "cycle_count": 10.0,
+        "voltage_v": 48.0,
+        "current_a": 0.0
+      }
+    ],
+    "solar": {
+      "generation_w": 3000.0,
+      "pv1_w": 2500.0,
+      "pv2_w": 500.0
+    },
+    "load": {
+      "demand_w": 800.0
+    },
+    "grid": {
+      "power_w": -500.0,
+      "connected": true
+    },
+    "active_faults": [],
+    "weather": "clear",
+    "energy_totals": {
+      "grid_import_kwh": 1.5,
+      "grid_export_kwh": 2.5,
+      "battery_charge_kwh": 3.5,
+      "battery_discharge_kwh": 4.5,
+      "solar_generation_kwh": 8.5,
+      "load_consumption_kwh": 6.5,
+      "ac_charge_kwh": 0.7,
+      "inverter_output_kwh": 8.0
+    },
+    "config": {
+      "solar_peak_watts": 6000.0,
+      "latitude": 51.5,
+      "tick_interval_secs": 30,
+      "inverter_type": "AllInOne6",
+      "max_ac_watts": 6000.0,
+      "pv2_peak_watts": 0.0,
+      "ct_meter_installed": true
+    }
+  },
+  "schedule": null
+}

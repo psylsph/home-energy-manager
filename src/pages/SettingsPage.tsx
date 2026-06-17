@@ -46,7 +46,8 @@ export default function SettingsPage() {
     setPanelGraphsEnabled,
     panelGraphsScale,
     setPanelGraphsScale,
-
+    panelGraphsYLock,
+    setPanelGraphsYLock,
   } = useInverterStore();
 
   // Connection fields
@@ -697,6 +698,20 @@ const VALID_INTERVALS = [5, 10, 15, 20];
               ))}
             </div>
           </div>
+
+          {/* Y-axis lock toggle */}
+          <div className="flex items-center justify-between">
+            <span className="text-text-primary text-sm font-sans">Lock Y-axis scale</span>
+            <Toggle
+              checked={panelGraphsYLock}
+              onChange={setPanelGraphsYLock}
+            />
+          </div>
+          {panelGraphsYLock && (
+            <p className="text-text-secondary text-xs font-sans">
+              Charts Y-axis locks to a clean ceiling based on the data maximum instead of auto-fitting
+            </p>
+          )}
         </div>
       </section>
 

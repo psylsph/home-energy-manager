@@ -1347,4 +1347,179 @@ mod tests {
         // standard LV BMS at 0x32.
         assert!(!DeviceType::Unknown(0).is_batteryless());
     }
+
+    // -----------------------------------------------------------------------
+    // supports_gen3_extended on each device type
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn supports_gen3_extended_for_all_device_types() {
+        let extended: &[DeviceType] = &[
+            DeviceType::Gen3Hybrid,
+            DeviceType::AllInOne6kW,
+            DeviceType::AllInOne3_6kW,
+            DeviceType::AllInOne5kW,
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOneHybrid,
+            DeviceType::Gen4Hybrid,
+        ];
+        for dt in extended {
+            assert!(
+                dt.supports_gen3_extended(),
+                "{dt:?} should support gen3 extended"
+            );
+        }
+
+        let non_extended: &[DeviceType] = &[
+            DeviceType::Gen1Hybrid,
+            DeviceType::Gen2Hybrid,
+            DeviceType::PolarHybrid,
+            DeviceType::Gen3PlusHybrid,
+            DeviceType::PvInverter,
+            DeviceType::ACCoupled,
+            DeviceType::ACCoupledMk2,
+            DeviceType::ThreePhase,
+            DeviceType::AioCommercial,
+            DeviceType::ACThreePhase,
+            DeviceType::Ems,
+            DeviceType::EmsCommercial,
+            DeviceType::Gateway,
+        ];
+        for dt in non_extended {
+            assert!(
+                !dt.supports_gen3_extended(),
+                "{dt:?} should NOT support gen3 extended"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // uses_three_phase_schedule_slots on each device type
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn uses_three_phase_schedule_slots_for_all_device_types() {
+        let three_phase: &[DeviceType] = &[
+            DeviceType::ThreePhase,
+            DeviceType::ACThreePhase,
+            DeviceType::AioCommercial,
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOneHybrid,
+            DeviceType::Gateway,
+        ];
+        for dt in three_phase {
+            assert!(
+                dt.uses_three_phase_schedule_slots(),
+                "{dt:?} should use three-phase schedule slots"
+            );
+        }
+
+        let single_phase: &[DeviceType] = &[
+            DeviceType::Gen1Hybrid,
+            DeviceType::Gen2Hybrid,
+            DeviceType::Gen3Hybrid,
+            DeviceType::PolarHybrid,
+            DeviceType::Gen3PlusHybrid,
+            DeviceType::PvInverter,
+            DeviceType::ACCoupled,
+            DeviceType::ACCoupledMk2,
+            DeviceType::AllInOne6kW,
+            DeviceType::AllInOne3_6kW,
+            DeviceType::AllInOne5kW,
+            DeviceType::Gen4Hybrid,
+            DeviceType::Ems,
+            DeviceType::EmsCommercial,
+        ];
+        for dt in single_phase {
+            assert!(
+                !dt.uses_three_phase_schedule_slots(),
+                "{dt:?} should NOT use three-phase schedule slots"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // preferred_read_slave_address on each device type
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn preferred_read_slave_address_for_all_device_types() {
+        let slave31: &[DeviceType] = &[
+            DeviceType::ACCoupled,
+            DeviceType::ACCoupledMk2,
+            DeviceType::Gen1Hybrid,
+        ];
+        for dt in slave31 {
+            assert_eq!(
+                dt.preferred_read_slave_address(),
+                0x31,
+                "{dt:?} should use slave 0x31"
+            );
+        }
+
+        let slave11: &[DeviceType] = &[
+            DeviceType::Gen2Hybrid,
+            DeviceType::Gen3Hybrid,
+            DeviceType::PolarHybrid,
+            DeviceType::Gen3PlusHybrid,
+            DeviceType::PvInverter,
+            DeviceType::ThreePhase,
+            DeviceType::AioCommercial,
+            DeviceType::ACThreePhase,
+            DeviceType::Ems,
+            DeviceType::EmsCommercial,
+            DeviceType::Gateway,
+            DeviceType::AllInOne6kW,
+            DeviceType::AllInOne3_6kW,
+            DeviceType::AllInOne5kW,
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOneHybrid,
+            DeviceType::Gen4Hybrid,
+        ];
+        for dt in slave11 {
+            assert_eq!(
+                dt.preferred_read_slave_address(),
+                0x11,
+                "{dt:?} should use slave 0x11"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // needs_gateway_input_blocks on gateway and non-gateway types
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn needs_gateway_input_blocks_for_all_device_types() {
+        assert!(DeviceType::Gateway.needs_gateway_input_blocks());
+
+        let non_gateway: &[DeviceType] = &[
+            DeviceType::Gen1Hybrid,
+            DeviceType::Gen2Hybrid,
+            DeviceType::Gen3Hybrid,
+            DeviceType::PolarHybrid,
+            DeviceType::Gen3PlusHybrid,
+            DeviceType::PvInverter,
+            DeviceType::ACCoupled,
+            DeviceType::ACCoupledMk2,
+            DeviceType::ThreePhase,
+            DeviceType::AioCommercial,
+            DeviceType::ACThreePhase,
+            DeviceType::Ems,
+            DeviceType::EmsCommercial,
+            DeviceType::AllInOne6kW,
+            DeviceType::AllInOne3_6kW,
+            DeviceType::AllInOne5kW,
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOneHybrid,
+            DeviceType::Gen4Hybrid,
+        ];
+        for dt in non_gateway {
+            assert!(
+                !dt.needs_gateway_input_blocks(),
+                "{dt:?} should NOT need gateway input blocks"
+            );
+        }
+    }
+
 }

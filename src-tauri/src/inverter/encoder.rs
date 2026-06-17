@@ -1436,4 +1436,146 @@ mod tests {
         assert_eq!(writes[0].address, HR_INVERTER_REBOOT);
         assert_eq!(writes[0].value, 100);
     }
+
+    // -----------------------------------------------------------------------
+    // Extended slot N tests (slots 3-10)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extended_charge_slots_3_to_10_encode() {
+        for slot in 3u8..=10u8 {
+            let cmd = ControlCommand::SetChargeSlotN {
+                slot,
+                start: 200,
+                end: 500,
+            };
+            let writes = cmd.encode().unwrap();
+            assert_eq!(writes.len(), 2, "slot {} should produce 2 writes", slot);
+            assert!(writes[0].value == 200 && writes[1].value == 500);
+        }
+    }
+
+    #[test]
+    fn extended_discharge_slots_3_to_10_encode() {
+        for slot in 3u8..=10u8 {
+            let cmd = ControlCommand::SetDischargeSlotN {
+                slot,
+                start: 1600,
+                end: 1900,
+            };
+            let writes = cmd.encode().unwrap();
+            assert_eq!(writes.len(), 2, "slot {} should produce 2 writes", slot);
+            assert!(writes[0].value == 1600 && writes[1].value == 1900);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // SetBatterySocReserve vs SetThreePhaseBatterySocReserve
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn single_phase_soc_reserve_uses_hr_110() {
+        let writes = ControlCommand::SetBatterySocReserve { reserve: 25 }
+            .encode()
+            .unwrap();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].address, HR_BATTERY_SOC_RESERVE);
+        assert_eq!(writes[0].value, 25);
+    }
+
+    #[test]
+    fn three_phase_soc_reserve_uses_hr_1109() {
+        let writes = ControlCommand::SetThreePhaseBatterySocReserve { reserve: 25 }
+            .encode()
+            .unwrap();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].address, HR_3PH_BATTERY_SOC_RESERVE);
+        assert_eq!(writes[0].value, 25);
+    }
+
+    // -----------------------------------------------------------------------
+    // SetAcChargeLimit and SetAcDischargeLimit validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn set_ac_charge_limit_at_boundaries() {
+        // Min is 1
+        assert!(ControlCommand::SetAcChargeLimit { limit: 1 }
+            .encode()
+            .is_ok());
+        assert!(ControlCommand::SetAcChargeLimit { limit: 100 }
+            .encode()
+            .is_ok());
+    }
+
+    #[test]
+    fn set_ac_discharge_limit_at_boundaries() {
+        assert!(ControlCommand::SetAcDischargeLimit { limit: 1 }
+            .encode()
+            .is_ok());
+        assert!(ControlCommand::SetAcDischargeLimit { limit: 100 }
+            .encode()
+            .is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // ThreePhaseForceCharge and ThreePhaseForceDischarge additional coverage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn three_phase_force_charge_at_min_soc() {
+        let writes = ControlCommand::ThreePhaseForceCharge { target_soc: 4 }
+            .encode()
+            .unwrap();
+        assert_eq!(writes.len(), 5);
+        assert_eq!(writes[4].address, HR_3PH_CHARGE_TARGET_SOC);
+        assert_eq!(writes[4].value, 4);
+    }
+
+    #[test]
+    fn three_phase_force_charge_at_max_soc() {
+        let writes = ControlCommand::ThreePhaseForceCharge { target_soc: 100 }
+            .encode()
+            .unwrap();
+        assert_eq!(writes[4].address, HR_3PH_CHARGE_TARGET_SOC);
+        assert_eq!(writes[4].value, 100);
+    }
+
+    #[test]
+    fn force_charge_at_min_soc() {
+        let writes = ControlCommand::ForceCharge { target_soc: 4 }
+            .encode()
+            .unwrap();
+        assert_eq!(writes[4].value, 4);
+    }
+
+    #[test]
+    fn force_discharge_does_not_write_charge_enable() {
+        let writes = ControlCommand::ForceDischarge.encode().unwrap();
+        // Must clear HR_ENABLE_CHARGE (value 0) and HR_ENABLE_CHARGE_TARGET (value 0).
+        let charge_enable = writes
+            .iter()
+            .find(|w| w.address == HR_ENABLE_CHARGE)
+            .expect("ForceDischarge must include HR_ENABLE_CHARGE");
+        assert_eq!(charge_enable.value, 0, "ForceDischarge must clear charge enable");
+        let charge_target = writes
+            .iter()
+            .find(|w| w.address == HR_ENABLE_CHARGE_TARGET)
+            .expect("ForceDischarge must include HR_ENABLE_CHARGE_TARGET");
+        assert_eq!(charge_target.value, 0, "ForceDischarge must clear charge target");
+    }
+
+    #[test]
+    fn pause_battery_disables_charge_and_discharge() {
+        let writes = ControlCommand::PauseBattery.encode().unwrap();
+        assert_eq!(writes.len(), 2);
+        let charge = writes.iter().find(|w| w.address == HR_ENABLE_CHARGE).unwrap();
+        assert_eq!(charge.value, 0);
+        let discharge = writes
+            .iter()
+            .find(|w| w.address == HR_ENABLE_DISCHARGE)
+            .unwrap();
+        assert_eq!(discharge.value, 0);
+    }
+
 }
