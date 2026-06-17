@@ -1,7 +1,7 @@
 //! Quick diagnostic: connect to inverter and dump raw registers.
 
-use app_lib::modbus::client::ModbusClient;
-use app_lib::modbus::registers::STANDARD_POLL_BLOCKS;
+use givenergy_local::modbus::client::ModbusClient;
+use givenergy_local::modbus::registers::STANDARD_POLL_BLOCKS;
 
 #[tokio::main]
 async fn main() {
@@ -22,8 +22,8 @@ async fn main() {
 
     for block in STANDARD_POLL_BLOCKS {
         let reg_type = match block.register_type {
-            app_lib::modbus::registers::RegisterType::Input => "Input",
-            app_lib::modbus::registers::RegisterType::Holding => "Holding",
+            givenergy_local::modbus::registers::RegisterType::Input => "Input",
+            givenergy_local::modbus::registers::RegisterType::Holding => "Holding",
         };
         println!(
             "\n=== {} block: {} start={} count={} ===",
@@ -31,11 +31,11 @@ async fn main() {
         );
 
         let rt = match block.register_type {
-            app_lib::modbus::registers::RegisterType::Input => {
-                app_lib::modbus::framer::RegisterType::Input
+            givenergy_local::modbus::registers::RegisterType::Input => {
+                givenergy_local::modbus::framer::RegisterType::Input
             }
-            app_lib::modbus::registers::RegisterType::Holding => {
-                app_lib::modbus::framer::RegisterType::Holding
+            givenergy_local::modbus::registers::RegisterType::Holding => {
+                givenergy_local::modbus::framer::RegisterType::Holding
             }
         };
 
