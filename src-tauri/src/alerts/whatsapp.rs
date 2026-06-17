@@ -1,16 +1,13 @@
-//! WhatsApp Web client using whatsapp-rust (native Rust, QR pairing).
-//!
-//! Generates a QR code for the user to scan with WhatsApp's "Link a Device"
-//! feature. Once paired, sends alert messages via E2E-encrypted WebSocket.
-//!
-//! Uses an in-memory backend (no SQLite) because whatsapp-rust-sqlite-storage
-//! pulls in diesel+r2d2 which conflicts with rusqlite's bundled SQLite,
-//! causing disk I/O errors that corrupt Signal Protocol sessions. The
-//! trade-off is that pairing does not persist across restarts.
+//! Uses a rusqlite-backed persistent store so pairing and Signal sessions
+//! survive restarts without needing the upstream whatsapp-rust-sqlite-storage
+//! crate (which pulls in diesel+r2d2 and conflicts with the project's
+//! rusqlite). The database lives at `~/.givenergy-local/whatsapp-store.db`.
 
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use super::whatsapp_store::SqliteBackend;
 use whatsapp_rust::bot::Bot;
 use whatsapp_rust::store::traits::Backend;
 use whatsapp_rust::types::events::Event;
@@ -18,7 +15,6 @@ use whatsapp_rust::waproto::whatsapp as wa;
 use whatsapp_rust::{Client, Jid, TokioRuntime};
 use whatsapp_rust_tokio_transport::TokioWebSocketTransportFactory;
 use whatsapp_rust_ureq_http_client::UreqHttpClient;
-use wacore::store::InMemoryBackend;
 
 /// Current WhatsApp pairing state, surfaced to the UI.
 #[derive(Debug, Clone, PartialEq)]
@@ -34,14 +30,16 @@ pub struct WhatsAppState {
     pub pairing_state: Arc<Mutex<PairingState>>,
     client: Arc<Mutex<Option<Arc<Client>>>>,
     paired_jid: Arc<Mutex<Option<Jid>>>,
+    db_path: Option<std::path::PathBuf>,
 }
 
 impl WhatsAppState {
-    pub fn new() -> Self {
+    pub fn new(db_path: Option<std::path::PathBuf>) -> Self {
         Self {
             pairing_state: Arc::new(Mutex::new(PairingState::Idle)),
             client: Arc::new(Mutex::new(None)),
             paired_jid: Arc::new(Mutex::new(None)),
+            db_path,
         }
     }
 
@@ -54,6 +52,7 @@ impl WhatsAppState {
         let pairing_state = self.pairing_state.clone();
         let client_slot = self.client.clone();
         let paired_jid = self.paired_jid.clone();
+        let db_path = self.db_path.clone();
 
         tokio::spawn(async move {
             loop {
@@ -63,7 +62,17 @@ impl WhatsAppState {
 
                 tracing::info!("WhatsApp: starting bot (QR pairing)");
 
-                let backend: Arc<dyn Backend> = Arc::new(InMemoryBackend::new());
+                let backend: Arc<dyn Backend> = if let Some(ref path) = db_path {
+                    match crate::alerts::whatsapp_store::SqliteBackend::open(path) {
+                        Ok(b) => Arc::new(b),
+                        Err(e) => {
+                            tracing::warn!("WhatsApp: failed to open store at {path:?}: {e}, falling back to in-memory");
+                            Arc::new(wacore::store::InMemoryBackend::new())
+                        }
+                    }
+                } else {
+                    Arc::new(wacore::store::InMemoryBackend::new())
+                };
 
                 let bot = Bot::builder()
                     .with_backend(backend)
@@ -204,6 +213,6 @@ impl WhatsAppState {
 
 impl Default for WhatsAppState {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }

@@ -6,17 +6,24 @@ authors = ["Stuart Harding"]
 edition = "2021"
 
 [dependencies]
-serde_json = "1.0"
+# Data serialization
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# WhatsApp store backend
+hex = "0.4"
+async-trait = "0.1"
+bytes = "1"
+
 log = "0.4.31"
 tauri = { version = "2.11.2", features = ["image-png"] }
 tauri-plugin-log = "2"
 tauri-plugin-opener = "2"
 
 # WhatsApp Web client (native Rust, QR pairing)
-# WhatsApp Web client (native Rust, QR pairing)
-# In-memory backend only — sqlite-storage uses diesel+r2d2 which conflicts
-# with rusqlite (disk I/O errors). Session is ephemeral; re-pair on restart.
+# Uses a custom rusqlite-backed store (whatsapp_store.rs) for persistence.
+# The upstream sqlite-storage feature pulls in diesel+r2d2 which conflicts
+# with rusqlite (disk I/O errors). Custom store uses rusqlite directly.
 whatsapp-rust = { version = "0.6", default-features = false, features = ["tokio-runtime", "tokio-transport", "ureq-client", "signal"] }
 whatsapp-rust-tokio-transport = "0.6"
 whatsapp-rust-ureq-http-client = "0.6"

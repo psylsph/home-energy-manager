@@ -979,13 +979,8 @@ const VALID_INTERVALS = [5, 10, 15, 20];
             {/* WhatsApp */}
             <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
               <h3 className="text-text-primary text-sm font-sans font-medium">WhatsApp</h3>
-              <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
-                <p className="text-amber-400 text-xs font-sans font-medium">
-                  ⚠️ You must re-pair WhatsApp after every app restart. The session is not persisted yet.
-                </p>
-              </div>
               <p className="text-text-secondary text-xs font-sans">
-                Pair your WhatsApp account to send alerts. On your phone, open WhatsApp Settings, tap "Linked Devices", then "Link a Device" and scan the QR code below. Then enter the phone number that should <strong>receive</strong> the alerts — this must be a different number from the linked account (you cannot message yourself).
+                Pair your WhatsApp account to send alerts. On your phone, open WhatsApp Settings, tap "Linked Devices", then "Link a Device" and scan the QR code below. Then enter the phone number that should <strong>receive</strong> the alerts — this must be a different number from the linked account (you cannot message yourself). Pairing persists across restarts.
               </p>
               <div className="flex flex-col gap-2">
                 <label className="flex flex-col gap-1">
@@ -1007,55 +1002,43 @@ const VALID_INTERVALS = [5, 10, 15, 20];
             {/* Battery temperature & SOC thresholds */}
             <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
               <h3 className="text-text-primary text-sm font-sans font-medium">Battery Temperature &amp; SOC</h3>
-              <div className="grid grid-cols-2 gap-4">
-                {/* Temperature pair */}
-                <div className="border border-white/5 rounded-lg p-3 flex flex-col gap-2">
-                  <span className="text-text-secondary text-xs font-sans font-medium">Temperature (°C)</span>
-                  <div className="flex items-center gap-2">
-                    <label className="flex flex-col gap-1">
-                      <span className="text-text-secondary text-xs font-sans">below (0 = off)</span>
-                      <input
-                        type="number" step="0.5" min="0" max="50"
-                        value={alertsConfig.batt_temp_min}
-                        onChange={(e) => setAlertsConfig((p) => ({ ...p, batt_temp_min: Number(e.target.value) }))}
-                        className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-24 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                      />
-                    </label>
-                    <label className="flex flex-col gap-1">
-                      <span className="text-text-secondary text-xs font-sans">above (0 = off)</span>
-                      <input
-                        type="number" step="0.5" min="0" max="80"
-                        value={alertsConfig.batt_temp_max}
-                        onChange={(e) => setAlertsConfig((p) => ({ ...p, batt_temp_max: Number(e.target.value) }))}
-                        className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-24 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                      />
-                    </label>
-                  </div>
-                </div>
-                {/* SOC pair */}
-                <div className="border border-white/5 rounded-lg p-3 flex flex-col gap-2">
-                  <span className="text-text-secondary text-xs font-sans font-medium">SOC (%)</span>
-                  <div className="flex items-center gap-2">
-                    <label className="flex flex-col gap-1">
-                      <span className="text-text-secondary text-xs font-sans">below</span>
-                      <input
-                        type="number" min="0" max="100"
-                        value={alertsConfig.soc_min}
-                        onChange={(e) => setAlertsConfig((p) => ({ ...p, soc_min: Number(e.target.value) }))}
-                        className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-24 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                      />
-                    </label>
-                    <label className="flex flex-col gap-1">
-                      <span className="text-text-secondary text-xs font-sans">above (100 = off)</span>
-                      <input
-                        type="number" min="0" max="100"
-                        value={alertsConfig.soc_max}
-                        onChange={(e) => setAlertsConfig((p) => ({ ...p, soc_max: Number(e.target.value) }))}
-                        className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-24 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                      />
-                    </label>
-                  </div>
-                </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <label className="flex flex-col gap-1">
+                  <span className="text-text-secondary text-xs font-sans">Temp below °C</span>
+                  <input
+                    type="number" step="0.5" min="0" max="50"
+                    value={alertsConfig.batt_temp_min}
+                    onChange={(e) => setAlertsConfig((p) => ({ ...p, batt_temp_min: Number(e.target.value) }))}
+                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-text-secondary text-xs font-sans">Temp above °C</span>
+                  <input
+                    type="number" step="0.5" min="0" max="80"
+                    value={alertsConfig.batt_temp_max}
+                    onChange={(e) => setAlertsConfig((p) => ({ ...p, batt_temp_max: Number(e.target.value) }))}
+                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-text-secondary text-xs font-sans">SOC below %</span>
+                  <input
+                    type="number" min="0" max="100"
+                    value={alertsConfig.soc_min}
+                    onChange={(e) => setAlertsConfig((p) => ({ ...p, soc_min: Number(e.target.value) }))}
+                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-text-secondary text-xs font-sans">SOC above %</span>
+                  <input
+                    type="number" min="0" max="100"
+                    value={alertsConfig.soc_max}
+                    onChange={(e) => setAlertsConfig((p) => ({ ...p, soc_max: Number(e.target.value) }))}
+                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                  />
+                </label>
               </div>
             </div>
 
@@ -1092,18 +1075,18 @@ const VALID_INTERVALS = [5, 10, 15, 20];
               </div>
             </div>
 
-            <div className="flex items-center gap-3">
+            <div className="flex flex-col sm:flex-row gap-2">
               <button
                 onClick={handleAlertsSave}
                 disabled={alertsSaving}
-                className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 transition-opacity"
+                className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-4 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 transition-opacity sm:w-auto"
               >
                 {alertsSaving ? 'Saving…' : 'Save Notification Settings'}
               </button>
               <button
                 onClick={handleAlertsTest}
                 disabled={alertsTesting || !alertsConfig.telegram_bot_token || !alertsConfig.telegram_chat_id}
-                className="bg-bg-elevated text-text-primary font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-80 disabled:opacity-40 transition-opacity border border-white/5"
+                className="bg-bg-elevated text-text-primary font-sans font-semibold text-sm px-4 py-2 rounded-lg hover:opacity-80 disabled:opacity-40 transition-opacity border border-white/5 sm:w-auto"
               >
                 {alertsTesting ? 'Sending…' : 'Send Test Notification'}
               </button>

@@ -7,6 +7,7 @@
 
 pub mod report;
 pub mod whatsapp;
+pub mod whatsapp_store;
 
 use std::collections::HashMap;
 use std::time::Instant;

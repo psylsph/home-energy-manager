@@ -257,7 +257,9 @@ impl AppState {
                 crate::settings::Settings::load().alerts_config,
             )),
             alert_debounce: Arc::new(Mutex::new(crate::alerts::AlertDebounce::new())),
-            whatsapp: crate::alerts::whatsapp::WhatsAppState::new(),
+            whatsapp: crate::alerts::whatsapp::WhatsAppState::new(Some(
+                crate::settings::Settings::settings_dir().join("whatsapp-store.db"),
+            )),
             last_report_date: Arc::new(Mutex::new(None)),
             latest_evc: Arc::new(Mutex::new(None)),
         }
@@ -300,7 +302,9 @@ impl AppState {
                 crate::settings::Settings::load().alerts_config,
             )),
             alert_debounce: Arc::new(Mutex::new(crate::alerts::AlertDebounce::new())),
-            whatsapp: crate::alerts::whatsapp::WhatsAppState::new(),
+            whatsapp: crate::alerts::whatsapp::WhatsAppState::new(Some(
+                crate::settings::Settings::settings_dir().join("whatsapp-store.db"),
+            )),
             last_report_date: Arc::new(Mutex::new(None)),
             latest_evc: Arc::new(Mutex::new(None)),
         }
