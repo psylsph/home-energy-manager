@@ -56,9 +56,9 @@ jobs:
             rpm
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --locked
-        env:
-          RUSTC_BOOTSTRAP: 1
+        run: |
+          curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          cargo binstall --no-confirm tauri-cli
 
       - name: Build frontend
         run: npm run build
@@ -291,7 +291,6 @@ jobs:
             | `Linux-RPM-x86_64-...rpm` | **Linux** — RHEL/Fedora/openSUSE (x86_64) |
             | `Linux-RPM-ARM64-...rpm` | **Linux** — RHEL/Fedora/openSUSE (ARM64) |
             | `Android-Chromebook-...apk` | **Chromebook** — Android APK (ARM64 & x86_64) |
-            | — | AppImage temporarily disabled — GitHub asset returns 504 |
 
             > **Windows security notice**: Windows SmartScreen may warn that the MSI is from an unknown publisher, and Microsoft Defender has recently false-flagged the unsigned Windows installer as `Trojan:Script/Wacatac.C!ml` on some systems. VirusTotal scans are clean and the exact installer has been submitted to Microsoft as a false positive. Future Windows builds will use SignPath Foundation code signing as required.
 
@@ -337,9 +336,9 @@ jobs:
           echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> $GITHUB_ENV
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --locked
-        env:
-          RUSTC_BOOTSTRAP: 1
+        run: |
+          curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          cargo binstall --no-confirm tauri-cli
 
       - name: Initialize Android project
         run: cargo tauri android init --ci
