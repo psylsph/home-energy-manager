@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Battery SOC chart showing 0–5000 scale instead of 0–100** — the
+  shared Y-axis lock feature (added in 0.28.5) was applied to *every* history
+  chart, overriding the SOC chart's fixed `[0, 100]` domain with a shared
+  ceiling computed from the largest value across all charts (e.g. battery
+  power in watts ≈ 5000). The lock is now scoped to the Solar PV chart only,
+  matching the documented intent; SOC stays fixed at `[0, 100]` and all other
+  history charts fall back to Recharts auto-scaling.
+
 ## [0.28.6] - 2026-06-17
 
 ### Fixed

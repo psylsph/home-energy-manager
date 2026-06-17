@@ -295,13 +295,12 @@ function formatWindowLabel(range: HistoryRange, offset: number): string {
 // Single chart component
 // ---------------------------------------------------------------------------
 
-function ChartCard({ chart, data, range, domain, ticks, yLock }: {
+function ChartCard({ chart, data, range, domain, ticks }: {
   chart: ChartDef;
   data: Record<string, TimePoint[]>;
   range: HistoryRange;
   domain: [number, number];
   ticks?: number[];
-  yLock: boolean;
 }) {
   const [mutedSeries, setMutedSeries] = useState<Partial<Record<string, boolean>>>({});
   const allFields = [...chart.fields.map((f) => f.field), ...(chart.requires ?? [])];
@@ -356,26 +355,10 @@ function ChartCard({ chart, data, range, domain, ticks, yLock }: {
     return out;
   });
 
-  // When Y-axis lock is enabled, compute a data-driven ceiling and share it
-  // via the store so all range switches use the highest ceiling seen this session.
-  const yLockMax = useInverterStore((state) => state.panelGraphsYLockMax);
-  const setYLockMax = useInverterStore((state) => state.setPanelGraphsYLockMax);
-  let yDomain: [number, number] | undefined = chart.yDomain;
-  if (yLock) {
-    let max = 0;
-    for (const row of seriesData) {
-      for (const name of seriesNames) {
-        const v = row[name];
-        if (v !== null && Math.abs(v) > max) max = Math.abs(v);
-      }
-    }
-    if (max > 0) {
-      const ceiling = max <= 10000 ? Math.ceil(max / 5000) * 5000 : Math.ceil(max / 10000) * 10000;
-      const shared = Math.max(yLockMax, ceiling);
-      if (shared > yLockMax) setYLockMax(shared);
-      yDomain = chart.unit === '%' ? [0, shared] : [0, shared];
-    }
-  }
+  // Charts use their declared yDomain (e.g. SOC fixed at 0-100) or Recharts
+  // auto-scaling otherwise. The shared Y-axis lock feature is scoped to the
+  // Solar power chart on the dashboard only (see SolarPowerChart.tsx).
+  const yDomain: [number, number] | undefined = chart.yDomain;
 
   return (
     <div className="bg-bg-elevated rounded-xl p-4 relative">
@@ -586,7 +569,6 @@ export default function HistoryPage() {
   const [tab, setTab] = useState<MetricTab>('battery');
   const range = useInverterStore((state) => state.chartRange);
   const setChartRange = useInverterStore((state) => state.setChartRange);
-  const yLock = useInverterStore((state) => state.panelGraphsYLock);
   const [offset, setOffset] = useState(0);
   const lastDateRef = useRef(getHistoryPickerValue(range, offset));
   const [data, setData] = useState<Record<string, TimePoint[]>>({});
@@ -808,7 +790,6 @@ export default function HistoryPage() {
               range={range}
               domain={displayDomain}
               ticks={getHistoryXAxisTicks(range, displayDomain)}
-              yLock={yLock}
             />
           ))}
         </div>
