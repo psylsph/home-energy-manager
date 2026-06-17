@@ -19,7 +19,7 @@ function WhatsAppQrCode() {
     let cancelled = false;
     import('qrcode').then((qr) => {
       qr.toString(
-        'https://wa.me/34603212597?text=I%20allow%20callmebot%20to%20send%20me%20messages',
+        'https://wa.me/34684770005?text=I%20allow%20callmebot%20to%20call%20me',
         { type: 'svg', width: 180, margin: 1, color: { dark: '#4ade80', light: '#1a1a2e' } },
       ).then((svg) => {
         if (!cancelled) setDataUrl('data:image/svg+xml;utf8,' + encodeURIComponent(svg));
@@ -926,7 +926,7 @@ const VALID_INTERVALS = [5, 10, 15, 20];
             <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
               <h3 className="text-text-primary text-sm font-sans font-medium">WhatsApp (CallMeBot)</h3>
               <p className="text-text-secondary text-xs font-sans">
-                Scan the QR code below with your phone to open WhatsApp and pre-fill the authorisation message. Just tap send, then enter the API key you receive.
+                Scan the QR code below with your phone to open WhatsApp and pre-fill the authorisation message. Just tap send, then enter the API key you receive. If the QR doesn't work, add +34 684 770 005 to your contacts and send "I allow callmebot to call me" to that number.
               </p>
               <div className="flex justify-center my-2">
                 <WhatsAppQrCode />

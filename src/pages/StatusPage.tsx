@@ -50,6 +50,8 @@ export default function StatusPage() {
         </section>
       )}
 
+      <ColdBatteryWarning />
+
       {/* Energy flow diagram — full width card */}
       <section className="bg-bg-surface rounded-2xl p-2">
         <EnergyFlowDiagram
@@ -60,8 +62,6 @@ export default function StatusPage() {
           showEvc={!!evcHost}
         />
       </section>
-
-      <ColdBatteryWarning />
 
       {/* Battery + Summary side by side on md+ */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-stretch">
