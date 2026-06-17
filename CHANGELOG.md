@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.9] - 2026-06-17
+
+### Fixed
+
+- **CI: tauri-cli install fails on latest nightly** — the `rustix` crate (a
+  transitive dependency of tauri-cli) uses internal `rustc_layout_scalar_valid_*`
+  attributes that newer nightly Rust rejects. Set `RUSTC_BOOTSTRAP=1` during
+  `cargo install tauri-cli` to bypass the feature gate check.
+
+### Changed
+
+- **CI: Android APK now builds in parallel** — removed `needs: [build]`
+  from the `build-android` job so it starts alongside desktop targets instead
+  of waiting for them all to complete first.
+
 ## [0.28.8] - 2026-06-17
 
 ### Added
