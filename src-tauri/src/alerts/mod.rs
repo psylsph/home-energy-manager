@@ -216,6 +216,33 @@ pub fn build_alert_message(snapshot: &InverterSnapshot, alerts: &[AlertType]) ->
     msg
 }
 
+/// Build a "problem cleared" notification message.
+pub fn build_cleared_message(snapshot: &InverterSnapshot, alerts: &[AlertType]) -> String {
+    let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let mut msg = format!("✅ HEM All Clear — {}\n", time);
+    msg.push_str("━━━━━━━━━━━━━━━━━━━━━━━━\n");
+
+    msg.push_str("Resolved:\n");
+    for alert in alerts {
+        msg.push_str(&format!("  ▪ {} — back to normal\n", alert.human_name()));
+    }
+
+    msg.push_str("\nSystem Status:\n");
+    msg.push_str(&format!(
+        "  Battery temp: {:.1}°C\n  Battery SOC: {}%\n  Solar: {} W\n  Grid: {} W\n  Home: {} W\n  Battery Pwr: {} W\n  Grid Online: {}\n  Inverter temp: {:.1}°C\n",
+        snapshot.battery_temperature,
+        snapshot.soc,
+        snapshot.solar_power,
+        snapshot.grid_power,
+        snapshot.home_power,
+        snapshot.battery_power,
+        if snapshot.grid_online { "Yes" } else { "No" },
+        snapshot.inverter_temperature,
+    ));
+
+    msg
+}
+
 // ---------------------------------------------------------------------------
 // Telegram sender
 // ---------------------------------------------------------------------------

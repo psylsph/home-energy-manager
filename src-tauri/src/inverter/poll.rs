@@ -1984,8 +1984,54 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             })
                                             .copied()
                                             .collect();
+                                        // Detect alerts that were previously active but have
+                                        // now returned to normal.
+                                        let cleared = debounce.extract_cleared(&triggered);
                                         let _cooldown = config.cooldown_minutes;
                                         drop(debounce);
+
+                                        // Send "problem cleared" notifications
+                                        if !cleared.is_empty() {
+                                            let text = crate::alerts::build_cleared_message(
+                                                &snapshot, &cleared,
+                                            );
+                                            let token = config.telegram_bot_token.clone();
+                                            let chat_id = config.telegram_chat_id.clone();
+                                            let wa_text = text.clone();
+                                            let cleared_names = cleared
+                                                .iter()
+                                                .map(|a| a.human_name())
+                                                .collect::<Vec<_>>()
+                                                .join(", ");
+
+                                            tokio::task::spawn_blocking(move || {
+                                                match crate::alerts::send_telegram_message(
+                                                    &token,
+                                                    &chat_id,
+                                                    &text,
+                                                ) {
+                                                    Ok(()) => tracing::info!(
+                                                        "Cleared alert sent: {cleared_names}"
+                                                    ),
+                                                    Err(e) => tracing::warn!(
+                                                        "Failed to send cleared alert: {e}"
+                                                    ),
+                                                }
+                                            });
+
+                                            let wa_recipient = config.whatsapp_recipient.clone();
+                                            let wa_state = state.clone();
+                                            tokio::task::spawn(async move {
+                                                if wa_recipient.is_empty() {
+                                                    return;
+                                                }
+                                                if let Err(e) = wa_state.whatsapp.send_message(&wa_recipient, &wa_text).await {
+                                                    tracing::warn!("WhatsApp cleared alert failed: {e}");
+                                                } else {
+                                                    tracing::info!("WhatsApp cleared alert sent");
+                                                }
+                                            });
+                                        }
 
                                         if !to_send.is_empty() {
                                             let text = crate::alerts::build_alert_message(
