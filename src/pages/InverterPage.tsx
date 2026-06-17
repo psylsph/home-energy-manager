@@ -165,7 +165,7 @@ export default function InverterPage() {
           <span className="text-text-primary font-mono text-right">{formatVoltage(s.pv1_voltage)}</span>
           <span className="text-text-secondary">PV1 Current</span>
           <span className="text-text-primary font-mono text-right">{formatCurrent(s.pv1_current)}</span>
-          {(s.pv2_voltage > 0 || s.pv2_power > 0) && (
+          {(s.pv2_power > 0 || s.pv2_current > 0) && (
             <>
               <span className="text-text-secondary">PV2 Power</span>
               <span className="text-text-primary font-mono text-right">{formatPower(s.pv2_power)}</span>

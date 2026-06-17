@@ -128,13 +128,13 @@ export default function SolarPowerChart() {
   const hasData = rows.length > 0;
   // Locked Y-axis ceiling: compute from data, share via store so all range
   // switches use the highest ceiling seen this session.
-  const yDomain: [number, number] | undefined = useMemo(() => {
-    if (!yLock || rows.length === 0) return undefined;
+  let yDomain: [number, number] | undefined;
+  if (yLock && rows.length > 0) {
     const ceiling = computeYMax(rows, hasPv2);
     const shared = Math.max(yLockMax, ceiling);
     if (shared > yLockMax) setYLockMax(shared);
-    return [0, shared];
-  }, [rows, hasPv2, yLock, yLockMax, setYLockMax]);
+    yDomain = [0, shared];
+  }
 
   return (
     <section className="bg-bg-surface rounded-2xl p-5">

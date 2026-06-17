@@ -28,7 +28,7 @@ export default function SolarPage() {
     );
   }
 
-  const hasPv2 = snapshot.pv2_voltage > 0 || snapshot.pv2_power > 0;
+  const hasPv2 = snapshot.pv2_power > 0 || snapshot.pv2_current > 0;
 
   return (
     <div className="flex flex-col gap-4 max-w-4xl mx-auto">

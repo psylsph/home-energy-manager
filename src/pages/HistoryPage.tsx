@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect, useMemo } from 'react';
+import { useRef, useState, useEffect } from 'react';
 import {
   AreaChart,
   Area,
@@ -193,9 +193,19 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
                 // Even for 1-minute buckets this is generous.
                 // This is the last line of defense against corrupted counter
                 // values that slip through the backend sanitizer.
-                if (delta > 2) delta = 0;
+                if (delta > 2) {
+                  // Spike detected: zero the delta AND don't update prev,
+                  // so the corrupted cumulative value doesn't permanently
+                  // inflate the baseline. The next real reading will produce
+                  // a catch-up delta (capped at 2), then prev re-syncs.
+                  delta = 0;
+                } else {
+                  // Normal delta — advance the baseline.
+                  prev = raw;
+                }
+              } else if (raw != null) {
+                prev = raw;
               }
-              if (raw != null) prev = raw;
               const rate = isOffPeak(row.t, importTariffCfg.off_peak_start, importTariffCfg.off_peak_end)
                 ? importTariffCfg.off_peak_rate : importTariffCfg.peak_rate;
               acc += delta * rate;
@@ -350,8 +360,8 @@ function ChartCard({ chart, data, range, domain, ticks, yLock }: {
   // via the store so all range switches use the highest ceiling seen this session.
   const yLockMax = useInverterStore((state) => state.panelGraphsYLockMax);
   const setYLockMax = useInverterStore((state) => state.setPanelGraphsYLockMax);
-  const yDomain: [number, number] | undefined = useMemo(() => {
-    if (!yLock) return chart.yDomain;
+  let yDomain: [number, number] | undefined = chart.yDomain;
+  if (yLock) {
     let max = 0;
     for (const row of seriesData) {
       for (const name of seriesNames) {
@@ -359,12 +369,13 @@ function ChartCard({ chart, data, range, domain, ticks, yLock }: {
         if (v !== null && Math.abs(v) > max) max = Math.abs(v);
       }
     }
-    if (max === 0) return chart.yDomain;
-    const ceiling = max <= 10000 ? Math.ceil(max / 5000) * 5000 : Math.ceil(max / 10000) * 10000;
-    const shared = Math.max(yLockMax, ceiling);
-    if (shared > yLockMax) setYLockMax(shared);
-    return chart.unit === '%' ? [0, shared] : [0, shared];
-  }, [chart, seriesData, seriesNames, yLock, yLockMax, setYLockMax]);
+    if (max > 0) {
+      const ceiling = max <= 10000 ? Math.ceil(max / 5000) * 5000 : Math.ceil(max / 10000) * 10000;
+      const shared = Math.max(yLockMax, ceiling);
+      if (shared > yLockMax) setYLockMax(shared);
+      yDomain = chart.unit === '%' ? [0, shared] : [0, shared];
+    }
+  }
 
   return (
     <div className="bg-bg-elevated rounded-xl p-4 relative">
