@@ -13,7 +13,23 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
   );
 }
 
-
+function WhatsAppQrCode() {
+  const [dataUrl, setDataUrl] = useState('');
+  useEffect(() => {
+    let cancelled = false;
+    import('qrcode').then((qr) => {
+      qr.toString(
+        'https://wa.me/34603212597?text=I%20allow%20callmebot%20to%20send%20me%20messages',
+        { type: 'svg', width: 180, margin: 1, color: { dark: '#4ade80', light: '#1a1a2e' } },
+      ).then((svg) => {
+        if (!cancelled) setDataUrl('data:image/svg+xml;utf8,' + encodeURIComponent(svg));
+      });
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  if (!dataUrl) return <div className="w-[180px] h-[180px] bg-bg-elevated rounded-lg animate-pulse" />;
+  return <img src={dataUrl} alt="WhatsApp QR code" className="w-[180px] h-[180px] rounded-lg" />;
+}
 
 export default function SettingsPage() {
   const {
@@ -910,10 +926,11 @@ const VALID_INTERVALS = [5, 10, 15, 20];
             <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
               <h3 className="text-text-primary text-sm font-sans font-medium">WhatsApp (CallMeBot)</h3>
               <p className="text-text-secondary text-xs font-sans">
-                Send "I allow callmebot to send me messages" to{' '}
-                <button onClick={() => openExternal('https://wa.me/34603212597')} className="text-flow-active underline hover:opacity-80 inline">+34 603 21 25 97</button>{' '}
-                on WhatsApp once, then enter your details below.
+                Scan the QR code below with your phone to open WhatsApp and pre-fill the authorisation message. Just tap send, then enter the API key you receive.
               </p>
+              <div className="flex justify-center my-2">
+                <WhatsAppQrCode />
+              </div>
               <label className="flex flex-col gap-1">
                 <span className="text-text-secondary text-xs font-sans">Phone (international format)</span>
                 <input
