@@ -288,6 +288,7 @@ jobs:
             | `Linux-Debian-ARM64-...deb` | **Linux** — Debian/Ubuntu (ARM64, e.g. Raspberry Pi) |
             | `Linux-RPM-x86_64-...rpm` | **Linux** — RHEL/Fedora/openSUSE (x86_64) |
             | `Linux-RPM-ARM64-...rpm` | **Linux** — RHEL/Fedora/openSUSE (ARM64) |
+            | `Android-Chromebook-...apk` | **Chromebook** — Android APK (ARM64 & x86_64) |
             | — | AppImage temporarily disabled — GitHub asset returns 504 |
 
             > **Windows security notice**: Windows SmartScreen may warn that the MSI is from an unknown publisher, and Microsoft Defender has recently false-flagged the unsigned Windows installer as `Trojan:Script/Wacatac.C!ml` on some systems. VirusTotal scans are clean and the exact installer has been submitted to Microsoft as a false positive. Future Windows builds will use SignPath Foundation code signing as required.
@@ -299,4 +300,71 @@ jobs:
             See [CHANGELOG.md](https://github.com/psylsph/home-energy-manager/blob/master/CHANGELOG.md) for details.
           draft: false
           prerelease: false
+          files: release-assets/*
+
+  build-android:
+    name: Android APK
+    needs: [build]
+    permissions:
+      contents: write
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      - name: Install frontend dependencies
+        uses: ./.github/actions/setup-frontend
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK
+        run: |
+          sdkmanager --install "ndk;27.0.12077973" > /dev/null 2>&1
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> $GITHUB_ENV
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked
+
+      - name: Initialize Android project
+        run: cargo tauri android init --ci
+
+      - name: Build APK
+        run: cargo tauri android build --apk --ci
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          cp src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk \
+            release-assets/Android-ARM64-Chromebook-Home-Energy-Manager-${{ github.ref_name }}.apk 2>/dev/null || echo "No universal APK, checking per-abi..."
+          # Fall back to per-abi APKs
+          for abi in arm64-v8a x86_64; do
+            apk="src-tauri/gen/android/app/build/outputs/apk/$abi/release/app-$abi-release.apk"
+            if [ -f "$apk" ]; then
+              label="$abi"
+              case "$abi" in
+                arm64-v8a) label="ARM64" ;;
+                x86_64)   label="x86_64" ;;
+              esac
+              cp "$apk" "release-assets/Android-Chromebook-$label-Home-Energy-Manager-${{ github.ref_name }}.apk"
+            fi
+          done
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
           files: release-assets/*
