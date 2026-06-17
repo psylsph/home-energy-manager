@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.6] - 2026-06-17
+
+### Fixed
+
+- **Cost calculation overcount from cumulative counter spikes** — when a
+  dongle corruption spike hit `today_import_kwh`, the delta was zeroed but the
+  `prev` value was updated to the spike. This permanently inflated the
+  cumulative baseline, causing every subsequent bucket to compute wrong deltas.
+  Now when delta > 2 kWh, `prev` is not updated at all. The next real reading
+  produces a catch-up delta (capped at 2), then `prev` re-syncs. Spike damage
+  is limited to at most one bucket instead of persisting forever.
+
+## [0.28.5] - 2026-06-17
+
+### Added
+
+- **Lock Y-axis scale setting** — a new toggle in Settings → Panel Controls
+  keeps chart vertical scales stable across time range switches. When enabled,
+  the Y-axis ceiling is computed from the data maximum and the highest ceiling
+  seen during the session is shared across all ranges (so switching from 1h to
+  30d never shrinks the scale). Applied to the Solar tab's PV chart and the
+  History tab's Solar PV chart. The SOC chart was already at a fixed [0, 100].
+  ([#81](https://github.com/psylsph/home-energy-manager/issues/81))
+
+### Fixed
+
+- **Dongle memory-leak fingerprint detection missed 0xFFC0/0xFFE0 corruption
+  patterns** — the `is_block_suspicious()` check only matched against 17 known
+  fingerprint values at specific register positions. A different dongle memory
+  region was producing corruption at 0xFFC0–0xFFE0 across multiple registers,
+  which the fixed-position fingerprint missed entirely. Added a general
+  heuristic: if 10+ registers in a 60-register block have values ≥ 0xE000
+  (57344), the block is almost certainly leaked memory. This catches the
+  0xFFC0/0xFFE0 pattern without needing to enumerate every possible corrupt
+  value. ([#76](https://github.com/psylsph/home-energy-manager/issues/76))
+
+- **Lifetime energy totals could decode as enormous values from uint32
+  register misassembly during dongle corruption** — added a hard plausibility
+  floor (`decode_lifetime_total_kwh()`) that returns 0.0 when the hi register
+  exceeds 1000 (corresponding to > 6.5 GWh lifetime, impossible for
+  residential). Applied to all 12 lifetime total decode sites across single-
+  phase, three-phase, and Gateway decoder paths. The sanitizer catches these
+  anyway, but the decoder-level check prevents the f32 value from entering the
+  pipeline in the first place.
+
+- **AC charge/discharge limit carry-forward logged at WARN instead of INFO**
+  — when the AC config block (HR 300-359) is briefly unavailable, the system
+  correctly preserves the previous limit value. The logging was at WARN level,
+  filling the developer console with noise on every transient skip. Changed to
+  INFO so it only shows at the INFO capture level.
+
 ## [0.28.4] - 2026-06-17
 
 ### Fixed
