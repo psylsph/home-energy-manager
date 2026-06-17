@@ -3,11 +3,9 @@
 //! crate (which pulls in diesel+r2d2 and conflicts with the project's
 //! rusqlite). The database lives at `~/.givenergy-local/whatsapp-store.db`.
 
-use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use super::whatsapp_store::SqliteBackend;
 use whatsapp_rust::bot::Bot;
 use whatsapp_rust::store::traits::Backend;
 use whatsapp_rust::types::events::Event;
@@ -83,10 +81,12 @@ impl WhatsAppState {
                         let pairing_state = pairing_state.clone();
                         let paired_jid = paired_jid.clone();
                         let client_slot = client_slot.clone();
+                        let db_path = db_path.clone();
                         move |event, client| {
                             let pairing_state = pairing_state.clone();
                             let paired_jid = paired_jid.clone();
                             let client_slot = client_slot.clone();
+                            let db_path = db_path.clone();
                             async move {
                                 match &*event {
                                     Event::PairingQrCode { code, .. } => {
@@ -117,6 +117,11 @@ impl WhatsAppState {
                                         *pairing_state.lock().await = PairingState::Idle;
                                         *client_slot.lock().await = None;
                                         *paired_jid.lock().await = None;
+                                        // Stale session data is invalid — delete
+                                        // so next start does a fresh pairing.
+                                        if let Some(path) = db_path.as_ref() {
+                                            let _ = std::fs::remove_file(path);
+                                        }
                                     }
                                     _ => {}
                                 }
@@ -181,8 +186,7 @@ impl WhatsAppState {
             .clone();
         drop(client_guard);
 
-        // Ensure the client is fully ready (connected + logged in + initial
-        // sync done) before attempting to send.
+        // Ensure the client is fully ready before attempting to send.
         if let Err(e) = client
             .wait_for_connected(std::time::Duration::from_secs(30))
             .await
@@ -195,17 +199,42 @@ impl WhatsAppState {
             .parse()
             .map_err(|e| format!("Invalid recipient phone '{recipient_phone}': {e}"))?;
 
-        tracing::info!("WhatsApp: sending alert to {jid}");
-        client
-            .send_message(
-                jid,
-                wa::Message {
-                    conversation: Some(text.to_string()),
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|e| format!("Send: {e}"))?;
+        // Retry loop: the first send may trigger pre-key exchange/device-list
+        // sync as a side effect. Subsequent attempts use the established
+        // sessions. This handles the "session not found" scenario where
+        // the initial sync hasn't completed by the time we first send.
+        for attempt in 0..3 {
+            if attempt > 0 {
+                tracing::info!("WhatsApp: retry {attempt} sending to {jid}");
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+
+            match client
+                .send_message(
+                    jid.clone(),
+                    wa::Message {
+                        conversation: Some(text.to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                Ok(result) => {
+                    tracing::info!(
+                        "WhatsApp: alert sent (message_id={}) to {jid}",
+                        result.message_id
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    if attempt == 2 {
+                        tracing::warn!("WhatsApp: send failed after 3 attempts: {e}");
+                        return Err(format!("Send: {e}"));
+                    }
+                    tracing::info!("WhatsApp: send attempt {attempt} failed, retrying: {e}");
+                }
+            }
+        }
 
         Ok(())
     }

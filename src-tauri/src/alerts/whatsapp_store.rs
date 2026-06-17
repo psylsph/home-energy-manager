@@ -23,7 +23,7 @@ use wacore::store::Device;
 use wacore::store::error::Result;
 use wacore::store::error::StoreError;
 use wacore::store::traits::{
-    AppSyncStore, AppStateSyncKey, Backend, DeviceListRecord, DeviceStore,
+    AppSyncStore, AppStateSyncKey, DeviceListRecord, DeviceStore,
     LidPnMappingEntry, ProtocolStore, SignalStore, TcTokenEntry,
 };
 
@@ -498,7 +498,6 @@ impl ProtocolStore for SqliteBackend {
         chat_jid: &str,
         message_id: &str,
     ) -> Result<Option<Vec<u8>>> {
-        let key = format!("proto:sentmsg:{chat_jid}:{message_id}");
         let val = self.get("proto", &format!("sentmsg:{chat_jid}:{message_id}"));
         if val.is_some() {
             self.del("proto", &format!("sentmsg:{chat_jid}:{message_id}"));
@@ -506,7 +505,7 @@ impl ProtocolStore for SqliteBackend {
         Ok(val)
     }
 
-    async fn delete_expired_sent_messages(&self, cutoff_timestamp: i64) -> Result<u32> {
+    async fn delete_expired_sent_messages(&self, _cutoff_timestamp: i64) -> Result<u32> {
         // sent messages don't have timestamps in this store — keep them forever
         // (expiry is not critical for correctness)
         Ok(0)

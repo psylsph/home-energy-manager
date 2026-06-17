@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.8] - 2026-06-17
+
+### Added
+
+- **Persistent WhatsApp sessions** — pairing and Signal sessions now survive
+  restarts. Uses a custom rusqlite-backed store (`whatsapp-store.db`) instead
+  of the previous in-memory-only backend. No more re-pairing after every
+  restart. The database is stored alongside settings.
+- **Send retry with session warm-up** — the first message attempt after
+  connecting can trigger the Signal pre-key exchange as a side effect.
+  If it fails, the app retries up to 3 times with 3-second delays. This
+  fixes the "session not found" errors where the initial sync hadn't
+  completed.
+
+### Fixed
+
+- **Stale session database cleaned on logout** — when you unlink the device
+  from WhatsApp, the stored session database is deleted so a fresh pairing
+  starts cleanly next time.
+
+### Changed
+
+- **WhatsApp pairing now persists across restarts** — the amber warning
+  about re-pairing has been removed from the Settings page. Pair once, it
+  sticks until you manually unlink.
+
 ## [0.28.7] - 2026-06-17
 
 ### Added
