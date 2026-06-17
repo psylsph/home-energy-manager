@@ -18,12 +18,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   If it fails, the app retries up to 3 times with 3-second delays. This
   fixes the "session not found" errors where the initial sync hadn't
   completed.
+- **Android APK build pipeline** — new `build-android` job in the release
+  workflow cross-compiles with the Android NDK for `aarch64` and `x86_64`,
+  producing APKs that run on Chromebooks via ChromeOS's Android subsystem.
+  Requires Java 17, Android SDK, and the NDK (installed in CI).
 
 ### Fixed
 
 - **Stale session database cleaned on logout** — when you unlink the device
   from WhatsApp, the stored session database is deleted so a fresh pairing
   starts cleanly next time.
+- **Battery SOC chart showing 0–5000 scale instead of 0–100** — the
+  shared Y-axis lock feature was applied to *every* history chart,
+  overriding SOC's fixed `[0, 100]` domain with a shared ceiling computed
+  from the largest value across all charts. The lock is now scoped to the
+  Solar PV chart only; SOC stays fixed at `[0, 100]`.
+- **Docker build failing on stable toolchain** — added `rustup toolchain
+  install nightly && rustup default nightly` to the Docker build stage.
+- **CI failing on stable toolchain** — switched `dtolnay/rust-toolchain`
+  from `@stable` to `@nightly` in CI workflow.
+- **regdump example broken after crate rename** — updated all `app_lib::`
+  references to `givenergy_local::` in `examples/regdump.rs`.
+- **Mobile layout broken in Settings alerts section** — simplified the
+  Battery Temperature & SOC panel to a flat 2-column grid and fixed button
+  sizing on narrow viewports.
 
 ### Changed
 
