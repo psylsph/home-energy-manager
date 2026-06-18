@@ -931,14 +931,9 @@ const VALID_INTERVALS = [5, 10, 15, 20];
       {/* ─── Section 4.5: Notifications ─── */}
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
         <h2 className="text-text-primary text-lg font-semibold font-sans">Notifications</h2>
-        <p className="text-text-secondary text-xs font-sans">
-          Send Telegram alerts when critical conditions are detected, plus a daily consumption report. Create a bot via{' '}
-          <button onClick={() => openExternal('https://t.me/botfather')} className="text-flow-active underline hover:opacity-80 inline">@BotFather</button> on Telegram, get your bot token, then send /start to your bot and get your chat ID from{' '}
-          <button onClick={() => openExternal('https://t.me/userinfobot')} className="text-flow-active underline hover:opacity-80 inline">@userinfobot</button>.
-        </p>
 
-        <div className="flex items-center justify-between">
-          <div className="flex flex-col gap-0.5">
+
+
             <span className="text-text-primary text-sm font-sans">Enable Alerts</span>
           </div>
           <Toggle
@@ -952,6 +947,11 @@ const VALID_INTERVALS = [5, 10, 15, 20];
             {/* Credentials */}
             <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
               <h3 className="text-text-primary text-sm font-sans font-medium">Telegram Configuration</h3>
+              <p className="text-text-secondary text-xs font-sans">
+                Send alerts when critical conditions are detected. Create a bot via{' '}
+                <button onClick={() => openExternal('https://t.me/botfather')} className="text-flow-active underline hover:opacity-80 inline">@BotFather</button> on Telegram, get your bot token, then send /start to your bot and get your chat ID from{' '}
+                <button onClick={() => openExternal('https://t.me/userinfobot')} className="text-flow-active underline hover:opacity-80 inline">@userinfobot</button>.
+              </p>
               <label className="flex flex-col gap-1">
                 <span className="text-text-secondary text-xs font-sans">Bot Token (from @BotFather)</span>
                 <input
@@ -982,34 +982,11 @@ const VALID_INTERVALS = [5, 10, 15, 20];
               </div>
             </div>
 
-            {/* WhatsApp */}
-            <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
-              <h3 className="text-text-primary text-sm font-sans font-medium">WhatsApp</h3>
-              <p className="text-text-secondary text-xs font-sans">
-                Pair your WhatsApp account to send alerts. On your phone, open WhatsApp Settings, tap "Linked Devices", then "Link a Device" and scan the QR code below. Then enter the phone number that should <strong>receive</strong> the alerts.
-              </p>
-              <div className="flex flex-col gap-2">
-                <label className="flex flex-col gap-1">
-                  <span className="text-text-secondary text-xs font-sans">Recipient phone (digits only, intl format, e.g. 447700900123)</span>
-                  <input
-                    type="tel"
-                    value={alertsConfig.whatsapp_recipient}
-                    onChange={(e) => setAlertsConfig((p) => ({ ...p, whatsapp_recipient: e.target.value.replace(/\D/g, '') }))}
-                    placeholder="447700900123"
-                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                  />
-                </label>
-              </div>
-              <div id="whatsapp-pairing" className="flex items-center justify-center py-4">
-                <WhatsAppPairing />
-              </div>
-            </div>
-
             {/* ntfy.sh */}
             <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
               <h3 className="text-text-primary text-sm font-sans font-medium">ntfy Push Notifications</h3>
               <p className="text-text-secondary/70 text-xs font-sans">
-                Free push notifications via&nbsp;
+                <strong className="text-green-400">Recommended</strong> — Free push notifications via&nbsp;
                 <button onClick={() => openExternal('https://ntfy.sh')} className="text-flow-active underline hover:opacity-80 inline">ntfy.sh</button>.
                 Install the app on your phone and subscribe to the topic below.
                 The topic is generated from your inverter serial so it's unique to you.
@@ -1043,6 +1020,29 @@ const VALID_INTERVALS = [5, 10, 15, 20];
                   Connect to an inverter to generate your ntfy topic.
                 </p>
               )}
+            </div>
+
+            {/* WhatsApp */}
+            <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
+              <h3 className="text-text-primary text-sm font-sans font-medium">WhatsApp <span className="text-yellow-400 text-xs font-normal">(experimental — may be unreliable)</span></h3>
+              <p className="text-text-secondary text-xs font-sans">
+                Pair your WhatsApp account to send alerts. On your phone, open WhatsApp Settings, tap "Linked Devices", then "Link a Device" and scan the QR code below. Then enter the phone number that should <strong>receive</strong> the alerts.
+              </p>
+              <div className="flex flex-col gap-2">
+                <label className="flex flex-col gap-1">
+                  <span className="text-text-secondary text-xs font-sans">Recipient phone (digits only, intl format, e.g. 447700900123)</span>
+                  <input
+                    type="tel"
+                    value={alertsConfig.whatsapp_recipient}
+                    onChange={(e) => setAlertsConfig((p) => ({ ...p, whatsapp_recipient: e.target.value.replace(/\D/g, '') }))}
+                    placeholder="447700900123"
+                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                  />
+                </label>
+              </div>
+              <div id="whatsapp-pairing" className="flex items-center justify-center py-4">
+                <WhatsAppPairing />
+              </div>
             </div>
 
             {/* Battery temperature & SOC thresholds */}
