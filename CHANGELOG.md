@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.31.4] - 2026-06-18
+
+### Added
+
+- **Telegram `/report` command.** Send `/report` in your Telegram chat to
+  receive yesterday's full consumption report as an HTML document (tap to open
+  — includes charts, hourly breakdowns, totals). The caption shows the same
+  plain-text summary as a `/today` reply.
+
+### Changed
+
+- **Daily consumption report now actually delivers.** The HTML report was
+  previously generated at the configured time but silently discarded — the
+  underscore in `let Some(_report_body)` meant it was never sent to Telegram.
+  It now sends the report as a document attachment via `sendDocument` with the
+  plain-text summary as the caption.
+- **Daily summary no longer shows misleading `0.0 kWh off-peak`** when no
+  structured tariff (with off-peak window) is configured. The peak/off-peak
+  breakdown line is hidden unless the off-peak window is set in Settings →
+  Tariff.
+
 ## [0.31.3] - 2026-06-18
 
 ### Removed

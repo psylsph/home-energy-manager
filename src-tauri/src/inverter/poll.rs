@@ -2165,13 +2165,40 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                                 generate_daily_report_html(
                                                                     &rows, &date_str,
                                                                 );
-                                                            if let Some(_report_body) = html {
-                                                                // Daily report skipped for Telegram — the HTML report
-                                                                // is too large and complex for Telegram's message format.
-                                                                // A plain-text summary can be added later.
-                                                                tracing::debug!(
-                                                                    "Daily report generated for {}, skipped (Telegram)", date_str
+                                                            if let Some(ref report_body) = html {
+                                                                let caption = crate::alerts::report::
+                                                                    generate_daily_summary_text(
+                                                                        &rows,
+                                                                        &yesterday
+                                                                            .format("%A %d %B %Y")
+                                                                            .to_string(),
+                                                                        &crate::settings::Settings::load(),
+                                                                    )
+                                                                    .unwrap_or_default();
+
+                                                                let token = config.telegram_bot_token.clone();
+                                                                let chat_id = config.telegram_chat_id.clone();
+                                                                let filename = format!(
+                                                                    "hem-report-{}.html",
+                                                                    yesterday
                                                                 );
+                                                                let body = report_body.clone();
+                                                                tokio::task::spawn_blocking(move || {
+                                                                    match crate::alerts::send_telegram_document(
+                                                                        &token,
+                                                                        &chat_id,
+                                                                        &caption,
+                                                                        &filename,
+                                                                        body.as_bytes(),
+                                                                    ) {
+                                                                        Ok(()) => tracing::warn!(
+                                                                            "Daily report sent"
+                                                                        ),
+                                                                        Err(e) => tracing::warn!(
+                                                                            "Failed to send daily report: {e}"
+                                                                        ),
+                                                                    }
+                                                                });
                                                                 *last_sent = Some(today);
                                                             } else {
                                                                 tracing::debug!(

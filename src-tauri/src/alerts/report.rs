@@ -296,13 +296,18 @@ pub fn generate_daily_summary_text(
         t.import_kwh, import_cost
     ));
     if off_peak_import_kwh > 0.0 || peak_import_kwh > 0.0 {
-        msg.push_str(&format!(
-            "   ↳ peak {:.1} kWh @ {:.3}p · off-peak {:.1} kWh @ {:.3}p\n",
-            peak_import_kwh,
-            peak_rate * 100.0,
-            off_peak_import_kwh,
-            off_peak_rate * 100.0
-        ));
+        // Only show the peak/off-peak breakdown if structured tariffs are configured.
+        // Without an off-peak window, all import is classified as peak and showing
+        // "0.0 off-peak" is misleading.
+        if !op_start.is_empty() && !op_end.is_empty() {
+            msg.push_str(&format!(
+                "   ↳ peak {:.1} kWh @ {:.3}p · off-peak {:.1} kWh @ {:.3}p\n",
+                peak_import_kwh,
+                peak_rate * 100.0,
+                off_peak_import_kwh,
+                off_peak_rate * 100.0
+            ));
+        }
     }
     msg.push_str(&format!(
         "📤 Export: <b>{:.1} kWh</b> — £{:.2}\n",

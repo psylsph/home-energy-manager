@@ -403,6 +403,93 @@ pub fn send_telegram_message(bot_token: &str, chat_id: &str, text: &str) -> Resu
     }
 }
 
+/// Send a file (HTML report) as a document via the Telegram Bot API.
+///
+/// The `caption` is sent as the message text below the document.
+/// Uses `sendDocument` with `multipart/form-data`.
+pub fn send_telegram_document(
+    bot_token: &str,
+    chat_id: &str,
+    caption: &str,
+    filename: &str,
+    file_body: &[u8],
+) -> Result<(), String> {
+    let url = format!("https://api.telegram.org/bot{bot_token}/sendDocument");
+
+    let boundary = format!(
+        "----HEM{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    let crlf = "\r\n";
+
+    let mut body = Vec::new();
+
+    // chat_id field
+    body.extend(format!("--{boundary}{crlf}").as_bytes());
+    body.extend(format!("Content-Disposition: form-data; name=\"chat_id\"{crlf}").as_bytes());
+    body.extend(crlf.as_bytes());
+    body.extend(chat_id.as_bytes());
+    body.extend(crlf.as_bytes());
+
+    // document file
+    body.extend(format!("--{boundary}{crlf}").as_bytes());
+    body.extend(
+        format!(
+            "Content-Disposition: form-data; name=\"document\"; filename=\"{filename}\"{crlf}"
+        )
+        .as_bytes(),
+    );
+    body.extend(format!("Content-Type: text/html{crlf}").as_bytes());
+    body.extend(crlf.as_bytes());
+    body.extend(file_body);
+    body.extend(crlf.as_bytes());
+
+    // caption
+    body.extend(format!("--{boundary}{crlf}").as_bytes());
+    body.extend(format!("Content-Disposition: form-data; name=\"caption\"{crlf}").as_bytes());
+    body.extend(crlf.as_bytes());
+    body.extend(caption.as_bytes());
+    body.extend(crlf.as_bytes());
+
+    // parse_mode
+    body.extend(format!("--{boundary}{crlf}").as_bytes());
+    body.extend(
+        format!("Content-Disposition: form-data; name=\"parse_mode\"{crlf}").as_bytes(),
+    );
+    body.extend(crlf.as_bytes());
+    body.extend(b"HTML");
+    body.extend(crlf.as_bytes());
+
+    // end
+    body.extend(format!("--{boundary}--{crlf}").as_bytes());
+
+    let resp = match telegram_agent()
+        .post(&url)
+        .content_type(&format!("multipart/form-data; boundary={boundary}"))
+        .send(body)
+    {
+        Ok(r) => r,
+        Err(ureq::Error::StatusCode(code)) => {
+            return Err(format!("Telegram API {} (document upload)", code));
+        }
+        Err(e) => return Err(format!("HTTP transport error: {e}")),
+    };
+
+    let status = resp.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        let text = resp
+            .into_body()
+            .read_to_string()
+            .unwrap_or_else(|_| "<read error>".to_string());
+        Err(format!("Telegram API {}: {}", status, text))
+    }
+}
+
 /// Send a notification via ntfy.sh (or a self-hosted ntfy server).
 ///
 /// Uses `ureq` (synchronous) — call from `tokio::task::spawn_blocking`.
@@ -601,6 +688,7 @@ fn build_help_message() -> String {
     msg.push_str("<b>Commands</b>:\n");
     msg.push_str("/status — Live system status\n");
     msg.push_str("/today — Today's energy summary & cost\n");
+    msg.push_str("/report — Yesterday's full consumption report\n");
     msg.push_str("/battery — Battery & module details\n");
     msg.push_str("/mode — Battery mode & settings\n");
     msg.push_str("/version — System & firmware info\n");
@@ -617,6 +705,7 @@ pub fn register_telegram_commands(bot_token: &str) {
         "commands": [
             { "command": "status",  "description": "Live system status" },
             { "command": "today",   "description": "Today's energy summary & cost" },
+            { "command": "report",  "description": "Yesterday's full consumption report" },
             { "command": "battery", "description": "Battery & module details" },
             { "command": "mode",    "description": "Battery mode & settings" },
             { "command": "version", "description": "System & firmware info" },
@@ -685,6 +774,35 @@ async fn build_today_reply(state: &crate::inverter::poll::AppState) -> String {
         Some(s) => s,
         None => "⚠️ Not enough data to summarise today yet.".to_string(),
     }
+}
+
+/// Build the `/report` response — returns the HTML body, caption, and date
+/// string for yesterday's full report, or `None` if insufficient data.
+async fn build_report_reply(
+    state: &crate::inverter::poll::AppState,
+) -> Option<(String, String, String)> {
+    let yesterday = chrono::Local::now()
+        .date_naive()
+        .checked_sub_signed(chrono::Duration::days(1))
+        .unwrap_or_else(|| chrono::Local::now().date_naive());
+    let date_str = yesterday.format("%A %d %B %Y").to_string();
+
+    let db_guard = state.history.lock().await;
+    let db = db_guard.clone();
+    drop(db_guard);
+
+    let db = db.as_ref()?;
+    let rows = db.get_readings_for_date(yesterday).ok()?;
+    if rows.len() < 2 {
+        return None;
+    }
+
+    let html = crate::alerts::report::generate_daily_report_html(&rows, &date_str)?;
+    let settings = crate::settings::Settings::load();
+    let caption = crate::alerts::report::generate_daily_summary_text(&rows, &date_str, &settings)
+        .unwrap_or_else(|| "📊 Daily report".to_string());
+
+    Some((html, caption, date_str))
 }
 
 /// Spawns a background task that polls Telegram for commands and replies
@@ -811,6 +929,29 @@ pub fn spawn_telegram_poller(state: std::sync::Arc<crate::inverter::poll::AppSta
                         }
                     }
                     "today" => build_today_reply(&state).await,
+                    "report" => {
+                        match build_report_reply(&state).await {
+                            Some((html_body, caption, date_str)) => {
+                                let cid_str = chat_id.to_string();
+                                let token_c = token.clone();
+                                let filename = format!("hem-report-{}.html", date_str);
+                                tokio::task::spawn_blocking(move || {
+                                    if let Err(e) = crate::alerts::send_telegram_document(
+                                        &token_c,
+                                        &cid_str,
+                                        &caption,
+                                        &filename,
+                                        html_body.as_bytes(),
+                                    ) {
+                                        tracing::warn!("Telegram /report failed: {e}");
+                                    }
+                                });
+                                continue; // already sent via document, skip text reply
+                            }
+                            None => "⚠️ Not enough data for yesterday's report yet."
+                                .to_string(),
+                        }
+                    }
                     // Unrecognized command from the allowed chat → help.
                     _ => build_help_message(),
                 };
