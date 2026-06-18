@@ -116,6 +116,59 @@ If you already have a built `dist/` folder from a previous build, you can point 
 ./target/release/givenergy-local --headless --dist /path/to/dist
 ```
 
+#### Raspberry Pi (headless server)
+
+Home Energy Manager runs great on a Raspberry Pi as a dedicated home server. You need **64-bit** Trixie (Debian 13) or newer — older releases (Bookworm, Raspberry Pi OS) ship glibc 2.36 which is too old for the prebuilt binary.
+
+**1. Install the ARM64 `.deb`**
+
+Download the latest `arm64.deb` from the [Releases page](https://github.com/psylsph/home-energy-manager/releases/latest) and install:
+
+```bash
+sudo dpkg -i home-energy-manager_*_arm64.deb
+```
+
+This installs `givenergy-local` to `/usr/bin/` — it's now on your PATH.
+
+**2. Run headless**
+
+```bash
+givenergy-local --headless
+```
+
+The web UI is available at `http://<pi-ip>:7337` from any browser on your network.
+
+**3. Auto-start on boot (systemd)**
+
+Create a systemd service so the app starts automatically when the Pi boots:
+
+```bash
+sudo tee /etc/systemd/system/givenergy-local.service << 'EOF'
+[Unit]
+Description=Home Energy Manager
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/givenergy-local --headless
+Restart=on-failure
+RestartSec=5
+User=pi
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now givenergy-local
+```
+
+Check it's running:
+
+```bash
+sudo journalctl -u givenergy-local -f
+```
+
 ### Option 2: Docker
 
 The quickest way to get started with Docker:
