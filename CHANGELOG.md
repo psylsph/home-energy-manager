@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.31.2] - 2026-06-18
+
+### Fixed
+
+- **Telegram bot commands delayed by minutes, or delivered in a burst.** The
+  Telegram poller runs a single sequential loop (`sleep → getUpdates → reply`)
+  and the `getUpdates` call used the default ureq client with **no client-side
+  timeout**. The `timeout=10` query parameter only governs the *server-side*
+  long-poll, not the client read. When the held-open connection stalled at the
+  network layer (common in containerised/Docker deployments via DNS or MTU
+  quirks), nothing could rescue it — the poller froze for the OS-level TCP
+  timeout (minutes), while every command sent during the stall queued at
+  Telegram and then arrived in a single scrambled burst once the connection
+  recovered.
+
+  All Telegram Bot API HTTP calls now go through a shared `ureq::Agent`
+  configured with a 20s end-to-end timeout (`timeout_global`). A stalled call
+  now dies after 20s and the poll loop continues immediately, so command
+  latency is bounded (~23s worst case) instead of minutes. The 20s limit
+  comfortably exceeds the 10s server-side long-poll, so behaviour is unchanged
+  when the network is healthy. The shared agent also pools connections,
+  removing the per-call TLS handshake overhead.
+
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 

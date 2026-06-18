@@ -10,7 +10,8 @@ pub mod whatsapp;
 pub mod whatsapp_store;
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -284,6 +285,39 @@ pub fn build_cleared_message(snapshot: &InverterSnapshot, alerts: &[AlertType]) 
 // Telegram sender
 // ---------------------------------------------------------------------------
 
+/// Hard end-to-end timeout for any single Telegram Bot API HTTP call.
+///
+/// `getUpdates` uses a server-side long-poll (`timeout=10`), so the server
+/// legitimately holds an idle connection open for up to 10s. This constant
+/// must exceed that by a comfortable margin; 20s gives ~10s headroom for a
+/// healthy empty poll while bounding any network-layer stall to 20s instead
+/// of the OS TCP timeout (which is **minutes** and froze the whole poller).
+///
+/// See `telegram_agent()`.
+const TELEGRAM_HTTP_TIMEOUT: u64 = 20;
+
+/// Shared HTTP agent for all Telegram Bot API calls.
+///
+/// Configured with a global end-to-end timeout so a single stalled call —
+/// DNS, connect, or (most commonly in containerised deployments) a held-open
+/// `getUpdates` long-poll that the network layer has silently stalled —
+/// cannot freeze the single-threaded poll loop for the OS-level TCP timeout.
+/// A stalled call now dies after [`TELEGRAM_HTTP_TIMEOUT`] and the loop
+/// continues, so command latency is bounded (~23s worst case) instead of
+/// minutes-to-forever.
+///
+/// The agent is shared via [`OnceLock`] so its connection pool is reused
+/// across calls; clones are cheap (inner `Arc`).
+fn telegram_agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(TELEGRAM_HTTP_TIMEOUT)))
+            .build();
+        ureq::Agent::new_with_config(config)
+    })
+}
+
 /// Send a notification via the Telegram Bot API.
 ///
 /// Uses `ureq` (synchronous) — call from `tokio::task::spawn_blocking`.
@@ -306,7 +340,7 @@ pub fn send_telegram_message(
     let body =
         serde_json::to_string(&payload).map_err(|e| format!("Failed to serialize: {e}"))?;
 
-    let resp = match ureq::post(&url)
+    let resp = match telegram_agent().post(&url)
         .content_type("application/json")
         .send(&body)
     {
@@ -540,7 +574,7 @@ pub fn register_telegram_commands(bot_token: &str) {
     let Ok(body) = serde_json::to_string(&payload) else {
         return;
     };
-    match ureq::post(&url)
+    match telegram_agent().post(&url)
         .content_type("application/json")
         .send(&body)
     {
@@ -647,7 +681,7 @@ pub fn spawn_telegram_poller(state: std::sync::Arc<crate::inverter::poll::AppSta
                     "https://api.telegram.org/bot{}/getUpdates?offset={}&timeout=10",
                     poll_token, cur_offset
                 );
-                let result = ureq::get(&url).call();
+                let result = telegram_agent().get(&url).call();
                 match result {
                     Ok(r) => {
                         let body = r.into_body().read_to_string().unwrap_or_default();
