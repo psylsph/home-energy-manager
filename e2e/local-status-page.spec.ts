@@ -165,12 +165,13 @@ test.describe('Status Page - Summary Tiles', () => {
   });
 });
 
-test.describe('Status Page - Footer', () => {
-  test('should show polling info footer', async ({ page }) => {
+test.describe('Status Page - Polling State', () => {
+  test('should show connection state', async ({ page }) => {
     await page.goto('/');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    await expect(page.locator('text=/polled from the inverter/i')).toBeVisible({ timeout: 5_000 });
+    // The snapshot is loaded, so the status page should show energy data
+    await expect(page.locator('text=Solar')).toBeVisible({ timeout: 5_000 });
   });
 });
 

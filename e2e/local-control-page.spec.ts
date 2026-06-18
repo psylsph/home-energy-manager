@@ -28,7 +28,7 @@ test.describe('Control Page - Quick Actions', () => {
 
   test('should show Pause Battery button', async ({ page }) => {
     await page.goto('/#/control');
-    await expect(page.locator('text=Pause Battery')).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('text=Pause Battery').first()).toBeVisible({ timeout: 15_000 });
   });
 
   test('should show Sync Clock button', async ({ page }) => {

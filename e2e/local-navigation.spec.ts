@@ -53,7 +53,7 @@ test.describe('Navigation', () => {
 test.describe('Connection Indicator', () => {
   test('should show connected state in header', async ({ page }) => {
     await page.goto('/');
-    await expect(page.locator('text=Connected')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText('Connected').first()).toBeVisible({ timeout: 15_000 });
   });
 
   test('should show connected host', async ({ page }) => {
@@ -119,7 +119,7 @@ test.describe('Developer Mode', () => {
 
     // Enable developer mode
     const section = page.locator('section', { hasText: 'Developer Mode' }).first();
-    const devToggle = section.locator('button').first();
+    const devToggle = section.locator('div.cursor-pointer').first();
     await devToggle.click();
 
     // Navigate back to see Logs in nav

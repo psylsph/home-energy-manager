@@ -17,8 +17,8 @@ async function enableDeveloperMode(page: import('@playwright/test').Page) {
   const logsVisible = await page.locator('nav >> text=Logs').isVisible().catch(() => false);
   if (!logsVisible) {
     await page.goto('/#/settings');
-    const section = page.locator('section', { hasText: 'Developer Mode' }).first();
-    const toggle = section.locator('button').first();
+    // Toggle is a <div> (not <button>), target via cursor-pointer class
+    const toggle = page.locator('section:has-text("Developer Mode") div.cursor-pointer').first();
     await toggle.click();
     await page.waitForTimeout(500);
   }
@@ -57,7 +57,7 @@ test.describe('Logs Page - Controls', () => {
     await enableDeveloperMode(page);
     await page.goto('/#/logs');
 
-    await expect(page.locator('input[placeholder="Filter logs..."]')).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('input[placeholder="Filter logs\u2026"]')).toBeVisible({ timeout: 10_000 });
   });
 
   test('should show Refresh button', async ({ page }) => {
@@ -123,7 +123,7 @@ test.describe('Logs Page - Log Content', () => {
     await page.goto('/#/logs');
 
     // Type a very specific filter that won't match anything
-    const filterInput = page.locator('input[placeholder="Filter logs..."]');
+    const filterInput = page.locator('input[placeholder="Filter logs\u2026"]');
     await filterInput.fill('ZZZZZZ_NO_MATCH_ZZZZZZ');
     await page.waitForTimeout(500);
 

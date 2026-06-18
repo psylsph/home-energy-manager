@@ -10,7 +10,7 @@ test.describe('History Page - Loading', () => {
   test('should load and show History tabs', async ({ page }) => {
     await page.goto('/#/history');
     // Use heading or tab bar, not nav link which also says 'History'
-    await expect(page.locator('button:has-text("Battery"), button:has-text("Solar")')).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('button:has-text("Battery"), button:has-text("Solar")').first()).toBeVisible({ timeout: 15_000 });
   });
 });
 
@@ -40,14 +40,14 @@ test.describe('History Page - Tab Navigation', () => {
 test.describe('History Page - Time Range', () => {
   test('should show time range buttons', async ({ page }) => {
     await page.goto('/#/history');
-    await expect(page.locator('text=1h')).toBeVisible({ timeout: 15_000 });
-    await expect(page.locator('text=24h')).toBeVisible();
-    await expect(page.locator('text=7d')).toBeVisible();
+    await expect(page.locator('button:has-text("1h")').first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('text=24h').first()).toBeVisible();
+    await expect(page.locator('text=7d').first()).toBeVisible();
   });
 
   test('should switch time ranges', async ({ page }) => {
     await page.goto('/#/history');
-    await expect(page.locator('text=1h')).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('button:has-text("1h")').first()).toBeVisible({ timeout: 15_000 });
 
     await page.locator('button:has-text("24h")').click();
     await page.waitForTimeout(500);

@@ -41,14 +41,14 @@ test.describe('Battery Page - SOC Overview', () => {
     await page.goto('/#/battery');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    await expect(page.getByText('Power', { exact: true })).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText('Power', { exact: true }).first()).toBeVisible({ timeout: 5_000 });
   });
 
   test('should show Voltage row', async ({ page }) => {
     await page.goto('/#/battery');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    await expect(page.getByText('Voltage', { exact: true })).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText('Voltage', { exact: true }).first()).toBeVisible({ timeout: 5_000 });
   });
 
   test('should show Current row', async ({ page }) => {
@@ -95,34 +95,21 @@ test.describe('Battery Page - SOC Overview', () => {
 });
 
 test.describe('Battery Page - Stored Energy', () => {
-  test('should show Stored Energy heading', async ({ page }) => {
+  test('should show Battery Panel with energy data', async ({ page }) => {
     await page.goto('/#/battery');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    await expect(page.locator('text=Stored Energy')).toBeVisible({ timeout: 5_000 });
+    // The battery panel shows Charged Today / Discharged Today values
+    await expect(page.locator('text=Charged Today')).toBeVisible({ timeout: 5_000 });
   });
 
-  test('should show Capacity in kWh', async ({ page }) => {
+  test('should show a SOC ring', async ({ page }) => {
     await page.goto('/#/battery');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    await expect(page.locator('text=Capacity')).toBeVisible({ timeout: 5_000 });
-  });
-
-  test('should show Available in kWh', async ({ page }) => {
-    await page.goto('/#/battery');
-    await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
-
-    await expect(page.locator('text=Available')).toBeVisible({ timeout: 5_000 });
-  });
-
-  test('should show a progress bar', async ({ page }) => {
-    await page.goto('/#/battery');
-    await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
-
-    // Progress bar for stored energy - look for any progress-like element
-    const progressBar = page.locator('div[class*="bg-green"], div[style*="width"]').first();
-    await expect(progressBar).toBeVisible({ timeout: 5_000 });
+    // SOC ring shows battery charge level
+    const socValue = page.locator('text=75%');
+    await expect(socValue).toBeVisible({ timeout: 5_000 });
   });
 });
 
@@ -139,7 +126,7 @@ test.describe('Battery Page - Modules', () => {
     await page.goto('/#/battery');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    await expect(page.locator('text=/Module \\d/').first()).toBeVisible({ timeout: 5_000 });
+    await expect(page.locator('text=/Module #\\d/').first()).toBeVisible({ timeout: 5_000 });
   });
 
   test('should expand module details on click', async ({ page }) => {
@@ -147,7 +134,7 @@ test.describe('Battery Page - Modules', () => {
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
     // Click on first module to expand
-    await page.locator('text=/Module \\d/').first().click();
+    await page.locator('text=/Module #\\d/').first().click();
 
     // Should show detailed fields after expansion
     await expect(page.locator('text=/Serial|Cells|Cycle|BMS/').first()).toBeVisible({ timeout: 5_000 });
@@ -167,7 +154,7 @@ test.describe('Battery Page - Modules', () => {
     await page.goto('/#/battery');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    await page.locator('text=/Module \\d/').first().click();
+    await page.locator('text=/Module #\\d/').first().click();
 
     // Wait for expanded content
     await page.waitForTimeout(1000);

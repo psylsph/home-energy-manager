@@ -157,13 +157,17 @@ pub fn evaluate_alerts(snapshot: &InverterSnapshot, config: &AlertsConfig) -> Ve
     }
 
     // PV string loss: one string near zero while the other produces,
-    // or both near zero while total solar > 100 W
+    // or both near zero while total solar > 100 W.
+    // Guards against false positives: if a string has voltage > 50 V it
+    // is clearly connected and should not trigger, even if power is low.
     if config.pv_string_loss_enabled {
         let solar = snapshot.solar_power;
         let pv1 = snapshot.pv1_power.unsigned_abs() as i32;
         let pv2 = snapshot.pv2_power.unsigned_abs() as i32;
-        let pv1_near_zero = pv1 < 10;
-        let pv2_near_zero = pv2 < 10;
+        let pv1_v = snapshot.pv1_voltage;
+        let pv2_v = snapshot.pv2_voltage;
+        let pv1_near_zero = pv1 < 10 && pv1_v < 50.0;
+        let pv2_near_zero = pv2 < 10 && pv2_v < 50.0;
 
         if (solar > 100 && pv1_near_zero && pv2_near_zero)
             || (pv1 > 50 && pv2_near_zero)

@@ -1104,7 +1104,6 @@ const VALID_INTERVALS = [5, 10, 15, 20];
           </div>
           <Toggle checked={developerMode} onChange={setDeveloperMode} />
         </div>
-        {developerMode}
       </section>
 
       {/* ─── Section 7: About ─── */}

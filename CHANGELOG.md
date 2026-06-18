@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.11] - 2026-06-18
+
+### Fixed
+
+- **PV String Loss false alerts** — the alert only checked PV power, so a
+  string with voltage but low power (shading, breaker off) would falsely
+  trigger "string lost". Now also checks voltage: if PV voltage is above
+  50V the string is clearly connected and won't alert.
+- **Developer mode toggle in E2E tests** — the toggle is a `<div>` element,
+  not a `<button>`. Three inline test selectors were silently clicking nothing,
+  causing 8 timeout failures. Fixed all three to target `div.cursor-pointer`.
+- **Strict-mode selector violations** — 12 tests failed because Playwright
+  found multiple matching elements (e.g. `text=1h` matching both an `<option>`
+  and a `<button>`). Added `.first()` or more specific selectors throughout.
+- **Outdated battery page references** — "Stored Energy", "Capacity" and
+  "Available" test expectations removed — these labels were removed in a
+  prior UI refactor. Replaced with checks for the SOC ring and Charged Today.
+- **Filter placeholder ellipsis mismatch** — the Logs page input uses
+  `Filter logs…` (Unicode ellipsis) but the test looked for three dots.
+
+### Changed
+
+- **E2E test count now accurate** — many failures were false positives from
+  stale selectors. All 22 failures fixed, 217 tests should now pass.
+
 ## [0.28.10] - 2026-06-18
 
 ### Fixed

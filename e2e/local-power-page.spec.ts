@@ -45,13 +45,13 @@ test.describe('Power Page - Time Range', () => {
   test('should show time range buttons', async ({ page }) => {
     await page.goto('/#/power');
     // At least some range buttons should be visible
-    await expect(page.locator('text=1h')).toBeVisible({ timeout: 15_000 });
-    await expect(page.locator('text=24h')).toBeVisible();
+    await expect(page.locator('button:has-text("1h")').first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('text=24h').first()).toBeVisible();
   });
 
   test('should allow switching time ranges', async ({ page }) => {
     await page.goto('/#/power');
-    await expect(page.locator('text=1h')).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('button:has-text("1h")').first()).toBeVisible({ timeout: 15_000 });
 
     // Click on a different range
     const btn6h = page.getByRole('button', { name: '6h', exact: true });

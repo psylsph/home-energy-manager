@@ -34,7 +34,7 @@ test.describe('Settings Page - Connection', () => {
   test('should show Port input', async ({ page }) => {
     await page.goto('/#/settings');
     // Port field may be part of a combined address:port row
-    await expect(page.locator('input[type="number"]')).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('input[type="number"]').first()).toBeVisible({ timeout: 10_000 });
   });
 
   test('should show Serial Number input', async ({ page }) => {
@@ -49,7 +49,7 @@ test.describe('Settings Page - Connection', () => {
 
   test('should show Scan Network button', async ({ page }) => {
     await page.goto('/#/settings');
-    await expect(page.locator('text=Scan Network')).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('text=Scan Network').first()).toBeVisible({ timeout: 10_000 });
   });
 });
 
@@ -181,7 +181,7 @@ test.describe('Settings Page - Developer', () => {
     // Click the toggle
     // The toggle is a button near the Developer Mode text
     const section = page.locator('section', { hasText: 'Developer Mode' }).first();
-    const toggle = section.locator('button').first();
+    const toggle = section.locator('div.cursor-pointer').first();
     await toggle.click();
 
     // DevTools section should appear
