@@ -29,6 +29,13 @@ pub enum AlertType {
     BatteryTempLow,
     BatterySocHigh,
     BatterySocLow,
+    /// The inverter/BMS reported a battery warning via its hardware fault
+    /// register (`IR(57) charger_warning_code`). This is distinct from
+    /// [`BatteryTempHigh`], which is gated by the user's °C threshold — this
+    /// variant is the device's own warning flag and is *not* tied to a
+    /// configured temperature. It is subject to a consecutive-read
+    /// confirmation (see [`AlertDebounce::confirm_battery_warning`]) so a
+    /// single corrupted register read cannot trigger it.
     BatteryOverTemp,
     GridOffline,
 }
@@ -42,7 +49,12 @@ impl AlertType {
             Self::BatterySocHigh => "Battery SOC High",
             Self::BatterySocLow => "Battery SOC Low",
             Self::GridOffline => "Grid Offline",
-            Self::BatteryOverTemp => "Battery Over-Temperature",
+            // Deliberately distinct from "Battery Temperature High": this one
+            // is the inverter's own hardware warning flag (IR 57), not the
+            // user's °C threshold being breached. Renamed from
+            // "Battery Over-Temperature" to avoid users conflating it with
+            // the threshold-based alert.
+            Self::BatteryOverTemp => "Inverter Battery Warning",
         }
     }
 }
@@ -52,12 +64,24 @@ impl AlertType {
 // ---------------------------------------------------------------------------
 
 /// Per-alert-type debounce tracker to prevent notification floods.
+/// Number of consecutive poll cycles the inverter's hardware battery
+/// warning flag (`IR(57)`) must read `true` before the `BatteryOverTemp`
+/// alert is allowed to fire. The GivEnergy data adapter occasionally returns
+/// a transiently corrupted value on this register, and a single blip should
+/// never fire a warning. See [`AlertDebounce::confirm_battery_warning`].
+pub(crate) const BATTERY_WARNING_CONFIRM_CYCLES: u32 = 3;
+
 #[derive(Debug)]
 pub struct AlertDebounce {
     /// Map from alert type to the last time it was sent.
     last_sent: HashMap<AlertType, Instant>,
     /// Set of alert types currently in an active (fired) state.
     active: std::collections::HashSet<AlertType>,
+    /// Consecutive-cycle count of the inverter's raw `IR(57)` warning flag.
+    /// Reset to 0 the moment the flag reads `false`. The `BatteryOverTemp`
+    /// alert is only confirmed once this reaches
+    /// [`BATTERY_WARNING_CONFIRM_CYCLES`].
+    battery_warning_streak: u32,
 }
 
 impl AlertDebounce {
@@ -65,6 +89,26 @@ impl AlertDebounce {
         Self {
             last_sent: HashMap::new(),
             active: std::collections::HashSet::new(),
+            battery_warning_streak: 0,
+        }
+    }
+
+    /// Feed the inverter's raw `IR(57)` warning flag for this cycle and return
+    /// `true` only if the flag has now read `true` for
+    /// [`BATTERY_WARNING_CONFIRM_CYCLES`] consecutive cycles. A single
+    /// `false` resets the streak to 0, so a genuine warning that blinks off
+    /// for one cycle has to build the streak back up before re-firing.
+    ///
+    /// This is the register-corruption defence for the over-temp alert:
+    /// transient garbage on `IR(57)` (which is not otherwise sanitised) cannot
+    /// trigger a warning on its own.
+    pub fn confirm_battery_warning(&mut self, flag: bool) -> bool {
+        if flag {
+            self.battery_warning_streak = self.battery_warning_streak.saturating_add(1);
+            self.battery_warning_streak >= BATTERY_WARNING_CONFIRM_CYCLES
+        } else {
+            self.battery_warning_streak = 0;
+            false
         }
     }
 
@@ -101,10 +145,13 @@ impl AlertDebounce {
     }
 
     /// Clear ALL debounce state — use when the user saves alert settings
-    /// so previously-fired alerts can re-trigger immediately.
+    /// so previously-fired alerts can re-trigger immediately. Also resets
+    /// the hardware battery-warning confirmation streak so a stale confirmed
+    /// flag doesn't carry across a config change.
     pub fn clear(&mut self) {
         self.last_sent.clear();
         self.active.clear();
+        self.battery_warning_streak = 0;
     }
 
     pub fn len(&self) -> usize {
@@ -878,6 +925,58 @@ mod tests {
         d.should_fire(AlertType::GridOffline, 30);
         assert!(d.should_fire(AlertType::BatterySocLow, 30)); // different type allowed
     }
+
+    // ================================================================
+    // Hardware battery warning confirmation (IR 57 transient-read defence)
+    // ================================================================
+
+    #[test]
+    fn test_battery_warning_not_confirmed_on_single_read() {
+        // A single transient `true` on IR(57) must NOT fire — this is the
+        // exact regression for the reported 21.5°C over-temp false positive.
+        let mut d = AlertDebounce::new();
+        assert!(!d.confirm_battery_warning(true));
+    }
+
+    #[test]
+    fn test_battery_warning_confirmed_after_threshold_cycles() {
+        let mut d = AlertDebounce::new();
+        // Below threshold: never confirmed.
+        for _ in 0..(BATTERY_WARNING_CONFIRM_CYCLES - 1) {
+            assert!(!d.confirm_battery_warning(true));
+        }
+        // On the Nth consecutive true, it confirms.
+        assert!(d.confirm_battery_warning(true));
+        // And stays confirmed while the flag remains set.
+        assert!(d.confirm_battery_warning(true));
+    }
+
+    #[test]
+    fn test_battery_warning_streak_resets_on_false() {
+        let mut d = AlertDebounce::new();
+        // Build up almost to the threshold.
+        for _ in 0..(BATTERY_WARNING_CONFIRM_CYCLES - 1) {
+            d.confirm_battery_warning(true);
+        }
+        // A single `false` resets the streak — a genuine warning that blinks
+        // off for one cycle has to rebuild.
+        assert!(!d.confirm_battery_warning(false));
+        // One true is not enough again.
+        assert!(!d.confirm_battery_warning(true));
+    }
+
+    #[test]
+    fn test_battery_warning_clears_streak_independently_of_debounce_clear() {
+        // clear() (called when saving settings) must also wipe the streak so
+        // a stale confirmed flag doesn't leak across a config change.
+        let mut d = AlertDebounce::new();
+        for _ in 0..BATTERY_WARNING_CONFIRM_CYCLES {
+            d.confirm_battery_warning(true);
+        }
+        d.clear();
+        assert!(!d.confirm_battery_warning(true));
+    }
+
 
     // ================================================================
     // Build message

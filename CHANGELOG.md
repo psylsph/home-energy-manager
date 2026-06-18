@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.1] - 2026-06-18
+
+### Fixed
+
+- **Spurious "Battery Over-Temperature" alert on transient reads** — the alert
+  fired from a single corrupted read of the inverter's hardware warning
+  register (IR 57), which is not otherwise sanitised. This caused reports like
+  an over-temp warning firing at 21.5°C with the threshold set to 45°C: the
+  alert wasn't gated by the °C setting at all. The flag now requires
+  3 consecutive cycles of agreement before firing, so a one-off garbage read
+  can't trigger it.
+
+### Changed
+
+- **Renamed the alert to "Inverter Battery Warning"** — it was confusingly
+  labelled "Battery Over-Temperature", which users conflated with the °C-based
+  "Battery Temperature High" alert (the one the 45/50°C threshold actually
+  controls). The renamed alert is the inverter/BMS's own hardware warning flag
+  and is intentionally independent of the configured temperature limit, so a
+  genuine device warning always gets through.
+
 ## [0.31.0] - 2026-06-18
 
 ### Added

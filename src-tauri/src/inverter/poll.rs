@@ -58,6 +58,7 @@ use crate::server::ws::ConnectedClients;
 use tokio::sync::{broadcast, Mutex, Notify};
 
 use crate::history::HistoryDb;
+use crate::alerts::AlertType;
 use crate::inverter::decoder::decode_snapshot;
 use crate::inverter::encoder::{ControlCommand, RegisterWrite};
 use crate::inverter::model::{BatteryMode, DeviceType, InverterSnapshot};
@@ -1985,11 +1986,36 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         );
                                         let triggered =
                                             crate::alerts::evaluate_alerts(&snapshot, &config);
+                                        let mut debounce =
+                                            state.alert_debounce.lock().await;
+
+                                        // Register-corruption defence for the inverter's
+                                        // hardware battery warning flag (IR 57). The raw
+                                        // flag is fed into the debounce's consecutive-read
+                                        // counter every cycle; the BatteryOverTemp alert
+                                        // is only kept if the flag has now read `true` for
+                                        // BATTERY_WARNING_CONFIRM_CYCLES cycles in a row.
+                                        // This prevents a single transient garbage read on
+                                        // IR(57) from firing a spurious warning (e.g. the
+                                        // reported 21.5°C over-temp false positive), while
+                                        // still allowing a genuine sustained warning
+                                        // through regardless of the configured °C limit.
+                                        let confirmed =
+                                            debounce.confirm_battery_warning(
+                                                snapshot.battery_over_temp
+                                                    && config.battery_over_temp_enabled,
+                                            );
+                                        let confirmed_triggered: Vec<AlertType> = triggered
+                                            .iter()
+                                            .copied()
+                                            .filter(|a| {
+                                                *a != AlertType::BatteryOverTemp || confirmed
+                                            })
+                                            .collect();
+                                        let triggered = confirmed_triggered;
                                         if !triggered.is_empty() {
                                             tracing::warn!("Alerts: triggered={:?}", triggered);
                                         }
-                                        let mut debounce =
-                                            state.alert_debounce.lock().await;
                                         let (to_send, suppressed): (Vec<_>, Vec<_>) = triggered
                                             .iter()
                                             .copied()

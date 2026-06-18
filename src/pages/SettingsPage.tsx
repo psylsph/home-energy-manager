@@ -1104,7 +1104,7 @@ const VALID_INTERVALS = [5, 10, 15, 20];
                 />
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-text-primary text-sm font-sans">Battery Over-Temperature</span>
+                <span className="text-text-primary text-sm font-sans">Inverter Battery Warning</span>
                 <Toggle
                   checked={alertsConfig.battery_over_temp_enabled}
                   onChange={(v) => setAlertsConfig((p) => ({ ...p, battery_over_temp_enabled: v }))}
