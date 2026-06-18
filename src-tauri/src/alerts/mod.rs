@@ -93,6 +93,20 @@ impl AlertDebounce {
     }
 
     /// Number of entries in the debounce map (for API display).
+    /// Remove an alert type from both last_sent and active sets,
+    /// clearing its cooldown and re-enabling immediate re-fire.
+    pub fn reset_for_type(&mut self, alert_type: AlertType) {
+        self.last_sent.remove(&alert_type);
+        self.active.remove(&alert_type);
+    }
+
+    /// Clear ALL debounce state — use when the user saves alert settings
+    /// so previously-fired alerts can re-trigger immediately.
+    pub fn clear(&mut self) {
+        self.last_sent.clear();
+        self.active.clear();
+    }
+
     pub fn len(&self) -> usize {
         self.last_sent.len()
     }

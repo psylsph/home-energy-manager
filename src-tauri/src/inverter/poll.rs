@@ -1977,17 +1977,29 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     let settings_cfg = state.alert_config.lock().await;
                                     let config = settings_cfg.clone();
                                     if config.enabled {
+                                        tracing::warn!(
+                                            "Alerts: evaluating (grid_loss={}, batt_over_temp={}, soc={})",
+                                            snapshot.grid_loss,
+                                            snapshot.battery_over_temp,
+                                            snapshot.soc,
+                                        );
                                         let triggered =
                                             crate::alerts::evaluate_alerts(&snapshot, &config);
+                                        if !triggered.is_empty() {
+                                            tracing::warn!("Alerts: triggered={:?}", triggered);
+                                        }
                                         let mut debounce =
                                             state.alert_debounce.lock().await;
-                                        let to_send: Vec<crate::alerts::AlertType> = triggered
+                                        let (to_send, suppressed): (Vec<_>, Vec<_>) = triggered
                                             .iter()
-                                            .filter(|a| {
-                                                debounce.should_fire(**a, config.cooldown_minutes)
-                                            })
                                             .copied()
-                                            .collect();
+                                            .partition(|a| debounce.should_fire(*a, config.cooldown_minutes));
+                                        if !suppressed.is_empty() {
+                                            tracing::warn!(
+                                                "Alerts: {:?} triggered but suppressed by cooldown",
+                                                suppressed
+                                            );
+                                        }
                                         // Detect alerts that were previously active but have
                                         // now returned to normal.
                                         let cleared = debounce.extract_cleared(&triggered);
@@ -2014,7 +2026,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                     &chat_id,
                                                     &text,
                                                 ) {
-                                                    Ok(()) => tracing::info!(
+                                                    Ok(()) => tracing::warn!(
                                                         "Cleared alert sent: {cleared_names}"
                                                     ),
                                                     Err(e) => tracing::warn!(
@@ -2032,7 +2044,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                 if let Err(e) = wa_state.whatsapp.send_message(&wa_recipient, &wa_text).await {
                                                     tracing::warn!("WhatsApp cleared alert failed: {e}");
                                                 } else {
-                                                    tracing::info!("WhatsApp cleared alert sent");
+                                                    tracing::warn!("WhatsApp cleared alert sent");
                                                 }
                                             });
                                         }
@@ -2051,7 +2063,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                     &chat_id,
                                                     &text,
                                                 ) {
-                                                    Ok(()) => tracing::info!(
+                                                    Ok(()) => tracing::warn!(
                                                         "Alert sent: {:?}",
                                                         to_send
                                                     ),
@@ -2071,7 +2083,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                 if let Err(e) = wa_state.whatsapp.send_message(&wa_recipient, &wa_text).await {
                                                     tracing::warn!("WhatsApp alert failed: {e}");
                                                 } else {
-                                                    tracing::info!("WhatsApp alert sent");
+                                                    tracing::warn!("WhatsApp alert sent");
                                                 }
                                             });
                                         }

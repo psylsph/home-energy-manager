@@ -954,15 +954,6 @@ const VALID_INTERVALS = [5, 10, 15, 20];
                   className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
                 />
               </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-text-secondary text-xs font-sans">Cooldown (minutes between alerts)</span>
-                <input
-                  type="number" min={1} max={1440}
-                  value={alertsConfig.cooldown_minutes}
-                  onChange={(e) => setAlertsConfig((p) => ({ ...p, cooldown_minutes: Number(e.target.value) }))}
-                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                />
-              </label>
               <div className="flex justify-center gap-4 mt-1">
                 <div className="flex flex-col items-center gap-1">
                   <StoreQr url="https://play.google.com/store/apps/details?id=org.telegram.messenger" alt="Telegram Android" />
@@ -1043,7 +1034,7 @@ const VALID_INTERVALS = [5, 10, 15, 20];
 
             {/* Toggle alerts */}
             <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
-              <h3 className="text-text-primary text-sm font-sans font-medium">Other Alerts</h3>
+              <h3 className="text-text-primary text-sm font-sans font-medium">Alert Triggers & Cooldown</h3>
               <div className="flex items-center justify-between">
                 <span className="text-text-primary text-sm font-sans">Grid Offline</span>
                 <Toggle
@@ -1058,6 +1049,15 @@ const VALID_INTERVALS = [5, 10, 15, 20];
                   onChange={(v) => setAlertsConfig((p) => ({ ...p, battery_over_temp_enabled: v }))}
                 />
               </div>
+              <label className="flex flex-col gap-1">
+                <span className="text-text-secondary text-xs font-sans">Cooldown (minutes between all alerts)</span>
+                <input
+                  type="number" min={1} max={1440}
+                  value={alertsConfig.cooldown_minutes}
+                  onChange={(e) => setAlertsConfig((p) => ({ ...p, cooldown_minutes: Number(e.target.value) }))}
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                />
+              </label>
             </div>
 
             <div className="flex flex-col sm:flex-row gap-2">

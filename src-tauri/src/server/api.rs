@@ -1357,6 +1357,10 @@ pub async fn set_alerts(
         config.daily_report_minute = v.min(59) as u8;
     }
 
+    // Reset debounce so toggling an alert off/on immediately re-enables
+    // notification delivery on the next poll cycle.
+    state.alert_debounce.lock().await.clear();
+
     tracing::info!("Alert config updated");
 
     // Persist to settings.json
