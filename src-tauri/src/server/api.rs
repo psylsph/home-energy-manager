@@ -1356,6 +1356,12 @@ pub async fn set_alerts(
     if let Some(v) = body.get("daily_report_minute").and_then(|v| v.as_u64()) {
         config.daily_report_minute = v.min(59) as u8;
     }
+    if let Some(v) = body.get("ntfy_topic").and_then(|v| v.as_str()) {
+        config.ntfy_topic = v.to_string();
+    }
+    if let Some(v) = body.get("ntfy_server").and_then(|v| v.as_str()) {
+        config.ntfy_server = v.to_string();
+    }
 
     // Reset debounce so toggling an alert off/on immediately re-enables
     // notification delivery on the next poll cycle.
@@ -1383,15 +1389,16 @@ pub async fn test_alerts(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
 
     let has_telegram =
         !config.telegram_bot_token.is_empty() && !config.telegram_chat_id.is_empty();
+    let has_ntfy = !config.ntfy_topic.is_empty();
     let wa_paired = matches!(
         *state.whatsapp.pairing_state.lock().await,
         crate::alerts::whatsapp::PairingState::Paired
     );
 
-    if !has_telegram && !wa_paired {
+    if !has_telegram && !has_ntfy && !wa_paired {
         return (StatusCode::BAD_REQUEST, Json(json!({
             "ok": false,
-            "message": "No notification channels configured. Set up Telegram or pair WhatsApp first."
+            "message": "No notification channels configured. Set up Telegram, ntfy, or pair WhatsApp first."
         })));
     }
 
@@ -1424,6 +1431,24 @@ pub async fn test_alerts(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
                 Ok(()) => results.push("WhatsApp: OK".into()),
                 Err(e) => results.push(format!("WhatsApp: {e}")),
             }
+        }
+    }
+
+    if has_ntfy {
+        let topic = config.ntfy_topic.clone();
+        let server = config.ntfy_server.clone();
+        let r = tokio::task::spawn_blocking(move || {
+            crate::alerts::send_ntfy_message(
+                &topic,
+                &server,
+                "✅ Test Alert\n\nThis is a test from Home Energy Manager.",
+            )
+        })
+        .await;
+        match r {
+            Ok(Ok(())) => results.push("ntfy: OK".into()),
+            Ok(Err(e)) => results.push(format!("ntfy: {e}")),
+            Err(_) => results.push("ntfy: internal error".into()),
         }
     }
 

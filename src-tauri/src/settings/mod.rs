@@ -365,6 +365,13 @@ pub struct AlertsConfig {
     #[serde(default)]
     pub whatsapp_recipient: String,
 
+    /// ntfy.sh (or self-hosted) topic for push notifications.
+    #[serde(default)]
+    pub ntfy_topic: String,
+    /// ntfy server URL (default: https://ntfy.sh).
+    #[serde(default = "default_ntfy_server")]
+    pub ntfy_server: String,
+
     // -- Daily consumption report --
     /// Whether to send a daily consumption report.
     pub daily_report_enabled: bool,
@@ -372,6 +379,10 @@ pub struct AlertsConfig {
     pub daily_report_hour: u8,
     /// Minute to send the daily report (0-59, local time).
     pub daily_report_minute: u8,
+}
+
+fn default_ntfy_server() -> String {
+    "https://ntfy.sh".to_string()
 }
 
 impl Default for AlertsConfig {
@@ -388,6 +399,8 @@ impl Default for AlertsConfig {
             grid_offline_enabled: false,
             battery_over_temp_enabled: false,
             whatsapp_recipient: String::new(),
+            ntfy_topic: String::new(),
+            ntfy_server: default_ntfy_server(),
             daily_report_enabled: false,
             daily_report_hour: 8,
             daily_report_minute: 0,

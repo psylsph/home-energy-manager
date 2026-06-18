@@ -143,6 +143,8 @@ const VALID_INTERVALS = [5, 10, 15, 20];
     soc_min: 4, soc_max: 100,
     grid_offline_enabled: false, battery_over_temp_enabled: false,
     whatsapp_recipient: '',
+    ntfy_topic: '',
+    ntfy_server: 'https://ntfy.sh',
   });
   const [alertsSaving, setAlertsSaving] = useState(false);
   const [alertsTesting, setAlertsTesting] = useState(false);
@@ -987,6 +989,34 @@ const VALID_INTERVALS = [5, 10, 15, 20];
               <div id="whatsapp-pairing" className="flex items-center justify-center py-4">
                 <WhatsAppPairing />
               </div>
+            </div>
+
+            {/* ntfy.sh */}
+            <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
+              <h3 className="text-text-primary text-sm font-sans font-medium">ntfy Push Notifications</h3>
+              <p className="text-text-secondary/70 text-xs font-sans">
+                Free push notifications via&nbsp;
+                <button onClick={() => openExternal('https://ntfy.sh')} className="text-flow-active underline hover:opacity-80 inline">ntfy.sh</button>.
+                Create a topic, install the app on your phone, and enter the topic name here.
+              </p>
+              <label className="flex flex-col gap-1">
+                <span className="text-text-secondary text-xs font-sans">Topic</span>
+                <input
+                  type="text" placeholder="my-alerts"
+                  value={alertsConfig.ntfy_topic}
+                  onChange={(e) => setAlertsConfig((p) => ({ ...p, ntfy_topic: e.target.value }))}
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-text-secondary text-xs font-sans">Server (optional, default: ntfy.sh)</span>
+                <input
+                  type="text" placeholder="https://ntfy.sh"
+                  value={alertsConfig.ntfy_server}
+                  onChange={(e) => setAlertsConfig((p) => ({ ...p, ntfy_server: e.target.value }))}
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                />
+              </label>
             </div>
 
             {/* Battery temperature & SOC thresholds */}

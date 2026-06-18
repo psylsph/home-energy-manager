@@ -135,8 +135,9 @@ pub fn evaluate_alerts(snapshot: &InverterSnapshot, config: &AlertsConfig) -> Ve
     let has_telegram =
         !config.telegram_bot_token.is_empty() && !config.telegram_chat_id.is_empty();
     let has_whatsapp = !config.whatsapp_recipient.is_empty();
+    let has_ntfy = !config.ntfy_topic.is_empty();
 
-    if !has_telegram && !has_whatsapp {
+    if !has_telegram && !has_whatsapp && !has_ntfy {
         return Vec::new();
     }
 
@@ -278,6 +279,36 @@ pub fn send_telegram_message(
             .read_to_string()
             .unwrap_or_else(|_| "<read error>".to_string());
         Err(format!("Telegram API {}: {}", status, text))
+    }
+}
+
+/// Send a notification via ntfy.sh (or a self-hosted ntfy server).
+///
+/// Uses `ureq` (synchronous) — call from `tokio::task::spawn_blocking`.
+pub fn send_ntfy_message(
+    topic: &str,
+    server: &str,
+    text: &str,
+) -> Result<(), String> {
+    let url = format!("{}/{}", server.trim_end_matches('/'), topic);
+
+    let server_display = server;
+    let resp = match ureq::post(&url)
+        .content_type("text/plain")
+        .send(text.to_string())
+    {
+        Ok(r) => r,
+        Err(ureq::Error::StatusCode(code)) => {
+            return Err(format!("ntfy API {} at {}", code, server_display));
+        }
+        Err(e) => return Err(format!("HTTP transport error to {}: {e}", server_display)),
+    };
+
+    let status = resp.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(format!("ntfy API {} at {}", status, server_display))
     }
 }
 
@@ -444,6 +475,8 @@ mod tests {
             grid_offline_enabled: false,
             battery_over_temp_enabled: false,
             whatsapp_recipient: String::new(),
+            ntfy_topic: String::new(),
+            ntfy_server: "https://ntfy.sh".to_string(),
             daily_report_enabled: false,
             daily_report_hour: 8,
             daily_report_minute: 0,

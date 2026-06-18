@@ -2014,6 +2014,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             let token = config.telegram_bot_token.clone();
                                             let chat_id = config.telegram_chat_id.clone();
                                             let wa_text = text.clone();
+                                            let ntfy_text = text.clone();
                                             let cleared_names = cleared
                                                 .iter()
                                                 .map(|a| a.human_name())
@@ -2047,6 +2048,22 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                     tracing::warn!("WhatsApp cleared alert sent");
                                                 }
                                             });
+
+                                            let ntfy_topic = config.ntfy_topic.clone();
+                                            let ntfy_server = config.ntfy_server.clone();
+                                            tokio::task::spawn_blocking(move || {
+                                                if ntfy_topic.is_empty() {
+                                                    return;
+                                                }
+                                                match crate::alerts::send_ntfy_message(
+                                                    &ntfy_topic,
+                                                    &ntfy_server,
+                                                    &ntfy_text,
+                                                ) {
+                                                    Ok(()) => tracing::warn!("ntfy cleared alert sent"),
+                                                    Err(e) => tracing::warn!("ntfy cleared alert failed: {e}"),
+                                                }
+                                            });
                                         }
 
                                         if !to_send.is_empty() {
@@ -2056,6 +2073,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             let token = config.telegram_bot_token.clone();
                                             let chat_id = config.telegram_chat_id.clone();
                                             let wa_text = text.clone();
+                                            let ntfy_text = text.clone();
 
                                             tokio::task::spawn_blocking(move || {
                                                 match crate::alerts::send_telegram_message(
@@ -2084,6 +2102,23 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                     tracing::warn!("WhatsApp alert failed: {e}");
                                                 } else {
                                                     tracing::warn!("WhatsApp alert sent");
+                                                }
+                                            });
+
+                                            // Also send via ntfy if topic configured
+                                            let ntfy_topic = config.ntfy_topic.clone();
+                                            let ntfy_server = config.ntfy_server.clone();
+                                            tokio::task::spawn_blocking(move || {
+                                                if ntfy_topic.is_empty() {
+                                                    return;
+                                                }
+                                                match crate::alerts::send_ntfy_message(
+                                                    &ntfy_topic,
+                                                    &ntfy_server,
+                                                    &ntfy_text,
+                                                ) {
+                                                    Ok(()) => tracing::warn!("ntfy alert sent"),
+                                                    Err(e) => tracing::warn!("ntfy alert failed: {e}"),
                                                 }
                                             });
                                         }
