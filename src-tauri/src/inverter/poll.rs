@@ -1977,7 +1977,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     let settings_cfg = state.alert_config.lock().await;
                                     let config = settings_cfg.clone();
                                     if config.enabled {
-                                        tracing::warn!(
+                                        tracing::debug!(
                                             "Alerts: evaluating (grid_loss={}, batt_over_temp={}, soc={})",
                                             snapshot.grid_loss,
                                             snapshot.battery_over_temp,
