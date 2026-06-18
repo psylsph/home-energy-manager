@@ -88,6 +88,7 @@ export default function SettingsPage() {
     setPanelGraphsScale,
     panelGraphsYLock,
     setPanelGraphsYLock,
+    snapshot,
   } = useInverterStore();
 
   // Connection fields
@@ -327,8 +328,9 @@ const VALID_INTERVALS = [5, 10, 15, 20];
   // Save email alerts
   const handleAlertsSave = async () => {
     setAlertsSaving(true);
-    // Auto-generate ntfy topic from inverter serial
-    const ntfyTopic = serial ? `hem-${serial}` : '';
+    // Auto-generate ntfy topic from inverter serial (live snapshot as fallback)
+    const invSerial = serial || snapshot?.inverter_serial || '';
+    const ntfyTopic = invSerial ? `hem-${invSerial}` : '';
     const saveConfig = { ...alertsConfig, ntfy_topic: ntfyTopic };
     try {
       const res = await apiPost('/api/alerts', saveConfig) as { message: string; ok: boolean };
@@ -975,7 +977,7 @@ const VALID_INTERVALS = [5, 10, 15, 20];
             <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
               <h3 className="text-text-primary text-sm font-sans font-medium">WhatsApp</h3>
               <p className="text-text-secondary text-xs font-sans">
-                Pair your WhatsApp account to send alerts. On your phone, open WhatsApp Settings, tap "Linked Devices", then "Link a Device" and scan the QR code below. Then enter the phone number that should <strong>receive</strong> the alerts — this must be a different number from the linked account (you cannot message yourself). Pairing persists across restarts.
+                Pair your WhatsApp account to send alerts. On your phone, open WhatsApp Settings, tap "Linked Devices", then "Link a Device" and scan the QR code below. Then enter the phone number that should <strong>receive</strong> the alerts.
               </p>
               <div className="flex flex-col gap-2">
                 <label className="flex flex-col gap-1">
@@ -1003,14 +1005,14 @@ const VALID_INTERVALS = [5, 10, 15, 20];
                 Install the app on your phone and subscribe to the topic below.
                 The topic is generated from your inverter serial so it's unique to you.
               </p>
-              {serial ? (
+              {(serial || snapshot?.inverter_serial) ? (
                 <div className="flex flex-col gap-3">
                   <div className="bg-bg-elevated rounded-lg px-4 py-3 flex flex-col gap-2">
                     <span className="text-text-secondary text-xs font-sans">Subscribe to this topic in the ntfy app</span>
                     <div className="flex items-center gap-2">
-                      <code className="flex-1 bg-bg-surface text-text-primary font-mono text-sm rounded px-3 py-2 select-all">hem-{serial}</code>
+                      <code className="flex-1 bg-bg-surface text-text-primary font-mono text-sm rounded px-3 py-2 select-all">hem-{serial || snapshot?.inverter_serial}</code>
                       <button
-                        onClick={() => { navigator.clipboard.writeText('hem-' + serial); flash('Topic copied!', true); }}
+                        onClick={() => { navigator.clipboard.writeText('hem-' + (serial || snapshot?.inverter_serial)); flash('Topic copied!', true); }}
                         className="shrink-0 bg-flow-active text-bg-base text-xs font-sans font-semibold px-3 py-2 rounded-lg hover:opacity-90 transition-opacity"
                       >
                         Copy
