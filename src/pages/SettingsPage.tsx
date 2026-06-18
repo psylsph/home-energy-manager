@@ -932,25 +932,26 @@ const VALID_INTERVALS = [5, 10, 15, 20];
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
         <h2 className="text-text-primary text-lg font-semibold font-sans">Notifications</h2>
 
-
-
+        <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
+          <div className="flex items-center justify-between">
             <span className="text-text-primary text-sm font-sans">Enable Alerts</span>
+            <Toggle
+              checked={alertsConfig.enabled}
+              onChange={(v) => setAlertsConfig((p) => ({ ...p, enabled: v }))}
+            />
           </div>
-          <Toggle
-            checked={alertsConfig.enabled}
-            onChange={(v) => setAlertsConfig((p) => ({ ...p, enabled: v }))}
-          />
         </div>
 
         {alertsConfig.enabled && (
           <div className="flex flex-col gap-4">
             {/* Credentials */}
             <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
-              <h3 className="text-text-primary text-sm font-sans font-medium">Telegram Configuration</h3>
+              <h3 className="text-text-primary text-sm font-sans font-medium">Telegram</h3>
               <p className="text-text-secondary text-xs font-sans">
-                Send alerts when critical conditions are detected. Create a bot via{' '}
+                <strong className="text-green-400">Recommended</strong> — Send alerts when critical conditions are detected. Create a bot via{' '}
                 <button onClick={() => openExternal('https://t.me/botfather')} className="text-flow-active underline hover:opacity-80 inline">@BotFather</button> on Telegram, get your bot token, then send /start to your bot and get your chat ID from{' '}
                 <button onClick={() => openExternal('https://t.me/userinfobot')} className="text-flow-active underline hover:opacity-80 inline">@userinfobot</button>.
+                Interactive messaging (reply to alerts directly from Telegram) will be available in a future release.
               </p>
               <label className="flex flex-col gap-1">
                 <span className="text-text-secondary text-xs font-sans">Bot Token (from @BotFather)</span>

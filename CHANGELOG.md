@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.30.0] - 2026-06-18
+
+### Added
+
+- **ntfy push notifications** — a new notification channel alongside Telegram
+  and WhatsApp. Free via ntfy.sh, install the app on your phone and subscribe
+  to your auto-generated topic. The topic name is based on your inverter serial
+  so it's unique to you. Shown with a copy button for easy setup.
+- **Alert logs now visible at default log level** — successes, failures, and
+  debounce suppression all log at `warn` level so you can see what's happening
+  without changing `RUST_LOG`.
+
+### Fixed
+
+- **Grid Offline alert now matches the Status page** — the Status page banner
+  fires on `grid_loss || !grid_online`, but the alert only checked `grid_loss`.
+  If the AC voltage register showed no grid but the consensus flag was off, the
+  alert stayed silent. Now both conditions trigger a notification.
+- **Toggling alerts now takes effect immediately** — saving alert settings
+  clears the debounce so re-enabled alerts fire on the next poll cycle without
+  waiting for the cooldown to expire.
+
+### Changed
+
+- **Cooldown moved to Alert Triggers section** — renamed from "Other Alerts"
+  to "Alert Triggers & Cooldown" to make clear the cooldown applies to all
+  channels, not just Telegram.
+- **ntfy listed before WhatsApp in Settings** — with a recommendation badge
+  since WhatsApp pairing can be unreliable for self-send delivery.
+- **Removed Solar Clipping and PV String Loss alerts** — both were unreliable
+  and produced false positives.
+
 ## [0.29.0] - 2026-06-18
 
 ### Fixed
