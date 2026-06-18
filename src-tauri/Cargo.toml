@@ -5,6 +5,10 @@ description = "Home Energy Manager — Monitor and control GivEnergy inverters"
 authors = ["Stuart Harding"]
 edition = "2021"
 
+[lib]
+name = "givenergy_local"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [dependencies]
 # Data serialization
 serde = { version = "1.0", features = ["derive"] }

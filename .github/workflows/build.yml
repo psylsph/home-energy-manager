@@ -65,6 +65,8 @@ jobs:
 
       - name: Build Tauri app (macOS)
         if: matrix.platform == 'macos-latest'
+        env:
+          TAURI_BUNDLER_DMG_IGNORE_CI: false
         run: cargo tauri build --target ${{ matrix.target }} --bundles dmg
 
       - name: Build Tauri app (Windows)
