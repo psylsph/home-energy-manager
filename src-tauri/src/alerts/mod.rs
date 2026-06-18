@@ -29,10 +29,8 @@ pub enum AlertType {
     BatteryTempLow,
     BatterySocHigh,
     BatterySocLow,
-    SolarClipping,
-    PvStringLoss,
-    GridOffline,
     BatteryOverTemp,
+    GridOffline,
 }
 
 impl AlertType {
@@ -43,8 +41,6 @@ impl AlertType {
             Self::BatteryTempLow => "Battery Temperature Low",
             Self::BatterySocHigh => "Battery SOC High",
             Self::BatterySocLow => "Battery SOC Low",
-            Self::SolarClipping => "Solar Clipping",
-            Self::PvStringLoss => "PV String Circuit Loss",
             Self::GridOffline => "Grid Offline",
             Self::BatteryOverTemp => "Battery Over-Temperature",
         }
@@ -124,7 +120,9 @@ pub fn evaluate_alerts(snapshot: &InverterSnapshot, config: &AlertsConfig) -> Ve
     }
     let has_telegram =
         !config.telegram_bot_token.is_empty() && !config.telegram_chat_id.is_empty();
-    if !has_telegram {
+    let has_whatsapp = !config.whatsapp_recipient.is_empty();
+
+    if !has_telegram && !has_whatsapp {
         return Vec::new();
     }
 
@@ -147,36 +145,6 @@ pub fn evaluate_alerts(snapshot: &InverterSnapshot, config: &AlertsConfig) -> Ve
     if config.soc_max < 100 && soc > config.soc_max {
         alerts.push(AlertType::BatterySocHigh);
     }
-
-    // Solar clipping: solar output near inverter's max AC capacity
-    if config.solar_clipping_enabled {
-        let max_ac = snapshot.max_ac_power_w;
-        if max_ac > 0 && (snapshot.solar_power as u32) > max_ac.saturating_mul(95) / 100 {
-            alerts.push(AlertType::SolarClipping);
-        }
-    }
-
-    // PV string loss: one string near zero while the other produces,
-    // or both near zero while total solar > 100 W.
-    // Guards against false positives: if a string has voltage > 50 V it
-    // is clearly connected and should not trigger, even if power is low.
-    if config.pv_string_loss_enabled {
-        let solar = snapshot.solar_power;
-        let pv1 = snapshot.pv1_power.unsigned_abs() as i32;
-        let pv2 = snapshot.pv2_power.unsigned_abs() as i32;
-        let pv1_v = snapshot.pv1_voltage;
-        let pv2_v = snapshot.pv2_voltage;
-        let pv1_near_zero = pv1 < 10 && pv1_v < 50.0;
-        let pv2_near_zero = pv2 < 10 && pv2_v < 50.0;
-
-        if (solar > 100 && pv1_near_zero && pv2_near_zero)
-            || (pv1 > 50 && pv2_near_zero)
-            || (pv2 > 50 && pv1_near_zero)
-        {
-            alerts.push(AlertType::PvStringLoss);
-        }
-    }
-
     // Grid offline
     if config.grid_offline_enabled && snapshot.grid_loss {
         alerts.push(AlertType::GridOffline);
@@ -457,8 +425,6 @@ mod tests {
             batt_temp_max: 45.0,
             soc_min: 10,
             soc_max: 95,
-            solar_clipping_enabled: false,
-            pv_string_loss_enabled: false,
             grid_offline_enabled: false,
             battery_over_temp_enabled: false,
             whatsapp_recipient: String::new(),
@@ -553,52 +519,6 @@ mod tests {
         let config = alerts_config();
         let alerts = evaluate_alerts(&snap, &config);
         assert!(alerts.contains(&AlertType::BatterySocHigh));
-    }
-
-    #[test]
-    fn test_solar_clipping() {
-        let mut snap = make_snapshot();
-        snap.solar_power = 5800;
-        snap.max_ac_power_w = 6000;
-        let mut config = alerts_config();
-        config.solar_clipping_enabled = true;
-        let alerts = evaluate_alerts(&snap, &config);
-        assert!(alerts.contains(&AlertType::SolarClipping));
-    }
-
-    #[test]
-    fn test_solar_no_clipping_when_under() {
-        let mut snap = make_snapshot();
-        snap.solar_power = 4000;
-        snap.max_ac_power_w = 6000;
-        let mut config = alerts_config();
-        config.solar_clipping_enabled = true;
-        let alerts = evaluate_alerts(&snap, &config);
-        assert!(!alerts.contains(&AlertType::SolarClipping));
-    }
-
-    #[test]
-    fn test_pv_string_loss_one_dead() {
-        let mut snap = make_snapshot();
-        snap.pv1_power = 3000;
-        snap.pv2_power = 0;
-        snap.solar_power = 3000;
-        let mut config = alerts_config();
-        config.pv_string_loss_enabled = true;
-        let alerts = evaluate_alerts(&snap, &config);
-        assert!(alerts.contains(&AlertType::PvStringLoss));
-    }
-
-    #[test]
-    fn test_pv_string_loss_both_dead_solar_producing() {
-        let mut snap = make_snapshot();
-        snap.pv1_power = 0;
-        snap.pv2_power = 0;
-        snap.solar_power = 200;
-        let mut config = alerts_config();
-        config.pv_string_loss_enabled = true;
-        let alerts = evaluate_alerts(&snap, &config);
-        assert!(alerts.contains(&AlertType::PvStringLoss));
     }
 
     #[test]

@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prior UI refactor. Replaced with checks for the SOC ring and Charged Today.
 - **Filter placeholder ellipsis mismatch** — the Logs page input uses
   `Filter logs…` (Unicode ellipsis) but the test looked for three dots.
+- **Removed Solar Clipping and PV String Loss alerts** — both were unreliable
+  and produced false positives. Grid Offline, battery temperature, and SOC
+  alerts remain.
 
 ### Changed
 

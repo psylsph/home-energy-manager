@@ -141,7 +141,6 @@ const VALID_INTERVALS = [5, 10, 15, 20];
     cooldown_minutes: 30,
     batt_temp_min: 0, batt_temp_max: 0,
     soc_min: 4, soc_max: 100,
-    solar_clipping_enabled: false, pv_string_loss_enabled: false,
     grid_offline_enabled: false, battery_over_temp_enabled: false,
     whatsapp_recipient: '',
   });
@@ -1045,20 +1044,6 @@ const VALID_INTERVALS = [5, 10, 15, 20];
             {/* Toggle alerts */}
             <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
               <h3 className="text-text-primary text-sm font-sans font-medium">Other Alerts</h3>
-              <div className="flex items-center justify-between">
-                <span className="text-text-primary text-sm font-sans">Solar Clipping</span>
-                <Toggle
-                  checked={alertsConfig.solar_clipping_enabled}
-                  onChange={(v) => setAlertsConfig((p) => ({ ...p, solar_clipping_enabled: v }))}
-                />
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-text-primary text-sm font-sans">PV String Loss</span>
-                <Toggle
-                  checked={alertsConfig.pv_string_loss_enabled}
-                  onChange={(v) => setAlertsConfig((p) => ({ ...p, pv_string_loss_enabled: v }))}
-                />
-              </div>
               <div className="flex items-center justify-between">
                 <span className="text-text-primary text-sm font-sans">Grid Offline</span>
                 <Toggle

@@ -354,10 +354,6 @@ pub struct AlertsConfig {
     pub soc_min: u8,
     /// Battery SOC alert maximum (%). 100 = disabled.
     pub soc_max: u8,
-    /// Alert when solar power exceeds 95% of inverter max AC capacity.
-    pub solar_clipping_enabled: bool,
-    /// Alert when a PV string drops to near zero while the other produces.
-    pub pv_string_loss_enabled: bool,
     /// Alert on grid loss.
     pub grid_offline_enabled: bool,
     /// Alert on battery over-temperature flag.
@@ -389,8 +385,6 @@ impl Default for AlertsConfig {
             batt_temp_max: 0.0,
             soc_min: 4,
             soc_max: 100,
-            solar_clipping_enabled: false,
-            pv_string_loss_enabled: false,
             grid_offline_enabled: false,
             battery_over_temp_enabled: false,
             whatsapp_recipient: String::new(),

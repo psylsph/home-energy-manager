@@ -1338,12 +1338,6 @@ pub async fn set_alerts(
     if let Some(v) = body.get("soc_max").and_then(|v| v.as_u64()) {
         config.soc_max = v.min(100) as u8;
     }
-    if let Some(v) = body.get("solar_clipping_enabled").and_then(|v| v.as_bool()) {
-        config.solar_clipping_enabled = v;
-    }
-    if let Some(v) = body.get("pv_string_loss_enabled").and_then(|v| v.as_bool()) {
-        config.pv_string_loss_enabled = v;
-    }
     if let Some(v) = body.get("grid_offline_enabled").and_then(|v| v.as_bool()) {
         config.grid_offline_enabled = v;
     }

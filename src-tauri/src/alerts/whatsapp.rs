@@ -123,6 +123,14 @@ impl WhatsAppState {
                                             let _ = std::fs::remove_file(path);
                                         }
                                     }
+                                    Event::Receipt(receipt) => {
+                                        let msg_ids = receipt.message_ids.join(", ");
+                                        tracing::warn!(
+                                            "WhatsApp: receipt {:?} for message(s) {}",
+                                            receipt.r#type,
+                                            msg_ids
+                                        );
+                                    }
                                     _ => {}
                                 }
                             }
@@ -205,7 +213,7 @@ impl WhatsAppState {
         // the initial sync hasn't completed by the time we first send.
         for attempt in 0..3 {
             if attempt > 0 {
-                tracing::info!("WhatsApp: retry {attempt} sending to {jid}");
+                tracing::warn!("WhatsApp: retry {attempt} sending to {jid}");
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             }
 
@@ -220,18 +228,24 @@ impl WhatsAppState {
                 .await
             {
                 Ok(result) => {
+                    tracing::warn!(
+                        "WhatsApp: message accepted by server (message_id={}, to={})",
+                        result.message_id, result.to
+                    );
+                    // Listen for delivery receipt — the bot's event handler
+                    // will log the actual delivery status via Event::Receipt.
                     tracing::info!(
-                        "WhatsApp: alert sent (message_id={}) to {jid}",
+                        "WhatsApp: {jid} <- message queued for delivery (mid={})",
                         result.message_id
                     );
                     return Ok(());
                 }
                 Err(e) => {
                     if attempt == 2 {
-                        tracing::warn!("WhatsApp: send failed after 3 attempts: {e}");
+                        tracing::error!("WhatsApp: send failed after 3 attempts: {e}");
                         return Err(format!("Send: {e}"));
                     }
-                    tracing::info!("WhatsApp: send attempt {attempt} failed, retrying: {e}");
+                    tracing::warn!("WhatsApp: send attempt {attempt} failed, retrying: {e}");
                 }
             }
         }
