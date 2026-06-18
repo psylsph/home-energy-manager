@@ -351,23 +351,246 @@ fn build_status_message(snapshot: &InverterSnapshot) -> String {
     msg
 }
 
-/// Spawns a background task that polls Telegram for /status commands and
-/// replies with the current inverter snapshot.
+/// Per-module battery detail (for `/battery`).
+fn build_battery_message(snapshot: &InverterSnapshot) -> String {
+    let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let mut msg = format!("🔋 <b>Battery Detail</b> — {time}\n");
+    msg.push_str("━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    msg.push_str(&format!(
+        "Overall: <b>{}%</b> SOC · {:.1}°C · {:.1}V · {} W\n",
+        snapshot.soc,
+        snapshot.battery_temperature,
+        snapshot.battery_voltage,
+        snapshot.battery_power
+    ));
+    msg.push_str(&format!(
+        "Capacity: {:.1} kWh · State: {}\n",
+        snapshot.battery_capacity_kwh,
+        match snapshot.battery_state {
+            crate::inverter::model::BatteryState::Charging => "Charging",
+            crate::inverter::model::BatteryState::Discharging => "Discharging",
+            crate::inverter::model::BatteryState::Idle => "Idle",
+        }
+    ));
+
+    if snapshot.battery_modules.is_empty() {
+        msg.push_str("\n<i>No per-module BMS data available.</i>");
+    } else {
+        msg.push_str(&format!("\n<b>Modules ({})</b>:\n", snapshot.battery_modules.len()));
+        for m in &snapshot.battery_modules {
+            msg.push_str(&format!(
+                "  #{}: {}% · {:.1}°C · {:.1}V · {:.1}/{:.0}Ah · {} cycles\n",
+                m.index,
+                m.soc,
+                m.temperature,
+                m.voltage,
+                m.remaining_capacity_ah,
+                m.capacity_ah,
+                m.num_cycles
+            ));
+        }
+        msg.pop(); // trailing newline
+    }
+    msg
+}
+
+/// Battery mode and configuration (for `/mode`).
+fn build_mode_message(snapshot: &InverterSnapshot) -> String {
+    let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let mut msg = format!("⚙️ <b>Battery Mode</b> — {time}\n");
+    msg.push_str("━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    msg.push_str(&format!(
+        "Mode: <b>{}</b>\n",
+        match snapshot.battery_mode {
+            crate::inverter::model::BatteryMode::Eco => "Eco",
+            crate::inverter::model::BatteryMode::EcoPaused => "Eco (Paused)",
+            crate::inverter::model::BatteryMode::TimedDemand => "Timed Demand",
+            crate::inverter::model::BatteryMode::TimedExport => "Timed Export",
+            crate::inverter::model::BatteryMode::ExportPaused => "Export (Paused)",
+            crate::inverter::model::BatteryMode::Unknown => "Unknown",
+        }
+    ));
+    msg.push_str(&format!(
+        "Reserve: <b>{}%</b> · Target SOC: <b>{}%</b>\n",
+        snapshot.battery_reserve, snapshot.target_soc
+    ));
+    msg.push_str(&format!(
+        "Charge rate: <b>{}%</b> · Discharge rate: <b>{}%</b>\n",
+        snapshot.charge_rate, snapshot.discharge_rate
+    ));
+
+    // Active automation / status flags
+    let mut flags: Vec<&str> = Vec::new();
+    if snapshot.cosy_active {
+        flags.push("Cosy charging");
+    } else if snapshot.cosy_enabled {
+        flags.push("Cosy idle");
+    }
+    if snapshot.agile_active {
+        flags.push("Agile active");
+    } else if snapshot.agile_enabled {
+        flags.push("Agile idle");
+    }
+    if snapshot.auto_winter_active {
+        flags.push("Auto-winter");
+    }
+    if snapshot.load_limiter_active {
+        flags.push("Load limiter");
+    }
+    if flags.is_empty() {
+        msg.push_str("Automation: none active");
+    } else {
+        msg.push_str(&format!("Active: {}", flags.join(", ")));
+    }
+    msg
+}
+
+/// System / firmware info (for `/version`).
+fn build_version_message(snapshot: &InverterSnapshot) -> String {
+    let mut msg = "📋 <b>System Info</b>\n".to_string();
+    msg.push_str("━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    msg.push_str(&format!("App: <b>v{}</b>\n", env!("CARGO_PKG_VERSION")));
+    if !snapshot.device_type_display.is_empty() {
+        msg.push_str(&format!("Device: {}\n", snapshot.device_type_display));
+    }
+    msg.push_str(&format!("Serial: <code>{}</code>\n", snapshot.inverter_serial));
+    msg.push_str(&format!("ARM firmware: {}", snapshot.firmware_version));
+    if !snapshot.dsp_firmware_version.is_empty() {
+        msg.push_str(&format!("\nDSP firmware: {}", snapshot.dsp_firmware_version));
+    }
+    msg
+}
+
+/// List of available commands (for `/help` and `/start`).
+fn build_help_message() -> String {
+    let mut msg = "🤖 <b>Home Energy Manager</b>\n".to_string();
+    msg.push_str("━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    msg.push_str("<b>Commands</b>:\n");
+    msg.push_str("/status — Live system status\n");
+    msg.push_str("/today — Today's energy summary & cost\n");
+    msg.push_str("/battery — Battery & module details\n");
+    msg.push_str("/mode — Battery mode & settings\n");
+    msg.push_str("/version — System & firmware info\n");
+    msg.push_str("/help — Show this help");
+    msg
+}
+
+/// Register the bot's command menu with Telegram so that typing `/`
+/// auto-suggests the commands in the chat. Best-effort: failures are logged
+/// but never fatal.
+pub fn register_telegram_commands(bot_token: &str) {
+    let url = format!("https://api.telegram.org/bot{}/setMyCommands", bot_token);
+    let payload = serde_json::json!({
+        "commands": [
+            { "command": "status",  "description": "Live system status" },
+            { "command": "today",   "description": "Today's energy summary & cost" },
+            { "command": "battery", "description": "Battery & module details" },
+            { "command": "mode",    "description": "Battery mode & settings" },
+            { "command": "version", "description": "System & firmware info" },
+            { "command": "help",    "description": "Show available commands" },
+        ]
+    });
+    let Ok(body) = serde_json::to_string(&payload) else {
+        return;
+    };
+    match ureq::post(&url)
+        .content_type("application/json")
+        .send(&body)
+    {
+        Ok(r) if r.status().is_success() => {
+            tracing::info!("Telegram command menu registered");
+        }
+        Ok(r) => {
+            tracing::warn!("Telegram setMyCommands returned {}", r.status());
+        }
+        Err(e) => {
+            tracing::warn!("Failed to register Telegram commands: {e}");
+        }
+    }
+}
+
+/// Extract the lowercase command name from an incoming message: trims
+/// whitespace, takes the first token, and strips an optional `@botname`
+/// suffix (Telegram sends this in group chats).
+fn parse_command(text: &str) -> String {
+    let first = text.split_whitespace().next().unwrap_or("");
+    let without_suffix = first.split('@').next().unwrap_or(first);
+    without_suffix
+        .strip_prefix('/')
+        .unwrap_or(without_suffix)
+        .to_ascii_lowercase()
+}
+
+/// Build the `/today` summary by querying today's history and the configured
+/// tariffs. Async because it locks the history DB and reads settings.
+async fn build_today_reply(state: &crate::inverter::poll::AppState) -> String {
+    let today = chrono::Local::now().date_naive();
+    let date_str = today.format("%A %d %B").to_string();
+
+    let db_guard = state.history.lock().await;
+    let db = db_guard.clone();
+    drop(db_guard);
+
+    let Some(db) = db else {
+        return "⚠️ History database not available.".to_string();
+    };
+
+    let rows = match db.get_readings_for_date(today) {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("Telegram /today query failed: {e}");
+            return format!("⚠️ Could not read history: {e}");
+        }
+    };
+    if rows.is_empty() {
+        return "⚠️ No history data for today yet.".to_string();
+    }
+
+    let settings = crate::settings::Settings::load();
+    match crate::alerts::report::generate_daily_summary_text(&rows, &date_str, &settings) {
+        Some(s) => s,
+        None => "⚠️ Not enough data to summarise today yet.".to_string(),
+    }
+}
+
+
+/// Spawns a background task that polls Telegram for commands and replies
+/// with inverter data. Supported commands: `/status`, `/today`, `/battery`,
+/// `/mode`, `/version`, `/help`.
 ///
-/// The task reads `state.alert_config` on each cycle so config changes
-/// (token updates) take effect without restart.
+/// Security: only the chat id configured in `alert_config.telegram_chat_id`
+/// receives replies — every other chat is silently ignored. The task reads
+/// `state.alert_config` on each cycle so config changes (token / chat id
+/// updates) take effect without restart.
 pub fn spawn_telegram_poller(state: std::sync::Arc<crate::inverter::poll::AppState>) {
     tracing::debug!("Telegram poller started");
     tokio::spawn(async move {
         let mut offset: i64 = 0;
+        let mut commands_registered = false;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
             let config = state.alert_config.lock().await.clone();
             if !config.enabled || config.telegram_bot_token.is_empty() {
+                // Token removed/alerts disabled — re-register the command menu
+                // the next time a token is configured.
+                commands_registered = false;
                 continue;
             }
             let token = config.telegram_bot_token.clone();
+            // Only the configured chat may interact with the bot. If no chat
+            // id is set, nobody can issue commands (consistent with alerts).
+            let allowed_chat = config.telegram_chat_id.parse::<i64>().ok();
+
+            // Register the command menu once per token (so `/` autocompletes).
+            if !commands_registered {
+                let reg_token = token.clone();
+                tokio::task::spawn_blocking(move || register_telegram_commands(&reg_token))
+                    .await
+                    .ok();
+                commands_registered = true;
+            }
+
             let cur_offset = offset;
             let poll_token = token.clone();
 
@@ -409,26 +632,62 @@ pub fn spawn_telegram_poller(state: std::sync::Arc<crate::inverter::poll::AppSta
                 if *update_id >= offset {
                     offset = update_id + 1;
                 }
-                if *chat_id != 0
-                    && (text.eq_ignore_ascii_case("/status") || text.eq_ignore_ascii_case("/start"))
-                {
-                        let snapshot = state.latest_snapshot.lock().await;
-                        let reply = if let Some(ref snap) = *snapshot {
-                            build_status_message(snap)
-                        } else {
-                            "⚠️ No inverter data available yet. Waiting for connection...".to_string()
-                        };
-                        drop(snapshot);
 
-                        let cid_str = chat_id.to_string();
-                        let token_c = token.clone();
-                        tracing::info!("Telegram: replying to /status for chat {}", chat_id);
-                        tokio::task::spawn_blocking(move || {
-                            if let Err(e) = send_telegram_message(&token_c, &cid_str, &reply) {
-                                tracing::warn!("Telegram reply failed: {e}");
-                            }
-                        });
+                // Allowlist: only respond to the configured chat.
+                match allowed_chat {
+                    Some(allowed) if *chat_id == allowed => {}
+                    _ => continue,
+                }
+
+                let cmd = parse_command(text);
+                if cmd.is_empty() {
+                    continue;
+                }
+
+                let reply = match cmd.as_str() {
+                    "start" | "help" => build_help_message(),
+                    "status" => {
+                        let snapshot = state.latest_snapshot.lock().await;
+                        match &*snapshot {
+                            Some(s) => build_status_message(s),
+                            None => "⚠️ No inverter data available yet. Waiting for connection..."
+                                .to_string(),
+                        }
                     }
+                    "battery" => {
+                        let snapshot = state.latest_snapshot.lock().await;
+                        match &*snapshot {
+                            Some(s) => build_battery_message(s),
+                            None => "⚠️ No inverter data available yet.".to_string(),
+                        }
+                    }
+                    "mode" => {
+                        let snapshot = state.latest_snapshot.lock().await;
+                        match &*snapshot {
+                            Some(s) => build_mode_message(s),
+                            None => "⚠️ No inverter data available yet.".to_string(),
+                        }
+                    }
+                    "version" => {
+                        let snapshot = state.latest_snapshot.lock().await;
+                        match &*snapshot {
+                            Some(s) => build_version_message(s),
+                            None => "⚠️ No inverter data available yet.".to_string(),
+                        }
+                    }
+                    "today" => build_today_reply(&state).await,
+                    // Unrecognized command from the allowed chat → help.
+                    _ => build_help_message(),
+                };
+
+                let cid_str = chat_id.to_string();
+                let token_c = token.clone();
+                tracing::info!("Telegram: replying to '/{cmd}' for chat {chat_id}");
+                tokio::task::spawn_blocking(move || {
+                    if let Err(e) = send_telegram_message(&token_c, &cid_str, &reply) {
+                        tracing::warn!("Telegram reply failed: {e}");
+                    }
+                });
             }
         }
     });
@@ -632,5 +891,25 @@ mod tests {
         assert!(msg.contains("Grid Offline"));
         assert!(msg.contains("Battery temp:"));
         assert!(msg.contains("System Status:"));
+    }
+
+    #[test]
+    fn test_parse_command_strips_suffix_and_case() {
+        assert_eq!(parse_command("/status"), "status");
+        assert_eq!(parse_command("  /STATUS  "), "status");
+        assert_eq!(parse_command("/status@hem_bot"), "status");
+        assert_eq!(parse_command("/Help@MyBot extra args"), "help");
+        assert_eq!(parse_command("/today"), "today");
+        assert_eq!(parse_command("hello"), "hello");
+        assert_eq!(parse_command(""), "");
+        assert_eq!(parse_command("   "), "");
+    }
+
+    #[test]
+    fn test_build_help_lists_all_commands() {
+        let msg = build_help_message();
+        for cmd in ["/status", "/today", "/battery", "/mode", "/version", "/help"] {
+            assert!(msg.contains(cmd), "help missing {cmd}");
+        }
     }
 }

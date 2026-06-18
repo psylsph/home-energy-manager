@@ -7,6 +7,8 @@
 
 use std::collections::BTreeMap;
 
+use chrono::Timelike;
+
 /// A single reading row from the history database.
 #[derive(Debug, Clone)]
 pub struct ReadingRow {
@@ -92,6 +94,214 @@ fn format_watts(value: f64) -> String {
     } else {
         format!("{:.0} W", value)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Daily totals (plain-text summary for Telegram `/today`)
+// ---------------------------------------------------------------------------
+
+/// Aggregated daily energy totals, computed by integrating history rows.
+///
+/// This mirrors the integration logic in [`generate_daily_report_html`] but
+/// returns structured data instead of HTML, so the Telegram `/today` summary
+/// can reuse the exact same kWh math (and split cost by peak/off-peak hour).
+#[derive(Debug, Default, Clone)]
+pub struct DailyTotals {
+    pub solar_kwh: f64,
+    pub home_kwh: f64,
+    pub import_kwh: f64,
+    pub export_kwh: f64,
+    pub battery_charge_kwh: f64,
+    pub battery_discharge_kwh: f64,
+    /// Per-hour buckets: `hour_start_unix_ts -> (import_kwh, export_kwh)`,
+    /// used to split import cost between peak and off-peak windows.
+    pub hourly_import_export: BTreeMap<i64, (f64, f64)>,
+    pub soc_min: Option<f32>,
+    pub soc_max: Option<f32>,
+    pub row_count: usize,
+}
+
+/// Integrate a day's worth of power samples into kWh totals.
+///
+/// Returns `None` if there's insufficient data (fewer than 2 valid readings,
+/// or no detectable sample interval).
+pub fn compute_daily_totals(rows: &[ReadingRow]) -> Option<DailyTotals> {
+    let valid: Vec<&ReadingRow> = rows
+        .iter()
+        .filter(|r| {
+            r.solar_power.is_some()
+                || r.battery_power.is_some()
+                || r.grid_power.is_some()
+                || r.home_power.is_some()
+        })
+        .collect();
+
+    if valid.len() < 2 {
+        return None;
+    }
+
+    let median_ms = median_interval_ms(rows)?;
+    let max_gap_ms = median_ms * 3.5;
+
+    let mut totals = DailyTotals::default();
+    let mut soc_values: Vec<f32> = Vec::new();
+    let mut hourly: BTreeMap<i64, (f64, f64)> = BTreeMap::new();
+
+    for i in 0..valid.len() - 1 {
+        let a = valid[i];
+        let b = valid[i + 1];
+        let raw_dt_ms = (b.timestamp - a.timestamp) as f64 * 1000.0;
+        if raw_dt_ms <= 0.0 || raw_dt_ms > max_gap_ms {
+            continue;
+        }
+        let hours = raw_dt_ms / 3_600_000.0;
+        if hours <= 0.0 {
+            continue;
+        }
+
+        totals.solar_kwh += integrate_pair(a.solar_power, b.solar_power, hours, positive_part);
+        totals.home_kwh += integrate_pair(a.home_power, b.home_power, hours, positive_part);
+        totals.import_kwh += integrate_pair(a.grid_power, b.grid_power, hours, positive_part);
+        totals.export_kwh += integrate_pair(a.grid_power, b.grid_power, hours, negative_magnitude);
+        totals.battery_charge_kwh +=
+            integrate_pair(a.battery_power, b.battery_power, hours, negative_magnitude);
+        totals.battery_discharge_kwh +=
+            integrate_pair(a.battery_power, b.battery_power, hours, positive_part);
+
+        let hour_start = (a.timestamp / 3600) * 3600;
+        let e = hourly.entry(hour_start).or_insert((0.0, 0.0));
+        e.0 += integrate_pair(a.grid_power, b.grid_power, hours, positive_part);
+        e.1 += integrate_pair(a.grid_power, b.grid_power, hours, negative_magnitude);
+    }
+
+    for row in &valid {
+        if let Some(soc) = row.soc {
+            soc_values.push(soc);
+        }
+    }
+    if soc_values.is_empty() {
+        totals.soc_min = None;
+        totals.soc_max = None;
+    } else {
+        totals.soc_min = Some(soc_values.iter().cloned().fold(f32::MAX, f32::min));
+        totals.soc_max = Some(soc_values.iter().cloned().fold(f32::MIN, f32::max));
+    }
+    totals.hourly_import_export = hourly;
+    totals.row_count = valid.len();
+    Some(totals)
+}
+
+/// Parse a `"HH:MM"` time into minutes-since-midnight.
+fn parse_hhmm(s: &str) -> Option<u16> {
+    let mut it = s.split(':');
+    let h: u16 = it.next()?.trim().parse().ok()?;
+    let m: u16 = it.next()?.trim().parse().ok()?;
+    Some(h * 60 + m)
+}
+
+/// Returns `true` if the local wall-clock time of `ts` falls within the
+/// configured off-peak window. Handles windows that cross midnight
+/// (e.g. 23:00 → 05:30). Returns `false` if the window strings can't be parsed.
+fn is_off_peak(ts: i64, off_peak_start: &str, off_peak_end: &str) -> bool {
+    let (Some(start), Some(end)) = (parse_hhmm(off_peak_start), parse_hhmm(off_peak_end)) else {
+        return false;
+    };
+    let Some(dt) = chrono::DateTime::from_timestamp(ts, 0) else {
+        return false;
+    };
+    let local = dt.with_timezone(&chrono::Local);
+    let mins: u32 = local.hour() * 60 + local.minute();
+    let start = start as u32;
+    let end = end as u32;
+    if start <= end {
+        mins >= start && mins < end
+    } else {
+        // crosses midnight
+        mins >= start || mins < end
+    }
+}
+
+/// Build a concise plain-text daily summary for Telegram, including a
+/// peak/off-peak cost split derived from the configured tariffs.
+///
+/// Returns `None` if there's insufficient data to integrate.
+pub fn generate_daily_summary_text(
+    rows: &[ReadingRow],
+    date_str: &str,
+    settings: &crate::settings::Settings,
+) -> Option<String> {
+    let t = compute_daily_totals(rows)?;
+
+    // Resolve tariff rates, preferring the structured peak/off-peak config and
+    // falling back to the legacy flat rate.
+    let imp_cfg = settings.import_tariff_config.as_ref();
+    let peak_rate = imp_cfg.map(|c| c.peak_rate).unwrap_or(settings.import_tariff);
+    let off_peak_rate = imp_cfg.map(|c| c.off_peak_rate).unwrap_or(settings.import_tariff);
+    let (op_start, op_end) = match imp_cfg {
+        Some(c) => (c.off_peak_start.as_str(), c.off_peak_end.as_str()),
+        None => ("", ""),
+    };
+    let export_rate = settings
+        .export_tariff_config
+        .as_ref()
+        .map(|c| c.peak_rate)
+        .unwrap_or(settings.export_tariff);
+
+    // Split import cost between peak and off-peak using the hourly buckets.
+    let mut import_cost = 0.0_f64;
+    let mut off_peak_import_kwh = 0.0_f64;
+    let mut peak_import_kwh = 0.0_f64;
+    for (ts, (imp_kwh, _)) in &t.hourly_import_export {
+        if is_off_peak(*ts, op_start, op_end) {
+            import_cost += imp_kwh * off_peak_rate;
+            off_peak_import_kwh += imp_kwh;
+        } else {
+            import_cost += imp_kwh * peak_rate;
+            peak_import_kwh += imp_kwh;
+        }
+    }
+    let export_income = t.export_kwh * export_rate;
+    let net_cost = import_cost - export_income;
+    let self_suff = if t.home_kwh > 0.0 {
+        (1.0 - t.import_kwh / t.home_kwh).clamp(0.0, 1.0) * 100.0
+    } else {
+        0.0
+    };
+
+    let soc_range = match (t.soc_min, t.soc_max) {
+        (Some(lo), Some(hi)) => format!("{}%–{}%", lo as i32, hi as i32),
+        _ => "—".to_string(),
+    };
+
+    let mut msg = format!("📊 <b>Daily Summary</b> — {date_str}\n");
+    msg.push_str("━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    msg.push_str(&format!("☀️ Solar: <b>{:.1} kWh</b>\n", t.solar_kwh));
+    msg.push_str(&format!("🏠 Home: <b>{:.1} kWh</b>\n", t.home_kwh));
+    msg.push_str(&format!(
+        "🔋 Battery: +{:.1} / -{:.1} kWh  (SOC {})",
+        t.battery_charge_kwh, t.battery_discharge_kwh, soc_range
+    ));
+    msg.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    msg.push_str(&format!(
+        "📥 Import: <b>{:.1} kWh</b> — £{:.2}\n",
+        t.import_kwh, import_cost
+    ));
+    if off_peak_import_kwh > 0.0 || peak_import_kwh > 0.0 {
+        msg.push_str(&format!(
+        "   ↳ peak {:.1} kWh @ {:.3}p · off-peak {:.1} kWh @ {:.3}p\n",
+        peak_import_kwh,
+        peak_rate * 100.0,
+        off_peak_import_kwh,
+        off_peak_rate * 100.0
+    ));
+    }
+    msg.push_str(&format!(
+        "📤 Export: <b>{:.1} kWh</b> — £{:.2}\n",
+        t.export_kwh, export_income
+    ));
+    msg.push_str(&format!("💵 Net cost: <b>£{:.2}</b>\n", net_cost));
+    msg.push_str(&format!("🌱 Self-sufficiency: <b>{:.0}%</b>", self_suff));
+    Some(msg)
 }
 
 /// Generate a daily consumption report as an HTML string.
@@ -756,6 +966,7 @@ fn render_donut(title: &str, items: &[(&str, f64, &str)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     fn dummy_reading(ts: i64, solar: i32, battery: i32, grid: i32, home: i32, soc: f32) -> ReadingRow {
         ReadingRow {
@@ -836,5 +1047,59 @@ mod tests {
         assert_eq!(escape_html("<script>"), "&lt;script&gt;");
         assert_eq!(escape_html("a & b"), "a &amp; b");
         assert_eq!(escape_html("hello"), "hello");
+    }
+
+    #[test]
+    fn test_compute_daily_totals_matches_integration() {
+        // Same fixture as the HTML report test: 1 hour from 0 → 2000 W solar
+        // should integrate to ~1 kWh (trapezoid), confirming the totals helper
+        // reuses the same math as generate_daily_report_html.
+        let rows = vec![
+            dummy_reading(0, 0, 0, 0, 0, 50.0),
+            dummy_reading(3600, 2000, 0, 0, 0, 60.0),
+        ];
+        let t = compute_daily_totals(&rows).expect("should integrate two readings");
+        assert!((t.solar_kwh - 1.0).abs() < 0.001, "solar = {}", t.solar_kwh);
+        assert_eq!(t.row_count, 2);
+        assert_eq!(t.soc_min, Some(50.0));
+        assert_eq!(t.soc_max, Some(60.0));
+        assert_eq!(t.hourly_import_export.len(), 1);
+    }
+
+    #[test]
+    fn test_compute_daily_totals_insufficient_data() {
+        assert!(compute_daily_totals(&[]).is_none());
+        assert!(compute_daily_totals(&[dummy_reading(0, 0, 0, 0, 0, 0.0)]).is_none());
+    }
+
+    #[test]
+    fn test_is_off_peak_window() {
+        // Off-peak 00:30–05:30. Use a timestamp whose local time is 03:00.
+        // We anchor on any date and just check the window logic via the hour.
+        let midday = chrono::Local
+            .with_ymd_and_hms(2026, 6, 18, 12, 0, 0)
+            .unwrap()
+            .timestamp();
+        let night = chrono::Local
+            .with_ymd_and_hms(2026, 6, 18, 3, 0, 0)
+            .unwrap()
+            .timestamp();
+        assert!(!is_off_peak(midday, "00:30", "05:30"));
+        assert!(is_off_peak(night, "00:30", "05:30"));
+    }
+
+    #[test]
+    fn test_is_off_peak_midnight_crossing() {
+        // 23:00–05:30 crosses midnight.
+        let late = chrono::Local
+            .with_ymd_and_hms(2026, 6, 18, 23, 30, 0)
+            .unwrap()
+            .timestamp();
+        let noon = chrono::Local
+            .with_ymd_and_hms(2026, 6, 18, 12, 0, 0)
+            .unwrap()
+            .timestamp();
+        assert!(is_off_peak(late, "23:00", "05:30"));
+        assert!(!is_off_peak(noon, "23:00", "05:30"));
     }
 }

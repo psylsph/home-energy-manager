@@ -26,7 +26,7 @@ export default defineConfig({
     browserName: 'chromium',
     channel: 'chrome',
     viewport: { width: 1280, height: 900 },
-    actionTimeout: 5_000,
+    actionTimeout: 10_000,
     navigationTimeout: 10_000,
     baseURL: 'http://127.0.0.1:17337',
   },

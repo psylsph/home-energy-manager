@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.0] - 2026-06-18
+
+### Added
+
+- **More Telegram bot commands** — alongside `/status`, the bot now responds to:
+  - `/today` — today's energy summary with a peak/off-peak cost split derived
+    from your configured tariffs and net cost.
+  - `/battery` — overall battery state plus per-module BMS detail (SOC, voltage,
+    temperature, capacity, cycle count).
+  - `/mode` — current battery mode, reserve/target SOC, charge/discharge rates,
+    and active automation flags (Cosy/Agile/auto-winter/load limiter).
+  - `/version` — app version, device type, inverter serial, and ARM/DSP firmware.
+  - `/help` — lists all available commands.
+- **Command menu autocompletion** — the bot registers its commands with Telegram
+  on startup, so typing `/` in the chat suggests the available commands.
+
+### Security
+
+- **Telegram bot now allowlists the configured chat** — previously `/status`
+  replied to *any* chat that messaged the bot. Commands now only execute for
+  the chat id set in `telegram_chat_id`; all other chats are silently ignored.
+  This is a prerequisite for adding inverter control commands safely.
+
 ## [0.30.0] - 2026-06-18
 
 ### Added
