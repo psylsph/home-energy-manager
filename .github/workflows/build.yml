@@ -351,21 +351,44 @@ jobs:
       - name: Prepare release assets
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p release-assets
-          cp src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk \
-            release-assets/Android-ARM64-Chromebook-Home-Energy-Manager-${{ github.ref_name }}.apk 2>/dev/null || echo "No universal APK, checking per-abi..."
-          # Fall back to per-abi APKs
-          for abi in arm64-v8a x86_64; do
-            apk="src-tauri/gen/android/app/build/outputs/apk/$abi/release/app-$abi-release.apk"
+
+          # Tauri v2 may produce app-universal-release-unsigned.apk or
+          # app-universal-release.apk depending on the version.
+          # Use find to discover whatever APK was produced.
+          apk_dir="src-tauri/gen/android/app/build/outputs/apk"
+          found=false
+
+          for apk in "$apk_dir"/universal/release/app-universal-release*.apk; do
             if [ -f "$apk" ]; then
-              label="$abi"
-              case "$abi" in
-                arm64-v8a) label="ARM64" ;;
-                x86_64)   label="x86_64" ;;
-              esac
-              cp "$apk" "release-assets/Android-Chromebook-$label-Home-Energy-Manager-${{ github.ref_name }}.apk"
+              cp "$apk" "release-assets/Android-Chromebook-ARM64-Home-Energy-Manager-${{ github.ref_name }}.apk"
+              echo "Copied universal APK: $apk"
+              found=true
             fi
           done
+
+          # Also look for per-abi APKs (arm64-v8a, x86_64)
+          for abi in arm64-v8a x86_64; do
+            for apk in "$apk_dir/$abi/release/app-$abi-release"*.apk; do
+              if [ -f "$apk" ]; then
+                label="$abi"
+                case "$abi" in
+                  arm64-v8a) label="ARM64" ;;
+                  x86_64)   label="x86_64" ;;
+                esac
+                cp "$apk" "release-assets/Android-Chromebook-$label-Home-Energy-Manager-${{ github.ref_name }}.apk"
+                echo "Copied per-abi APK ($abi): $apk"
+                found=true
+              fi
+            done
+          done
+
+          if [ "$found" = false ]; then
+            echo "ERROR: No APK found anywhere under $apk_dir"
+            ls -laR "$apk_dir" 2>/dev/null || echo "APK directory does not exist"
+            exit 1
+          fi
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v3

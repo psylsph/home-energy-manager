@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.0] - 2026-06-18
+
+### Fixed
+
+- **Grid Offline alert now matches the Status page** — the Status page banner
+  fires when the grid drops (either `grid_loss` or `!grid_online`), but the
+  alert only checked `grid_loss`. If the consensus flag was off but the AC
+  voltage register showed no grid, the alert stayed silent while the banner
+  screamed. Now both conditions trigger a notification.
+- **Toggling alerts now takes effect immediately** — saving alert settings
+  clears the debounce so previously-fired alerts re-trigger on the next poll
+  cycle. No more toggling off/on and waiting 30 minutes.
+- **Alert logs now visible at default log level** — send confirmations,
+  debounce suppression, and evaluation diagnostics all log at `warn` level
+  instead of `info`, so they show up without changing `RUST_LOG`.
+
+### Changed
+
+- **Cooldown moved to Alert Triggers section** — renamed from "Other Alerts"
+  to "Alert Triggers & Cooldown" so it's clear the cooldown applies to all
+  channels, not just Telegram.
+- **Removed Solar Clipping and PV String Loss alerts** — both were unreliable
+  and produced false positives.
+
 ## [0.28.11] - 2026-06-18
 
 ### Fixed

@@ -159,8 +159,10 @@ pub fn evaluate_alerts(snapshot: &InverterSnapshot, config: &AlertsConfig) -> Ve
     if config.soc_max < 100 && soc > config.soc_max {
         alerts.push(AlertType::BatterySocHigh);
     }
-    // Grid offline
-    if config.grid_offline_enabled && snapshot.grid_loss {
+    // Grid offline — match the frontend hasGridFault() logic:
+    // also trigger when grid_online is false even if grid_loss is
+    // not set (they come from separate register decodes).
+    if config.grid_offline_enabled && (snapshot.grid_loss || !snapshot.grid_online) {
         alerts.push(AlertType::GridOffline);
     }
 
