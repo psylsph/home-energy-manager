@@ -327,8 +327,11 @@ const VALID_INTERVALS = [5, 10, 15, 20];
   // Save email alerts
   const handleAlertsSave = async () => {
     setAlertsSaving(true);
+    // Auto-generate ntfy topic from inverter serial
+    const ntfyTopic = serial ? `hem-${serial}` : '';
+    const saveConfig = { ...alertsConfig, ntfy_topic: ntfyTopic };
     try {
-      const res = await apiPost('/api/alerts', alertsConfig) as { message: string; ok: boolean };
+      const res = await apiPost('/api/alerts', saveConfig) as { message: string; ok: boolean };
       flash(res.message, res.ok);
     } catch {
       flash('Failed to save alert settings', false);
@@ -997,27 +1000,30 @@ const VALID_INTERVALS = [5, 10, 15, 20];
               <p className="text-text-secondary/70 text-xs font-sans">
                 Free push notifications via&nbsp;
                 <button onClick={() => openExternal('https://ntfy.sh')} className="text-flow-active underline hover:opacity-80 inline">ntfy.sh</button>.
-                Use a unique topic name like&nbsp;<code>hem-xxxx-alerts</code> to prevent others
-                from reading your alerts. For self-hosted servers, use authentication.
+                Install the app on your phone and subscribe to the topic below.
+                The topic is generated from your inverter serial so it's unique to you.
               </p>
-              <label className="flex flex-col gap-1">
-                <span className="text-text-secondary text-xs font-sans">Topic</span>
-                <input
-                  type="text" placeholder="my-alerts"
-                  value={alertsConfig.ntfy_topic}
-                  onChange={(e) => setAlertsConfig((p) => ({ ...p, ntfy_topic: e.target.value }))}
-                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-text-secondary text-xs font-sans">Server (optional, default: ntfy.sh)</span>
-                <input
-                  type="text" placeholder="https://ntfy.sh"
-                  value={alertsConfig.ntfy_server}
-                  onChange={(e) => setAlertsConfig((p) => ({ ...p, ntfy_server: e.target.value }))}
-                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                />
-              </label>
+              {serial ? (
+                <div className="flex flex-col gap-3">
+                  <div className="bg-bg-elevated rounded-lg px-4 py-3 flex flex-col gap-1">
+                    <span className="text-text-secondary text-xs font-sans">Your ntfy topic</span>
+                    <span className="text-text-primary font-mono text-sm break-all select-all">hem-{serial}</span>
+                  </div>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-text-secondary text-xs font-sans">Server (optional, default: ntfy.sh)</span>
+                    <input
+                      type="text" placeholder="https://ntfy.sh"
+                      value={alertsConfig.ntfy_server}
+                      onChange={(e) => setAlertsConfig((p) => ({ ...p, ntfy_server: e.target.value }))}
+                      className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                    />
+                  </label>
+                </div>
+              ) : (
+                <p className="text-text-secondary/50 text-xs font-sans italic">
+                  Connect to an inverter to generate your ntfy topic.
+                </p>
+              )}
             </div>
 
             {/* Battery temperature & SOC thresholds */}
