@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.31.5] - 2026-06-18
+
+### Fixed
+
+- **macOS minimum version now explicitly set to 10.15 (Catalina).** The app
+  bundle now declares `minimumSystemVersion: "10.15"` so macOS shows a clear
+  error dialog on older systems instead of a blank white screen. The blank
+  screen was caused by modern JavaScript syntax (optional chaining, nullish
+  coalescing, etc.) that Safari 12 on macOS 10.14 (Mojave) cannot parse.
+
 ## [0.31.4] - 2026-06-18
 
 ### Added

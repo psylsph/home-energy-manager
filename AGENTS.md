@@ -199,6 +199,12 @@ Three optional register blocks are conditionally polled: EXTENDED_SLOTS_BLOCK (H
 
 GNOME Wayland 43+ resolves the icon entirely through **application ID matching** (window GTK app ID must match a `.desktop` file ID). Fix: set `"enableGTKAppId": true` in `tauri.conf.json`. Dev mode workaround: run `bash scripts/install-dev-desktop.sh` once. Packaged `.deb`/`.rpm` installs handle this automatically.
 
+### macOS minimum version: 10.15 (Catalina)
+
+The app sets `bundle.macOS.minimumSystemVersion` to `"10.15"` in `tauri.conf.json`. This is because Vite's default build target emits modern JS syntax (optional chaining, nullish coalescing, etc.) that Safari 12 / WebKit on macOS 10.14 (Mojave) cannot parse, resulting in a blank white screen. Users on 10.14 or earlier will see a clear macOS dialog explaining the requirement instead.
+
+Users on unsupported Macs can try [OpenCore Legacy Patcher](https://github.com/dortania/OpenCore-Legacy-Patcher) to install a newer macOS version.
+
 ### macOS 26.5 blocks ad-hoc signed binaries
 
 macOS 26.5 blocks ad-hoc signed binaries inside `/Applications`. Three issues: (1) `/Applications` block — mitigated via one-time "Open Anyway" approval; (2) Gatekeeper on `open` — mitigated via `xattr -d com.apple.quarantine`; (3) x86_64 crashes under Rosetta — use aarch64 builds. The DMG workflow is standard; a `launch.command` script in the project root bypasses `/Applications` by searching Desktop first.
