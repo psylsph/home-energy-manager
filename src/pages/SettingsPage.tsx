@@ -997,7 +997,8 @@ const VALID_INTERVALS = [5, 10, 15, 20];
               <p className="text-text-secondary/70 text-xs font-sans">
                 Free push notifications via&nbsp;
                 <button onClick={() => openExternal('https://ntfy.sh')} className="text-flow-active underline hover:opacity-80 inline">ntfy.sh</button>.
-                Create a topic, install the app on your phone, and enter the topic name here.
+                Use a unique topic name (e.g.&nbsp;<code>hem-{random}-alerts</code>) to prevent others
+                from reading your alerts. For self-hosted servers, use authentication.
               </p>
               <label className="flex flex-col gap-1">
                 <span className="text-text-secondary text-xs font-sans">Topic</span>
