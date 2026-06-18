@@ -6,8 +6,6 @@
 //! Also handles daily consumption report generation and sending.
 
 pub mod report;
-pub mod whatsapp;
-pub mod whatsapp_store;
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -38,6 +36,13 @@ pub enum AlertType {
     /// confirmation (see [`AlertDebounce::confirm_battery_warning`]) so a
     /// single corrupted register read cannot trigger it.
     BatteryOverTemp,
+    /// Solar generation has sustained above the user-configured clipping
+    /// ceiling (`solar_clipping_ceiling_w`) for several consecutive cycles,
+    /// indicating the inverter is likely curtailing output and the user is
+    /// losing potential generation. Gated by a consecutive-read confirmation
+    /// (see [`AlertDebounce::confirm_solar_clipping`]) so a momentary
+    /// cloud-edge spike above the ceiling does not fire it.
+    SolarClipping,
     GridOffline,
 }
 
@@ -56,6 +61,7 @@ impl AlertType {
             // "Battery Over-Temperature" to avoid users conflating it with
             // the threshold-based alert.
             Self::BatteryOverTemp => "Inverter Battery Warning",
+            Self::SolarClipping => "Solar Clipping",
         }
     }
 }
@@ -72,6 +78,13 @@ impl AlertType {
 /// never fire a warning. See [`AlertDebounce::confirm_battery_warning`].
 pub(crate) const BATTERY_WARNING_CONFIRM_CYCLES: u32 = 3;
 
+/// Number of consecutive poll cycles solar generation must exceed the
+/// configured clipping ceiling before the [`AlertType::SolarClipping`] alert
+/// is allowed to fire. Prevents a momentary cloud-edge spike above the
+/// ceiling from triggering a clipping alert. See
+/// [`AlertDebounce::confirm_solar_clipping`].
+pub(crate) const SOLAR_CLIPPING_CONFIRM_CYCLES: u32 = 3;
+
 #[derive(Debug)]
 pub struct AlertDebounce {
     /// Map from alert type to the last time it was sent.
@@ -83,6 +96,10 @@ pub struct AlertDebounce {
     /// alert is only confirmed once this reaches
     /// [`BATTERY_WARNING_CONFIRM_CYCLES`].
     battery_warning_streak: u32,
+    /// Consecutive-cycle count of "solar above ceiling". Reset to 0 the moment
+    /// solar drops back below the ceiling. The `SolarClipping` alert is only
+    /// confirmed once this reaches [`SOLAR_CLIPPING_CONFIRM_CYCLES`].
+    solar_clipping_streak: u32,
 }
 
 impl AlertDebounce {
@@ -91,6 +108,7 @@ impl AlertDebounce {
             last_sent: HashMap::new(),
             active: std::collections::HashSet::new(),
             battery_warning_streak: 0,
+            solar_clipping_streak: 0,
         }
     }
 
@@ -113,6 +131,24 @@ impl AlertDebounce {
         }
     }
 
+    /// Feed this cycle's "solar generation exceeds the configured ceiling"
+    /// flag and return `true` only if it has held `true` for
+    /// [`SOLAR_CLIPPING_CONFIRM_CYCLES`] consecutive cycles. A single `false`
+    /// (solar dropped back below the ceiling) resets the streak to 0.
+    ///
+    /// This is the precision defence for the solar-clipping alert: a
+    /// momentary cloud-edge spike above the ceiling does not fire it, only a
+    /// sustained over-ceiling state does.
+    pub fn confirm_solar_clipping(&mut self, over_ceiling: bool) -> bool {
+        if over_ceiling {
+            self.solar_clipping_streak = self.solar_clipping_streak.saturating_add(1);
+            self.solar_clipping_streak >= SOLAR_CLIPPING_CONFIRM_CYCLES
+        } else {
+            self.solar_clipping_streak = 0;
+            false
+        }
+    }
+
     /// Returns `true` if this alert type should fire (cooldown has elapsed).
     pub fn should_fire(&mut self, alert_type: AlertType, cooldown_minutes: u32) -> bool {
         let cooldown = std::time::Duration::from_secs(cooldown_minutes as u64 * 60);
@@ -129,7 +165,8 @@ impl AlertDebounce {
     /// Compute which previously-active alerts are no longer triggered,
     /// and remove them from the active set.
     pub fn extract_cleared(&mut self, currently_triggered: &[AlertType]) -> Vec<AlertType> {
-        let triggered_set: std::collections::HashSet<_> = currently_triggered.iter().copied().collect();
+        let triggered_set: std::collections::HashSet<_> =
+            currently_triggered.iter().copied().collect();
         let cleared: Vec<_> = self.active.difference(&triggered_set).copied().collect();
         for c in &cleared {
             self.active.remove(c);
@@ -153,6 +190,7 @@ impl AlertDebounce {
         self.last_sent.clear();
         self.active.clear();
         self.battery_warning_streak = 0;
+        self.solar_clipping_streak = 0;
     }
 
     pub fn len(&self) -> usize {
@@ -180,12 +218,10 @@ pub fn evaluate_alerts(snapshot: &InverterSnapshot, config: &AlertsConfig) -> Ve
     if !config.enabled {
         return Vec::new();
     }
-    let has_telegram =
-        !config.telegram_bot_token.is_empty() && !config.telegram_chat_id.is_empty();
-    let has_whatsapp = !config.whatsapp_recipient.is_empty();
+    let has_telegram = !config.telegram_bot_token.is_empty() && !config.telegram_chat_id.is_empty();
     let has_ntfy = !config.ntfy_topic.is_empty();
 
-    if !has_telegram && !has_whatsapp && !has_ntfy {
+    if !has_telegram && !has_ntfy {
         return Vec::new();
     }
 
@@ -218,6 +254,17 @@ pub fn evaluate_alerts(snapshot: &InverterSnapshot, config: &AlertsConfig) -> Ve
     // Battery over-temperature
     if config.battery_over_temp_enabled && snapshot.battery_over_temp {
         alerts.push(AlertType::BatteryOverTemp);
+    }
+
+    // Solar clipping — solar generation above the configured ceiling.
+    // `ceiling_w == 0` means disabled (no ceiling set). The consecutive-read
+    // confirmation that filters transient spikes is applied by the caller via
+    // [`AlertDebounce::confirm_solar_clipping`].
+    if config.solar_clipping_enabled
+        && config.solar_clipping_ceiling_w > 0
+        && snapshot.solar_power > config.solar_clipping_ceiling_w as i32
+    {
+        alerts.push(AlertType::SolarClipping);
     }
 
     alerts
@@ -321,15 +368,8 @@ fn telegram_agent() -> &'static ureq::Agent {
 /// Send a notification via the Telegram Bot API.
 ///
 /// Uses `ureq` (synchronous) — call from `tokio::task::spawn_blocking`.
-pub fn send_telegram_message(
-    bot_token: &str,
-    chat_id: &str,
-    text: &str,
-) -> Result<(), String> {
-    let url = format!(
-        "https://api.telegram.org/bot{}/sendMessage",
-        bot_token
-    );
+pub fn send_telegram_message(bot_token: &str, chat_id: &str, text: &str) -> Result<(), String> {
+    let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
 
     let payload = serde_json::json!({
         "chat_id": chat_id,
@@ -337,10 +377,10 @@ pub fn send_telegram_message(
         "parse_mode": "HTML",
     });
 
-    let body =
-        serde_json::to_string(&payload).map_err(|e| format!("Failed to serialize: {e}"))?;
+    let body = serde_json::to_string(&payload).map_err(|e| format!("Failed to serialize: {e}"))?;
 
-    let resp = match telegram_agent().post(&url)
+    let resp = match telegram_agent()
+        .post(&url)
         .content_type("application/json")
         .send(&body)
     {
@@ -366,11 +406,7 @@ pub fn send_telegram_message(
 /// Send a notification via ntfy.sh (or a self-hosted ntfy server).
 ///
 /// Uses `ureq` (synchronous) — call from `tokio::task::spawn_blocking`.
-pub fn send_ntfy_message(
-    topic: &str,
-    server: &str,
-    text: &str,
-) -> Result<(), String> {
+pub fn send_ntfy_message(topic: &str, server: &str, text: &str) -> Result<(), String> {
     let url = format!("{}/{}", server.trim_end_matches('/'), topic);
 
     let server_display = server;
@@ -407,7 +443,10 @@ fn build_status_message(snapshot: &InverterSnapshot) -> String {
         snapshot.solar_power, snapshot.pv1_power, snapshot.pv2_power
     ));
     msg.push_str(&format!("🏠 Home: <b>{} W</b>\n", snapshot.home_power));
-    msg.push_str(&format!("🔋 Battery: <b>{} W</b>  (SOC: <b>{}%</b>)\n", snapshot.battery_power, snapshot.soc));
+    msg.push_str(&format!(
+        "🔋 Battery: <b>{} W</b>  (SOC: <b>{}%</b>)\n",
+        snapshot.battery_power, snapshot.soc
+    ));
     msg.push_str(&format!("⚡ Grid: <b>{} W</b>\n", snapshot.grid_power));
     msg.push_str(&format!(
         "🌡️ Battery temp: {:.1}°C  |  Inverter: {:.1}°C\n",
@@ -415,7 +454,11 @@ fn build_status_message(snapshot: &InverterSnapshot) -> String {
     ));
     msg.push_str(&format!(
         "📶 Grid: {}\n",
-        if snapshot.grid_online { "🟢 Online" } else { "🔴 Offline" }
+        if snapshot.grid_online {
+            "🟢 Online"
+        } else {
+            "🔴 Offline"
+        }
     ));
     msg.push_str(&format!(
         "☀️ Today generated: <b>{:.1} kWh</b>\n",
@@ -457,7 +500,10 @@ fn build_battery_message(snapshot: &InverterSnapshot) -> String {
     if snapshot.battery_modules.is_empty() {
         msg.push_str("\n<i>No per-module BMS data available.</i>");
     } else {
-        msg.push_str(&format!("\n<b>Modules ({})</b>:\n", snapshot.battery_modules.len()));
+        msg.push_str(&format!(
+            "\n<b>Modules ({})</b>:\n",
+            snapshot.battery_modules.len()
+        ));
         for m in &snapshot.battery_modules {
             msg.push_str(&format!(
                 "  #{}: {}% · {:.1}°C · {:.1}V · {:.1}/{:.0}Ah · {} cycles\n",
@@ -534,10 +580,16 @@ fn build_version_message(snapshot: &InverterSnapshot) -> String {
     if !snapshot.device_type_display.is_empty() {
         msg.push_str(&format!("Device: {}\n", snapshot.device_type_display));
     }
-    msg.push_str(&format!("Serial: <code>{}</code>\n", snapshot.inverter_serial));
+    msg.push_str(&format!(
+        "Serial: <code>{}</code>\n",
+        snapshot.inverter_serial
+    ));
     msg.push_str(&format!("ARM firmware: {}", snapshot.firmware_version));
     if !snapshot.dsp_firmware_version.is_empty() {
-        msg.push_str(&format!("\nDSP firmware: {}", snapshot.dsp_firmware_version));
+        msg.push_str(&format!(
+            "\nDSP firmware: {}",
+            snapshot.dsp_firmware_version
+        ));
     }
     msg
 }
@@ -574,7 +626,8 @@ pub fn register_telegram_commands(bot_token: &str) {
     let Ok(body) = serde_json::to_string(&payload) else {
         return;
     };
-    match telegram_agent().post(&url)
+    match telegram_agent()
+        .post(&url)
         .content_type("application/json")
         .send(&body)
     {
@@ -633,7 +686,6 @@ async fn build_today_reply(state: &crate::inverter::poll::AppState) -> String {
         None => "⚠️ Not enough data to summarise today yet.".to_string(),
     }
 }
-
 
 /// Spawns a background task that polls Telegram for commands and replies
 /// with inverter data. Supported commands: `/status`, `/today`, `/battery`,
@@ -707,7 +759,9 @@ pub fn spawn_telegram_poller(state: std::sync::Arc<crate::inverter::poll::AppSta
                         Vec::new()
                     }
                 }
-            }).await.unwrap_or_default();
+            })
+            .await
+            .unwrap_or_default();
 
             for (update_id, chat_id, text) in &updates {
                 if *update_id >= offset {
@@ -814,7 +868,8 @@ mod tests {
             soc_max: 95,
             grid_offline_enabled: false,
             battery_over_temp_enabled: false,
-            whatsapp_recipient: String::new(),
+            solar_clipping_enabled: false,
+            solar_clipping_ceiling_w: 0,
             ntfy_topic: String::new(),
             ntfy_server: "https://ntfy.sh".to_string(),
             daily_report_enabled: false,
@@ -1011,6 +1066,76 @@ mod tests {
         assert!(!d.confirm_battery_warning(true));
     }
 
+    // ================================================================
+    // Solar clipping
+    // ================================================================
+
+    #[test]
+    fn test_solar_clipping_fires_when_over_ceiling_and_enabled() {
+        // make_snapshot() has solar_power = 5200.
+        let mut config = alerts_config();
+        config.solar_clipping_enabled = true;
+        config.solar_clipping_ceiling_w = 5000;
+        let alerts = evaluate_alerts(&make_snapshot(), &config);
+        assert!(alerts.contains(&AlertType::SolarClipping));
+    }
+
+    #[test]
+    fn test_solar_clipping_no_alert_when_disabled() {
+        let mut config = alerts_config();
+        config.solar_clipping_enabled = false;
+        config.solar_clipping_ceiling_w = 5000; // ceiling set but toggle off
+        let alerts = evaluate_alerts(&make_snapshot(), &config);
+        assert!(!alerts.contains(&AlertType::SolarClipping));
+    }
+
+    #[test]
+    fn test_solar_clipping_no_alert_when_ceiling_zero() {
+        // ceiling_w == 0 means disabled even if the toggle is on.
+        let mut config = alerts_config();
+        config.solar_clipping_enabled = true;
+        config.solar_clipping_ceiling_w = 0;
+        let alerts = evaluate_alerts(&make_snapshot(), &config);
+        assert!(!alerts.contains(&AlertType::SolarClipping));
+    }
+
+    #[test]
+    fn test_solar_clipping_no_alert_when_under_ceiling() {
+        let mut config = alerts_config();
+        config.solar_clipping_enabled = true;
+        config.solar_clipping_ceiling_w = 6000; // above solar_power (5200)
+        let alerts = evaluate_alerts(&make_snapshot(), &config);
+        assert!(!alerts.contains(&AlertType::SolarClipping));
+    }
+
+    #[test]
+    fn test_solar_clipping_not_confirmed_on_single_read() {
+        // A single cycle over the ceiling must NOT fire — precision defence
+        // against a momentary cloud-edge spike.
+        let mut d = AlertDebounce::new();
+        assert!(!d.confirm_solar_clipping(true));
+    }
+
+    #[test]
+    fn test_solar_clipping_confirmed_after_threshold_cycles() {
+        let mut d = AlertDebounce::new();
+        for _ in 0..(SOLAR_CLIPPING_CONFIRM_CYCLES - 1) {
+            assert!(!d.confirm_solar_clipping(true));
+        }
+        assert!(d.confirm_solar_clipping(true)); // Nth consecutive cycle
+        assert!(d.confirm_solar_clipping(true)); // stays confirmed while over
+    }
+
+    #[test]
+    fn test_solar_clipping_streak_resets_on_drop_below_ceiling() {
+        let mut d = AlertDebounce::new();
+        for _ in 0..(SOLAR_CLIPPING_CONFIRM_CYCLES - 1) {
+            d.confirm_solar_clipping(true);
+        }
+        // Solar drops back below the ceiling for one cycle — streak resets.
+        assert!(!d.confirm_solar_clipping(false));
+        assert!(!d.confirm_solar_clipping(true)); // not enough again
+    }
 
     // ================================================================
     // Build message
@@ -1041,7 +1166,9 @@ mod tests {
     #[test]
     fn test_build_help_lists_all_commands() {
         let msg = build_help_message();
-        for cmd in ["/status", "/today", "/battery", "/mode", "/version", "/help"] {
+        for cmd in [
+            "/status", "/today", "/battery", "/mode", "/version", "/help",
+        ] {
             assert!(msg.contains(cmd), "help missing {cmd}");
         }
     }

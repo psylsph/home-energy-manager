@@ -391,10 +391,11 @@ impl DeviceType {
         };
         match self {
             Self::ACThreePhase => AC_EXTENDED_AND_THREE_PHASE_BLOCKS,
-            Self::HybridHvGen3 | Self::AllInOneHybrid | Self::ThreePhase | Self::AioCommercial
-            | Self::Gateway => {
-                EXTENDED_AND_THREE_PHASE_BLOCKS
-            }
+            Self::HybridHvGen3
+            | Self::AllInOneHybrid
+            | Self::ThreePhase
+            | Self::AioCommercial
+            | Self::Gateway => EXTENDED_AND_THREE_PHASE_BLOCKS,
             Self::AllInOne6kW | Self::AllInOne3_6kW | Self::AllInOne5kW => {
                 EXTENDED_AND_AC_CONFIG_BLOCKS
             }
@@ -443,10 +444,7 @@ impl DeviceType {
 
     /// Whether schedule (charge/discharge slot) writes/reads are supported for this device.
     pub fn supports_schedule_slots(&self) -> bool {
-        !matches!(
-            self,
-            Self::Ems | Self::EmsCommercial | Self::PvInverter
-        )
+        !matches!(self, Self::Ems | Self::EmsCommercial | Self::PvInverter)
     }
 
     /// Preferred Modbus slave address for operational inverter register reads.
@@ -1521,5 +1519,4 @@ mod tests {
             );
         }
     }
-
 }

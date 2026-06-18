@@ -1557,19 +1557,28 @@ mod tests {
             .iter()
             .find(|w| w.address == HR_ENABLE_CHARGE)
             .expect("ForceDischarge must include HR_ENABLE_CHARGE");
-        assert_eq!(charge_enable.value, 0, "ForceDischarge must clear charge enable");
+        assert_eq!(
+            charge_enable.value, 0,
+            "ForceDischarge must clear charge enable"
+        );
         let charge_target = writes
             .iter()
             .find(|w| w.address == HR_ENABLE_CHARGE_TARGET)
             .expect("ForceDischarge must include HR_ENABLE_CHARGE_TARGET");
-        assert_eq!(charge_target.value, 0, "ForceDischarge must clear charge target");
+        assert_eq!(
+            charge_target.value, 0,
+            "ForceDischarge must clear charge target"
+        );
     }
 
     #[test]
     fn pause_battery_disables_charge_and_discharge() {
         let writes = ControlCommand::PauseBattery.encode().unwrap();
         assert_eq!(writes.len(), 2);
-        let charge = writes.iter().find(|w| w.address == HR_ENABLE_CHARGE).unwrap();
+        let charge = writes
+            .iter()
+            .find(|w| w.address == HR_ENABLE_CHARGE)
+            .unwrap();
         assert_eq!(charge.value, 0);
         let discharge = writes
             .iter()
@@ -1577,5 +1586,4 @@ mod tests {
             .unwrap();
         assert_eq!(discharge.value, 0);
     }
-
 }

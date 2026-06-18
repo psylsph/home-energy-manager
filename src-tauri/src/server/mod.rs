@@ -80,7 +80,6 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Email alerts
         .route("/api/alerts", get(api::get_alerts).post(api::set_alerts))
         .route("/api/alerts/test", post(api::test_alerts))
-        .route("/api/whatsapp/status", get(api::whatsapp_status))
         // Discovery
         .route("/api/discover", get(api::discover))
         .route("/api/evc/discover", get(api::evc_discover))
@@ -134,8 +133,8 @@ async fn static_cache_control(request: Request, next: Next) -> Response {
 /// blocking). The bundled `dist/` resources serve the Vite output.
 pub fn create_router_with_frontend(state: Arc<AppState>, dist_dir: &str) -> Router {
     let router = create_router(state);
-    let serve_dir = ServeDir::new(dist_dir)
-        .fallback(ServeDir::new(format!("{}/index.html", dist_dir)));
+    let serve_dir =
+        ServeDir::new(dist_dir).fallback(ServeDir::new(format!("{}/index.html", dist_dir)));
     router.fallback_service(
         ServiceBuilder::new()
             .layer(middleware::from_fn(static_cache_control))
@@ -297,10 +296,8 @@ mod tests {
     /// `Cache-Control` header for the given request URI.
     async fn cache_control_for(uri: &str) -> Option<String> {
         let dist = TempDist::new();
-        let app = create_router_with_frontend(
-            Arc::new(AppState::new()),
-            dist.path.to_str().unwrap(),
-        );
+        let app =
+            create_router_with_frontend(Arc::new(AppState::new()), dist.path.to_str().unwrap());
         let request = Request::builder()
             .uri(uri)
             .body(axum::body::Body::empty())

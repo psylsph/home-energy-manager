@@ -4,6 +4,144 @@ Planned and under-investigation items for Home Energy Manager. This is not a
 release commitment; items may change as hardware access, simulator support, and
 user reports improve.
 
+## Solar clipping & PV string-loss alerts
+
+**Status**: Design proposed; not implemented. Requested by the alert user who
+wanted two new alert types alongside the existing temperature/SOC/grid ones.
+
+Two distinct alerts, both of which are **financial/performance** rather than
+safety alerts. That flips the cost asymmetry from the over-temp alert: a missed
+clipping event costs a few pence in lost generation, but a false-positive storm
+erodes trust in every other alert. So both designs bias hard toward precision
+— accept false-negatives, never false-positives.
+
+### 1. Solar clipping alert
+
+Clipping = the inverter's AC output is capped at its rated limit on a bright
+day. **"Output near the limit" is the wrong trigger** — sitting at rated power
+on a clear day is correct operation and would fire constantly. The real
+signature is a **sustained flat-top at the ceiling**: output pinned within
+~2–3% of the limit with near-zero variance over several minutes. The *flatness*
+(plateau) is the tell that the MPPT has been curtailed — a non-clipping bright
+day still has cloud/gust ripple.
+
+**Trigger (all must hold):**
+
+1. Inverter AC output within ~2% of the effective limit, **and**
+2. Rolling std-dev over ~5 min is very low (flat-top), **and**
+3. Sustained for ≥ N cycles (reuse the consecutive-read confirmation pattern
+   from `confirm_battery_warning()`), **and**
+4. Daylight — trivially satisfied since output near the ceiling can't happen
+   at night.
+
+**The "limit" source — three tiers:**
+
+- **Own inverter output:** use `snap.max_ac_power_w`, derived from the device-
+   type code (DTC) via `DeviceType::max_ac_power_w()` /
+   `max_ac_power_for_dtc()` (5000W for Gen2/Gen3/Polar hybrids, 3600W for the
+   3.6kW AIO, 6000W for 6kW/three-phase, etc.). No config needed.
+- **Manual override:** user enters a derated limit (e.g. "I cap at 4500W" or
+   "my DTC table is wrong"). Overrides the DTC value when set.
+- **External CT (e.g. a separate PV inverter on a clamp):** no nameplate is
+   available from the inverter data, so **manual limit is the only reliable
+   option**. A "learned ceiling" (rolling max over N weeks) is fragile to
+   seasons and self-defeating if it always clips — skip auto-learn; require
+   manual for CT-sourced PV.
+
+**Open question to resolve before implementing:** the snapshot exposes
+`solar_power` (= DC, `pv1_power + pv2_power`), but clipping is an AC phenomenon.
+We may need to derive inverter AC output as `solar_power + battery_discharge
+− battery_charge` (power onto the AC bus), or confirm there is a direct live
+AC-output register. Worth a focused dig into `decoder.rs` before building so we
+compare the right quantity to `max_ac_power_w`.
+
+### 2. PV string / circuit loss alert
+
+Genuinely the harder one because of three confounders: **night**,
+**string-2-never-installed**, and **transients**. Each needs a specific
+defence, and together they make it reliable:
+
+**A. Sibling-string daylight proxy (solves night).** Don't detect "is it
+daytime" in absolute terms. Instead: **PV2 is only declared lost if PV1 is
+clearly producing** (`pv1_power > ~150–200W`, bright enough that PV2 should
+also be making something) **and** `pv2_power ≈ 0`. Under the same sun, two
+strings on the same roof can't diverge that much unless one is broken. PV1 is
+the irradiance reference — at night both read ~0, so the condition can't fire.
+(Acceptable trade-off: if both strings ever read 0, no alert — total darkness
+isn't a fault.)
+
+**B. "Ever produced" auto-detection (solves not-installed).** Keep a
+per-string "has ever produced" flag learned over the first day or two of
+running. **PV2-loss alerts only ever fire if PV2 has been seen producing
+meaningful power at least once.** If PV2 is simply never attached, the flag
+never sets → zero false alarms — no manual "PV2 installed: yes/no" needed in
+the common case. A real failure is then a genuine *change*: it used to
+produce, now it's gone.
+
+**C. Consecutive-read confirmation (solves transients).** Same pattern as the
+over-temp fix: require N consecutive cycles of "PV1 high + PV2 dead" before
+firing. One corrupted 0-read on IR(20) can't trigger it.
+
+**D. Optional manual override** for edge cases: a "strings installed" config
+(`Auto` / `One` / `Two`) for installs where auto-detection is ambiguous.
+Default = `Auto`.
+
+**Trigger (all must hold):**
+
+1. `pv1_power` above the daylight threshold for ≥ N cycles (it's bright),
+   **and**
+2. `pv2_power ≈ 0` for the same ≥ N cycles, **and**
+3. PV2's "ever produced" flag is set (so we know it's installed), **and**
+4. Not in the system's startup/learning window.
+
+**Optional asymmetry-ratio variant** (later, not first cut): instead of only
+"pv2 dead", alert when `pv1/pv2` (or vice-versa) exceeds an expected ratio for
+a sustained period — catches a half-shaded or degraded string, not just a dead
+one. More false-positive-prone; ship dead-string first.
+
+### Shared building blocks
+
+- **Consecutive-read confirmation** — `confirm_battery_warning()` on
+  `AlertDebounce` exists; generalise it into a small "streak" helper so both
+  new alerts reuse the same proven mechanism.
+- **Per-string "ever produced" / rolling-stats state** belongs on
+  `AlertDebounce` (or a sibling struct) exactly like
+  `battery_warning_streak` does today — device-lifecycle state, reset on
+  `clear()`.
+- **Daylight helper** — a single function "is it daytime" based on the
+  sibling-string proxy, shared by both alerts (clipping doesn't strictly need
+  it but it's a cheap belt-and-braces gate).
+
+### Proposed config shape
+
+Extending `AlertsConfig` (`settings/mod.rs`):
+
+```
+solar_clipping_enabled: bool
+solar_clipping_limit_w: Option<u32>   // manual override; None = use DTC max_ac_power_w
+solar_clipping_minutes: u32           // sustained window (default ~5)
+
+pv_string_loss_enabled: bool
+pv_strings_installed: enum { Auto, One, Two }   // default Auto (ever-produced)
+pv_string_loss_minutes: u32                      // sustained window
+```
+
+Manual limits appear exactly where needed (clipping limit override + the
+strings-installed override), but are **optional** — defaults use DTC +
+auto-detection so a typical user configures nothing.
+
+### Open questions to confirm before building
+
+1. **Clipping quantity** — is there a live AC-output register, or is deriving
+   it from `solar_power ± battery_power` acceptable?
+2. **Strings installed** — happy with "Auto via ever-produced" as the default,
+   manual override only?
+3. **Dead-string only** vs dead + asymmetry (degraded string) — ship dead
+   first?
+4. **External-CT clipping** — manual limit only, agreed (no learned ceiling)?
+
+---
+
 ## Power page CSV/PDF exports and period summaries
 
 **Status**: In progress.

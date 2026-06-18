@@ -358,12 +358,15 @@ pub struct AlertsConfig {
     pub grid_offline_enabled: bool,
     /// Alert on battery over-temperature flag.
     pub battery_over_temp_enabled: bool,
-
-    /// Target WhatsApp phone number to receive alerts (digits only, international
-    /// format, e.g. "34684770005"). Must be a different number from the linked
-    /// WhatsApp account — you cannot send to yourself.
+    /// Alert when solar generation sustains above the clipping ceiling.
     #[serde(default)]
-    pub whatsapp_recipient: String,
+    pub solar_clipping_enabled: bool,
+    /// Manual clipping ceiling in watts. Solar generation sustained above
+    /// this value triggers [`crate::alerts::AlertType::SolarClipping`].
+    /// `0` = no ceiling (alert disabled even if `solar_clipping_enabled`).
+    /// Users typically set this around their inverter's rated AC output.
+    #[serde(default)]
+    pub solar_clipping_ceiling_w: u32,
 
     /// ntfy.sh (or self-hosted) topic for push notifications.
     #[serde(default)]
@@ -398,7 +401,8 @@ impl Default for AlertsConfig {
             soc_max: 100,
             grid_offline_enabled: false,
             battery_over_temp_enabled: false,
-            whatsapp_recipient: String::new(),
+            solar_clipping_enabled: false,
+            solar_clipping_ceiling_w: 0,
             ntfy_topic: String::new(),
             ntfy_server: default_ntfy_server(),
             daily_report_enabled: false,

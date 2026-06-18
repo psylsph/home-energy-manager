@@ -2,6 +2,47 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.31.3] - 2026-06-18
+
+### Removed
+
+- **WhatsApp alert channel.** The experimental WhatsApp (QR-pairing) alert
+  delivery has been removed. It never worked reliably: a freshly-linked
+  companion device cannot establish Signal Protocol sessions with the other
+  devices of the *same* account it was paired to, so alert messages were
+  accepted by WhatsApp's server but silently dropped ("session … not found",
+  only `sender` receipts, never `delivered`). This is a limitation of the
+  unofficial WhatsApp Web protocol (the same affects Baileys/whatsmeow), not a
+  bug we could fix in app code. **Telegram and ntfy remain the recommended,
+  reliable alert channels** — ntfy in particular is free, needs no second phone
+  number, and delivers push notifications to your lock screen. The
+  `whatsapp-rust`/`wacore` dependencies and the custom `whatsapp-store.db`
+  backend were removed along with the `/api/whatsapp/*` endpoints and the
+  Settings → WhatsApp pairing UI. The project **no longer requires a Rust
+  nightly toolchain** (stable is now used in CI).
+
+### Added
+
+- **Solar Clipping alert.** A new alert fires when solar generation is
+  sustained above a user-configured manual ceiling, indicating the inverter is
+  likely curtailing output. Set the ceiling (in watts) under Settings → Alert
+  Triggers & Cooldown → Solar Clipping; set to your inverter's rated AC output.
+  Like the hardware battery warning, it requires **3 consecutive cycles** of
+  agreement before firing, so a momentary cloud-edge spike above the ceiling
+  does not trigger it. Disabled by default (ceiling 0). The ceiling is a
+  manual value because the inverter's own limit is not always reliably
+  available, and for external-CT-sourced PV there is no nameplate at all.
+
+### Changed
+
+- **Settings → Alert Triggers layout tidy-ups.** The "Cooldown" field is now
+  a "Cooldown Timer" heading with the value entry below it; the cooldown and
+  solar-clipping value fields are now aligned and equal-width; the
+  "Battery temperature alerts only work with inverters that report
+  temperature…" notice moved to sit as a sub-heading under "Battery
+  Temperature & SOC" where it belongs; the About link now points to
+  https://psylsph.github.io/home-energy-manager/.
+
 ## [0.31.2] - 2026-06-18
 
 ### Fixed

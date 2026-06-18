@@ -172,7 +172,6 @@ impl Default for LoadLimiterConfig {
     }
 }
 
-
 // ===========================================================================
 // Persistence helpers (Cosy + Agile crash-recovery flags)
 // ===========================================================================
@@ -306,7 +305,6 @@ pub(crate) fn cosy_slot_register_writes(
     writes
 }
 
-
 /// Generate register writes to clear the inverter's charge slot 1 registers
 /// and disable charging (used when there's no next Cosy slot to preload).
 pub(crate) fn clear_cosy_slot_registers(device_type: DeviceType) -> Vec<RegisterWrite> {
@@ -345,7 +343,6 @@ pub(crate) fn clear_cosy_slot_registers(device_type: DeviceType) -> Vec<Register
     writes
 }
 
-
 /// Execute a list of register writes to the inverter with inter-write delays.
 /// Returns `true` if all writes succeeded.
 pub(crate) async fn write_registers_to_inverter(
@@ -370,7 +367,6 @@ pub(crate) async fn write_registers_to_inverter(
 // ===========================================================================
 // State-machine transition logic
 // ===========================================================================
-
 
 /// Evaluate the auto-winter state machine and return register writes if a
 /// state transition requires changing the inverter's configuration (enabling
@@ -491,7 +487,6 @@ pub(crate) fn check_auto_winter(
 
     None
 }
-
 
 /// Check load discharge limiter and return register writes if the state
 /// machine transitions to Paused or back to Idle.
@@ -793,7 +788,10 @@ mod tests {
         let writes = check_auto_winter(&snap, &config, &mut state, &mut saved);
 
         assert!(writes.is_none(), "one reading must not trigger activation");
-        assert!(matches!(state, AutoWinterState::ColdPending { consecutive: 1 }));
+        assert!(matches!(
+            state,
+            AutoWinterState::ColdPending { consecutive: 1 }
+        ));
         assert!(saved.is_none(), "saved values only captured on activation");
     }
 
@@ -811,7 +809,10 @@ mod tests {
             };
             assert!(check_auto_winter(&snap, &config, &mut state, &mut saved).is_none());
         }
-        assert!(matches!(state, AutoWinterState::ColdPending { consecutive: 2 }));
+        assert!(matches!(
+            state,
+            AutoWinterState::ColdPending { consecutive: 2 }
+        ));
 
         // Third cold reading: activate.
         let snap = InverterSnapshot {
@@ -830,8 +831,12 @@ mod tests {
             })
         );
         // Writes enable charge target + set target SOC.
-        assert!(writes.iter().any(|w| w.address == HR_ENABLE_CHARGE_TARGET && w.value == 1));
-        assert!(writes.iter().any(|w| w.address == HR_CHARGE_TARGET_SOC && w.value == 90));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_CHARGE_TARGET && w.value == 1));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_CHARGE_TARGET_SOC && w.value == 90));
     }
 
     #[test]
@@ -850,15 +855,22 @@ mod tests {
             ..Default::default()
         };
         assert!(check_auto_winter(&snap, &config, &mut state, &mut saved).is_none());
-        assert!(matches!(state, AutoWinterState::WarmPending { consecutive: 1 }));
+        assert!(matches!(
+            state,
+            AutoWinterState::WarmPending { consecutive: 1 }
+        ));
 
         // Second warm reading: restore.
         let writes = check_auto_winter(&snap, &config, &mut state, &mut saved).expect("restores");
         assert_eq!(state, AutoWinterState::Idle);
         assert!(saved.is_none(), "saved consumed on restore");
         // Restores the saved target SOC (77) + enable (1).
-        assert!(writes.iter().any(|w| w.address == HR_CHARGE_TARGET_SOC && w.value == 77));
-        assert!(writes.iter().any(|w| w.address == HR_ENABLE_CHARGE_TARGET && w.value == 1));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_CHARGE_TARGET_SOC && w.value == 77));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_CHARGE_TARGET && w.value == 1));
     }
 
     #[test]
@@ -879,7 +891,11 @@ mod tests {
         };
         let _ = check_auto_winter(&snap, &config, &mut state, &mut saved);
 
-        assert_eq!(saved, Some(restored), "restored saved values must survive activation");
+        assert_eq!(
+            saved,
+            Some(restored),
+            "restored saved values must survive activation"
+        );
     }
 
     // -----------------------------------------------------------------
@@ -958,16 +974,17 @@ mod tests {
         // First 4 high-load polls: pending, no writes.
         for _ in 0..4 {
             assert!(check_load_limiter(&high, &config, &mut state, 60).is_none());
-            assert!(matches!(
-                state,
-                LoadLimiterState::HighLoadPending { .. }
-            ));
+            assert!(matches!(state, LoadLimiterState::HighLoadPending { .. }));
         }
         // 5th: transition to Paused with restore-100 writes.
         let writes = check_load_limiter(&high, &config, &mut state, 60).expect("pauses");
         assert_eq!(state, LoadLimiterState::Paused);
-        assert!(writes.iter().any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 100));
-        assert!(writes.iter().any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 100));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0));
     }
 
     #[test]
@@ -988,8 +1005,12 @@ mod tests {
         // 3rd: restore Eco (reserve back to 4).
         let writes = check_load_limiter(&low, &config, &mut state, 60).expect("restores");
         assert_eq!(state, LoadLimiterState::Idle);
-        assert!(writes.iter().any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 4));
-        assert!(writes.iter().any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 4));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1));
     }
 
     #[test]
@@ -1004,6 +1025,8 @@ mod tests {
 
         let writes = check_load_limiter(&low, &config, &mut state, 60).expect("immediate restore");
         assert_eq!(state, LoadLimiterState::Idle);
-        assert!(writes.iter().any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 4));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 4));
     }
 }

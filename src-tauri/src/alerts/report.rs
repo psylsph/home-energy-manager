@@ -46,7 +46,12 @@ fn negative_magnitude(v: Option<i32>) -> f64 {
     f64::max(-(v.unwrap_or(0) as f64), 0.0)
 }
 
-fn integrate_pair(a: Option<i32>, b: Option<i32>, hours: f64, transform: fn(Option<i32>) -> f64) -> f64 {
+fn integrate_pair(
+    a: Option<i32>,
+    b: Option<i32>,
+    hours: f64,
+    transform: fn(Option<i32>) -> f64,
+) -> f64 {
     match (a, b) {
         (None, None) => 0.0,
         (None, Some(b)) => transform(Some(b)) * hours / 1000.0,
@@ -235,8 +240,12 @@ pub fn generate_daily_summary_text(
     // Resolve tariff rates, preferring the structured peak/off-peak config and
     // falling back to the legacy flat rate.
     let imp_cfg = settings.import_tariff_config.as_ref();
-    let peak_rate = imp_cfg.map(|c| c.peak_rate).unwrap_or(settings.import_tariff);
-    let off_peak_rate = imp_cfg.map(|c| c.off_peak_rate).unwrap_or(settings.import_tariff);
+    let peak_rate = imp_cfg
+        .map(|c| c.peak_rate)
+        .unwrap_or(settings.import_tariff);
+    let off_peak_rate = imp_cfg
+        .map(|c| c.off_peak_rate)
+        .unwrap_or(settings.import_tariff);
     let (op_start, op_end) = match imp_cfg {
         Some(c) => (c.off_peak_start.as_str(), c.off_peak_end.as_str()),
         None => ("", ""),
@@ -288,12 +297,12 @@ pub fn generate_daily_summary_text(
     ));
     if off_peak_import_kwh > 0.0 || peak_import_kwh > 0.0 {
         msg.push_str(&format!(
-        "   ↳ peak {:.1} kWh @ {:.3}p · off-peak {:.1} kWh @ {:.3}p\n",
-        peak_import_kwh,
-        peak_rate * 100.0,
-        off_peak_import_kwh,
-        off_peak_rate * 100.0
-    ));
+            "   ↳ peak {:.1} kWh @ {:.3}p · off-peak {:.1} kWh @ {:.3}p\n",
+            peak_import_kwh,
+            peak_rate * 100.0,
+            off_peak_import_kwh,
+            off_peak_rate * 100.0
+        ));
     }
     msg.push_str(&format!(
         "📤 Export: <b>{:.1} kWh</b> — £{:.2}\n",
@@ -447,8 +456,16 @@ pub fn generate_daily_report_html(rows: &[ReadingRow], date_str: &str) -> Option
         None
     };
     // Clamp min/max to valid range
-    let soc_min_val = if soc_values.is_empty() { None } else { Some(soc_min) };
-    let soc_max_val = if soc_values.is_empty() { None } else { Some(soc_max) };
+    let soc_min_val = if soc_values.is_empty() {
+        None
+    } else {
+        Some(soc_min)
+    };
+    let soc_max_val = if soc_values.is_empty() {
+        None
+    } else {
+        Some(soc_max)
+    };
 
     let bucket_list: Vec<&Bucket> = buckets.values().collect();
 
@@ -577,9 +594,7 @@ pub fn generate_daily_report_html(rows: &[ReadingRow], date_str: &str) -> Option
     }
 
     // Donut charts
-    html.push_str(
-        "<section class=\"charts-2\">",
-    );
+    html.push_str("<section class=\"charts-2\">");
     html.push_str(&render_donut(
         "Grid balance",
         &[
@@ -595,9 +610,7 @@ pub fn generate_daily_report_html(rows: &[ReadingRow], date_str: &str) -> Option
         ],
     ));
     html.push_str("</section>");
-    html.push_str(
-        "<section class=\"charts-2\">",
-    );
+    html.push_str("<section class=\"charts-2\">");
     html.push_str(&render_donut(
         "Estimated solar destination",
         &[
@@ -621,9 +634,7 @@ pub fn generate_daily_report_html(rows: &[ReadingRow], date_str: &str) -> Option
     html.push_str("</section>");
 
     // Bucket breakdown table
-    html.push_str(
-        "<section class=\"table-card\"><h2>Bucket breakdown</h2><table><thead><tr>",
-    );
+    html.push_str("<section class=\"table-card\"><h2>Bucket breakdown</h2><table><thead><tr>");
     html.push_str(
         "<th>Hour</th><th>Solar</th><th>Home</th><th>Import</th><th>Export</th><th>Charge</th><th>Discharge</th><th>Avg SOC</th>",
     );
@@ -761,7 +772,10 @@ fn render_combined_power_chart(sorted: &[&ReadingRow]) -> String {
         let value = y_max * ratio;
         extras.push_str(&format!(
             "<line x1=\"{}\" x2=\"{}\" y1=\"{:.1}\" y2=\"{:.1}\" class=\"grid-line\" />",
-            left, width - right, y, y
+            left,
+            width - right,
+            y,
+            y
         ));
         let label = if value.abs() >= 1000.0 {
             format!("{:.0}k", value / 1000.0)
@@ -770,7 +784,9 @@ fn render_combined_power_chart(sorted: &[&ReadingRow]) -> String {
         };
         extras.push_str(&format!(
             "<text x=\"{}\" y=\"{:.1}\" text-anchor=\"end\" class=\"axis-label\">{}</text>",
-            left - 8, y + 4.0, label
+            left - 8,
+            y + 4.0,
+            label
         ));
     }
     // SOC axis
@@ -778,7 +794,9 @@ fn render_combined_power_chart(sorted: &[&ReadingRow]) -> String {
         let y = y_for_soc(val);
         extras.push_str(&format!(
             "<text x=\"{}\" y=\"{:.1}\" class=\"axis-label\">{:.0}%</text>",
-            width - right + 8, y + 4.0, val
+            width - right + 8,
+            y + 4.0,
+            val
         ));
     }
 
@@ -806,7 +824,8 @@ fn render_combined_power_chart(sorted: &[&ReadingRow]) -> String {
         }
         legend.push_str(&format!(
             "<text x=\"{:.1}\" y=\"22\" class=\"legend-label\">{}</text></g>",
-            x + 28.0, escape_html(label)
+            x + 28.0,
+            escape_html(label)
         ));
     }
 
@@ -849,7 +868,11 @@ fn render_bar_chart(title: &str, buckets: &[&Bucket], series: &[(&str, &str, &st
                     "battery_discharge_kwh" => b.battery_discharge_kwh,
                     _ => 0.0,
                 };
-                if v > 0.0 { v } else { 0.0 }
+                if v > 0.0 {
+                    v
+                } else {
+                    0.0
+                }
             })
         })
         .fold(0.1_f64, f64::max);
@@ -871,7 +894,10 @@ fn render_bar_chart(title: &str, buckets: &[&Bucket], series: &[(&str, &str, &st
                 _ => 0.0,
             };
             let bar_h = v / max_val * chart_h;
-            let x = left as f64 + bi as f64 * group_w + (group_w - bar_w * series.len() as f64) / 2.0 + si as f64 * bar_w;
+            let x = left as f64
+                + bi as f64 * group_w
+                + (group_w - bar_w * series.len() as f64) / 2.0
+                + si as f64 * bar_w;
             let y = top as f64 + chart_h - bar_h;
             bars.push_str(&format!(
                 "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"2\" fill=\"{}\" />",
@@ -888,7 +914,9 @@ fn render_bar_chart(title: &str, buckets: &[&Bucket], series: &[(&str, &str, &st
         let x = left as f64 + i as f64 * group_w + group_w / 2.0;
         labels.push_str(&format!(
             "<text x=\"{:.1}\" y=\"{}\" text-anchor=\"middle\" class=\"axis-label\">{}</text>",
-            x, height - 18, escape_html(&bucket.hour_label)
+            x,
+            height - 18,
+            escape_html(&bucket.hour_label)
         ));
     }
 
@@ -898,11 +926,16 @@ fn render_bar_chart(title: &str, buckets: &[&Bucket], series: &[(&str, &str, &st
         let val = max_val * ratio;
         grid.push_str(&format!(
             "<line x1=\"{}\" x2=\"{}\" y1=\"{:.1}\" y2=\"{:.1}\" class=\"grid-line\" />",
-            left, width - right, y, y
+            left,
+            width - right,
+            y,
+            y
         ));
         grid.push_str(&format!(
             "<text x=\"{}\" y=\"{:.1}\" text-anchor=\"end\" class=\"axis-label\">{:.0}</text>",
-            left - 8, y + 4.0, val
+            left - 8,
+            y + 4.0,
+            val
         ));
     }
 
@@ -915,7 +948,8 @@ fn render_bar_chart(title: &str, buckets: &[&Bucket], series: &[(&str, &str, &st
         ));
         legend.push_str(&format!(
             "<text x=\"{:.1}\" y=\"23\" class=\"legend-label\">{}</text></g>",
-            x + 16.0, escape_html(label)
+            x + 16.0,
+            escape_html(label)
         ));
     }
 
@@ -968,7 +1002,14 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
-    fn dummy_reading(ts: i64, solar: i32, battery: i32, grid: i32, home: i32, soc: f32) -> ReadingRow {
+    fn dummy_reading(
+        ts: i64,
+        solar: i32,
+        battery: i32,
+        grid: i32,
+        home: i32,
+        soc: f32,
+    ) -> ReadingRow {
         ReadingRow {
             timestamp: ts,
             solar_power: Some(solar),

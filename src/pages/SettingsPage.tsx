@@ -27,55 +27,6 @@ function StoreQr({ url, alt }: { url: string; alt: string }) {
   return <img src={dataUrl} alt={alt} className="w-[120px] h-[120px] rounded-lg" />;
 }
 
-function WhatsAppPairing() {
-  const [state, setState] = useState<'idle' | 'waiting' | 'paired' | 'error'>('idle');
-  const [qrData, setQrData] = useState('');
-  const [qrSvg, setQrSvg] = useState('');
-
-  useEffect(() => {
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const res = await fetch(`${getApiBase()}/api/whatsapp/status`);
-        const data = await res.json();
-        if (cancelled) return;
-        setState(data.state);
-        setQrData(data.qr || '');
-      } catch { /* ignore */ }
-    };
-    poll();
-    const interval = setInterval(poll, 3000);
-    return () => { cancelled = true; clearInterval(interval); };
-  }, []);
-
-  // Render QR code SVG when we have the pairing data
-  useEffect(() => {
-    if (!qrData || state !== 'waiting') { return; }
-    let cancelled = false;
-    import('qrcode').then((qr) => {
-      qr.toString(qrData, { type: 'svg', width: 200, margin: 1, color: { dark: '#000000', light: '#ffffff' } })
-        .then((svg) => { if (!cancelled) setQrSvg('data:image/svg+xml;utf8,' + encodeURIComponent(svg)); });
-    }).catch(() => {});
-    return () => { cancelled = true; };
-  }, [qrData, state]);
-
-  if (state === 'paired') {
-    return <span className="text-flow-active text-sm font-sans">✅ WhatsApp connected</span>;
-  }
-  if (state === 'error') {
-    return <span className="text-red-400 text-xs font-sans">Connection error — will retry automatically</span>;
-  }
-  if (state === 'waiting' && qrSvg) {
-    return (
-      <div className="flex flex-col items-center gap-2">
-        <img src={qrSvg} alt="WhatsApp QR" className="w-[200px] h-[200px] rounded-lg bg-white p-1" />
-        <span className="text-text-secondary text-xs font-sans">Scan with WhatsApp → Linked Devices</span>
-      </div>
-    );
-  }
-  return <span className="text-text-secondary text-xs font-sans animate-pulse">Waiting for QR code...</span>;
-}
-
 export default function SettingsPage() {
   const {
     connectionState,
@@ -143,7 +94,7 @@ const VALID_INTERVALS = [5, 10, 15, 20];
     batt_temp_min: 0, batt_temp_max: 0,
     soc_min: 4, soc_max: 100,
     grid_offline_enabled: false, battery_over_temp_enabled: false,
-    whatsapp_recipient: '',
+    solar_clipping_enabled: false, solar_clipping_ceiling_w: 0,
     ntfy_topic: '',
     ntfy_server: 'https://ntfy.sh',
   });
@@ -1023,32 +974,15 @@ const VALID_INTERVALS = [5, 10, 15, 20];
               )}
             </div>
 
-            {/* WhatsApp */}
-            <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
-              <h3 className="text-text-primary text-sm font-sans font-medium">WhatsApp <span className="text-yellow-400 text-xs font-normal">(experimental — may be unreliable)</span></h3>
-              <p className="text-text-secondary text-xs font-sans">
-                Pair your WhatsApp account to send alerts. On your phone, open WhatsApp Settings, tap "Linked Devices", then "Link a Device" and scan the QR code below. Then enter the phone number that should <strong>receive</strong> the alerts.
-              </p>
-              <div className="flex flex-col gap-2">
-                <label className="flex flex-col gap-1">
-                  <span className="text-text-secondary text-xs font-sans">Recipient phone (digits only, intl format, e.g. 447700900123)</span>
-                  <input
-                    type="tel"
-                    value={alertsConfig.whatsapp_recipient}
-                    onChange={(e) => setAlertsConfig((p) => ({ ...p, whatsapp_recipient: e.target.value.replace(/\D/g, '') }))}
-                    placeholder="447700900123"
-                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                  />
-                </label>
-              </div>
-              <div id="whatsapp-pairing" className="flex items-center justify-center py-4">
-                <WhatsAppPairing />
-              </div>
-            </div>
-
             {/* Battery temperature & SOC thresholds */}
             <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
-              <h3 className="text-text-primary text-sm font-sans font-medium">Battery Temperature &amp; SOC</h3>
+              <div>
+                <h3 className="text-text-primary text-sm font-sans font-medium">Battery Temperature &amp; SOC</h3>
+                <p className="text-text-secondary/70 text-xs font-sans">
+                  Battery temperature alerts only work with inverters that report
+                  temperature. Not available with a Gateway at this time.
+                </p>
+              </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <label className="flex flex-col gap-1">
                   <span className="text-text-secondary text-xs font-sans">Temp below °C</span>
@@ -1092,10 +1026,6 @@ const VALID_INTERVALS = [5, 10, 15, 20];
             {/* Toggle alerts */}
             <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
               <h3 className="text-text-primary text-sm font-sans font-medium">Alert Triggers & Cooldown</h3>
-              <p className="text-text-secondary/70 text-xs font-sans">
-                Battery temperature alerts only work with inverters that report
-                temperature. Not available with a Gateway at this time.
-              </p>
               <div className="flex items-center justify-between">
                 <span className="text-text-primary text-sm font-sans">Grid Offline</span>
                 <Toggle
@@ -1110,15 +1040,43 @@ const VALID_INTERVALS = [5, 10, 15, 20];
                   onChange={(v) => setAlertsConfig((p) => ({ ...p, battery_over_temp_enabled: v }))}
                 />
               </div>
-              <label className="flex flex-col gap-1">
-                <span className="text-text-secondary text-xs font-sans">Cooldown (minutes between all alerts)</span>
-                <input
-                  type="number" min={1} max={1440}
-                  value={alertsConfig.cooldown_minutes}
-                  onChange={(e) => setAlertsConfig((p) => ({ ...p, cooldown_minutes: Number(e.target.value) }))}
-                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+              <div className="flex items-center justify-between">
+                <span className="text-text-primary text-sm font-sans">
+                  Solar Clipping
+                  <span className="block text-text-secondary text-xs font-sans">
+                    Alert when generation sustains above your inverter's rated limit
+                  </span>
+                </span>
+                <Toggle
+                  checked={alertsConfig.solar_clipping_enabled}
+                  onChange={(v) => setAlertsConfig((p) => ({ ...p, solar_clipping_enabled: v }))}
                 />
-              </label>
+              </div>
+              {alertsConfig.solar_clipping_enabled && (
+                <label className="flex items-center justify-between gap-3">
+                  <span className="text-text-secondary text-xs font-sans">
+                    Clipping Ceiling (W) — rated AC output, 0 = off
+                  </span>
+                  <input
+                    type="number" step="100" min="0" max="100000"
+                    value={alertsConfig.solar_clipping_ceiling_w}
+                    onChange={(e) => setAlertsConfig((p) => ({ ...p, solar_clipping_ceiling_w: Number(e.target.value) }))}
+                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-bg-elevated focus:border-flow-active outline-none transition-colors text-left"
+                  />
+                </label>
+              )}
+              <div className="flex flex-col gap-1">
+                <span className="text-text-primary text-sm font-sans font-medium">Cooldown Timer</span>
+                <label className="flex items-center justify-between gap-2">
+                  <span className="text-text-secondary text-xs font-sans">minutes between all alerts</span>
+                  <input
+                    type="number" min={1} max={1440}
+                    value={alertsConfig.cooldown_minutes}
+                    onChange={(e) => setAlertsConfig((p) => ({ ...p, cooldown_minutes: Number(e.target.value) }))}
+                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-bg-elevated focus:border-flow-active outline-none transition-colors text-left"
+                  />
+                </label>
+              </div>
             </div>
 
             <div className="flex flex-col sm:flex-row gap-2">
@@ -1156,12 +1114,12 @@ const VALID_INTERVALS = [5, 10, 15, 20];
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-2">
         <h2 className="text-text-primary text-lg font-semibold font-sans">About</h2>
         <a
-          href="https://github.com/psylsph/home-energy-manager"
+          href="https://psylsph.github.io/home-energy-manager/"
           target="_blank"
           rel="noopener noreferrer"
           className="text-flow-active text-sm font-sans hover:underline mt-1"
         >
-          github.com/psylsph/home-energy-manager
+          psylsph.github.io/home-energy-manager
         </a>
       </section>
     </div>

@@ -57,8 +57,8 @@ use crate::server::logs::LogRing;
 use crate::server::ws::ConnectedClients;
 use tokio::sync::{broadcast, Mutex, Notify};
 
-use crate::history::HistoryDb;
 use crate::alerts::AlertType;
+use crate::history::HistoryDb;
 use crate::inverter::decoder::decode_snapshot;
 use crate::inverter::encoder::{ControlCommand, RegisterWrite};
 use crate::inverter::model::{BatteryMode, DeviceType, InverterSnapshot};
@@ -67,13 +67,13 @@ use crate::inverter::sanitizer::{
     derive_battery_fields_from_bms, is_block_suspicious, sanitize_snapshot, validate_battery_bms,
     ConsecutiveSuspectCounts, DeltaCorrectionCounts, GraceCumulativeSamples,
 };
-pub use crate::inverter::state_machines::{
-    AgileState, AutoWinterConfig, AutoWinterSaved, AutoWinterState, LoadLimiterConfig,
-    LoadLimiterState, PriceSlot,
-};
 use crate::inverter::state_machines::{
     check_auto_winter, check_load_limiter, clear_cosy_slot_registers, cosy_slot_register_writes,
     persist_agile_state, persist_cosy_active, write_registers_to_inverter,
+};
+pub use crate::inverter::state_machines::{
+    AgileState, AutoWinterConfig, AutoWinterSaved, AutoWinterState, LoadLimiterConfig,
+    LoadLimiterState, PriceSlot,
 };
 use crate::modbus::client::ModbusClient;
 use crate::modbus::registers::{HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET};
@@ -221,8 +221,6 @@ pub struct AppState {
     pub alert_config: Arc<Mutex<crate::settings::AlertsConfig>>,
     /// Email alert debounce tracker (in-memory only).
     pub alert_debounce: Arc<Mutex<crate::alerts::AlertDebounce>>,
-    /// WhatsApp bot state.
-    pub whatsapp: crate::alerts::whatsapp::WhatsAppState,
     /// Last date a daily consumption report was sent.
     pub last_report_date: Arc<Mutex<Option<chrono::NaiveDate>>>,
 }
@@ -254,13 +252,8 @@ impl AppState {
             )),
             agile_state: Arc::new(Mutex::new(AgileState::Idle)),
             cached_agile_prices: Arc::new(Mutex::new(Vec::new())),
-            alert_config: Arc::new(Mutex::new(
-                crate::settings::Settings::load().alerts_config,
-            )),
+            alert_config: Arc::new(Mutex::new(crate::settings::Settings::load().alerts_config)),
             alert_debounce: Arc::new(Mutex::new(crate::alerts::AlertDebounce::new())),
-            whatsapp: crate::alerts::whatsapp::WhatsAppState::new(Some(
-                crate::settings::Settings::settings_dir().join("whatsapp-store.db"),
-            )),
             last_report_date: Arc::new(Mutex::new(None)),
             latest_evc: Arc::new(Mutex::new(None)),
         }
@@ -299,13 +292,8 @@ impl AppState {
             )),
             agile_state: Arc::new(Mutex::new(AgileState::Idle)),
             cached_agile_prices: Arc::new(Mutex::new(Vec::new())),
-            alert_config: Arc::new(Mutex::new(
-                crate::settings::Settings::load().alerts_config,
-            )),
+            alert_config: Arc::new(Mutex::new(crate::settings::Settings::load().alerts_config)),
             alert_debounce: Arc::new(Mutex::new(crate::alerts::AlertDebounce::new())),
-            whatsapp: crate::alerts::whatsapp::WhatsAppState::new(Some(
-                crate::settings::Settings::settings_dir().join("whatsapp-store.db"),
-            )),
             last_report_date: Arc::new(Mutex::new(None)),
             latest_evc: Arc::new(Mutex::new(None)),
         }
@@ -419,9 +407,6 @@ fn should_probe_hv_stacks(known_device_type: Option<DeviceType>, hv_probe_done: 
 pub async fn run_poll_loop(state: Arc<AppState>) {
     // Start the Telegram /status command poller
     crate::alerts::spawn_telegram_poller(state.clone());
-
-    // Start the WhatsApp bot (QR pairing)
-    state.whatsapp.start().await;
 
     let mut backoff = Duration::from_secs(5);
 
@@ -2005,11 +1990,28 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                 snapshot.battery_over_temp
                                                     && config.battery_over_temp_enabled,
                                             );
+                                        // Precision defence for the solar-clipping
+                                        // alert: feed this cycle's "solar above the
+                                        // configured ceiling" flag into a
+                                        // consecutive-read counter. The alert only
+                                        // survives if solar has been over the
+                                        // ceiling for SOLAR_CLIPPING_CONFIRM_CYCLES
+                                        // cycles, so a momentary cloud-edge spike
+                                        // does not fire it.
+                                        let clipping_confirmed =
+                                            debounce.confirm_solar_clipping(
+                                                config.solar_clipping_enabled
+                                                    && config.solar_clipping_ceiling_w > 0
+                                                    && snapshot.solar_power
+                                                        > config.solar_clipping_ceiling_w as i32,
+                                            );
                                         let confirmed_triggered: Vec<AlertType> = triggered
                                             .iter()
                                             .copied()
-                                            .filter(|a| {
-                                                *a != AlertType::BatteryOverTemp || confirmed
+                                            .filter(|a| match *a {
+                                                AlertType::BatteryOverTemp => confirmed,
+                                                AlertType::SolarClipping => clipping_confirmed,
+                                                _ => true,
                                             })
                                             .collect();
                                         let triggered = confirmed_triggered;
@@ -2039,7 +2041,6 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             );
                                             let token = config.telegram_bot_token.clone();
                                             let chat_id = config.telegram_chat_id.clone();
-                                            let wa_text = text.clone();
                                             let ntfy_text = text.clone();
                                             let cleared_names = cleared
                                                 .iter()
@@ -2047,33 +2048,22 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                 .collect::<Vec<_>>()
                                                 .join(", ");
 
-                                            tokio::task::spawn_blocking(move || {
-                                                match crate::alerts::send_telegram_message(
-                                                    &token,
-                                                    &chat_id,
-                                                    &text,
-                                                ) {
-                                                    Ok(()) => tracing::warn!(
-                                                        "Cleared alert sent: {cleared_names}"
-                                                    ),
-                                                    Err(e) => tracing::warn!(
-                                                        "Failed to send cleared alert: {e}"
-                                                    ),
-                                                }
-                                            });
-
-                                            let wa_recipient = config.whatsapp_recipient.clone();
-                                            let wa_state = state.clone();
-                                            tokio::task::spawn(async move {
-                                                if wa_recipient.is_empty() {
-                                                    return;
-                                                }
-                                                if let Err(e) = wa_state.whatsapp.send_message(&wa_recipient, &wa_text).await {
-                                                    tracing::warn!("WhatsApp cleared alert failed: {e}");
-                                                } else {
-                                                    tracing::warn!("WhatsApp cleared alert sent");
-                                                }
-                                            });
+                                            if !token.is_empty() && !chat_id.is_empty() {
+                                                tokio::task::spawn_blocking(move || {
+                                                    match crate::alerts::send_telegram_message(
+                                                        &token,
+                                                        &chat_id,
+                                                        &text,
+                                                    ) {
+                                                        Ok(()) => tracing::warn!(
+                                                            "Cleared alert sent: {cleared_names}"
+                                                        ),
+                                                        Err(e) => tracing::warn!(
+                                                            "Failed to send cleared alert: {e}"
+                                                        ),
+                                                    }
+                                                });
+                                            }
 
                                             let ntfy_topic = config.ntfy_topic.clone();
                                             let ntfy_server = config.ntfy_server.clone();
@@ -2098,38 +2088,25 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             );
                                             let token = config.telegram_bot_token.clone();
                                             let chat_id = config.telegram_chat_id.clone();
-                                            let wa_text = text.clone();
                                             let ntfy_text = text.clone();
 
-                                            tokio::task::spawn_blocking(move || {
-                                                match crate::alerts::send_telegram_message(
-                                                    &token,
-                                                    &chat_id,
-                                                    &text,
-                                                ) {
-                                                    Ok(()) => tracing::warn!(
-                                                        "Alert sent: {:?}",
-                                                        to_send
-                                                    ),
-                                                    Err(e) => tracing::warn!(
-                                                        "Failed to send alert: {e}"
-                                                    ),
-                                                }
-                                            });
-
-                                            // Also send via WhatsApp if paired + recipient configured
-                                            let wa_recipient = config.whatsapp_recipient.clone();
-                                            let wa_state = state.clone();
-                                            tokio::task::spawn(async move {
-                                                if wa_recipient.is_empty() {
-                                                    return; // No recipient configured
-                                                }
-                                                if let Err(e) = wa_state.whatsapp.send_message(&wa_recipient, &wa_text).await {
-                                                    tracing::warn!("WhatsApp alert failed: {e}");
-                                                } else {
-                                                    tracing::warn!("WhatsApp alert sent");
-                                                }
-                                            });
+                                            if !token.is_empty() && !chat_id.is_empty() {
+                                                tokio::task::spawn_blocking(move || {
+                                                    match crate::alerts::send_telegram_message(
+                                                        &token,
+                                                        &chat_id,
+                                                        &text,
+                                                    ) {
+                                                        Ok(()) => tracing::warn!(
+                                                            "Alert sent: {:?}",
+                                                            to_send
+                                                        ),
+                                                        Err(e) => tracing::warn!(
+                                                            "Failed to send alert: {e}"
+                                                        ),
+                                                    }
+                                                });
+                                            }
 
                                             // Also send via ntfy if topic configured
                                             let ntfy_topic = config.ntfy_topic.clone();
@@ -2485,7 +2462,6 @@ mod tests {
         });
     }
 
-
     #[test]
     fn model_detection_repolls_for_ac_coupled_address_switch_and_extra_block() {
         // ACCoupled: slave changes from detection 0x11 to operational 0x31,
@@ -2753,8 +2729,7 @@ mod tests {
                         //    parking_lot::Mutex. Do synchronous work.
                         {
                             let mut clients = s.connected_clients.lock();
-                            let addr: std::net::SocketAddr =
-                                "127.0.0.1:6000".parse().unwrap();
+                            let addr: std::net::SocketAddr = "127.0.0.1:6000".parse().unwrap();
                             let cid = clients.add(addr);
                             clients.remove(cid);
                         } // parking_lot guard dropped HERE, before any .await.
@@ -2774,20 +2749,18 @@ mod tests {
                 }));
             }
 
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                async {
-                    for h in handles {
-                        h.await.expect("task panicked");
-                    }
-                },
-            )
+            let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                for h in handles {
+                    h.await.expect("task panicked");
+                }
+            })
             .await;
 
             assert!(
                 result.is_ok(),
                 "concurrent tokio + parking_lot mutex access deadlocked (timeout)"
             );
-        }).await;
+        })
+        .await;
     }
 }

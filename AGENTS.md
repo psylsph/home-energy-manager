@@ -17,7 +17,7 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 ## Prerequisites
 
 - **Node.js** + npm
-- **Rust nightly** toolchain (`rustup default nightly`) — required by `whatsapp-rust` crate
+- **Rust** toolchain (stable; `rustup default stable`)
 - **Tauri CLI**: `cargo install tauri-cli`
 
 ## Commands

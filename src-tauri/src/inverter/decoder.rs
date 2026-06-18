@@ -293,9 +293,7 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
     // authoritative value when present, otherwise fall back to the derived formula.
     // The Gateway likewise exposes an authoritative, EV-excluding house load
     // (`p_load`, IR 1618) — keep it when present.
-    let has_direct_home_power = (snap
-        .device_type
-        .needs_three_phase_input_blocks()
+    let has_direct_home_power = (snap.device_type.needs_three_phase_input_blocks()
         || snap.device_type.needs_gateway_input_blocks())
         && snap.home_power > 0;
     if !has_direct_home_power {
@@ -484,8 +482,7 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
         // Corroborate the software signals against the actual electrical
         // readings. Both must indicate grid loss for it to be reported,
         // avoiding false positives from transient register fluctuations.
-        snap.grid_loss =
-            (system_mode == SYSTEM_MODE_OFF_GRID || no_utility) && !ac_present;
+        snap.grid_loss = (system_mode == SYSTEM_MODE_OFF_GRID || no_utility) && !ac_present;
         snap.grid_online = !snap.grid_loss;
     }
     snap.inverter_trip = status == STATUS_FAULT;
@@ -1489,28 +1486,38 @@ fn gw_u32(data: &[u16], hi_off: usize, lo_off: usize, is_v2: bool) -> u32 {
 /// u32 (MSB), table bit 31 = bit 0 (LSB). Source: `model/gateway.py`
 /// `_gateway_fault_code`. Empty entries are reserved/unused.
 const GATEWAY_FAULT_NAMES: [&str; 32] = [
-    "Relay 1&2 bonding",        // 0
-    "Relay 3&4 bonding",        // 1
-    "Relay 1&2 disconnect",     // 2
-    "Relay 3&4 disconnect",     // 3
-    "AC over frequency 1",      // 4
-    "AC under frequency 1",     // 5
-    "AC over voltage 1",        // 6
-    "AC under voltage 1",       // 7
-    "AC over frequency 2",      // 8
-    "AC under frequency 2",     // 9
-    "AC over voltage 2",        // 10
-    "AC under voltage 2",       // 11
-    "",                          // 12 (reserved)
-    "No zero-point protection", // 13
-    "Over quarter AC voltage",  // 14
-    "Under quarter AC voltage", // 15
-    "Over AC voltage long-time",// 16
-    "AC over frequency constant",   // 17
-    "AC under frequency constant",  // 18
-    "AC over voltage constant",     // 19
-    "", "", "", "", "", "", "", "", "", "", "", // 20-30 (reserved)
-    "Grid mode Off",            // 31
+    "Relay 1&2 bonding",           // 0
+    "Relay 3&4 bonding",           // 1
+    "Relay 1&2 disconnect",        // 2
+    "Relay 3&4 disconnect",        // 3
+    "AC over frequency 1",         // 4
+    "AC under frequency 1",        // 5
+    "AC over voltage 1",           // 6
+    "AC under voltage 1",          // 7
+    "AC over frequency 2",         // 8
+    "AC under frequency 2",        // 9
+    "AC over voltage 2",           // 10
+    "AC under voltage 2",          // 11
+    "",                            // 12 (reserved)
+    "No zero-point protection",    // 13
+    "Over quarter AC voltage",     // 14
+    "Under quarter AC voltage",    // 15
+    "Over AC voltage long-time",   // 16
+    "AC over frequency constant",  // 17
+    "AC under frequency constant", // 18
+    "AC over voltage constant",    // 19
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",              // 20-30 (reserved)
+    "Grid mode Off", // 31
 ];
 
 fn decode_gateway_faults(raw: u32) -> Vec<String> {
@@ -1600,10 +1607,26 @@ fn decode_gateway_1600_1659(data: &[u16], snap: &mut InverterSnapshot) {
     let total_discharge_u32 = gw_u32(data, 53, 54, is_v2);
     // Plausibility: the hi word of a genuine residential lifetime total never
     // exceeds ~30 (200 MWh). hi > 1000 (>6.5 GWh) is impossible corruption.
-    snap.total_import_kwh = if (total_import_u32 >> 16) > 1000 { 0.0 } else { total_import_u32 as f32 * 0.1 };
-    snap.total_export_kwh = if (total_export_u32 >> 16) > 1000 { 0.0 } else { total_export_u32 as f32 * 0.1 };
-    snap.total_charge_kwh = if (total_charge_u32 >> 16) > 1000 { 0.0 } else { total_charge_u32 as f32 * 0.1 };
-    snap.total_discharge_kwh = if (total_discharge_u32 >> 16) > 1000 { 0.0 } else { total_discharge_u32 as f32 * 0.1 };
+    snap.total_import_kwh = if (total_import_u32 >> 16) > 1000 {
+        0.0
+    } else {
+        total_import_u32 as f32 * 0.1
+    };
+    snap.total_export_kwh = if (total_export_u32 >> 16) > 1000 {
+        0.0
+    } else {
+        total_export_u32 as f32 * 0.1
+    };
+    snap.total_charge_kwh = if (total_charge_u32 >> 16) > 1000 {
+        0.0
+    } else {
+        total_charge_u32 as f32 * 0.1
+    };
+    snap.total_discharge_kwh = if (total_discharge_u32 >> 16) > 1000 {
+        0.0
+    } else {
+        total_discharge_u32 as f32 * 0.1
+    };
 }
 
 /// IR 1660-1719: AIO stack summary (count, aggregate power, state) + per-AIO
@@ -2078,12 +2101,18 @@ mod tests {
         // and frequency are normal, grid_loss must stay false.
         let mut blocks = test_blocks();
         blocks[0].data[49] = SYSTEM_MODE_OFF_GRID; // IR(49): OffGrid (transient)
-        // Voltage/frequency already at default 241.0V / 50.02 Hz
+                                                   // Voltage/frequency already at default 241.0V / 50.02 Hz
 
         let snap = decode_snapshot(&blocks);
 
-        assert!(snap.grid_online, "voltage is normal — grid must be reported as online");
-        assert!(!snap.grid_loss, "must NOT false-positive on transient OffGrid");
+        assert!(
+            snap.grid_online,
+            "voltage is normal — grid must be reported as online"
+        );
+        assert!(
+            !snap.grid_loss,
+            "must NOT false-positive on transient OffGrid"
+        );
     }
 
     #[test]
@@ -2092,12 +2121,18 @@ mod tests {
         // transiently but voltage/frequency remain normal.
         let mut blocks = test_blocks();
         blocks[0].data[40] = GRID_LOSS_MASK_IR40; // IR(40) bit 7: "No Utility"
-        // Voltage/frequency already at default 241.0V / 50.02 Hz
+                                                  // Voltage/frequency already at default 241.0V / 50.02 Hz
 
         let snap = decode_snapshot(&blocks);
 
-        assert!(snap.grid_online, "voltage is normal — grid must be reported as online");
-        assert!(!snap.grid_loss, "must NOT false-positive on transient No Utility bit");
+        assert!(
+            snap.grid_online,
+            "voltage is normal — grid must be reported as online"
+        );
+        assert!(
+            !snap.grid_loss,
+            "must NOT false-positive on transient No Utility bit"
+        );
     }
 
     #[test]
@@ -3012,19 +3047,49 @@ mod tests {
     /// Build the five gateway input blocks with the given register data
     /// (60 or 29 regs each).
     fn gateway_block1(data_1600_1659: [u16; 60]) -> BlockRead {
-        make_block(RegisterType::Input, 1600, 60, "input_1600_1659", data_1600_1659.to_vec())
+        make_block(
+            RegisterType::Input,
+            1600,
+            60,
+            "input_1600_1659",
+            data_1600_1659.to_vec(),
+        )
     }
     fn gateway_block2(data_1660_1719: [u16; 60]) -> BlockRead {
-        make_block(RegisterType::Input, 1660, 60, "input_1660_1719", data_1660_1719.to_vec())
+        make_block(
+            RegisterType::Input,
+            1660,
+            60,
+            "input_1660_1719",
+            data_1660_1719.to_vec(),
+        )
     }
     fn gateway_block3(data_1720_1779: [u16; 60]) -> BlockRead {
-        make_block(RegisterType::Input, 1720, 60, "input_1720_1779", data_1720_1779.to_vec())
+        make_block(
+            RegisterType::Input,
+            1720,
+            60,
+            "input_1720_1779",
+            data_1720_1779.to_vec(),
+        )
     }
     fn gateway_block4(data_1780_1830: [u16; 51]) -> BlockRead {
-        make_block(RegisterType::Input, 1780, 51, "input_1780_1830", data_1780_1830.to_vec())
+        make_block(
+            RegisterType::Input,
+            1780,
+            51,
+            "input_1780_1830",
+            data_1780_1830.to_vec(),
+        )
     }
     fn gateway_block5_v1(data_1831_1859: [u16; 29]) -> BlockRead {
-        make_block(RegisterType::Input, 1831, 29, "input_1831_1859", data_1831_1859.to_vec())
+        make_block(
+            RegisterType::Input,
+            1831,
+            29,
+            "input_1831_1859",
+            data_1831_1859.to_vec(),
+        )
     }
     /// Holding register 0-59 block with DTC 0x7001 (Gateway).
     fn gateway_holding_block() -> BlockRead {
@@ -3041,7 +3106,7 @@ mod tests {
         b1[2] = 0x0000; // 0,0
         b1[3] = 0x0009; // 9 (last digit) — V1 (IR(1603) < 10)
         b1[4] = 2; // work_mode = On Grid
-        // Grid: v_grid = 2410 → 241.0 V
+                   // Grid: v_grid = 2410 → 241.0 V
         b1[8] = 2410;
         // PV: p_pv = 3500 W
         b1[17] = 3500;
@@ -3055,22 +3120,27 @@ mod tests {
         b1[29] = 0x3233; // '2','3'
         b1[30] = 0x3030; // '0','0'
         b1[31] = 0x3031; // '0','1'
-        // Energy today: import=12.3, solar=45.6, export=3.4, charge=20.0, discharge=18.5, load=30.0
+                         // Energy today: import=12.3, solar=45.6, export=3.4, charge=20.0, discharge=18.5, load=30.0
         b1[40] = 123; // e_grid_import_today
         b1[43] = 456; // e_pv_today
-        b1[46] = 34;  // e_grid_export_today
+        b1[46] = 34; // e_grid_export_today
         b1[49] = 200; // e_aio_charge_today
         b1[52] = 185; // e_aio_discharge_today
         b1[55] = 300; // e_load_today
-        // Lifetime totals (V1 hi/lo): import=12345.6, export=543.2, charge=8000.0, discharge=7500.0
-        // e_grid_import_total: IR(1641)=0x0001, IR(1642)=0xE240 → (1<<16)|57856 = 123392 /10 = 12339.2
-        // Actually use clean values: 1234 = 0x04D2 high, 5678 = 0x162E low → uint32=80913222 /10 ≈ 8091322.2 no
-        // Let's use: hi=0x0001=1, lo=0x0000=0 → 65536 /10 = 6553.6
-        b1[41] = 1; b1[42] = 0;   // e_grid_import_total high, low
-        b1[44] = 0; b1[45] = 1000; // e_pv_total = 1000 /10 = 100.0
-        b1[47] = 0; b1[48] = 500;  // e_grid_export_total = 500/10 = 50.0
-        b1[50] = 2; b1[51] = 0;    // e_aio_charge_total = 131072/10 = 13107.2
-        b1[53] = 1; b1[54] = 5000; // e_aio_discharge_total = (1<<16)|5000 = 70536/10 = 7053.6
+                      // Lifetime totals (V1 hi/lo): import=12345.6, export=543.2, charge=8000.0, discharge=7500.0
+                      // e_grid_import_total: IR(1641)=0x0001, IR(1642)=0xE240 → (1<<16)|57856 = 123392 /10 = 12339.2
+                      // Actually use clean values: 1234 = 0x04D2 high, 5678 = 0x162E low → uint32=80913222 /10 ≈ 8091322.2 no
+                      // Let's use: hi=0x0001=1, lo=0x0000=0 → 65536 /10 = 6553.6
+        b1[41] = 1;
+        b1[42] = 0; // e_grid_import_total high, low
+        b1[44] = 0;
+        b1[45] = 1000; // e_pv_total = 1000 /10 = 100.0
+        b1[47] = 0;
+        b1[48] = 500; // e_grid_export_total = 500/10 = 50.0
+        b1[50] = 2;
+        b1[51] = 0; // e_aio_charge_total = 131072/10 = 13107.2
+        b1[53] = 1;
+        b1[54] = 5000; // e_aio_discharge_total = (1<<16)|5000 = 70536/10 = 7053.6
 
         let mut b2 = [0u16; 60];
         b2[40] = 1; // parallel_aio_num = 1
@@ -3144,9 +3214,18 @@ mod tests {
         assert_eq!(snap.gateway_software_version, "GA0000010");
         assert!(snap.gateway_is_v2);
         assert_eq!(snap.gateway_work_mode, 2);
-        assert!(snap.gateway_fault_codes.iter().any(|f| f == "Relay 1&2 bonding"));
-        assert!(snap.gateway_fault_codes.iter().any(|f| f == "Grid mode Off"));
-        assert!(!snap.gateway_fault_codes.iter().any(|f| f == "Relay 3&4 bonding"));
+        assert!(snap
+            .gateway_fault_codes
+            .iter()
+            .any(|f| f == "Relay 1&2 bonding"));
+        assert!(snap
+            .gateway_fault_codes
+            .iter()
+            .any(|f| f == "Grid mode Off"));
+        assert!(!snap
+            .gateway_fault_codes
+            .iter()
+            .any(|f| f == "Relay 3&4 bonding"));
         assert!(gateway_is_valid(&snap.gateway_software_version));
     }
 
@@ -3240,10 +3319,11 @@ mod tests {
         b1[1] = 0x3030;
         b1[2] = 0x0000;
         b1[3] = 0x000A; // 10 → V2 (GA000010)
-        // V2 byte order: uint32 is (low << 16) | high, so hi_off and lo_off swap.
-        // For e_grid_import_total: V2 expects IR(1642) as high, IR(1641) as low.
-        // The fixture has hi=1@41, lo=0@42. gw_u32 swaps: uint32(lo=0, hi=1) = (0<<16)|1 = 1.
-        b1[41] = 1; b1[42] = 0; // hi@41=1, lo@42=0 → V2 reads lo=0 as hi → (0<<16)|1 = 1
+                        // V2 byte order: uint32 is (low << 16) | high, so hi_off and lo_off swap.
+                        // For e_grid_import_total: V2 expects IR(1642) as high, IR(1641) as low.
+                        // The fixture has hi=1@41, lo=0@42. gw_u32 swaps: uint32(lo=0, hi=1) = (0<<16)|1 = 1.
+        b1[41] = 1;
+        b1[42] = 0; // hi@41=1, lo@42=0 → V2 reads lo=0 as hi → (0<<16)|1 = 1
 
         let mut b5 = [0u16; 29];
         // V2: aio1 serial @ 1841-1845 (offsets 10-14)

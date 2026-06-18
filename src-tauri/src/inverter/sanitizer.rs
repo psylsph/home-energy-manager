@@ -88,7 +88,10 @@ pub(crate) fn is_block_suspicious(data: &[u16]) -> bool {
 
     // General heuristic: if too many registers are in the 0xE000+ range,
     // the block contains leaked memory from a different dongle region.
-    let high_count = data.iter().filter(|&&v| v >= HIGH_REGISTER_THRESHOLD).count();
+    let high_count = data
+        .iter()
+        .filter(|&&v| v >= HIGH_REGISTER_THRESHOLD)
+        .count();
     high_count >= HIGH_REGISTER_COUNT_LIMIT
 }
 
@@ -730,7 +733,12 @@ pub(crate) fn sanitize_snapshot(
         if snap.device_type.needs_gateway_input_blocks() {
             (20_000, 25_000, 25_000, 25_000)
         } else {
-            (max_battery_power, max_grid_power, max_solar_power, max_home_power)
+            (
+                max_battery_power,
+                max_grid_power,
+                max_solar_power,
+                max_home_power,
+            )
         };
 
     // Power fields: apply the 10-readings suspect-count method.
@@ -1995,11 +2003,7 @@ mod tests {
             ..Default::default()
         };
         // solar: all NaN -> None. import: [5.0, 50.0, 5.1] -> median 5.1.
-        let samples = [
-            mk(f32::NAN, 5.0),
-            mk(f32::NAN, 50.0),
-            mk(f32::NAN, 5.1),
-        ];
+        let samples = [mk(f32::NAN, 5.0), mk(f32::NAN, 50.0), mk(f32::NAN, 5.1)];
         let median = GraceCumulativeSamples::median(&samples);
         assert!(median.today_solar_kwh.is_none());
         assert_eq!(median.today_import_kwh, Some(5.1));
@@ -2010,7 +2014,10 @@ mod tests {
             ..Default::default()
         };
         median.apply_to(&mut snap);
-        assert_eq!(snap.today_solar_kwh, 12.0, "all-NaN field keeps last reading");
+        assert_eq!(
+            snap.today_solar_kwh, 12.0,
+            "all-NaN field keeps last reading"
+        );
         assert_eq!(snap.today_import_kwh, 5.1, "normal field gets its median");
     }
 
@@ -2022,10 +2029,14 @@ mod tests {
     fn check_power_field_in_range_value_is_accepted_and_resets_counter() {
         let mut counts = ConsecutiveSuspectCounts::default();
         counts.0.insert("grid_power", 5);
-        let (val, sanitized) = check_power_field(3000, Some(2900), 15_000, "grid_power", &mut counts);
+        let (val, sanitized) =
+            check_power_field(3000, Some(2900), 15_000, "grid_power", &mut counts);
         assert_eq!(val, 3000);
         assert!(!sanitized);
-        assert!(!counts.0.contains_key("grid_power"), "in-range reading resets the counter");
+        assert!(
+            !counts.0.contains_key("grid_power"),
+            "in-range reading resets the counter"
+        );
     }
 
     #[test]
@@ -2038,15 +2049,24 @@ mod tests {
         for _ in 1..SUSPECT_RELEASE_THRESHOLD {
             let (val, sanitized) =
                 check_power_field(16_000, Some(12_000), 15_000, "grid_power", &mut counts);
-            assert_eq!(val, 12_000, "over-limit value uses previous during suspect window");
+            assert_eq!(
+                val, 12_000,
+                "over-limit value uses previous during suspect window"
+            );
             assert!(sanitized);
         }
         // 10th cycle: released (accepted as legitimate).
         let (val, sanitized) =
             check_power_field(16_000, Some(12_000), 15_000, "grid_power", &mut counts);
-        assert_eq!(val, 16_000, "persistent over-limit value is released at threshold");
+        assert_eq!(
+            val, 16_000,
+            "persistent over-limit value is released at threshold"
+        );
         assert!(!sanitized);
-        assert!(!counts.0.contains_key("grid_power"), "counter cleared on release");
+        assert!(
+            !counts.0.contains_key("grid_power"),
+            "counter cleared on release"
+        );
     }
 
     #[test]
@@ -2058,7 +2078,10 @@ mod tests {
         for _ in 0..(SUSPECT_RELEASE_THRESHOLD * 3) {
             let (val, sanitized) =
                 check_power_field(32_767, Some(12_000), 15_000, "grid_power", &mut counts);
-            assert_eq!(val, 12_000, "32767 corruption must always fall back to previous");
+            assert_eq!(
+                val, 12_000,
+                "32767 corruption must always fall back to previous"
+            );
             assert!(sanitized, "32767 must always be flagged as sanitized");
         }
         // Counter never reaches the release threshold for corruption.
@@ -2074,15 +2097,19 @@ mod tests {
         // First-ever reading is the corruption signature: clamp to the limit
         // (sign-preserved) rather than writing 32767 into the snapshot/history.
         let mut counts = ConsecutiveSuspectCounts::default();
-        let (val, sanitized) =
-            check_power_field(32_767, None, 15_000, "grid_power", &mut counts);
-        assert_eq!(val, 15_000, "positive corruption with no previous clamps to +limit");
+        let (val, sanitized) = check_power_field(32_767, None, 15_000, "grid_power", &mut counts);
+        assert_eq!(
+            val, 15_000,
+            "positive corruption with no previous clamps to +limit"
+        );
         assert!(sanitized);
 
         // Negative saturation clamps to -limit.
-        let (val, sanitized) =
-            check_power_field(-32_768, None, 15_000, "grid_power", &mut counts);
-        assert_eq!(val, -15_000, "negative corruption with no previous clamps to -limit");
+        let (val, sanitized) = check_power_field(-32_768, None, 15_000, "grid_power", &mut counts);
+        assert_eq!(
+            val, -15_000,
+            "negative corruption with no previous clamps to -limit"
+        );
         assert!(sanitized);
     }
 
@@ -2118,7 +2145,6 @@ mod tests {
         assert!(sanitized);
         assert_eq!(counts.0.get("grid_power").copied(), Some(1));
     }
-
 
     #[test]
     fn daily_energy_tiny_decrease_is_noise_not_repoll() {
@@ -2500,7 +2526,10 @@ mod tests {
             &mut suspect_counts,
         );
 
-        assert!(sanitized, "tiny midnight corruption should still be rejected");
+        assert!(
+            sanitized,
+            "tiny midnight corruption should still be rejected"
+        );
         assert_eq!(snap.discharge_slots[0].start_hour, 18);
         assert_eq!(snap.discharge_slots[0].end_hour, 19);
     }
@@ -2772,7 +2801,10 @@ mod tests {
             &mut suspect_counts,
         );
 
-        assert!(!sanitized, "valid full-day charge slot must not force a re-poll");
+        assert!(
+            !sanitized,
+            "valid full-day charge slot must not force a re-poll"
+        );
         assert_eq!(snap.charge_slots[0].start_hour, 0);
         assert_eq!(snap.charge_slots[0].start_minute, 0);
         assert_eq!(snap.charge_slots[0].end_hour, 23);
@@ -2818,7 +2850,10 @@ mod tests {
             &mut suspect_counts,
         );
 
-        assert!(sanitized, "tiny midnight charge slot corruption should be rejected");
+        assert!(
+            sanitized,
+            "tiny midnight charge slot corruption should be rejected"
+        );
         assert_eq!(snap.charge_slots[0].start_hour, 2);
         assert_eq!(snap.charge_slots[0].end_hour, 5);
     }
@@ -2865,7 +2900,10 @@ mod tests {
             &mut suspect_counts,
         );
 
-        assert!(!sanitized, "overnight 2-hour charge slot must not be suspicious");
+        assert!(
+            !sanitized,
+            "overnight 2-hour charge slot must not be suspicious"
+        );
         assert_eq!(snap.charge_slots[0].start_hour, 23);
         assert_eq!(snap.charge_slots[0].end_hour, 1);
     }
@@ -2911,7 +2949,10 @@ mod tests {
             &mut suspect_counts,
         );
 
-        assert!(!sanitized, "disabled slot with tiny times must not be suspicious");
+        assert!(
+            !sanitized,
+            "disabled slot with tiny times must not be suspicious"
+        );
         assert!(!snap.charge_slots[0].enabled);
     }
 
@@ -2955,7 +2996,10 @@ mod tests {
             &mut suspect_counts,
         );
 
-        assert!(!sanitized, "slot at 00:15 must not be suspicious (start minutes > 10)");
+        assert!(
+            !sanitized,
+            "slot at 00:15 must not be suspicious (start minutes > 10)"
+        );
     }
 
     #[test]
@@ -3020,7 +3064,10 @@ mod tests {
         );
 
         // Exactly 10 min (duration <= 10) + start <= 10 = suspicious
-        assert!(sanitized, "exactly-10-min slot with start <= 10 is still caught");
+        assert!(
+            sanitized,
+            "exactly-10-min slot with start <= 10 is still caught"
+        );
         assert_eq!(snap.charge_slots[0].start_hour, 2);
     }
 
@@ -3253,9 +3300,11 @@ mod tests {
             &mut suspect_counts,
         );
 
-        assert!(!sanitized, "overnight 2-hour discharge slot must not be suspicious");
+        assert!(
+            !sanitized,
+            "overnight 2-hour discharge slot must not be suspicious"
+        );
         assert_eq!(snap.discharge_slots[0].start_hour, 23);
         assert_eq!(snap.discharge_slots[0].end_hour, 1);
     }
-
 }
