@@ -35,7 +35,7 @@ tokio = { version = "1", features = ["full"] }
 # HTTP server
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "fs"] }
+tower-http = { version = "0.7.0", features = ["cors", "fs"] }
 
 # CRC for Modbus
 crc = "3"
@@ -61,7 +61,7 @@ futures-util = "0.3"
 local-ip-address = "0.6"
 
 # SQLite for history storage
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
 
 # Efficient mutex for log ring
 parking_lot = "0.12"
