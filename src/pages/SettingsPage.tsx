@@ -1005,9 +1005,17 @@ const VALID_INTERVALS = [5, 10, 15, 20];
               </p>
               {serial ? (
                 <div className="flex flex-col gap-3">
-                  <div className="bg-bg-elevated rounded-lg px-4 py-3 flex flex-col gap-1">
-                    <span className="text-text-secondary text-xs font-sans">Your ntfy topic</span>
-                    <span className="text-text-primary font-mono text-sm break-all select-all">hem-{serial}</span>
+                  <div className="bg-bg-elevated rounded-lg px-4 py-3 flex flex-col gap-2">
+                    <span className="text-text-secondary text-xs font-sans">Subscribe to this topic in the ntfy app</span>
+                    <div className="flex items-center gap-2">
+                      <code className="flex-1 bg-bg-surface text-text-primary font-mono text-sm rounded px-3 py-2 select-all">hem-{serial}</code>
+                      <button
+                        onClick={() => { navigator.clipboard.writeText('hem-' + serial); flash('Topic copied!', true); }}
+                        className="shrink-0 bg-flow-active text-bg-base text-xs font-sans font-semibold px-3 py-2 rounded-lg hover:opacity-90 transition-opacity"
+                      >
+                        Copy
+                      </button>
+                    </div>
                   </div>
                   <label className="flex flex-col gap-1">
                     <span className="text-text-secondary text-xs font-sans">Server (optional, default: ntfy.sh)</span>
