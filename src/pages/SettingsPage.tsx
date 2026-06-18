@@ -1035,6 +1035,10 @@ const VALID_INTERVALS = [5, 10, 15, 20];
             {/* Toggle alerts */}
             <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
               <h3 className="text-text-primary text-sm font-sans font-medium">Alert Triggers & Cooldown</h3>
+              <p className="text-text-secondary/70 text-xs font-sans">
+                Battery temperature alerts only work with inverters that report
+                temperature. Not available with a Gateway at this time.
+              </p>
               <div className="flex items-center justify-between">
                 <span className="text-text-primary text-sm font-sans">Grid Offline</span>
                 <Toggle
