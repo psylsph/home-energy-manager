@@ -326,23 +326,30 @@ pub fn run() {
                         img.height(),
                         img.rgba().len()
                     );
-                    if let Some(window) = app.get_webview_window("main") {
-                        tracing::info!(
-                            "Main window found (label: {}), setting icon...",
-                            window.label()
-                        );
-                        match window.set_icon(img) {
-                            Ok(()) => {
-                                tracing::info!("Window icon set successfully");
+                    #[cfg(desktop)]
+                    {
+                        if let Some(window) = app.get_webview_window("main") {
+                            tracing::info!(
+                                "Main window found (label: {}), setting icon...",
+                                window.label()
+                            );
+                            match window.set_icon(img) {
+                                Ok(()) => {
+                                    tracing::info!("Window icon set successfully");
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to set window icon: {e}");
+                                }
                             }
-                            Err(e) => {
-                                tracing::error!("Failed to set window icon: {e}");
-                            }
+                        } else {
+                            tracing::warn!(
+                                "Main window not found (app.get_webview_window returned None), cannot set icon"
+                            );
                         }
-                    } else {
-                        tracing::warn!(
-                            "Main window not found (app.get_webview_window returned None), cannot set icon"
-                        );
+                    }
+                    #[cfg(not(desktop))]
+                    {
+                        tracing::debug!("Skipping window icon on non-desktop target");
                     }
                 }
                 Err(e) => {
