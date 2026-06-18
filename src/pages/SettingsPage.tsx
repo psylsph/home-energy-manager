@@ -213,6 +213,15 @@ const VALID_INTERVALS = [5, 10, 15, 20];
     })();
   }, []);
 
+  // Auto-save generated ntfy topic when serial becomes available
+  useEffect(() => {
+    const invSerial = serial || snapshot?.inverter_serial || '';
+    const generatedTopic = invSerial ? `hem-${invSerial}` : '';
+    if (generatedTopic && generatedTopic !== alertsConfig.ntfy_topic) {
+      apiPost('/api/alerts', { ntfy_topic: generatedTopic }).catch(() => {});
+    }
+  }, [serial, snapshot?.inverter_serial]);
+
   // Network URL — use LAN IP if available, otherwise fall back to getApiBase()
   const lanUrl = lanIp ? `http://${lanIp}:${getServerPort()}` : getApiBase();
 
