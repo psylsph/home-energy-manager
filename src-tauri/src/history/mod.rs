@@ -385,14 +385,7 @@ impl HistoryDb {
         let mut current_local_date: Option<chrono::NaiveDate> = None;
         let mut accumulated_kwh: f64 = 0.0;
         let mut prev_ts: Option<i64> = None;
-        // Rolling window of real solar_power readings (ts, power) for the last
-        // 30 minutes. Used to compute average power for slot-filler intervals
-        // so a 1-minute spike or dip doesn't distort the 30-min energy total.
-        let mut power_window: Vec<(i64, i32)> = Vec::new();
-        // Last known real power — used as fallback when the rolling window
-        // is empty (e.g. slot-filler rows more than 30 min after the last
-        // real reading).
-        let mut last_real_power: i32 = 0;
+        let mut prev_solar_power: i32 = 0;
 
         for (ts, solar_power) in &rows {
             let ts = *ts;
@@ -408,39 +401,17 @@ impl HistoryDb {
                 current_local_date = local_date;
                 accumulated_kwh = 0.0;
                 prev_ts = None;
-                power_window.clear();
-                last_real_power = 0;
+                prev_solar_power = 0;
             }
-
-            // Add real (non-zero) readings to the rolling window
-            if solar_power > 0 {
-                power_window.push((ts, solar_power));
-                last_real_power = solar_power;
-            }
-            // Prune entries older than 30 minutes
-            let cutoff = ts - 1800;
-            power_window.retain(|(t, _)| *t >= cutoff);
-
-            // Compute average power over the last 30 minutes.
-            // Fall back to last known real power if the window is empty
-            // (e.g. slot-filler rows far from any real reading).
-            let avg_power: i32 = if power_window.is_empty() {
-                last_real_power
-            } else {
-                let sum: i64 = power_window.iter().map(|(_, p)| *p as i64).sum();
-                (sum / power_window.len() as i64) as i32
-            };
 
             // Accumulate PV power since the previous reading
             if let Some(prev) = prev_ts {
                 let delta_secs = ts - prev;
                 // Only accumulate for normal poll intervals (<= 1 hour).
                 // Larger gaps mean the system was offline — treat as 0 power.
-                // 30-min slot-filler rows are 1800s apart, so threshold must
-                // be larger than 1800s to avoid breaking the chain.
                 if delta_secs > 0 && delta_secs < 3600 {
                     let delta_hours = delta_secs as f64 / 3600.0;
-                    let power_kw = avg_power.max(0) as f64 / 1000.0;
+                    let power_kw = prev_solar_power.max(0) as f64 / 1000.0;
                     accumulated_kwh += power_kw * delta_hours;
                 }
             }
@@ -448,6 +419,7 @@ impl HistoryDb {
             updates.push((ts, accumulated_kwh));
 
             prev_ts = Some(ts);
+            prev_solar_power = solar_power;
         }
 
         // Step 4: write back all computed values
@@ -1763,7 +1735,7 @@ mod tests {
                 "first row should be 0 after reopen, got {val0}"
             );
 
-            // Second row should be ~0.351 kWh (rolling avg of 4026+4403 × 5min)
+            // Second row should be ~0.3355 kWh (4026W × 5min)
             let val1: f64 = conn
                 .query_row(
                     "SELECT today_solar_kwh FROM readings WHERE timestamp = ?",
@@ -1772,8 +1744,8 @@ mod tests {
                 )
                 .unwrap();
             assert!(
-                (val1 - 0.351).abs() < 0.01,
-                "second row should be ~0.351 kWh, got {val1}"
+                (val1 - 0.3355).abs() < 0.01,
+                "second row should be ~0.3355 kWh, got {val1}"
             );
         }
     }
