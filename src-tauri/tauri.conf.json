@@ -58,7 +58,7 @@
         "conflicts": ["giv-energy-local"],
         "replaces": ["giv-energy-local"],
         "files": {
-          "/usr/share/givenergy-local/dist": "dist"
+          "/usr/share/givenergy-local/dist": "../dist"
         }
       },
       "rpm": {
