@@ -400,8 +400,9 @@ impl HistoryDb {
             // Accumulate PV power since the previous reading
             if let Some(prev) = prev_ts {
                 let delta_ms = ts - prev;
-                if delta_ms > 0 && delta_ms < 3_600_000 {
-                    // Max 1-hour gap to avoid wild extrapolation
+                // Only accumulate for normal poll intervals (<= 10 min).
+                // Larger gaps mean the system was offline — treat as 0 power.
+                if delta_ms > 0 && delta_ms < 600_000 {
                     let delta_hours = delta_ms as f64 / 3_600_000.0;
                     let power_kw = prev_solar_power.max(0) as f64 / 1000.0;
                     accumulated_kwh += power_kw * delta_hours;
@@ -1402,6 +1403,64 @@ mod tests {
             "10:00 ({}) should be > 09:00 ({})",
             rows[2].1,
             rows[1].1
+        );
+    }
+
+    /// A gap > 10 minutes between readings must NOT accumulate energy
+    /// (treats missing time slots as 0 power).
+    #[test]
+    fn reconstruct_solar_kwh_gap_treated_as_zero() {
+        let db = test_db();
+        let noon = local_noon_ms(-1);
+        let midnight = noon - 12 * 3600_000;
+
+        // Insert two readings 15 minutes apart with 800W solar
+        let ts1 = midnight + 8 * 3600_000; // 08:00
+        let ts2 = ts1 + 15 * 60_000;        // 08:15 (15 min gap > 10 min threshold)
+
+        let mut snap = make_snapshot(ts1, 50, 800);
+        snap.today_solar_kwh = 0.0;
+        db.insert_reading(&snap);
+
+        let mut snap = make_snapshot(ts2, 50, 800);
+        snap.today_solar_kwh = 0.0;
+        db.insert_reading(&snap);
+
+        let conn = db.conn.lock().unwrap();
+        let count = HistoryDb::reconstruct_solar_kwh(&conn).unwrap();
+        drop(conn);
+
+        // Both rows should be updated
+        assert_eq!(count, 2);
+
+        let conn = db.conn.lock().unwrap();
+        let val1: f64 = conn
+            .query_row(
+                "SELECT today_solar_kwh FROM readings WHERE timestamp = ?",
+                rusqlite::params![ts1],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let val2: f64 = conn
+            .query_row(
+                "SELECT today_solar_kwh FROM readings WHERE timestamp = ?",
+                rusqlite::params![ts2],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        // First row: 0 (no previous reading to integrate)
+        assert!(
+            val1.abs() < 0.01,
+            "first row should be 0, got {}",
+            val1
+        );
+        // Second row: also 0 (15 min gap > 10 min threshold, treated as 0 power)
+        assert!(
+            val2.abs() < 0.01,
+            "second row should be 0 (gap treated as 0 power), got {}",
+            val2
         );
     }
 }
