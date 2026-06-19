@@ -535,8 +535,8 @@ impl HistoryDb {
 
                     if conn
                         .execute(
-                            "INSERT OR REPLACE INTO readings (timestamp, today_solar_kwh) \
-                             VALUES (?1, ?2)",
+                            "INSERT OR REPLACE INTO readings (timestamp, solar_power, today_solar_kwh) \
+                             VALUES (?1, 0, ?2)",
                             rusqlite::params![slot_ts, slot_kwh],
                         )
                         .is_ok()
