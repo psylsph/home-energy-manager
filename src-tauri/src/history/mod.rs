@@ -405,15 +405,27 @@ impl HistoryDb {
             }
 
             // Accumulate PV power since the previous reading
-            // Only accumulate if we had a real (non-zero) power reading.
-            // solar_power=0 means no reading (slot-filler or night), treat as offline.
+            // For gaps, interpolate: use average of prev and current power.
+            // solar_power=0 is treated as "no reading" - use other side of gap.
             if let Some(prev) = prev_ts {
                 let delta_secs = ts - prev;
                 // Only accumulate for normal poll intervals (<= 10 min = 600s).
                 // Larger gaps mean the system was offline — treat as 0 power.
-                if delta_secs > 0 && delta_secs < 600 && prev_solar_power > 0 {
+                if delta_secs > 0 && delta_secs < 600 {
+                    let power_kw = if prev_solar_power > 0 && solar_power > 0 {
+                        // Both sides have real readings - interpolate
+                        ((prev_solar_power + solar_power) / 2) as f64 / 1000.0
+                    } else if prev_solar_power > 0 {
+                        // Previous has real reading, use it
+                        prev_solar_power as f64 / 1000.0
+                    } else if solar_power > 0 {
+                        // Current has real reading, use it
+                        solar_power as f64 / 1000.0
+                    } else {
+                        // Both are 0/missing - no energy
+                        0.0
+                    };
                     let delta_hours = delta_secs as f64 / 3600.0;
-                    let power_kw = prev_solar_power as f64 / 1000.0;
                     accumulated_kwh += power_kw * delta_hours;
                 }
             }
@@ -1737,7 +1749,7 @@ mod tests {
                 "first row should be 0 after reopen, got {val0}"
             );
 
-            // Second row should be ~0.3355 kWh (4026W × 5min)
+            // Second row should be ~0.351 kWh (interpolated avg of 4026+4403 × 5min)
             let val1: f64 = conn
                 .query_row(
                     "SELECT today_solar_kwh FROM readings WHERE timestamp = ?",
@@ -1746,8 +1758,8 @@ mod tests {
                 )
                 .unwrap();
             assert!(
-                (val1 - 0.3355).abs() < 0.01,
-                "second row should be ~0.3355 kWh, got {val1}"
+                (val1 - 0.351).abs() < 0.01,
+                "second row should be ~0.351 kWh, got {val1}"
             );
         }
     }
