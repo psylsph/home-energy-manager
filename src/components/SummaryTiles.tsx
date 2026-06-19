@@ -14,7 +14,6 @@ interface TileDef {
 }
 
 function SummaryTilesInner({ snapshot: s }: Props) {
-  const isGateway = s.device_type_code?.startsWith('70');
   const tiles: TileDef[] = [
     {
       label: 'Solar Today',
@@ -23,7 +22,7 @@ function SummaryTilesInner({ snapshot: s }: Props) {
       icon: '☀️',
     },
     {
-      label: 'Consumption' + (isGateway ? ' (excl. EV)' : ''),
+      label: 'Consumption',
       value: formatEnergy(s.today_consumption_kwh),
       accent: '#14B8A6',
       icon: '🏠',

@@ -174,7 +174,7 @@ All notable changes to this project will be documented in this file.
   "Battery temperature alerts only work with inverters that report
   temperature…" notice moved to sit as a sub-heading under "Battery
   Temperature & SOC" where it belongs; the About link now points to
-  https://psylsph.github.io/home-energy-manager/.
+  <https://psylsph.github.io/home-energy-manager/>.
 
 ## [0.31.2] - 2026-06-18
 
@@ -198,9 +198,6 @@ All notable changes to this project will be documented in this file.
   comfortably exceeds the 10s server-side long-poll, so behaviour is unchanged
   when the network is healthy. The shared agent also pools connections,
   removing the per-call TLS handshake overhead.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.31.1] - 2026-06-18
 
@@ -543,7 +540,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Unit-test infrastructure for React hooks** — `vitest` + `@testing-library/react`
-  + `jsdom` for component-level unit tests. Run with `npm test` (`vitest run`)
+  `jsdom` for component-level unit tests. Run with `npm test` (`vitest run`)
   or `npm run test:watch`. Separate `vitest.config.ts` keeps the production Vite
   config untouched.
   - First test suite: `src/hooks/useAction.test.tsx` with 9 tests covering
@@ -736,7 +733,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **GivEnergy Gateway support** _(experimental)_ — first-class support for the
+- **GivEnergy Gateway support** *(experimental)* — first-class support for the
   GivEnergy Gateway (DTC 0x7001, serial prefix `GW`), a system controller
   / AC distribution hub that manages up to 3 All-in-One battery units.
   - **Polling & decoding**: reads the Gateway's unique Input Register bank
@@ -857,7 +854,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Cold-battery warning added to the Status page.**
 - **Slightly shorter default window height.**
 
-## [0.24.x] — June 2026
+## [0.24.x] - 2026-06-01
 
 ### Changed
 
@@ -883,7 +880,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SOC=100 only rejected when actually charging hard** (threshold raised
   from 500 W to 2000 W — gentle top-balancing is normal).
 
-## [0.23.x] — June 2026
+## [0.23.x] - 2026-06-01
 
 ### Added
 
@@ -904,12 +901,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grid. Fixes
   [#72](https://github.com/psylsph/home-energy-manager/issues/72).
 
-## [0.22.x] — June 2026
+## [0.22.x] - 2026-06-01
 
 - Briefly added a Windows MSIX release asset, then restored the MSI-only
   Windows build after the MSIX bundle target broke release CI.
 
-## [0.21.x] — June 2026
+## [0.21.x] - 2026-06-01
 
 ### Added
 
@@ -930,13 +927,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **EV charger polling compatibility** — correct unit id and
   GivTCP-compatible state mapping.
 
-## [0.20.x] — June 2026
+## [0.20.x] - 2026-06-01
 
 - **Power report relabelled "Consumption Report"** (KPI cards, breakdown
   charts, highlights, and bucket table all kept).
 - **Clearer CSV/PDF export confirmations** ("downloaded to Downloads").
 
-## [0.19.x] — June 2026
+## [0.19.x] - 2026-06-01
 
 ### Added
 
@@ -957,7 +954,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Quieter logging** — single dropped frames at debug, not warning.
 - **Relaxed meter detection** accepts any non-zero voltage (was ≥100V).
 
-## [0.18.x] — June 2026
+## [0.18.x] - 2026-06-01
 
 ### Changed
 
@@ -971,7 +968,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **All-in-One control readbacks** — AC charge/discharge limits, export
   priority, EPS, and pause slot now show correctly instead of blanking out.
 
-## [0.17.x] — June 2026
+## [0.17.x] - 2026-06-01
 
 A large series of releases focused on **HV/three-phase battery support,
 chart reliability, and UI polish.**
@@ -1028,7 +1025,7 @@ chart reliability, and UI polish.**
 - **Lots of performance work**: 60-register reads (was 20), settings loaded
   once per cycle, history queries moved off the worker thread.
 
-## [0.16.x] — June 2026
+## [0.16.x] - 2026-06-01
 
 ### Added
 
@@ -1046,7 +1043,7 @@ chart reliability, and UI polish.**
 - **Settings file no longer corrupted** by concurrent writes (atomic save).
 - **Chart lines now reach the axis** (x-axis starts at the first reading).
 
-## [0.15.x] — June 2026
+## [0.15.x] - 2026-06-01
 
 ### Added
 
@@ -1062,7 +1059,7 @@ chart reliability, and UI polish.**
 - Note-box and callout text readable in light mode; active Agile slot
   highlighted with a pulsing red border.
 
-## [0.14.x] — June 2026
+## [0.14.x] - 2026-06-01
 
 ### Added
 
@@ -1079,7 +1076,7 @@ chart reliability, and UI polish.**
   longer sets SOC to 100%); status shows "Override" when forcing.
 - Force charge/discharge now write the correct three-phase registers.
 
-## [0.13.x] — June 2026
+## [0.13.x] - 2026-06-01
 
 ### Added
 
@@ -1114,7 +1111,7 @@ chart reliability, and UI polish.**
   daily-energy dips no longer false-alarm.
 - macOS DMG `/Applications` workflow with automated Gatekeeper handling.
 
-## [0.12.x] — June 2026
+## [0.12.x] - 2026-06-01
 
 ### Added
 
@@ -1150,7 +1147,7 @@ chart reliability, and UI polish.**
   on Apple Silicon. Builds now self-verify before uploading.
 - **Bottom nav on small phones**: Tabs shrink to icons only on narrow screens.
 
-## [0.11.x] — June 2026
+## [0.11.x] - 2026-06-01
 
 ### Added
 
@@ -1168,7 +1165,7 @@ chart reliability, and UI polish.**
 - **Mystery charge slots appearing**: A late dongle response mistaken for
   schedule data is now rejected. (#41)
 
-## [0.10.0] — June 2026
+## [0.10.0] - 2026-06-01
 
 ### Changed
 
@@ -1182,7 +1179,7 @@ chart reliability, and UI polish.**
 - **Reserve SOC lower bound**: Consistently enforced at 4% (inverter-safe
   minimum), not 0%.
 
-## [0.9.x] — June 2026
+## [0.9.x] - 2026-06-01
 
 *Heavy development period — lots of new features and fixes.*
 
@@ -1319,7 +1316,7 @@ chart reliability, and UI polish.**
   auto-appending .dmg extension — all fixed.
 - **macOS launch.command**: Bypasses Gatekeeper on macOS 26.5+.
 
-## [0.8.x] — May 2026
+## [0.8.x] - 2026-05-01
 
 *Data sanitisation and cost accuracy focus.*
 
@@ -1367,7 +1364,7 @@ chart reliability, and UI polish.**
 - **LAN access in dev mode**: Axum server serves frontend from `dist/`.
 - **Network Access shows LAN IP**: Displays actual LAN IP, not 127.0.0.1.
 
-## [0.7.0] — May 2026
+## [0.7.0] - 2026-05-01
 
 - **Connected clients display**: Settings page shows WebSocket client IPs.
   Local connections labelled "This device".
@@ -1375,14 +1372,14 @@ chart reliability, and UI polish.**
 - **LAN access in dev mode**: Axum server serves frontend from `dist/`.
 - **Network Access shows LAN IP**: Real LAN IP instead of 127.0.0.1.
 
-## [0.6.0] — May 2026
+## [0.6.0] - 2026-05-01
 
 - **Developer Mode toggle**: Reveals a Logs page with scrollable,
   filterable backend output. Log capture, text/level filtering, auto-scroll.
 - **Network discovery filtering**: Verifies GivEnergy protocol before
   listing a device (no more false positives from other port 8899 services).
 
-## [0.5.x] — May 2026
+## [0.5.x] - 2026-05-01
 
 - **Live snapshot sanitization**: Physically impossible readings
   (battery >10kW, SOC=0 with live power, SOC=100 while charging) are now
@@ -1397,7 +1394,7 @@ chart reliability, and UI polish.**
 - **Schedule slot time pickers**: Stack vertically on mobile (no overlap).
 - **Copy URL button**: Works on non-HTTPS LAN contexts.
 
-## [0.5.0] — May 2026
+## [0.5.0] - 2026-05-01
 
 ### Added
 
@@ -1412,16 +1409,16 @@ chart reliability, and UI polish.**
 
 - **Windows builds**: Frontend now served correctly in installed apps.
 
-## [0.4.0] — May 2026
+## [0.4.0] - 2026-05-01
 
-## [0.3.0] — May 2026
+## [0.3.0] - 2026-05-01
 
 - Non-technical README with download links and quick start guide.
 - DESIGN.md with architecture, protocol, and API reference.
 - App version shown in Settings → About.
 - Energy flow diagram: Home on left, Grid on right.
 
-## [0.2.0] — May 2026
+## [0.2.0] - 2026-05-01
 
 - **Correct Modbus write protocol**: Now uses function code 6 with device
   address 0x11 (was 0x10 with 0x32). Per GivEnergy reference library.
@@ -1434,7 +1431,7 @@ chart reliability, and UI polish.**
 - **No more panic on port bind failure**: Logs error and continues.
 - **All CI checks passing**: lint, typecheck, 94 Rust tests.
 
-## [0.1.0] — May 2025
+## [0.1.0] - 2025-05-01
 
 ### Added
 
@@ -1450,3 +1447,6 @@ chart reliability, and UI polish.**
 - Persistent settings (`~/.givenergy-local/settings.json`).
 - 94 Rust unit tests.
 - Modbus polling resilience, stale response retry, TCP buffer drain.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
