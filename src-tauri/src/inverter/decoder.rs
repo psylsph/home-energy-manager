@@ -426,6 +426,11 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.pv2_voltage = get_reg(data, 2) as f32 * 0.1; // IR(2):  v_pv2 (/10 V)
     snap.pv1_current = get_reg(data, 8) as f32 * 0.1; // IR(8):  i_pv1 (/10 A)
     snap.pv2_current = get_reg(data, 9) as f32 * 0.1; // IR(9):  i_pv2 (/10 A)
+    // If PV2 has no voltage or current, there is no second string — zero
+    // out the power field so garbage register values don't pollute history.
+    if snap.pv2_voltage == 0.0 && snap.pv2_current == 0.0 {
+        snap.pv2_power = 0;
+    }
 
     // -- Battery --
     // IR(52): p_battery (int16 W) — inverter convention: positive = DISCHARGING.
@@ -914,6 +919,11 @@ fn decode_input_1000_1059(data: &[u16], snap: &mut InverterSnapshot) {
     snap.pv1_power = p_pv1 as i32;
     snap.pv2_power = p_pv2 as i32;
     snap.solar_power = snap.pv1_power + snap.pv2_power;
+    // If PV2 has no voltage or current, there is no second string — zero
+    // out the power field so garbage register values don't pollute history.
+    if snap.pv2_voltage == 0.0 && snap.pv2_current == 0.0 {
+        snap.pv2_power = 0;
+    }
 }
 
 /// IR 1060-1119: Grid, inverter output, load and EPS-bound measurements.

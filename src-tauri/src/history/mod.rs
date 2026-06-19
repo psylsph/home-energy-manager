@@ -207,6 +207,25 @@ impl HistoryDb {
         // this scan completes within seconds for typical history sizes.
         // Pre-v0.17.0 databases that lack the column will run the full
         // repair once; subsequent launches are no-ops.
+
+        // ---- Backup before repair ----
+        // Copy the database before any destructive write, so the user can
+        // restore the original if the repair introduces new issues.
+        {
+            let backup_path = path.with_extension("db.bak");
+            if let Err(e) = std::fs::copy(path, &backup_path) {
+                tracing::warn!(
+                    "Failed to backup history DB to {}: {e}",
+                    backup_path.display()
+                );
+            } else {
+                tracing::info!(
+                    "History DB backed up to {}",
+                    backup_path.display()
+                );
+            }
+        }
+
         let energy_cols = [
             "today_solar_kwh",
             "today_import_kwh",
