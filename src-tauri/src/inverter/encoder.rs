@@ -191,6 +191,8 @@ pub enum ControlCommand {
     SetActivePowerRate { rate: u16 },
     /// Set Eco mode (self-consumption, no discharge, clear discharge slots).
     SetEcoMode { soc_reserve: u16 },
+    /// Set Export Paused mode (export mode, but disable discharge).
+    SetExportPaused { soc_reserve: u16 },
     /// Set Timed Demand mode (self-consumption + discharge).
     SetTimedDemandMode { soc_reserve: u16 },
     /// Set Timed Export mode (export + discharge).
@@ -399,6 +401,14 @@ impl ControlCommand {
                 vec![
                     rw(HR_BATTERY_POWER_MODE, 1), // self-consumption
                     rw(HR_ENABLE_DISCHARGE, 0),   // no timed discharge
+                    rw(HR_BATTERY_SOC_RESERVE, *soc_reserve),
+                ]
+            }
+            ControlCommand::SetExportPaused { soc_reserve } => {
+                validate_range(*soc_reserve, 4, 100, "SOC reserve")?;
+                vec![
+                    rw(HR_BATTERY_POWER_MODE, 0), // export mode
+                    rw(HR_ENABLE_DISCHARGE, 0),   // disable discharge
                     rw(HR_BATTERY_SOC_RESERVE, *soc_reserve),
                 ]
             }
@@ -905,6 +915,7 @@ mod tests {
             ControlCommand::SetChargeLimit { limit: 30 },
             ControlCommand::SetDischargeLimit { limit: 40 },
             ControlCommand::SetEcoMode { soc_reserve: 4 },
+            ControlCommand::SetExportPaused { soc_reserve: 100 },
             ControlCommand::SetTimedDemandMode { soc_reserve: 10 },
             ControlCommand::SetTimedExportMode { soc_reserve: 10 },
             ControlCommand::PauseBattery,

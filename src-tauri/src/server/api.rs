@@ -497,7 +497,7 @@ pub async fn set_mode(
         "eco_paused" => ControlCommand::PauseBattery,
         "timed_demand" => ControlCommand::SetTimedDemandMode { soc_reserve },
         "timed_export" => ControlCommand::SetTimedExportMode { soc_reserve },
-        "export_paused" => ControlCommand::SetBatteryPowerMode { mode: 0 },
+        "export_paused" => ControlCommand::SetExportPaused { soc_reserve },
         _ => return error_response(&format!("Unknown mode: '{}'", mode_str)),
     };
 
@@ -511,7 +511,7 @@ pub async fn set_mode(
             // registers are non-zero, making it impossible to stay in Eco.
             // Three-phase models and Gateway use different slot addresses
             // (HR 1118-1121) than single-phase (HR 44-45/56-57).
-            if mode_str == "eco" || mode_str == "eco_paused" {
+            if mode_str == "eco" || mode_str == "eco_paused" || mode_str == "export_paused" {
                 // Clear ALL discharge slot registers to prevent Gen3 inverter
                 // firmware from auto-re-enabling enable_discharge. The Gen3
                 // keeps HR59=1 when discharge slot registers are non-zero,
