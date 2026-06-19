@@ -155,6 +155,12 @@ async fn initialize_app_state(
         }
     }
 
+    // Apply saved alert config
+    {
+        let mut ac = state.alert_config.lock().await;
+        *ac = app_settings.alerts_config.clone();
+    }
+
     // Open history database
     let config_dir = crate::settings::Settings::settings_dir();
     let db_path = config_dir.join("history.db");
@@ -538,6 +544,7 @@ mod tests {
             s.load_limiter_active_persisted = true;
             s.auto_winter_saved_enable_target = Some(true);
             s.auto_winter_saved_target_soc = Some(77);
+            s.alerts_config.enabled = true;
             s.save().expect("settings save");
 
             let loaded = Settings::load();
@@ -596,6 +603,15 @@ mod tests {
                     .expect("auto-winter saved should be restored");
                 assert!(saved.enable_charge_target);
                 assert_eq!(saved.target_soc, 77);
+            }
+
+            // Alert config applied
+            {
+                let ac = state.alert_config.lock().await;
+                assert!(
+                    ac.enabled,
+                    "alert config should be restored from persisted settings"
+                );
             }
 
             // History database opened
