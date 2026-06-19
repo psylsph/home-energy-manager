@@ -1355,5 +1355,53 @@ mod tests {
             (noon_val - 3.6).abs() < 1.0,
             "noon value {noon_val} should be near 3.6 kWh (PV integrated), not stuck at 1.5"
         );
+
+        // Verify consecutive rows have DIFFERENT (increasing) values
+        // proving we're NOT applying the same value to all slots.
+        // Check 3 rows at 08:00, 09:00, 10:00 when solar_power is 800W.
+        let rows: Vec<(i64, f64)> = {
+            let conn = db.conn.lock().unwrap();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT timestamp, today_solar_kwh FROM readings \
+                     WHERE timestamp IN (?1, ?2, ?3) ORDER BY timestamp",
+                )
+                .unwrap();
+            let r = stmt
+                .query_map(
+                    rusqlite::params![
+                        midnight + 8 * 3600_000,
+                        midnight + 9 * 3600_000,
+                        midnight + 10 * 3600_000,
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect();
+            r
+        };
+
+        assert_eq!(rows.len(), 3, "Should have 3 checkpoints");
+        // 08:00: ~0.43 kWh (400W×1h at 5-min intervals)
+        assert!(
+            rows[0].1 > 0.3,
+            "08:00 value should be ~0.43 kWh, got {}",
+            rows[0].1
+        );
+        // 09:00: ~1.23 kWh (0.43 + 800W×1h)
+        assert!(
+            rows[1].1 > rows[0].1,
+            "09:00 ({}) should be > 08:00 ({})",
+            rows[1].1,
+            rows[0].1
+        );
+        // 10:00: ~2.03 kWh (1.23 + 800W×1h)
+        assert!(
+            rows[2].1 > rows[1].1,
+            "10:00 ({}) should be > 09:00 ({})",
+            rows[2].1,
+            rows[1].1
+        );
     }
 }
