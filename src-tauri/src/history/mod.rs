@@ -340,8 +340,10 @@ impl HistoryDb {
     /// corruption regardless of device type.
     fn reconstruct_solar_kwh(conn: &Connection) -> Result<i64, String> {
         // Step 1: drop all existing values
-        conn.execute("UPDATE readings SET today_solar_kwh = 0", [])
+        let cleared = conn
+            .execute("UPDATE readings SET today_solar_kwh = 0", [])
             .map_err(|e| format!("Failed to clear today_solar_kwh: {e}"))?;
+        tracing::info!("Solar reconstruction: cleared {cleared} rows to 0");
 
         // Step 2: read solar_power and timestamps
         let mut stmt = conn
@@ -363,8 +365,16 @@ impl HistoryDb {
             .map_err(|e| format!("Row read failed: {e}"))?;
 
         if rows.is_empty() {
+            tracing::info!("Solar reconstruction: no rows to process");
             return Ok(0);
         }
+
+        tracing::info!(
+            "Solar reconstruction: processing {} rows, first ts={}, first solar_power={:?}",
+            rows.len(),
+            rows[0].0,
+            rows[0].1,
+        );
 
         // Step 3: integrate per day, always starting from 0
         let mut updates: Vec<(i64, f64)> = Vec::new();
@@ -428,6 +438,15 @@ impl HistoryDb {
                 tracing::warn!("Failed to reconstruct today_solar_kwh at ts={ts}");
             }
         }
+
+        // Log first few written values for debugging
+        if count > 0 {
+            let preview = &updates[..updates.len().min(5)];
+            for (ts, val) in preview {
+                tracing::info!("Solar reconstruction: ts={ts}, today_solar_kwh={val:.4}");
+            }
+        }
+        tracing::info!("Solar reconstruction: wrote {count} rows");
 
         Ok(count)
     }
