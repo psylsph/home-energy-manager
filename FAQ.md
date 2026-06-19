@@ -166,6 +166,15 @@ Alternatively, use the **Scan Network** button on the Settings page.
 
 ---
 
+---
+
+### How do I set up Telegram or ntfy notifications?
+
+See the **[Notification Setup Guide](NOTIFICATIONS.md)** for step-by-step
+instructions on both Telegram and ntfy.
+
+---
+
 ### Something else?
 
 Open an issue on [GitHub](https://github.com/psylsph/home-energy-manager/issues) and we'll help you out.

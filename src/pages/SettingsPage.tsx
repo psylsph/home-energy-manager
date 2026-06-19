@@ -907,7 +907,15 @@ const VALID_INTERVALS = [5, 10, 15, 20];
 
       {/* ─── Section 4.5: Notifications ─── */}
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
-        <h2 className="text-text-primary text-lg font-semibold font-sans">Notifications</h2>
+        <div className="flex items-center justify-between">
+          <h2 className="text-text-primary text-lg font-semibold font-sans">Notifications</h2>
+          <button
+            onClick={() => openExternal('https://github.com/psylsph/home-energy-manager/blob/master/NOTIFICATIONS.md')}
+            className="text-flow-active text-xs font-sans underline hover:opacity-80 transition-opacity"
+          >
+            Setup guide ↗
+          </button>
+        </div>
 
         <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
           <div className="flex items-center justify-between">
