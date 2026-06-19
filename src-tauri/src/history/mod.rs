@@ -405,13 +405,15 @@ impl HistoryDb {
             }
 
             // Accumulate PV power since the previous reading
+            // Only accumulate if we had a real (non-zero) power reading.
+            // solar_power=0 means no reading (slot-filler or night), treat as offline.
             if let Some(prev) = prev_ts {
                 let delta_secs = ts - prev;
                 // Only accumulate for normal poll intervals (<= 10 min = 600s).
                 // Larger gaps mean the system was offline — treat as 0 power.
-                if delta_secs > 0 && delta_secs < 600 {
+                if delta_secs > 0 && delta_secs < 600 && prev_solar_power > 0 {
                     let delta_hours = delta_secs as f64 / 3600.0;
-                    let power_kw = prev_solar_power.max(0) as f64 / 1000.0;
+                    let power_kw = prev_solar_power as f64 / 1000.0;
                     accumulated_kwh += power_kw * delta_hours;
                 }
             }
