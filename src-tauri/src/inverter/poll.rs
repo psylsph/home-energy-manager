@@ -576,6 +576,10 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // after model detection for devices that use the HV BCU protocol.
                 let mut detected_hv_stacks: Vec<(u8, u8)> = Vec::new();
                 let mut hv_probe_done = false;
+                // Tracks PV energy computed from solar_power * delta_time
+                // integration as the authoritative source for today_solar_kwh,
+                // cross-checked against the (often corrupted) register value.
+                let mut solar_energy_tracker: Option<(tokio::time::Instant, f32)> = None;
                 // Tracks which Cosy slot index was last preloaded into the
                 // inverter's charge slot registers. Only re-writes when the
                 // "next upcoming slot" changes (e.g. after a slot ends).
@@ -2273,6 +2277,63 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 let ag = state.agile_state.lock().await;
                                 snapshot.agile_active = *ag != AgileState::Idle;
                                 snapshot.agile_state = format!("{:?}", *ag);
+
+                                // ---- Solar energy from PV power integration ----
+                                // Compute today_solar_kwh by integrating solar_power
+                                // over time, rather than relying on the register
+                                // value which can get stuck at a corrupted baseline.
+                                {
+                                    let now = tokio::time::Instant::now();
+                                    if let Some((last_time, accumulated_kwh)) =
+                                        solar_energy_tracker.as_mut()
+                                    {
+                                        let elapsed_secs =
+                                            now.duration_since(*last_time).as_secs_f64();
+                                        // Only accumulate for reasonable time gaps
+                                        if elapsed_secs > 0.0 && elapsed_secs < 600.0 {
+                                            let power_w = snapshot.solar_power.max(0) as f64;
+                                            let added_kwh =
+                                                power_w * elapsed_secs / 3_600_000.0;
+                                            *accumulated_kwh += added_kwh as f32;
+
+                                            // Detect midnight rollover: register value
+                                            // drops significantly while tracker still
+                                            // has yesterday's accumulated value
+                                            if snapshot.today_solar_kwh
+                                                < *accumulated_kwh - 1.0
+                                            {
+                                                tracing::info!(
+                                                    register = snapshot.today_solar_kwh,
+                                                    accumulated = *accumulated_kwh,
+                                                    "Solar tracker reset (midnight rollover)"
+                                                );
+                                                *accumulated_kwh =
+                                                    snapshot.today_solar_kwh;
+                                            }
+
+                                            // Log significant cross-check discrepancies
+                                            let diff = (*accumulated_kwh
+                                                - snapshot.today_solar_kwh)
+                                                .abs();
+                                            if diff > 0.5 {
+                                                tracing::info!(
+                                                    register = snapshot.today_solar_kwh,
+                                                    computed = *accumulated_kwh,
+                                                    diff,
+                                                    "Solar energy cross-check: register vs PV-integrated"
+                                                );
+                                            }
+
+                                            // Use the computed value
+                                            snapshot.today_solar_kwh = *accumulated_kwh;
+                                        }
+                                        *last_time = now;
+                                    } else {
+                                        // First poll: seed from register
+                                        solar_energy_tracker =
+                                            Some((now, snapshot.today_solar_kwh));
+                                    }
+                                }
 
                                 {
                                     let mut latest = state.latest_snapshot.lock().await;
