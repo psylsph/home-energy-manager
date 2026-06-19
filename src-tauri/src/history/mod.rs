@@ -407,9 +407,9 @@ impl HistoryDb {
             // Accumulate PV power since the previous reading
             if let Some(prev) = prev_ts {
                 let delta_secs = ts - prev;
-                // Only accumulate for normal poll intervals (<= 1 hour).
+                // Only accumulate for normal poll intervals (<= 10 min = 600s).
                 // Larger gaps mean the system was offline — treat as 0 power.
-                if delta_secs > 0 && delta_secs < 3600 {
+                if delta_secs > 0 && delta_secs < 600 {
                     let delta_hours = delta_secs as f64 / 3600.0;
                     let power_kw = prev_solar_power.max(0) as f64 / 1000.0;
                     accumulated_kwh += power_kw * delta_hours;
@@ -493,7 +493,7 @@ impl HistoryDb {
                     .collect();
 
                 for slot_minute in (0..288).step_by(1) {
-                    let slot_ts = local_midnight + slot_minute * 300; // 5-minute slot
+                    let slot_ts = local_midnight + slot_minute * 300; // 5-minute slot (seconds)
 
                     // Check if this slot already has a row
                     let exists: bool = conn
