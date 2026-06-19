@@ -409,9 +409,9 @@ impl HistoryDb {
             // solar_power=0 is treated as "no reading" - use other side of gap.
             if let Some(prev) = prev_ts {
                 let delta_secs = ts - prev;
-                // Only accumulate for normal poll intervals (<= 10 min = 600s).
-                // Larger gaps mean the system was offline — treat as 0 power.
-                if delta_secs > 0 && delta_secs < 600 {
+                // Allow accumulation across larger gaps (up to 4 hours = 14400s).
+                // Interpolate power across the gap.
+                if delta_secs > 0 && delta_secs < 14400 {
                     let power_kw = if prev_solar_power > 0 && solar_power > 0 {
                         // Both sides have real readings - interpolate
                         ((prev_solar_power + solar_power) / 2) as f64 / 1000.0
