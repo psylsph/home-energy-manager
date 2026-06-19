@@ -345,21 +345,39 @@ const TELEGRAM_HTTP_TIMEOUT: u64 = 20;
 
 /// Shared HTTP agent for all Telegram Bot API calls.
 ///
-/// Configured with a global end-to-end timeout so a single stalled call —
-/// DNS, connect, or (most commonly in containerised deployments) a held-open
-/// `getUpdates` long-poll that the network layer has silently stalled —
-/// cannot freeze the single-threaded poll loop for the OS-level TCP timeout.
-/// A stalled call now dies after [`TELEGRAM_HTTP_TIMEOUT`] and the loop
-/// continues, so command latency is bounded (~23s worst case) instead of
-/// minutes-to-forever.
+/// Two defences against the recurring `Telegram poll error: timeout: global`
+/// that a NAT'd / containerised network path produces roughly every 5
+/// minutes:
 ///
-/// The agent is shared via [`OnceLock`] so its connection pool is reused
-/// across calls; clones are cheap (inner `Arc`).
+/// * **No connection pooling.** `max_idle_connections` and
+///   `max_idle_connections_per_host` are both pinned to `0`, so every Bot API
+///   call opens a fresh TCP+TLS connection. The recurring stall happens when a
+///   middlebox silently reaps the TCP state of an *idle pooled* connection and
+///   the poller then reuses that half-open socket (its request bytes vanish
+///   until the global timeout fires). A brand-new connection is always far
+///   too young for such a reaper (which acts on minutes of idle time), so the
+///   stale-socket reuse path can't occur. (TCP keepalive would be the more
+///   efficient fix, but ureq 3.x keeps its `TcpTransport` in a private module
+///   and exposes no public socket/transport hook, so it isn't reachable from
+///   application code without re-implementing the whole HTTP/1.1 transport.)
+/// * **Global end-to-end timeout** ([`TELEGRAM_HTTP_TIMEOUT`]) so a genuinely
+///   stalled call still can't freeze the single-threaded poll loop for the
+///   OS-level TCP timeout (minutes). Repeated stalls are damped by
+///   [`PollBackoff`] in the poll loop.
+///
+/// The agent is shared via [`OnceLock`]; with pooling disabled each call pays
+/// its own TCP+TLS setup, which is negligible against the ~13s poll cadence.
 fn telegram_agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(TELEGRAM_HTTP_TIMEOUT)))
+            // Disable connection pooling entirely — see the doc comment above.
+            // This is the root-cause fix for the recurring
+            // `timeout: global` polls: never reuse a (possibly reaped)
+            // pooled socket.
+            .max_idle_connections(0)
+            .max_idle_connections_per_host(0)
             .build();
         ureq::Agent::new_with_config(config)
     })
@@ -805,6 +823,128 @@ async fn build_report_reply(
     Some((html, caption, date_str))
 }
 
+// ---------------------------------------------------------------------------
+// Poll backoff
+// ---------------------------------------------------------------------------
+
+/// Exponential backoff for repeated Telegram poll failures.
+///
+/// Each consecutive failure grows the sleep taken *before* the next poll,
+/// geometrically up to [`Self::cap`]; a single success resets it to
+/// [`Self::base`]. This damps log spam and request rate during a sustained
+/// outage (revoked token, broken route to `api.telegram.org`, …) while still
+/// probing for recovery. It complements [`telegram_agent`]'s no-pooling fix:
+/// pooling stops the common stale-socket reuse, while backoff keeps the
+/// poller well-behaved when the path is genuinely down.
+///
+/// Pure and deterministic — it keeps no clock — so the full state machine is
+/// unit tested directly.
+#[derive(Debug, Clone)]
+pub(crate) struct PollBackoff {
+    base: Duration,
+    factor: u32,
+    cap: Duration,
+    /// Consecutive failures so far (drives the multiplier).
+    consecutive_failures: u32,
+}
+
+impl PollBackoff {
+    /// Build the backoff used by the Telegram poller: base 3s, factor ×2,
+    /// cap 60s. The resulting sleep *after* N consecutive failures is
+    /// `3, 6, 12, 24, 48, 60, 60, …` seconds, resetting to 3 on the first
+    /// success.
+    pub fn new_for_telegram() -> Self {
+        Self::new(Duration::from_secs(3), 2, Duration::from_secs(60))
+    }
+
+    /// Build an explicit backoff. `factor` should be ≥ 2.
+    pub const fn new(base: Duration, factor: u32, cap: Duration) -> Self {
+        Self {
+            base,
+            factor,
+            cap,
+            consecutive_failures: 0,
+        }
+    }
+
+    /// The delay the poller should sleep right now, given its failure history.
+    ///
+    /// Zero failures → [`Self::base`] (the healthy cadence). Each failure
+    /// multiplies by [`Self::factor`], saturating at [`Self::cap`] and holding
+    /// there until a success resets it.
+    pub fn current_delay(&self) -> Duration {
+        let mut delay = self.base;
+        for _ in 0..self.consecutive_failures {
+            delay = match delay.checked_mul(self.factor) {
+                Some(d) if d <= self.cap => d,
+                // Overflowed or crossed the cap: hold at the cap from here on.
+                _ => return self.cap,
+            };
+        }
+        delay
+    }
+
+    /// Record a failed poll and return the (now grown) delay to sleep before
+    /// retrying.
+    pub fn record_failure(&mut self) -> Duration {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        self.current_delay()
+    }
+
+    /// Record a successful poll; resets the next delay to [`Self::base`].
+    pub fn record_success(&mut self) {
+        self.consecutive_failures = 0;
+    }
+
+    /// Consecutive failures currently recorded (handy for logging/tests).
+    pub fn consecutive_failures(&self) -> u32 {
+        self.consecutive_failures
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Poll-error severity classification
+// ---------------------------------------------------------------------------
+
+/// How loudly a Telegram poll failure should be logged.
+///
+/// The `getUpdates` long-poll is *designed* to hold a connection open for up
+/// to 10s (`timeout=10`) waiting for updates, so a timeout surfacing from it
+/// is benign — it just means "no updates this cycle, try again." With the
+/// stale-socket reuse now fixed (see [`telegram_agent`]'s no-pooling config),
+/// a timeout is no longer the recurring NAT-reap symptom it once was; it's a
+/// rare network blip that the [`PollBackoff`] handles gracefully. Such
+/// timeouts are logged at [`PollErrorSeverity::Info`] so they don't clutter
+/// the WARN-level console (which is the default for both stdout and the dev
+/// log ring). Anything that *isn't* a timeout — DNS failure, connection
+/// refused, a bad/expired bot token (HTTP 401), … — may indicate a real
+/// misconfiguration or broken path the user should know about, so it stays at
+/// [`PollErrorSeverity::Warn`]. Both severities still feed the backoff
+/// counter, since either way the poll failed and we want to ease off if it
+/// keeps happening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PollErrorSeverity {
+    /// Benign/expected (a timeout) — log at INFO.
+    Info,
+    /// May need user attention (DNS, auth, refused, …) — log at WARN.
+    Warn,
+}
+
+/// Classify a Telegram poll error for logging. See [`PollErrorSeverity`].
+///
+/// Pure (and `&self`-free) so the full classification table is unit-tested
+/// directly — there's no other way to exercise logging-level decisions.
+pub(crate) fn poll_error_severity(err: &ureq::Error) -> PollErrorSeverity {
+    // Every `Timeout` variant (Global, Connect, RecvResponse, …) is a benign
+    // "the call didn't complete in time" — expected for a long-poll and
+    // handled by the backoff. All other errors are surfaced as WARN.
+    if matches!(err, ureq::Error::Timeout(_)) {
+        PollErrorSeverity::Info
+    } else {
+        PollErrorSeverity::Warn
+    }
+}
+
 /// Spawns a background task that polls Telegram for commands and replies
 /// with inverter data. Supported commands: `/status`, `/today`, `/battery`,
 /// `/mode`, `/version`, `/help`.
@@ -818,14 +958,21 @@ pub fn spawn_telegram_poller(state: std::sync::Arc<crate::inverter::poll::AppSta
     tokio::spawn(async move {
         let mut offset: i64 = 0;
         let mut commands_registered = false;
+        // Exponential backoff on repeated poll failures. Starts at the healthy
+        // 3s cadence and only grows after consecutive transport failures.
+        let mut backoff = PollBackoff::new_for_telegram();
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            tokio::time::sleep(backoff.current_delay()).await;
 
             let config = state.alert_config.lock().await.clone();
             if !config.enabled || config.telegram_bot_token.is_empty() {
                 // Token removed/alerts disabled — re-register the command menu
-                // the next time a token is configured.
+                // the next time a token is configured. This isn't a network
+                // failure, so reset the backoff: the first real poll after
+                // re-enabling should use the base interval, not whatever the
+                // last outage grew it to.
                 commands_registered = false;
+                backoff.record_success();
                 continue;
             }
             let token = config.telegram_bot_token.clone();
@@ -845,41 +992,91 @@ pub fn spawn_telegram_poller(state: std::sync::Arc<crate::inverter::poll::AppSta
             let cur_offset = offset;
             let poll_token = token.clone();
 
-            // Run the HTTP poll on a blocking thread so we don't stall the async runtime
-            let updates = tokio::task::spawn_blocking(move || -> Vec<(i64, i64, String)> {
-                let url = format!(
-                    "https://api.telegram.org/bot{}/getUpdates?offset={}&timeout=10",
-                    poll_token, cur_offset
-                );
-                let result = telegram_agent().get(&url).call();
-                match result {
-                    Ok(r) => {
-                        let body = r.into_body().read_to_string().unwrap_or_default();
-                        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&body) {
-                            let mut msgs = Vec::new();
-                            if let Some(results) = data["result"].as_array() {
-                                for update in results {
-                                    let update_id = update["update_id"].as_i64().unwrap_or(0);
-                                    if let Some(msg) = update.get("message") {
-                                        let chat_id = msg["chat"]["id"].as_i64().unwrap_or(0);
-                                        let text = msg["text"].as_str().unwrap_or("").to_string();
-                                        msgs.push((update_id, chat_id, text));
+            // Run the HTTP poll on a blocking thread so we don't stall the
+            // async runtime. Transport errors come back as the typed
+            // `ureq::Error` so the loop can classify them (benign timeout vs.
+            // genuine failure) and grow the backoff; a successful poll (even
+            // an empty one) resets it.
+            let poll_outcome = tokio::task::spawn_blocking(
+                move || -> Result<Vec<(i64, i64, String)>, ureq::Error> {
+                    let url = format!(
+                        "https://api.telegram.org/bot{}/getUpdates?offset={}&timeout=10",
+                        poll_token, cur_offset
+                    );
+                    match telegram_agent().get(&url).call() {
+                        Ok(r) => {
+                            let body = r.into_body().read_to_string().unwrap_or_default();
+                            if let Ok(data) =
+                                serde_json::from_str::<serde_json::Value>(&body)
+                            {
+                                let mut msgs = Vec::new();
+                                if let Some(results) = data["result"].as_array() {
+                                    for update in results {
+                                        let update_id =
+                                            update["update_id"].as_i64().unwrap_or(0);
+                                        if let Some(msg) = update.get("message") {
+                                            let chat_id =
+                                                msg["chat"]["id"].as_i64().unwrap_or(0);
+                                            let text =
+                                                msg["text"].as_str().unwrap_or("").to_string();
+                                            msgs.push((update_id, chat_id, text));
+                                        }
                                     }
                                 }
+                                Ok(msgs)
+                            } else {
+                                // A body we couldn't parse isn't a transport
+                                // failure — map it to an empty success so it
+                                // doesn't trigger backoff.
+                                Ok(Vec::new())
                             }
-                            msgs
-                        } else {
-                            Vec::new()
                         }
+                        Err(e) => Err(e),
                     }
-                    Err(e) => {
-                        tracing::warn!("Telegram poll error: {e}");
-                        Vec::new()
-                    }
+                },
+            )
+            .await;
+
+            let updates = match poll_outcome {
+                Ok(Ok(updates)) => {
+                    backoff.record_success();
+                    updates
                 }
-            })
-            .await
-            .unwrap_or_default();
+                Ok(Err(err)) => {
+                    // A poll failed. Grow the backoff either way (we want to
+                    // ease off if it keeps happening), but log at a level
+                    // matching the severity: a benign timeout is INFO (the
+                    // long-poll simply returned no updates), while anything
+                    // else (DNS, auth, refused, …) is WARN since it may need
+                    // user attention.
+                    let delay = backoff.record_failure();
+                    let consecutive = backoff.consecutive_failures();
+                    match poll_error_severity(&err) {
+                        PollErrorSeverity::Info => tracing::info!(
+                            "Telegram poll timed out (benign — long-poll returned \
+                             no updates); retrying in ~{delay:?} \
+                             (consecutive timeouts: {consecutive})"
+                        ),
+                        PollErrorSeverity::Warn => tracing::warn!(
+                            "Telegram poll error: {err}; backing off after {consecutive} \
+                             consecutive failure(s), next attempt in ~{delay:?}"
+                        ),
+                    }
+                    Vec::new()
+                }
+                Err(join_err) => {
+                    // The spawn_blocking task itself failed (panic/cancel).
+                    // This is never benign — a panic in the poll task signals a
+                    // bug and warrants attention.
+                    let delay = backoff.record_failure();
+                    let consecutive = backoff.consecutive_failures();
+                    tracing::warn!(
+                        "Telegram poll task failed: {join_err}; backing off after {consecutive} \
+                         consecutive failure(s), next attempt in ~{delay:?}"
+                    );
+                    Vec::new()
+                }
+            };
 
             for (update_id, chat_id, text) in &updates {
                 if *update_id >= offset {
@@ -1312,5 +1509,243 @@ mod tests {
         ] {
             assert!(msg.contains(cmd), "help missing {cmd}");
         }
+    }
+
+    // ================================================================
+    // PollBackoff — exponential backoff for repeated Telegram poll failures
+    // ================================================================
+
+    #[test]
+    fn test_backoff_starts_at_base() {
+        // With no failures recorded the poller sleeps the healthy base cadence.
+        let b = PollBackoff::new_for_telegram();
+        assert_eq!(b.current_delay(), Duration::from_secs(3));
+        assert_eq!(b.consecutive_failures(), 0);
+    }
+
+    #[test]
+    fn test_backoff_sequence_after_consecutive_failures() {
+        // Telegram defaults: base=3s, factor=2, cap=60s.
+        // Expected next-delays: 3, 6, 12, 24, 48, 60, 60, 60, …
+        let mut b = PollBackoff::new_for_telegram();
+        assert_eq!(b.current_delay(), Duration::from_secs(3)); // 0 failures
+        let expected = [
+            (1u32, Duration::from_secs(6)),
+            (2, Duration::from_secs(12)),
+            (3, Duration::from_secs(24)),
+            (4, Duration::from_secs(48)),
+            (5, Duration::from_secs(60)),
+            (6, Duration::from_secs(60)),
+            (7, Duration::from_secs(60)),
+        ];
+        for (failures, want) in expected {
+            let got = b.record_failure();
+            assert_eq!(
+                got, want,
+            "delay after {failures} consecutive failures should be {want:?}, got {got:?}"
+            );
+            assert_eq!(b.consecutive_failures(), failures);
+            assert_eq!(b.current_delay(), want, "current_delay must match record_failure");
+        }
+    }
+
+    #[test]
+    fn test_backoff_current_delay_is_pure() {
+        // current_delay() must not mutate state — repeated calls are identical.
+        let mut b = PollBackoff::new_for_telegram();
+        b.record_failure();
+        b.record_failure();
+        let first = b.current_delay();
+        let second = b.current_delay();
+        let third = b.current_delay();
+        assert_eq!(first, Duration::from_secs(12));
+        assert_eq!(first, second);
+        assert_eq!(second, third);
+        assert_eq!(b.consecutive_failures(), 2, "current_delay must not bump the counter");
+    }
+
+    #[test]
+    fn test_backoff_caps_and_holds() {
+        // Far past the cap the delay stays pinned at the cap, never above.
+        let mut b = PollBackoff::new_for_telegram();
+        for _ in 0..50 {
+            let d = b.record_failure();
+            assert!(d <= Duration::from_secs(60), "delay {d:?} exceeded the 60s cap");
+        }
+        assert_eq!(b.current_delay(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_backoff_success_resets_to_base() {
+        let mut b = PollBackoff::new_for_telegram();
+        for _ in 0..5 {
+            b.record_failure();
+        }
+        assert!(b.current_delay() > Duration::from_secs(3));
+        b.record_success();
+        assert_eq!(b.consecutive_failures(), 0);
+        assert_eq!(b.current_delay(), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn test_backoff_success_resets_not_decrements() {
+        // A single success fully resets the sequence — it does not decrement.
+        let mut b = PollBackoff::new_for_telegram();
+        b.record_failure(); // -> 6s
+        b.record_failure(); // -> 12s
+        assert_eq!(b.current_delay(), Duration::from_secs(12));
+        b.record_success();
+        // The next failure starts over from base × factor.
+        assert_eq!(b.record_failure(), Duration::from_secs(6));
+    }
+
+    #[test]
+    fn test_backoff_custom_params() {
+        // base=1s, factor=3, cap=10s → 1, 3, 9, 10(capped), 10, …
+        let mut b = PollBackoff::new(Duration::from_secs(1), 3, Duration::from_secs(10));
+        assert_eq!(b.current_delay(), Duration::from_secs(1));
+        assert_eq!(b.record_failure(), Duration::from_secs(3));
+        assert_eq!(b.record_failure(), Duration::from_secs(9));
+        assert_eq!(b.record_failure(), Duration::from_secs(10)); // 9×3=27 > cap
+        assert_eq!(b.record_failure(), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_backoff_exact_cap_value_is_kept() {
+        // base=2s, factor=2, cap=8s → 2, 4, 8, 8. A delay landing exactly on
+        // the cap must be kept as-is, not prematurely clamped from below.
+        let mut b = PollBackoff::new(Duration::from_secs(2), 2, Duration::from_secs(8));
+        assert_eq!(b.current_delay(), Duration::from_secs(2));
+        assert_eq!(b.record_failure(), Duration::from_secs(4));
+        assert_eq!(b.record_failure(), Duration::from_secs(8));
+        assert_eq!(b.record_failure(), Duration::from_secs(8));
+    }
+
+    #[test]
+    fn test_backoff_large_factor_does_not_panic() {
+        // A factor that would overflow Duration via naive multiplication must
+        // be caught (checked_mul) and saturate to the cap with no panic.
+        let mut b = PollBackoff::new(Duration::from_secs(1), u32::MAX, Duration::from_secs(5));
+        assert_eq!(b.record_failure(), Duration::from_secs(5));
+        assert_eq!(b.record_failure(), Duration::from_secs(5));
+        assert_eq!(b.current_delay(), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_backoff_failure_counter_never_overflows() {
+        // saturating_add guards the counter; a long outage can't overflow it.
+        let mut b = PollBackoff::new_for_telegram();
+        for _ in 0..1000 {
+            b.record_failure();
+        }
+        assert!(b.consecutive_failures() >= 1000);
+        assert_eq!(b.current_delay(), Duration::from_secs(60));
+    }
+
+    // ================================================================
+    // poll_error_severity — benign timeout vs. genuine failure
+    // ================================================================
+
+    #[test]
+    fn test_poll_error_severity_all_timeouts_are_benign() {
+        // Every Timeout variant is a benign "the call didn't complete in time",
+        // expected for the getUpdates long-poll. The production matcher uses a
+        // wildcard (`matches!(err, ureq::Error::Timeout(_))`), so any future
+        // variant is handled correctly too; this loop just pins the current
+        // enum's intent.
+        for timeout in [
+            ureq::Timeout::Global,
+            ureq::Timeout::PerCall,
+            ureq::Timeout::Resolve,
+            ureq::Timeout::Connect,
+            ureq::Timeout::SendRequest,
+            ureq::Timeout::SendBody,
+            ureq::Timeout::Await100,
+            ureq::Timeout::RecvResponse,
+            ureq::Timeout::RecvBody,
+        ] {
+            assert_eq!(
+                poll_error_severity(&ureq::Error::Timeout(timeout)),
+                PollErrorSeverity::Info,
+                "Timeout variant {:?} should be benign (Info)",
+                timeout
+            );
+        }
+    }
+
+    #[test]
+    fn test_poll_error_severity_global_timeout_is_info() {
+        // The specific case from the bug report: `timeout: global`.
+        assert_eq!(
+            poll_error_severity(&ureq::Error::Timeout(ureq::Timeout::Global)),
+            PollErrorSeverity::Info
+        );
+    }
+
+    #[test]
+    fn test_poll_error_severity_genuine_errors_warn() {
+        // Non-timeout failures may indicate misconfiguration or a broken path.
+        assert_eq!(
+            poll_error_severity(&ureq::Error::HostNotFound),
+            PollErrorSeverity::Warn
+        );
+        assert_eq!(
+            poll_error_severity(&ureq::Error::ConnectionFailed),
+            PollErrorSeverity::Warn
+        );
+        // HTTP 401 = bad/expired bot token — definitely not benign.
+        assert_eq!(
+            poll_error_severity(&ureq::Error::StatusCode(401)),
+            PollErrorSeverity::Warn
+        );
+        assert_eq!(
+            poll_error_severity(&ureq::Error::StatusCode(500)),
+            PollErrorSeverity::Warn
+        );
+    }
+
+    #[test]
+    fn test_poll_error_severity_io_error_warns() {
+        // A raw transport I/O error (connection reset, broken pipe, …) is a
+        // genuine failure, not a long-poll timeout.
+        let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset by peer");
+        assert_eq!(
+            poll_error_severity(&ureq::Error::Io(io_err)),
+            PollErrorSeverity::Warn
+        );
+    }
+
+    // ================================================================
+    // telegram_agent — no-pooling + global timeout config
+    // ================================================================
+
+    #[test]
+    fn test_telegram_agent_disables_connection_pooling() {
+        // Root-cause fix for `timeout: global`: pooled (possibly reaped)
+        // sockets must never be reused, so both pool limits are pinned to 0.
+        let cfg = telegram_agent().config();
+        assert_eq!(cfg.max_idle_connections(), 0, "global pool must be disabled");
+        assert_eq!(
+            cfg.max_idle_connections_per_host(),
+            0,
+            "per-host pool must be disabled"
+        );
+    }
+
+    #[test]
+    fn test_telegram_agent_global_timeout_is_set() {
+        let cfg = telegram_agent().config();
+        assert_eq!(
+            cfg.timeouts().global,
+            Some(Duration::from_secs(TELEGRAM_HTTP_TIMEOUT))
+        );
+    }
+
+    #[test]
+    fn test_telegram_agent_is_shared_singleton() {
+        // OnceLock: every caller gets the same agent (one config, one pool).
+        let a = telegram_agent();
+        let b = telegram_agent();
+        assert!(std::ptr::eq(a, b));
     }
 }

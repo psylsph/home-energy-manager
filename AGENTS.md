@@ -88,6 +88,7 @@ Frontend talks exclusively to the local Axum server — never directly to the in
   - `registers.rs` — register addresses, poll block definitions, safe-write whitelist, HHMM encode/decode. Standard blocks: `IR(0,60)`, `HR(0,60)`, `HR(60,60)`, per-battery `IR(60,60)`. Optional blocks: `EXTENDED_SLOTS_BLOCK` (HR240-299), `AC_CONFIG_BLOCK` (HR300-359), `THREE_PHASE_CONFIG_BLOCK` (HR1080-1124).
 - **`server/`** — Axum HTTP layer: `api.rs` (REST endpoints), `ws.rs` (WebSocket snapshot stream), `logs.rs` (LogRing + `GET /api/logs`), `mod.rs` (router + graceful bind)
 - **`settings/`** — persisted JSON config (`~/.givenergy-local/settings.json`)
+- **`alerts/`** — alert evaluation engine + push notifications. Evaluates each sanitized `InverterSnapshot` against user thresholds (battery temperature high/low, battery SOC high/low, solar-clipping ceiling, inverter battery-warning flag, grid offline) with per-type cooldown and consecutive-read confirmation, then delivers via the **Telegram Bot API** and/or **ntfy.sh** (including self-hosted ntfy). Also generates/sends the daily consumption report and polls Telegram for `/status`, `/today`, `/report` commands. **This covers GitHub issue #85 (critical-condition notifications) — implemented as Telegram + ntfy push notifications rather than email.**
 
 ### Shared state (`AppState`)
 

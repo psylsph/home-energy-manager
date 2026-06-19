@@ -1107,7 +1107,7 @@ impl ModbusClient {
         device_type: Option<&crate::inverter::model::DeviceType>,
     ) -> Result<Vec<BlockRead>, ClientError> {
         // Three-phase models read all real-time telemetry from the
-        // IR(1000-1414) range, making input_0_59 and input_180_239
+        // IR(1000-1414) range, making input_0_59 and input_180_181
         // redundant. The Gateway likewise reads all telemetry from its own
         // IR(1600-1859) aggregation bank. Both use the lean HR-only standard
         // set to save ~300 ms per cycle and reduce timeout exposure. On the
@@ -2166,12 +2166,13 @@ mod tests {
                 base: 60,
                 data: (200..260).collect(),
             },
-            // input_180_239: IR 180-239
+            // input_180_181: IR 180-181 (only 2 registers are consumed;
+            // the block reads count=2, not a full 60-register window)
             MockResponse::ReadResponse {
                 slave: 0x11,
                 function: 0x04,
                 base: 180,
-                data: (500..560).collect(),
+                data: (500..502).collect(),
             },
         ];
 

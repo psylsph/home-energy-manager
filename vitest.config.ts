@@ -9,6 +9,13 @@ import react from '@vitejs/plugin-react';
 // build`. Run with `npm test` (`vitest run`) or `npm run test:watch`.
 export default defineConfig({
   plugins: [react()],
+  // Mirror the `define` from vite.config.ts so components that reference the
+  // build-injected `__APP_VERSION__` global (e.g. <App/>'s header) can render
+  // under Vitest — without this the bare identifier resolves to an undeclared
+  // global and throws a ReferenceError during render.
+  define: {
+    __APP_VERSION__: JSON.stringify('test'),
+  },
   test: {
     environment: 'jsdom',
     include: ['src/**/*.test.{ts,tsx}'],

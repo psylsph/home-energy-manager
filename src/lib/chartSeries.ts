@@ -31,18 +31,49 @@ export const SPIKE_THRESHOLDS: Record<string, number> = {
 };
 
 /**
+ * Cumulative monotonic daily counters. These reset to ~0 at midnight and
+ * otherwise only ever increase. A spike in such a counter must be repaired
+ * by **carrying the previous value forward**, not by interpolating between
+ * neighbours — interpolation would invent a value that is neither a real
+ * reading nor monotonic, which corrupts any per-bucket delta/cost derived
+ * from the counter. This mirrors the backend sanitizer, which falls back to
+ * the previous reading when a `today_*_kwh` value is out of range.
+ *
+ * Identified by the `today_*_kwh` naming convention so newly-added daily
+ * counters are handled automatically. Instantaneous rates/gauges (power,
+ * voltage, SOC) stay on interpolation, where a midpoint is the least-bad
+ * estimate.
+ */
+export function isCumulativeField(field: string): boolean {
+  return /^today_.*_kwh$/.test(field);
+}
+
+/**
  * Replace single-point spikes with the average of their neighbours. Shared
  * between the History page charts and any other chart that renders raw polled
  * series (e.g. the Battery tab's today-SOC chart). Keeps post-query spike
  * filtering consistent everywhere a series is drawn.
+ *
+ * For cumulative counters ([`isCumulativeField`]) a detected spike is instead
+ * replaced by the last accepted value (carry-forward) so the series stays
+ * monotonic. `lastGoodV` tracks that baseline; a detected spike carries it
+ * forward unchanged, so across multiple isolated spikes each repair anchors
+ * to the most recent good reading rather than inventing a value.
  */
 export function removeSpikes(points: TimePoint[], field: string): TimePoint[] {
   if (points.length < 3) return points;
   const threshold = SPIKE_THRESHOLDS[field] ?? 4000;
+  const cumulative = isCumulativeField(field);
   const result: TimePoint[] = [];
+  // Baseline for cumulative carry-forward; updated on every accepted point.
+  // (The detector only fires for isolated spikes whose neighbours agree, so
+  // the previous raw point is always a real reading — lastGoodV just makes
+  // the carry-forward explicit and robust.)
+  let lastGoodV = points[0].v;
   for (let i = 0; i < points.length; i++) {
     if (i === 0 || i === points.length - 1) {
       result.push(points[i]);
+      lastGoodV = points[i].v;
       continue;
     }
     const prev = points[i - 1];
@@ -52,9 +83,11 @@ export function removeSpikes(points: TimePoint[], field: string): TimePoint[] {
     const dNext = Math.abs(cur.v - next.v);
     const dNeighbors = Math.abs(next.v - prev.v);
     if (dPrev > threshold && dNext > threshold && dNeighbors < threshold * 0.5) {
-      result.push({ t: cur.t, v: (prev.v + next.v) / 2 });
+      const replacement = cumulative ? lastGoodV : (prev.v + next.v) / 2;
+      result.push({ t: cur.t, v: replacement });
     } else {
       result.push(cur);
+      lastGoodV = cur.v;
     }
   }
   return result;

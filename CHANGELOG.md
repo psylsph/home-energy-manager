@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **Telegram poller no longer reuses stale pooled connections** (fixes the
+  recurring `Telegram poll error: timeout: global` logged roughly every 5
+  minutes on NAT'd / containerised networks). The Bot API agent now pins
+  `max_idle_connections` and `max_idle_connections_per_host` to `0`, so every
+  poll opens a fresh TCP+TLS connection that is too young to have been reaped
+  by a middlebox's idle-state garbage collector. (TCP keepalive would have
+  been the more efficient fix, but ureq 3.x keeps its `TcpTransport` in a
+  private module and exposes no public socket/transport hook, so it isn't
+  reachable from application code without re-implementing the whole HTTP/1.1
+  transport.)
+
+- **Exponential backoff on repeated Telegram poll failures.** The poller now
+  backs off `3 → 6 → 12 → 24 → 48 → 60s` (capped, then held) on consecutive
+  transport failures, resetting to the 3s base cadence on the first success.
+  This damps log spam and request rate during a sustained outage (revoked
+  token, broken route, …) while still probing for recovery. The warning line
+  now also reports the consecutive-failure count and the next-attempt delay.
+
+- **Poll timeouts demoted from WARN to INFO.** A `getUpdates` timeout is now
+  treated as benign — the Bot API's long-poll is *designed* to hold a
+  connection open waiting for updates, so a timeout just means "no updates
+  this cycle, retry," and is fully handled by the backoff. Timeouts are logged
+  at INFO (below the default WARN console level, so the recurring
+  `Telegram poll error: timeout: global` lines disappear from the dev console
+  and stdout unless you bump logging to INFO). Genuine non-timeout failures
+  (DNS, connection refused, an expired bot token returning HTTP 401, …) still
+  log at WARN since they may need attention. Both severities still feed the
+  backoff counter.
+
 ## [0.31.7] - 2026-06-19
 
 ### Added

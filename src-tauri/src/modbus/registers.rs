@@ -58,11 +58,19 @@ pub const STANDARD_POLL_BLOCKS: &[RegisterBlock] = &[
         register_type: RegisterType::Holding,
         name: "holding_60_119",
     },
+    // Only IR(180)/IR(181) are consumed by the decoder (alternative battery
+    // lifetime discharge/charge totals). IR(182-239) are deliberately *not*
+    // read — they are absent from the authoritative givenergy-modbus register
+    // map for every model, so reading a full 60-register block here would
+    // pull 58 unverified registers across the dongle's TCP link for nothing.
+    // Reading count=2 trims ~58 registers (≈ one full Modbus round-trip incl.
+    // inter-request delay) off every single-phase poll cycle. See
+    // `decode_input_180_181` in `decoder.rs`.
     RegisterBlock {
         start: 180,
-        count: 60,
+        count: 2,
         register_type: RegisterType::Input,
-        name: "input_180_239",
+        name: "input_180_181",
     },
 ];
 
@@ -70,7 +78,7 @@ pub const STANDARD_POLL_BLOCKS: &[RegisterBlock] = &[
 ///
 /// Three-phase inverters read all real-time telemetry (PV, grid, battery,
 /// daily/lifetime energy totals) from the IR(1000-1414) range, which
-/// completely supersedes the single-phase `input_0_59` and `input_180_239`
+/// completely supersedes the single-phase `input_0_59` and `input_180_181`
 /// blocks. Reading those two blocks on every cycle wastes ~300 ms of
 /// inter-request delay and adds two opportunities for a timeout to kill the
 /// entire poll.
@@ -787,6 +795,14 @@ mod tests {
         // Holding 60-119 covers charge_slot_1 (94-95), soc_reserve (110), limits (111-112)
         assert_eq!(STANDARD_POLL_BLOCKS[2].start, 60);
         assert_eq!(STANDARD_POLL_BLOCKS[2].count, 60);
+        // Input 180-181 covers only the two alternative battery lifetime
+        // totals (discharge/charge). Reading a full 60-register window here
+        // would fetch 58 unverified registers for nothing — see
+        // `decode_input_180_181`.
+        assert_eq!(STANDARD_POLL_BLOCKS[3].start, 180);
+        assert_eq!(STANDARD_POLL_BLOCKS[3].count, 2);
+        assert_eq!(STANDARD_POLL_BLOCKS[3].name, "input_180_181");
+        assert_eq!(STANDARD_POLL_BLOCKS[3].register_type, RegisterType::Input);
     }
 
     #[test]

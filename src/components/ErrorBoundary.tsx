@@ -22,6 +22,20 @@ export default class ErrorBoundary extends Component<Props, State> {
     console.error('ErrorBoundary caught:', error, info.componentStack);
   }
 
+  componentDidMount() {
+    // When a child throws during the *initial* render, the boundary mounts
+    // straight into its error state and `componentDidUpdate` never fires — so
+    // the countdown must also be started here. Without this, a page that
+    // throws on load would show "Will retry in 30s" but the timer would never
+    // tick and the auto-retry would never happen (only the manual "Retry now"
+    // button worked). `startCountdown` clears any prior timer first, so this
+    // is safe even if React also runs `componentDidUpdate` for the same error
+    // (CODE_REVIEW issue 3.4).
+    if (this.state.error) {
+      this.startCountdown();
+    }
+  }
+
   componentDidUpdate(_prevProps: Props, prevState: State) {
     if (prevState.error !== this.state.error && this.state.error) {
       this.startCountdown();

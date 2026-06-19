@@ -208,7 +208,7 @@ fn block_key(block: &crate::modbus::registers::RegisterBlock) -> &'static str {
         (RegisterType::Input, 1240) => "input_1240_1299",
         (RegisterType::Input, 1300) => "input_1300_1359",
         (RegisterType::Input, 1360) => "input_1360_1413",
-        (RegisterType::Input, 180) => "input_180_239",
+        (RegisterType::Input, 180) => "input_180_181",
         // Gateway aggregation bank (IR 1600-1859) — see GATEWAY_INPUT_BLOCKS.
         (RegisterType::Input, 1600) => "input_1600_1659",
         (RegisterType::Input, 1660) => "input_1660_1719",
@@ -269,7 +269,7 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
             "input_1240_1299" => decode_input_1240_1299(data, &mut snap),
             "input_1300_1359" => decode_input_1300_1359(data, &mut snap),
             "input_1360_1413" => decode_input_1360_1413(data, &mut snap),
-            "input_180_239" => decode_input_180_239(data, &mut snap),
+            "input_180_181" => decode_input_180_181(data, &mut snap),
             // Gateway aggregation bank decoders.
             "input_1600_1659" => decode_gateway_1600_1659(data, &mut snap),
             "input_1660_1719" => decode_gateway_1660_1719(data, &mut snap),
@@ -531,24 +531,21 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     // IR(32-33): e_grid_in_total // keep raw IR(35) for energy balance
 }
 
-/// IR 180-239: Alternative battery energy counters (unverified range).
+/// IR 180-181: Alternative battery lifetime energy counters.
 ///
-/// Per givenergy-modbus reference, IR(180)/IR(181) carry alternative total
-/// battery discharge/charge energy (deci-kWh). IR(182)/IR(183) carry
-/// alternative today counters. IR(184-239) are not in the authoritative
-/// givenergy-modbus register map and are decoded as 0 — values from this
-/// block should be treated as unverified/experimental.
-fn decode_input_180_239(data: &[u16], snap: &mut InverterSnapshot) {
+/// Per the givenergy-modbus reference, IR(180)/IR(181) carry alternative
+/// total battery discharge/charge energy (deci-kWh). These are the *only*
+/// two registers consumed from this range, so the poll block above reads
+/// `count=2` rather than a full 60-register window — IR(182-239) are absent
+/// from the authoritative givenergy-modbus register map for every model and
+/// are intentionally not fetched (see `STANDARD_POLL_BLOCKS`).
+fn decode_input_180_181(data: &[u16], snap: &mut InverterSnapshot) {
     // IR(180)/IR(181) are confirmed by givenergy-modbus as alternative
-    // battery total energy counters (deci-kWh).
+    // battery total energy counters (deci-kWh). `get_reg` is bounds-safe,
+    // so even if a future caller hands us fewer than 2 registers the decode
+    // degrades to 0 rather than panicking.
     snap.total_discharge_kwh = get_reg(data, 0) as f32 * 0.1; // IR(180): e_battery_discharge_total_alt1
     snap.total_charge_kwh = get_reg(data, 1) as f32 * 0.1; // IR(181): e_battery_charge_total_alt1
-                                                           // IR(182-239) are NOT in the authoritative givenergy-modbus register
-                                                           // map for any model — decoded as 0. These offsets are deliberately
-                                                           // left unread to avoid silently shipping values from an unverified
-                                                           // address range. If new registers are discovered here in the future,
-                                                           // add explicit decoders and a note about which firmware/hardware
-                                                           // revision they were confirmed on.
 }
 
 /// Decode holding registers 0-59 (configuration part 1).
@@ -1946,6 +1943,40 @@ mod tests {
         );
 
         vec![input_block, holding_block, holding_60]
+    }
+
+    #[test]
+    fn input_180_181_block_decodes_alternative_battery_totals() {
+        // IR(180)=12345 → 1234.5 kWh lifetime discharge,
+        // IR(181)=60000 → 6000.0 kWh lifetime charge.
+        // The block reads only count=2 (see STANDARD_POLL_BLOCKS); confirm
+        // the dispatch + decode handle a 2-element slice and scale by 0.1.
+        let blocks = vec![make_block(
+            RegisterType::Input,
+            180,
+            2,
+            "input_180_181",
+            vec![12345, 60000],
+        )];
+        let snap = decode_snapshot(&blocks);
+        assert!((snap.total_discharge_kwh - 1234.5).abs() < 1e-6);
+        assert!((snap.total_charge_kwh - 6000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn input_180_181_block_is_bounds_safe_when_underfilled() {
+        // A short slice (e.g. an empty read) must not panic — get_reg clamps
+        // to 0, so both totals decode to 0.0 rather than crashing.
+        let blocks = vec![make_block(
+            RegisterType::Input,
+            180,
+            2,
+            "input_180_181",
+            vec![],
+        )];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.total_discharge_kwh, 0.0);
+        assert_eq!(snap.total_charge_kwh, 0.0);
     }
 
     #[test]

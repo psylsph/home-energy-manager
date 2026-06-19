@@ -1174,15 +1174,51 @@ pub(crate) fn sanitize_snapshot(
                         sanitized = true;
                     }
                 }
-                // Increase must be plausible for elapsed time
+                // Increase must be plausible for elapsed time.
+                //
+                // IMPORTANT: if we always reject-and-carry-forward here, a
+                // single corrupted *low* grace-period baseline poisons the
+                // field forever — every subsequent real (higher) reading is
+                // also "too fast" relative to the stuck baseline, so the value
+                // freezes and never recovers (observed on AC-coupled
+                // inverters: today_export_kwh stuck at ~1.0 while the real
+                // value was 18.5, spamming this warning every 3s).
+                //
+                // The decrease branch already solves this with a consecutive-
+                // correction release; mirror it here. After
+                // DELTA_CORRECTION_RELEASE_THRESHOLD consecutive "too fast"
+                // jumps to the *same* raw value, accept that raw value — the
+                // baseline was the corrupted reading, not the current one.
                 else if raw > prev_val + max_increase_kwh {
-                    tracing::warn!(
-                        field = $name, raw, prev = prev_val,
-                        elapsed_secs, max_increase_kwh,
-                        "Daily energy jumped too fast - using previous",
-                    );
-                    $value = prev_val;
-                    sanitized = true;
+                    let count = delta_corrections.0.entry($name).or_insert(0);
+                    *count += 1;
+                    if *count >= DELTA_CORRECTION_RELEASE_THRESHOLD {
+                        tracing::info!(
+                            field = $name, raw, prev = prev_val,
+                            count = *count,
+                            "Daily energy consistently higher than baseline - accepting raw, baseline was likely wrong",
+                        );
+                        $value = raw;
+                        delta_corrections.0.remove($name);
+                        // Don't set sanitized=true - we're accepting raw, not rejecting it
+                    } else if *count >= RATE_LIMIT_AFTER {
+                        tracing::debug!(
+                            field = $name, raw, prev = prev_val,
+                            count = *count,
+                            elapsed_secs, max_increase_kwh,
+                            "Daily energy jumped too fast (baseline suspect, repeated) - using previous",
+                        );
+                        $value = prev_val;
+                        sanitized = true;
+                    } else {
+                        tracing::warn!(
+                            field = $name, raw, prev = prev_val,
+                            elapsed_secs, max_increase_kwh,
+                            "Daily energy jumped too fast - using previous",
+                        );
+                        $value = prev_val;
+                        sanitized = true;
+                    }
                 }
                 else {
                     // Normal increase within rate limit - raw accepted, reset counter
@@ -1291,15 +1327,43 @@ pub(crate) fn sanitize_snapshot(
                         sanitized = true;
                     }
                 }
-                // Increase must be plausible for elapsed time
+                // Increase must be plausible for elapsed time.
+                //
+                // Same stuck-baseline protection as the daily-energy branch
+                // above: a corrupted-low grace-period baseline would otherwise
+                // freeze the lifetime total forever (every real reading is
+                // "too fast" relative to the stuck baseline). Release after
+                // DELTA_CORRECTION_RELEASE_THRESHOLD consistent jumps.
                 else if raw > prev_val + max_lifetime_increase_kwh {
-                    tracing::warn!(
-                        field = $name, raw, prev = prev_val,
-                        elapsed_secs, max = max_lifetime_increase_kwh,
-                        "Lifetime total jumped too fast - using previous",
-                    );
-                    $value = prev_val;
-                    sanitized = true;
+                    let count = delta_corrections.0.entry($name).or_insert(0);
+                    *count += 1;
+                    if *count >= DELTA_CORRECTION_RELEASE_THRESHOLD {
+                        tracing::info!(
+                            field = $name, raw, prev = prev_val,
+                            count = *count,
+                            "Lifetime total consistently higher than baseline - accepting raw, baseline was likely wrong",
+                        );
+                        $value = raw;
+                        delta_corrections.0.remove($name);
+                        // Don't set sanitized=true - we're accepting raw, not rejecting it
+                    } else if *count >= RATE_LIMIT_AFTER {
+                        tracing::debug!(
+                            field = $name, raw, prev = prev_val,
+                            count = *count,
+                            elapsed_secs, max = max_lifetime_increase_kwh,
+                            "Lifetime total jumped too fast (baseline suspect, repeated) - using previous",
+                        );
+                        $value = prev_val;
+                        sanitized = true;
+                    } else {
+                        tracing::warn!(
+                            field = $name, raw, prev = prev_val,
+                            elapsed_secs, max = max_lifetime_increase_kwh,
+                            "Lifetime total jumped too fast - using previous",
+                        );
+                        $value = prev_val;
+                        sanitized = true;
+                    }
                 }
                 else {
                     // Normal increase within rate limit - raw accepted, reset counter
@@ -2433,6 +2497,237 @@ mod tests {
         assert!(
             delta_corrections.0.get("today_consumption_kwh").is_none(),
             "counter should be reset after normal increase"
+        );
+    }
+
+    #[test]
+    fn daily_energy_stuck_low_baseline_recovers_after_threshold() {
+        // Reproduces the AC-coupled production bug: a corrupted-low grace-
+        // period baseline (prev=1.04) poisons the field. The inverter
+        // consistently reports the real value (18.5), but every reading is
+        // "too fast" relative to the stuck baseline. Before the fix this
+        // looped forever, spamming "Daily energy jumped too fast" every poll
+        // and freezing today_export_kwh at ~1.0.
+        //
+        // 3s polls, 10 kW circuit: max_increase ≈ (3/3600)*10 + 1 ≈ 1.008 kWh,
+        // so 18.5 vs prev 1.04 is always rejected until release kicks in.
+        let prev_export = 1.0388889;
+        let raw_export = 18.5;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+
+        for i in 0..DELTA_CORRECTION_RELEASE_THRESHOLD {
+            let prev = InverterSnapshot {
+                timestamp: 100 + i as i64 * 3,
+                battery_mode: BatteryMode::Eco,
+                grid_voltage: 230.0,
+                grid_frequency: 50.0,
+                today_export_kwh: prev_export,
+                ..Default::default()
+            };
+            // Each cycle the inverter reports the SAME real value; prev stays
+            // frozen because we keep carrying it forward until release.
+            let mut snap = InverterSnapshot {
+                timestamp: 100 + (i as i64 + 1) * 3,
+                battery_mode: BatteryMode::Eco,
+                grid_voltage: 230.0,
+                grid_frequency: 50.0,
+                today_export_kwh: raw_export,
+                ..Default::default()
+            };
+            let mut pending_mode = None;
+            let _ = sanitize_snapshot(
+                &mut snap,
+                Some(&prev),
+                false,
+                &mut pending_mode,
+                &mut delta_corrections,
+                &mut suspect_counts,
+            );
+
+            if i < DELTA_CORRECTION_RELEASE_THRESHOLD - 1 {
+                assert_eq!(
+                    snap.today_export_kwh, prev_export,
+                    "cycle {}: stuck baseline must carry forward until release",
+                    i
+                );
+            } else {
+                // On the threshold cycle the real value is finally accepted —
+                // the field unfreezes and subsequent polls track it normally.
+                assert_eq!(
+                    snap.today_export_kwh, raw_export,
+                    "cycle {}: should accept raw once the stuck baseline is released",
+                    i
+                );
+            }
+        }
+
+        // Counter is cleared after release so a later legitimate jump isn't
+        // mistaken for another stuck baseline.
+        assert!(
+            delta_corrections.0.get("today_export_kwh").is_none()
+                || *delta_corrections.0.get("today_export_kwh").unwrap() == 0
+        );
+    }
+
+    #[test]
+    fn daily_energy_fast_jump_counter_resets_on_normal_reading() {
+        // A couple of "too fast" jumps accumulate a count; a subsequent
+        // within-rate-limit reading must reset the counter so the next
+        // transient jump starts fresh (no premature release).
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+
+        // 2 cycles of stuck-baseline jump (below the release threshold of 10).
+        for i in 0..2u8 {
+            let prev = InverterSnapshot {
+                timestamp: 100 + i as i64 * 3,
+                battery_mode: BatteryMode::Eco,
+                grid_voltage: 230.0,
+                grid_frequency: 50.0,
+                today_import_kwh: 1.0,
+                ..Default::default()
+            };
+            let mut snap = InverterSnapshot {
+                timestamp: 100 + (i as i64 + 1) * 3,
+                battery_mode: BatteryMode::Eco,
+                grid_voltage: 230.0,
+                grid_frequency: 50.0,
+                today_import_kwh: 6.9,
+                ..Default::default()
+            };
+            let mut pending_mode = None;
+            let _ = sanitize_snapshot(
+                &mut snap,
+                Some(&prev),
+                false,
+                &mut pending_mode,
+                &mut delta_corrections,
+                &mut suspect_counts,
+            );
+        }
+        assert_eq!(*delta_corrections.0.get("today_import_kwh").unwrap(), 2);
+
+        // A normal (within-rate-limit) reading resets the counter.
+        let prev = InverterSnapshot {
+            timestamp: 106,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            today_import_kwh: 1.0,
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            timestamp: 109,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            today_import_kwh: 1.02, // small, plausible delta
+            ..Default::default()
+        };
+        let mut pending_mode = None;
+        let _ = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+        );
+        assert!(
+            delta_corrections.0.get("today_import_kwh").is_none(),
+            "a normal reading must reset the fast-jump counter"
+        );
+    }
+
+    #[test]
+    fn daily_energy_transient_fast_jump_is_not_released_prematurely() {
+        // A genuine single transient corruption (one big jump) must NOT be
+        // accepted — release requires THRESHOLD consecutive jumps. This guards
+        // against the fix weakening real corruption detection.
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+
+        let prev = InverterSnapshot {
+            timestamp: 100,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            today_solar_kwh: 2.0,
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            timestamp: 103,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            today_solar_kwh: 40.0, // one-shot corruption spike
+            ..Default::default()
+        };
+        let mut pending_mode = None;
+        let _ = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+        );
+        assert_eq!(
+            snap.today_solar_kwh, 2.0,
+            "a single transient jump must be rejected, not accepted"
+        );
+        // The spike is still in the raw snapshot (the sanitizer only overrides
+        // the field, it doesn't re-read), so the counter advances by exactly 1.
+        assert_eq!(*delta_corrections.0.get("today_solar_kwh").unwrap(), 1);
+    }
+
+    #[test]
+    fn lifetime_total_stuck_low_baseline_recovers_after_threshold() {
+        // Same stuck-baseline fix applied to the lifetime-total branch. A
+        // corrupted-low grace baseline would otherwise freeze the lifetime
+        // counter forever. Lifetime total_export_kwh here.
+        let prev_total = 100.0;
+        let raw_total = 5000.0;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+
+        for i in 0..DELTA_CORRECTION_RELEASE_THRESHOLD {
+            let prev = InverterSnapshot {
+                timestamp: 100 + i as i64 * 3,
+                battery_mode: BatteryMode::Eco,
+                grid_voltage: 230.0,
+                grid_frequency: 50.0,
+                total_export_kwh: prev_total,
+                ..Default::default()
+            };
+            let mut snap = InverterSnapshot {
+                timestamp: 100 + (i as i64 + 1) * 3,
+                battery_mode: BatteryMode::Eco,
+                grid_voltage: 230.0,
+                grid_frequency: 50.0,
+                total_export_kwh: raw_total,
+                ..Default::default()
+            };
+            let mut pending_mode = None;
+            let _ = sanitize_snapshot(
+                &mut snap,
+                Some(&prev),
+                false,
+                &mut pending_mode,
+                &mut delta_corrections,
+                &mut suspect_counts,
+            );
+
+            if i < DELTA_CORRECTION_RELEASE_THRESHOLD - 1 {
+                assert_eq!(snap.total_export_kwh, prev_total);
+            } else {
+                assert_eq!(snap.total_export_kwh, raw_total);
+            }
+        }
+        assert!(
+            delta_corrections.0.get("total_export_kwh").is_none()
+                || *delta_corrections.0.get("total_export_kwh").unwrap() == 0
         );
     }
 

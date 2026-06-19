@@ -199,13 +199,19 @@ function Layout() {
     return !key || !hiddenPanels.includes(key);
   });
 
-  // Helper: return the panel element unless it's hidden, then redirect to /
-  function panelRoute(path: string, element: React.ReactNode) {
-    const key = path.replace(/^\//, '');
-    if (hiddenPanels.includes(key)) {
+  // Build a <Route> for a page. Every page is wrapped in its own
+  // <ErrorBoundary> here so a render or async-setState error on one page is
+  // contained and can never crash the whole app — one page failing still
+  // leaves the rest navigable. This helper is the *single* place the boundary
+  // is applied, so a route cannot be added without it (CODE_REVIEW issue 3.4).
+  //
+  // `hideable` panels redirect to "/" when the user has hidden that tab via
+  // Settings (`hiddenPanels`); the core pages are always shown.
+  function page(path: string, element: React.ReactNode, hideable = false) {
+    if (hideable && hiddenPanels.includes(path.replace(/^\//, ''))) {
       return <Route path={path} element={<Navigate to="/" replace />} />;
     }
-    return <Route path={path} element={element} />;
+    return <Route path={path} element={<ErrorBoundary>{element}</ErrorBoundary>} />;
   }
 
   return (
@@ -231,16 +237,16 @@ function Layout() {
       {/* Content */}
       <main className="flex-1 overflow-auto px-4 py-6 md:px-6 md:py-8 pb-safe">
         <Routes>
-          <Route path="/" element={<ErrorBoundary><StatusPage /></ErrorBoundary>} />
-          {panelRoute('/power', <ErrorBoundary><PowerPage /></ErrorBoundary>)}
-          {panelRoute('/battery', <ErrorBoundary><BatteryPage /></ErrorBoundary>)}
-          {panelRoute('/history', <ErrorBoundary><HistoryPage /></ErrorBoundary>)}
-          <Route path="/control" element={<ErrorBoundary><ControlPage /></ErrorBoundary>} />
-          <Route path="/settings" element={<ErrorBoundary><SettingsPage /></ErrorBoundary>} />
-          {panelRoute('/solar', <ErrorBoundary><SolarPage /></ErrorBoundary>)}
-          {panelRoute('/meters', <ErrorBoundary><MetersPage /></ErrorBoundary>)}
-          {panelRoute('/inverter', <ErrorBoundary><InverterPage /></ErrorBoundary>)}
-          {developerMode && <Route path="/logs" element={<ErrorBoundary><LogsPage /></ErrorBoundary>} />}
+          {page('/', <StatusPage />)}
+          {page('/power', <PowerPage />, true)}
+          {page('/battery', <BatteryPage />, true)}
+          {page('/history', <HistoryPage />, true)}
+          {page('/control', <ControlPage />)}
+          {page('/settings', <SettingsPage />)}
+          {page('/solar', <SolarPage />, true)}
+          {page('/meters', <MetersPage />, true)}
+          {page('/inverter', <InverterPage />, true)}
+          {developerMode && page('/logs', <LogsPage />)}
         </Routes>
       </main>
 
