@@ -382,33 +382,65 @@ impl HistoryDb {
 
         // Step 3: integrate per day, always starting from 0
         let mut updates: Vec<(i64, f64)> = Vec::new();
-        let mut current_day: i64 = -1;
+        let mut current_local_date: Option<chrono::NaiveDate> = None;
         let mut accumulated_kwh: f64 = 0.0;
         let mut prev_ts: Option<i64> = None;
-        let mut prev_solar_power: i32 = 0;
+        // Rolling window of real solar_power readings (ts, power) for the last
+        // 30 minutes. Used to compute average power for slot-filler intervals
+        // so a 1-minute spike or dip doesn't distort the 30-min energy total.
+        let mut power_window: Vec<(i64, i32)> = Vec::new();
+        // Last known real power — used as fallback when the rolling window
+        // is empty (e.g. slot-filler rows more than 30 min after the last
+        // real reading).
+        let mut last_real_power: i32 = 0;
 
         for (ts, solar_power) in &rows {
             let ts = *ts;
             let solar_power = solar_power.unwrap_or(0);
 
-            // Detect day boundary via UTC day number (no timezone dependency)
-            let day = ts / 86400000;
-            if day != current_day {
-                // New day — reset accumulator to 0
-                current_day = day;
+            // Detect day boundary via local date (inverter resets today_*_kwh
+            // at local midnight, not UTC midnight).
+            let local_date = chrono::Local
+                .timestamp_opt(ts, 0)
+                .earliest()
+                .map(|dt| dt.date_naive());
+            if local_date != current_local_date {
+                current_local_date = local_date;
                 accumulated_kwh = 0.0;
                 prev_ts = None;
-                prev_solar_power = 0;
+                power_window.clear();
+                last_real_power = 0;
             }
+
+            // Add real (non-zero) readings to the rolling window
+            if solar_power > 0 {
+                power_window.push((ts, solar_power));
+                last_real_power = solar_power;
+            }
+            // Prune entries older than 30 minutes
+            let cutoff = ts - 1800;
+            power_window.retain(|(t, _)| *t >= cutoff);
+
+            // Compute average power over the last 30 minutes.
+            // Fall back to last known real power if the window is empty
+            // (e.g. slot-filler rows far from any real reading).
+            let avg_power: i32 = if power_window.is_empty() {
+                last_real_power
+            } else {
+                let sum: i64 = power_window.iter().map(|(_, p)| *p as i64).sum();
+                (sum / power_window.len() as i64) as i32
+            };
 
             // Accumulate PV power since the previous reading
             if let Some(prev) = prev_ts {
-                let delta_ms = ts - prev;
-                // Only accumulate for normal poll intervals (<= 10 min).
+                let delta_secs = ts - prev;
+                // Only accumulate for normal poll intervals (<= 1 hour).
                 // Larger gaps mean the system was offline — treat as 0 power.
-                if delta_ms > 0 && delta_ms < 600_000 {
-                    let delta_hours = delta_ms as f64 / 3_600_000.0;
-                    let power_kw = prev_solar_power.max(0) as f64 / 1000.0;
+                // 30-min slot-filler rows are 1800s apart, so threshold must
+                // be larger than 1800s to avoid breaking the chain.
+                if delta_secs > 0 && delta_secs < 3600 {
+                    let delta_hours = delta_secs as f64 / 3600.0;
+                    let power_kw = avg_power.max(0) as f64 / 1000.0;
                     accumulated_kwh += power_kw * delta_hours;
                 }
             }
@@ -416,7 +448,6 @@ impl HistoryDb {
             updates.push((ts, accumulated_kwh));
 
             prev_ts = Some(ts);
-            prev_solar_power = solar_power;
         }
 
         // Step 4: write back all computed values
@@ -441,6 +472,114 @@ impl HistoryDb {
             }
         }
         tracing::warn!("Solar reconstruction: wrote {count} rows");
+
+        // Step 5: fill in missing 5-minute slots for each day
+        // Generates 288 slots per day (00:00, 00:05, 00:10, ... 23:55)
+        // and inserts interpolated today_solar_kwh values for any missing slots.
+        // Interpolation is scoped to within a single local day — at local midnight
+        // the accumulator resets to 0, so slots on the next day start from 0.
+        if !updates.is_empty() {
+            // Find the local midnight timestamps for the first and last day
+            let first_ts = updates[0].0;
+            let last_ts = updates[updates.len() - 1].0;
+            let first_local_date = chrono::Local
+                .timestamp_opt(first_ts, 0)
+                .earliest()
+                .map(|dt| dt.date_naive())
+                .unwrap();
+            let last_local_date = chrono::Local
+                .timestamp_opt(last_ts, 0)
+                .earliest()
+                .map(|dt| dt.date_naive())
+                .unwrap();
+            let mut inserted = 0i64;
+
+            let mut current_date = first_local_date;
+            while current_date <= last_local_date {
+                // Local midnight for this date
+                let local_midnight = chrono::Local
+                    .from_local_datetime(&current_date.and_hms_opt(0, 0, 0).unwrap())
+                    .earliest()
+                    .unwrap()
+                    .timestamp();
+                let next_midnight = chrono::Local
+                    .from_local_datetime(
+                        &current_date
+                            .succ_opt()
+                            .unwrap()
+                            .and_hms_opt(0, 0, 0)
+                            .unwrap(),
+                    )
+                    .earliest()
+                    .unwrap()
+                    .timestamp();
+
+                // Collect updates that fall within this local day
+                let day_updates: Vec<&(i64, f64)> = updates
+                    .iter()
+                    .filter(|(t, _)| *t >= local_midnight && *t < next_midnight)
+                    .collect();
+
+                for slot_minute in (0..288).step_by(1) {
+                    let slot_ts = local_midnight + slot_minute * 300; // 5-minute slot
+
+                    // Check if this slot already has a row
+                    let exists: bool = conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM readings WHERE timestamp = ?",
+                            rusqlite::params![slot_ts],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .unwrap_or(0)
+                        > 0;
+
+                    if exists {
+                        continue;
+                    }
+
+                    // Find the nearest data points before and after this slot
+                    // within the same local day. If no before point exists, use 0
+                    // (day start). If no after point exists, use the last
+                    // known value (carry forward).
+                    let before = day_updates.iter().filter(|entry| entry.0 <= slot_ts).last();
+                    let after = day_updates.iter().find(|entry| entry.0 >= slot_ts);
+
+                    let slot_kwh = match (before, after) {
+                        (Some((b_ts, b_val)), Some((a_ts, a_val))) if b_ts == a_ts => *b_val,
+                        (Some((b_ts, b_val)), Some((a_ts, a_val))) => {
+                            // Linear interpolation within the same day
+                            let range = (a_ts - b_ts) as f64;
+                            if range > 0.0 {
+                                let offset = (slot_ts - b_ts) as f64;
+                                b_val + (a_val - b_val) * (offset / range)
+                            } else {
+                                *b_val
+                            }
+                        }
+                        (Some((_, val)), None) => *val,
+                        (None, Some((_, val))) => *val,
+                        (None, None) => 0.0,
+                    };
+
+                    if conn
+                        .execute(
+                            "INSERT OR REPLACE INTO readings (timestamp, today_solar_kwh) \
+                             VALUES (?1, ?2)",
+                            rusqlite::params![slot_ts, slot_kwh],
+                        )
+                        .is_ok()
+                    {
+                        inserted += 1;
+                    }
+                }
+
+                current_date = current_date.succ_opt().unwrap();
+            }
+
+            if inserted > 0 {
+                tracing::warn!("Solar reconstruction: inserted {inserted} missing 5-min slots");
+            }
+        }
 
         Ok(count)
     }
@@ -694,6 +833,7 @@ impl HistoryDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Local;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -733,6 +873,16 @@ mod tests {
             .earliest()
             .unwrap()
             .timestamp_millis()
+    }
+
+    fn local_noon_secs(day_offset: i64) -> i64 {
+        let date = Local::now().date_naive() + chrono::Duration::days(day_offset);
+        let naive = date.and_hms_opt(12, 0, 0).unwrap();
+        Local
+            .from_local_datetime(&naive)
+            .earliest()
+            .unwrap()
+            .timestamp()
     }
 
     #[test]
@@ -1283,15 +1433,14 @@ mod tests {
     fn reconstruct_solar_kwh_fixes_stuck_baseline() {
         let db = test_db();
 
-        // Use local noon to get a deterministic midnight
-        let noon = local_noon_ms(-1);
-        let midnight = noon - 12 * 3600_000;
+        // Fixed UTC day in seconds (2026-06-19)
+        let midnight: i64 = 1710288000;
 
         // Insert readings from 06:00 to 18:00 at 5-minute intervals
         // Phase 1 (06:00–11:00): correct today_solar_kwh
         // Phase 2 (11:00–14:00): stuck at 1.5 kWh (corrupted)
         // Phase 3 (14:00–18:00): stuck at 2.0 kWh (corrupted)
-        let mut ts = midnight + 6 * 3600_000;
+        let mut ts = midnight + 6 * 3600;
         let mut correct_kwh: f64 = 0.0;
 
         for hour_offset in 0..12 {
@@ -1310,11 +1459,11 @@ mod tests {
                 correct_kwh += (solar_w as f64) / 1000.0 * delta_hours;
 
                 // Register is stuck after 11:00
-                let stored_kwh = if ts >= midnight + 11 * 3600_000
-                    && ts < midnight + 14 * 3600_000
+                let stored_kwh = if ts >= midnight + 11 * 3600
+                    && ts < midnight + 14 * 3600
                 {
                     1.5
-                } else if ts >= midnight + 14 * 3600_000 {
+                } else if ts >= midnight + 14 * 3600 {
                     2.0
                 } else {
                     correct_kwh
@@ -1324,7 +1473,7 @@ mod tests {
                 snap.today_solar_kwh = stored_kwh as f32;
                 db.insert_reading(&snap);
 
-                ts += 5 * 60_000;
+                ts += 5 * 60; // 5 minutes in seconds
             }
         }
 
@@ -1337,7 +1486,7 @@ mod tests {
         assert_eq!(count, 144, "Should have reconstructed all 144 rows");
 
         // Verify: first reading of the day starts at 0
-        let first_ts = midnight + 6 * 3600_000;
+        let first_ts = midnight + 6 * 3600;
         let conn = db.conn.lock().unwrap();
         let first_val: f64 = conn
             .query_row(
@@ -1353,7 +1502,7 @@ mod tests {
         );
 
         // Verify: at noon, stored value should be near PV-integrated total, not 1.5
-        let noon_ts = midnight + 12 * 3600_000;
+        let noon_ts = midnight + 12 * 3600;
         let conn = db.conn.lock().unwrap();
         let noon_val: f64 = conn
             .query_row(
@@ -1384,9 +1533,9 @@ mod tests {
             let r = stmt
                 .query_map(
                     rusqlite::params![
-                        midnight + 8 * 3600_000,
-                        midnight + 9 * 3600_000,
-                        midnight + 10 * 3600_000,
+                        midnight + 8 * 3600,
+                        midnight + 9 * 3600,
+                        midnight + 10 * 3600,
                     ],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
@@ -1419,17 +1568,17 @@ mod tests {
         );
     }
 
-    /// A gap > 10 minutes between readings must NOT accumulate energy
+    /// A gap > 1 hour between readings must NOT accumulate energy
     /// (treats missing time slots as 0 power).
     #[test]
     fn reconstruct_solar_kwh_gap_treated_as_zero() {
         let db = test_db();
-        let noon = local_noon_ms(-1);
-        let midnight = noon - 12 * 3600_000;
+        let noon = local_noon_secs(-1);
+        let midnight = noon - 12 * 3600;
 
-        // Insert two readings 15 minutes apart with 800W solar
-        let ts1 = midnight + 8 * 3600_000; // 08:00
-        let ts2 = ts1 + 15 * 60_000;        // 08:15 (15 min gap > 10 min threshold)
+        // Insert two readings 2 hours apart with 800W solar
+        let ts1 = midnight + 8 * 3600; // 08:00
+        let ts2 = ts1 + 2 * 3600;        // 10:00 (2h gap > 1h threshold)
 
         let mut snap = make_snapshot(ts1, 50, 800);
         snap.today_solar_kwh = 0.0;
@@ -1469,7 +1618,7 @@ mod tests {
             "first row should be 0, got {}",
             val1
         );
-        // Second row: also 0 (15 min gap > 10 min threshold, treated as 0 power)
+        // Second row: also 0 (2h gap > 1h threshold, treated as 0 power)
         assert!(
             val2.abs() < 0.01,
             "second row should be 0 (gap treated as 0 power), got {}",
@@ -1482,19 +1631,19 @@ mod tests {
     fn reconstruct_solar_kwh_with_user_data() {
         let db = test_db();
 
-        // User's timestamps (UTC millis for 2026-06-19)
-        // 2026-06-19T09:50:00.000Z = 1710323400000
-        // 2026-06-19T11:15:00.000Z = 1710328500000
-        // 2026-06-19T11:20:00.000Z = 1710328800000
+        // User's timestamps (UTC seconds for 2026-06-19)
+        // 2026-06-19T09:50:00.000Z = 1710323400
+        // 2026-06-19T11:15:00.000Z = 1710328500
+        // 2026-06-19T11:20:00.000Z = 1710328800
         // ...
-        let base = 1710323400000i64; // 09:50 UTC
+        let base = 1710323400i64; // 09:50 UTC
 
         // Insert rows matching user's data
         let rows_data: Vec<(i64, i32, f64)> = vec![
             (base, 4026, 5.2268622569437),
-            (base + 5100_000, 4403, 5.23257441972147),   // 11:15 (1h25m gap)
-            (base + 5100_000 + 300_000, 4400, 5.23293874805481), // 11:20
-            (base + 5100_000 + 600_000, 4395, 5.23330745416592), // 11:25
+            (base + 5100, 4403, 5.23257441972147),   // 11:15 (1h25m gap)
+            (base + 5100 + 300, 4400, 5.23293874805481), // 11:20
+            (base + 5100 + 600, 4395, 5.23330745416592), // 11:25
         ];
 
         for (ts, pv, kwh) in &rows_data {
@@ -1544,7 +1693,7 @@ mod tests {
         let val1: f64 = conn
             .query_row(
                 "SELECT today_solar_kwh FROM readings WHERE timestamp = ?",
-                rusqlite::params![base + 5100_000],
+                rusqlite::params![base + 5100],
                 |row| row.get(0),
             )
             .unwrap();
@@ -1559,7 +1708,7 @@ mod tests {
         let val2: f64 = conn
             .query_row(
                 "SELECT today_solar_kwh FROM readings WHERE timestamp = ?",
-                rusqlite::params![base + 5100_000 + 300_000],
+                rusqlite::params![base + 5100 + 300],
                 |row| row.get(0),
             )
             .unwrap();
@@ -1582,11 +1731,11 @@ mod tests {
         // Step 1: create DB and insert data with corrupted today_solar_kwh
         {
             let db = HistoryDb::open(&path).unwrap();
-            let base = 1710323400000i64;
+            let base = 1710323400i64;
             let rows_data: Vec<(i64, i32, f64)> = vec![
                 (base, 4026, 5.2268622569437),
-                (base + 300_000, 4403, 5.23257441972147),  // 5min gap
-                (base + 600_000, 4400, 5.23293874805481),  // 5min gap
+                (base + 300, 4403, 5.23257441972147),  // 5min gap
+                (base + 600, 4400, 5.23293874805481),  // 5min gap
             ];
             for (ts, pv, kwh) in &rows_data {
                 let mut snap = make_snapshot(*ts, 50, *pv);
@@ -1605,7 +1754,7 @@ mod tests {
             let val0: f64 = conn
                 .query_row(
                     "SELECT today_solar_kwh FROM readings WHERE timestamp = ?",
-                    rusqlite::params![1710323400000i64],
+                    rusqlite::params![1710323400i64],
                     |row| row.get(0),
                 )
                 .unwrap();
@@ -1614,17 +1763,17 @@ mod tests {
                 "first row should be 0 after reopen, got {val0}"
             );
 
-            // Second row should be ~0.367 kWh (4026W × 5min)
+            // Second row should be ~0.351 kWh (rolling avg of 4026+4403 × 5min)
             let val1: f64 = conn
                 .query_row(
                     "SELECT today_solar_kwh FROM readings WHERE timestamp = ?",
-                    rusqlite::params![1710323700000i64],
+                    rusqlite::params![1710323700i64],
                     |row| row.get(0),
                 )
                 .unwrap();
             assert!(
-                (val1 - 0.335).abs() < 0.01,
-                "second row should be ~0.335 kWh, got {val1}"
+                (val1 - 0.351).abs() < 0.01,
+                "second row should be ~0.351 kWh, got {val1}"
             );
         }
     }
