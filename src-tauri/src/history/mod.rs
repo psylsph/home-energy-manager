@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use chrono::{Local, TimeZone, Timelike};
+use chrono::{Datelike, Local, TimeZone, Timelike};
 use rusqlite::{params, Connection, Result as SqlResult};
 use serde::Serialize;
 
@@ -311,10 +311,141 @@ impl HistoryDb {
             let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS _repair_{col}"));
         }
 
+        // ---- Reconstruct today_solar_kwh from PV power integration ----
+        // Integrate solar_power × delta_time for each day, replacing corrupted
+        // register values (stuck baselines, flatlines) with the computed total.
+        // Uses whatever solar_power the decoder already stored per device type —
+        // no device-specific logic needed here.
+        let solar_repaired = Self::reconstruct_solar_kwh(&conn);
+        if let Ok(count) = solar_repaired {
+            if count > 0 {
+                tracing::info!(
+                    "Reconstructed {count} today_solar_kwh values from solar_power integration"
+                );
+            }
+        }
+
         tracing::info!("History database opened at {}", path.display());
         Ok(Self {
             conn: Mutex::new(conn),
         })
+    }
+
+    /// Reconstruct `today_solar_kwh` by integrating `solar_power` over time.
+    ///
+    /// For each day, seeds from the first reading's register value (reset to 0
+    /// if that reading looks corrupted), then accumulates
+    /// `solar_power (W) × delta_time (h) / 1000` to build the true energy curve.
+    /// Only writes back rows where the computed value differs from the stored
+    /// value by more than 0.02 kWh.
+    ///
+    /// Uses `solar_power` directly from the DB — the decoder already stores the
+    /// correct per-device-type value (pv1+pv2 for hybrid, p_pv for gateway, etc.).
+    fn reconstruct_solar_kwh(conn: &Connection) -> Result<i64, String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp, solar_power, today_solar_kwh \
+                 FROM readings ORDER BY timestamp",
+            )
+            .map_err(|e| format!("Prepare failed: {e}"))?;
+
+        let rows: Vec<(i64, Option<i32>, Option<f64>)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i32>>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                ))
+            })
+            .map_err(|e| format!("Query failed: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Row read failed: {e}"))?;
+
+        if rows.is_empty() {
+            return Ok(0);
+        }
+
+        let mut updates: Vec<(i64, f64)> = Vec::new();
+        let mut current_day_midnight: Option<i64> = None;
+        let mut accumulated_kwh: f64 = 0.0;
+        let mut prev_ts: Option<i64> = None;
+        let mut prev_solar_power: i32 = 0;
+        let mut is_first_of_day = true;
+
+        for (ts, solar_power, stored_kwh) in &rows {
+            let ts = *ts;
+            let solar_power = solar_power.unwrap_or(0);
+
+            // Detect day boundary via local midnight
+            let secs = ts / 1000;
+            let local_dt = Local
+                .timestamp_opt(secs, 0)
+                .earliest()
+                .ok_or_else(|| format!("Invalid timestamp {ts}"))?;
+            let this_midnight = Local
+                .with_ymd_and_hms(local_dt.year(), local_dt.month(), local_dt.day(), 0, 0, 0)
+                .earliest()
+                .ok_or_else(|| format!("Ambiguous midnight for {ts}"))?
+                .timestamp_millis();
+
+            if current_day_midnight != Some(this_midnight) {
+                // New day — seed accumulator
+                current_day_midnight = Some(this_midnight);
+                accumulated_kwh = stored_kwh.unwrap_or(0.0).max(0.0);
+                // If first reading is at night (no sun) but shows a large value,
+                // the register was likely corrupted — start from 0 instead.
+                if solar_power < 10 && accumulated_kwh > 1.0 {
+                    accumulated_kwh = 0.0;
+                }
+                prev_ts = None;
+                prev_solar_power = 0;
+                is_first_of_day = true;
+            }
+
+            // Accumulate PV power since the previous reading
+            if let Some(prev) = prev_ts {
+                let delta_ms = ts - prev;
+                if delta_ms > 0 && delta_ms < 3_600_000 {
+                    // Max 1-hour gap to avoid wild extrapolation
+                    let delta_hours = delta_ms as f64 / 3_600_000.0;
+                    let power_kw = prev_solar_power.max(0) as f64 / 1000.0;
+                    accumulated_kwh += power_kw * delta_hours;
+                }
+            }
+
+            // Compare with stored value (skip first-of-day which seeds the accumulator)
+            if !is_first_of_day {
+                if let Some(stored) = stored_kwh {
+                    if !stored.is_nan() {
+                        let diff = (stored - accumulated_kwh).abs();
+                        if diff > 0.02 {
+                            updates.push((ts, accumulated_kwh));
+                        }
+                    }
+                }
+            }
+
+            prev_ts = Some(ts);
+            prev_solar_power = solar_power;
+            is_first_of_day = false;
+        }
+
+        let count = updates.len() as i64;
+        if count > 0 {
+            for (ts, new_val) in &updates {
+                if conn
+                    .execute(
+                        "UPDATE readings SET today_solar_kwh = ?1 WHERE timestamp = ?2",
+                        rusqlite::params![*new_val, *ts],
+                    )
+                    .is_err()
+                {
+                    tracing::warn!("Failed to reconstruct today_solar_kwh at ts={ts}");
+                }
+            }
+        }
+
+        Ok(count)
     }
 
     /// Insert a snapshot as a new reading row.
@@ -1145,5 +1276,87 @@ mod tests {
         );
         // Row 2: 35.0 > 25.0 → increase kept
         assert!((rows[2].2 - 35.0).abs() < 0.01);
+    }
+
+    /// Reconstruct today_solar_kwh from solar_power integration.
+    /// Simulates a day where the register was stuck at 1.5 kWh while PV was
+    /// generating 800W. The repair should overwrite the stuck value with the
+    /// PV-integrated total.
+    #[test]
+    fn reconstruct_solar_kwh_fixes_stuck_baseline() {
+        let db = test_db();
+
+        // Use local noon to get a deterministic midnight
+        let noon = local_noon_ms(-1);
+        let midnight = noon - 12 * 3600_000;
+
+        // Insert readings from 06:00 to 18:00 at 5-minute intervals
+        // Phase 1 (06:00–11:00): correct today_solar_kwh
+        // Phase 2 (11:00–14:00): stuck at 1.5 kWh (corrupted)
+        // Phase 3 (14:00–18:00): stuck at 2.0 kWh (corrupted)
+        let mut ts = midnight + 6 * 3600_000;
+        let mut correct_kwh: f64 = 0.0;
+
+        for hour_offset in 0..12 {
+            for _ in 0..12 {
+                let hour = 6 + hour_offset;
+                // Solar power: ramp 0→800W (06-08), hold 800W (08-16), drop (16-18)
+                let solar_w = if hour < 8 {
+                    (hour as i32 - 6) * 400
+                } else if hour < 16 {
+                    800
+                } else {
+                    (18 - hour as i32) * 400
+                };
+
+                let delta_hours = 5.0 / 60.0;
+                correct_kwh += (solar_w as f64) / 1000.0 * delta_hours;
+
+                // Register is stuck after 11:00
+                let stored_kwh = if ts >= midnight + 11 * 3600_000
+                    && ts < midnight + 14 * 3600_000
+                {
+                    1.5
+                } else if ts >= midnight + 14 * 3600_000 {
+                    2.0
+                } else {
+                    correct_kwh
+                };
+
+                let mut snap = make_snapshot(ts, 50, solar_w);
+                snap.today_solar_kwh = stored_kwh as f32;
+                db.insert_reading(&snap);
+
+                ts += 5 * 60_000;
+            }
+        }
+
+        // Run reconstruction directly
+        let conn = db.conn.lock().unwrap();
+        let count = HistoryDb::reconstruct_solar_kwh(&conn).unwrap();
+        drop(conn);
+
+        assert!(
+            count > 0,
+            "Should have repaired at least one stuck-baseline row"
+        );
+
+        // Verify: at noon, stored value should be near PV-integrated total, not 1.5
+        let noon_ts = midnight + 12 * 3600_000;
+        let conn = db.conn.lock().unwrap();
+        let noon_val: f64 = conn
+            .query_row(
+                "SELECT today_solar_kwh FROM readings WHERE timestamp = ?",
+                rusqlite::params![noon_ts],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        // By noon: ~3.6 kWh from PV integration, not 1.5
+        assert!(
+            (noon_val - 3.6).abs() < 1.0,
+            "noon value {noon_val} should be near 3.6 kWh (PV integrated), not stuck at 1.5"
+        );
     }
 }
