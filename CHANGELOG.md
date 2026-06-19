@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.31.8] - 2026-06-19
 
 ### Fixed
 
@@ -34,6 +34,46 @@ All notable changes to this project will be documented in this file.
   (DNS, connection refused, an expired bot token returning HTTP 401, …) still
   log at WARN since they may need attention. Both severities still feed the
   backoff counter.
+
+- **Frozen daily energy counters when the grace-period baseline was corrupted
+  low.** The sanitizer's "jumped too fast" delta branch (both daily
+  `today_*_kwh` and lifetime `total_*_kwh` counters) rejected an implausibly
+  large jump and carried the previous value forward — but had no recovery
+  path, so a single corrupted *low* grace-period baseline poisoned the field
+  forever. Every subsequent real (higher) reading was also "too fast"
+  relative to the stuck baseline, freezing the counter — e.g. on AC-coupled
+  inverters `today_export_kwh` stuck at ~1.0 kWh while the inverter reported
+  18.5, spamming `Daily energy jumped too fast - using previous` every poll
+  cycle. Symptom: the Solar history "PV Energy Today (kWh)" flat-lined and
+  the derived "Solar Today" / "Home Consumption" values were wrong, while
+  instantaneous PV Power (W) looked fine. The branch now mirrors the existing
+  decrease-branch release: after 10 consecutive jumps to the same raw value
+  the baseline is accepted as the corrupted reading and the raw value is
+  taken (logged at INFO), with the warning downgraded to DEBUG after 3 cycles
+  while recovering. A genuine single transient spike is still rejected.
+
+- **`ErrorBoundary` auto-retry now starts for errors present at mount.**
+  `componentDidUpdate` never fires when a child throws on the initial render,
+  so a page that threw on load showed "Will retry in 30s" but the countdown
+  never ticked (only the manual "Retry now" button worked). The countdown is
+  now also started in `componentDidMount`. Every route is also now wrapped
+  structurally via a single `page()` helper, so a route can no longer be
+  added without an `ErrorBoundary`.
+
+### Changed
+
+- **History charts no longer invent non-monotonic values when repairing
+  cumulative-counter spikes.** `removeSpikes()` now carries the previous good
+  value forward for cumulative daily counters (`today_*_kwh`) instead of
+  interpolating the midpoint of their neighbours — a synthetic value that
+  broke monotonicity and corrupted per-bar kWh deltas and derived cost.
+  Instantaneous rates and gauges (power, voltage, SOC) still interpolate,
+  where a midpoint is the least-bad estimate.
+
+- **Single-phase poll trims 58 unused registers per cycle.** The `input_180`
+  block now reads only IR 180/181 (the two alternative battery lifetime
+  totals the decoder consumes), not the full 60-register window — IR 182-239
+  are absent from the authoritative register map for every model.
 
 ## [0.31.7] - 2026-06-19
 
