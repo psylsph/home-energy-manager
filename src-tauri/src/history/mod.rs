@@ -1476,4 +1476,156 @@ mod tests {
             val2
         );
     }
+
+    /// Reproduce the user's exact production data to find the bug.
+    #[test]
+    fn reconstruct_solar_kwh_with_user_data() {
+        let db = test_db();
+
+        // User's timestamps (UTC millis for 2026-06-19)
+        // 2026-06-19T09:50:00.000Z = 1710323400000
+        // 2026-06-19T11:15:00.000Z = 1710328500000
+        // 2026-06-19T11:20:00.000Z = 1710328800000
+        // ...
+        let base = 1710323400000i64; // 09:50 UTC
+
+        // Insert rows matching user's data
+        let rows_data: Vec<(i64, i32, f64)> = vec![
+            (base, 4026, 5.2268622569437),
+            (base + 5100_000, 4403, 5.23257441972147),   // 11:15 (1h25m gap)
+            (base + 5100_000 + 300_000, 4400, 5.23293874805481), // 11:20
+            (base + 5100_000 + 600_000, 4395, 5.23330745416592), // 11:25
+        ];
+
+        for (ts, pv, kwh) in &rows_data {
+            let mut snap = make_snapshot(*ts, 50, *pv);
+            snap.today_solar_kwh = *kwh as f32;
+            db.insert_reading(&snap);
+        }
+
+        // Run reconstruction
+        let conn = db.conn.lock().unwrap();
+        let count = HistoryDb::reconstruct_solar_kwh(&conn).unwrap();
+        drop(conn);
+
+        assert_eq!(count, 4, "Should have reconstructed all 4 rows");
+
+        // Check each row
+        let conn = db.conn.lock().unwrap();
+        for (ts, pv, _) in &rows_data {
+            let val: f64 = conn
+                .query_row(
+                    "SELECT today_solar_kwh FROM readings WHERE timestamp = ?",
+                    rusqlite::params![*ts],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            println!("ts={ts}, pv={pv}, today_solar_kwh={val}");
+        }
+        drop(conn);
+
+        // First row (09:50): should be 0 (no previous reading)
+        let conn = db.conn.lock().unwrap();
+        let val0: f64 = conn
+            .query_row(
+                "SELECT today_solar_kwh FROM readings WHERE timestamp = ?",
+                rusqlite::params![base],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert!(
+            val0.abs() < 0.01,
+            "first row should be 0, got {val0}"
+        );
+
+        // Second row (11:15): should be 0 (gap > 10 min)
+        let conn = db.conn.lock().unwrap();
+        let val1: f64 = conn
+            .query_row(
+                "SELECT today_solar_kwh FROM readings WHERE timestamp = ?",
+                rusqlite::params![base + 5100_000],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert!(
+            val1.abs() < 0.01,
+            "second row (gap) should be 0, got {val1}"
+        );
+
+        // Third row (11:20): should be ~0.367 kWh (4403W × 5min)
+        let conn = db.conn.lock().unwrap();
+        let val2: f64 = conn
+            .query_row(
+                "SELECT today_solar_kwh FROM readings WHERE timestamp = ?",
+                rusqlite::params![base + 5100_000 + 300_000],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert!(
+            (val2 - 0.367).abs() < 0.01,
+            "third row should be ~0.367 kWh, got {val2}"
+        );
+    }
+
+    /// Verify reconstruction runs when DB is opened (full startup path).
+    #[test]
+    fn reconstruct_solar_kwh_on_open() {
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("givenergy-history-test-{id}"));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_history.db");
+        let _ = std::fs::remove_file(&path);
+
+        // Step 1: create DB and insert data with corrupted today_solar_kwh
+        {
+            let db = HistoryDb::open(&path).unwrap();
+            let base = 1710323400000i64;
+            let rows_data: Vec<(i64, i32, f64)> = vec![
+                (base, 4026, 5.2268622569437),
+                (base + 300_000, 4403, 5.23257441972147),  // 5min gap
+                (base + 600_000, 4400, 5.23293874805481),  // 5min gap
+            ];
+            for (ts, pv, kwh) in &rows_data {
+                let mut snap = make_snapshot(*ts, 50, *pv);
+                snap.today_solar_kwh = *kwh as f32;
+                db.insert_reading(&snap);
+            }
+            // DB drops here, connection closes
+        }
+
+        // Step 2: reopen — reconstruction should run on existing data
+        {
+            let db = HistoryDb::open(&path).unwrap();
+            let conn = db.conn.lock().unwrap();
+
+            // First row should be 0 (no previous reading)
+            let val0: f64 = conn
+                .query_row(
+                    "SELECT today_solar_kwh FROM readings WHERE timestamp = ?",
+                    rusqlite::params![1710323400000i64],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(
+                val0.abs() < 0.01,
+                "first row should be 0 after reopen, got {val0}"
+            );
+
+            // Second row should be ~0.367 kWh (4026W × 5min)
+            let val1: f64 = conn
+                .query_row(
+                    "SELECT today_solar_kwh FROM readings WHERE timestamp = ?",
+                    rusqlite::params![1710323700000i64],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(
+                (val1 - 0.335).abs() < 0.01,
+                "second row should be ~0.335 kWh, got {val1}"
+            );
+        }
+    }
 }
