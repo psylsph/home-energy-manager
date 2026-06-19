@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use chrono::{Datelike, Local, TimeZone, Timelike};
+use chrono::{Local, TimeZone, Timelike};
 use rusqlite::{params, Connection, Result as SqlResult};
 use serde::Serialize;
 
@@ -317,12 +317,16 @@ impl HistoryDb {
         // Uses whatever solar_power the decoder already stored per device type —
         // no device-specific logic needed here.
         let solar_repaired = Self::reconstruct_solar_kwh(&conn);
-        if let Ok(count) = solar_repaired {
-            if count > 0 {
+        match &solar_repaired {
+            Ok(count) if *count > 0 => {
                 tracing::info!(
                     "Reconstructed {count} today_solar_kwh values from solar_power integration"
                 );
             }
+            Err(e) => {
+                tracing::warn!("Solar reconstruction failed: {e}");
+            }
+            _ => {}
         }
 
         tracing::info!("History database opened at {}", path.display());
@@ -378,7 +382,7 @@ impl HistoryDb {
 
         // Step 3: integrate per day, always starting from 0
         let mut updates: Vec<(i64, f64)> = Vec::new();
-        let mut current_day_midnight: Option<i64> = None;
+        let mut current_day: i64 = -1;
         let mut accumulated_kwh: f64 = 0.0;
         let mut prev_ts: Option<i64> = None;
         let mut prev_solar_power: i32 = 0;
@@ -387,21 +391,11 @@ impl HistoryDb {
             let ts = *ts;
             let solar_power = solar_power.unwrap_or(0);
 
-            // Detect day boundary via local midnight
-            let secs = ts / 1000;
-            let local_dt = Local
-                .timestamp_opt(secs, 0)
-                .earliest()
-                .ok_or_else(|| format!("Invalid timestamp {ts}"))?;
-            let this_midnight = Local
-                .with_ymd_and_hms(local_dt.year(), local_dt.month(), local_dt.day(), 0, 0, 0)
-                .earliest()
-                .ok_or_else(|| format!("Ambiguous midnight for {ts}"))?
-                .timestamp_millis();
-
-            if current_day_midnight != Some(this_midnight) {
+            // Detect day boundary via UTC day number (no timezone dependency)
+            let day = ts / 86400000;
+            if day != current_day {
                 // New day — reset accumulator to 0
-                current_day_midnight = Some(this_midnight);
+                current_day = day;
                 accumulated_kwh = 0.0;
                 prev_ts = None;
                 prev_solar_power = 0;
