@@ -333,28 +333,29 @@ impl HistoryDb {
 
     /// Reconstruct `today_solar_kwh` by integrating `solar_power` over time.
     ///
-    /// For each day, seeds from the first reading's register value (reset to 0
-    /// if that reading looks corrupted), then accumulates
-    /// `solar_power (W) × delta_time (h) / 1000` to build the true energy curve.
-    /// Only writes back rows where the computed value differs from the stored
-    /// value by more than 0.02 kWh.
-    ///
-    /// Uses `solar_power` directly from the DB — the decoder already stores the
-    /// correct per-device-type value (pv1+pv2 for hybrid, p_pv for gateway, etc.).
+    /// First drops all existing `today_solar_kwh` values to 0, then
+    /// accumulates `solar_power (W) × delta_time (h) / 1000` for each day
+    /// starting from 0 at midnight. This completely rebuilds the energy curve
+    /// from the stored power readings, fixing any stuck-baseline or flatline
+    /// corruption regardless of device type.
     fn reconstruct_solar_kwh(conn: &Connection) -> Result<i64, String> {
+        // Step 1: drop all existing values
+        conn.execute("UPDATE readings SET today_solar_kwh = 0", [])
+            .map_err(|e| format!("Failed to clear today_solar_kwh: {e}"))?;
+
+        // Step 2: read solar_power and timestamps
         let mut stmt = conn
             .prepare(
-                "SELECT timestamp, solar_power, today_solar_kwh \
+                "SELECT timestamp, solar_power \
                  FROM readings ORDER BY timestamp",
             )
             .map_err(|e| format!("Prepare failed: {e}"))?;
 
-        let rows: Vec<(i64, Option<i32>, Option<f64>)> = stmt
+        let rows: Vec<(i64, Option<i32>)> = stmt
             .query_map([], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, Option<i32>>(1)?,
-                    row.get::<_, Option<f64>>(2)?,
                 ))
             })
             .map_err(|e| format!("Query failed: {e}"))?
@@ -365,14 +366,14 @@ impl HistoryDb {
             return Ok(0);
         }
 
+        // Step 3: integrate per day, always starting from 0
         let mut updates: Vec<(i64, f64)> = Vec::new();
         let mut current_day_midnight: Option<i64> = None;
         let mut accumulated_kwh: f64 = 0.0;
         let mut prev_ts: Option<i64> = None;
         let mut prev_solar_power: i32 = 0;
-        let mut is_first_of_day = true;
 
-        for (ts, solar_power, stored_kwh) in &rows {
+        for (ts, solar_power) in &rows {
             let ts = *ts;
             let solar_power = solar_power.unwrap_or(0);
 
@@ -389,17 +390,11 @@ impl HistoryDb {
                 .timestamp_millis();
 
             if current_day_midnight != Some(this_midnight) {
-                // New day — seed accumulator
+                // New day — reset accumulator to 0
                 current_day_midnight = Some(this_midnight);
-                accumulated_kwh = stored_kwh.unwrap_or(0.0).max(0.0);
-                // If first reading is at night (no sun) but shows a large value,
-                // the register was likely corrupted — start from 0 instead.
-                if solar_power < 10 && accumulated_kwh > 1.0 {
-                    accumulated_kwh = 0.0;
-                }
+                accumulated_kwh = 0.0;
                 prev_ts = None;
                 prev_solar_power = 0;
-                is_first_of_day = true;
             }
 
             // Accumulate PV power since the previous reading
@@ -413,35 +408,23 @@ impl HistoryDb {
                 }
             }
 
-            // Compare with stored value (skip first-of-day which seeds the accumulator)
-            if !is_first_of_day {
-                if let Some(stored) = stored_kwh {
-                    if !stored.is_nan() {
-                        let diff = (stored - accumulated_kwh).abs();
-                        if diff > 0.02 {
-                            updates.push((ts, accumulated_kwh));
-                        }
-                    }
-                }
-            }
+            updates.push((ts, accumulated_kwh));
 
             prev_ts = Some(ts);
             prev_solar_power = solar_power;
-            is_first_of_day = false;
         }
 
+        // Step 4: write back all computed values
         let count = updates.len() as i64;
-        if count > 0 {
-            for (ts, new_val) in &updates {
-                if conn
-                    .execute(
-                        "UPDATE readings SET today_solar_kwh = ?1 WHERE timestamp = ?2",
-                        rusqlite::params![*new_val, *ts],
-                    )
-                    .is_err()
-                {
-                    tracing::warn!("Failed to reconstruct today_solar_kwh at ts={ts}");
-                }
+        for (ts, new_val) in &updates {
+            if conn
+                .execute(
+                    "UPDATE readings SET today_solar_kwh = ?1 WHERE timestamp = ?2",
+                    rusqlite::params![*new_val, *ts],
+                )
+                .is_err()
+            {
+                tracing::warn!("Failed to reconstruct today_solar_kwh at ts={ts}");
             }
         }
 
@@ -1336,9 +1319,23 @@ mod tests {
         let count = HistoryDb::reconstruct_solar_kwh(&conn).unwrap();
         drop(conn);
 
+        // All 144 rows should be updated (we clear + rewrite all)
+        assert_eq!(count, 144, "Should have reconstructed all 144 rows");
+
+        // Verify: first reading of the day starts at 0
+        let first_ts = midnight + 6 * 3600_000;
+        let conn = db.conn.lock().unwrap();
+        let first_val: f64 = conn
+            .query_row(
+                "SELECT today_solar_kwh FROM readings WHERE timestamp = ?",
+                rusqlite::params![first_ts],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
         assert!(
-            count > 0,
-            "Should have repaired at least one stuck-baseline row"
+            first_val.abs() < 0.01,
+            "first reading should start at 0, got {first_val}"
         );
 
         // Verify: at noon, stored value should be near PV-integrated total, not 1.5
