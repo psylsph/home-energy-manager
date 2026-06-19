@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.31.7] - 2026-06-19
+
+### Added
+
+- **Notification setup guide.** New `NOTIFICATIONS.md` with step-by-step
+  instructions for Telegram and ntfy, from creating a bot to receiving the
+  first alert.
+- **FAQ entry.** *"How do I set up Telegram or ntfy notifications?"* links
+  to the new guide.
+- **Settings page link.** A "Setup guide ↗" button next to the Notifications
+  section opens the guide directly.
+
 ## [0.31.6] - 2026-06-19
 
 ### Fixed
