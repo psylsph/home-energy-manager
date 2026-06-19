@@ -263,6 +263,10 @@ pub struct Settings {
     #[serde(default = "default_evc_port")]
     pub evc_port: u16,
 
+    /// When true, skip auto-discovery of the dongle on persistent connection failure.
+    #[serde(default)]
+    pub disable_auto_discovery: bool,
+
     /// Full import tariff config with peak/off-peak rates and times.
     /// Falls back to legacy `import_tariff` if `None`.
     #[serde(default)]
@@ -452,6 +456,7 @@ impl Default for Settings {
             agile_state_persisted: String::new(),
             hidden_panels: Vec::new(),
             alerts_config: AlertsConfig::default(),
+            disable_auto_discovery: true,
         }
     }
 }
@@ -622,6 +627,7 @@ mod tests {
             agile_state_persisted: "discharging".to_string(),
             hidden_panels: Vec::new(),
             alerts_config: AlertsConfig::default(),
+            disable_auto_discovery: true,
         };
         let json = serde_json::to_string(&s).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
@@ -689,6 +695,7 @@ mod tests {
             agile_state_persisted: String::new(),
             hidden_panels: Vec::new(),
             alerts_config: AlertsConfig::default(),
+            disable_auto_discovery: true,
         };
 
         // We can't easily override the settings path for testing,

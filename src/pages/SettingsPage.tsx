@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { apiGet, apiPost, getApiBase, getServerPort } from '../lib/api';
 import { openExternal } from '../lib/openExternal';
 import type { PollSettings, DiscoveredInverter, DiscoveredEvc, TariffConfig } from '../lib/types';
@@ -22,7 +22,7 @@ function StoreQr({ url, alt }: { url: string; alt: string }) {
         .then((svg) => { if (!cancelled) setDataUrl('data:image/svg+xml;utf8,' + encodeURIComponent(svg)); });
     }).catch(() => {});
     return () => { cancelled = true; };
-  }, []);
+  }, [url]);
   if (!dataUrl) return <div className="w-[120px] h-[120px] bg-bg-elevated rounded-lg animate-pulse" />;
   return <img src={dataUrl} alt={alt} className="w-[120px] h-[120px] rounded-lg" />;
 }
@@ -67,6 +67,7 @@ const VALID_INTERVALS = [5, 10, 15, 20];
   const [evcDiscovering, setEvcDiscovering] = useState(false);
   const [evcDiscoverResults, setEvcDiscoverResults] = useState<DiscoveredEvc[]>([]);
   const [evcDiscoverError, setEvcDiscoverError] = useState('');
+  const [disableAutoDiscovery, setDisableAutoDiscovery] = useState(false);
 
   // Tariffs
   const [importTariffCfg, setImportTariffCfg] = useState<TariffConfig>({
@@ -135,6 +136,7 @@ const VALID_INTERVALS = [5, 10, 15, 20];
         }
         setEvcHost(s.evc_host ?? '');
         setEvcPort(s.evc_port ?? 502);
+        setDisableAutoDiscovery(s.disable_auto_discovery ?? false);
         setSettingsLoaded(true);
       } catch (e: unknown) {
         console.warn('Failed to load settings:', e);
@@ -164,11 +166,16 @@ const VALID_INTERVALS = [5, 10, 15, 20];
     })();
   }, []);
 
-  // Auto-save generated ntfy topic when serial becomes available
+  // Auto-save generated ntfy topic when serial becomes available.
+  // Use a ref to track the last auto-pushed topic so the guard condition
+  // doesn't need `alertsConfig.ntfy_topic` in its deps (which would
+  // overwrite user input when they edit the topic field).
+  const lastAutoNtfyTopic = useRef('');
   useEffect(() => {
     const invSerial = serial || snapshot?.inverter_serial || '';
     const generatedTopic = invSerial ? `hem-${invSerial}` : '';
-    if (generatedTopic && generatedTopic !== alertsConfig.ntfy_topic) {
+    if (generatedTopic && generatedTopic !== lastAutoNtfyTopic.current) {
+      lastAutoNtfyTopic.current = generatedTopic;
       apiPost('/api/alerts', { ntfy_topic: generatedTopic }).catch(() => {});
     }
   }, [serial, snapshot?.inverter_serial]);
@@ -508,6 +515,25 @@ const VALID_INTERVALS = [5, 10, 15, 20];
             ))}
           </div>
         )}
+
+        {/* Auto-Discovery toggle */}
+        <div className="flex items-center justify-between bg-bg-elevated rounded-xl px-4 py-3 border border-white/5">
+          <div className="flex flex-col gap-0.5">
+            <span className="text-text-primary text-sm font-sans font-medium">Enable Auto-Discovery</span>
+            <span className="text-text-secondary text-xs font-sans">
+              Scan the LAN for a new dongle IP after repeated connection failures. Disable if you have multiple inverters on the same network.
+            </span>
+          </div>
+          <Toggle
+            checked={!disableAutoDiscovery}
+            onChange={(v) => {
+              setDisableAutoDiscovery(!v);
+              apiPost('/api/settings', { disable_auto_discovery: !v })
+                .then(() => flash('Auto-Discovery setting saved', true))
+                .catch((e) => flash(e.message ?? 'Failed to save', false));
+            }}
+          />
+        </div>
       </section>
 
       {/* ─── Section 2: Remote / Mobile Network Access ─── */}

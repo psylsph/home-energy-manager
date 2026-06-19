@@ -401,7 +401,7 @@ fn parse_dist(args: &[String]) -> Option<String> {
 /// 1. `--dist <path>` CLI argument
 /// 2. `./dist/` relative to the current working directory
 /// 3. `<exe_dir>/dist/` relative to the binary location
-/// 4. `/usr/share/givenergy-local/dist/` system path
+/// 4. `/usr/share/givenergy-local/dist/` system path (also used by `.deb` and Docker)
 fn resolve_dist_dir(args: &[String]) -> Option<String> {
     if let Some(path) = parse_dist(args) {
         if std::path::Path::new(&path).exists() {

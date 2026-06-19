@@ -133,6 +133,7 @@ export interface PollSettings {
   hidden_panels: string[];
   evc_host: string;
   evc_port: number;
+  disable_auto_discovery: boolean;
 }
 
 export interface DiscoveredInverter {
@@ -149,6 +150,15 @@ export interface DiscoveredEvc {
 }
 
 export type ConnectionState = 'connected' | 'reconnecting' | 'disconnected';
+
+export interface StatusResponse {
+  ok: boolean;
+  connection: ConnectionState;
+  host: string;
+  lan_ip: string | null;
+  connected_since_epoch_ms: number | null;
+  connect_failures: number;
+}
 
 export interface WsSnapshotMessage {
   type: 'snapshot';

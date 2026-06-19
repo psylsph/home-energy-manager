@@ -209,7 +209,7 @@ pub async fn get_snapshot(State(state): State<Arc<AppState>>) -> (StatusCode, Js
     }
 }
 
-/// GET /api/status — current connection state and LAN IP
+/// GET /api/status — current connection state, timing info, and LAN IP
 pub async fn get_status(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let cs = state.connection_state.lock().await.clone();
     let host = state.settings.lock().await.host.clone();
@@ -220,6 +220,20 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> (StatusCode, Json
     let client_addrs: Vec<String> = clients.list().into_iter().map(|a| a.to_string()).collect();
     let client_count = clients.count();
     drop(clients);
+
+    // Connection timestamp (epoch millis) and consecutive failure count.
+    let cs_val = state
+        .connected_since
+        .lock()
+        .ok()
+        .and_then(|guard| *guard);
+    let connected_since_epoch_ms = cs_val
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64);
+    let connect_failures: u32 = state
+        .connect_failures
+        .load(std::sync::atomic::Ordering::Relaxed);
+
     (
         StatusCode::OK,
         Json(json!({
@@ -229,6 +243,8 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> (StatusCode, Json
         "lan_ip": lan_ip,
         "clients": client_addrs,
         "client_count": client_count,
+        "connected_since_epoch_ms": connected_since_epoch_ms,
+        "connect_failures": connect_failures,
         })),
     )
 }
@@ -253,6 +269,7 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "hidden_panels": settings.hidden_panels,
             "evc_host": settings.evc_host,
             "evc_port": settings.evc_port,
+            "disable_auto_discovery": settings.disable_auto_discovery,
         }
         })),
     )
@@ -357,6 +374,9 @@ pub async fn update_settings(
     if let Some(evc_port) = body.get("evc_port").and_then(|v| v.as_u64()) {
         persist.evc_port = evc_port.min(u16::MAX as u64) as u16;
     }
+    if let Some(d) = body.get("disable_auto_discovery").and_then(|v| v.as_bool()) {
+        persist.disable_auto_discovery = d;
+    }
     if let Err(e) = persist.save() {
         tracing::warn!("Failed to persist settings: {}", e);
         return server_error(&format!("Failed to save settings: {}", e));
@@ -385,11 +405,12 @@ pub async fn update_settings(
     if incoming.interval_secs > 0 {
         settings.interval_secs = incoming.interval_secs;
     }
-    // Sync EVC settings from persisted config to in-memory PollSettings
+    // Sync EVC settings + auto-discovery flag from persisted config to in-memory PollSettings
     {
         let disk = crate::settings::Settings::load();
         settings.evc_host = disk.evc_host.clone();
         settings.evc_port = disk.evc_port;
+        settings.disable_auto_discovery = disk.disable_auto_discovery;
     }
 
     let connection_changed =
@@ -434,14 +455,20 @@ fn parse_settings(body: &serde_json::Value) -> Result<PollSettings, String> {
         return Err("interval_secs must be >= 5".to_string());
     }
 
+    let disable_auto_discovery = body
+        .get("disable_auto_discovery")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
     Ok(PollSettings {
         host,
         port,
         serial,
-        interval_secs,           // caller will merge: 0 means "keep existing"
-        version: 0,              // not set by the API; caller bumps it
-        evc_host: String::new(), // merged from disk settings separately
+        interval_secs,          // caller will merge: 0 means "keep existing"
+        version: 0,             // not set by the API; caller bumps it
+        evc_host: String::new(),// merged from disk settings separately
         evc_port: 502,
+        disable_auto_discovery,
     })
 }
 
@@ -1474,6 +1501,29 @@ pub async fn test_alerts(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
 }
 
 // ---------------------------------------------------------------------------
+// Reconnect endpoint
+// ---------------------------------------------------------------------------
+
+/// POST /api/reconnect — force a disconnect and reconnection cycle.
+///
+/// Bumps the settings version to wake the poll loop, which detects
+/// the version change and disconnects, then reconnects with a fresh
+/// TCP session. Useful for clearing a dongle that has become
+/// unresponsive or when the user suspects a connection issue.
+pub async fn post_reconnect(
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<Value>) {
+    // Bump settings version so the poll loop detects the change
+    // and breaks out of the inner loop → disconnect → reconnect.
+    let mut settings = state.settings.lock().await;
+    settings.version = settings.version.wrapping_add(1);
+    drop(settings);
+
+    state.write_notify.notify_one();
+    tracing::info!("Reconnect requested — bumped settings version to force cycle");
+    ok_response("Reconnecting...")
+}
+
 // Discovery endpoint
 // ---------------------------------------------------------------------------
 

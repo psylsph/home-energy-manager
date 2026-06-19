@@ -49,7 +49,7 @@
 //! [tokio-fair]: https://docs.rs/tokio/latest/tokio/sync/struct.Mutex.html#fairness
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Timelike;
 
@@ -111,6 +111,9 @@ pub enum PollMessage {
         state: ConnectionState,
         /// Host we are connected to (or trying to reach).
         host: String,
+        /// Epoch millis when the current connection was established (None if not connected).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        connected_since_epoch_ms: Option<u64>,
     },
     /// EV charger data has been polled.
     Evc(Box<crate::evc::EvcSnapshot>),
@@ -145,6 +148,8 @@ pub struct PollSettings {
     pub evc_host: String,
     /// EV Charger TCP port (default 502).
     pub evc_port: u16,
+    /// When true, skip auto-discovery of the dongle on persistent connection failure.
+    pub disable_auto_discovery: bool,
 }
 
 impl Default for PollSettings {
@@ -157,6 +162,7 @@ impl Default for PollSettings {
             version: 0,
             evc_host: String::new(),
             evc_port: 502,
+            disable_auto_discovery: true,
         }
     }
 }
@@ -223,6 +229,10 @@ pub struct AppState {
     pub alert_debounce: Arc<Mutex<crate::alerts::AlertDebounce>>,
     /// Last date a daily consumption report was sent.
     pub last_report_date: Arc<Mutex<Option<chrono::NaiveDate>>>,
+    /// Wall-clock time when the current connection was established (None if disconnected).
+    pub connected_since: Arc<std::sync::Mutex<Option<std::time::SystemTime>>>,
+    /// How many consecutive TCP connect attempts have failed since the last success.
+    pub connect_failures: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl AppState {
@@ -256,6 +266,8 @@ impl AppState {
             alert_debounce: Arc::new(Mutex::new(crate::alerts::AlertDebounce::new())),
             last_report_date: Arc::new(Mutex::new(None)),
             latest_evc: Arc::new(Mutex::new(None)),
+            connected_since: Arc::new(std::sync::Mutex::new(None)),
+            connect_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 }
@@ -296,6 +308,8 @@ impl AppState {
             alert_debounce: Arc::new(Mutex::new(crate::alerts::AlertDebounce::new())),
             last_report_date: Arc::new(Mutex::new(None)),
             latest_evc: Arc::new(Mutex::new(None)),
+            connected_since: Arc::new(std::sync::Mutex::new(None)),
+            connect_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 }
@@ -409,6 +423,14 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
     crate::alerts::spawn_telegram_poller(state.clone());
 
     let mut backoff = Duration::from_secs(5);
+    // Track consecutive connection failures to trigger auto-discovery.
+    let mut consecutive_connect_failures: u32 = 0;
+    // When we last ran LAN discovery (to avoid scanning too often).
+    let mut last_discovery_time: Option<Instant> = None;
+    // After this many consecutive failures, trigger auto-discovery.
+    const DISCOVERY_AFTER_FAILURES: u32 = 5;
+    // Minimum interval between auto-discovery scans.
+    const DISCOVERY_COOLDOWN: Duration = Duration::from_secs(300);
 
     loop {
         // ---- Read current settings ----
@@ -433,6 +455,27 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     "Connected to inverter"
                 );
 
+                // Reset auto-discovery state on successful connection.
+                consecutive_connect_failures = 0;
+                last_discovery_time = None;
+
+                // Record connection timestamp for uptime tracking.
+                let now = std::time::SystemTime::now();
+                if let Ok(mut guard) = state.connected_since.lock() {
+                    *guard = Some(now);
+                }
+                {
+                    state
+                        .connect_failures
+                        .store(0, std::sync::atomic::Ordering::Relaxed);
+                }
+
+                // Convert to epoch millis for the frontend.
+                let connected_since_epoch_ms = now
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_millis() as u64);
+
                 // Broadcast connected state.
                 {
                     let mut cs = state.connection_state.lock().await;
@@ -441,6 +484,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 let _ = state.tx.send(PollMessage::Connection {
                     state: ConnectionState::Connected,
                     host: settings.host.clone(),
+                    connected_since_epoch_ms,
                 });
 
                 // Allow the dongle time to initialise after TCP connect.
@@ -2408,6 +2452,11 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 
                 tracing::debug!("Disconnected - entering reconnect cycle");
 
+                // Clear connection timestamp when the connection drops.
+                if let Ok(mut guard) = state.connected_since.lock() {
+                    *guard = None;
+                }
+
                 {
                     let mut cs = state.connection_state.lock().await;
                     *cs = ConnectionState::Reconnecting;
@@ -2415,6 +2464,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 let _ = state.tx.send(PollMessage::Connection {
                     state: ConnectionState::Reconnecting,
                     host: settings.host.clone(),
+                    connected_since_epoch_ms: None,
                 });
             }
             Err(e) => {
@@ -2428,10 +2478,98 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     let mut cs = state.connection_state.lock().await;
                     *cs = ConnectionState::Disconnected;
                 }
+                if let Ok(mut guard) = state.connected_since.lock() {
+                    *guard = None;
+                }
+
                 let _ = state.tx.send(PollMessage::Connection {
                     state: ConnectionState::Disconnected,
                     host: settings.host.clone(),
+                    connected_since_epoch_ms: None,
                 });
+
+                // Track consecutive connect failures for frontend.
+                state
+                    .connect_failures
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                // ---- Auto-discovery on persistent connection failure ----
+                // After N consecutive failures, scan the LAN for the dongle
+                // in case its IP changed (DHCP renewal, etc.). If exactly one
+                // alternative inverter is found, auto-switch to it.
+                consecutive_connect_failures = consecutive_connect_failures.wrapping_add(1);
+                let should_discover = !settings.disable_auto_discovery
+                    && consecutive_connect_failures >= DISCOVERY_AFTER_FAILURES
+                    && last_discovery_time
+                        .is_none_or(|t| t.elapsed() >= DISCOVERY_COOLDOWN);
+
+                if should_discover {
+                    last_discovery_time = Some(Instant::now());
+                    tracing::warn!(
+                        "Auto-discovery: {} consecutive failures to reach {}:{}. Scanning LAN...",
+                        consecutive_connect_failures,
+                        settings.host,
+                        settings.port
+                    );
+
+                    let subnets = crate::inverter::discovery::detect_lan_subnets();
+                    let inverters = crate::inverter::discovery::scan_multiple_subnets(&subnets).await;
+
+                    // Filter out the configured host (it's clearly not responding).
+                    let candidates: Vec<_> = inverters
+                        .iter()
+                        .filter(|inv| inv.ip != settings.host)
+                        .collect();
+
+                    match candidates.len() {
+                        0 => {
+                            tracing::warn!(
+                                "Auto-discovery: no alternative inverters found on LAN ({}:{} unreachable). Dongle may be powered off or network changed.",
+                                settings.host,
+                                settings.port
+                            );
+                        }
+                        1 => {
+                            let new = &candidates[0];
+                            tracing::warn!(
+                                "Auto-discovery: found alternative inverter at {}:{}. Auto-switching from {}:{}.",
+                                new.ip, new.port, settings.host, settings.port
+                            );
+
+                            // Persist the new host to disk so it survives restart.
+                            let mut persist = crate::settings::Settings::load();
+                            persist.host = new.ip.clone();
+                            persist.port = new.port;
+                            if let Err(e) = persist.save() {
+                                tracing::warn!("Auto-discovery: failed to persist new host: {e}");
+                            }
+
+                            // Update in-memory settings + bump version so the
+                            // next loop iteration picks up the new host.
+                            let mut poll_settings = state.settings.lock().await;
+                            poll_settings.host = new.ip.clone();
+                            poll_settings.port = new.port;
+                            poll_settings.version = poll_settings.version.wrapping_add(1);
+                            drop(poll_settings);
+
+                            // Reset counters so we try the new host immediately
+                            // with a fresh TCP connect, not a stale backoff.
+                            consecutive_connect_failures = 0;
+                            backoff = Duration::from_secs(5);
+                        }
+                        n => {
+                            let alts: Vec<_> = candidates
+                                .iter()
+                                .map(|i| format!("{}:{}", i.ip, i.port))
+                                .collect();
+                            tracing::warn!(
+                                "Auto-discovery: found {} alternative inverters — ambiguous, not auto-switching: {}",
+                                n,
+                                alts.join(", ")
+                            );
+                        }
+                    }
+                }
             }
         }
 
@@ -2692,12 +2830,41 @@ mod tests {
         let msg = PollMessage::Connection {
             state: ConnectionState::Reconnecting,
             host: "192.168.1.100".to_string(),
+            connected_since_epoch_ms: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"connection\""));
+        // When None, the field should be skipped.
+        assert!(!json.contains("connected_since_epoch_ms"));
         let de: PollMessage = serde_json::from_str(&json).unwrap();
         assert!(
-            matches!(de, PollMessage::Connection { state: ConnectionState::Reconnecting, ref host } if host == "192.168.1.100")
+            matches!(de, PollMessage::Connection { state: ConnectionState::Reconnecting, ref host, connected_since_epoch_ms } if host == "192.168.1.100" && connected_since_epoch_ms.is_none())
+        );
+    }
+
+    #[test]
+    fn poll_message_connection_with_since() {
+        let msg = PollMessage::Connection {
+            state: ConnectionState::Connected,
+            host: "10.0.0.5".to_string(),
+            connected_since_epoch_ms: Some(1_700_000_000_000u64),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("connected_since_epoch_ms"));
+        assert!(json.contains("1700000000000"));
+        let de: PollMessage = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(de, PollMessage::Connection { state: ConnectionState::Connected, ref host, connected_since_epoch_ms: Some(ts) } if host == "10.0.0.5" && ts == 1_700_000_000_000u64)
+        );
+    }
+
+    #[test]
+    fn poll_message_connection_backward_compat() {
+        // Old-format JSON without connected_since_epoch_ms must still deserialize.
+        let json = r#"{"type":"connection","state":"disconnected","host":"192.168.1.1"}"#;
+        let de: PollMessage = serde_json::from_str(json).unwrap();
+        assert!(
+            matches!(de, PollMessage::Connection { state: ConnectionState::Disconnected, ref host, connected_since_epoch_ms } if host == "192.168.1.1" && connected_since_epoch_ms.is_none())
         );
     }
 
@@ -2716,6 +2883,71 @@ mod tests {
             let state = Arc::new(AppState::new());
             let cs = state.connection_state.blocking_lock();
             assert_eq!(*cs, ConnectionState::Disconnected);
+        });
+    }
+
+    #[test]
+    fn app_state_connected_since_starts_none() {
+        crate::test_util::with_isolated_config_dir(|| {
+            let state = Arc::new(AppState::new());
+            let cs = state.connected_since.lock().unwrap();
+            assert!(cs.is_none());
+        });
+    }
+
+    #[test]
+    fn app_state_connect_failures_starts_zero() {
+        crate::test_util::with_isolated_config_dir(|| {
+            let state = Arc::new(AppState::new());
+            assert_eq!(
+                state.connect_failures.load(std::sync::atomic::Ordering::Relaxed),
+                0
+            );
+        });
+    }
+
+    #[test]
+    fn app_state_connected_since_set_and_clear() {
+        crate::test_util::with_isolated_config_dir(|| {
+            let state = Arc::new(AppState::new());
+            // Set connected_since
+            *state.connected_since.lock().unwrap() = Some(std::time::SystemTime::now());
+            assert!(state.connected_since.lock().unwrap().is_some());
+            // Clear it
+            *state.connected_since.lock().unwrap() = None;
+            assert!(state.connected_since.lock().unwrap().is_none());
+        });
+    }
+
+    #[test]
+    fn app_state_connect_failures_increment_and_reset() {
+        crate::test_util::with_isolated_config_dir(|| {
+            let state = Arc::new(AppState::new());
+            assert_eq!(
+                state.connect_failures.load(std::sync::atomic::Ordering::Relaxed),
+                0
+            );
+            state
+                .connect_failures
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(
+                state.connect_failures.load(std::sync::atomic::Ordering::Relaxed),
+                1
+            );
+            state
+                .connect_failures
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(
+                state.connect_failures.load(std::sync::atomic::Ordering::Relaxed),
+                2
+            );
+            state
+                .connect_failures
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(
+                state.connect_failures.load(std::sync::atomic::Ordering::Relaxed),
+                0
+            );
         });
     }
 

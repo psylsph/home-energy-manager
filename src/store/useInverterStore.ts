@@ -32,9 +32,13 @@ interface InverterState {
   evcCharging: boolean;
   /** EV Charger Modbus connection/data status. */
   evcConnected: boolean;
+  /** Epoch millis when the current connection was established (null when disconnected). */
+  connectedSince: number | null;
+  /** Consecutive connection failures since last successful connect. */
+  connectFailures: number;
   setSnapshot: (snapshot: InverterSnapshot) => void;
   clearSnapshot: () => void;
-  setConnection: (state: ConnectionState, host?: string) => void;
+  setConnection: (state: ConnectionState, host?: string, connectedSince?: number | null) => void;
   setDeveloperMode: (enabled: boolean) => void;
   setThemeMode: (mode: ThemeMode) => void;
 
@@ -136,6 +140,8 @@ export const useInverterStore = create<InverterState>((set) => ({
   snapshot: null,
   connectionState: 'disconnected',
   connectedHost: null,
+  connectedSince: null,
+  connectFailures: 0,
   developerMode: loadDeveloperMode(),
   themeMode: loadThemeMode(),
 
@@ -152,7 +158,13 @@ export const useInverterStore = create<InverterState>((set) => ({
   evcConnected: false,
   setSnapshot: (snapshot) => set({ snapshot }),
   clearSnapshot: () => set({ snapshot: null }),
-  setConnection: (state, host) => set({ connectionState: state, connectedHost: host ?? null }),
+  setConnection: (state, host, connectedSince) =>
+    set((prev) => ({
+      connectionState: state,
+      connectedHost: host ?? null,
+      connectedSince: state === 'connected' ? (connectedSince ?? Date.now()) : null,
+      connectFailures: state === 'connected' ? 0 : prev.connectFailures,
+    })),
   setDeveloperMode: (enabled) => {
     try {
       localStorage.setItem('devMode', String(enabled));

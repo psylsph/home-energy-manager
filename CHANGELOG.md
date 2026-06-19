@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.31.6] - 2026-06-19
+
+### Fixed
+
+- **Raspberry Pi `.deb` package now includes the frontend `dist/` directory.**
+  The headless binary (`givenergy-local --headless`) on ARM `.deb` installs was
+  running in API-only mode because the Vite-built frontend wasn't bundled at a
+  path the binary searched. `tauri.conf.json` now uses `deb.files` to place
+  `dist/` at `/usr/share/givenergy-local/dist/`, which matches the Docker
+  convention and `resolve_dist_dir()`'s search order.
+
+### Changed
+
+- **Lint fixes:** `useWebSocket.ts` window-assignment wrapped in `useEffect`;
+  `SettingsPage.tsx` added missing `useEffect` deps (`url`, `useRef` for ntfy
+  topic guard).
+
 ## [0.31.5] - 2026-06-18
 
 ### Fixed

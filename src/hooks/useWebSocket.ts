@@ -30,14 +30,27 @@ export function useWebSocket() {
   // were missed before the page loaded).
   const fetchInitialStatus = useCallback(async () => {
     try {
-      const res = await apiGet<{ ok: boolean; connection: ConnectionState; host: string }>('/api/status');
+      const res = await apiGet<{
+        ok: boolean;
+        connection: ConnectionState;
+        host: string;
+        connected_since_epoch_ms: number | null;
+        connect_failures: number;
+      }>('/api/status');
       if (res.ok) {
-        setConnection(res.connection, res.host);
+        setConnection(res.connection, res.host, res.connected_since_epoch_ms ?? undefined);
+        // Update connect failures separately (setConnection only resets on connect).
+        useInverterStore.setState({ connectFailures: res.connect_failures });
       }
     } catch {
       // Backend not reachable — stay disconnected
     }
   }, [setConnection]);
+
+  // Export the fetch function so the StatusPage can trigger re-fetches.
+  useEffect(() => {
+    (window as unknown as Record<string, unknown>).__fetchInitialStatus = fetchInitialStatus;
+  }, [fetchInitialStatus]);
 
   const connect = useCallback(() => {
     const url = getWsUrl();
@@ -60,7 +73,15 @@ export function useWebSocket() {
           })();
           setSnapshot(snapshot);
         } else if (data.type === 'connection') {
-          setConnection(data.state as ConnectionState, data.host);
+          setConnection(
+            data.state as ConnectionState,
+            data.host,
+            data.connected_since_epoch_ms ?? undefined,
+          );
+          // Update connect failures
+          if (data.state === 'connected') {
+            useInverterStore.setState({ connectFailures: 0 });
+          }
           // Clear stale snapshot when connection drops so the UI shows
           // "waiting for data" instead of frozen old values.
           if (data.state !== 'connected') {
