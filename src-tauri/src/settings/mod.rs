@@ -339,6 +339,7 @@ fn default_agile_discharge_threshold() -> f64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlertsConfig {
     /// Master toggle for all alerts.
+    #[serde(default)]
     pub enabled: bool,
     /// Telegram bot token (from @BotFather).
     #[serde(default)]

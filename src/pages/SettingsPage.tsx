@@ -922,7 +922,12 @@ const VALID_INTERVALS = [5, 10, 15, 20];
             <span className="text-text-primary text-sm font-sans">Enable Alerts</span>
             <Toggle
               checked={alertsConfig.enabled}
-              onChange={(v) => setAlertsConfig((p) => ({ ...p, enabled: v }))}
+              onChange={(v) => {
+                setAlertsConfig((p) => ({ ...p, enabled: v }));
+                apiPost('/api/alerts', { enabled: v })
+                  .then(() => flash(v ? 'Alerts enabled' : 'Alerts disabled', true))
+                  .catch((e) => flash(e.message ?? 'Failed to save', false));
+              }}
             />
           </div>
         </div>
@@ -1113,24 +1118,25 @@ const VALID_INTERVALS = [5, 10, 15, 20];
               </div>
             </div>
 
-            <div className="flex flex-col sm:flex-row gap-2">
-              <button
-                onClick={handleAlertsSave}
-                disabled={alertsSaving}
-                className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-4 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 transition-opacity sm:w-auto"
-              >
-                {alertsSaving ? 'Saving…' : 'Save Notification Settings'}
-              </button>
-              <button
-                onClick={handleAlertsTest}
-                disabled={alertsTesting || !alertsConfig.telegram_bot_token || !alertsConfig.telegram_chat_id}
-                className="bg-bg-elevated text-text-primary font-sans font-semibold text-sm px-4 py-2 rounded-lg hover:opacity-80 disabled:opacity-40 transition-opacity border border-white/5 sm:w-auto"
-              >
-                {alertsTesting ? 'Sending…' : 'Send Test Notification'}
-              </button>
-            </div>
           </div>
         )}
+
+        <div className="flex flex-col sm:flex-row gap-2">
+          <button
+            onClick={handleAlertsSave}
+            disabled={alertsSaving}
+            className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-4 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 transition-opacity sm:w-auto"
+          >
+            {alertsSaving ? 'Saving…' : 'Save Notification Settings'}
+          </button>
+          <button
+            onClick={handleAlertsTest}
+            disabled={alertsTesting || !alertsConfig.telegram_bot_token || !alertsConfig.telegram_chat_id}
+            className="bg-bg-elevated text-text-primary font-sans font-semibold text-sm px-4 py-2 rounded-lg hover:opacity-80 disabled:opacity-40 transition-opacity border border-white/5 sm:w-auto"
+          >
+            {alertsTesting ? 'Sending…' : 'Send Test Notification'}
+          </button>
+        </div>
       </section>
 
       {/* ─── Section 5: Developer Mode ─── */}

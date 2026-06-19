@@ -311,11 +311,8 @@ impl HistoryDb {
             let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS _repair_{col}"));
         }
 
-        // ---- Reconstruct today_solar_kwh from PV power integration ----
-        // Integrate solar_power × delta_time for each day, replacing corrupted
-        // register values (stuck baselines, flatlines) with the computed total.
-        // Uses whatever solar_power the decoder already stored per device type —
-        // no device-specific logic needed here.
+        // ---- Reconstruct today_solar_kwh ----
+        // Use the inverter's values directly, only recalculating when stuck.
         let solar_repaired = Self::reconstruct_solar_kwh(&conn);
         match &solar_repaired {
             Ok(count) if *count > 0 => {
@@ -335,33 +332,37 @@ impl HistoryDb {
         })
     }
 
-    /// Reconstruct `today_solar_kwh` by integrating `solar_power` over time.
+    /// Reconstruct `today_solar_kwh` by using the inverter's own values where reliable,
+    /// only recalculating from solar_power when the register appears stuck.
     ///
-    /// First drops all existing `today_solar_kwh` values to 0, then
-    /// accumulates `solar_power (W) × delta_time (h) / 1000` for each day
-    /// starting from 0 at midnight. This completely rebuilds the energy curve
-    /// from the stored power readings, fixing any stuck-baseline or flatline
-    /// corruption regardless of device type.
+    /// This replaces the old approach that cleared all values and reintegrated from
+    /// scratch (which over-calculated due to gap interpolation).
     fn reconstruct_solar_kwh(conn: &Connection) -> Result<i64, String> {
-        // Step 1: drop all existing values
-        let cleared = conn
-            .execute("UPDATE readings SET today_solar_kwh = 0", [])
-            .map_err(|e| format!("Failed to clear today_solar_kwh: {e}"))?;
-        tracing::warn!("Solar reconstruction: cleared {cleared} rows to 0");
+        // Step 1: delete old slot-filler rows (solar_power=0/NULL with today_solar_kwh > 0)
+        let deleted = conn
+            .execute(
+                "DELETE FROM readings WHERE (solar_power = 0 OR solar_power IS NULL) AND today_solar_kwh > 0",
+                [],
+            )
+            .map_err(|e| format!("Failed to delete old slot-filler rows: {e}"))?;
+        if deleted > 0 {
+            tracing::warn!("Solar reconstruction: deleted {deleted} old slot-filler rows");
+        }
 
-        // Step 2: read solar_power and timestamps
+        // Step 2: Read all rows with solar_power readings - use inverter's values
         let mut stmt = conn
             .prepare(
-                "SELECT timestamp, solar_power \
-                 FROM readings ORDER BY timestamp",
+                "SELECT timestamp, solar_power, today_solar_kwh \
+                 FROM readings WHERE solar_power > 0 ORDER BY timestamp",
             )
             .map_err(|e| format!("Prepare failed: {e}"))?;
 
-        let rows: Vec<(i64, Option<i32>)> = stmt
+        let rows: Vec<(i64, i32, f64)> = stmt
             .query_map([], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
-                    row.get::<_, Option<i32>>(1)?,
+                    row.get::<_, i32>(1)?,
+                    row.get::<_, f64>(2).unwrap_or(0.0),
                 ))
             })
             .map_err(|e| format!("Query failed: {e}"))?
@@ -373,70 +374,48 @@ impl HistoryDb {
             return Ok(0);
         }
 
-        tracing::warn!(
-            "Solar reconstruction: processing {} rows, first ts={}, first solar_power={:?}",
-            rows.len(),
-            rows[0].0,
-            rows[0].1,
-        );
-
-        // Step 3: integrate per day, always starting from 0
+        // Step 3: Process each day, using inverter's value unless stuck
         let mut updates: Vec<(i64, f64)> = Vec::new();
         let mut current_local_date: Option<chrono::NaiveDate> = None;
-        let mut accumulated_kwh: f64 = 0.0;
         let mut prev_ts: Option<i64> = None;
-        let mut prev_solar_power: i32 = 0;
+        let mut prev_value: f64 = 0.0;
 
-        for (ts, solar_power) in &rows {
-            let ts = *ts;
-            let solar_power = solar_power.unwrap_or(0);
-
-            // Detect day boundary via local date (inverter resets today_*_kwh
-            // at local midnight, not UTC midnight).
+        for (ts, solar_power, stored_value) in &rows {
+            // Detect day boundary
             let local_date = chrono::Local
-                .timestamp_opt(ts, 0)
+                .timestamp_opt(*ts, 0)
                 .earliest()
                 .map(|dt| dt.date_naive());
             if local_date != current_local_date {
                 current_local_date = local_date;
-                accumulated_kwh = 0.0;
                 prev_ts = None;
-                prev_solar_power = 0;
+                prev_value = 0.0;
             }
 
-            // Accumulate PV power since the previous reading
-            // For gaps, interpolate: use average of prev and current power.
-            // solar_power=0 is treated as "no reading" - use other side of gap.
-            if let Some(prev) = prev_ts {
+            // Use inverter's value if it's increasing, otherwise recalculate
+            let new_value = if let Some(prev) = prev_ts {
                 let delta_secs = ts - prev;
-                // Allow accumulation across larger gaps (up to 4 hours = 14400s).
-                // Interpolate power across the gap.
-                if delta_secs > 0 && delta_secs < 14400 {
-                    let power_kw = if prev_solar_power > 0 && solar_power > 0 {
-                        // Both sides have real readings - interpolate
-                        ((prev_solar_power + solar_power) / 2) as f64 / 1000.0
-                    } else if prev_solar_power > 0 {
-                        // Previous has real reading, use it
-                        prev_solar_power as f64 / 1000.0
-                    } else if solar_power > 0 {
-                        // Current has real reading, use it
-                        solar_power as f64 / 1000.0
-                    } else {
-                        // Both are 0/missing - no energy
-                        0.0
-                    };
+                // If gap > 30 min and value didn't increase, it's stuck - recalculate
+                if delta_secs > 1800 && *stored_value <= prev_value {
+                    // Recalculate from previous value using current power
+                    let power_kw = *solar_power as f64 / 1000.0;
                     let delta_hours = delta_secs as f64 / 3600.0;
-                    accumulated_kwh += power_kw * delta_hours;
+                    prev_value + power_kw * delta_hours
+                } else {
+                    // Use inverter's value (it's increasing normally)
+                    *stored_value
                 }
-            }
+            } else {
+                // First reading of day - use stored value
+                *stored_value
+            };
 
-            updates.push((ts, accumulated_kwh));
-
-            prev_ts = Some(ts);
-            prev_solar_power = solar_power;
+            updates.push((*ts, new_value));
+            prev_ts = Some(*ts);
+            prev_value = new_value;
         }
 
-        // Step 4: write back all computed values
+        // Step 4: write back computed values
         let count = updates.len() as i64;
         for (ts, new_val) in &updates {
             if conn
@@ -446,127 +425,11 @@ impl HistoryDb {
                 )
                 .is_err()
             {
-                tracing::warn!("Failed to reconstruct today_solar_kwh at ts={ts}");
+                tracing::warn!("Failed to update today_solar_kwh at ts={ts}");
             }
         }
 
-        // Log first few written values for debugging
-        if count > 0 {
-            let preview = &updates[..updates.len().min(5)];
-            for (ts, val) in preview {
-                tracing::warn!("Solar reconstruction: ts={ts}, today_solar_kwh={val:.4}");
-            }
-        }
-        tracing::warn!("Solar reconstruction: wrote {count} rows");
-
-        // Step 5: fill in missing 5-minute slots for each day
-        // Generates 288 slots per day (00:00, 00:05, 00:10, ... 23:55)
-        // and inserts interpolated today_solar_kwh values for any missing slots.
-        // Interpolation is scoped to within a single local day — at local midnight
-        // the accumulator resets to 0, so slots on the next day start from 0.
-        if !updates.is_empty() {
-            // Find the local midnight timestamps for the first and last day
-            let first_ts = updates[0].0;
-            let last_ts = updates[updates.len() - 1].0;
-            let first_local_date = chrono::Local
-                .timestamp_opt(first_ts, 0)
-                .earliest()
-                .map(|dt| dt.date_naive())
-                .unwrap();
-            let last_local_date = chrono::Local
-                .timestamp_opt(last_ts, 0)
-                .earliest()
-                .map(|dt| dt.date_naive())
-                .unwrap();
-            let mut inserted = 0i64;
-
-            let mut current_date = first_local_date;
-            while current_date <= last_local_date {
-                // Local midnight for this date
-                let local_midnight = chrono::Local
-                    .from_local_datetime(&current_date.and_hms_opt(0, 0, 0).unwrap())
-                    .earliest()
-                    .unwrap()
-                    .timestamp();
-                let next_midnight = chrono::Local
-                    .from_local_datetime(
-                        &current_date
-                            .succ_opt()
-                            .unwrap()
-                            .and_hms_opt(0, 0, 0)
-                            .unwrap(),
-                    )
-                    .earliest()
-                    .unwrap()
-                    .timestamp();
-
-                // Collect updates that fall within this local day
-                let day_updates: Vec<&(i64, f64)> = updates
-                    .iter()
-                    .filter(|(t, _)| *t >= local_midnight && *t < next_midnight)
-                    .collect();
-
-                for slot_minute in (0..288).step_by(1) {
-                    let slot_ts = local_midnight + slot_minute * 300; // 5-minute slot (seconds)
-
-                    // Check if this slot already has a row
-                    let exists: bool = conn
-                        .query_row(
-                            "SELECT COUNT(*) FROM readings WHERE timestamp = ?",
-                            rusqlite::params![slot_ts],
-                            |row| row.get::<_, i64>(0),
-                        )
-                        .unwrap_or(0)
-                        > 0;
-
-                    if exists {
-                        continue;
-                    }
-
-                    // Find the nearest data points before and after this slot
-                    // within the same local day. If no before point exists, use 0
-                    // (day start). If no after point exists, use the last
-                    // known value (carry forward).
-                    let before = day_updates.iter().filter(|entry| entry.0 <= slot_ts).last();
-                    let after = day_updates.iter().find(|entry| entry.0 >= slot_ts);
-
-                    let slot_kwh = match (before, after) {
-                        (Some((b_ts, b_val)), Some((a_ts, a_val))) if b_ts == a_ts => *b_val,
-                        (Some((b_ts, b_val)), Some((a_ts, a_val))) => {
-                            // Linear interpolation within the same day
-                            let range = (a_ts - b_ts) as f64;
-                            if range > 0.0 {
-                                let offset = (slot_ts - b_ts) as f64;
-                                b_val + (a_val - b_val) * (offset / range)
-                            } else {
-                                *b_val
-                            }
-                        }
-                        (Some((_, val)), None) => *val,
-                        (None, Some((_, val))) => *val,
-                        (None, None) => 0.0,
-                    };
-
-                    if conn
-                        .execute(
-                            "INSERT OR REPLACE INTO readings (timestamp, solar_power, today_solar_kwh) \
-                             VALUES (?1, 0, ?2)",
-                            rusqlite::params![slot_ts, slot_kwh],
-                        )
-                        .is_ok()
-                    {
-                        inserted += 1;
-                    }
-                }
-
-                current_date = current_date.succ_opt().unwrap();
-            }
-
-            if inserted > 0 {
-                tracing::warn!("Solar reconstruction: inserted {inserted} missing 5-min slots");
-            }
-        }
-
+        tracing::warn!("Solar reconstruction: updated {count} rows");
         Ok(count)
     }
 
