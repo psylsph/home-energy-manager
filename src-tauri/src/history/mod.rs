@@ -329,7 +329,7 @@ impl HistoryDb {
             _ => {}
         }
 
-        tracing::info!("History database opened at {}", path.display());
+        tracing::warn!("History database opened at {}", path.display());
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -347,7 +347,7 @@ impl HistoryDb {
         let cleared = conn
             .execute("UPDATE readings SET today_solar_kwh = 0", [])
             .map_err(|e| format!("Failed to clear today_solar_kwh: {e}"))?;
-        tracing::info!("Solar reconstruction: cleared {cleared} rows to 0");
+        tracing::warn!("Solar reconstruction: cleared {cleared} rows to 0");
 
         // Step 2: read solar_power and timestamps
         let mut stmt = conn
@@ -369,11 +369,11 @@ impl HistoryDb {
             .map_err(|e| format!("Row read failed: {e}"))?;
 
         if rows.is_empty() {
-            tracing::info!("Solar reconstruction: no rows to process");
+            tracing::warn!("Solar reconstruction: no rows to process");
             return Ok(0);
         }
 
-        tracing::info!(
+        tracing::warn!(
             "Solar reconstruction: processing {} rows, first ts={}, first solar_power={:?}",
             rows.len(),
             rows[0].0,
@@ -437,10 +437,10 @@ impl HistoryDb {
         if count > 0 {
             let preview = &updates[..updates.len().min(5)];
             for (ts, val) in preview {
-                tracing::info!("Solar reconstruction: ts={ts}, today_solar_kwh={val:.4}");
+                tracing::warn!("Solar reconstruction: ts={ts}, today_solar_kwh={val:.4}");
             }
         }
-        tracing::info!("Solar reconstruction: wrote {count} rows");
+        tracing::warn!("Solar reconstruction: wrote {count} rows");
 
         Ok(count)
     }
