@@ -345,13 +345,23 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
     let has_direct_consumption =
         snap.today_ac_charge_kwh != snap.today_consumption_kwh && snap.today_consumption_kwh > 0.0;
     if !has_direct_consumption {
-        snap.today_consumption_kwh = snap.today_solar_kwh + snap.today_import_kwh
+        // Single-phase fallback formula: derive consumption from the energy
+        // balance at the home level (solar + import + discharge - export - charge).
+        // decode_input_0_59 already set this correctly; this branch is a
+        // safety net for cases where that initial assignment was zeroed
+        // out (e.g. the GE formula without battery terms).
+        let consumption_kwh = (snap.today_solar_kwh
+            + snap.today_import_kwh
+            + snap.today_discharge_kwh
             - snap.today_export_kwh
-            - snap.today_ac_charge_kwh;
-        if snap.today_consumption_kwh < 0.0 {
-            snap.today_consumption_kwh = 0.0;
-        }
+            - snap.today_charge_kwh)
+            .max(0.0);
+        snap.today_consumption_kwh = consumption_kwh;
+        snap.home_energy_today_kwh = consumption_kwh;
     }
+    // When a direct e_load_today register was decoded, home_energy_today_kwh
+    // is set later (after all blocks are decoded) by the dedicated
+    // three-phase / gateway handlers below.
 
     // Derive battery mode from the three key holding registers.
     snap.battery_mode = BatteryMode::from_registers(
@@ -500,22 +510,53 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.inverter_temperature = get_reg(data, 41) as f32 * 0.1; // IR(41): t_inverter_heatsink (/10 °C)
 
     // -- Energy totals (all in /10 kWh) --
-    // IR(44) is e_pv_generation_today (per givenergy-modbus sentinel
-    // cross-correlation, confirmed against the GE app's Energy-today
-    // screen — see #174). Fall back to the older per-string daily
-    // registers (IR(17)/IR(19)) when IR(44) is unavailable/zero.
-    let pv_generation_today = get_reg(data, 44); // IR(44): e_pv_generation_today
-    if pv_generation_today > 0 {
-        snap.today_solar_kwh = pv_generation_today as f32 * 0.1;
+    // Prefer the per-string daily registers IR(17) and IR(19) for
+    // `today_solar_kwh`. These give a value 5–10% lower than IR(44)
+    // (e_pv_generation_today), which matches what the GivEnergy app,
+    // Android inverter monitor, BBC Inverter Utility and other third
+    // parties agree on (issue #99). Fall back to IR(44) when the
+    // per-string registers are unavailable (early firmware or zero).
+    //
+    // Each per-string register is sanitised individually against the same
+    // 200 kWh absolute range the post-decode check uses, so a corrupted
+    // single-string value is dropped before it contaminates the sum.
+    // The post-decode `check_energy_field!` macro is a second line of
+    // defence for the combined value.
+    //
+    // For the second string (IR(19)) we only include its daily energy
+    // when PV2 has panels connected (pv2_voltage > 0); IR(19) can return
+    // stale or garbage data when no second PV string is present.
+    const MAX_DAILY_KWH_TENTHS: u16 = 2_000; // 200 kWh × 10 — same ceiling as the sanitizer
+    let pv1_raw = get_reg(data, 17);
+    let pv1_today = if pv1_raw <= MAX_DAILY_KWH_TENTHS {
+        pv1_raw as f32
     } else {
-        // Fallback: only include PV2's daily energy if PV2 has panels connected.
-        // IR(19) can return stale or garbage data when no second PV string is present.
-        let pv2_today = if snap.pv2_voltage > 0.0 {
-            get_reg(data, 19) as f32
+        // Corrupted IR(17) — exclude this string from the sum.
+        0.0
+    };
+    let pv2_today = if snap.pv2_voltage > 0.0 {
+        let pv2_raw = get_reg(data, 19);
+        if pv2_raw <= MAX_DAILY_KWH_TENTHS {
+            pv2_raw as f32
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+    let per_string_today = pv1_today + pv2_today;
+    if per_string_today > 0.0 {
+        snap.today_solar_kwh = per_string_today * 0.1; // IR(17)+IR(19)
+    } else {
+        // Fallback to the aggregate register when the per-string data
+        // is unavailable (returns the higher value — known to be 5–10%
+        // above the per-string sum). Sanitise IR(44) the same way.
+        let ir44_raw = get_reg(data, 44);
+        snap.today_solar_kwh = if ir44_raw <= MAX_DAILY_KWH_TENTHS {
+            ir44_raw as f32 * 0.1
         } else {
             0.0
         };
-        snap.today_solar_kwh = (get_reg(data, 17) as f32 + pv2_today) * 0.1; // IR(17)+IR(19)
     }
     snap.today_import_kwh = get_reg(data, 26) as f32 * 0.1; // IR(26): e_grid_in_day
     snap.today_export_kwh = get_reg(data, 25) as f32 * 0.1; // IR(25): e_grid_out_day
@@ -528,12 +569,29 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
                                                                // For single-phase there is no direct load register — consumption is
                                                                // computed (matching the reference's e_consumption_today @property).
     snap.today_ac_charge_kwh = get_reg(data, 35) as f32 * 0.1; // IR(35): e_ac_charge_today
-                                                               // Consumption = solar + import - export - ac_charge (ref formula).
+                                                               // Consumption from energy balance at the home level:
+                                                               //   energy_in  = solar + grid_import + battery_discharge
+                                                               //   energy_out = grid_export + battery_charge
+                                                               //   home_consumed = energy_in - energy_out
+                                                               // This generalises the GE app's formula (solar + import - export - ac_charge)
+                                                               // by also subtracting total battery charge and adding total battery
+                                                               // discharge, so the term correctly accounts for battery throughput
+                                                               // (matters for AC coupled + battery systems where the battery is
+                                                               // charged from the grid in the morning and discharged to the home
+                                                               // in the evening). For systems without a battery, charge_today and
+                                                               // discharge_today are zero and the formula collapses to the GE one.
                                                                // Clamped at 0 to avoid negative from meter rounding noise.
-    snap.today_consumption_kwh = (snap.today_solar_kwh + snap.today_import_kwh
+    let consumption_kwh = (snap.today_solar_kwh
+        + snap.today_import_kwh
+        + snap.today_discharge_kwh
         - snap.today_export_kwh
-        - snap.today_ac_charge_kwh)
+        - snap.today_charge_kwh)
         .max(0.0);
+    snap.today_consumption_kwh = consumption_kwh;
+    // home_energy_today_kwh mirrors the formula so the SummaryTiles and
+    // HistoryPage consumption displays read the same register-derived
+    // value (no integration, no prev state, no stuck-at-0 risk).
+    snap.home_energy_today_kwh = consumption_kwh;
     snap.total_export_kwh = decode_lifetime_total_kwh(get_reg(data, 21), get_reg(data, 22)); // IR(21-22): e_grid_out_total
     snap.total_import_kwh = decode_lifetime_total_kwh(get_reg(data, 32), get_reg(data, 33));
     // IR(32-33): e_grid_in_total // keep raw IR(35) for energy balance
@@ -1119,6 +1177,10 @@ fn decode_input_1360_1413(data: &[u16], snap: &mut InverterSnapshot) {
     snap.today_charge_kwh = uint32(get_reg(data, 32), get_reg(data, 33)) as f32 * 0.1;
     snap.today_discharge_kwh = uint32(get_reg(data, 28), get_reg(data, 29)) as f32 * 0.1;
     snap.today_consumption_kwh = uint32(get_reg(data, 36), get_reg(data, 37)) as f32 * 0.1;
+    // Three-phase has a native e_load_today register; mirror it so the
+    // SummaryTiles / HistoryPage consumption display reads the same value
+    // regardless of inverter type.
+    snap.home_energy_today_kwh = snap.today_consumption_kwh;
     snap.today_ac_charge_kwh = uint32(get_reg(data, 16), get_reg(data, 17)) as f32 * 0.1;
     snap.total_import_kwh = decode_lifetime_total_kwh(get_reg(data, 22), get_reg(data, 23)); // IR(1382-1383): e_import_total
     snap.total_export_kwh = decode_lifetime_total_kwh(get_reg(data, 26), get_reg(data, 27)); // IR(1386-1387): e_export_total
@@ -1608,6 +1670,10 @@ fn decode_gateway_1600_1659(data: &[u16], snap: &mut InverterSnapshot) {
     snap.today_charge_kwh = get_reg(data, 49) as f32 * 0.1; // e_aio_charge_today
     snap.today_discharge_kwh = get_reg(data, 52) as f32 * 0.1; // e_aio_discharge_today
     snap.today_consumption_kwh = get_reg(data, 55) as f32 * 0.1; // e_load_today
+    // Gateway has a native e_load_today register; mirror it so the
+    // SummaryTiles / HistoryPage consumption display reads the same value
+    // regardless of inverter type.
+    snap.home_energy_today_kwh = snap.today_consumption_kwh;
 
     // --- Lifetime energy totals (uint32 ÷10 kWh, V1/V2 byte order) ---
     // Decode with V1/V2 awareness, then apply plausibility check on the result.
@@ -2033,8 +2099,9 @@ mod tests {
         assert!((snap.today_export_kwh - 3.0).abs() < 0.1);
         assert!((snap.today_charge_kwh - 4.0).abs() < 0.1);
         assert!((snap.today_discharge_kwh - 2.5).abs() < 0.1);
-        // consumption = solar(28.0) + import(5.2) - export(3.0) - ac_charge(12.0) = 18.2
-        assert!((snap.today_consumption_kwh - 18.2).abs() < 0.1);
+        // consumption = solar(28.0) + import(5.2) + discharge(2.5) - export(3.0) - charge(4.0) = 28.7
+        assert!((snap.today_consumption_kwh - 28.7).abs() < 0.1);
+        assert!((snap.home_energy_today_kwh - 28.7).abs() < 0.1);
         assert!((snap.today_ac_charge_kwh - 12.0).abs() < 0.1);
         assert!((snap.total_import_kwh - 678.9).abs() < 0.1);
         assert!((snap.total_export_kwh - 1234.5).abs() < 0.1);
@@ -2476,16 +2543,20 @@ mod tests {
     }
 
     #[test]
-    fn single_phase_daily_solar_uses_ir44_not_lifetime_pv_total() {
+    fn single_phase_daily_solar_uses_ir17_ir19_with_ir44_fallback() {
+        // Verify the IR(17)+IR(19) priority over IR(44) for today_solar_kwh
+        // (issue #99: IR(44) reads ~5–10% high, matching third-party tools
+        // requires using the per-string registers when available). When
+        // the per-string registers are zero, IR(44) is used as fallback.
         let mut input_data = vec![0u16; 60];
         input_data[11] = 3;
-        input_data[12] = 4641; // lifetime PV total = 201249 * 0.1 = 20124.9 kWh; not a daily value
-        input_data[17] = 0;
-        input_data[19] = 0;
+        input_data[12] = 4641; // lifetime PV total — should be ignored for daily value
+        input_data[17] = 0; // per-string PV1 zero → triggers fallback
+        input_data[19] = 0; // per-string PV2 zero
         input_data[25] = 10; // export today 1.0 kWh
         input_data[26] = 20; // import today 2.0 kWh
         input_data[35] = 5; // AC charge today 0.5 kWh
-        input_data[44] = 37; // PV generation today 3.7 kWh
+        input_data[44] = 37; // PV generation today 3.7 kWh (used as fallback)
 
         let mut holding_data = vec![0u16; 60];
         holding_data[0] = 0x3001; // AC Coupled
@@ -2498,16 +2569,99 @@ mod tests {
         let snap = decode_snapshot(&blocks);
 
         assert_eq!(snap.device_type, DeviceType::ACCoupled);
+        // Fallback path: IR(17)=IR(19)=0 → use IR(44) = 3.7 kWh.
         assert!((snap.today_solar_kwh - 3.7).abs() < 0.01);
-        // GE app formula for single-phase consumption: PV generation + import - export - AC charge.
-        assert!((snap.today_consumption_kwh - 4.2).abs() < 0.01);
+        // Consumption formula at the home level: solar + import + discharge - export - charge.
+        // No charge/discharge registers set → both are 0, so the term collapses
+        // to the GE app's formula: solar(3.7) + import(2.0) - export(1.0) = 4.7 kWh.
+        assert!((snap.today_consumption_kwh - 4.7).abs() < 0.01);
+        assert!((snap.home_energy_today_kwh - 4.7).abs() < 0.01);
         assert!((snap.today_ac_charge_kwh - 0.5).abs() < 0.01);
     }
 
     #[test]
-    fn single_phase_consumption_formula_with_ir44() {
-        // Gen3 hybrid with solar from primary IR(44) path (not fallback).
-        // Verifies consumption computation when IR(44) is non-zero.
+    fn single_phase_daily_solar_prefers_ir17_over_ir44() {
+        // IR(17) and IR(44) BOTH report valid solar. Per the documentation,
+        // IR(17) is the authoritative per-string source and IR(44) is
+        // typically 5–10% high. We must use IR(17), not IR(44).
+        let mut input_data = vec![0u16; 60];
+        input_data[17] = 30; // IR(17): 3.0 kWh (authoritative)
+        input_data[44] = 33; // IR(44): 3.3 kWh (5–10% higher, must NOT be used)
+        input_data[25] = 0;
+        input_data[26] = 0;
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x3001;
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", input_data),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", vec![0; 60]),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert!(
+            (snap.today_solar_kwh - 3.0).abs() < 0.01,
+            "must use IR(17)=3.0, not IR(44)=3.3; got {}",
+            snap.today_solar_kwh
+        );
+    }
+
+    #[test]
+    fn single_phase_ir17_corruption_dropped() {
+        // Corrupted IR(17) (above the 200 kWh daily ceiling) is dropped
+        // before contributing to the sum, falling back to IR(44) if
+        // IR(19) is also unavailable.
+        let mut input_data = vec![0u16; 60];
+        input_data[17] = 5_000; // IR(17): 500 kWh — corrupted, must be excluded
+        input_data[19] = 0;
+        input_data[25] = 0;
+        input_data[26] = 0;
+        input_data[44] = 30; // IR(44): 3.0 kWh (valid fallback)
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x3001;
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", input_data),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", vec![0; 60]),
+        ];
+        let snap = decode_snapshot(&blocks);
+        // IR(17) excluded → per-string sum is 0 → fall back to IR(44)=3.0 kWh.
+        assert!(
+            (snap.today_solar_kwh - 3.0).abs() < 0.01,
+            "corrupted IR(17) must be excluded, falling back to IR(44); got {}",
+            snap.today_solar_kwh
+        );
+    }
+
+    #[test]
+    fn single_phase_ir44_corruption_dropped_when_used_as_fallback() {
+        // Corrupted IR(44) (above the 200 kWh daily ceiling) is dropped
+        // when used as the fallback value.
+        let mut input_data = vec![0u16; 60];
+        input_data[17] = 0;
+        input_data[19] = 0;
+        input_data[25] = 0;
+        input_data[26] = 0;
+        input_data[44] = 10_000; // IR(44): 1000 kWh — corrupted
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x3001;
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", input_data),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", vec![0; 60]),
+        ];
+        let snap = decode_snapshot(&blocks);
+        // IR(17)=IR(19)=0 and IR(44) corrupted → today_solar_kwh = 0.
+        assert!(
+            snap.today_solar_kwh.abs() < 0.01,
+            "corrupted IR(44) must be excluded, got {}",
+            snap.today_solar_kwh
+        );
+    }
+
+    #[test]
+    fn single_phase_consumption_formula_with_ir44_fallback() {
+        // Gen3 hybrid where IR(17)/IR(19) are zero (per-string registers
+        // unavailable), forcing fallback to IR(44) for today_solar_kwh.
+        // Verifies consumption computation when IR(44) is the source.
         let mut input_data = vec![0u16; 60];
         input_data[25] = 50; // export today 5.0 kWh
         input_data[26] = 80; // import today 8.0 kWh
@@ -2531,8 +2685,11 @@ mod tests {
         assert!((snap.today_import_kwh - 8.0).abs() < 0.01);
         assert!((snap.today_export_kwh - 5.0).abs() < 0.01);
         assert!((snap.today_ac_charge_kwh - 3.0).abs() < 0.01);
-        // Consumption = 10.0 + 8.0 - 5.0 - 3.0 = 10.0
-        assert!((snap.today_consumption_kwh - 10.0).abs() < 0.01);
+        // Consumption = solar(10.0) + import(8.0) + discharge(0) - export(5.0) - charge(0) = 13.0
+        // (no charge/discharge registers set → those terms are 0; the
+        // formula generalises the GE one by adding battery throughput.)
+        assert!((snap.today_consumption_kwh - 13.0).abs() < 0.01);
+        assert!((snap.home_energy_today_kwh - 13.0).abs() < 0.01);
     }
 
     #[test]
@@ -3663,5 +3820,126 @@ mod tests {
         // because the derivation guard failed.
         assert_eq!(snap.battery_power, -800);
         assert_eq!(snap.grid_power, 0);
+    }
+
+    // ===================================================================
+    // home_energy_today_kwh decoder formula tests
+    //
+    // The metric is derived directly from the existing today_*_kwh register
+    // values via the home-level energy balance:
+    //
+    //   consumption = solar + import + discharge - export - charge
+    //
+    // This generalises the GE app's formula (solar + import - export - ac_charge)
+    // by adding the missing battery throughput terms. For systems without a
+    // battery, charge_today and discharge_today are zero and the formula
+    // collapses to the GE one.
+    //
+    // These tests pin the formula for single-phase (which has no native
+    // e_load register) and verify that three-phase / gateway mirror the
+    // direct register read.
+    // ===================================================================
+
+    /// Single-phase helper: build blocks with the five today_*_kwh inputs.
+    fn single_phase_blocks_for_consumption(
+        solar: u16,
+        import: u16,
+        export: u16,
+        charge: u16,
+        discharge: u16,
+    ) -> Vec<BlockRead> {
+        let mut input_data = vec![0u16; 60];
+        // IR(18): pv1_power (W) — only used for live power; daily comes from
+        // IR(17) (now the primary per-string source).
+        input_data[18] = solar * 10; // arbitrary live power proportional to solar
+        input_data[25] = export; // IR(25): export_today (/10 kWh)
+        input_data[26] = import; // IR(26): import_today
+        input_data[35] = 0; // IR(35): e_ac_charge_today (unused in new formula)
+        input_data[36] = charge; // IR(36): e_battery_charge_today
+        input_data[37] = discharge; // IR(37): e_battery_discharge_today
+        // IR(17): e_pv1_generation_today — primary per-string source for solar_today.
+        input_data[17] = solar;
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x2101; // PolarHybrid (no ARM refinement)
+        vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", input_data),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", vec![0; 60]),
+        ]
+    }
+
+    #[test]
+    fn home_energy_today_no_battery_collapses_to_ge_formula() {
+        // No battery → charge=0, discharge=0 → formula reduces to
+        // solar + import - export, matching the GE app's pre-battery term.
+        let blocks = single_phase_blocks_for_consumption(20, 50, 10, 0, 0);
+        let snap = decode_snapshot(&blocks);
+        // solar(2.0) + import(5.0) + discharge(0) - export(1.0) - charge(0) = 6.0
+        assert!((snap.home_energy_today_kwh - 6.0).abs() < 0.01);
+        assert!((snap.today_consumption_kwh - 6.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn home_energy_today_ac_coupled_battery_user_scenario() {
+        // User's real AC coupled + battery scenario:
+        // solar=2, import=11.5, export=1.3 (all /10 in IR(25/26) so 20/115/13)
+        // Plus battery: charge=120 (12 kWh grid-to-battery), discharge=80 (8 kWh to home).
+        // consumption = 2 + 11.5 + 8 - 1.3 - 12 = 8.2 kWh.
+        let blocks = single_phase_blocks_for_consumption(20, 115, 13, 120, 80);
+        let snap = decode_snapshot(&blocks);
+        assert!((snap.today_solar_kwh - 2.0).abs() < 0.01);
+        assert!((snap.today_import_kwh - 11.5).abs() < 0.01);
+        assert!((snap.today_export_kwh - 1.3).abs() < 0.01);
+        assert!((snap.today_charge_kwh - 12.0).abs() < 0.01);
+        assert!((snap.today_discharge_kwh - 8.0).abs() < 0.01);
+        assert!(
+            (snap.home_energy_today_kwh - 8.2).abs() < 0.01,
+            "consumption must include battery throughput, got {}",
+            snap.home_energy_today_kwh
+        );
+    }
+
+    #[test]
+    fn home_energy_today_battery_heavy_charge_does_not_starve_consumption() {
+        // Battery charged a lot more than it discharged (typical overnight).
+        // Net: most of the home's consumption came from grid imports
+        // rather than from battery discharge.
+        let blocks = single_phase_blocks_for_consumption(10, 30, 0, 50, 10);
+        let snap = decode_snapshot(&blocks);
+        // solar(1.0) + import(3.0) + discharge(1.0) - export(0) - charge(5.0) = 0
+        assert!(
+            snap.home_energy_today_kwh >= 0.0,
+            "clamped to 0 (formula yields 0)"
+        );
+        assert!((snap.home_energy_today_kwh - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn home_energy_today_mirrors_today_consumption_kwh() {
+        // For single-phase both fields must be identical — the user-facing
+        // consumption display reads home_energy_today_kwh and should match
+        // the existing today_consumption_kwh value.
+        let blocks = single_phase_blocks_for_consumption(30, 20, 5, 15, 25);
+        let snap = decode_snapshot(&blocks);
+        // solar(3.0) + import(2.0) + discharge(2.5) - export(0.5) - charge(1.5) = 5.5
+        assert!((snap.today_consumption_kwh - 5.5).abs() < 0.01);
+        assert!((snap.home_energy_today_kwh - 5.5).abs() < 0.01);
+        assert_eq!(snap.today_consumption_kwh, snap.home_energy_today_kwh);
+    }
+
+    #[test]
+    fn home_energy_today_does_not_reset_with_home_power() {
+        // The previous integration-based approach got stuck at 0 when
+        // home_power was momentarily zero. The register-derived formula
+        // has no such failure mode — it always computes from registers.
+        let blocks = single_phase_blocks_for_consumption(15, 40, 8, 20, 5);
+        let snap = decode_snapshot(&blocks);
+        // solar(1.5) + import(4.0) + discharge(0.5) - export(0.8) - charge(2.0) = 3.2
+        assert!(
+            snap.home_energy_today_kwh > 0.0,
+            "must never be 0 when registers report valid activity, got {}",
+            snap.home_energy_today_kwh
+        );
+        assert!((snap.home_energy_today_kwh - 3.2).abs() < 0.01);
     }
 }
