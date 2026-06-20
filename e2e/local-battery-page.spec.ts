@@ -100,16 +100,17 @@ test.describe('Battery Page - Stored Energy', () => {
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
     // The battery panel shows Charged Today / Discharged Today values
-    await expect(page.locator('text=Charged Today')).toBeVisible({ timeout: 5_000 });
+    // Use exact: true to avoid the substring matching 'Discharged Today'.
+    await expect(page.getByText('Charged Today', { exact: true })).toBeVisible({ timeout: 5_000 });
   });
 
   test('should show a SOC ring', async ({ page }) => {
     await page.goto('/#/battery');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    // SOC ring shows battery charge level
-    const socValue = page.locator('text=75%');
-    await expect(socValue).toBeVisible({ timeout: 5_000 });
+    // SOC ring shows battery charge level — use the bold 2xl ring label,
+    // not any of the per-module SOC labels that share the same text.
+    await expect(page.locator('span.text-2xl', { hasText: '75%' })).toBeVisible({ timeout: 5_000 });
   });
 });
 
@@ -126,18 +127,22 @@ test.describe('Battery Page - Modules', () => {
     await page.goto('/#/battery');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    await expect(page.locator('text=/Module #\\d/').first()).toBeVisible({ timeout: 5_000 });
+    // Each module renders as a button containing "Module" + "#N" in
+    // separate divs (the "#N" is the index label).
+    const moduleEntries = page.locator('button:has-text("Module")');
+    await expect(moduleEntries.first()).toBeVisible({ timeout: 5_000 });
+    expect(await moduleEntries.count()).toBeGreaterThanOrEqual(2);
   });
 
   test('should expand module details on click', async ({ page }) => {
     await page.goto('/#/battery');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    // Click on first module to expand
-    await page.locator('text=/Module #\\d/').first().click();
+    // Click on first module button to expand.
+    await page.locator('button:has-text("Module")').first().click();
 
-    // Should show detailed fields after expansion
-    await expect(page.locator('text=/Serial|Cells|Cycle|BMS/').first()).toBeVisible({ timeout: 5_000 });
+    // Should show detailed fields after expansion (Serial, Cycle, etc.).
+    await expect(page.getByText('Serial', { exact: true })).toBeVisible({ timeout: 5_000 });
   });
 
   test('should show SOC and Voltage in module summary', async ({ page }) => {
@@ -154,14 +159,15 @@ test.describe('Battery Page - Modules', () => {
     await page.goto('/#/battery');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    await page.locator('text=/Module #\\d/').first().click();
+    // Click first module button to expand.
+    await page.locator('button:has-text("Module")').first().click();
 
     // Wait for expanded content
     await page.waitForTimeout(1000);
 
-    // Should show either cell voltage bars or "No cell data" text
-    const cellContent = page.locator('text=/Cell|cell voltage|No cell/');
-    await expect(cellContent.first()).toBeVisible({ timeout: 5_000 });
+    // Should show the cell voltage chart heading after expansion.
+    // Use exact match to avoid matching the per-cell row text.
+    await expect(page.getByText('Cell Voltages', { exact: true })).toBeVisible({ timeout: 5_000 });
   });
 });
 

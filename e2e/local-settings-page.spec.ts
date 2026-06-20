@@ -10,14 +10,14 @@ import { test, expect } from './local-fixture.js';
 test.describe('Settings Page - Loading', () => {
   test('should load settings page', async ({ page }) => {
     await page.goto('/#/settings');
-    await expect(page.locator('text=Connection')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole('heading', { name: 'Inverter Connection' })).toBeVisible({ timeout: 10_000 });
   });
 });
 
 test.describe('Settings Page - Connection', () => {
   test('should show Connection heading', async ({ page }) => {
     await page.goto('/#/settings');
-    await expect(page.locator('text=Connection')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole('heading', { name: 'Inverter Connection' })).toBeVisible({ timeout: 10_000 });
   });
 
   test('should show connection state', async ({ page }) => {
@@ -44,7 +44,12 @@ test.describe('Settings Page - Connection', () => {
 
   test('should show Connect button', async ({ page }) => {
     await page.goto('/#/settings');
-    await expect(page.locator('text=Connect')).toBeVisible({ timeout: 10_000 });
+    // Use role=button with exact name — plain `text=Connect` matches
+    // 6 elements (the button, the "Inverter Connection" heading,
+    // helper text mentioning "Connect a GivEnergy EV Charger", etc).
+    await expect(
+      page.getByRole('button', { name: 'Connect', exact: true })
+    ).toBeVisible({ timeout: 10_000 });
   });
 
   test('should show Scan Network button', async ({ page }) => {
@@ -178,14 +183,18 @@ test.describe('Settings Page - Developer', () => {
     await page.goto('/#/settings');
     await expect(page.locator('text=Developer Mode')).toBeVisible({ timeout: 10_000 });
 
-    // Click the toggle
-    // The toggle is a button near the Developer Mode text
-    const section = page.locator('section', { hasText: 'Developer Mode' }).first();
-    const toggle = section.locator('div.cursor-pointer').first();
+    // The toggle is the only `div.cursor-pointer` inside the Developer
+    // section (the row containing the "Developer Mode" label).
+    const developerSection = page.locator('section').filter({ hasText: 'Developer Mode' }).first();
+    const toggle = developerSection.locator('div.cursor-pointer').first();
     await toggle.click();
 
-    // DevTools section should appear
-    await expect(page.locator('text=/Test Cold Battery|DevTools/')).toBeVisible({ timeout: 5_000 });
+    // The Modbus port input (title="Inverter Modbus port") becomes visible
+    // when developer mode is enabled (it lives in the Inverter Connection
+    // section and is gated on `developerMode`).
+    await expect(
+      page.locator('input[title="Inverter Modbus port"]')
+    ).toBeVisible({ timeout: 5_000 });
   });
 });
 

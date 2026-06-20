@@ -29,7 +29,8 @@ test.describe('Status Page - Energy Flow Diagram', () => {
     await page.goto('/');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    await expect(page.locator('text=INVERTER')).toBeVisible({ timeout: 5_000 });
+    // EnergyFlowDiagram renders the central hub with label "Inverter".
+    await expect(page.getByText('Inverter', { exact: true }).first()).toBeVisible({ timeout: 5_000 });
   });
 
   test('should show Solar node with power value', async ({ page }) => {
@@ -170,8 +171,9 @@ test.describe('Status Page - Polling State', () => {
     await page.goto('/');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    // The snapshot is loaded, so the status page should show energy data
-    await expect(page.locator('text=Solar')).toBeVisible({ timeout: 5_000 });
+    // The snapshot is loaded, so the status page should show energy data.
+    // The SummaryTiles "Solar Today" tile is the most reliable indicator.
+    await expect(page.getByText('Solar Today', { exact: true })).toBeVisible({ timeout: 5_000 });
   });
 });
 

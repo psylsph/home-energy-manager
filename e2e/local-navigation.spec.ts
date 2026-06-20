@@ -58,7 +58,9 @@ test.describe('Connection Indicator', () => {
 
   test('should show connected host', async ({ page }) => {
     await page.goto('/');
-    await expect(page.locator('text=127.0.0.1')).toBeVisible({ timeout: 15_000 });
+    // The ConnectionIndicator in the header renders `Connected · <host>`
+    // when connected, so look for "Connected" and the IP suffix together.
+    await expect(page.getByText(/Connected · 127\.0\.0\.1/, { exact: false })).toBeVisible({ timeout: 15_000 });
   });
 
   test('API status endpoint returns connected', async ({ baseUrl }) => {

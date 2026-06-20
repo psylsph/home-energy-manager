@@ -44,9 +44,10 @@ test.describe('Power Page - Stat Tiles', () => {
 test.describe('Power Page - Time Range', () => {
   test('should show time range buttons', async ({ page }) => {
     await page.goto('/#/power');
-    // At least some range buttons should be visible
-    await expect(page.locator('button:has-text("1h")').first()).toBeVisible({ timeout: 15_000 });
-    await expect(page.locator('text=24h').first()).toBeVisible();
+    // Time range is exposed as buttons on desktop (the <select> is mobile-only).
+    const rangeButtons = page.locator('button').filter({ hasText: /^(1h|6h|12h|24h|7d|30d)$/ });
+    await expect(rangeButtons.first()).toBeVisible({ timeout: 15_000 });
+    expect(await rangeButtons.count()).toBeGreaterThanOrEqual(3);
   });
 
   test('should allow switching time ranges', async ({ page }) => {

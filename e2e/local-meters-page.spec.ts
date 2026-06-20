@@ -16,12 +16,11 @@ test.describe('Meters Page - Loading', () => {
 test.describe('Meters Page - CT Configuration', () => {
   test('should show CT Clamp Configuration or "No meters" message', async ({ page }) => {
     await page.goto('/#/meters');
-
-    // Either shows config or "No external CT meters detected"
-    const configVisible = await page.locator('text=CT Clamp Configuration').isVisible().catch(() => false);
-    const noMetersVisible = await page.locator('text=/No.*meters|Connect to/').isVisible().catch(() => false);
-
-    expect(configVisible || noMetersVisible).toBe(true);
+    // Wait for the page to settle (poll loop produces snapshot, meters card
+    // and/or empty-state message then renders).
+    await expect(page.getByText('CT Clamp Configuration').or(
+      page.getByText(/No external CT meters detected|Connect to an inverter/)
+    )).toBeVisible({ timeout: 15_000 });
   });
 });
 

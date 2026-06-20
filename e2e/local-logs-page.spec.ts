@@ -46,11 +46,14 @@ test.describe('Logs Page - Controls', () => {
     await enableDeveloperMode(page);
     await page.goto('/#/logs');
 
-    await expect(page.locator('text=ERROR')).toBeVisible({ timeout: 10_000 });
-    await expect(page.locator('text=WARN')).toBeVisible();
-    await expect(page.locator('text=INFO')).toBeVisible();
-    await expect(page.locator('text=DEBUG')).toBeVisible();
-    await expect(page.locator('text=TRACE')).toBeVisible();
+    // Capture-level buttons (ERROR, WARN, INFO, DEBUG, TRACE) — but log
+    // entries also contain level labels, so use button role + exact match
+    // to disambiguate. There should be exactly one button per level.
+    for (const level of ['ERROR', 'WARN', 'INFO', 'DEBUG', 'TRACE']) {
+      await expect(
+        page.getByRole('button', { name: level, exact: true })
+      ).toHaveCount(1, { timeout: 10_000 });
+    }
   });
 
   test('should show filter input', async ({ page }) => {
