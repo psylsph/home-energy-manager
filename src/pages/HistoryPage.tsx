@@ -398,7 +398,9 @@ function ChartCard({ chart, data, range, domain, ticks }: {
             axisLine={false}
             domain={yDomain ?? chart.yDomain}
             tickFormatter={(v: number) =>
-              chart.unit === '£' ? `£${v.toFixed(2)}` : `${Math.round(v)}`
+              chart.unit === '£' ? `£${v.toFixed(2)}`
+                : chart.unit === 'kWh' ? `${v.toFixed(1)}`
+                : `${Math.round(v)}`
             }
           />
           <Tooltip
@@ -417,6 +419,7 @@ function ChartCard({ chart, data, range, domain, ticks }: {
             formatter={(value) => {
               const n = typeof value === 'number' ? value : 0;
               if (chart.unit === '£') return [`£${n.toFixed(2)}`, ''];
+              if (chart.unit === 'kWh') return [`${n.toFixed(1)} ${chart.unit}`, ''];
               return [`${Math.round(n)} ${chart.unit}`, ''];
             }}
           />
