@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.33.1] - 2026-06-20
+
+### Fixed
+
+- "Send Test Notification" button now activates when only ntfy is configured (no Telegram required)
+
 ## [0.33.0] - 2026-06-20
 
 ### Added
