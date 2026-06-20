@@ -342,7 +342,7 @@ impl HistoryDb {
             );
         } // end if !repair_done
 
-        tracing::warn!("History database opened at {}", path.display());
+        tracing::info!("History database opened at {}", path.display());
         Ok(Self {
             conn: Mutex::new(conn),
         })
