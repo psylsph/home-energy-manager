@@ -814,6 +814,37 @@ pub(crate) fn sanitize_snapshot(
         }
     }
 
+    // -- Cumulative home-energy integration --
+    //
+    // Integrate `home_power` over time to produce a properly monotonic
+    // `home_energy_today_kwh` metric. The previous formula-derived
+    // `today_consumption_kwh` (solar + import - export - ac_charge) can
+    // legitimately decrease when the battery keeps AC-charging from the grid
+    // after solar stops, which the sanitizer was wrongly flagging as register
+    // corruption (issue #99 follow-up).
+    //
+    // Trapezoidal rule: each tick adds (prev_home + cur_home) / 2 * Δh / 1000
+    // to the running total. Resets to 0 on long gaps (> 1h) to handle midnight
+    // rollover and reconnects cleanly.
+    if let Some(p) = prev {
+        let elapsed_secs = (snap.timestamp - p.timestamp).max(0) as f32;
+        let elapsed_hours = elapsed_secs / 3600.0;
+        // Long gap → assume midnight rollover or restart, start fresh.
+        if elapsed_hours > 1.0 {
+            snap.home_energy_today_kwh = 0.0;
+        } else if snap.home_power > 0 && p.home_power > 0 {
+            // Normal integration tick (trapezoidal).
+            let avg_w = (snap.home_power + p.home_power) as f32 / 2.0;
+            let delta_kwh = avg_w * elapsed_hours / 1000.0;
+            snap.home_energy_today_kwh =
+                (p.home_energy_today_kwh + delta_kwh).max(p.home_energy_today_kwh);
+        } else {
+            // Zero load on either end → no accumulation this tick; keep prev.
+            snap.home_energy_today_kwh = p.home_energy_today_kwh;
+        }
+    }
+    // No prev → field stays at whatever the decoder initialised (0.0).
+
     // Inverter temperature: reject physically impossible values.
     // A heatsink >100°C means hardware damage is imminent; anything above
     // 80°C is unusual. Raw register corruption can produce values like 239°C.
@@ -3601,5 +3632,343 @@ mod tests {
         );
         assert_eq!(snap.discharge_slots[0].start_hour, 23);
         assert_eq!(snap.discharge_slots[0].end_hour, 1);
+    }
+
+    // ===================================================================
+    // home_energy_today_kwh integration tests
+    //
+    // `home_energy_today_kwh` is the new properly-integrated cumulative
+    // consumption metric. It accumulates `home_power * elapsed_time` from the
+    // previous snapshot, replacing the misleading `today_consumption_kwh`
+    // formula (solar + import - export - ac_charge) which can legitimately
+    // decrease when the battery continues AC-charging from the grid after
+    // solar stops.
+    //
+    // These tests pin the integration semantics. The implementation lives
+    // in `sanitize_snapshot` and runs AFTER the home_power field has been
+    // sanitized.
+    // ===================================================================
+
+    /// Helper: build a snapshot for integration tests.
+    fn make_snap_for_integration(
+        ts: i64,
+        home_power: i32,
+        device_type: DeviceType,
+        home_energy: f32,
+    ) -> InverterSnapshot {
+        InverterSnapshot {
+            timestamp: ts,
+            device_type,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            battery_reserve: 4,
+            home_power,
+            home_energy_today_kwh: home_energy,
+            ..Default::default()
+        }
+    }
+
+    fn integration_counts() -> (DeltaCorrectionCounts, ConsecutiveSuspectCounts) {
+        (
+            DeltaCorrectionCounts::default(),
+            ConsecutiveSuspectCounts::default(),
+        )
+    }
+
+    #[test]
+    fn home_energy_today_first_reading_starts_at_zero() {
+        // No prev → integration is impossible. Stays at 0.
+        let mut snap = make_snap_for_integration(100, 1000, DeviceType::PolarHybrid, 0.0);
+        let (mut delta, mut suspect) = integration_counts();
+        let mut pending_mode = None;
+        let _ = sanitize_snapshot(
+            &mut snap,
+            None,
+            false,
+            &mut pending_mode,
+            &mut delta,
+            &mut suspect,
+        );
+        assert_eq!(
+            snap.home_energy_today_kwh, 0.0,
+            "first reading must start at 0 — no prev to integrate from"
+        );
+    }
+
+    #[test]
+    fn home_energy_today_constant_load_integrates_linearly() {
+        // 1000 W for 1 hour → 1.0 kWh.
+        let prev = make_snap_for_integration(0, 1000, DeviceType::PolarHybrid, 0.0);
+        let mut snap = make_snap_for_integration(3600, 1000, DeviceType::PolarHybrid, 0.0);
+        let (mut delta, mut suspect) = integration_counts();
+        let mut pending_mode = None;
+        let _ = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta,
+            &mut suspect,
+        );
+        assert!(
+            (snap.home_energy_today_kwh - 1.0).abs() < 0.001,
+            "1000W for 1h must integrate to 1.0 kWh, got {}",
+            snap.home_energy_today_kwh
+        );
+    }
+
+    #[test]
+    fn home_energy_today_variable_load_uses_trapezoidal() {
+        // prev 500 W at t=0, snap 1500 W at t=1h → trapezoidal:
+        // (500 + 1500) / 2 * 1h = 1.0 kWh.
+        let prev = make_snap_for_integration(0, 500, DeviceType::PolarHybrid, 0.0);
+        let mut snap = make_snap_for_integration(3600, 1500, DeviceType::PolarHybrid, 0.0);
+        let (mut delta, mut suspect) = integration_counts();
+        let mut pending_mode = None;
+        let _ = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta,
+            &mut suspect,
+        );
+        assert!(
+            (snap.home_energy_today_kwh - 1.0).abs() < 0.001,
+            "trapezoidal 500→1500 W over 1h must integrate to 1.0 kWh, got {}",
+            snap.home_energy_today_kwh
+        );
+    }
+
+    #[test]
+    fn home_energy_today_poll_interval_5s_is_sub_kwh() {
+        // Normal 5s polling: 1000 W → 5000/3600/1000 = 0.00139 kWh per poll.
+        let prev = make_snap_for_integration(0, 1000, DeviceType::PolarHybrid, 5.0);
+        let mut snap = make_snap_for_integration(5, 1000, DeviceType::PolarHybrid, 5.0);
+        let (mut delta, mut suspect) = integration_counts();
+        let mut pending_mode = None;
+        let _ = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta,
+            &mut suspect,
+        );
+        let delta_kwh = snap.home_energy_today_kwh - prev.home_energy_today_kwh;
+        assert!(
+            (delta_kwh - 1000.0 * 5.0 / 3600.0 / 1000.0).abs() < 1e-6,
+            "5s tick at 1000W must accumulate ~0.00139 kWh, got {}",
+            delta_kwh
+        );
+    }
+
+    #[test]
+    fn home_energy_today_zero_load_does_not_accumulate() {
+        // No load on either end → skip integration, keep prev total.
+        let prev = make_snap_for_integration(0, 0, DeviceType::PolarHybrid, 4.5);
+        let mut snap = make_snap_for_integration(3600, 0, DeviceType::PolarHybrid, 0.0);
+        let (mut delta, mut suspect) = integration_counts();
+        let mut pending_mode = None;
+        let _ = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta,
+            &mut suspect,
+        );
+        assert_eq!(
+            snap.home_energy_today_kwh, 4.5,
+            "zero-load must NOT accumulate — keep prev total"
+        );
+    }
+
+    #[test]
+    fn home_energy_today_load_drops_to_zero_does_not_subtract() {
+        // prev 2000W energy=2; snap 0W t+1h → energy stays at 2.0
+        // (no negative accumulation; zero load on snap end means no trapezoidal area).
+        let prev = make_snap_for_integration(0, 2000, DeviceType::PolarHybrid, 2.0);
+        let mut snap = make_snap_for_integration(3600, 0, DeviceType::PolarHybrid, 0.0);
+        let (mut delta, mut suspect) = integration_counts();
+        let mut pending_mode = None;
+        let _ = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta,
+            &mut suspect,
+        );
+        assert_eq!(
+            snap.home_energy_today_kwh, 2.0,
+            "load dropping to zero must not subtract energy"
+        );
+    }
+
+    #[test]
+    fn home_energy_today_long_gap_resets_to_zero() {
+        // 2-hour gap → assume restart or midnight rollover. Start fresh at 0.
+        // After the long gap, current home=1000W for 1h would normally add 1.0 kWh,
+        // but since prev is reset to 0 we start from scratch.
+        let prev = make_snap_for_integration(0, 1000, DeviceType::PolarHybrid, 15.0);
+        let mut snap = make_snap_for_integration(7200, 1000, DeviceType::PolarHybrid, 0.0);
+        let (mut delta, mut suspect) = integration_counts();
+        let mut pending_mode = None;
+        let _ = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta,
+            &mut suspect,
+        );
+        assert_eq!(
+            snap.home_energy_today_kwh, 0.0,
+            "2h gap must reset the running total (midnight / restart)"
+        );
+    }
+
+    #[test]
+    fn home_energy_today_short_gap_accumulates_normally() {
+        // 60s gap is normal — should accumulate.
+        let prev = make_snap_for_integration(0, 2000, DeviceType::PolarHybrid, 1.0);
+        let mut snap = make_snap_for_integration(60, 2000, DeviceType::PolarHybrid, 0.0);
+        let (mut delta, mut suspect) = integration_counts();
+        let mut pending_mode = None;
+        let _ = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta,
+            &mut suspect,
+        );
+        // (2000 + 2000) / 2 * 60 / 3600 / 1000 = 0.0333 kWh added to 1.0 → 1.0333
+        assert!(
+            (snap.home_energy_today_kwh - 1.0333).abs() < 0.001,
+            "60s gap at 2000W must add ~0.0333 kWh, got {}",
+            snap.home_energy_today_kwh
+        );
+    }
+
+    #[test]
+    fn home_energy_today_negative_home_power_does_not_subtract() {
+        // Defensive: home_power should never be negative, but if it is, don't subtract.
+        let prev = make_snap_for_integration(0, 1000, DeviceType::PolarHybrid, 1.5);
+        let mut snap = make_snap_for_integration(3600, -1000, DeviceType::PolarHybrid, 0.0);
+        let (mut delta, mut suspect) = integration_counts();
+        let mut pending_mode = None;
+        let _ = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta,
+            &mut suspect,
+        );
+        // snap.home_power < 0 → no accumulation, keep prev
+        assert_eq!(
+            snap.home_energy_today_kwh, 1.5,
+            "negative home_power must not subtract energy"
+        );
+    }
+
+    #[test]
+    fn home_energy_today_backwards_timestamp_does_not_subtract() {
+        // Defensive: timestamp going backwards (e.g., clock skew) must not produce
+        // a negative delta that would subtract from the running total.
+        let prev = make_snap_for_integration(3600, 1000, DeviceType::PolarHybrid, 2.5);
+        let mut snap = make_snap_for_integration(100, 1000, DeviceType::PolarHybrid, 0.0);
+        let (mut delta, mut suspect) = integration_counts();
+        let mut pending_mode = None;
+        let _ = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta,
+            &mut suspect,
+        );
+        assert_eq!(
+            snap.home_energy_today_kwh, 2.5,
+            "backwards timestamp must keep prev total"
+        );
+    }
+
+    #[test]
+    fn home_energy_today_three_phase_direct_home_power_integrates() {
+        // Three-phase inverters expose direct home_power via IR(1090).
+        // Integration must work for them too.
+        let prev = make_snap_for_integration(0, 5000, DeviceType::ThreePhase, 0.0);
+        let mut snap = make_snap_for_integration(3600, 5000, DeviceType::ThreePhase, 0.0);
+        let (mut delta, mut suspect) = integration_counts();
+        let mut pending_mode = None;
+        let _ = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta,
+            &mut suspect,
+        );
+        assert!(
+            (snap.home_energy_today_kwh - 5.0).abs() < 0.001,
+            "5kW for 1h on three-phase must integrate to 5.0 kWh"
+        );
+    }
+
+    #[test]
+    fn home_energy_today_ac_coupled_derived_home_power_integrates() {
+        // AC coupled single-phase has home_power derived from the balance
+        // formula. Integration must work even when home_power is derived.
+        let prev = make_snap_for_integration(0, 800, DeviceType::ACCoupled, 0.0);
+        let mut snap = make_snap_for_integration(3600, 1200, DeviceType::ACCoupled, 0.0);
+        let (mut delta, mut suspect) = integration_counts();
+        let mut pending_mode = None;
+        let _ = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta,
+            &mut suspect,
+        );
+        // Trapezoidal: (800 + 1200) / 2 * 1h = 1.0 kWh
+        assert!(
+            (snap.home_energy_today_kwh - 1.0).abs() < 0.001,
+            "AC coupled derived home_power must integrate via trapezoidal"
+        );
+    }
+
+    #[test]
+    fn home_energy_today_accumulates_across_many_polls() {
+        // 12 polls at 5s each, 1000W constant, starting from 0.
+        // Expected: 12 * 1000 * 5 / 3600 / 1000 = 0.01667 kWh
+        let mut prev = make_snap_for_integration(0, 1000, DeviceType::PolarHybrid, 0.0);
+        let mut final_snap = prev.clone();
+        let (mut delta, mut suspect) = integration_counts();
+        for i in 1..=12 {
+            let mut snap = make_snap_for_integration(i * 5, 1000, DeviceType::PolarHybrid, 0.0);
+            let mut pending_mode = None;
+            let _ = sanitize_snapshot(
+                &mut snap,
+                Some(&prev),
+                false,
+                &mut pending_mode,
+                &mut delta,
+                &mut suspect,
+            );
+            prev = snap.clone();
+            final_snap = snap;
+        }
+        let expected = 12.0 * 1000.0 * 5.0 / 3600.0 / 1000.0;
+        assert!(
+            (final_snap.home_energy_today_kwh - expected).abs() < 1e-6,
+            "12 polls of 5s @ 1000W should accumulate {}, got {}",
+            expected,
+            final_snap.home_energy_today_kwh
+        );
     }
 }

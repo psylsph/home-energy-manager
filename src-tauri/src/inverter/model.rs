@@ -709,7 +709,15 @@ pub struct InverterSnapshot {
     pub today_export_kwh: f32,
     pub today_charge_kwh: f32,
     pub today_discharge_kwh: f32,
+    /// Derived balance (solar + import - export - ac_charge). NOT a true
+    /// cumulative counter — can legitimately decrease when the battery
+    /// continues AC-charging from the grid after solar stops. Prefer
+    /// [`home_energy_today_kwh`] for user-facing consumption.
     pub today_consumption_kwh: f32,
+    /// Cumulative home energy consumption today (kWh), integrated from
+    /// [`home_power`] by the sanitizer. Always monotonic during the day;
+    /// resets to 0 on midnight rollover or a long poll gap.
+    pub home_energy_today_kwh: f32,
     /// Lifetime total import from grid (kWh).
     /// Single-phase: IR(32-33) e_grid_in_total (uint32 /10 kWh)
     /// Three-phase:  IR(1382-1383) e_import_total (uint32 /10 kWh)
