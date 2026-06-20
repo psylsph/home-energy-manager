@@ -826,21 +826,24 @@ pub(crate) fn sanitize_snapshot(
     // Trapezoidal rule: each tick adds (prev_home + cur_home) / 2 * Δh / 1000
     // to the running total. Resets to 0 on long gaps (> 1h) to handle midnight
     // rollover and reconnects cleanly.
+    //
+    // 0W readings are treated as legitimate zeroes (the home really had no
+    // load at that moment), not as missing data — a 0 endpoint simply halves
+    // the trapezoidal contribution. This matters because the FIRST prev after
+    // connect is often an empty (all-zero) snapshot that would otherwise block
+    // accumulation indefinitely.
     if let Some(p) = prev {
         let elapsed_secs = (snap.timestamp - p.timestamp).max(0) as f32;
         let elapsed_hours = elapsed_secs / 3600.0;
         // Long gap → assume midnight rollover or restart, start fresh.
         if elapsed_hours > 1.0 {
             snap.home_energy_today_kwh = 0.0;
-        } else if snap.home_power > 0 && p.home_power > 0 {
-            // Normal integration tick (trapezoidal).
-            let avg_w = (snap.home_power + p.home_power) as f32 / 2.0;
+        } else {
+            // Trapezoidal integration — 0W is a legitimate value, not missing.
+            let avg_w = (snap.home_power.max(0) + p.home_power.max(0)) as f32 / 2.0;
             let delta_kwh = avg_w * elapsed_hours / 1000.0;
             snap.home_energy_today_kwh =
                 (p.home_energy_today_kwh + delta_kwh).max(p.home_energy_today_kwh);
-        } else {
-            // Zero load on either end → no accumulation this tick; keep prev.
-            snap.home_energy_today_kwh = p.home_energy_today_kwh;
         }
     }
     // No prev → field stays at whatever the decoder initialised (0.0).
@@ -3787,8 +3790,9 @@ mod tests {
 
     #[test]
     fn home_energy_today_load_drops_to_zero_does_not_subtract() {
-        // prev 2000W energy=2; snap 0W t+1h → energy stays at 2.0
-        // (no negative accumulation; zero load on snap end means no trapezoidal area).
+        // prev 2000W energy=2; snap 0W t+1h → energy stays ≥ 2.0
+        // (no negative accumulation; zero load on snap end contributes half
+        // via trapezoidal: (2000+0)/2 * 1h = 1.0 kWh added).
         let prev = make_snap_for_integration(0, 2000, DeviceType::PolarHybrid, 2.0);
         let mut snap = make_snap_for_integration(3600, 0, DeviceType::PolarHybrid, 0.0);
         let (mut delta, mut suspect) = integration_counts();
@@ -3801,9 +3805,16 @@ mod tests {
             &mut delta,
             &mut suspect,
         );
-        assert_eq!(
-            snap.home_energy_today_kwh, 2.0,
-            "load dropping to zero must not subtract energy"
+        assert!(
+            snap.home_energy_today_kwh >= 2.0,
+            "load dropping to zero must not subtract energy (got {})",
+            snap.home_energy_today_kwh
+        );
+        // Trapezoidal: (2000 + 0) / 2 * 1h / 1000 = 1.0 kWh added
+        assert!(
+            (snap.home_energy_today_kwh - 3.0).abs() < 0.001,
+            "half-trapezoidal expected: 2.0 + 1.0 = 3.0 kWh, got {}",
+            snap.home_energy_today_kwh
         );
     }
 
@@ -3855,7 +3866,9 @@ mod tests {
 
     #[test]
     fn home_energy_today_negative_home_power_does_not_subtract() {
-        // Defensive: home_power should never be negative, but if it is, don't subtract.
+        // Defensive: home_power should never be negative, but if it is, the
+        // .max(0) clamp means it contributes 0 to the trapezoidal area
+        // rather than subtracting from the running total.
         let prev = make_snap_for_integration(0, 1000, DeviceType::PolarHybrid, 1.5);
         let mut snap = make_snap_for_integration(3600, -1000, DeviceType::PolarHybrid, 0.0);
         let (mut delta, mut suspect) = integration_counts();
@@ -3868,10 +3881,16 @@ mod tests {
             &mut delta,
             &mut suspect,
         );
-        // snap.home_power < 0 → no accumulation, keep prev
-        assert_eq!(
-            snap.home_energy_today_kwh, 1.5,
-            "negative home_power must not subtract energy"
+        // (1000 + max(-1000, 0)) / 2 * 1h / 1000 = 0.5 kWh added to 1.5 → 2.0
+        assert!(
+            snap.home_energy_today_kwh >= 1.5,
+            "negative home_power must not subtract energy (got {})",
+            snap.home_energy_today_kwh
+        );
+        assert!(
+            (snap.home_energy_today_kwh - 2.0).abs() < 0.001,
+            "clamped negative contributes half-trapezoidal: 1.5 + 0.5 = 2.0 kWh, got {}",
+            snap.home_energy_today_kwh
         );
     }
 
@@ -3969,6 +3988,71 @@ mod tests {
             "12 polls of 5s @ 1000W should accumulate {}, got {}",
             expected,
             final_snap.home_energy_today_kwh
+        );
+    }
+
+    #[test]
+    fn home_energy_today_accumulates_when_prev_home_power_was_zero() {
+        // Regression for the "stuck at 0" bug: when an AC-coupled inverter
+        // first connects, the initial prev snapshot may report home_power=0
+        // (solar=0, battery=0, grid=0 from the empty initial read). The next
+        // poll reports the real load (e.g. 5800W) but the AND condition on
+        // both endpoints being >0 skipped accumulation forever. The fix is
+        // to clamp negatives to 0 and let trapezoidal integrate even with one
+        // endpoint at 0.
+        let prev = make_snap_for_integration(0, 0, DeviceType::ACCoupled, 0.0);
+        let mut snap = make_snap_for_integration(3600, 5800, DeviceType::ACCoupled, 0.0);
+        let (mut delta, mut suspect) = integration_counts();
+        let mut pending_mode = None;
+        let _ = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta,
+            &mut suspect,
+        );
+        // Trapezoidal: (0 + 5800) / 2 * 1h / 1000 = 2.9 kWh
+        assert!(
+            snap.home_energy_today_kwh > 2.5,
+            "must accumulate even when prev.home_power was 0 (got {})",
+            snap.home_energy_today_kwh
+        );
+        assert!(
+            (snap.home_energy_today_kwh - 2.9).abs() < 0.001,
+            "expected 2.9 kWh from half-trapezoidal, got {}",
+            snap.home_energy_today_kwh
+        );
+    }
+
+    #[test]
+    fn home_energy_today_real_world_first_connect_scenario() {
+        // Real-world AC coupled + battery scenario the user reported:
+        // solar=0 (AC coupled has no DC strings), battery=+1500 (discharging),
+        // grid=-4300 (importing) → home_power = 0 + 1500 - (-4300) = 5800W.
+        // After a connect with prev=None, prev.home_power stays 0. The next
+        // poll needs to start accumulating from 0.
+        let prev = make_snap_for_integration(100, 0, DeviceType::ACCoupled, 0.0);
+        let mut snap = make_snap_for_integration(105, 5800, DeviceType::ACCoupled, 0.0);
+        let (mut delta, mut suspect) = integration_counts();
+        let mut pending_mode = None;
+        let _ = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta,
+            &mut suspect,
+        );
+        // 5s tick at 5800W (with prev at 0): (0 + 5800)/2 * 5/3600/1000 = 0.00403 kWh
+        assert!(
+            snap.home_energy_today_kwh > 0.0,
+            "must accumulate on the very first tick after connect (got 0)"
+        );
+        assert!(
+            snap.home_energy_today_kwh < 0.01,
+            "single 5s tick should accumulate < 0.01 kWh (got {})",
+            snap.home_energy_today_kwh
         );
     }
 }
