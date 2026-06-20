@@ -1,5 +1,5 @@
 import { useInverterStore } from '../store/useInverterStore';
-import { formatPower, formatVoltage, formatCurrent, formatTemp, formatEnergy, formatPercent, formatFrequency } from '../lib/format';
+import { formatPower, formatVoltage, formatCurrent, formatTemp, formatEnergy, formatPercent, formatFrequency, formatOperatingHours, formatBatteryMode } from '../lib/format';
 import ColdBatteryWarning from '../components/ColdBatteryWarning';
 
 export default function InverterPage() {
@@ -50,6 +50,21 @@ export default function InverterPage() {
           <span className="text-text-primary font-mono text-right">{s.battery_capacity_kwh.toFixed(1)} kWh</span>
           <span className="text-text-secondary">Inverter Time</span>
           <span className="text-text-primary font-mono text-right">{s.inverter_time || '—'}</span>
+          {/* IR(47-48) work_time_total — hidden when the inverter hasn't
+              populated the register (some firmware variants / first
+              connect window). The formatOperatingHours helper turns raw
+              hours into "3y 4m" style ages for a friendly read. */}
+          {s.operating_hours > 0 && (() => {
+            const age = formatOperatingHours(s.operating_hours);
+            return (
+              <>
+                <span className="text-text-secondary">Operating Hours</span>
+                <span className="text-text-primary font-mono text-right">
+                  {age ? `${age} (${s.operating_hours.toLocaleString()} h)` : '—'}
+                </span>
+              </>
+            );
+          })()}
         </div>
       </section>
 
@@ -208,7 +223,7 @@ export default function InverterPage() {
         <h2 className="text-text-primary font-semibold text-lg mb-4">Battery</h2>
         <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
           <span className="text-text-secondary">Battery Mode</span>
-          <span className="text-text-primary font-mono text-right">{s.battery_mode}</span>
+          <span className="text-text-primary font-mono text-right">{formatBatteryMode(s.battery_mode)}</span>
           <span className="text-text-secondary">SOC</span>
           <span className="text-text-primary font-mono text-right">{formatPercent(s.soc)}</span>
           <span className="text-text-secondary">Voltage</span>

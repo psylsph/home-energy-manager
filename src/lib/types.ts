@@ -43,6 +43,15 @@ export interface InverterSnapshot {
   total_charge_kwh: number;
   total_discharge_kwh: number;
   total_throughput_kwh: number;
+  /**
+   * Cumulative inverter operating hours (IR(47-48) `work_time_total`).
+   * Monotonically non-decreasing over the inverter's lifetime; the backend
+   * caps this at 876 000 hours (100 years) to reject uint32 rollovers and
+   * uninitialised-register garbage. Drives the "Inverter: 3y 4m old"
+   * display on the Inverter page. 0 means the inverter hasn't reported a
+   * value yet — UI hides the row in that case.
+   */
+  operating_hours: number;
   today_discharge_kwh: number;
   today_consumption_kwh: number;
   /**
