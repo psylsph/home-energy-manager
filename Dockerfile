@@ -51,8 +51,9 @@ FROM debian:bookworm-slim
 
 # Install runtime shared libraries needed by the Tauri binary
 # Even in headless mode, the binary links to GTK/WebKit/GStreamer/etc.
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    tzdata \
     libgtk-3-0 \
     libwebkit2gtk-4.1-0 \
     libjavascriptcoregtk-4.1-0 \

@@ -287,18 +287,17 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
     //   battery_power > 0 = discharging (power flowing OUT of battery)
     //   grid_power > 0 = exporting (power flowing OUT to grid, "p_grid_out")
     //
-    // Home consumption = solar - battery_charge - grid_export
-    //   = solar - battery_power - grid_power
-    // Three-phase models expose direct total load at IR(1089-1090); keep that
-    // authoritative value when present, otherwise fall back to the derived formula.
-    // The Gateway likewise exposes an authoritative, EV-excluding house load
-    // (`p_load`, IR 1618) — keep it when present.
-    let has_direct_home_power = (snap.device_type.needs_three_phase_input_blocks()
-        || snap.device_type.needs_gateway_input_blocks())
-        && snap.home_power > 0;
-    if !has_direct_home_power {
-        // home = solar + battery_discharge - grid_export
-        //      = solar + battery_power(+discharge) - grid_power(+export)
+    // Each telemetry path populates home_power directly from its authoritative
+    // register when available:
+    //   • single-phase: IR(42) p_load_demand (decode_input_0_59)
+    //   • three-phase:  IR(1089-1090) p_load_all (decode_input_1060_1119)
+    //   • gateway:      IR(1618) p_load, EV-excluding (decode_gateway_1600_1659)
+    // Fall back to the derived balance identity only when no direct reading is
+    // present (the register returned 0, or its block was not polled / failed
+    // this cycle). The derived formula is:
+    //   home = solar + battery_discharge - grid_export
+    //        = solar + battery_power(+discharge) - grid_power(+export)
+    if snap.home_power <= 0 {
         snap.home_power = snap.solar_power + snap.battery_power - snap.grid_power;
     }
 
@@ -461,6 +460,19 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.grid_voltage = get_reg(data, 5) as f32 * 0.1; // IR(5):  v_ac1 (/10 V)
     snap.grid_frequency = get_reg(data, 13) as f32 * 0.01; // IR(13): f_ac1 (/100 Hz)
 
+    // -- Home load --
+    // IR(42): p_load_demand — house consumption at the busbar, independently
+    // sensed by the inverter. This is a DIFFERENT physical node from the grid
+    // CT at IR(30) and the inverter AC terminal at IR(24). It is the
+    // authoritative single-phase home-power source used by givenergy-modbus
+    // (`p_load_demand`, inverter.py:667) and GivTCP (`Load_power =
+    // GEInv.p_load_demand`, read.py:1128). Empirically the derived identity
+    // solar+battery-grid does NOT equal this register in ~68% of samples
+    // (conversion-loss residual), so the direct reading is preferred and
+    // decode_snapshot only falls back to the derived formula when IR(42)
+    // returns 0. (HR(42) is a different register — enable_reversed_ct_clamp.)
+    snap.home_power = get_reg(data, 42) as i32; // IR(42): p_load_demand (W)
+
     // -- Fault / status detection --
     // Each condition uses its authoritative self-declared register rather than
     // the unverified IR(40) fault-word bits (whose layout givenergy-modbus marks
@@ -600,11 +612,12 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
 /// IR 180-181: Alternative battery lifetime energy counters.
 ///
 /// Per the givenergy-modbus reference, IR(180)/IR(181) carry alternative
-/// total battery discharge/charge energy (deci-kWh). These are the *only*
-/// two registers consumed from this range, so the poll block above reads
-/// `count=2` rather than a full 60-register window — IR(182-239) are absent
-/// from the authoritative givenergy-modbus register map for every model and
-/// are intentionally not fetched (see `STANDARD_POLL_BLOCKS`).
+/// *lifetime* total battery discharge/charge energy (deci-kWh). IR(182)
+/// and IR(183) carry alternative *daily* battery discharge/charge (also
+/// deci-kWh) and duplicate IR(37)/IR(36); this decoder does not consume
+/// them, so the poll block is trimmed to `count=2` — just the two
+/// lifetime registers actually read. See `STANDARD_POLL_BLOCKS` in
+/// `modbus/registers.rs`.
 fn decode_input_180_181(data: &[u16], snap: &mut InverterSnapshot) {
     // IR(180)/IR(181) are confirmed by givenergy-modbus as alternative
     // battery total energy counters (deci-kWh). `get_reg` is bounds-safe,
@@ -3667,6 +3680,45 @@ mod tests {
         assert_eq!(snap.battery_state, BatteryState::Charging);
         assert_eq!(snap.grid_power, 1500);
         assert_eq!(snap.home_power, 1200);
+    }
+
+    /// Helper: like single_phase_blocks_for_home_derivation but also sets
+    /// IR(42) p_load_demand to an explicit value, to exercise the primary
+    /// single-phase home-power source.
+    fn single_phase_blocks_with_ir42_load_demand(
+        solar: i32,
+        raw_p_battery: i16,
+        grid: i32,
+        ir42_load_demand: u16,
+    ) -> Vec<BlockRead> {
+        let mut blocks = single_phase_blocks_for_home_derivation(solar, raw_p_battery, grid);
+        // The first block is input_0_59 (see single_phase_blocks_for_home_derivation).
+        blocks[0].data[42] = ir42_load_demand; // IR(42): p_load_demand
+        blocks
+    }
+
+    #[test]
+    fn single_phase_home_power_reads_ir42_p_load_demand() {
+        // IR(42) p_load_demand is the authoritative single-phase house-load
+        // register (givenergy-modbus inverter.py:667, GivTCP read.py:1128).
+        // It must be preferred over the derived identity, which disagrees in
+        // ~68% of samples. Here IR(42)=2750 while the derived formula would
+        // give 3000 + 1000 - (-500) = 4500 — the direct reading wins.
+        let snap = decode_snapshot(&single_phase_blocks_with_ir42_load_demand(
+            3000, 1000, -500, 2750,
+        ));
+        assert_eq!(snap.home_power, 2750);
+    }
+
+    #[test]
+    fn single_phase_home_power_falls_back_to_derived_when_ir42_zero() {
+        // When IR(42) returns 0 (firmware quirk / not populated), decode must
+        // fall back to the derived balance identity rather than reporting 0.
+        // derived = 3000 + 1000 - (-500) = 4500
+        let snap = decode_snapshot(&single_phase_blocks_with_ir42_load_demand(
+            3000, 1000, -500, 0,
+        ));
+        assert_eq!(snap.home_power, 4500);
     }
 
     /// Helper: three-phase blocks with configurable p_battery_charge and

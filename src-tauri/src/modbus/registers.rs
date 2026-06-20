@@ -59,13 +59,13 @@ pub const STANDARD_POLL_BLOCKS: &[RegisterBlock] = &[
         name: "holding_60_119",
     },
     // Only IR(180)/IR(181) are consumed by the decoder (alternative battery
-    // lifetime discharge/charge totals). IR(182-239) are deliberately *not*
-    // read — they are absent from the authoritative givenergy-modbus register
-    // map for every model, so reading a full 60-register block here would
-    // pull 58 unverified registers across the dongle's TCP link for nothing.
-    // Reading count=2 trims ~58 registers (≈ one full Modbus round-trip incl.
-    // inter-request delay) off every single-phase poll cycle. See
-    // `decode_input_180_181` in `decoder.rs`.
+    // lifetime discharge/charge totals). IR(182)/IR(183) carry *alternative
+    // daily* battery charge/discharge (deci-kWh) and duplicate IR(36)/IR(37);
+    // this decoder does not consume them, so the block is trimmed to the
+    // two lifetime registers actually read. Reading count=2 trims ~58
+    // registers (≈ one full Modbus round-trip incl. inter-request delay)
+    // off every single-phase poll cycle. See `decode_input_180_181` in
+    // `decoder.rs`.
     RegisterBlock {
         start: 180,
         count: 2,
@@ -146,9 +146,12 @@ pub const IR_TODAY_DISCHARGE_ENERGY: u16 = 37;
 pub const IR_INVERTER_TEMPERATURE: u16 = 41;
 /// Battery voltage in 0.01 V units.
 pub const IR_BATTERY_VOLTAGE: u16 = 50;
-/// Battery current in 0.01 A units, signed.
+/// Battery current in 0.01 A units, signed
+/// (positive = discharging, negative = charging) — matches the raw wire
+/// convention used by givenergy-modbus and GivTCP.
 pub const IR_BATTERY_CURRENT: u16 = 51;
-/// Battery power in watts, signed (positive = charging).
+/// Battery power in watts, signed (positive = discharging, negative = charging)
+/// — matches the raw wire convention used by givenergy-modbus and GivTCP.
 pub const IR_BATTERY_POWER: u16 = 52;
 /// Battery temperature in 0.1 °C units.
 pub const IR_BATTERY_TEMPERATURE: u16 = 56;

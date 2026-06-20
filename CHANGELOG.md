@@ -2,28 +2,84 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.31.9] - 2026-06-20
+## [0.32.0] - 2026-06-20
+
+### Fixed
+
+- **Battery power sign convention now matches the GivEnergy app and the
+  givenergy-modbus / GivTCP reference libraries.** `battery_power` is now
+  **positive when discharging** and negative when charging (previously the
+  opposite). Raw register values from IR(52) (single-phase), IR(1136-1139)
+  (three-phase) and IR(1702) (`p_aio_total`, Gateway) are mapped verbatim
+  onto `battery_power` instead of being negated. Internal derivation
+  formulas, `BatteryState`, frontend display signs, history charting and the
+  Power page integration have been flipped consistently. This fixes the
+  inverted battery power reported by Gateway users (issue #78); display
+  values for already-working inverters are unchanged.
+
+- **Single-phase home consumption is now read directly from the inverter
+  instead of being derived.** `home_power` now uses IR(42) `p_load_demand`
+  (the inverter's independently-sensed busbar load) as its primary source,
+  falling back to the `solar + battery − grid` balance only when that
+  register returns 0. The derived identity disagreed with the measured load
+  in roughly two-thirds of poll cycles (a real conversion-loss residual), so
+  the Status page's radial energy-flow diagram now agrees with GivTCP and the
+  GivEnergy app. This brings single-phase in line with the three-phase
+  (IR 1089-1090 `p_load_all`) and Gateway (IR 1618 `p_load`) paths, which
+  already read authoritative load registers.
+
+- **"PV Energy Today" no longer over-reports on single-phase inverters.**
+  The daily solar total now prefers the per-string registers IR(17)/IR(19)
+  over IR(44), giving a value 5–10% lower that matches the GivEnergy app and
+  other third-party monitors. A one-time history-database repair also
+  reconstructs corrupted or stuck cumulative `today_solar_kwh` rows from the
+  recorded `solar_power` samples; the database is backed up first and the
+  repair runs only once (gated by a flag in the `meta` table).
+
+- **Spurious PV2 readings on single-string inverters are suppressed.** When
+  no second string is fitted, PV2 voltage and current are both zero and the
+  PV2 power field is now forced to zero so leftover register garbage cannot
+  inflate the solar total.
+
+- **Export Paused mode now actually pauses discharge.** Engaging the
+  "Paused" battery mode now writes `enable_discharge = 0` and clears the
+  discharge slots, instead of leaving discharge running.
+
+- **Alert configuration is now restored on startup.** Persisted alert
+  thresholds and notification settings are applied to the live alert engine
+  during startup, so alerts fire immediately after launch instead of only
+  after the settings were next saved.
+
+### Added
+
+- **Dedicated `home_energy_today_kwh` field** for home consumption energy.
+  The Status page "Consumption" tile and the History "Load Energy Today"
+  chart now use this field. A one-time database backfill copies legacy
+  `today_consumption_kwh` values across so existing historic chart data is
+  preserved. The conditional "(excl. EV)" suffix has been dropped from the
+  Consumption tile label.
+
+- **Docker "Today" chart no longer starts at 01:00 during BST.** In
+  headless/Docker mode the history "Today" window is computed server-side
+  with `chrono::Local`, but the `debian:bookworm-slim` image has no timezone
+  data, so it fell back to UTC and the day boundary landed at 01:00 local
+  time in zones east of UTC (e.g. BST). The image now ships `tzdata`, and
+  `docker-compose.yml` mounts the host's `/etc/localtime` read-only so the
+  container inherits the host's timezone without needing `TZ` set at all.
+  An optional `TZ` override (commented in the compose file) takes precedence
+  when the host has no `/etc/localtime` or a different zone is desired.
 
 ### Changed
 
-- **Battery power sign convention now matches GivEnergy / givenergy-modbus /
-  GivTCP references.** `battery_power` is **positive when discharging** and
-  negative when charging (previously the opposite). The raw register values
-  from IR(52) (single-phase), IR(1136-1139) (three-phase) and IR(1702)
-  (`p_aio_total`, Gateway) are now mapped verbatim onto `battery_power`
-  instead of being negated. Internal derivation formulas, `BatteryState`,
-  frontend display signs, history charting and the Power page integration
-  have been flipped consistently. End-to-end display values for currently-
-  working inverters are unchanged — only the internal representation and the
-  label sign now match the GivEnergy app and the reference libraries. This
-  also fixes the inverted battery power reported by Gateway users (issue #78).
+- History charts with kWh units now show one decimal place on the Y-axis and
+  tooltips instead of rounding to a whole number.
 
 ### Tests
 
-- Added 13 dedicated sign-convention tests covering every code path that
-  participates in the convention (single-phase, three-phase, Gateway, derived
-  home/grid formulas, invalid-version guard). Together with the updated
-  existing tests they form a complete net for any future regression.
+- Added dedicated sign-convention tests covering every code path that
+  participates in the battery-power convention (single-phase, three-phase,
+  Gateway, derived home/grid formulas, invalid-version guard), plus tests
+  for the new IR(42) home-power source and its zero-value fallback.
 
 ## [0.31.8] - 2026-06-19
 

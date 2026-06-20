@@ -206,6 +206,47 @@ impl HistoryDb {
         // formula value for display).
         let _ = conn.execute_batch("ALTER TABLE readings ADD COLUMN home_energy_today_kwh REAL");
 
+        // One-time backfill: populate home_energy_today_kwh for historic rows
+        // recorded before this column existed. Commit 5e1da32 renamed the
+        // History "Load Energy Today" chart from today_consumption_kwh to
+        // home_energy_today_kwh. Without this, the chart silently shows no
+        // historic data because the old rows never carried the new field.
+        //
+        // The two fields derive from the identical register formula (see
+        // decoder.rs `decode_input_0_59`), so the legacy value is a faithful
+        // backfill. The match clause covers both legacy shapes observed in
+        // the wild: rows from before the column existed are NULL after the
+        // ALTER above, while rows written by the brief integration-based
+        // decoder (commits fddc40a → 7a7ec1b) carry a 0 from the per-session
+        // accumulator reset. The `today_consumption_kwh > 0` guard means we
+        // only ever touch rows that genuinely carry consumption data, so
+        // legitimate midnight-reset rows (where both fields are 0) are left
+        // alone. Gated by a meta flag so it runs once per database.
+        let backfill_done: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'home_energy_backfill_done' AND value = '1')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !backfill_done {
+            match conn.execute(
+                "UPDATE readings SET home_energy_today_kwh = today_consumption_kwh \
+                 WHERE today_consumption_kwh > 0 \
+                   AND (home_energy_today_kwh IS NULL OR home_energy_today_kwh = 0)",
+                [],
+            ) {
+                Ok(n) if n > 0 => {
+                    tracing::info!("Backfilled home_energy_today_kwh for {n} historic rows");
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("home_energy_today_kwh backfill failed: {e}"),
+            }
+            let _ = conn.execute_batch(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('home_energy_backfill_done', '1')",
+            );
+        }
+
         // One-time migration: repair corrupted cumulative counter data and
         // reconstruct today_solar_kwh. Gated by a `meta` table flag so it
         // only runs once per database. On a healthy database this is a
@@ -1780,5 +1821,183 @@ mod tests {
                 val
             );
         }
+    }
+
+    #[test]
+    fn home_energy_today_kwh_backfills_from_legacy_consumption() {
+        // Simulate a REAL pre-upgrade database: the readings table was
+        // created before the home_energy_today_kwh column existed, so it
+        // has no such column and historic rows carry only
+        // today_consumption_kwh. After reopening with the current code, the
+        // ALTER adds the column (NULL for every legacy row) and the one-time
+        // backfill must copy today_consumption_kwh across so the History
+        // "Load Energy Today" chart shows historic data instead of blanks.
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("givenergy-history-test-{id}"));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("legacy_backfill_history.db");
+        let _ = std::fs::remove_file(&path);
+
+        // Hand-build a legacy schema identical to SCHEMA_SQL minus the
+        // home_energy_today_kwh column, then insert two historic rows with
+        // real (non-zero) consumption values and no home_energy_today_kwh.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE readings (
+                    timestamp INTEGER PRIMARY KEY,
+                    today_consumption_kwh REAL
+                );
+                CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO readings (timestamp, today_consumption_kwh) VALUES (?, ?)",
+                rusqlite::params![1_000i64, 16.2f64],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO readings (timestamp, today_consumption_kwh) VALUES (?, ?)",
+                rusqlite::params![2_000i64, 23.7f64],
+            )
+            .unwrap();
+        }
+
+        // Reopen through HistoryDb::open → runs the ALTER + backfill.
+        let db = HistoryDb::open(&path).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            let v1: f64 = conn
+                .query_row(
+                    "SELECT home_energy_today_kwh FROM readings WHERE timestamp = ?",
+                    rusqlite::params![1_000i64],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let v2: f64 = conn
+                .query_row(
+                    "SELECT home_energy_today_kwh FROM readings WHERE timestamp = ?",
+                    rusqlite::params![2_000i64],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!((v1 - 16.2).abs() < 1e-6, "legacy row 1 backfilled, got {v1}");
+            assert!((v2 - 23.7).abs() < 1e-6, "legacy row 2 backfilled, got {v2}");
+
+            // The backfill must be gated: reopening must not re-run it (and
+            // must not clobber values written by new inserts). The meta flag
+            // is the gate.
+            let done: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'home_energy_backfill_done' AND value = '1')",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(done, "home_energy_backfill_done flag set after backfill");
+        }
+
+        // Reopen again: backfill must be a no-op (flag already set) and
+        // values must be unchanged even if today_consumption_kwh changes.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "UPDATE readings SET today_consumption_kwh = 999.0 WHERE timestamp = ?",
+                rusqlite::params![1_000i64],
+            )
+            .unwrap();
+        }
+        let db = HistoryDb::open(&path).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            let v1: f64 = conn
+                .query_row(
+                    "SELECT home_energy_today_kwh FROM readings WHERE timestamp = ?",
+                    rusqlite::params![1_000i64],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!((v1 - 16.2).abs() < 1e-6, "backfill did not re-run, got {v1}");
+        }
+    }
+
+    #[test]
+    fn home_energy_today_kwh_backfills_zero_rows_but_keeps_legit_zeros() {
+        // Production scenario: the column already exists but historic rows
+        // carry 0 (written by the brief integration-based decoder whose
+        // per-session accumulator started at 0), not NULL. The IS NULL-only
+        // backfill in an earlier revision skipped these, leaving the chart
+        // blank for 124k rows. The backfill must also recover the 0 rows —
+        // but must NOT touch rows where 0 is a legitimate value:
+        //   * midnight reset rows (both consumption and home_energy are 0)
+        //   * rows already populated (home_energy already non-zero)
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("givenergy-history-test-{id}"));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("legacy_zero_backfill_history.db");
+        let _ = std::fs::remove_file(&path);
+
+        // Build a DB that already has the home_energy_today_kwh column
+        // (simulating the post-ALTER state), seeded with every shape:
+        //   t=1000: cons=16.2, home=0    → MUST backfill to 16.2
+        //   t=2000: cons=23.7, home=0    → MUST backfill to 23.7
+        //   t=3000: cons=0,    home=0    → midnight reset, LEAVE at 0
+        //   t=4000: cons=9.1,  home=9.1  → already populated, LEAVE at 9.1
+        //   t=5000: cons=NULL, home=0    → no consumption data, LEAVE at 0
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE readings (
+                    timestamp INTEGER PRIMARY KEY,
+                    today_consumption_kwh REAL,
+                    home_energy_today_kwh REAL
+                );
+                CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO readings (timestamp, today_consumption_kwh, home_energy_today_kwh) VALUES (?, ?, ?)",
+                rusqlite::params![1_000i64, 16.2f64, 0.0f64],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO readings (timestamp, today_consumption_kwh, home_energy_today_kwh) VALUES (?, ?, ?)",
+                rusqlite::params![2_000i64, 23.7f64, 0.0f64],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO readings (timestamp, today_consumption_kwh, home_energy_today_kwh) VALUES (?, ?, ?)",
+                rusqlite::params![3_000i64, 0.0f64, 0.0f64],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO readings (timestamp, today_consumption_kwh, home_energy_today_kwh) VALUES (?, ?, ?)",
+                rusqlite::params![4_000i64, 9.1f64, 9.1f64],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO readings (timestamp, today_consumption_kwh, home_energy_today_kwh) VALUES (?, ?, ?)",
+                rusqlite::params![5_000i64, None::<f64>, 0.0f64],
+            )
+            .unwrap();
+        }
+
+        // Reopen → backfill runs (no meta flag yet).
+        let db = HistoryDb::open(&path).unwrap();
+        let conn = db.conn.lock().unwrap();
+
+        let read = |ts: i64| -> f64 {
+            conn.query_row(
+                "SELECT home_energy_today_kwh FROM readings WHERE timestamp = ?",
+                rusqlite::params![ts],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert!((read(1_000) - 16.2).abs() < 1e-6, "zero row backfilled from consumption, got {}", read(1_000));
+        assert!((read(2_000) - 23.7).abs() < 1e-6, "zero row backfilled from consumption, got {}", read(2_000));
+        assert!(read(3_000).abs() < 1e-6, "midnight-reset row left at 0, got {}", read(3_000));
+        assert!((read(4_000) - 9.1).abs() < 1e-6, "already-populated row untouched, got {}", read(4_000));
+        assert!(read(5_000).abs() < 1e-6, "no-consumption-data row left at 0, got {}", read(5_000));
     }
 }

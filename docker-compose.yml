@@ -6,7 +6,17 @@ services:
     network_mode: "host"
     volumes:
       - "${HOME}/.givenergy-local:/root/.givenergy-local"
+      # Inherit the host's timezone so server-side day boundaries (history
+      # "Today" windowing, energy reconstruction) match the host's wall clock
+      # WITHOUT needing to set TZ. /etc/localtime is a self-contained tzfile
+      # that glibc reads directly, so this works on any Linux host that has it
+      # configured (standard). Falls back to the image default (UTC) if absent.
+      - /etc/localtime:/etc/localtime:ro
     environment:
       - GIVENERGY_LOCAL_CONFIG_DIR=/root/.givenergy-local
+      # Optional explicit override (requires the tzdata zone, bundled in the
+      # image). Uncomment ONLY if /etc/localtime is missing on the host, or you
+      # want a different zone than the host's. Takes precedence over the mount.
+      # - TZ=Europe/London
     # Default port is 7337. Override with --port if needed.
     # command: ["--headless", "--port", "7337"]
