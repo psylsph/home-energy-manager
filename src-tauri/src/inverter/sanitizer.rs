@@ -803,7 +803,7 @@ pub(crate) fn sanitize_snapshot(
     }
 
     // SOC: if 100 but battery is actively charging at high power, impossible
-    if snap.soc == 100 && snap.battery_power > 2000 {
+    if snap.soc == 100 && snap.battery_power < -2000 {
         if let Some(p) = prev {
             tracing::warn!(
                 prev_soc = p.soc,

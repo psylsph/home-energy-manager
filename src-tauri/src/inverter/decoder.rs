@@ -283,8 +283,8 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
     }
 
     // Compute home power.
-    // Internal sign conventions (after negation of raw battery values):
-    //   battery_power > 0 = charging (power flowing INTO battery)
+    // Internal sign conventions (match givenergy-modbus / GivTCP references):
+    //   battery_power > 0 = discharging (power flowing OUT of battery)
     //   grid_power > 0 = exporting (power flowing OUT to grid, "p_grid_out")
     //
     // Home consumption = solar - battery_charge - grid_export
@@ -297,7 +297,9 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
         || snap.device_type.needs_gateway_input_blocks())
         && snap.home_power > 0;
     if !has_direct_home_power {
-        snap.home_power = snap.solar_power - snap.battery_power - snap.grid_power;
+        // home = solar + battery_discharge - grid_export
+        //      = solar + battery_power(+discharge) - grid_power(+export)
+        snap.home_power = snap.solar_power + snap.battery_power - snap.grid_power;
     }
 
     // Gateway: derive grid power from the energy balance. The gateway measures
@@ -305,13 +307,13 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
     // battery power (`p_aio_total`, GE sign: + = discharge). Grid power has no
     // dedicated register — it is the residual that balances the equation:
     //   grid_export(HEM, +) = solar + battery_discharge - home
-    //                        = solar - battery_power(HEM +charge) - home
+    //                        = solar + battery_power(+discharge) - home
     // (algebra: grid_import - export = home - p_aio_total_ge - pv → solved for
     // HEM's +export convention; see gateway-design/IMPLEMENTATION-PLAN.md §5.)
     if snap.device_type.needs_gateway_input_blocks()
         && gateway_is_valid(&snap.gateway_software_version)
     {
-        snap.grid_power = snap.solar_power - snap.battery_power - snap.home_power;
+        snap.grid_power = snap.solar_power + snap.battery_power - snap.home_power;
     }
 
     // Populate the synthetic built-in grid CT meter (address 0x00) with
@@ -433,13 +435,14 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     }
 
     // -- Battery --
-    // IR(52): p_battery (int16 W) — inverter convention: positive = DISCHARGING.
-    // We negate so our model uses positive = charging throughout.
-    snap.battery_power = -signed(get_reg(data, 52));
+    // IR(52): p_battery (int16 W) — inverter/reference convention:
+    // positive = DISCHARGING. We keep the raw sign so our model matches
+    // givenergy-modbus and GivTCP (positive = discharging throughout).
+    snap.battery_power = signed(get_reg(data, 52));
     snap.soc = get_reg(data, 59) as u8; // IR(59): battery_soc (%)
     snap.battery_voltage = get_reg(data, 50) as f32 * 0.01; // IR(50): v_battery (/100 V)
-                                                            // IR(51): i_battery — negate to match power sign convention (positive = charging current)
-    snap.battery_current = -signed(get_reg(data, 51)) as f32 * 0.01;
+                                                            // IR(51): i_battery — keep raw sign (positive = discharging current)
+    snap.battery_current = signed(get_reg(data, 51)) as f32 * 0.01;
     snap.battery_state = BatteryState::from_power(snap.battery_power);
     snap.battery_temperature = get_reg(data, 56) as f32 * 0.1; // IR(56): t_battery (/10 °C)
 
@@ -898,7 +901,7 @@ fn decode_holding_1080_1124(data: &[u16], snap: &mut InverterSnapshot, raw: &mut
 // come directly from `givenergy_modbus/model/inverter_threephase.py`.
 //
 // Convention for our snapshot:
-//   battery_power > 0 = charging
+//   battery_power > 0 = discharging (matches givenergy-modbus / GivTCP)
 //   grid_power    > 0 = exporting (matching single-phase IR(30) sign)
 
 /// IR 1000-1059: PV voltage, current and power.
@@ -1017,8 +1020,8 @@ fn decode_input_1120_1179(data: &[u16], snap: &mut InverterSnapshot) {
 
     let p_discharge = uint32(get_reg(data, 16), get_reg(data, 17)) as f32 * 0.1;
     let p_charge = uint32(get_reg(data, 18), get_reg(data, 19)) as f32 * 0.1;
-    // Our convention: positive = charging.
-    snap.battery_power = (p_charge - p_discharge) as i32;
+    // Our convention (matches references): positive = discharging.
+    snap.battery_power = (p_discharge - p_charge) as i32;
     snap.battery_state = BatteryState::from_power(snap.battery_power);
     snap.battery_current = signed(get_reg(data, 20)) as f32 * 0.1;
 }
@@ -1447,11 +1450,11 @@ pub fn validate_hv_bcu(data: &[u16]) -> bool {
 // `gateway-design/gateway-register-reference.md` for the authoritative
 // byte-level reference.
 //
-// CRITICAL — sign conventions differ from the rest of the codebase:
+// Sign conventions:
 //   * Battery / AIO power (`p_aio_total`, `p_aio*_inverter`) is signed with
 //     the GivEnergy wire convention: **+ = discharging (out), − = charging
-//     (in)**. HEM's internal convention is the OPPOSITE (+ = charge), so these
-//     are negated when mapped onto `battery_power`.
+//     (in)**. HEM's internal convention now MATCHES this (+ = discharge),
+//     so these are mapped verbatim onto `battery_power`.
 //   * Grid power has no dedicated register — it is derived in `decode_snapshot`
 //     from the energy balance (solar + battery_discharge − home).
 //
@@ -1643,9 +1646,9 @@ fn decode_gateway_1660_1719(data: &[u16], snap: &mut InverterSnapshot) {
     snap.parallel_aio_online = get_reg(data, 41) as u8; // IR 1701
 
     // IR(1702) p_aio_total — aggregate AIO inverter power, signed (GE: +=discharge).
-    // Map to battery_power with HEM convention (+ = charge): NEGATE.
+    // Keep raw sign: our convention now matches references (+ = discharge).
     let p_aio_total = signed(get_reg(data, 42));
-    snap.battery_power = -p_aio_total;
+    snap.battery_power = p_aio_total;
     snap.battery_state = BatteryState::from_power(snap.battery_power);
 
     // Capacity / max power scale with the configured AIO count (per GivTCP
@@ -2004,10 +2007,10 @@ mod tests {
         assert!((snap.pv2_current - 4.8).abs() < 0.1);
 
         // Battery
-        assert_eq!(snap.battery_power, 800);
+        assert_eq!(snap.battery_power, -800);
         assert_eq!(snap.soc, 75);
         assert!((snap.battery_voltage - 52.0).abs() < 0.1);
-        assert!((snap.battery_current - 1.5).abs() < 0.1);
+        assert!((snap.battery_current - -1.5).abs() < 0.1);
         assert!((snap.battery_temperature - 31.0).abs() < 0.1);
         assert_eq!(snap.battery_state, BatteryState::Charging);
         // Capacity: 100 Ah × 51.20 V / 1000 = 5.12 kWh
@@ -2052,8 +2055,8 @@ mod tests {
         // which only controls the battery mode).
         assert_eq!(snap.battery_mode, BatteryMode::Eco);
 
-        // Home power: solar - battery_power - grid_power
-        //           = 4000 - 800 - 100 = 3100
+        // Home power: solar + battery_power - grid_power
+        //           = 4000 + (-800) - 100 = 3100
         assert_eq!(snap.home_power, 3100);
 
         // Serial number
@@ -2243,7 +2246,7 @@ mod tests {
         ir1120[1136 - 1120] = 0;
         ir1120[1137 - 1120] = 2000; // discharge 200W
         ir1120[1138 - 1120] = 0;
-        ir1120[1139 - 1120] = 7000; // charge 700W => battery_power +500W
+        ir1120[1139 - 1120] = 7000; // charge 700W => battery_power -500W (charging)
         ir1120[1140 - 1120] = 25; // battery current 2.5A
 
         let mut ir1360 = vec![0u16; 54];
@@ -2279,7 +2282,7 @@ mod tests {
         assert_eq!(snap.max_ac_power_w, 11_000);
         assert_eq!(snap.solar_power, 4_000);
         assert_eq!(snap.grid_power, 600);
-        assert_eq!(snap.battery_power, 500);
+        assert_eq!(snap.battery_power, -500);
         assert_eq!(snap.home_power, 2_200);
         assert_eq!(snap.soc, 67);
         assert!((snap.grid_voltage - 415.0).abs() < 0.1);
@@ -2752,8 +2755,8 @@ mod tests {
     fn battery_state_derivation() {
         let mut input_data = vec![0u16; 60];
 
-        // Battery discharging in inverter convention: raw p_battery = +500 (positive = discharging).
-        // After decoder negation: -500 (negative = discharging in our model).
+        // Battery discharging in reference convention: raw p_battery = +500
+        // (positive = discharging). Kept verbatim → battery_power = +500.
         input_data[52] = 500;
 
         let blocks = vec![
@@ -2762,7 +2765,7 @@ mod tests {
             make_block(RegisterType::Holding, 60, 60, "holding_60_119", vec![0; 60]),
         ];
         let snap = decode_snapshot(&blocks);
-        assert_eq!(snap.battery_power, -500);
+        assert_eq!(snap.battery_power, 500);
         assert_eq!(snap.battery_state, BatteryState::Discharging);
     }
 
@@ -3282,11 +3285,11 @@ mod tests {
         // home_power: p_load = 1200 W (authoritative, excludes EV)
         assert_eq!(snap.home_power, 1200);
 
-        // battery_power: -p_aio_total = -(-800) = 800 W (HEM: + = charge)
-        assert_eq!(snap.battery_power, 800);
+        // battery_power: p_aio_total = -800 W kept verbatim (GE: - = charging)
+        assert_eq!(snap.battery_power, -800);
         assert_eq!(snap.battery_state, BatteryState::Charging);
 
-        // grid_power (derived): solar - battery - home = 3500 - 800 - 1200 = 1500 W
+        // grid_power (derived): solar + battery - home = 3500 + (-800) - 1200 = 1500 W
         // Positive = export (solar charges battery AND exports to grid)
         assert_eq!(snap.grid_power, 1500);
 
@@ -3435,19 +3438,19 @@ mod tests {
 
     #[test]
     fn sign_convention_single_phase_discharging() {
-        // Raw IR(52) = +500 (inverter convention: positive = discharging).
-        // HEM negates → battery_power = -500, state = Discharging.
+        // Raw IR(52) = +500 (reference convention: positive = discharging).
+        // Kept verbatim → battery_power = +500, state = Discharging.
         let snap = decode_snapshot(&single_phase_blocks_with_battery(500));
-        assert_eq!(snap.battery_power, -500);
+        assert_eq!(snap.battery_power, 500);
         assert_eq!(snap.battery_state, BatteryState::Discharging);
     }
 
     #[test]
     fn sign_convention_single_phase_charging() {
-        // Raw IR(52) = -800 (inverter convention: negative = charging).
-        // HEM negates → battery_power = +800, state = Charging.
+        // Raw IR(52) = -800 (reference convention: negative = charging).
+        // Kept verbatim → battery_power = -800, state = Charging.
         let snap = decode_snapshot(&single_phase_blocks_with_battery(-800));
-        assert_eq!(snap.battery_power, 800);
+        assert_eq!(snap.battery_power, -800);
         assert_eq!(snap.battery_state, BatteryState::Charging);
     }
 
@@ -3483,13 +3486,13 @@ mod tests {
 
     #[test]
     fn sign_convention_single_phase_derived_home_discharging() {
-        // solar=3000, battery discharging (raw +1000 → HEM -1000),
+        // solar=3000, battery discharging (raw +1000 → +1000),
         // grid import (raw -500 → grid_power -500).
-        // home = solar - battery_power - grid_power = 3000 - (-1000) - (-500) = 4500
+        // home = solar + battery_power - grid_power = 3000 + 1000 - (-500) = 4500
         let snap = decode_snapshot(&single_phase_blocks_for_home_derivation(
             3000, 1000, -500,
         ));
-        assert_eq!(snap.battery_power, -1000);
+        assert_eq!(snap.battery_power, 1000);
         assert_eq!(snap.battery_state, BatteryState::Discharging);
         assert_eq!(snap.grid_power, -500);
         assert_eq!(snap.home_power, 4500);
@@ -3497,13 +3500,13 @@ mod tests {
 
     #[test]
     fn sign_convention_single_phase_derived_home_charging() {
-        // solar=3500, battery charging (raw -800 → HEM +800),
+        // solar=3500, battery charging (raw -800 → -800),
         // grid export (raw +1500 → grid_power +1500).
-        // home = solar - battery_power - grid_power = 3500 - 800 - 1500 = 1200
+        // home = solar + battery_power - grid_power = 3500 + (-800) - 1500 = 1200
         let snap = decode_snapshot(&single_phase_blocks_for_home_derivation(
             3500, -800, 1500,
         ));
-        assert_eq!(snap.battery_power, 800);
+        assert_eq!(snap.battery_power, -800);
         assert_eq!(snap.battery_state, BatteryState::Charging);
         assert_eq!(snap.grid_power, 1500);
         assert_eq!(snap.home_power, 1200);
@@ -3533,18 +3536,18 @@ mod tests {
     #[test]
     fn sign_convention_three_phase_discharging() {
         // p_charge=0, p_discharge=100.0W (1000 tenths).
-        // battery_power = p_charge - p_discharge = 0 - 100 = -100 (HEM: discharging).
+        // battery_power = p_discharge - p_charge = 100 - 0 = +100 (discharging).
         let snap = decode_snapshot(&three_phase_blocks_for_battery(0, 1000));
-        assert_eq!(snap.battery_power, -100);
+        assert_eq!(snap.battery_power, 100);
         assert_eq!(snap.battery_state, BatteryState::Discharging);
     }
 
     #[test]
     fn sign_convention_three_phase_charging() {
         // p_charge=80.0W (800 tenths), p_discharge=0.
-        // battery_power = p_charge - p_discharge = 80 - 0 = +80 (HEM: charging).
+        // battery_power = p_discharge - p_charge = 0 - 80 = -80 (charging).
         let snap = decode_snapshot(&three_phase_blocks_for_battery(800, 0));
-        assert_eq!(snap.battery_power, 80);
+        assert_eq!(snap.battery_power, -80);
         assert_eq!(snap.battery_state, BatteryState::Charging);
     }
 
@@ -3589,20 +3592,20 @@ mod tests {
 
     #[test]
     fn sign_convention_gateway_discharging() {
-        // p_aio_total = +800 (GE: discharging). HEM negates → battery_power = -800.
-        // solar=1000, home=500 → grid = solar - battery - home = 1000 - (-800) - 500 = +1300 (export).
+        // p_aio_total = +800 (GE: discharging). Kept verbatim → battery_power = +800.
+        // solar=1000, home=500 → grid = solar + battery - home = 1000 + 800 - 500 = +1300 (export).
         let snap = decode_snapshot(&gateway_blocks_for_power_flow(1000, 500, 800));
-        assert_eq!(snap.battery_power, -800);
+        assert_eq!(snap.battery_power, 800);
         assert_eq!(snap.battery_state, BatteryState::Discharging);
         assert_eq!(snap.grid_power, 1300);
     }
 
     #[test]
     fn sign_convention_gateway_charging() {
-        // p_aio_total = -800 (GE: charging). HEM negates → battery_power = +800.
-        // solar=3500, home=1200 → grid = solar - battery - home = 3500 - 800 - 1200 = +1500 (export).
+        // p_aio_total = -800 (GE: charging). Kept verbatim → battery_power = -800.
+        // solar=3500, home=1200 → grid = solar + battery - home = 3500 + (-800) - 1200 = +1500 (export).
         let snap = decode_snapshot(&gateway_blocks_for_power_flow(3500, 1200, -800));
-        assert_eq!(snap.battery_power, 800);
+        assert_eq!(snap.battery_power, -800);
         assert_eq!(snap.battery_state, BatteryState::Charging);
         assert_eq!(snap.grid_power, 1500);
     }
@@ -3621,11 +3624,10 @@ mod tests {
     fn sign_convention_gateway_user_issue_78_scenario() {
         // Reproduces the issue #78 scenario reported by a Gateway user:
         // solar=3700, battery discharging 2.2kW, home=5800, grid should be ≈0.
-        // Raw p_aio_total = +2200 (GE: + = discharge).
-        // HEM convention: battery_power = -2200 (discharging).
-        // grid = solar - battery_power - home = 3700 - (-2200) - 5800 = +100 ≈ 0 (export).
+        // Raw p_aio_total = +2200 (GE: + = discharge). Kept verbatim.
+        // grid = solar + battery_power - home = 3700 + 2200 - 5800 = +100 ≈ 0 (export).
         let snap = decode_snapshot(&gateway_blocks_for_power_flow(3700, 5800, 2200));
-        assert_eq!(snap.battery_power, -2200);
+        assert_eq!(snap.battery_power, 2200);
         assert_eq!(snap.battery_state, BatteryState::Discharging);
         assert_eq!(snap.grid_power, 100);
     }
@@ -3657,9 +3659,9 @@ mod tests {
         ];
         let snap = decode_snapshot(&blocks);
         assert!(!gateway_is_valid(&snap.gateway_software_version));
-        // battery_power is still decoded (negated), but grid stays at 0
+        // battery_power is still decoded (kept verbatim), but grid stays at 0
         // because the derivation guard failed.
-        assert_eq!(snap.battery_power, 800);
+        assert_eq!(snap.battery_power, -800);
         assert_eq!(snap.grid_power, 0);
     }
 }

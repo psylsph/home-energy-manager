@@ -187,7 +187,7 @@ export default function StatusPage() {
               <p className="text-sm text-red-100/90">
                 The inverter is reporting <strong>{gridFaultReason(snapshot)}</strong>.
                 Battery SOC is {formatPercent(snapshot.soc)}
-                {snapshot.battery_power < 0 ? ` and the battery is discharging at ${formatPower(Math.abs(snapshot.battery_power))}` : ''}.{gridFaultAdvice(snapshot)}
+                {snapshot.battery_power > 0 ? ` and the battery is discharging at ${formatPower(Math.abs(snapshot.battery_power))}` : ''}.{gridFaultAdvice(snapshot)}
               </p>
             </div>
           </div>

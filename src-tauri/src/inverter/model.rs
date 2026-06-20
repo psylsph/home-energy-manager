@@ -19,11 +19,14 @@ pub enum BatteryState {
 
 impl BatteryState {
     /// Derive battery state from power value.
+    ///
+    /// Convention matches givenergy-modbus / GivTCP: positive power =
+    /// discharging (current flowing OUT of the battery), negative = charging.
     pub fn from_power(power: i32) -> Self {
         if power > 0 {
-            Self::Charging
-        } else if power < 0 {
             Self::Discharging
+        } else if power < 0 {
+            Self::Charging
         } else {
             Self::Idle
         }
@@ -895,14 +898,16 @@ mod tests {
     // -- BatteryState --------------------------------------------------------
     #[test]
     fn battery_state_charging() {
-        assert_eq!(BatteryState::from_power(1), BatteryState::Charging);
-        assert_eq!(BatteryState::from_power(800), BatteryState::Charging);
+        // Negative power = charging (power flowing INTO battery).
+        assert_eq!(BatteryState::from_power(-1), BatteryState::Charging);
+        assert_eq!(BatteryState::from_power(-800), BatteryState::Charging);
     }
 
     #[test]
     fn battery_state_discharging() {
-        assert_eq!(BatteryState::from_power(-1), BatteryState::Discharging);
-        assert_eq!(BatteryState::from_power(-500), BatteryState::Discharging);
+        // Positive power = discharging (power flowing OUT of battery).
+        assert_eq!(BatteryState::from_power(1), BatteryState::Discharging);
+        assert_eq!(BatteryState::from_power(500), BatteryState::Discharging);
     }
 
     #[test]

@@ -170,7 +170,7 @@ function buildPowerRows(data: Record<string, TimePoint[]>): PowerRow[] {
     return {
       t,
       solarPower: solarValue == null ? null : Math.max(solarValue, 0),
-      batteryPower: batteryValue == null ? null : -batteryValue,
+      batteryPower: batteryValue == null ? null : batteryValue,
       gridPower: gridValue == null ? null : -gridValue,
       homePower: homeValue == null ? null : Math.max(homeValue, 0),
       soc: socValue == null ? null : Math.min(100, Math.max(0, socValue)),
@@ -961,8 +961,8 @@ export default function PowerPage() {
   const currentBattery = snapshot?.battery_power ?? 0;
   const currentGrid = snapshot?.grid_power ?? 0;
   const currentHome = Math.max(snapshot?.home_power ?? 0, 0);
-  const batteryDirection = currentBattery < 0 ? 'Discharging' : currentBattery > 0 ? 'Charging' : 'Idle';
-  const batteryColor = currentBattery < 0 ? '#22C55E' : currentBattery > 0 ? '#6366F1' : '#8B949E';
+  const batteryDirection = currentBattery > 0 ? 'Discharging' : currentBattery < 0 ? 'Charging' : 'Idle';
+  const batteryColor = currentBattery > 0 ? '#22C55E' : currentBattery < 0 ? '#6366F1' : '#8B949E';
   const gridDirection = currentGrid < 0 ? 'Importing' : currentGrid > 0 ? 'Exporting' : 'Idle';
   const gridColor = currentGrid < 0 ? '#EF4444' : currentGrid > 0 ? '#38BDF8' : '#8B949E';
 

@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.31.9] - 2026-06-20
+
+### Changed
+
+- **Battery power sign convention now matches GivEnergy / givenergy-modbus /
+  GivTCP references.** `battery_power` is **positive when discharging** and
+  negative when charging (previously the opposite). The raw register values
+  from IR(52) (single-phase), IR(1136-1139) (three-phase) and IR(1702)
+  (`p_aio_total`, Gateway) are now mapped verbatim onto `battery_power`
+  instead of being negated. Internal derivation formulas, `BatteryState`,
+  frontend display signs, history charting and the Power page integration
+  have been flipped consistently. End-to-end display values for currently-
+  working inverters are unchanged — only the internal representation and the
+  label sign now match the GivEnergy app and the reference libraries. This
+  also fixes the inverted battery power reported by Gateway users (issue #78).
+
+### Tests
+
+- Added 13 dedicated sign-convention tests covering every code path that
+  participates in the convention (single-phase, three-phase, Gateway, derived
+  home/grid formulas, invalid-version guard). Together with the updated
+  existing tests they form a complete net for any future regression.
+
 ## [0.31.8] - 2026-06-19
 
 ### Fixed

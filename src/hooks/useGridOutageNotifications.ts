@@ -51,7 +51,7 @@ export function useGridOutageNotifications() {
     const hadFault = previousKind.current !== 'none';
 
     if (kind !== 'none' && !hadFault && !notifiedForCurrentOutage.current) {
-      const discharging = snapshot.battery_power < 0
+      const discharging = snapshot.battery_power > 0
         ? ` Battery is discharging at ${formatPower(Math.abs(snapshot.battery_power))}.`
         : '';
       sendNotification(

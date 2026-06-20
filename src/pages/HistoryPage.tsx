@@ -96,8 +96,8 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
           title: 'Charge / Discharge Power',
           unit: 'W',
           fields: [
-            { field: 'battery_power', color: '#22C55E', label: 'Charge', transform: (v: number) => v > 0 ? v : 0 },
-            { field: 'battery_power', color: '#EF4444', label: 'Discharge', transform: (v: number) => v < 0 ? Math.abs(v) : 0 },
+            { field: 'battery_power', color: '#22C55E', label: 'Charge', transform: (v: number) => v < 0 ? Math.abs(v) : 0 },
+            { field: 'battery_power', color: '#EF4444', label: 'Discharge', transform: (v: number) => v > 0 ? v : 0 },
           ],
         },
         {
