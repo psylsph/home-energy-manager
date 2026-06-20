@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.34.2] - 2026-06-20
+
+### Fixed
+
+- **Total Throughput and Battery Life Remaining rows on the Battery page
+  are now hidden on AC-coupled and All-in-One inverters.** GivEnergy
+  firmware does not populate any lifetime throughput register on these
+  models, so the v0.34.0 behaviour of showing a dash for an empty meter
+  was misleading — it suggested a bug rather than a missing firmware
+  feature. The rows now hide entirely when the meter is empty, matching
+  the behaviour on a fresh hybrid install before any charge cycle has
+  completed.
+
 ## [0.34.1] - 2026-06-20
 
 ### Added
