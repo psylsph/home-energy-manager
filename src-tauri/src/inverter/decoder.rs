@@ -3402,4 +3402,264 @@ mod tests {
         assert_eq!(snap.grid_power, 0);
         assert_eq!(snap.home_power, 0);
     }
+
+    // ===================================================================
+    // BATTERY POWER SIGN CONVENTION COVERAGE
+    //
+    // Current convention (HEM): battery_power POSITIVE = CHARGING,
+    // NEGATIVE = DISCHARGING. This is the INVERSE of the raw inverter
+    // register convention (IR(52)/IR(1702): positive = discharging) — the
+    // decoder negates raw values to produce HEM's +charge convention.
+    //
+    // These tests pin every code path that participates in the convention
+    // so a sign flip touches all of them consistently. Each test documents
+    // the raw register value, the expected decoded value, and the expected
+    // downstream effect (BatteryState, derived home/grid power).
+    // ===================================================================
+
+    /// Helper: single-phase blocks with a configurable raw p_battery at IR(52).
+    /// Other input registers are zero so only the battery sign path is exercised.
+    fn single_phase_blocks_with_battery(raw_p_battery: i16) -> Vec<BlockRead> {
+        let mut input_data = vec![0u16; 60];
+        input_data[52] = raw_p_battery as u16;
+        // Provide a non-zero grid voltage so the meter-validation gate passes.
+        input_data[5] = 2410;
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x2101; // PolarHybrid (fixed DTC, no ARM refinement)
+        vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", input_data),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", vec![0; 60]),
+        ]
+    }
+
+    #[test]
+    fn sign_convention_single_phase_discharging() {
+        // Raw IR(52) = +500 (inverter convention: positive = discharging).
+        // HEM negates → battery_power = -500, state = Discharging.
+        let snap = decode_snapshot(&single_phase_blocks_with_battery(500));
+        assert_eq!(snap.battery_power, -500);
+        assert_eq!(snap.battery_state, BatteryState::Discharging);
+    }
+
+    #[test]
+    fn sign_convention_single_phase_charging() {
+        // Raw IR(52) = -800 (inverter convention: negative = charging).
+        // HEM negates → battery_power = +800, state = Charging.
+        let snap = decode_snapshot(&single_phase_blocks_with_battery(-800));
+        assert_eq!(snap.battery_power, 800);
+        assert_eq!(snap.battery_state, BatteryState::Charging);
+    }
+
+    #[test]
+    fn sign_convention_single_phase_idle() {
+        // Raw IR(52) = 0 → battery_power = 0, state = Idle.
+        let snap = decode_snapshot(&single_phase_blocks_with_battery(0));
+        assert_eq!(snap.battery_power, 0);
+        assert_eq!(snap.battery_state, BatteryState::Idle);
+    }
+
+    /// Helper: single-phase blocks with explicit solar, grid and battery so
+    /// the derived home_power formula (home = solar - battery - grid) is
+    /// exercised. IR(42) is left at zero so has_direct_home_power is false.
+    fn single_phase_blocks_for_home_derivation(
+        solar: i32,
+        raw_p_battery: i16,
+        grid: i32,
+    ) -> Vec<BlockRead> {
+        let mut input_data = vec![0u16; 60];
+        input_data[5] = 2410; // grid voltage
+        input_data[18] = solar as u16; // IR(18): pv1_power
+        input_data[30] = grid as i16 as u16; // IR(30): p_grid_out (+ = export)
+        input_data[52] = raw_p_battery as u16; // IR(52): p_battery
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x2101; // PolarHybrid
+        vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", input_data),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", vec![0; 60]),
+        ]
+    }
+
+    #[test]
+    fn sign_convention_single_phase_derived_home_discharging() {
+        // solar=3000, battery discharging (raw +1000 → HEM -1000),
+        // grid import (raw -500 → grid_power -500).
+        // home = solar - battery_power - grid_power = 3000 - (-1000) - (-500) = 4500
+        let snap = decode_snapshot(&single_phase_blocks_for_home_derivation(
+            3000, 1000, -500,
+        ));
+        assert_eq!(snap.battery_power, -1000);
+        assert_eq!(snap.battery_state, BatteryState::Discharging);
+        assert_eq!(snap.grid_power, -500);
+        assert_eq!(snap.home_power, 4500);
+    }
+
+    #[test]
+    fn sign_convention_single_phase_derived_home_charging() {
+        // solar=3500, battery charging (raw -800 → HEM +800),
+        // grid export (raw +1500 → grid_power +1500).
+        // home = solar - battery_power - grid_power = 3500 - 800 - 1500 = 1200
+        let snap = decode_snapshot(&single_phase_blocks_for_home_derivation(
+            3500, -800, 1500,
+        ));
+        assert_eq!(snap.battery_power, 800);
+        assert_eq!(snap.battery_state, BatteryState::Charging);
+        assert_eq!(snap.grid_power, 1500);
+        assert_eq!(snap.home_power, 1200);
+    }
+
+    /// Helper: three-phase blocks with configurable p_battery_charge and
+    /// p_battery_discharge (uint32 tenths-of-watts at IR(1136-1139)).
+    fn three_phase_blocks_for_battery(
+        p_charge_tenths: u32,
+        p_discharge_tenths: u32,
+    ) -> Vec<BlockRead> {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x4001; // ThreePhase
+        let mut ir1120 = vec![0u16; 60];
+        // IR(1136-1137): p_battery_discharge uint32 (hi, lo) tenths-of-watts
+        ir1120[1136 - 1120] = (p_discharge_tenths >> 16) as u16;
+        ir1120[1137 - 1120] = (p_discharge_tenths & 0xFFFF) as u16;
+        // IR(1138-1139): p_battery_charge uint32 (hi, lo) tenths-of-watts
+        ir1120[1138 - 1120] = (p_charge_tenths >> 16) as u16;
+        ir1120[1139 - 1120] = (p_charge_tenths & 0xFFFF) as u16;
+        vec![
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Input, 1120, 60, "input_1120_1179", ir1120),
+        ]
+    }
+
+    #[test]
+    fn sign_convention_three_phase_discharging() {
+        // p_charge=0, p_discharge=100.0W (1000 tenths).
+        // battery_power = p_charge - p_discharge = 0 - 100 = -100 (HEM: discharging).
+        let snap = decode_snapshot(&three_phase_blocks_for_battery(0, 1000));
+        assert_eq!(snap.battery_power, -100);
+        assert_eq!(snap.battery_state, BatteryState::Discharging);
+    }
+
+    #[test]
+    fn sign_convention_three_phase_charging() {
+        // p_charge=80.0W (800 tenths), p_discharge=0.
+        // battery_power = p_charge - p_discharge = 80 - 0 = +80 (HEM: charging).
+        let snap = decode_snapshot(&three_phase_blocks_for_battery(800, 0));
+        assert_eq!(snap.battery_power, 80);
+        assert_eq!(snap.battery_state, BatteryState::Charging);
+    }
+
+    #[test]
+    fn sign_convention_three_phase_idle() {
+        // p_charge=0, p_discharge=0 → battery_power = 0, Idle.
+        let snap = decode_snapshot(&three_phase_blocks_for_battery(0, 0));
+        assert_eq!(snap.battery_power, 0);
+        assert_eq!(snap.battery_state, BatteryState::Idle);
+    }
+
+    /// Helper: gateway fixture with configurable p_aio_total at IR(1702),
+    /// plus explicit p_pv (IR 1617) and p_load (IR 1618) so the derived
+    /// grid_power formula is exercised. One AIO online.
+    fn gateway_blocks_for_power_flow(
+        p_pv: u16,
+        p_load: u16,
+        p_aio_total: i16,
+    ) -> Vec<BlockRead> {
+        let mut b1 = [0u16; 60];
+        // Identity "GA000009" → V1 (IR(1603) = 9 < 10).
+        b1[0] = 0x4741; // 'G','A'
+        b1[1] = 0x3030; // '0','0'
+        b1[2] = 0x0000;
+        b1[3] = 0x0009; // 9 — V1
+        b1[8] = 2410; // v_grid = 241.0 V (meter validation)
+        b1[17] = p_pv; // p_pv
+        b1[18] = p_load; // p_load (home power)
+        let mut b2 = [0u16; 60];
+        b2[40] = 1; // parallel_aio_num = 1
+        b2[41] = 1; // parallel_aio_online = 1
+        b2[42] = p_aio_total as u16; // p_aio_total (GE: + = discharge)
+        vec![
+            gateway_holding_block(),
+            gateway_block1(b1),
+            gateway_block2(b2),
+            gateway_block3([0u16; 60]),
+            gateway_block4([0u16; 51]),
+            gateway_block5_v1([0u16; 29]),
+        ]
+    }
+
+    #[test]
+    fn sign_convention_gateway_discharging() {
+        // p_aio_total = +800 (GE: discharging). HEM negates → battery_power = -800.
+        // solar=1000, home=500 → grid = solar - battery - home = 1000 - (-800) - 500 = +1300 (export).
+        let snap = decode_snapshot(&gateway_blocks_for_power_flow(1000, 500, 800));
+        assert_eq!(snap.battery_power, -800);
+        assert_eq!(snap.battery_state, BatteryState::Discharging);
+        assert_eq!(snap.grid_power, 1300);
+    }
+
+    #[test]
+    fn sign_convention_gateway_charging() {
+        // p_aio_total = -800 (GE: charging). HEM negates → battery_power = +800.
+        // solar=3500, home=1200 → grid = solar - battery - home = 3500 - 800 - 1200 = +1500 (export).
+        let snap = decode_snapshot(&gateway_blocks_for_power_flow(3500, 1200, -800));
+        assert_eq!(snap.battery_power, 800);
+        assert_eq!(snap.battery_state, BatteryState::Charging);
+        assert_eq!(snap.grid_power, 1500);
+    }
+
+    #[test]
+    fn sign_convention_gateway_idle() {
+        // p_aio_total = 0 → battery_power = 0, Idle.
+        // solar=2000, home=2000 → grid = 2000 - 0 - 2000 = 0.
+        let snap = decode_snapshot(&gateway_blocks_for_power_flow(2000, 2000, 0));
+        assert_eq!(snap.battery_power, 0);
+        assert_eq!(snap.battery_state, BatteryState::Idle);
+        assert_eq!(snap.grid_power, 0);
+    }
+
+    #[test]
+    fn sign_convention_gateway_user_issue_78_scenario() {
+        // Reproduces the issue #78 scenario reported by a Gateway user:
+        // solar=3700, battery discharging 2.2kW, home=5800, grid should be ≈0.
+        // Raw p_aio_total = +2200 (GE: + = discharge).
+        // HEM convention: battery_power = -2200 (discharging).
+        // grid = solar - battery_power - home = 3700 - (-2200) - 5800 = +100 ≈ 0 (export).
+        let snap = decode_snapshot(&gateway_blocks_for_power_flow(3700, 5800, 2200));
+        assert_eq!(snap.battery_power, -2200);
+        assert_eq!(snap.battery_state, BatteryState::Discharging);
+        assert_eq!(snap.grid_power, 100);
+    }
+
+    #[test]
+    fn sign_convention_gateway_invalid_version_skips_grid_derivation() {
+        // When gateway_software_version is invalid (all zeros), the
+        // gateway-specific grid derivation must NOT run — grid stays at 0.
+        let mut b1 = [0u16; 60];
+        // All-zero identity registers → decoded version is all zeros → invalid.
+        b1[0] = 0x0000;
+        b1[1] = 0x0000;
+        b1[2] = 0x0000;
+        b1[3] = 0x0000;
+        b1[8] = 2410;
+        b1[17] = 3500; // p_pv
+        b1[18] = 1200; // p_load
+        let mut b2 = [0u16; 60];
+        b2[40] = 1;
+        b2[41] = 1;
+        b2[42] = (-800i16) as u16; // p_aio_total
+        let blocks = vec![
+            gateway_holding_block(),
+            gateway_block1(b1),
+            gateway_block2(b2),
+            gateway_block3([0u16; 60]),
+            gateway_block4([0u16; 51]),
+            gateway_block5_v1([0u16; 29]),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert!(!gateway_is_valid(&snap.gateway_software_version));
+        // battery_power is still decoded (negated), but grid stays at 0
+        // because the derivation guard failed.
+        assert_eq!(snap.battery_power, 800);
+        assert_eq!(snap.grid_power, 0);
+    }
 }
