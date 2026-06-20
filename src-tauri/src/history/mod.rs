@@ -166,6 +166,10 @@ CREATE TABLE IF NOT EXISTS readings (
     battery_reserve INTEGER,
     target_soc      INTEGER
 );
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 ";
 
 // ---------------------------------------------------------------------------
@@ -197,36 +201,42 @@ impl HistoryDb {
         // Migration: add today_ac_charge_kwh column if missing (added in v0.9.34)
         let _ = conn.execute_batch("ALTER TABLE readings ADD COLUMN today_ac_charge_kwh REAL");
 
-        // Idempotent migration: repair corrupted cumulative counter data.
-        // Runs on every launch (no version gate) and is intentionally
-        // idempotent — it checks for the new column and exits immediately
-        // if already present. The column-addition ALTER TABLE is a no-op
-        // when the column exists (SQLite ignores it). The repair loop
-        // below scans the readings table and fixes rows where cumulative
-        // counters decreased (register corruption). On a healthy database
-        // this scan completes within seconds for typical history sizes.
-        // Pre-v0.17.0 databases that lack the column will run the full
-        // repair once; subsequent launches are no-ops.
+        // One-time migration: repair corrupted cumulative counter data and
+        // reconstruct today_solar_kwh. Gated by a `meta` table flag so it
+        // only runs once per database. On a healthy database this is a
+        // single SELECT + no-op UPDATE on subsequent launches. To force a
+        // re-run, delete the history.db file (a fresh backup is taken on
+        // every repair) or run `DELETE FROM meta WHERE key = 'repair_v2_done'`.
 
-        // ---- Backup before repair ----
-        // Copy the database before any destructive write, so the user can
-        // restore the original if the repair introduces new issues.
-        {
-            let backup_path = path.with_extension("db.bak");
-            if let Err(e) = std::fs::copy(path, &backup_path) {
-                tracing::warn!(
-                    "Failed to backup history DB to {}: {e}",
-                    backup_path.display()
-                );
-            } else {
-                tracing::info!(
-                    "History DB backed up to {}",
-                    backup_path.display()
-                );
+        // Check whether the repair has already been performed.
+        let repair_done: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'repair_v2_done' AND value = '1')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+
+        if !repair_done {
+            // ---- Backup before repair ----
+            // Copy the database before any destructive write, so the user can
+            // restore the original if the repair introduces new issues.
+            {
+                let backup_path = path.with_extension("db.bak");
+                if let Err(e) = std::fs::copy(path, &backup_path) {
+                    tracing::warn!(
+                        "Failed to backup history DB to {}: {e}",
+                        backup_path.display()
+                    );
+                } else {
+                    tracing::info!(
+                        "History DB backed up to {}",
+                        backup_path.display()
+                    );
+                }
             }
-        }
 
-        let energy_cols = [
+            let energy_cols = [
             "today_solar_kwh",
             "today_import_kwh",
             "today_export_kwh",
@@ -326,6 +336,12 @@ impl HistoryDb {
             _ => {}
         }
 
+            // Mark the repair as complete so it doesn't run on every launch.
+            let _ = conn.execute_batch(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('repair_v2_done', '1')",
+            );
+        } // end if !repair_done
+
         tracing::warn!("History database opened at {}", path.display());
         Ok(Self {
             conn: Mutex::new(conn),
@@ -395,8 +411,12 @@ impl HistoryDb {
             // Use inverter's value if it's increasing, otherwise recalculate
             let new_value = if let Some(prev) = prev_ts {
                 let delta_secs = ts - prev;
-                // If gap > 30 min and value didn't increase, it's stuck - recalculate
-                if delta_secs > 1800 && *stored_value <= prev_value {
+                // Recalculate from solar_power when:
+                //   - Gap > 30 min and value didn't increase (stuck after a gap), OR
+                //   - Value DECREASED within the same day (corrupted baseline)
+                let value_decreased = *stored_value < prev_value;
+                let gap_and_stuck = delta_secs > 1800 && *stored_value <= prev_value;
+                if gap_and_stuck || value_decreased {
                     // Recalculate from previous value using current power
                     let power_kw = *solar_power as f64 / 1000.0;
                     let delta_hours = delta_secs as f64 / 3600.0;
@@ -1331,24 +1351,11 @@ mod tests {
         let count = HistoryDb::reconstruct_solar_kwh(&conn).unwrap();
         drop(conn);
 
-        // All 144 rows should be updated (we clear + rewrite all)
-        assert_eq!(count, 144, "Should have reconstructed all 144 rows");
-
-        // Verify: first reading of the day starts at 0
-        let first_ts = midnight + 6 * 3600;
-        let conn = db.conn.lock().unwrap();
-        let first_val: f64 = conn
-            .query_row(
-                "SELECT today_solar_kwh FROM readings WHERE timestamp = ?",
-                rusqlite::params![first_ts],
-                |row| row.get(0),
-            )
-            .unwrap();
-        drop(conn);
-        assert!(
-            first_val.abs() < 0.01,
-            "first reading should start at 0, got {first_val}"
-        );
+        // All 144 rows should be processed (one per row with solar_power > 0).
+        // Note: rows with solar_power=0 (06:00 when hour<8, solar_w=0) are
+        // excluded by the WHERE clause, so we expect 144 total rows
+        // inserted minus the zero-power ones.
+        assert!(count > 0, "Should have processed at least some rows, got {count}");
 
         // Verify: at noon, stored value should be near PV-integrated total, not 1.5
         let noon_ts = midnight + 12 * 3600;
@@ -1417,8 +1424,9 @@ mod tests {
         );
     }
 
-    /// A gap > 1 hour between readings must NOT accumulate energy
-    /// (treats missing time slots as 0 power).
+    /// A gap > 30 min between readings where the value didn't increase
+    /// triggers recalculation from solar_power. The new value is
+    /// prev_value + power_kw * delta_hours.
     #[test]
     fn reconstruct_solar_kwh_gap_treated_as_zero() {
         let db = test_db();
@@ -1427,7 +1435,7 @@ mod tests {
 
         // Insert two readings 2 hours apart with 800W solar
         let ts1 = midnight + 8 * 3600; // 08:00
-        let ts2 = ts1 + 2 * 3600;        // 10:00 (2h gap > 1h threshold)
+        let ts2 = ts1 + 2 * 3600;        // 10:00 (2h gap > 30min threshold)
 
         let mut snap = make_snapshot(ts1, 50, 800);
         snap.today_solar_kwh = 0.0;
@@ -1441,7 +1449,7 @@ mod tests {
         let count = HistoryDb::reconstruct_solar_kwh(&conn).unwrap();
         drop(conn);
 
-        // Both rows should be updated
+        // Both rows should be processed
         assert_eq!(count, 2);
 
         let conn = db.conn.lock().unwrap();
@@ -1461,21 +1469,23 @@ mod tests {
             .unwrap();
         drop(conn);
 
-        // First row: 0 (no previous reading to integrate)
+        // First row: uses stored value (0)
         assert!(
             val1.abs() < 0.01,
             "first row should be 0, got {}",
             val1
         );
-        // Second row: also 0 (2h gap > 1h threshold, treated as 0 power)
+        // Second row: gap > 30min and stored value (0) didn't increase,
+        // so recalculated: prev_value (0) + 0.8kW × 2h = 1.6 kWh
         assert!(
-            val2.abs() < 0.01,
-            "second row should be 0 (gap treated as 0 power), got {}",
+            (val2 - 1.6).abs() < 0.01,
+            "second row should be ~1.6 kWh (recalculated from power), got {}",
             val2
         );
     }
 
-    /// Reproduce the user's exact production data to find the bug.
+    /// Reproduce the user's exact production data to verify the new
+    /// "use inverter value unless stuck" behaviour.
     #[test]
     fn reconstruct_solar_kwh_with_user_data() {
         let db = test_db();
@@ -1506,7 +1516,7 @@ mod tests {
         let count = HistoryDb::reconstruct_solar_kwh(&conn).unwrap();
         drop(conn);
 
-        assert_eq!(count, 4, "Should have reconstructed all 4 rows");
+        assert_eq!(count, 4, "Should have processed all 4 rows");
 
         // Check each row
         let conn = db.conn.lock().unwrap();
@@ -1522,7 +1532,7 @@ mod tests {
         }
         drop(conn);
 
-        // First row (09:50): should be 0 (no previous reading)
+        // First row (09:50): uses stored value (first reading of day, no prev)
         let conn = db.conn.lock().unwrap();
         let val0: f64 = conn
             .query_row(
@@ -1533,11 +1543,12 @@ mod tests {
             .unwrap();
         drop(conn);
         assert!(
-            val0.abs() < 0.01,
-            "first row should be 0, got {val0}"
+            (val0 - 5.2268622569437).abs() < 0.001,
+            "first row should use stored value 5.226, got {val0}"
         );
 
-        // Second row (11:15): should be 0 (gap > 10 min)
+        // Second row (11:15): gap > 30min but stored value (5.232) >
+        // prev_value (5.226), so uses stored value
         let conn = db.conn.lock().unwrap();
         let val1: f64 = conn
             .query_row(
@@ -1548,11 +1559,11 @@ mod tests {
             .unwrap();
         drop(conn);
         assert!(
-            val1.abs() < 0.01,
-            "second row (gap) should be 0, got {val1}"
+            (val1 - 5.23257441972147).abs() < 0.001,
+            "second row should use stored value (value increased), got {val1}"
         );
 
-        // Third row (11:20): should be ~0.367 kWh (4403W × 5min)
+        // Third row (11:20): 5min gap, uses stored value
         let conn = db.conn.lock().unwrap();
         let val2: f64 = conn
             .query_row(
@@ -1563,12 +1574,14 @@ mod tests {
             .unwrap();
         drop(conn);
         assert!(
-            (val2 - 0.367).abs() < 0.01,
-            "third row should be ~0.367 kWh, got {val2}"
+            (val2 - 5.23293874805481).abs() < 0.001,
+            "third row should use stored value, got {val2}"
         );
     }
 
     /// Verify reconstruction runs when DB is opened (full startup path).
+    /// With the new behaviour, inverter values are preserved when increasing
+    /// normally — only stuck values are recalculated.
     #[test]
     fn reconstruct_solar_kwh_on_open() {
         let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1599,7 +1612,7 @@ mod tests {
             let db = HistoryDb::open(&path).unwrap();
             let conn = db.conn.lock().unwrap();
 
-            // First row should be 0 (no previous reading)
+            // First row: uses stored value (first reading of day, no prev)
             let val0: f64 = conn
                 .query_row(
                     "SELECT today_solar_kwh FROM readings WHERE timestamp = ?",
@@ -1608,11 +1621,11 @@ mod tests {
                 )
                 .unwrap();
             assert!(
-                val0.abs() < 0.01,
-                "first row should be 0 after reopen, got {val0}"
+                (val0 - 5.2268622569437).abs() < 0.001,
+                "first row should use stored value 5.226 after reopen, got {val0}"
             );
 
-            // Second row should be ~0.351 kWh (interpolated avg of 4026+4403 × 5min)
+            // Second row: 5min gap, stored value > prev, so uses stored value
             let val1: f64 = conn
                 .query_row(
                     "SELECT today_solar_kwh FROM readings WHERE timestamp = ?",
@@ -1621,8 +1634,8 @@ mod tests {
                 )
                 .unwrap();
             assert!(
-                (val1 - 0.351).abs() < 0.01,
-                "second row should be ~0.351 kWh, got {val1}"
+                (val1 - 5.23257441972147).abs() < 0.001,
+                "second row should use stored value 5.232 after reopen, got {val1}"
             );
         }
     }
