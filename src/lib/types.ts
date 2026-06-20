@@ -14,6 +14,15 @@ export interface InverterSnapshot {
   battery_state: 'idle' | 'charging' | 'discharging';
   battery_temperature: number;
   battery_capacity_kwh: number;
+  /**
+   * Instantaneous Emergency Power Supply (EPS) output power in watts
+   * (IR(31) `p_backup`). Only populated on device families with an AC
+   * output stage (AC-coupled, All-in-One). On grid-connected systems
+   * this reads 0; during a grid outage the EPS-leg load increases as
+   * backup circuits come online. Hidden from the Battery panel when
+   * the value is 0 — see `BatteryPanel.tsx`.
+   */
+  eps_power_w: number;
   grid_power: number;
   grid_voltage: number;
   grid_frequency: number;

@@ -950,6 +950,21 @@ pub async fn set_eps(
         None => return error_response("Missing 'enabled' field (boolean)"),
     };
 
+    // HR 317 only exists on AC-coupled / AC-three-phase / All-in-One models
+    // (see DeviceType::supports_eps). On every other family the firmware
+    // silently drops the write — earlier we returned 200 anyway, which left
+    // the user with a successful response but a UI that still showed EPS
+    // off on the next snapshot (because we don't poll HR 300-359 for those
+    // devices). Refuse the write up front with a clear error so the toggle
+    // can be hidden in the UI.
+    let device_type = latest_device_type(&state).await;
+    if !device_type.supports_eps() {
+        return error_response(&format!(
+            "Emergency Power Supply is not supported on {} inverters",
+            device_type.display_name()
+        ));
+    }
+
     let cmd = ControlCommand::SetEps { enabled };
     match cmd.encode() {
         Ok(writes) => {
@@ -2863,6 +2878,143 @@ mod tests {
                     .any(|w| w.address == HR_CHARGE_SLOT_2_GEN3_END && w.value == 415),
                 "Gen3 charge slot 2 must write extended HR244"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_eps_rejects_dc_hybrid() {
+        with_isolated_config_dir_async(|| async {
+            // DC hybrids have no AC output stage, so HR 317 is meaningless
+            // and the firmware silently drops the write. The API should
+            // refuse with a clear error rather than returning success.
+            let cases = [
+                DeviceType::Gen1Hybrid,
+                DeviceType::Gen2Hybrid,
+                DeviceType::Gen3Hybrid,
+                DeviceType::Gen4Hybrid,
+                DeviceType::PolarHybrid,
+                DeviceType::Gen3PlusHybrid,
+                DeviceType::ThreePhase,
+                DeviceType::AioCommercial,
+                DeviceType::HybridHvGen3,
+                DeviceType::AllInOneHybrid,
+                DeviceType::Gateway,
+                DeviceType::Ems,
+                DeviceType::PvInverter,
+            ];
+            for dt in cases {
+                let state = make_state_with_device(dt).await;
+                let body = serde_json::json!({ "enabled": true });
+                let (status, payload) =
+                    set_eps(State(state.clone()), Json(body)).await;
+                assert_eq!(
+                    status,
+                    StatusCode::BAD_REQUEST,
+                    "expected 400 for {:?}, got {:?}",
+                    dt,
+                    payload
+                );
+                assert_eq!(
+                    payload["ok"], false,
+                    "expected ok=false for {:?}, got {:?}",
+                    dt,
+                    payload
+                );
+                assert!(
+                    payload["error"]
+                        .as_str()
+                        .unwrap_or("")
+                        .contains("Emergency Power Supply"),
+                    "expected clear EPS error for {:?}, got {:?}",
+                    dt,
+                    payload
+                );
+                let writes = drain_pending_writes(&state).await;
+                assert!(
+                    writes.is_empty(),
+                    "handler must not queue writes for unsupported {:?}, got {:?}",
+                    dt,
+                    writes
+                );
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_eps_writes_hr317_for_supported_devices() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_ENABLE_EPS;
+            let cases = [
+                DeviceType::ACCoupled,
+                DeviceType::ACCoupledMk2,
+                DeviceType::ACThreePhase,
+                DeviceType::AllInOne6kW,
+                DeviceType::AllInOne3_6kW,
+                DeviceType::AllInOne5kW,
+            ];
+            for dt in cases {
+                let state = make_state_with_device(dt).await;
+                let body = serde_json::json!({ "enabled": true });
+                let (status, payload) =
+                    set_eps(State(state.clone()), Json(body)).await;
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "expected 200 for {:?}, got {:?}",
+                    dt,
+                    payload
+                );
+                assert_eq!(payload["ok"], true);
+                let writes = drain_pending_writes(&state).await;
+                assert_all_whitelisted(&writes);
+                assert!(
+                    writes
+                        .iter()
+                        .any(|w| w.address == HR_ENABLE_EPS && w.value == 1),
+                    "expected HR 317 = 1 for {:?}, got {:?}",
+                    dt,
+                    writes
+                );
+            }
+
+            // Same path with enabled=false should write 0.
+            let state = make_state_with_device(DeviceType::ACCoupled).await;
+            let body = serde_json::json!({ "enabled": false });
+            let (status, _) = set_eps(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let writes = drain_pending_writes(&state).await;
+            assert!(
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_ENABLE_EPS && w.value == 0),
+                "expected HR 317 = 0 for disable, got {:?}",
+                writes
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_eps_rejects_missing_enabled_field() {
+        with_isolated_config_dir_async(|| async {
+            // Even on a supported device, an invalid body should still 400.
+            let state = make_state_with_device(DeviceType::ACCoupled).await;
+            let body = serde_json::json!({});
+            let (status, payload) = set_eps(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(payload["ok"], false);
+            assert!(
+                payload["error"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("Missing"),
+                "expected 'Missing' error, got {:?}",
+                payload
+            );
+            let writes = drain_pending_writes(&state).await;
+            assert!(writes.is_empty());
         })
         .await;
     }

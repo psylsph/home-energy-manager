@@ -802,6 +802,31 @@ pub(crate) fn sanitize_snapshot(
     snap.home_power = val;
     sanitized |= was_sanitized;
 
+    // -- EPS power (IR(31) p_backup) --
+    // Reference libraries cap the raw value at 50 kW and treat it as
+    // uint16. The residential installs we care about (AC-coupled, AIO)
+    // typically peak around 3-5 kW on the EPS leg, so a 10 kW ceiling is
+    // conservative. Anything ≥ HARD_CORRUPTION_CEILING (the int16
+    // saturation fingerprint) is the dongle memory-leak corruption that
+    // affects every adjacent register, so reuse the same soft-then-hard
+    // strategy as the other power fields rather than treating EPS as a
+    // special case.
+    let prev_eps = prev.map(|p| p.eps_power_w as i32);
+    let raw_eps = snap.eps_power_w as i32;
+    let (eps_val, eps_was_sanitized) = check_power_field(
+        raw_eps,
+        prev_eps,
+        max_home_power, // same residential ceiling as home_power
+        "eps_power_w",
+        suspect_counts,
+    );
+    let clamped_eps = eps_val.max(0) as u32;
+    if clamped_eps != snap.eps_power_w {
+        snap.eps_power_w = clamped_eps;
+        sanitized = true;
+    }
+    sanitized |= eps_was_sanitized;
+
     // SOC: if 0 but power is flowing, clearly a garbled register
     if snap.soc == 0 && (snap.solar_power > 0 || snap.battery_power != 0 || snap.grid_power != 0) {
         if let Some(p) = prev {
@@ -3613,5 +3638,96 @@ mod tests {
         );
         assert_eq!(snap.discharge_slots[0].start_hour, 23);
         assert_eq!(snap.discharge_slots[0].end_hour, 1);
+    }
+
+    // -------------------------------------------------------------------
+    // EPS power (IR(31) p_backup) sanitization
+    // -------------------------------------------------------------------
+
+    fn sanitize_for_test(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot>) -> bool {
+        let mut pending_mode = None;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+        sanitize_snapshot(
+            snap,
+            prev,
+            false,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+        )
+    }
+
+    fn base_grid_connected_snap() -> InverterSnapshot {
+        // Minimal snapshot that survives the surrounding sanity checks
+        // (grid voltage/frequency present, battery mode valid) so we can
+        // exercise the EPS power branch in isolation.
+        InverterSnapshot {
+            timestamp: 100,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            grid_online: true,
+            soc: 50,
+            battery_reserve: 4,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn eps_power_w_in_range_is_accepted() {
+        let mut snap = base_grid_connected_snap();
+        snap.eps_power_w = 2400; // 2.4 kW on the EPS leg
+        let sanitized = sanitize_for_test(&mut snap, None);
+        assert!(
+            !sanitized,
+            "in-range EPS reading must not be flagged, got sanitized=true"
+        );
+        assert_eq!(snap.eps_power_w, 2400);
+    }
+
+    #[test]
+    fn eps_power_w_soft_over_limit_falls_back_to_previous() {
+        // Direct check of `check_power_field` for eps_power_w with a value
+        // over the soft ceiling. Mirrors the existing
+        // `check_power_field_soft_over_limit_uses_previous_then_releases`
+        // test, just parameterised on the new label. The full
+        // sanitize_snapshot soft-release path is exercised there.
+        let mut counts = ConsecutiveSuspectCounts::default();
+        let (val, sanitized) =
+            check_power_field(16_000, Some(0), 15_000, "eps_power_w", &mut counts);
+        assert_eq!(val, 0, "first over-limit cycle falls back to previous");
+        assert!(sanitized);
+        assert_eq!(counts.0.get("eps_power_w"), Some(&1));
+    }
+
+    #[test]
+    fn eps_power_w_at_int16_saturation_is_treated_as_corruption() {
+        // IR(31) stored as u32, then cast to i32 for the corruption check.
+        // The hard-corruption ceiling (|raw| >= 32000) catches both
+        // legitimate ~50 kW readings AND the typical dongle memory-leak
+        // fingerprint — it falls back to the previous value and never
+        // releases.
+        let mut prev = base_grid_connected_snap();
+        prev.eps_power_w = 800;
+
+        // 40_000 W is above HARD_CORRUPTION_CEILING (32_000). Sanitizer
+        // sees 40000 as i32, abs is 40000 >= 32000, falls back to prev.
+        let mut snap = prev.clone();
+        snap.eps_power_w = 40_000;
+        let sanitized = sanitize_for_test(&mut snap, Some(&prev));
+        assert!(sanitized, "saturated EPS value must be flagged");
+        assert_eq!(snap.eps_power_w, 800, "must fall back to previous");
+    }
+
+    #[test]
+    fn eps_power_w_zero_after_sanitize_remains_zero() {
+        // The grid-connected baseline (IR(31) = 0) must remain 0 — used
+        // by the UI to hide the EPS row.
+        let mut snap = base_grid_connected_snap();
+        snap.eps_power_w = 0;
+        let sanitized = sanitize_for_test(&mut snap, None);
+        assert!(!sanitized);
+        assert_eq!(snap.eps_power_w, 0);
     }
 }

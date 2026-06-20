@@ -455,6 +455,15 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.grid_voltage = get_reg(data, 5) as f32 * 0.1; // IR(5):  v_ac1 (/10 V)
     snap.grid_frequency = get_reg(data, 13) as f32 * 0.01; // IR(13): f_ac1 (/100 Hz)
 
+    // -- EPS --
+    // IR(31): p_backup (uint16 W) — Emergency Power Supply output. Reference
+    // libraries (givenergy-modbus `p_backup`, GivTCP `p_eps_backup`) treat the
+    // register as unsigned with a hardware max around 50 kW; on grid-connected
+    // inverters it reads 0. Treat the raw value as non-negative: if the high
+    // bit is set the firmware is misbehaving and we'll clamp in the
+    // sanitizer rather than display a meaningless negative number.
+    snap.eps_power_w = get_reg(data, 31) as u32;
+
     // -- Home load --
     // IR(42): p_load_demand — house consumption at the busbar, independently
     // sensed by the inverter. This is a DIFFERENT physical node from the grid
@@ -629,6 +638,10 @@ fn decode_input_180_181(data: &[u16], snap: &mut InverterSnapshot) {
     // degrades to 0 rather than panicking.
     snap.total_discharge_kwh = get_reg(data, 0) as f32 * 0.1; // IR(180): e_battery_discharge_total_alt1
     snap.total_charge_kwh = get_reg(data, 1) as f32 * 0.1; // IR(181): e_battery_charge_total_alt1
+
+    // For devices using alt1 counters (including AC coupled), calculate throughput
+    // from the charge + discharge values since IR(6-7) may not be available.
+    snap.total_throughput_kwh = snap.total_charge_kwh + snap.total_discharge_kwh;
 
     // Gen1 Hybrid: the reference's `_BATTERY_ENERGY_SOURCE` table routes
     // daily battery energy to alt2 (IR(182)/IR(183)). Override the values
@@ -1732,6 +1745,8 @@ fn decode_gateway_1600_1659(data: &[u16], snap: &mut InverterSnapshot) {
     } else {
         total_discharge_u32 as f32 * 0.1
     };
+    // Gateway has no direct e_battery_throughput register; use sum of charge + discharge.
+    snap.total_throughput_kwh = snap.total_charge_kwh + snap.total_discharge_kwh;
 }
 
 /// IR 1660-1719: AIO stack summary (count, aggregate power, state) + per-AIO
@@ -2070,6 +2085,8 @@ mod tests {
         let snap = decode_snapshot(&blocks);
         assert!((snap.total_discharge_kwh - 1234.5).abs() < 1e-6);
         assert!((snap.total_charge_kwh - 6000.0).abs() < 1e-6);
+        // Throughput is calculated from the alt1 charge + discharge values
+        assert!((snap.total_throughput_kwh - 7234.5).abs() < 1e-6);
         assert_eq!(snap.today_discharge_kwh, 0.0);
         assert_eq!(snap.today_charge_kwh, 0.0);
     }
@@ -3598,6 +3615,8 @@ mod tests {
         assert!((snap.total_charge_kwh - 13107.2).abs() < 0.1);
         // e_aio_discharge_total: hi=1, lo=5000 → 70536/10 = 7053.6
         assert!((snap.total_discharge_kwh - 7053.6).abs() < 0.1);
+        // Gateway has no direct throughput register, so it's the sum of charge + discharge
+        assert!((snap.total_throughput_kwh - 20160.8).abs() < 0.1);
     }
 
     #[test]
@@ -4091,5 +4110,75 @@ mod tests {
             snap.home_energy_today_kwh
         );
         assert!((snap.home_energy_today_kwh - 3.2).abs() < 0.01);
+    }
+
+    // -- EPS power (IR(31) p_backup) --------------------------------------
+    //
+    // IR(31) is only populated by `decode_input_0_59` which is dispatched
+    // for single-phase / AC-coupled / All-in-One devices. Three-phase and
+    // Gateway models skip input_0_59 entirely and read IR 1000-1414 /
+    // IR 1600-1859 instead; their EPS telemetry lives in IR 1180-1239 which
+    // is not currently captured (placeholder block). So eps_power_w stays
+    // 0 for those families until that decoder lands.
+
+    #[test]
+    fn eps_power_w_defaults_to_zero_when_block_missing() {
+        // No input_0_59 block at all (e.g. three-phase poll set) →
+        // snapshot never sees IR(31), field stays at default 0.
+        let blocks = vec![make_block(
+            RegisterType::Holding,
+            0,
+            60,
+            "holding_0_59",
+            vec![0; 60],
+        )];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.eps_power_w, 0);
+    }
+
+    #[test]
+    fn eps_power_w_decodes_ir31_when_present() {
+        let mut input_data = vec![0u16; 60];
+        input_data[31] = 2400; // 2.4 kW on the EPS leg during a grid outage
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x3001; // HR(0): AC-coupled
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", input_data),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.eps_power_w, 2400);
+    }
+
+    #[test]
+    fn eps_power_w_zero_when_grid_connected() {
+        // On grid-connected systems IR(31) reads 0 — the EPS leg is
+        // disconnected, so the panel hides the row.
+        let mut input_data = vec![0u16; 60];
+        input_data[31] = 0;
+        let blocks = vec![make_block(
+            RegisterType::Input,
+            0,
+            60,
+            "input_0_59",
+            input_data,
+        )];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.eps_power_w, 0);
+    }
+
+    #[test]
+    fn eps_power_w_does_not_crash_on_short_block() {
+        // A truncated input_0_59 read (e.g. mid-reconnect) must still
+        // produce a valid snapshot. get_reg clamps missing indices to 0.
+        let blocks = vec![make_block(
+            RegisterType::Input,
+            0,
+            60,
+            "input_0_59",
+            vec![0u16; 10], // 10 registers instead of 60
+        )];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.eps_power_w, 0);
     }
 }

@@ -122,6 +122,20 @@ function BatteryPanelInner({ snapshot: s }: Props) {
             {s.battery_state === 'discharging' ? '−' : s.battery_state === 'charging' ? '+' : ''}
             {formatPower(Math.abs(s.battery_power))}
           </span>
+          {/* EPS (Emergency Power Supply) output — only visible when the
+              backup leg is actively feeding loads. IR(31) reads 0 on
+              grid-connected systems and on devices that don't support
+              EPS (DC hybrids, pure three-phase); the row stays hidden
+              in both cases so the panel doesn't grow when there's
+              nothing to show. */}
+          {s.eps_power_w > 0 && (
+            <>
+              <span className="text-text-secondary">EPS Power</span>
+              <span className="text-text-primary font-mono text-right">
+                {formatPower(s.eps_power_w)}
+              </span>
+            </>
+          )}
           <span className="text-text-secondary">Voltage</span>
           <span className="text-text-primary font-mono text-right">{formatVoltage(s.battery_voltage)}</span>
           <span className="text-text-secondary">Current</span>

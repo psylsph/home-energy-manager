@@ -126,22 +126,40 @@ export default function BatteryPage() {
                             <span className="text-text-primary font-mono text-right">{m.remaining_capacity_ah.toFixed(1)} Ah</span>
                           </>
                         )}
-                        {s.total_throughput_kwh > 0 && s.battery_capacity_kwh > 0 && (
-                          <>
-                            <span className="text-text-secondary">Total Throughput</span>
-                            <span className="text-text-primary font-mono text-right">{s.total_throughput_kwh.toFixed(0)} kWh</span>
-                          </>
-                        )}
                         {m.design_capacity_ah > 0 && m.capacity_ah > 0 && (
                           <>
                             <span className="text-text-secondary">State of Health (current vs design capacity)</span>
                             <span className="text-text-primary font-mono text-right">{(m.capacity_ah / m.design_capacity_ah * 100).toFixed(0)}%</span>
                           </>
                         )}
-                        {s.total_throughput_kwh > 0 && s.battery_capacity_kwh > 0 && (
+                        {/* Total Throughput (IR(6-7) e_battery_throughput).
+                            The register pair is uint32 in /10 kWh — a zero
+                            raw value means the dongle hasn't populated it
+                            yet (early firmware, AIO no-battery reads, or a
+                            first-connect window before the lifetime total
+                            is reported). Render "-" instead of "0 kWh" so
+                            it's clear the meter is empty rather than the
+                            battery having done zero work. */}
+                        {s.battery_capacity_kwh > 0 && (
+                          <>
+                            <span className="text-text-secondary">Total Throughput</span>
+                            <span className="text-text-primary font-mono text-right">
+                              {s.total_throughput_kwh > 0
+                                ? `${s.total_throughput_kwh.toFixed(0)} kWh`
+                                : '–'}
+                            </span>
+                          </>
+                        )}
+                        {/* Battery Life Remaining — derived from the same
+                            IR(6-7) throughput reading. Mirrors the dash
+                            placeholder above when the meter is empty; the
+                            percentage is meaningless without a non-zero
+                            denominator so we don't try to compute it. */}
+                        {s.battery_capacity_kwh > 0 && (
                           <>
                             <span className="text-text-secondary">Battery Life Remaining (warranty throughput remaining)</span>
                             <span className="text-text-primary font-mono text-right">{(() => {
+                              if (s.total_throughput_kwh <= 0) return '–';
                               const RATED_THROUGHPUT_MWH_PER_KWH = 10;
                               const throughputUsed = s.total_throughput_kwh / (s.battery_capacity_kwh * RATED_THROUGHPUT_MWH_PER_KWH * 1000);
                               const remainingPct = Math.max(0, Math.min(1, 1 - throughputUsed)) * 100;

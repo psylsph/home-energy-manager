@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { useInverterStore } from '../store/useInverterStore';
 import { useAction } from '../hooks/useAction';
 import { apiPost, apiGet } from '../lib/api';
+import { deviceSupportsEps } from '../lib/deviceCapabilities';
 import type { ScheduleSlot } from '../lib/types';
 
 type BatteryMode = 'unknown' | 'eco' | 'eco_paused' | 'timed_demand' | 'timed_export' | 'export_paused';
@@ -1530,6 +1531,14 @@ export default function ControlPage() {
     : Math.max(4, Math.min(100, snapshot?.battery_reserve ?? 4));
   const isAcCoupled = snapshot?.device_type_code === '3001' || snapshot?.device_type_code === '3002';
 
+  // Whether this inverter exposes the Emergency Power Supply enable register
+  // at HR 317 — see lib/deviceCapabilities.ts. DC hybrids and pure
+  // three-phase models have no AC output stage, so the firmware silently
+  // drops HR 317 writes. The backend rejects /api/control/eps with HTTP
+  // 400 in that case; we hide the toggle here so the user never sees a
+  // control that cannot work.
+  const supportsEps = deviceSupportsEps(snapshot);
+
   // ARM firmware version as integer (e.g. 318, 352, 449). Used for firmware-gating
   // the extended schedule block on Gen3 hybrids.
   const armFwNum = snapshot?.firmware_version != null && snapshot.firmware_version !== ''
@@ -2111,8 +2120,8 @@ export default function ControlPage() {
       <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Battery and Power Controls</h2>
         <div className="bg-bg-surface rounded-xl p-4 space-y-5">
-          {/* EPS (Emergency Power Supply) — AC-coupled only */}
-          {isAcCoupled && (
+          {/* EPS (Emergency Power Supply) — AC-coupled / AC-three-phase / All-in-One */}
+          {supportsEps && (
             <div className="space-y-1 pt-2 border-t border-bg-elevated">
               <div className="flex items-center justify-between">
                 <div>
