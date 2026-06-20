@@ -132,34 +132,33 @@ export default function BatteryPage() {
                             <span className="text-text-primary font-mono text-right">{(m.capacity_ah / m.design_capacity_ah * 100).toFixed(0)}%</span>
                           </>
                         )}
-                        {/* Total Throughput (IR(6-7) e_battery_throughput).
-                            The register pair is uint32 in /10 kWh — a zero
-                            raw value means the dongle hasn't populated it
-                            yet (early firmware, AIO no-battery reads, or a
-                            first-connect window before the lifetime total
-                            is reported). Render "-" instead of "0 kWh" so
-                            it's clear the meter is empty rather than the
-                            battery having done zero work. */}
-                        {s.battery_capacity_kwh > 0 && (
+                        {/* Total Throughput + Battery Life Remaining.
+                            Decoded from IR(6-7) `e_battery_throughput` (uint32 /10 kWh)
+                            and re-derived from IR(180)+IR(181) for AC coupled / AIO
+                            where the dongle leaves IR(6-7) empty.
+
+                            Caveat for AC coupled inverters (DTC 3001 / 3002): GivEnergy
+                            firmware does NOT populate any lifetime throughput register
+                            on these models — neither IR(6-7) nor IR(180)/IR(181) report
+                            a real value. Confirmed against the givenergy-modbus
+                            reference library's `_BATTERY_ENERGY_SOURCE` table, which
+                            deliberately leaves the `total` slot undeclared for
+                            `Model.AC` / `Model.AC_3PH` (only `today` is mapped), and
+                            AIO follows the same shape. The rows are therefore hidden
+                            entirely when the meter is empty (zero value, never
+                            populated) — showing two "–" rows suggests a bug rather
+                            than a missing firmware feature.
+
+                            A zero value can also occur transiently on a fresh
+                            Hybrid install before any charge cycle has completed;
+                            hiding the rows in that case is also fine because there
+                            is nothing meaningful to display yet. */}
+                        {s.battery_capacity_kwh > 0 && s.total_throughput_kwh > 0 && (
                           <>
                             <span className="text-text-secondary">Total Throughput</span>
-                            <span className="text-text-primary font-mono text-right">
-                              {s.total_throughput_kwh > 0
-                                ? `${s.total_throughput_kwh.toFixed(0)} kWh`
-                                : '–'}
-                            </span>
-                          </>
-                        )}
-                        {/* Battery Life Remaining — derived from the same
-                            IR(6-7) throughput reading. Mirrors the dash
-                            placeholder above when the meter is empty; the
-                            percentage is meaningless without a non-zero
-                            denominator so we don't try to compute it. */}
-                        {s.battery_capacity_kwh > 0 && (
-                          <>
+                            <span className="text-text-primary font-mono text-right">{`${s.total_throughput_kwh.toFixed(0)} kWh`}</span>
                             <span className="text-text-secondary">Battery Life Remaining (warranty throughput remaining)</span>
                             <span className="text-text-primary font-mono text-right">{(() => {
-                              if (s.total_throughput_kwh <= 0) return '–';
                               const RATED_THROUGHPUT_MWH_PER_KWH = 10;
                               const throughputUsed = s.total_throughput_kwh / (s.battery_capacity_kwh * RATED_THROUGHPUT_MWH_PER_KWH * 1000);
                               const remainingPct = Math.max(0, Math.min(1, 1 - throughputUsed)) * 100;
