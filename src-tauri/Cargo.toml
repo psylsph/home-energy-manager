@@ -1,6 +1,6 @@
 [package]
 name = "givenergy-local"
-version = "0.32.0"
+version = "0.32.1"
 description = "Home Energy Manager — Monitor and control GivEnergy inverters"
 authors = ["Stuart Harding"]
 edition = "2021"
@@ -42,6 +42,7 @@ anyhow = "1"
 
 # Tracing
 tracing = "0.1"
+tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Futures utilities (join_all for discovery)

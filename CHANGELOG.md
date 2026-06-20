@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.32.1] - 2026-06-20
+
+### Fixed
+
+- **ntfy push notification configuration is now always visible when alerts
+  are enabled.** Previously the ntfy topic field, Copy button, and server
+  field were hidden behind an inverter-serial check, so users who enabled
+  alerts before connecting to an inverter (or with a non-reporting device)
+  saw only a "Connect to an inverter to generate your ntfy topic" message and
+  had no way to configure ntfy. The topic is now an always-visible editable
+  field that auto-fills from the inverter serial when connected and can be
+  set manually at any time. Also removed the silent auto-save `useEffect`
+  that could clobber a manually-entered topic.
+
+### Changed
+
+- Updated the Windows security notices in `README.md`, `INSTALL.md`, and the
+  release workflow. The installer is scanned clean by VirusTotal; the old
+  `Trojan:Script/Wacatac.C!ml` false-positive wording and the SignPath
+  Foundation code-signing plan (application rejected) have been removed, and
+  users are now asked to report any antivirus warning as a security
+  vulnerability via the GitHub issues page.
+
+### Docs
+
+- Fixed all markdown lint errors across the documentation (`PROBLEM.md`,
+  `ROADMAP.md`, `INSTALL.md`, `README.md`, and the `gateway-design/` notes) so
+  `npm run lint:md` passes clean.
+
 ## [0.32.0] - 2026-06-20
 
 ### Fixed

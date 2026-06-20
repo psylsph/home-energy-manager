@@ -71,7 +71,7 @@ Go to the [**Releases page**](https://github.com/psylsph/home-energy-manager/rel
 | 🍓 **Raspberry Pi / ARM64 Linux** (Ubuntu, Debian) | `Linux-Debian-ARM64-...deb` |
 | 🍓 **Raspberry Pi / ARM64 Linux** (Fedora, openSUSE) | `Linux-RPM-ARM64-...rpm` |
 
-**Windows users** — Windows SmartScreen may show "Windows protected your PC", and Microsoft Defender has recently false-flagged the unsigned `.msi` as `Trojan:Script/Wacatac.C!ml` on some systems. VirusTotal scans are clean and the exact installer has been submitted to Microsoft as a false positive. This is open-source software you can inspect on GitHub, and future Windows builds will use SignPath Foundation code signing as required.
+**Windows users** — Windows SmartScreen may show "Windows protected your PC" because the app is not code-signed. This is open-source software you can inspect on GitHub, and the installer is scanned clean by VirusTotal. If your antivirus flags it as malware, please report a security vulnerability at <https://github.com/psylsph/home-energy-manager/issues>.
 
 To run the MSI if SmartScreen appears:
 

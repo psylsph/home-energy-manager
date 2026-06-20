@@ -294,7 +294,7 @@ jobs:
             | `Linux-RPM-ARM64-...rpm` | **Linux** — RHEL/Fedora/openSUSE (ARM64) |
             | `Android-Chromebook-...apk` | **Chromebook** — Android APK (ARM64 & x86_64) |
 
-            > **Windows security notice**: Windows SmartScreen may warn that the MSI is from an unknown publisher, and Microsoft Defender has recently false-flagged the unsigned Windows installer as `Trojan:Script/Wacatac.C!ml` on some systems. VirusTotal scans are clean and the exact installer has been submitted to Microsoft as a false positive. Future Windows builds will use SignPath Foundation code signing as required.
+            > **Windows security notice**: Windows SmartScreen may warn that the MSI is from an unknown publisher because the app is not code-signed. The installer is scanned clean by VirusTotal. If your antivirus flags it as malware, please report a security vulnerability at <https://github.com/psylsph/home-energy-manager/issues>.
 
             > **macOS users**: Drag the app to your Applications folder. On first launch Gatekeeper may block it — open System Settings → Privacy & Security → click "Open Anyway". Or right-click the app → Open. See README.txt inside the DMG for details.
 

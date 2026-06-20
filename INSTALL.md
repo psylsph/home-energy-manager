@@ -8,7 +8,7 @@ How to install, update, and run Home Energy Manager on different platforms. For 
 
 ### Windows
 
-> **Windows security notice:** Windows SmartScreen may warn that the app is from an unknown publisher, and Microsoft Defender has recently false-flagged the unsigned `.msi` as `Trojan:Script/Wacatac.C!ml` on some systems. VirusTotal scans are clean and the exact installer has been submitted to Microsoft as a false positive. Future Windows builds will use SignPath Foundation code signing as required.
+> **Windows security notice:** Windows SmartScreen may warn that the app is from an unknown publisher because it is not code-signed. The installer is scanned clean by VirusTotal. If your antivirus flags it as malware, please report a security vulnerability at <https://github.com/psylsph/home-energy-manager/issues>.
 
 1. Download the `.msi` file from the [**Releases page**](https://github.com/psylsph/home-energy-manager/releases/latest)
 2. Double-click it to run the installer
@@ -35,15 +35,18 @@ How to install, update, and run Home Energy Manager on different platforms. For 
    - Most computers: the file with `amd64` in the name
    - Raspberry Pi (64-bit OS only): the file with `arm64` in the name
 2. Install it:
+
    ```bash
    sudo apt install ./home-energy-manager_*_amd64.deb
    ```
+
 3. Launch from your app menu, or run `givenergy-local` in a terminal
 
 **Fedora / openSUSE:**
 
 1. Download the `.rpm` file from the [**Releases page**](https://github.com/psylsph/home-energy-manager/releases/latest)
 2. Install it:
+
    ```bash
    sudo dnf install ./home-energy-manager-*.rpm    # Fedora
    sudo zypper install ./home-energy-manager-*.rpm  # openSUSE
@@ -68,11 +71,13 @@ To update, simply download and install the latest version from the [**Releases p
 ### Uninstalling
 
 **Linux (`.deb`):**
+
 ```bash
 sudo apt purge home-energy-manager
 ```
 
 This removes the app but keeps your data. To delete your settings and history as well:
+
 ```bash
 rm -rf ~/.givenergy-local
 ```
@@ -311,6 +316,7 @@ If you have more than one inverter, you can run multiple copies of the app. Each
 Set `GIVENERGY_LOCAL_CONFIG_DIR` to a different path for each inverter:
 
 **Linux / macOS:**
+
 ```bash
 # First inverter (default)
 ./givenergy-local
@@ -320,6 +326,7 @@ GIVENERGY_LOCAL_CONFIG_DIR=~/givenergy-instance2 ./givenergy-local
 ```
 
 **Windows (PowerShell):**
+
 ```powershell
 $env:GIVENERGY_LOCAL_CONFIG_DIR = "C:\Users\You\givenergy-config-2"
 .\givenergy-local.exe
@@ -332,6 +339,7 @@ Each instance needs a different port (default is 7337).
 **Desktop app:** Change the port in **Settings → HTTP Port**, then restart.
 
 **Headless:** Use the `--port` flag:
+
 ```bash
 GIVENERGY_LOCAL_CONFIG_DIR=~/givenergy-server ./givenergy-local --headless --port 8080
 ```

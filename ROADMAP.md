@@ -171,7 +171,7 @@ what users see on the Power chart.
 
 CSV export should include three sections:
 
-1. **Report metadata and summary **
+1. **Report metadata and summary**
    - Report name, selected period label, generated timestamp
    - Total solar generation kWh
    - Total home/load kWh
@@ -795,8 +795,7 @@ GitHub Actions currently reports a non-fatal Node 20 deprecation warning for
 some marketplace actions. Update affected actions or opt in to Node 24 when the
 actions used by the workflow support it cleanly.
 
-
-# Plan: Multi-Zone Tariff Cost Calculations (Flux & Beyond)
+## Plan: Multi-Zone Tariff Cost Calculations (Flux & Beyond)
 
 **Issue**: [#64 — Inclusion of Octopus Flux tariff for cost accounting](https://github.com/psylsph/home-energy-manager/issues/64)
 
@@ -985,6 +984,7 @@ export interface PollSettings {
 #### `PUT /api/settings` (accepts new fields)
 
 Same shape. Backend validates:
+
 - `tariff_mode` is `"standard"` or `"multizone"`
 - When `"multizone"`, the `multizone_*_config` must be present
 - Zone times are valid `"HH:MM"` format

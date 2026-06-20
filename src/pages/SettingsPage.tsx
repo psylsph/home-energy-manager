@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { apiGet, apiPost, getApiBase, getServerPort } from '../lib/api';
 import { openExternal } from '../lib/openExternal';
 import type { PollSettings, DiscoveredInverter, DiscoveredEvc, TariffConfig } from '../lib/types';
@@ -166,19 +166,11 @@ const VALID_INTERVALS = [5, 10, 15, 20];
     })();
   }, []);
 
-  // Auto-save generated ntfy topic when serial becomes available.
-  // Use a ref to track the last auto-pushed topic so the guard condition
-  // doesn't need `alertsConfig.ntfy_topic` in its deps (which would
-  // overwrite user input when they edit the topic field).
-  const lastAutoNtfyTopic = useRef('');
-  useEffect(() => {
-    const invSerial = serial || snapshot?.inverter_serial || '';
-    const generatedTopic = invSerial ? `hem-${invSerial}` : '';
-    if (generatedTopic && generatedTopic !== lastAutoNtfyTopic.current) {
-      lastAutoNtfyTopic.current = generatedTopic;
-      apiPost('/api/alerts', { ntfy_topic: generatedTopic }).catch(() => {});
-    }
-  }, [serial, snapshot?.inverter_serial]);
+  // Derived ntfy topic: fall back to a serial-based default when the user
+  // hasn't entered a custom topic. Kept as a derived value (not an effect) so
+  // manual edits are never overwritten and there's no setState-in-effect.
+  const generatedNtfyTopic = (serial || snapshot?.inverter_serial) ? `hem-${serial || snapshot?.inverter_serial}` : '';
+  const effectiveNtfyTopic = alertsConfig.ntfy_topic || generatedNtfyTopic;
 
   // Network URL — use LAN IP if available, otherwise fall back to getApiBase()
   const lanUrl = lanIp ? `http://${lanIp}:${getServerPort()}` : getApiBase();
@@ -295,10 +287,9 @@ const VALID_INTERVALS = [5, 10, 15, 20];
   // Save email alerts
   const handleAlertsSave = async () => {
     setAlertsSaving(true);
-    // Auto-generate ntfy topic from inverter serial (live snapshot as fallback)
-    const invSerial = serial || snapshot?.inverter_serial || '';
-    const ntfyTopic = invSerial ? `hem-${invSerial}` : '';
-    const saveConfig = { ...alertsConfig, ntfy_topic: ntfyTopic };
+    // Persist the effective topic (user-entered, or the serial-based default
+    // when left blank) so ntfy works without forcing the user to type one.
+    const saveConfig = { ...alertsConfig, ntfy_topic: effectiveNtfyTopic };
     try {
       const res = await apiPost('/api/alerts', saveConfig) as { message: string; ok: boolean };
       flash(res.message, res.ok);
@@ -980,37 +971,46 @@ const VALID_INTERVALS = [5, 10, 15, 20];
                 <strong className="text-green-400">Recommended</strong> — Free push notifications via&nbsp;
                 <button onClick={() => openExternal('https://ntfy.sh')} className="text-flow-active underline hover:opacity-80 inline">ntfy.sh</button>.
                 Install the app on your phone and subscribe to the topic below.
-                The topic is generated from your inverter serial so it's unique to you.
+                A topic is auto-generated from your inverter serial (unique to you) — edit it only if you want a custom one.
               </p>
-              {(serial || snapshot?.inverter_serial) ? (
-                <div className="flex flex-col gap-3">
-                  <div className="bg-bg-elevated rounded-lg px-4 py-3 flex flex-col gap-2">
-                    <span className="text-text-secondary text-xs font-sans">Subscribe to this topic in the ntfy app</span>
-                    <div className="flex items-center gap-2">
-                      <code className="flex-1 bg-bg-surface text-text-primary font-mono text-sm rounded px-3 py-2 select-all">hem-{serial || snapshot?.inverter_serial}</code>
-                      <button
-                        onClick={() => { navigator.clipboard.writeText('hem-' + (serial || snapshot?.inverter_serial)); flash('Topic copied!', true); }}
-                        className="shrink-0 bg-flow-active text-bg-base text-xs font-sans font-semibold px-3 py-2 rounded-lg hover:opacity-90 transition-opacity"
-                      >
-                        Copy
-                      </button>
-                    </div>
-                  </div>
-                  <label className="flex flex-col gap-1">
-                    <span className="text-text-secondary text-xs font-sans">Server (optional, default: ntfy.sh)</span>
-                    <input
-                      type="text" placeholder="https://ntfy.sh"
-                      value={alertsConfig.ntfy_server}
-                      onChange={(e) => setAlertsConfig((p) => ({ ...p, ntfy_server: e.target.value }))}
-                      className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                    />
-                  </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-text-secondary text-xs font-sans">Topic (subscribe to this in the ntfy app)</span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    placeholder={generatedNtfyTopic || 'hem-your-inverter-serial'}
+                    value={alertsConfig.ntfy_topic}
+                    onChange={(e) => setAlertsConfig((p) => ({ ...p, ntfy_topic: e.target.value }))}
+                    className="flex-1 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                  />
+                  <button
+                    onClick={() => { navigator.clipboard.writeText(effectiveNtfyTopic); flash('Topic copied!', true); }}
+                    disabled={!effectiveNtfyTopic}
+                    className="shrink-0 bg-flow-active text-bg-base text-xs font-sans font-semibold px-3 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 transition-opacity"
+                  >
+                    Copy
+                  </button>
                 </div>
-              ) : (
-                <p className="text-text-secondary/50 text-xs font-sans italic">
-                  Connect to an inverter to generate your ntfy topic.
-                </p>
-              )}
+                {!alertsConfig.ntfy_topic && generatedNtfyTopic && (
+                  <span className="text-text-secondary/60 text-xs font-sans">
+                    Using generated topic: <code className="font-mono">{generatedNtfyTopic}</code>
+                  </span>
+                )}
+                {!alertsConfig.ntfy_topic && !generatedNtfyTopic && (
+                  <span className="text-text-secondary/50 text-xs font-sans italic">
+                    Connect to an inverter to auto-generate a topic, or enter one manually.
+                  </span>
+                )}
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-text-secondary text-xs font-sans">Server (optional, default: ntfy.sh)</span>
+                <input
+                  type="text" placeholder="https://ntfy.sh"
+                  value={alertsConfig.ntfy_server}
+                  onChange={(e) => setAlertsConfig((p) => ({ ...p, ntfy_server: e.target.value }))}
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                />
+              </label>
             </div>
 
             {/* Battery temperature & SOC thresholds */}
