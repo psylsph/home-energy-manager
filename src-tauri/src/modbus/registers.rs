@@ -58,17 +58,15 @@ pub const STANDARD_POLL_BLOCKS: &[RegisterBlock] = &[
         register_type: RegisterType::Holding,
         name: "holding_60_119",
     },
-    // Only IR(180)/IR(181) are consumed by the decoder (alternative battery
-    // lifetime discharge/charge totals). IR(182)/IR(183) carry *alternative
-    // daily* battery charge/discharge (deci-kWh) and duplicate IR(36)/IR(37);
-    // this decoder does not consume them, so the block is trimmed to the
-    // two lifetime registers actually read. Reading count=2 trims ~58
-    // registers (≈ one full Modbus round-trip incl. inter-request delay)
-    // off every single-phase poll cycle. See `decode_input_180_181` in
-    // `decoder.rs`.
+    // IR(180)/IR(181) are alternative battery lifetime discharge/charge totals.
+    // IR(182)/IR(183) are alternative *daily* battery discharge/charge totals
+    // that are authoritative for Gen1 Hybrid inverters on firmware where the
+    // primary IR(36)/IR(37) registers read 0. The decoder routes by device type
+    // (see `decode_input_180_181` in `decoder.rs`). Reading 4 registers costs
+    // one extra Modbus frame per single-phase poll cycle.
     RegisterBlock {
         start: 180,
-        count: 2,
+        count: 4,
         register_type: RegisterType::Input,
         name: "input_180_181",
     },
@@ -798,12 +796,11 @@ mod tests {
         // Holding 60-119 covers charge_slot_1 (94-95), soc_reserve (110), limits (111-112)
         assert_eq!(STANDARD_POLL_BLOCKS[2].start, 60);
         assert_eq!(STANDARD_POLL_BLOCKS[2].count, 60);
-        // Input 180-181 covers only the two alternative battery lifetime
-        // totals (discharge/charge). Reading a full 60-register window here
-        // would fetch 58 unverified registers for nothing — see
-        // `decode_input_180_181`.
+        // Input 180-181/183 covers alternative battery lifetime totals
+        // (IR 180-181) plus the Gen1-authoritative alternative daily totals
+        // (IR 182-183). A full 60-register window is not needed.
         assert_eq!(STANDARD_POLL_BLOCKS[3].start, 180);
-        assert_eq!(STANDARD_POLL_BLOCKS[3].count, 2);
+        assert_eq!(STANDARD_POLL_BLOCKS[3].count, 4);
         assert_eq!(STANDARD_POLL_BLOCKS[3].name, "input_180_181");
         assert_eq!(STANDARD_POLL_BLOCKS[3].register_type, RegisterType::Input);
     }

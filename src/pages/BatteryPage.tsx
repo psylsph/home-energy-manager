@@ -87,7 +87,7 @@ export default function BatteryPage() {
                   {isExpanded && (
                     <div className="bg-bg-elevated/50 rounded-b-xl px-4 pb-4 pt-2 space-y-3 border-t border-bg-elevated">
                       {/* Module info row */}
-                      <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs">
+                      <div className="grid grid-cols-[20rem_1fr] gap-x-6 gap-y-1 text-xs">
                         {m.serial && (
                           <>
                             <span className="text-text-secondary">Serial</span>
@@ -114,12 +114,6 @@ export default function BatteryPage() {
                             <span className="text-text-primary font-mono text-right">{m.design_capacity_ah.toFixed(1)} Ah</span>
                           </>
                         )}
-                        {m.design_capacity_ah > 0 && m.capacity_ah > 0 && (
-                          <>
-                            <span className="text-text-secondary">State of Health</span>
-                            <span className="text-text-primary font-mono text-right">{(m.capacity_ah / m.design_capacity_ah * 100).toFixed(1)}%</span>
-                          </>
-                        )}
                         {m.capacity_ah > 0 && (
                           <>
                             <span className="text-text-secondary">Capacity</span>
@@ -130,6 +124,29 @@ export default function BatteryPage() {
                           <>
                             <span className="text-text-secondary">Remaining</span>
                             <span className="text-text-primary font-mono text-right">{m.remaining_capacity_ah.toFixed(1)} Ah</span>
+                          </>
+                        )}
+                        {s.total_throughput_kwh > 0 && s.battery_capacity_kwh > 0 && (
+                          <>
+                            <span className="text-text-secondary">Total Throughput</span>
+                            <span className="text-text-primary font-mono text-right">{s.total_throughput_kwh.toFixed(0)} kWh</span>
+                          </>
+                        )}
+                        {m.design_capacity_ah > 0 && m.capacity_ah > 0 && (
+                          <>
+                            <span className="text-text-secondary">State of Health (current vs design capacity)</span>
+                            <span className="text-text-primary font-mono text-right">{(m.capacity_ah / m.design_capacity_ah * 100).toFixed(0)}%</span>
+                          </>
+                        )}
+                        {s.total_throughput_kwh > 0 && s.battery_capacity_kwh > 0 && (
+                          <>
+                            <span className="text-text-secondary">Battery Life Remaining (warranty throughput remaining)</span>
+                            <span className="text-text-primary font-mono text-right">{(() => {
+                              const RATED_THROUGHPUT_MWH_PER_KWH = 10;
+                              const throughputUsed = s.total_throughput_kwh / (s.battery_capacity_kwh * RATED_THROUGHPUT_MWH_PER_KWH * 1000);
+                              const remainingPct = Math.max(0, Math.min(1, 1 - throughputUsed)) * 100;
+                              return remainingPct.toFixed(0) + '%';
+                            })()}</span>
                           </>
                         )}
                       </div>

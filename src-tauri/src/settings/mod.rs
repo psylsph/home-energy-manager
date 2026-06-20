@@ -267,6 +267,13 @@ pub struct Settings {
     #[serde(default)]
     pub disable_auto_discovery: bool,
 
+    /// When true, skip optional model-specific poll blocks (extended slots,
+    /// AC config, three-phase config) to reduce per-cycle timeout exposure
+    /// on chronically unstable dongles. Standard blocks and battery reads
+    /// are always performed. Default: false.
+    #[serde(default)]
+    pub minimal_telemetry_mode: bool,
+
     /// Full import tariff config with peak/off-peak rates and times.
     /// Falls back to legacy `import_tariff` if `None`.
     #[serde(default)]
@@ -458,6 +465,7 @@ impl Default for Settings {
             hidden_panels: Vec::new(),
             alerts_config: AlertsConfig::default(),
             disable_auto_discovery: true,
+            minimal_telemetry_mode: false,
         }
     }
 }
@@ -629,6 +637,7 @@ mod tests {
             hidden_panels: Vec::new(),
             alerts_config: AlertsConfig::default(),
             disable_auto_discovery: true,
+            minimal_telemetry_mode: true,
         };
         let json = serde_json::to_string(&s).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
@@ -638,6 +647,7 @@ mod tests {
         assert_eq!(decoded.poll_interval, 10);
         assert_eq!(decoded.http_port, 8080);
         assert!(!decoded.auto_connect);
+        assert!(decoded.minimal_telemetry_mode);
         assert!(decoded.auto_winter_enabled);
         assert_eq!(decoded.auto_winter_cold_threshold, 5.0);
         assert_eq!(decoded.auto_winter_recovery_threshold, 10.0);
@@ -697,6 +707,7 @@ mod tests {
             hidden_panels: Vec::new(),
             alerts_config: AlertsConfig::default(),
             disable_auto_discovery: true,
+            minimal_telemetry_mode: false,
         };
 
         // We can't easily override the settings path for testing,

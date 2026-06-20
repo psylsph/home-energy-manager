@@ -202,6 +202,12 @@ pub struct ModbusClient {
     pending: Arc<Mutex<HashMap<ResponseKey, oneshot::Sender<DecodedFrame>>>>,
     /// Set to `true` when connected, `false` on disconnect or consumer error.
     connected: Arc<AtomicBool>,
+    /// Instant the consumer task last received a complete frame from the
+    /// dongle. Drives the inactivity watchdog in the poll loop: a "zombie"
+    /// dongle (TCP alive, Modbus hung) keeps the socket open and keepalives
+    /// passing but never delivers a frame, so this timestamp goes stale.
+    /// `None` until the first frame arrives in a session.
+    last_rx_instant: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
     /// Handle to the background consumer task.
     consumer_handle: Option<tokio::task::JoinHandle<()>>,
 }
@@ -225,6 +231,7 @@ impl ModbusClient {
             inter_request_delay: Self::INTER_REQUEST_DELAY_DEFAULT,
             pending: Arc::new(Mutex::new(HashMap::new())),
             connected: Arc::new(AtomicBool::new(false)),
+            last_rx_instant: Arc::new(std::sync::Mutex::new(None)),
             consumer_handle: None,
         }
     }
@@ -276,6 +283,42 @@ impl ModbusClient {
         self.inter_request_delay = delay;
     }
 
+    /// Timeout for a single-register liveness probe — well inside any healthy
+    /// dongle's ~50 ms response time, so a silent ("zombie") dongle fails in
+    /// one round-trip instead of cascading through the full block-read retry
+    /// sequence (~minutes).
+    pub const LIVENESS_TIMEOUT: Duration = Duration::from_secs(3);
+
+    /// Cheap single-register read used to confirm the dongle is actually
+    /// answering Modbus before committing to a full multi-block poll.
+    ///
+    /// Holding register 0 is present on every GivEnergy model and is read in
+    /// every standard poll, so *any* response — data or a Modbus exception —
+    /// proves liveness. A "zombie" dongle (TCP connected, Modbus processor
+    /// hung) times out here in ~3 s. Uses exactly one attempt (no retry loop)
+    /// and treats a Modbus exception as success (the dongle decoded and
+    /// answered the request).
+    pub async fn liveness_probe(&mut self) -> Result<(), ClientError> {
+        let saved_timeout = self.timeout;
+        self.timeout = Self::LIVENESS_TIMEOUT;
+        let request =
+            framer::build_read_request(&self.serial, self.slave, RegisterType::Holding, 0, 1);
+        let key = ResponseKey::from_request(
+            self.slave,
+            RegisterType::Holding.function_code(),
+            0,
+            1,
+        );
+        let result = self.send_and_await_response(request, key).await;
+        self.timeout = saved_timeout;
+        match result {
+            // A decoded read response or even a Modbus exception means the
+            // dongle is alive and answering — the probe's only goal.
+            Ok(_) | Err(ClientError::InvalidResponse(_)) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Connect to the inverter. Returns `Err(ClientError::AlreadyConnected)` if
     /// a connection is already open.
     pub async fn connect(&mut self) -> Result<(), ClientError> {
@@ -299,9 +342,15 @@ impl ModbusClient {
         // network change, etc.) are detected within ~15 seconds rather than
         // hanging until the per-read timeout expires.
         let keepalive = socket2::SockRef::from(&stream);
+        // 3 probes × 5 s interval after 10 s idle ⇒ a genuinely dead peer
+        // (power-cycled, network gone) is detected in ~25 s rather than the
+        // OS default of ~10 s + 9×5 s = 55 s. Note: keepalive CANNOT detect
+        // a "zombie" dongle (TCP stack alive, Modbus hung) — the application
+        // layer watchdog (`last_rx_instant`) handles that case.
         let ka_conf = socket2::TcpKeepalive::new()
             .with_time(std::time::Duration::from_secs(10))
-            .with_interval(std::time::Duration::from_secs(5));
+            .with_interval(std::time::Duration::from_secs(5))
+            .with_retries(3);
         if let Err(e) = keepalive.set_tcp_keepalive(&ka_conf) {
             tracing::debug!("Failed to set TCP keepalive: {e} (non-fatal)");
         }
@@ -332,9 +381,10 @@ impl ModbusClient {
 
         let pending = self.pending.clone();
         let connected = self.connected.clone();
+        let last_rx = self.last_rx_instant.clone();
         let timeout = self.timeout;
         self.consumer_handle = Some(tokio::spawn(async move {
-            Self::consumer_task(reader, writer, pending, connected, timeout).await;
+            Self::consumer_task(reader, writer, pending, connected, last_rx, timeout).await;
         }));
 
         Ok(())
@@ -365,6 +415,21 @@ impl ModbusClient {
         self.connected.load(Ordering::SeqCst)
     }
 
+    /// Time elapsed since the consumer task last received a complete frame
+    /// from the dongle, or `None` if no frame has arrived yet this session.
+    ///
+    /// Used by the poll loop's inactivity watchdog to detect a "zombie"
+    /// dongle whose TCP stack is alive (so `connect()` and keepalives
+    /// succeed) but whose Modbus application processor has hung (so no
+    /// frame ever arrives). Such a connection is invisible to TCP keepalive.
+    pub fn last_activity_age(&self) -> Option<Duration> {
+        self.last_rx_instant
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|t| t.elapsed())
+    }
+
     // -----------------------------------------------------------------------
     // Core I/O helpers
     // -----------------------------------------------------------------------
@@ -393,6 +458,7 @@ impl ModbusClient {
         writer: Arc<Mutex<OwnedWriteHalf>>,
         pending: Arc<Mutex<HashMap<ResponseKey, oneshot::Sender<DecodedFrame>>>>,
         connected: Arc<AtomicBool>,
+        last_rx: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
         timeout: Duration,
     ) {
         // Read buffer that persists across frames so a stray byte or
@@ -410,8 +476,23 @@ impl ModbusClient {
                     // No data arrived yet — loop and try again.
                     continue;
                 }
-                Err(_) => break, // connection lost
+                Err(e) => {
+                    // Non-timeout error (RST, EOF, decode failure): the TCP
+                    // session is unusable. Log explicitly so a silently-exited
+                    // consumer (which previously broke here with no message)
+                    // is visible in diagnostics.
+                    tracing::warn!(
+                        error = %e,
+                        "Modbus reader: connection lost, exiting consumer task"
+                    );
+                    break;
+                }
             };
+
+            // A complete frame arrived — the dongle's Modbus layer is alive.
+            // Stamp the inactivity watchdog so the poll loop can distinguish a
+            // responsive dongle from a "zombie" (TCP up, Modbus hung).
+            *last_rx.lock().unwrap() = Some(std::time::Instant::now());
 
             // Heartbeat — the dongle sends one (~every 3 min) and closes the
             // socket after 3 unanswered ones (~9 min). Echo the request back so
@@ -607,6 +688,7 @@ impl ModbusClient {
         if n == 0 {
             return Err(ClientError::NotConnected);
         }
+        tracing::trace!("Modbus reader: received {n} bytes");
         buf.truncate(start + n);
         Ok(())
     }
@@ -861,9 +943,29 @@ impl ModbusClient {
                 Ok(decoded) => {
                     return Self::parse_register_response(&decoded, count);
                 }
-                Err(ClientError::Timeout) if attempt < Self::MAX_STALE_RETRIES => {
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    continue;
+                Err(ClientError::Timeout) => {
+                    // A pure timeout (no bytes at all within the generous
+                    // per-request window). Distinguish two cases:
+                    //
+                    // 1. Stale frame in buffer: the consumer received a
+                    //    wrong-key frame (updating `last_rx_instant`) but
+                    //    our real response hasn't arrived yet. Retrying
+                    //    gives the dongle a chance to send the correct
+                    //    response. Retry up to MAX_STALE_RETRIES times.
+                    //
+                    // 2. Zombie dongle: no bytes at all (last_rx_instant
+                    //    is stale or None). Re-sending identical requests
+                    //    only multiplies the wait — fail fast so the poll
+                    //    loop's connection-lost / inactivity-watchdog /
+                    //    back-off logic can take over.
+                    let recently_active = self
+                        .last_activity_age()
+                        .is_some_and(|age| age < Duration::from_secs(10));
+                    if recently_active && attempt < Self::MAX_STALE_RETRIES {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        continue;
+                    }
+                    return Err(ClientError::Timeout);
                 }
                 Err(ClientError::InvalidResponse(msg))
                     if attempt < Self::MAX_STALE_RETRIES && msg.contains("code 67") =>
@@ -1102,9 +1204,16 @@ impl ModbusClient {
     /// If extra blocks fail, they're silently skipped — the standard blocks
     /// are still returned. This is because extended blocks may not be
     /// supported by all firmware versions of a given model.
+    ///
+    /// When `minimal_telemetry` is true, the optional model-specific blocks
+    /// (extended slots, AC config, three-phase config, meter/gateway input
+    /// banks) are skipped entirely. This trades some UI detail (slots 3-10,
+    /// AC limits) for reduced per-cycle timeout exposure on chronically
+    /// unstable dongles. Standard blocks (always needed) are always read.
     pub async fn read_all_with_extras(
         &mut self,
         device_type: Option<&crate::inverter::model::DeviceType>,
+        minimal_telemetry: bool,
     ) -> Result<Vec<BlockRead>, ClientError> {
         // Three-phase models read all real-time telemetry from the
         // IR(1000-1414) range, making input_0_59 and input_180_181
@@ -1123,38 +1232,44 @@ impl ModbusClient {
         let mut results = self.read_blocks(standard_blocks).await?;
 
         if let Some(dt) = device_type {
-            for block in model_specific_blocks_in_poll_order(dt) {
-                // Pause between blocks to let the dongle catch up.
-                tokio::time::sleep(self.inter_request_delay).await;
+            if minimal_telemetry {
+                tracing::debug!(
+                    "Minimal telemetry mode - skipping optional model-specific blocks"
+                );
+            } else {
+                for block in model_specific_blocks_in_poll_order(dt) {
+                    // Pause between blocks to let the dongle catch up.
+                    tokio::time::sleep(self.inter_request_delay).await;
 
-                let reg_type = match block.register_type {
-                    super::registers::RegisterType::Input => RegisterType::Input,
-                    super::registers::RegisterType::Holding => RegisterType::Holding,
-                };
+                    let reg_type = match block.register_type {
+                        super::registers::RegisterType::Input => RegisterType::Input,
+                        super::registers::RegisterType::Holding => RegisterType::Holding,
+                    };
 
-                let t0 = std::time::Instant::now();
-                match self
-                    .read_registers(reg_type, block.start, block.count)
-                    .await
-                {
-                    Ok(data) => {
-                        tracing::debug!(
-                            block = block.name,
-                            start = block.start,
-                            count = block.count,
-                            received = data.len(),
-                            elapsed_ms = t0.elapsed().as_millis() as u64,
-                            "Model-specific block read OK"
-                        );
-                        results.push(BlockRead { block, data });
-                    }
-                    Err(e) => {
-                        tracing::debug!(
-                            block = block.name,
-                            error = %e,
-                            "Model-specific block read skipped (non-fatal)"
-                        );
-                        // Continue — model-specific blocks are optional.
+                    let t0 = std::time::Instant::now();
+                    match self
+                        .read_registers(reg_type, block.start, block.count)
+                        .await
+                    {
+                        Ok(data) => {
+                            tracing::debug!(
+                                block = block.name,
+                                start = block.start,
+                                count = block.count,
+                                received = data.len(),
+                                elapsed_ms = t0.elapsed().as_millis() as u64,
+                                "Model-specific block read OK"
+                            );
+                            results.push(BlockRead { block, data });
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                block = block.name,
+                                error = %e,
+                                "Model-specific block read skipped (non-fatal)"
+                            );
+                            // Continue — model-specific blocks are optional.
+                        }
                     }
                 }
             }
@@ -1400,6 +1515,10 @@ mod tests {
     fn standard_poll_blocks_are_accessible() {
         assert_eq!(STANDARD_POLL_BLOCKS.len(), 4);
         assert_eq!(STANDARD_POLL_BLOCKS[0].name, "input_0_59");
+        // Input 180 block now reads IR(180-183) to include the Gen1-authoritative
+        // alternative daily battery energy registers.
+        assert_eq!(STANDARD_POLL_BLOCKS[3].start, 180);
+        assert_eq!(STANDARD_POLL_BLOCKS[3].count, 4);
     }
 
     #[test]
@@ -2166,13 +2285,13 @@ mod tests {
                 base: 60,
                 data: (200..260).collect(),
             },
-            // input_180_181: IR 180-181 (only 2 registers are consumed;
-            // the block reads count=2, not a full 60-register window)
+            // input_180_181: IR 180-183 (4 registers: lifetime totals plus
+            // Gen1-authoritative alternative daily battery energy)
             MockResponse::ReadResponse {
                 slave: 0x11,
                 function: 0x04,
                 base: 180,
-                data: (500..502).collect(),
+                data: (500..504).collect(),
             },
         ];
 
@@ -2185,6 +2304,8 @@ mod tests {
         assert_eq!(blocks[0].data[0], 0);
         assert_eq!(blocks[1].block.name, "holding_0_59");
         assert_eq!(blocks[1].data[0], 100);
+        assert_eq!(blocks[3].block.name, "input_180_181");
+        assert_eq!(blocks[3].data.len(), 4);
 
         server.await.unwrap();
     }
@@ -2539,5 +2660,326 @@ mod tests {
             client.slave, 0x11,
             "slave address must be restored after successful probe"
         );
+    }
+
+    // =======================================================================
+    // Liveness probe tests
+    // =======================================================================
+
+    #[tokio::test]
+    async fn liveness_probe_success() {
+        // A responding dongle returns data for HR 0.
+        let data: Vec<u16> = vec![0x0001]; // status register
+        let responses = vec![MockResponse::ReadResponse {
+            slave: 0x11,
+            function: 0x03,
+            base: 0,
+            data,
+        }];
+
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+
+        let result = client.liveness_probe().await;
+        assert!(result.is_ok(), "liveness probe should succeed: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn liveness_probe_treats_exception_as_alive() {
+        // A Modbus exception (e.g. code 67 busy) still proves the dongle
+        // is alive — it decoded and answered the request.
+        let responses = vec![MockResponse::Exception {
+            slave: 0x11,
+            function: 0x03,
+            code: 67,
+        }];
+
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+
+        let result = client.liveness_probe().await;
+        assert!(
+            result.is_ok(),
+            "exception should be treated as alive: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn liveness_probe_timeout_on_silent_server() {
+        // A silent dongle (accepts TCP but never responds) should fail
+        // the probe in one round-trip (~LIVENESS_TIMEOUT), not retry.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server_handle = tokio::spawn(async move {
+            let (mut _stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            loop {
+                match tokio::time::timeout(Duration::from_secs(2), _stream.read(&mut buf)).await {
+                    Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                    Ok(Ok(_)) => {}
+                }
+            }
+        });
+
+        let mut client = ModbusClient::new("127.0.0.1", port, "TEST123456");
+        client.set_timeout(Duration::from_secs(15));
+        client.connect().await.unwrap();
+
+        let start = std::time::Instant::now();
+        let result = client.liveness_probe().await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_err(),
+            "liveness probe should fail on silent dongle"
+        );
+        // Should complete in ~LIVENESS_TIMEOUT (3 s), not 5× longer
+        assert!(
+            elapsed < Duration::from_secs(6),
+            "liveness probe should not retry — elapsed {elapsed:?}"
+        );
+
+        server_handle.await.unwrap();
+    }
+
+    // =======================================================================
+    // last_activity_age tests
+    // =======================================================================
+
+    #[tokio::test]
+    async fn last_activity_age_returns_some_after_successful_read() {
+        let data: Vec<u16> = (0..20).collect();
+        let responses = vec![MockResponse::ReadResponse {
+            slave: 0x11,
+            function: 0x04,
+            base: 0,
+            data,
+        }];
+
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+
+        // Before any read, age should be None (no frame received yet)
+        assert!(client.last_activity_age().is_none());
+
+        // Perform a successful read — the consumer receives a frame
+        let _ = client.read_registers(RegisterType::Input, 0, 20).await.unwrap();
+
+        // After a successful read, age should be Some and very small
+        let age = client.last_activity_age();
+        assert!(
+            age.is_some(),
+            "last_activity_age should be Some after a successful read"
+        );
+        assert!(
+            age.unwrap() < Duration::from_secs(1),
+            "age should be <1s after a recent read, got {:?}",
+            age
+        );
+    }
+
+    // =======================================================================
+    // read_all_with_extras minimal_telemetry tests
+    // =======================================================================
+
+    #[tokio::test]
+    async fn read_all_with_extras_minimal_telemetry_skips_optional_blocks() {
+        use crate::inverter::model::DeviceType;
+
+        // Standard blocks only (no optional model-specific blocks).
+        // The server only provides responses for the 4 standard blocks.
+        // If minimal_telemetry=true, read_all_with_extras should NOT
+        // attempt any optional blocks, so the server doesn't need to
+        // provide them.
+        let responses = vec![
+            // input_0_59
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 0,
+                data: (0..60).collect(),
+            },
+            // holding_0_59
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x03,
+                base: 0,
+                data: (100..160).collect(),
+            },
+            // holding_60_119
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x03,
+                base: 60,
+                data: (200..260).collect(),
+            },
+            // input_180_181: IR 180-183
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 180,
+                data: (500..504).collect(),
+            },
+        ];
+
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+
+        // With minimal_telemetry=true and a Gen3 device type (which has
+        // extended slots as optional blocks), only standard blocks should
+        // be returned.
+        let blocks = client
+            .read_all_with_extras(Some(&DeviceType::Gen3Hybrid), true)
+            .await
+            .unwrap();
+
+        // Should have exactly 4 standard blocks, no optional ones
+        assert_eq!(blocks.len(), 4);
+        assert_eq!(blocks[0].block.name, "input_0_59");
+        assert_eq!(blocks[1].block.name, "holding_0_59");
+        assert_eq!(blocks[2].block.name, "holding_60_119");
+        assert_eq!(blocks[3].block.name, "input_180_181");
+    }
+
+    #[tokio::test]
+    async fn read_all_with_extras_minimal_telemetry_false_reads_optional_blocks() {
+        use crate::inverter::model::DeviceType;
+
+        // Standard blocks + optional extended slots (HR 240-299) for Gen3.
+        let responses = vec![
+            // input_0_59
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 0,
+                data: (0..60).collect(),
+            },
+            // holding_0_59
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x03,
+                base: 0,
+                data: (100..160).collect(),
+            },
+            // holding_60_119
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x03,
+                base: 60,
+                data: (200..260).collect(),
+            },
+            // input_180_181: IR 180-183
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 180,
+                data: (500..504).collect(),
+            },
+            // extended_slots (HR 240-299) — optional block for Gen3
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x03,
+                base: 240,
+                data: (300..360).collect(),
+            },
+        ];
+
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+
+        // With minimal_telemetry=false, optional blocks should be read.
+        let blocks = client
+            .read_all_with_extras(Some(&DeviceType::Gen3Hybrid), false)
+            .await
+            .unwrap();
+
+        // Should have 5 blocks (4 standard + 1 optional)
+        assert_eq!(blocks.len(), 5);
+        assert!(blocks.iter().any(|b| b.block.name == "holding_240_299"));
+    }
+
+    // =======================================================================
+    // Timeout fail-fast vs retry tests
+    // =======================================================================
+
+    #[tokio::test]
+    async fn timeout_fails_fast_on_silent_server() {
+        // A completely silent server (accepts TCP but never responds).
+        // read_registers_raw should fail fast (1 attempt) rather than
+        // retrying 5×. The test measures elapsed time to confirm.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server_handle = tokio::spawn(async move {
+            let (mut _stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            loop {
+                match tokio::time::timeout(Duration::from_secs(3), _stream.read(&mut buf)).await {
+                    Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                    Ok(Ok(_)) => {}
+                }
+            }
+        });
+
+        let mut client = ModbusClient::new("127.0.0.1", port, "TEST123456");
+        client.set_timeout(Duration::from_millis(500));
+        client.connect().await.unwrap();
+
+        let start = std::time::Instant::now();
+        let result = client
+            .read_registers(RegisterType::Input, 0, 20)
+            .await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_err(),
+            "should fail on silent server"
+        );
+        // With fail-fast: ~500ms. With old 5× retry: ~2.5s + 4×500ms = ~4.5s.
+        // Allow some margin for TCP setup.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "should fail fast (~500ms), not retry 5× — elapsed {elapsed:?}"
+        );
+
+        server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn timeout_retries_on_recent_activity() {
+        // Server sends a stale (wrong-slave) frame first, then the correct
+        // response. The consumer receives the stale frame (updating
+        // last_rx_instant), so the timeout should trigger a retry.
+        let correct_data: Vec<u16> = (0..20).collect();
+
+        let responses = vec![
+            // Stale frame from wrong slave
+            MockResponse::ReadResponse {
+                slave: 0x35,
+                function: 0x04,
+                base: 200,
+                data: (200..220).collect(),
+            },
+            // Correct response
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 0,
+                data: correct_data,
+            },
+        ];
+
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+
+        // The stale frame arrives first (consumer drops it, updates
+        // last_rx_instant). The first send_and_await_response times out
+        // because the correct response hasn't arrived yet. With the
+        // activity-based retry, the client retries and gets the correct
+        // response on the second attempt.
+        let result = client
+            .read_registers(RegisterType::Input, 0, 20)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "should succeed after retry on stale frame: {result:?}"
+        );
+        assert_eq!(result.unwrap()[0], 0);
     }
 }

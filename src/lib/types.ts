@@ -30,6 +30,10 @@ export interface InverterSnapshot {
   today_charge_kwh: number;
   total_import_kwh: number;
   total_export_kwh: number;
+  total_solar_kwh: number;
+  total_charge_kwh: number;
+  total_discharge_kwh: number;
+  total_throughput_kwh: number;
   today_discharge_kwh: number;
   today_consumption_kwh: number;
   /**
@@ -76,6 +80,8 @@ export interface InverterSnapshot {
   enable_reversed_ct_clamp: boolean;
   meter_type: number;
   supports_battery_calibration: boolean;
+  ac_eps_enabled: boolean;
+  ac_export_priority: number;
 
   // -- Gateway-specific (absent on every other device; optional for backward compat) --
   parallel_aio_count?: number;

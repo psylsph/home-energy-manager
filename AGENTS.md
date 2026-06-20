@@ -85,7 +85,7 @@ Frontend talks exclusively to the local Axum server — never directly to the in
 - **`modbus/`** — GivEnergy Modbus TCP protocol
   - `client.rs` — `ModbusClient`: connect, read registers, write single register (FC6), stale frame drain, heartbeat handling (echoes dongle heartbeats). Default slave address `0x11`. `read_all_with_extras()` decides optional blocks by device type.
   - `framer.rs` — proprietary frame encode/decode (MBAP header + transparent sub-frame + CRC)
-  - `registers.rs` — register addresses, poll block definitions, safe-write whitelist, HHMM encode/decode. Standard blocks: `IR(0,60)`, `HR(0,60)`, `HR(60,60)`, per-battery `IR(60,60)`. Optional blocks: `EXTENDED_SLOTS_BLOCK` (HR240-299), `AC_CONFIG_BLOCK` (HR300-359), `THREE_PHASE_CONFIG_BLOCK` (HR1080-1124).
+  - `registers.rs` — register addresses, poll block definitions, safe-write whitelist, HHMM encode/decode. Standard blocks: `IR(0,60)`, `HR(0,60)`, `HR(60,60)`, `IR(180,4)` (alternative battery lifetime/daily totals for Gen1 Hybrid). Per-battery BMS reads (`BATTERY_1_POLL_BLOCK`, `BATTERY_POLL_BLOCK` = `IR(60,60)`) and HV stack reads (`HV_BCU_POLL_BLOCK` = `IR(60,60)` at device `0x70+`, BMU blocks at `0x50+`) are polled separately, not part of `STANDARD_POLL_BLOCKS`. Optional blocks (conditionally polled by device type): `EXTENDED_SLOTS_BLOCK` (HR 240-299), `AC_CONFIG_BLOCK` (HR 300-359), `THREE_PHASE_HIGH_CONFIG_BLOCK` (HR 1000-1079), `THREE_PHASE_CONFIG_BLOCK` (HR 1080-1124), seven `THREE_PHASE_INPUT_BLOCKS` (IR 1000-1413), five `GATEWAY_INPUT_BLOCKS` (IR 1600-1859).
 - **`server/`** — Axum HTTP layer: `api.rs` (REST endpoints), `ws.rs` (WebSocket snapshot stream), `logs.rs` (LogRing + `GET /api/logs`), `mod.rs` (router + graceful bind)
 - **`settings/`** — persisted JSON config (`~/.givenergy-local/settings.json`)
 - **`alerts/`** — alert evaluation engine + push notifications. Evaluates each sanitized `InverterSnapshot` against user thresholds (battery temperature high/low, battery SOC high/low, solar-clipping ceiling, inverter battery-warning flag, grid offline) with per-type cooldown and consecutive-read confirmation, then delivers via the **Telegram Bot API** and/or **ntfy.sh** (including self-hosted ntfy). Also generates/sends the daily consumption report and polls Telegram for `/status`, `/today`, `/report` commands. **This covers GitHub issue #85 (critical-condition notifications) — implemented as Telegram + ntfy push notifications rather than email.**
@@ -183,8 +183,17 @@ cd src-tauri && cargo build --release
 | `charge_slot_2` | HR 31-32 | Slot 2 |
 | `discharge_slot_1` | HR 56-57 | Slot 1 |
 | `discharge_slot_2` | HR 44-45 | Slot 2 |
+| `charge_slot_3..10` | HR 246-268 | Slots 3-10 (Gen3, AIO, HV Gen3) |
+| `charge_target_soc_1..10` | HR 242, 245, 248..269 | Per-slot target SOC (Gen3) |
+| `discharge_slot_3..10` | HR 276-298 | Slots 3-10 (Gen3, AIO, HV Gen3) |
+| `discharge_target_soc_1..10` | HR 272, 275, 278..299 | Per-slot target SOC (Gen3) |
+| `charge_slot_2_gen3` | HR 243-244 | Gen3 extended copy of slot 2 |
+| `3ph_charge_slot_1..2` | HR 1113-1116 | Three-phase slots 1-2 |
+| `3ph_discharge_slot_1..2` | HR 1118-1121 | Three-phase slots 1-2 |
+| `gateway_ems_charge_slots` | HR 2053-2071 | Gateway / EMS plant-level charge slots |
+| `gateway_ems_discharge_slots` | HR 2040, 2044-2052 | Gateway / EMS plant-level discharge slots |
 
-Slots 3-10 (on supported models) live in HR 240-299, with per-slot target SOCs interleaved. **GE Cloud UI** labels slots in opposite order — the data is identical, only labels differ. `ControlPage.tsx` shows yellow callout banners for: (a) the slot naming mismatch (any 2+ slot hybrid), (b) legacy Gen3 firmware (ARM FW ≤ 302) where extended HR 240-299 may return stale data.
+Slots 3-10 (on supported models) live in HR 240-299, with per-slot target SOCs interleaved. Three-phase models use HR 1080-1124 for slot/target registers (mirroring the single-phase layout at different addresses). Gateway / EMS plant-level scheduling uses HR 2040-2071 for charge and discharge slots. **GE Cloud UI** labels slots in opposite order — the data is identical, only labels differ. `ControlPage.tsx` shows yellow callout banners for: (a) the slot naming mismatch (any 2+ slot hybrid), (b) legacy Gen3 firmware (ARM FW ≤ 302) where extended HR 240-299 may return stale data.
 
 ### Discharge slot handling
 
@@ -192,7 +201,18 @@ Discharge Schedule is always visible regardless of mode. In Eco mode, edits are 
 
 ### Optional block carry-forward
 
-Three optional register blocks are conditionally polled: EXTENDED_SLOTS_BLOCK (HR240-299), AC_CONFIG_BLOCK (HR300-359), THREE_PHASE_CONFIG_BLOCK (HR1080-1124). When an optional block read fails, `carry_forward_optional_block_values()` preserves previous values rather than flashing defaults/zeros in the UI for one cycle.
+Multiple optional register blocks are conditionally polled, grouped by device type:
+
+| Block group | Range | Used by |
+|---|---|---|
+| `EXTENDED_SLOTS_BLOCK` | HR 240-299 | Gen3, AIO, HV Gen3, AC-three-phase |
+| `AC_CONFIG_BLOCK` | HR 300-359 | AC-coupled, AIO, AC-three-phase |
+| `THREE_PHASE_HIGH_CONFIG_BLOCK` | HR 1000-1079 | Three-phase (real-time control, battery reserve) |
+| `THREE_PHASE_CONFIG_BLOCK` | HR 1080-1124 | Three-phase (battery limits, charge/discharge slots) |
+| `THREE_PHASE_INPUT_BLOCKS` (×7) | IR 1000-1413 | Three-phase (real-time telemetry) |
+| `GATEWAY_INPUT_BLOCKS` (×5) | IR 1600-1859 | Gateway / EMS aggregation hub |
+
+When an optional block read fails, `carry_forward_optional_block_values()` preserves previous values rather than flashing defaults/zeros in the UI for one cycle.
 
 ## Known issues
 

@@ -726,6 +726,10 @@ pub struct InverterSnapshot {
     /// Single-phase: IR(21-22) e_grid_out_total (uint32 /10 kWh)
     /// Three-phase:  IR(1386-1387) e_export_total (uint32 /10 kWh)
     pub total_export_kwh: f32,
+    /// Lifetime total solar generation (kWh).
+    /// Single-phase: IR(11-12) e_pv_total (uint32 /10 kWh)
+    /// Three-phase:  IR(1374-1375) e_pv_total (uint32 /10 kWh)
+    pub total_solar_kwh: f32,
     /// Lifetime total battery charge energy (kWh).
     /// Single-phase: IR(181) e_battery_charge_total_alt1 (deci)
     /// Three-phase:  IR(1394-1395) e_battery_charge_total (uint32 /10 kWh)
@@ -734,6 +738,10 @@ pub struct InverterSnapshot {
     /// Single-phase: IR(180) e_battery_discharge_total_alt1 (deci)
     /// Three-phase:  IR(1390-1391) e_battery_discharge_total (uint32 /10 kWh)
     pub total_discharge_kwh: f32,
+    /// Lifetime total battery throughput energy (kWh).
+    /// Single-phase: IR(6-7) e_battery_throughput (uint32 /10 kWh)
+    /// Three-phase:  Sum of charge + discharge totals (IR 1390-1395)
+    pub total_throughput_kwh: f32,
     /// AC charge from grid today (kWh). IR(35) — NOT house consumption.
     /// Used in the consumption formula: solar + import - export - ac_charge.
     pub today_ac_charge_kwh: f32,

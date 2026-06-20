@@ -53,6 +53,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/control/reserve", post(api::set_reserve))
         .route("/api/control/charge-rate", post(api::set_charge_rate))
         .route("/api/control/discharge-rate", post(api::set_discharge_rate))
+        .route("/api/control/eps", post(api::set_eps))
         .route(
             "/api/control/active-power-rate",
             post(api::set_active_power_rate),

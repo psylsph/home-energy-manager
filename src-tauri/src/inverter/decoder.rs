@@ -332,23 +332,18 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
     // Compute consumption today from energy balance (matching the GE app).
     // IR(35) is AC charge today, NOT house consumption — the reference library
     // confirmed this via sentinel cross-correlation (#174). Single-phase inverters
-    // (Gen1/Gen2/Gen3Hybrid) have NO native consumption register, so consumption
-    // is derived from the energy balance formula:
-    //   consumption = solar_today + import_today - export_today - ac_charge_today
-    // Battery DC charge/discharge throughput nets out and is not a term.
-    // Three-phase/HV models expose e_load_today at IR(1396-1397) — when that block
-    // was decoded, the direct register value is preserved instead of computing.
-    // The direct read is detected by checking whether today_ac_charge_kwh and
-    // today_consumption_kwh came from different registers (they are set to the same
-    // IR(35) value in decode_input_0_59, but diverge after decode_input_1360_1413).
-    let has_direct_consumption =
-        snap.today_ac_charge_kwh != snap.today_consumption_kwh && snap.today_consumption_kwh > 0.0;
+    // (Gen1/Gen2/Gen3Hybrid, AC-coupled, etc.) have NO native consumption register,
+    // so consumption is always derived from the energy balance formula:
+    //   consumption = solar + import + discharge - export - charge
+    // Three-phase/HV/Gateway models expose a native e_load_today register; when
+    // that block was decoded, the direct register value is preserved instead of
+    // recomputing. Detect a direct read by model (only those models have a native
+    // consumption register) and a non-zero, distinct consumption value.
+    let has_direct_consumption = (snap.device_type.needs_three_phase_input_blocks()
+        || snap.device_type.needs_gateway_input_blocks())
+        && snap.today_consumption_kwh > 0.0
+        && snap.today_ac_charge_kwh != snap.today_consumption_kwh;
     if !has_direct_consumption {
-        // Single-phase fallback formula: derive consumption from the energy
-        // balance at the home level (solar + import + discharge - export - charge).
-        // decode_input_0_59 already set this correctly; this branch is a
-        // safety net for cases where that initial assignment was zeroed
-        // out (e.g. the GE formula without battery terms).
         let consumption_kwh = (snap.today_solar_kwh
             + snap.today_import_kwh
             + snap.today_discharge_kwh
@@ -606,25 +601,43 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.home_energy_today_kwh = consumption_kwh;
     snap.total_export_kwh = decode_lifetime_total_kwh(get_reg(data, 21), get_reg(data, 22)); // IR(21-22): e_grid_out_total
     snap.total_import_kwh = decode_lifetime_total_kwh(get_reg(data, 32), get_reg(data, 33));
-    // IR(32-33): e_grid_in_total // keep raw IR(35) for energy balance
+    // IR(32-33): e_grid_in_total
+    snap.total_solar_kwh = decode_lifetime_total_kwh(get_reg(data, 11), get_reg(data, 12));
+    // IR(11-12): e_pv_total (uint32 /10 kWh)
+    snap.total_throughput_kwh = decode_lifetime_total_kwh(get_reg(data, 6), get_reg(data, 7));
+    // IR(6-7): e_battery_throughput (uint32 /10 kWh)
+    // keep raw IR(35) for energy balance
 }
 
-/// IR 180-181: Alternative battery lifetime energy counters.
+/// IR 180-183: Alternative battery energy counters.
 ///
-/// Per the givenergy-modbus reference, IR(180)/IR(181) carry alternative
-/// *lifetime* total battery discharge/charge energy (deci-kWh). IR(182)
-/// and IR(183) carry alternative *daily* battery discharge/charge (also
-/// deci-kWh) and duplicate IR(37)/IR(36); this decoder does not consume
-/// them, so the poll block is trimmed to `count=2` — just the two
-/// lifetime registers actually read. See `STANDARD_POLL_BLOCKS` in
-/// `modbus/registers.rs`.
+/// Per the givenergy-modbus reference:
+///   • IR(180)/IR(181) carry alternative *lifetime* total battery
+///     discharge/charge energy (deci-kWh).
+///   • IR(182)/IR(183) carry alternative *daily* battery discharge/charge
+///     energy (deci-kWh).
+///
+/// For Gen1 Hybrid inverters the reference declares the alternative daily
+/// registers (`alt2`) authoritative; on some Gen1 firmware IR(36)/IR(37)
+/// read 0 while IR(182)/IR(183) contain the real daily values. All other
+/// single-phase models continue to use IR(36)/IR(37). The final consumption
+/// recomputation in `decode_snapshot` picks up any override here.
 fn decode_input_180_181(data: &[u16], snap: &mut InverterSnapshot) {
     // IR(180)/IR(181) are confirmed by givenergy-modbus as alternative
     // battery total energy counters (deci-kWh). `get_reg` is bounds-safe,
-    // so even if a future caller hands us fewer than 2 registers the decode
+    // so even if a future caller hands us fewer than 4 registers the decode
     // degrades to 0 rather than panicking.
     snap.total_discharge_kwh = get_reg(data, 0) as f32 * 0.1; // IR(180): e_battery_discharge_total_alt1
     snap.total_charge_kwh = get_reg(data, 1) as f32 * 0.1; // IR(181): e_battery_charge_total_alt1
+
+    // Gen1 Hybrid: the reference's `_BATTERY_ENERGY_SOURCE` table routes
+    // daily battery energy to alt2 (IR(182)/IR(183)). Override the values
+    // previously set from IR(37)/IR(36) only when the device type has been
+    // decoded and is specifically Gen1.
+    if snap.device_type == DeviceType::Gen1Hybrid {
+        snap.today_discharge_kwh = get_reg(data, 2) as f32 * 0.1; // IR(182): e_battery_discharge_today_alt2
+        snap.today_charge_kwh = get_reg(data, 3) as f32 * 0.1; // IR(183): e_battery_charge_today_alt2
+    }
 }
 
 /// Decode holding registers 0-59 (configuration part 1).
@@ -1200,6 +1213,9 @@ fn decode_input_1360_1413(data: &[u16], snap: &mut InverterSnapshot) {
     snap.total_charge_kwh = decode_lifetime_total_kwh(get_reg(data, 34), get_reg(data, 35)); // IR(1394-1395): e_battery_charge_total
     snap.total_discharge_kwh = decode_lifetime_total_kwh(get_reg(data, 30), get_reg(data, 31));
     // IR(1390-1391): e_battery_discharge_total
+    snap.total_solar_kwh = decode_lifetime_total_kwh(get_reg(data, 14), get_reg(data, 15)); // IR(1374-1375): e_pv_total (uint32 /10 kWh)
+    // Three-phase has no direct e_battery_throughput register; use sum of charge + discharge.
+    snap.total_throughput_kwh = snap.total_charge_kwh + snap.total_discharge_kwh;
 }
 
 /// Decode meter data from raw register values (IR 60-89) into a MeterData struct.
@@ -2041,34 +2057,116 @@ mod tests {
     fn input_180_181_block_decodes_alternative_battery_totals() {
         // IR(180)=12345 → 1234.5 kWh lifetime discharge,
         // IR(181)=60000 → 6000.0 kWh lifetime charge.
-        // The block reads only count=2 (see STANDARD_POLL_BLOCKS); confirm
-        // the dispatch + decode handle a 2-element slice and scale by 0.1.
+        // The block now reads count=4 (see STANDARD_POLL_BLOCKS); confirm
+        // the dispatch + decode handle a 4-element slice and scale by 0.1.
+        // No device type is supplied, so the alt2 daily registers are ignored.
         let blocks = vec![make_block(
             RegisterType::Input,
             180,
-            2,
+            4,
             "input_180_181",
-            vec![12345, 60000],
+            vec![12345, 60000, 9876, 5432],
         )];
         let snap = decode_snapshot(&blocks);
         assert!((snap.total_discharge_kwh - 1234.5).abs() < 1e-6);
         assert!((snap.total_charge_kwh - 6000.0).abs() < 1e-6);
+        assert_eq!(snap.today_discharge_kwh, 0.0);
+        assert_eq!(snap.today_charge_kwh, 0.0);
     }
 
     #[test]
     fn input_180_181_block_is_bounds_safe_when_underfilled() {
         // A short slice (e.g. an empty read) must not panic — get_reg clamps
-        // to 0, so both totals decode to 0.0 rather than crashing.
+        // to 0, so all four decoded values degrade to 0.0 rather than crashing.
         let blocks = vec![make_block(
             RegisterType::Input,
             180,
-            2,
+            4,
             "input_180_181",
             vec![],
         )];
         let snap = decode_snapshot(&blocks);
         assert_eq!(snap.total_discharge_kwh, 0.0);
         assert_eq!(snap.total_charge_kwh, 0.0);
+    }
+
+    #[test]
+    fn gen1_hybrid_uses_alt2_daily_battery_energy() {
+        // Gen1 Hybrid DTC in the 0x20 family with ARM firmware century 0
+        // resolves to Gen1Hybrid. The primary IR(36)/IR(37) daily counters
+        // are non-zero, but the decoder must prefer the alt2 IR(182)/IR(183)
+        // values per the reference's `_BATTERY_ENERGY_SOURCE` table.
+        let mut input_data = vec![0u16; 60];
+        input_data[1] = 300; // PV1 voltage = 30.0 V (so PV1 energy counts)
+        input_data[8] = 50; // PV1 current = 5.0 A
+        input_data[2] = 300; // PV2 voltage = 30.0 V (so PV2 energy counts)
+        input_data[9] = 40; // PV2 current = 4.0 A
+        input_data[17] = 100; // PV1 today = 10.0 kWh
+        input_data[19] = 50; // PV2 today = 5.0 kWh
+        input_data[25] = 30; // export today = 3.0 kWh
+        input_data[26] = 20; // import today = 2.0 kWh
+        input_data[35] = 10; // AC charge today = 1.0 kWh
+        input_data[36] = 40; // primary charge today = 4.0 kWh
+        input_data[37] = 25; // primary discharge today = 2.5 kWh
+        let input_block = make_block(RegisterType::Input, 0, 60, "input_0_59", input_data);
+
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x2001; // DTC family 0x20
+        holding_data[21] = 1234; // ARM FW century 12 → Gen1Hybrid
+        holding_data[27] = 1; // eco mode
+        let holding_block = make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data);
+
+        let mut alt_data = vec![0u16; 4];
+        alt_data[2] = 99; // IR(182): alt2 discharge today = 9.9 kWh
+        alt_data[3] = 77; // IR(183): alt2 charge today = 7.7 kWh
+        let alt_block = make_block(RegisterType::Input, 180, 4, "input_180_181", alt_data);
+
+        let snap = decode_snapshot(&[holding_block, input_block, alt_block]);
+        assert_eq!(snap.device_type, DeviceType::Gen1Hybrid);
+        assert!((snap.today_discharge_kwh - 9.9).abs() < 1e-6);
+        assert!((snap.today_charge_kwh - 7.7).abs() < 1e-6);
+        // Consumption is recomputed after the override using the alt2 values:
+        // solar(15) + import(2) + discharge(9.9) - export(3) - charge(7.7) = 16.2
+        assert!((snap.today_consumption_kwh - 16.2).abs() < 1e-6);
+        assert!((snap.home_energy_today_kwh - 16.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn non_gen1_ignores_alt2_daily_battery_energy() {
+        // Gen3 Hybrid (ARM firmware century 3) should keep the primary
+        // IR(36)/IR(37) values even when IR(182)/IR(183) are non-zero.
+        let mut input_data = vec![0u16; 60];
+        input_data[1] = 300; // PV1 voltage = 30.0 V
+        input_data[8] = 50; // PV1 current = 5.0 A
+        input_data[2] = 300; // PV2 voltage = 30.0 V
+        input_data[9] = 40; // PV2 current = 4.0 A
+        input_data[17] = 100; // PV1 today = 10.0 kWh
+        input_data[19] = 50; // PV2 today = 5.0 kWh
+        input_data[25] = 30; // export today = 3.0 kWh
+        input_data[26] = 20; // import today = 2.0 kWh
+        input_data[35] = 10; // AC charge today = 1.0 kWh
+        input_data[36] = 40; // primary charge today = 4.0 kWh
+        input_data[37] = 25; // primary discharge today = 2.5 kWh
+        let input_block = make_block(RegisterType::Input, 0, 60, "input_0_59", input_data);
+
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x2001; // DTC family 0x20
+        holding_data[21] = 300; // ARM FW century 3 → Gen3Hybrid
+        holding_data[27] = 1;
+        let holding_block = make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data);
+
+        let mut alt_data = vec![0u16; 4];
+        alt_data[2] = 99; // alt2 discharge today = 9.9 kWh (should be ignored)
+        alt_data[3] = 77; // alt2 charge today = 7.7 kWh (should be ignored)
+        let alt_block = make_block(RegisterType::Input, 180, 4, "input_180_181", alt_data);
+
+        let snap = decode_snapshot(&[holding_block, input_block, alt_block]);
+        assert_eq!(snap.device_type, DeviceType::Gen3Hybrid);
+        assert!((snap.today_discharge_kwh - 2.5).abs() < 1e-6);
+        assert!((snap.today_charge_kwh - 4.0).abs() < 1e-6);
+        // Consumption uses primary values:
+        // solar(15) + import(2) + discharge(2.5) - export(3) - charge(4) = 12.5
+        assert!((snap.today_consumption_kwh - 12.5).abs() < 1e-6);
     }
 
     #[test]

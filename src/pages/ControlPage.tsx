@@ -1337,7 +1337,7 @@ function LoadLimiterSection() {
 
   return (
     <div className="space-y-3">
-      <h3 className="text-text-primary font-medium text-base">Load Discharge Limiter</h3>
+      <h2 className="text-text-primary font-semibold text-lg">Load Discharge Limiter</h2>
 
       {snapshot != null && !isEco && (
         <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-2.5 text-xs text-text-primary">
@@ -1977,10 +1977,10 @@ export default function ControlPage() {
         )}
       </section>
 
-      {/* Section 5: Charging Mode */}
+      {/* Section 3: Charging Mode */}
       <CosyChargingSection mode={chargeMode} cosyActive={cosyActive} onModeChange={setChargeMode} />
 
-      {/* Section 3: Charge Schedule */}
+      {/* Section 4: Charge Schedule */}
       {!cosyEnabled && chargeMode !== 'agile' && schedulesUnsupported && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold">Charge/Discharge Schedules</h2>
@@ -2044,7 +2044,7 @@ export default function ControlPage() {
         </div>
       </section>}
 
-      {/* Section 4: Discharge Schedule — always visible.
+      {/* Section 5: Discharge Schedule — always visible.
           In Eco mode, slot edits are held locally until the user switches to Timed.
           The Timed button is locked until at least one discharge slot is configured. */}
       {!cosyEnabled && chargeMode !== 'agile' && !schedulesUnsupported && (
@@ -2107,12 +2107,35 @@ export default function ControlPage() {
         </section>
       )}
 
-      {/* Section 5: Auto Winter Mode */}
-      <AutoWinterSection />
-      {/* Section 6: Battery & Power Limits */}
+      {/* Section 6: Battery and Power Controls */}
       <section className="space-y-3">
-        <h2 className="text-text-primary font-semibold text-lg">Battery & Power Limits</h2>
+        <h2 className="text-text-primary font-semibold text-lg">Battery and Power Controls</h2>
         <div className="bg-bg-surface rounded-xl p-4 space-y-5">
+          {/* EPS (Emergency Power Supply) — AC-coupled only */}
+          {isAcCoupled && (
+            <div className="space-y-1 pt-2 border-t border-bg-elevated">
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-text-primary text-sm font-medium">Emergency Power Supply (EPS)</span>
+                  <p className="text-text-secondary text-xs mt-0.5">
+                    Enable Backup Power During Grid Outages
+                  </p>
+                </div>
+                <button
+                  onClick={async () => {
+                    try {
+                      await apiPost('/api/control/eps', { enabled: !snapshot?.ac_eps_enabled });
+                    } catch (e: unknown) { console.warn("EPS toggle failed:", e); }
+                  }}
+                  className={`relative w-10 h-5 rounded-full transition ${snapshot?.ac_eps_enabled ? 'bg-battery' : 'bg-bg-elevated'}`}
+                >
+                  <span
+                    className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition ${snapshot?.ac_eps_enabled ? 'left-5.5' : 'left-0.5'}`}
+                  />
+                </button>
+              </div>
+            </div>
+          )}
           {/* Reserve SOC */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
@@ -2219,6 +2242,8 @@ export default function ControlPage() {
         </div>
         {/* Load Discharge Limiter — always visible when battery is in Eco mode */}
         <LoadLimiterSection />
+        {/* Auto Winter Mode */}
+        <AutoWinterSection />
         {/* Developer Controls (dev mode only) */}
         {developerMode && (
           <section className="space-y-4 border-t border-bg-elevated pt-4 mt-4">

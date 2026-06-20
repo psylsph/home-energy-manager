@@ -150,6 +150,11 @@ pub struct PollSettings {
     pub evc_port: u16,
     /// When true, skip auto-discovery of the dongle on persistent connection failure.
     pub disable_auto_discovery: bool,
+    /// When true, skip optional model-specific poll blocks (extended slots,
+    /// AC config, three-phase config) to reduce per-cycle timeout exposure
+    /// on chronically unstable dongles. Standard blocks and battery reads
+    /// are always performed. Default: false.
+    pub minimal_telemetry_mode: bool,
 }
 
 impl Default for PollSettings {
@@ -163,6 +168,7 @@ impl Default for PollSettings {
             evc_host: String::new(),
             evc_port: 502,
             disable_auto_discovery: true,
+            minimal_telemetry_mode: false,
         }
     }
 }
@@ -402,6 +408,25 @@ fn should_probe_hv_stacks(known_device_type: Option<DeviceType>, hv_probe_done: 
 // Main poll loop
 // ---------------------------------------------------------------------------
 
+/// Reconnect delay for sessions that connected but produced no successful
+/// Modbus reads ("zombie dongle"). Escalates with consecutive dead sessions
+/// so a chronically hung dongle is given time to self-recover instead of
+/// being hammered in a tight reconnect loop. TCP `connect()` succeeds for a
+/// zombie, so the normal connect-failure back-off never kicks in — this
+/// function provides the escalation that path is missing.
+///
+/// Schedule: 0→5 s, 1→30 s, 2→60 s, 3→2 min, 4→5 min, 5+→10 min cap.
+fn dead_session_backoff(consecutive_dead_sessions: u32) -> Duration {
+    match consecutive_dead_sessions {
+        0 => Duration::from_secs(5),
+        1 => Duration::from_secs(30),
+        2 => Duration::from_secs(60),
+        3 => Duration::from_secs(120),
+        4 => Duration::from_secs(300),
+        _ => Duration::from_secs(600),
+    }
+}
+
 /// Runs the polling loop indefinitely (spawn as a Tokio task).
 ///
 /// ## Behaviour
@@ -425,6 +450,12 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
     let mut backoff = Duration::from_secs(5);
     // Track consecutive connection failures to trigger auto-discovery.
     let mut consecutive_connect_failures: u32 = 0;
+    // Consecutive sessions that connected (TCP up) but produced ZERO
+    // successful Modbus reads — the "zombie dongle" signature. Each one
+    // escalates the reconnect delay via `dead_session_backoff()` so a
+    // chronically hung dongle isn't hammered every few seconds. Reset to 0
+    // the moment a session yields at least one good poll.
+    let mut consecutive_dead_sessions: u32 = 0;
     // When we last ran LAN discovery (to avoid scanning too often).
     let mut last_discovery_time: Option<Instant> = None;
     // After this many consecutive failures, trigger auto-discovery.
@@ -446,6 +477,11 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 
         // ---- Create client and connect ----
         let mut client = ModbusClient::new(&settings.host, settings.port, &settings.serial);
+
+        // Tracks whether this session produced at least one successful
+        // Modbus read. Drives `consecutive_dead_sessions` (zombie-dongle
+        // back-off escalation) at disconnect time.
+        let mut session_had_successful_read = false;
 
         match client.connect().await {
             Ok(()) => {
@@ -496,27 +532,67 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // session - without this, cached responses corrupt the
                 // request-response pairing for the first poll.
 
+                // Liveness probe + warmup.
+                //
+                // A "zombie" dongle keeps its TCP stack alive (so connect()
+                // succeeds and keepalives pass) while its Modbus application
+                // processor hangs. Without a cheap liveness check we'd only
+                // discover this by timing out the full multi-block warmup +
+                // poll sequence — minutes of pure timeouts per reconnect
+                // cycle. The probe is a single-register read: a healthy
+                // dongle answers in ~50 ms; a dead one fails in one
+                // round-trip (~3 s). When it fails we skip warmup entirely
+                // and reconnect.
+                let mut session_unusable = false;
+                match client.liveness_probe().await {
+                    Ok(()) => tracing::debug!("Liveness probe OK"),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Liveness probe FAILED after connect - dongle not answering Modbus: {e}"
+                        );
+                        session_unusable = true;
+                    }
+                }
+
                 // Warmup reads: discard the first register reads after connect.
                 // The dongle's internal state can be stale after a TCP reconnect,
                 // causing the first reads to return garbage values (e.g.
                 // today_import_kwh = 0.6 when the real value is 39.0). We do
                 // multiple warmup reads because a single discard isn't enough -
                 // the dongle can return corrupted data for several reads.
-                for i in 0..3 {
-                    match client.read_all_standard().await {
-                        Ok(blocks) => {
-                            tracing::debug!(
-                                "Warmup read {}/3 - OK ({} blocks)",
-                                i + 1,
-                                blocks.len()
-                            );
+                //
+                // Bail on the FIRST failing read: if the dongle can't serve one
+                // multi-block read it won't serve the next two either, so
+                // reconnecting now saves ~2× the per-read timeout.
+                if !session_unusable {
+                    for i in 0..3 {
+                        match client.read_all_standard().await {
+                            Ok(blocks) => {
+                                tracing::debug!(
+                                    "Warmup read {}/3 - OK ({} blocks)",
+                                    i + 1,
+                                    blocks.len()
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Warmup read {}/3 - FAILED: {e} - ending session",
+                                    i + 1
+                                );
+                                session_unusable = true;
+                                break;
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!("Warmup read {}/3 - FAILED: {e}", i + 1,);
-                        }
+                        tokio::time::sleep(Duration::from_millis(500)).await;
                     }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
                 }
+
+                // Capture the minimal-telemetry flag for this session. It is
+                // read from the in-memory settings (which are synced from disk
+                // at connect time) and passed to `read_all_with_extras` to skip
+                // optional model-specific blocks when the user has opted into
+                // reduced timeout exposure.
+                let minimal_telemetry = state.settings.lock().await.minimal_telemetry_mode;
 
                 // Clear any previous snapshot so the next reading is accepted
                 // without delta sanitization. After a reconnect, the previous
@@ -565,6 +641,11 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 let mut suspect_counts = ConsecutiveSuspectCounts::default();
                 let mut known_device_type: Option<crate::inverter::model::DeviceType> = None;
                 let mut detected_meters: Vec<u8> = Vec::new();
+                // Battery slave addresses already announced this session, so
+                // "Battery #N detected" is logged once (INFO) per address
+                // instead of every poll cycle (the previous behaviour spammed
+                // INFO on every successful read).
+                let mut known_battery_addrs: Vec<u8> = Vec::new();
                 let mut meter_probe_done = false;
                 // Meter discovery retry state: when enable_ammeter or EM115 is
                 // configured but the initial scan finds nothing, we retry every
@@ -631,11 +712,25 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // bump by the API is always detected regardless of timing.
                 let settings_version_at_connect = state.settings.lock().await.version;
                 loop {
+                    // Warmup/liveness declared the dongle unresponsive — skip
+                    // straight to the disconnect + reconnect path (which also
+                    // counts this as a dead session for back-off escalation).
+                    if session_unusable {
+                        tracing::warn!(
+                            "Session unusable after connect - reconnecting without polling"
+                        );
+                        break;
+                    }
+
                     // Capture version BEFORE the poll to detect changes that
                     // happen during the poll (API bumps version while we read).
                     // NOTE: this is the INSTANTANEOUS version, not a stored
                     // baseline. The baseline check happens after the sleep.
                     let current_version = state.settings.lock().await.version;
+                    // Current poll interval — used by the inactivity watchdog
+                    // to decide how long a silent dongle must be silent before
+                    // we treat it as a zombie and reconnect.
+                    let interval_secs_now = state.settings.lock().await.interval_secs;
 
                     // If version changed since we last connected, break immediately.
                     if current_version != settings_version_at_connect {
@@ -686,7 +781,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     // dropped during the read cycle. No explicit flush needed.
 
                     let (poll_ok, sanitized, connection_lost) = async {
-                        match client.read_all_with_extras(known_device_type.as_ref()).await {
+                        match client.read_all_with_extras(known_device_type.as_ref(), minimal_telemetry).await {
                             Ok(blocks) => {
                                 let mut snapshot = decode_snapshot(&blocks);
 
@@ -1298,10 +1393,18 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                     crate::inverter::decoder::decode_battery_block_into(
                                                         &data, i + 1, &mut snapshot, "",
                                                     );
-                                                    tracing::info!(
-                                                        "Battery #{} detected at addr 0x{:02X} (SOC={}%)",
-                                                        i + 2, addr, soc
-                                                    );
+                                                    if !known_battery_addrs.contains(&addr) {
+                                                        tracing::info!(
+                                                            "Battery #{} detected at addr 0x{:02X} (SOC={}%)",
+                                                            i + 2, addr, soc
+                                                        );
+                                                        known_battery_addrs.push(addr);
+                                                    } else {
+                                                        tracing::debug!(
+                                                            "Battery #{} at addr 0x{:02X} (SOC={}%)",
+                                                            i + 2, addr, soc
+                                                        );
+                                                    }
                                                 } else {
                                                     tracing::debug!(
                                                         "Battery addr 0x{:02X}: SOC={} - not present",
@@ -2305,11 +2408,22 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 (true, sanitized || block_suspicious, false)
                             }
                             Err(e) => {
-                                let connection_lost = e.is_connection_lost();
-                                if connection_lost {
+                                let mut connection_lost = e.is_connection_lost();
+                                // Inactivity watchdog: detect a "zombie" dongle
+                                // (TCP up, Modbus hung). If no frame has arrived
+                                // since before this cycle began, the dongle is
+                                // silent — reconnect now instead of burning
+                                // through the consecutive-failure retries.
+                                let silent_age = client.last_activity_age();
+                                let silent = silent_age.is_some_and(|age| {
+                                    age >= Duration::from_secs(interval_secs_now.max(5))
+                                });
+                                if silent || connection_lost {
+                                    connection_lost = true;
                                     tracing::warn!(
                                         error = %e,
-                                        "Poll read failed - connection lost, reconnecting"
+                                        silent_for = ?silent_age,
+                                        "Poll read failed - dongle unresponsive, reconnecting"
                                     );
                                 } else {
                                     tracing::warn!(
@@ -2328,6 +2442,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                         true => {
                             consecutive_failures = 0;
                             consecutive_suspicious = 0;
+                            session_had_successful_read = true;
 
                             // Tick the meter retry cadence counter.
                             if meter_probe_done
@@ -2446,6 +2561,20 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     "Disconnecting from inverter - will reconnect"
                 );
                 client.disconnect().await;
+
+                // Tally dead sessions for back-off escalation. A session that
+                // never produced a successful Modbus read (zombie dongle, or
+                // warmup/liveness failure) increments the counter; a productive
+                // session resets it so the next reconnect uses the default delay.
+                if session_had_successful_read {
+                    consecutive_dead_sessions = 0;
+                } else {
+                    consecutive_dead_sessions = consecutive_dead_sessions.saturating_add(1);
+                    tracing::warn!(
+                        consecutive_dead_sessions,
+                        "Session produced no successful Modbus reads - escalating reconnect back-off"
+                    );
+                }
 
                 // Clear the latest snapshot so the next connection starts fresh.
                 // Without this, stale/corrupted values from the old session
@@ -2579,8 +2708,13 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
         }
 
         // ---- Back-off before retry ----
-        tracing::debug!("Retrying connection in {:?}", backoff);
-        tokio::time::sleep(backoff).await;
+        let delay = backoff.max(dead_session_backoff(consecutive_dead_sessions));
+        tracing::debug!(
+            "Retrying connection in {:?} (dead_sessions={})",
+            delay,
+            consecutive_dead_sessions
+        );
+        tokio::time::sleep(delay).await;
         backoff = (backoff * 2).min(Duration::from_secs(60));
     }
 }
@@ -2601,6 +2735,25 @@ mod tests {
         assert!(s.serial.is_empty());
         assert_eq!(s.port, 8899);
         assert_eq!(s.interval_secs, 60);
+        assert!(!s.minimal_telemetry_mode);
+    }
+
+    #[test]
+    fn dead_session_backoff_schedule() {
+        // 0 dead sessions → 5 s (same as the base back-off)
+        assert_eq!(dead_session_backoff(0), Duration::from_secs(5));
+        // 1 → 30 s
+        assert_eq!(dead_session_backoff(1), Duration::from_secs(30));
+        // 2 → 60 s
+        assert_eq!(dead_session_backoff(2), Duration::from_secs(60));
+        // 3 → 2 min
+        assert_eq!(dead_session_backoff(3), Duration::from_secs(120));
+        // 4 → 5 min
+        assert_eq!(dead_session_backoff(4), Duration::from_secs(300));
+        // 5+ → 10 min cap
+        assert_eq!(dead_session_backoff(5), Duration::from_secs(600));
+        assert_eq!(dead_session_backoff(10), Duration::from_secs(600));
+        assert_eq!(dead_session_backoff(100), Duration::from_secs(600));
     }
 
     #[test]

@@ -177,6 +177,8 @@ export default function InverterPage() {
           )}
           <span className="text-text-secondary">Solar Today</span>
           <span className="text-text-primary font-mono text-right">{formatEnergy(s.today_solar_kwh)}</span>
+          <span className="text-text-secondary">Lifetime Solar Generation</span>
+          <span className="text-text-primary font-mono text-right">{formatEnergy(s.total_solar_kwh)}</span>
         </div>
       </section>
 
