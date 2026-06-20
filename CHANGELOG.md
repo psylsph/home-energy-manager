@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.34.1] - 2026-06-20
+
+### Added
+
+- **Inverter age / operating hours on the Inverter page.** The page now
+  shows how long the inverter has been running, decoded from the
+  inverter's internal work-time counter and rendered as a friendly age
+  like "3y 4m". The exact hour count is shown next to it (for example
+  "29 400 h") so you can see the raw figure too. The row is hidden on
+  inverters that haven't reported a value yet.
+
+### Changed
+
+- **Battery Mode on the Inverter page is now shown as Upper Camel Case**
+  (for example `EcoPaused`, `TimedExport`) instead of the raw
+  `eco_paused` / `timed_export` enum values from the backend. Other
+  pages that display battery mode keep their existing labels.
+
 ## [0.34.0] - 2026-06-20
 
 ### Added

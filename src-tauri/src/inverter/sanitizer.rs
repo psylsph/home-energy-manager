@@ -827,6 +827,44 @@ pub(crate) fn sanitize_snapshot(
     }
     sanitized |= eps_was_sanitized;
 
+    // -- Operating hours (IR(47-48) work_time_total) --
+    // Monotonically non-decreasing lifetime counter. Three failure modes to
+    // guard against:
+    //   1. uninitialised register (0xFFFF_FFFF = ~4.29M hours): decoder
+    //      already zeroes this via MAX_OPERATING_HOURS, but a stale-poll
+    //      fallback or a future refactor could re-introduce it. Re-check.
+    //   2. transient corruption (e.g. dongle memory-leak fingerprint
+    //      returning a random uint32 mid-cycle): fall back to previous.
+    //   3. counter went backwards: impossible — use previous.
+    if snap.operating_hours > crate::inverter::decoder::MAX_OPERATING_HOURS {
+        if let Some(p) = prev {
+            tracing::warn!(
+                raw = snap.operating_hours,
+                prev = p.operating_hours,
+                "operating_hours above 100y ceiling - using previous"
+            );
+            snap.operating_hours = p.operating_hours;
+            sanitized = true;
+        } else {
+            snap.operating_hours = 0;
+            sanitized = true;
+        }
+    } else if let Some(p) = prev {
+        if snap.operating_hours < p.operating_hours {
+            // Counter rolled backwards — either the inverter was replaced or
+            // the register was cleared. Either way the snapshot can't make
+            // sense of it; preserve the previous reading so the dashboard
+            // doesn't flash a misleadingly young age.
+            tracing::warn!(
+                raw = snap.operating_hours,
+                prev = p.operating_hours,
+                "operating_hours went backwards - using previous"
+            );
+            snap.operating_hours = p.operating_hours;
+            sanitized = true;
+        }
+    }
+
     // SOC: if 0 but power is flowing, clearly a garbled register
     if snap.soc == 0 && (snap.solar_power > 0 || snap.battery_power != 0 || snap.grid_power != 0) {
         if let Some(p) = prev {
@@ -3729,5 +3767,75 @@ mod tests {
         let sanitized = sanitize_for_test(&mut snap, None);
         assert!(!sanitized);
         assert_eq!(snap.eps_power_w, 0);
+    }
+
+    // -------------------------------------------------------------------
+    // Operating hours (IR(47-48) work_time_total) sanitization
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn operating_hours_in_range_is_accepted() {
+        let mut snap = base_grid_connected_snap();
+        snap.operating_hours = 26_280; // ~3 years
+        let sanitized = sanitize_for_test(&mut snap, None);
+        assert!(
+            !sanitized,
+            "in-range operating_hours must not be flagged, got sanitized=true"
+        );
+        assert_eq!(snap.operating_hours, 26_280);
+    }
+
+    #[test]
+    fn operating_hours_above_ceiling_falls_back_to_previous() {
+        // Defensive check: if a future decoder refactor lets through a
+        // value above MAX_OPERATING_HOURS, the sanitizer must catch it
+        // rather than displaying ~490 years.
+        let mut prev = base_grid_connected_snap();
+        prev.operating_hours = 10_000;
+        let mut snap = prev.clone();
+        snap.operating_hours = 4_294_967_295;
+        let sanitized = sanitize_for_test(&mut snap, Some(&prev));
+        assert!(sanitized, "above-ceiling reading must be flagged");
+        assert_eq!(
+            snap.operating_hours, 10_000,
+            "above-ceiling cycle must fall back to previous"
+        );
+    }
+
+    #[test]
+    fn operating_hours_above_ceiling_with_no_previous_zeroes() {
+        // No previous reading to preserve — clamp to 0 so the UI hides
+        // the row instead of showing a nonsense age.
+        let mut snap = base_grid_connected_snap();
+        snap.operating_hours = 4_294_967_295;
+        let sanitized = sanitize_for_test(&mut snap, None);
+        assert!(sanitized);
+        assert_eq!(snap.operating_hours, 0);
+    }
+
+    #[test]
+    fn operating_hours_backwards_jump_falls_back_to_previous() {
+        // A genuine installed inverter never decreases its work_time_total.
+        // A backwards jump means either the inverter was replaced or the
+        // register was cleared; the snapshot can't tell which, so we
+        // preserve the previous reading to avoid showing a misleadingly
+        // young age.
+        let mut prev = base_grid_connected_snap();
+        prev.operating_hours = 50_000;
+        let mut snap = prev.clone();
+        snap.operating_hours = 100; // backward from 50k to 100
+        let sanitized = sanitize_for_test(&mut snap, Some(&prev));
+        assert!(sanitized);
+        assert_eq!(snap.operating_hours, 50_000);
+    }
+
+    #[test]
+    fn operating_hours_zero_after_sanitize_remains_zero() {
+        // Pre-poll default; the UI hides the row at 0.
+        let mut snap = base_grid_connected_snap();
+        snap.operating_hours = 0;
+        let sanitized = sanitize_for_test(&mut snap, None);
+        assert!(!sanitized);
+        assert_eq!(snap.operating_hours, 0);
     }
 }

@@ -782,6 +782,17 @@ pub struct InverterSnapshot {
     /// Single-phase: IR(6-7) e_battery_throughput (uint32 /10 kWh)
     /// Three-phase:  Sum of charge + discharge totals (IR 1390-1395)
     pub total_throughput_kwh: f32,
+    /// Cumulative inverter operating hours — IR(47-48) work_time_total
+    /// (uint32). Reference libraries cap this at 876 000 hours (100
+    /// years) to reject uint32 rollovers and obvious corruption; values
+    /// above that ceiling are treated as garbage by the sanitizer.
+    ///
+    /// Drives the "Inverter: 3y 4m old" display on the Inverter page.
+    /// 0 when the inverter hasn't reported a value yet or when the
+    /// device family doesn't expose the register (e.g. some gateway
+    /// firmware variants).
+    #[serde(default)]
+    pub operating_hours: u32,
     /// AC charge from grid today (kWh). IR(35) — NOT house consumption.
     /// Used in the consumption formula: solar + import - export - ac_charge.
     pub today_ac_charge_kwh: f32,

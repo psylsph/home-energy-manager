@@ -98,6 +98,19 @@ fn uint32(hi: u16, lo: u16) -> u32 {
     ((hi as u32) << 16) | (lo as u32)
 }
 
+/// Absolute upper bound on IR(47-48) `work_time_total_hours`.
+///
+/// Mirrors givenergy-modbus `Def(C.uint32, None, IR(47), IR(48), max=876_000)`.
+/// At an inverter run-hour rate of 8760 h/year (continuous operation), 100
+/// years is comfortably beyond any plausible installed lifetime. The cap
+/// rejects uint32 rollovers and obvious corruption (uninitialised registers
+/// frequently come back as 0xFFFF_FFFF = ~4.29 million hours, which would
+/// otherwise read as ~490 years).
+///
+/// Used both by `decode_input_0_59` (initial gate) and the sanitizer
+/// (carry-forward on stale-poll fallback).
+pub(crate) const MAX_OPERATING_HOURS: u32 = 876_000;
+
 /// Decode a lifetime energy total from two registers as deci-kWh.
 ///
 /// Returns 0.0 if the combined value is obviously corrupted (hi register
@@ -616,6 +629,20 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.total_throughput_kwh = decode_lifetime_total_kwh(get_reg(data, 6), get_reg(data, 7));
     // IR(6-7): e_battery_throughput (uint32 /10 kWh)
     // keep raw IR(35) for energy balance
+
+    // IR(47-48): work_time_total_hours (uint32). Reference libraries
+    // (givenergy-modbus `work_time_total_hours`, GivTCP `work_time_total`)
+    // cap this at 876_000 (100 years). uint32 can hold ~4.29 billion so
+    // an unmodulated rollover would still read as a valid number; the
+    // cap distinguishes a real installed-and-running inverter from a
+    // corrupted or never-populated register. The sanitizer reapplies
+    // the same ceiling — see the absolute-range check there.
+    let operating = uint32(get_reg(data, 47), get_reg(data, 48));
+    snap.operating_hours = if operating > MAX_OPERATING_HOURS {
+        0
+    } else {
+        operating
+    };
 }
 
 /// IR 180-183: Alternative battery energy counters.
@@ -4180,5 +4207,102 @@ mod tests {
         )];
         let snap = decode_snapshot(&blocks);
         assert_eq!(snap.eps_power_w, 0);
+    }
+
+    // -- Operating hours (IR(47-48) work_time_total) --------------------
+    //
+    // The decoder applies MAX_OPERATING_HOURS (876 000 = 100 years) as an
+    // initial sanity gate; out-of-range raw values are zeroed so the UI
+    // doesn't render "489y 4m" from a stuck-at-0xFFFF_FFFF register. The
+    // sanitizer reapplies the same ceiling with prev-fallback.
+
+    #[test]
+    fn operating_hours_defaults_to_zero_when_block_missing() {
+        let blocks = vec![make_block(
+            RegisterType::Holding,
+            0,
+            60,
+            "holding_0_59",
+            vec![0; 60],
+        )];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.operating_hours, 0);
+    }
+
+    #[test]
+    fn operating_hours_decodes_ir47_48_when_present() {
+        // 26 280 h ≈ 3 years (8760 h/year). Stored as a uint32 split
+        // across IR(47)=hi and IR(48)=lo in big-endian word order:
+        //   26 280 = 0x000066A8
+        //   hi (IR(47)) = 0x0000
+        //   lo (IR(48)) = 0x66A8
+        let mut input_data = vec![0u16; 60];
+        input_data[48] = 0x66A8;
+        let blocks = vec![make_block(
+            RegisterType::Input,
+            0,
+            60,
+            "input_0_59",
+            input_data,
+        )];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.operating_hours, 26_280);
+    }
+
+    #[test]
+    fn operating_hours_decodes_high_register_correctly() {
+        // 80 000 h ≈ 9 years. 80_000 = 0x00013880:
+        //   hi (IR(47)) = 0x0001
+        //   lo (IR(48)) = 0x3880
+        let mut input_data = vec![0u16; 60];
+        input_data[47] = 0x0001;
+        input_data[48] = 0x3880;
+        let blocks = vec![make_block(
+            RegisterType::Input,
+            0,
+            60,
+            "input_0_59",
+            input_data,
+        )];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.operating_hours, 80_000);
+    }
+
+    #[test]
+    fn operating_hours_caps_at_100_years_during_decode() {
+        // Uninitialised 0xFFFF_FFFF (= 4 294 967 295 h, ~490 years).
+        // Decoder must zero it before the sanitizer sees it so the UI
+        // shows nothing rather than a misleading age.
+        let mut input_data = vec![0u16; 60];
+        input_data[47] = 0xFFFF;
+        input_data[48] = 0xFFFF;
+        let blocks = vec![make_block(
+            RegisterType::Input,
+            0,
+            60,
+            "input_0_59",
+            input_data,
+        )];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.operating_hours, 0);
+    }
+
+    #[test]
+    fn operating_hours_accepts_exactly_100_years() {
+        // Boundary: MAX_OPERATING_HOURS is inclusive, so a perfectly-old
+        // unit should still be accepted. 876_000 h = exactly 100 years
+        // at 8760 h/year.
+        let mut input_data = vec![0u16; 60];
+        input_data[47] = (876_000u32 >> 16) as u16;
+        input_data[48] = (876_000u32 & 0xFFFF) as u16;
+        let blocks = vec![make_block(
+            RegisterType::Input,
+            0,
+            60,
+            "input_0_59",
+            input_data,
+        )];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.operating_hours, 876_000);
     }
 }
