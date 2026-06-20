@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.33.0] - 2026-06-20
+
+### Added
+
+- **Persistent rotating log files.** App output is now written to a
+  daily-rotated file at `~/.givenergy-local/logs/app.log.YYYY-MM-DD`
+  (`%USERPROFILE%\.givenergy-local\logs\` on Windows) in addition to the
+  existing in-memory ring buffer shown in the developer console. Previously
+  logs were kept only in memory and lost on every restart, with developer mode
+  merely surfacing that ephemeral buffer. Each day produces one bounded file,
+  and files older than 14 days are pruned on startup so total disk usage stays
+  capped. The file layer defaults to INFO level (more verbose than the terse
+  WARN console/ring streams) and runs independently of developer mode.
+
 ## [0.32.1] - 2026-06-20
 
 ### Fixed

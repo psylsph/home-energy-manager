@@ -43,15 +43,15 @@ fn html_escape(input: &str) -> String {
 
 /// Initialise the global tracing subscriber.
 ///
-/// Two layers are installed:
-/// * a `fmt` layer to stdout/stderr (default level **WARN**, override with
-///   `RUST_LOG`), and
-/// * a `LogCaptureLayer` feeding the in-memory ring buffer that backs the
-///   developer console (LogsPage).
+/// Three layers are installed:
+/// * `fmt` to stdout/stderr (default level **WARN**, override with `RUST_LOG`),
+/// * `fmt` to a **daily-rotated file** under `<config_dir>/logs/` (default
+///   level **INFO**), and
+/// * `LogCaptureLayer` feeding the in-memory ring buffer behind the developer
+///   console (LogsPage).
 ///
-/// The two layers filter independently. Shared by the Tauri-windowed `run()`
-/// and headless `run_headless()` so the tracing setup can never drift between
-/// the two startup paths.
+/// Daily rotation bounds each file to one day of output; [`prune_old_logs`]
+/// then caps how many days accumulate so total disk usage stays bounded.
 fn init_tracing(log_ring: &Arc<LogRing>) {
     use tracing_subscriber::prelude::*;
     let capture_layer = LogCaptureLayer::new(log_ring.clone());
@@ -68,10 +68,53 @@ fn init_tracing(log_ring: &Arc<LogRing>) {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         );
+    // Persistent daily-rotated file log. One file per day bounds each file's
+    // size; prune_old_logs caps how many days accumulate. Default level INFO
+    // so the file records more history than the terse WARN console/ring
+    // streams. Failure to write (e.g. read-only dir) is silent per-write —
+    // the user's ~/.givenergy-local/ is already writable for settings/db.
+    let log_dir = settings::Settings::settings_dir().join("logs");
+    prune_old_logs(&log_dir);
+    let _ = std::fs::create_dir_all(&log_dir);
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .with_ansi(false)
+        .with_writer(tracing_appender::rolling::daily(&log_dir, "app.log"))
+        .with_filter(tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::registry()
         .with(fmt_layer)
         .with(capture_layer)
+        .with(file_layer)
         .init();
+}
+
+/// How many days of rotated log files to keep on disk.
+const LOG_RETENTION_DAYS: i64 = 14;
+
+/// Delete `app.log.<YYYY-MM-DD>` files older than [`LOG_RETENTION_DAYS`].
+/// `tracing-appender` names daily rotations this way, so the date is parsed
+/// straight from the suffix. Failures are ignored — pruning is best-effort
+/// and must never block startup.
+fn prune_old_logs(log_dir: &std::path::Path) {
+    let read_dir = match std::fs::read_dir(log_dir) {
+        Ok(rd) => rd,
+        Err(_) => return, // dir doesn't exist yet — nothing to prune
+    };
+    let cutoff = chrono::Local::now().date_naive() - chrono::Duration::days(LOG_RETENTION_DAYS);
+    for entry in read_dir.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(date_str) = name.strip_prefix("app.log.") else {
+            continue;
+        };
+        if let Ok(date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+            if date < cutoff {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 /// Build the shared [`AppState`] from persisted settings.
@@ -647,5 +690,42 @@ mod tests {
             assert!(state.history.lock().await.is_some());
         })
         .await;
+    }
+
+    /// `prune_old_logs` keeps files within the retention window and deletes
+    /// older ones, while leaving unrelated files untouched.
+    #[test]
+    fn prune_old_logs_drops_expired_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "hem-prune-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let today = chrono::Local::now().date_naive();
+        let keep = today.format("app.log.%Y-%m-%d").to_string();
+        let old = (today - chrono::Duration::days(LOG_RETENTION_DAYS + 1))
+            .format("app.log.%Y-%m-%d")
+            .to_string();
+        let unrelated = "settings.json".to_string();
+
+        std::fs::write(dir.join(&keep), "keep").unwrap();
+        std::fs::write(dir.join(&old), "drop").unwrap();
+        std::fs::write(dir.join(&unrelated), "ignore").unwrap();
+
+        prune_old_logs(&dir);
+
+        assert!(dir.join(&keep).exists(), "recent log should be kept");
+        assert!(!dir.join(&old).exists(), "expired log should be deleted");
+        assert!(
+            dir.join(&unrelated).exists(),
+            "non-log files must be left alone"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
