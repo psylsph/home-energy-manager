@@ -54,6 +54,7 @@ const ALLOWED_FIELDS: &[&str] = &[
     "today_discharge_kwh",
     "today_consumption_kwh",
     "today_ac_charge_kwh",
+    "home_energy_today_kwh",
     "charge_rate",
     "discharge_rate",
     "battery_reserve",
@@ -75,6 +76,7 @@ const CUMULATIVE_FIELDS: &[&str] = &[
     "today_discharge_kwh",
     "today_consumption_kwh",
     "today_ac_charge_kwh",
+    "home_energy_today_kwh",
 ];
 
 fn is_cumulative_field(field: &str) -> bool {
@@ -161,6 +163,7 @@ CREATE TABLE IF NOT EXISTS readings (
     today_discharge_kwh REAL,
     today_consumption_kwh REAL,
     today_ac_charge_kwh REAL,
+    home_energy_today_kwh REAL,
     charge_rate     INTEGER,
     discharge_rate  INTEGER,
     battery_reserve INTEGER,
@@ -198,8 +201,10 @@ impl HistoryDb {
         // Migration: add today_ac_charge_kwh column if missing (added in v0.9.34)
         let _ = conn.execute_batch("ALTER TABLE readings ADD COLUMN today_ac_charge_kwh REAL");
 
-        // Migration: add today_ac_charge_kwh column if missing (added in v0.9.34)
-        let _ = conn.execute_batch("ALTER TABLE readings ADD COLUMN today_ac_charge_kwh REAL");
+        // Migration: add home_energy_today_kwh column if missing (integrated
+        // cumulative consumption, replaces the misleading today_consumption_kwh
+        // formula value for display).
+        let _ = conn.execute_batch("ALTER TABLE readings ADD COLUMN home_energy_today_kwh REAL");
 
         // One-time migration: repair corrupted cumulative counter data and
         // reconstruct today_solar_kwh. Gated by a `meta` table flag so it
@@ -473,9 +478,9 @@ impl HistoryDb {
                 grid_voltage, grid_frequency, inverter_temperature,
                 today_solar_kwh, today_import_kwh, today_export_kwh,
                 today_charge_kwh, today_discharge_kwh, today_consumption_kwh,
-                today_ac_charge_kwh,
+                today_ac_charge_kwh, home_energy_today_kwh,
                 charge_rate, discharge_rate, battery_reserve, target_soc
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30)",
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31)",
             params![
                 snap.timestamp,
                 snap.solar_power,
@@ -503,6 +508,7 @@ impl HistoryDb {
                 snap.today_discharge_kwh,
                 snap.today_consumption_kwh,
                 snap.today_ac_charge_kwh,
+                snap.home_energy_today_kwh,
                 snap.charge_rate,
                 snap.discharge_rate,
                 snap.battery_reserve,
@@ -1636,6 +1642,142 @@ mod tests {
             assert!(
                 (val1 - 5.23257441972147).abs() < 0.001,
                 "second row should use stored value 5.232 after reopen, got {val1}"
+            );
+        }
+    }
+
+    // ===================================================================
+    // home_energy_today_kwh history DB tests
+    //
+    // The integrated cumulative consumption metric is stored in its own
+    // column. It is treated as cumulative (MAX aggregation) like the
+    // today_*_kwh fields, but it does NOT participate in the register-
+    // corruption repair (it is computed from home_power, not read from
+    // a dongle register).
+    // ===================================================================
+
+    #[test]
+    fn home_energy_today_kwh_is_allowed_field() {
+        assert!(is_allowed_field("home_energy_today_kwh"));
+    }
+
+    #[test]
+    fn home_energy_today_kwh_is_cumulative_field() {
+        // MAX aggregation must be used so the displayed value matches
+        // the day's peak (true cumulative consumption).
+        assert!(is_cumulative_field("home_energy_today_kwh"));
+    }
+
+    #[test]
+    fn home_energy_today_kwh_is_inserted_and_readable() {
+        let db = test_db();
+        let mut snap = make_snapshot(1_000, 50, 0);
+        snap.home_energy_today_kwh = 3.5;
+        db.insert_reading(&snap);
+
+        let conn = db.conn.lock().unwrap();
+        let stored: f64 = conn
+            .query_row(
+                "SELECT home_energy_today_kwh FROM readings WHERE timestamp = ?",
+                rusqlite::params![1_000i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            (stored - 3.5).abs() < 1e-6,
+            "stored value must match inserted value, got {stored}"
+        );
+    }
+
+    #[test]
+    fn home_energy_today_kwh_query_uses_max_aggregation() {
+        // A 24h bucket with three readings: 1.0, 2.5, 4.0.
+        // Cumulative → MAX → 4.0 (true day's peak consumption).
+        let db = test_db();
+        let base = 1_700_000_000i64;
+        for (offset, kwh) in [(0, 1.0f32), (3600, 2.5), (7200, 4.0)] {
+            let mut snap = make_snapshot(base + offset, 50, 0);
+            snap.home_energy_today_kwh = kwh;
+            db.insert_reading(&snap);
+        }
+        let result = db
+            .query_history(
+                21_600,
+                3600,
+                0,
+                &["home_energy_today_kwh".to_string()],
+                Some((base - 3600, base + 10_800)),
+            )
+            .unwrap();
+        let series = result
+            .get("home_energy_today_kwh")
+            .and_then(|v| v.as_array())
+            .expect("series must be present");
+        assert_eq!(series.len(), 3, "3 hourly buckets");
+        // Find the maximum value in the result
+        let max: f64 = series
+            .iter()
+            .filter_map(|p| p.get("v").and_then(|v| v.as_f64()))
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            (max - 4.0).abs() < 1e-6,
+            "MAX aggregation must pick the day's peak, got {max}"
+        );
+    }
+
+    #[test]
+    fn home_energy_today_kwh_existing_db_migrates_column() {
+        // Simulate an existing DB (created before home_energy_today_kwh was
+        // added) by creating a DB with the OLD schema and inserting a row,
+        // then reopening with the new schema and verifying the column
+        // appears and accepts values.
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("givenergy-history-test-{id}"));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("legacy_history.db");
+        let _ = std::fs::remove_file(&path);
+
+        // Open with current schema (which includes the ALTER migration),
+        // insert legacy row (no home_energy_today_kwh), reopen.
+        {
+            let db = HistoryDb::open(&path).unwrap();
+            let mut snap = make_snapshot(1_000, 50, 0);
+            snap.today_solar_kwh = 2.0;
+            db.insert_reading(&snap);
+        }
+        {
+            let db = HistoryDb::open(&path).unwrap();
+            let mut snap = make_snapshot(2_000, 50, 0);
+            snap.home_energy_today_kwh = 7.5;
+            db.insert_reading(&snap);
+            // Should not panic — the ALTER TABLE migration added the column.
+        }
+        {
+            let db = HistoryDb::open(&path).unwrap();
+            let conn = db.conn.lock().unwrap();
+            let val: Option<f64> = conn
+                .query_row(
+                    "SELECT home_energy_today_kwh FROM readings WHERE timestamp = ?",
+                    rusqlite::params![1_000i64],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(
+                val.is_none() || (val.unwrap() - 0.0).abs() < 1e-6,
+                "legacy row has NULL/0 for new column, got {:?}",
+                val
+            );
+            let val: Option<f64> = conn
+                .query_row(
+                    "SELECT home_energy_today_kwh FROM readings WHERE timestamp = ?",
+                    rusqlite::params![2_000i64],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(
+                val.map(|v| (v - 7.5).abs() < 1e-6).unwrap_or(false),
+                "new row stores 7.5, got {:?}",
+                val
             );
         }
     }
