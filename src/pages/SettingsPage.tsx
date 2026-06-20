@@ -1131,7 +1131,7 @@ const VALID_INTERVALS = [5, 10, 15, 20];
           </button>
           <button
             onClick={handleAlertsTest}
-            disabled={alertsTesting || !alertsConfig.telegram_bot_token || !alertsConfig.telegram_chat_id}
+            disabled={alertsTesting || (!alertsConfig.telegram_bot_token || !alertsConfig.telegram_chat_id) && !effectiveNtfyTopic}
             className="bg-bg-elevated text-text-primary font-sans font-semibold text-sm px-4 py-2 rounded-lg hover:opacity-80 disabled:opacity-40 transition-opacity border border-white/5 sm:w-auto"
           >
             {alertsTesting ? 'Sending…' : 'Send Test Notification'}
