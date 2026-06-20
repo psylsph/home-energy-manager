@@ -28,6 +28,7 @@ export const SPIKE_THRESHOLDS: Record<string, number> = {
   today_charge_kwh: 5,
   today_discharge_kwh: 5,
   today_consumption_kwh: 5,
+  home_energy_today_kwh: 5,
 };
 
 /**
@@ -40,12 +41,14 @@ export const SPIKE_THRESHOLDS: Record<string, number> = {
  * the previous reading when a `today_*_kwh` value is out of range.
  *
  * Identified by the `today_*_kwh` naming convention so newly-added daily
- * counters are handled automatically. Instantaneous rates/gauges (power,
- * voltage, SOC) stay on interpolation, where a midpoint is the least-bad
- * estimate.
+ * counters are handled automatically. `home_energy_today_kwh` is also
+ * cumulative (integrated from `home_power` in the sanitizer) but uses a
+ * different prefix, so it's matched explicitly. Instantaneous rates/gauges
+ * (power, voltage, SOC) stay on interpolation, where a midpoint is the
+ * least-bad estimate.
  */
 export function isCumulativeField(field: string): boolean {
-  return /^today_.*_kwh$/.test(field);
+  return /^today_.*_kwh$/.test(field) || field === 'home_energy_today_kwh';
 }
 
 /**

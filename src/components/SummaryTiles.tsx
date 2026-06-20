@@ -23,7 +23,7 @@ function SummaryTilesInner({ snapshot: s }: Props) {
     },
     {
       label: 'Consumption',
-      value: formatEnergy(s.today_consumption_kwh),
+      value: formatEnergy(s.home_energy_today_kwh),
       accent: '#14B8A6',
       icon: '🏠',
     },

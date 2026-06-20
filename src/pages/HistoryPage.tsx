@@ -158,7 +158,7 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
           key: 'home-energy',
           title: 'Load Energy Today (kWh)',
           unit: 'kWh',
-          fields: [{ field: 'today_consumption_kwh', color: '#14B8A6' }],
+          fields: [{ field: 'home_energy_today_kwh', color: '#14B8A6' }],
         },
       ];
     case 'cost':

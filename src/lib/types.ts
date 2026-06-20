@@ -32,6 +32,14 @@ export interface InverterSnapshot {
   total_export_kwh: number;
   today_discharge_kwh: number;
   today_consumption_kwh: number;
+  /**
+   * Cumulative home energy consumption today (kWh), integrated from
+   * `home_power`. Always monotonic during the day; resets at midnight.
+   * Use this for "Consumption Today" displays instead of the formula-
+   * derived `today_consumption_kwh` which can decrease when the battery
+   * keeps AC-charging from the grid after solar stops.
+   */
+  home_energy_today_kwh: number;
   battery_modules: BatteryModule[];
   battery_mode: 'unknown' | 'eco' | 'eco_paused' | 'timed_demand' | 'timed_export' | 'export_paused';
   battery_reserve: number;

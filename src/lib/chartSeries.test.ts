@@ -17,6 +17,10 @@ describe('isCumulativeField', () => {
       'today_discharge_kwh',
       'today_consumption_kwh',
       'today_ac_charge_kwh',
+      // home_energy_today_kwh doesn't match the today_*_kwh prefix regex,
+      // but it IS cumulative (integrated from home_power), so the predicate
+      // has an explicit match for it.
+      'home_energy_today_kwh',
     ]) {
       expect(isCumulativeField(f), `${f} should be cumulative`).toBe(true);
     }
