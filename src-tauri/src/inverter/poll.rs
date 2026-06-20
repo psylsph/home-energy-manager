@@ -2180,10 +2180,13 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     let config = settings_cfg.clone();
                                     drop(settings_cfg);
 
-                                    if config.daily_report_enabled {
+                                    if config.daily_report_enabled && config.enabled {
                                         let today = chrono::Local::now().date_naive();
                                         let mut last_sent = state.last_report_date.lock().await;
-                                        if *last_sent != Some(today) {
+                                        // Only send if we have sent a report before.
+                                        // Don't send on startup - last_sent starts as None.
+                                        if let Some(sent_date) = *last_sent {
+                                            if sent_date < today {
                                             let now = chrono::Local::now();
                                             let minutes_since_midnight =
                                                 now.hour() * 60 + now.minute();
@@ -2259,6 +2262,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                         }
                                                     }
                                                 }
+                                            }
                                             }
                                         }
                                     }
