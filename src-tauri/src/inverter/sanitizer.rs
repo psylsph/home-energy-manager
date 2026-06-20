@@ -125,8 +125,10 @@ pub(crate) struct GraceCumulativeSamples {
     pub(crate) today_ac_charge_kwh: Option<f32>,
     pub(crate) total_import_kwh: Option<f32>,
     pub(crate) total_export_kwh: Option<f32>,
+    pub(crate) total_solar_kwh: Option<f32>,
     pub(crate) total_charge_kwh: Option<f32>,
     pub(crate) total_discharge_kwh: Option<f32>,
+    pub(crate) total_throughput_kwh: Option<f32>,
 }
 
 impl GraceCumulativeSamples {
@@ -142,8 +144,10 @@ impl GraceCumulativeSamples {
             today_ac_charge_kwh: Some(s.today_ac_charge_kwh),
             total_import_kwh: Some(s.total_import_kwh),
             total_export_kwh: Some(s.total_export_kwh),
+            total_solar_kwh: Some(s.total_solar_kwh),
             total_charge_kwh: Some(s.total_charge_kwh),
             total_discharge_kwh: Some(s.total_discharge_kwh),
+            total_throughput_kwh: Some(s.total_throughput_kwh),
         }
     }
 
@@ -180,11 +184,17 @@ impl GraceCumulativeSamples {
         if let Some(v) = self.total_export_kwh {
             s.total_export_kwh = v;
         }
+        if let Some(v) = self.total_solar_kwh {
+            s.total_solar_kwh = v;
+        }
         if let Some(v) = self.total_charge_kwh {
             s.total_charge_kwh = v;
         }
         if let Some(v) = self.total_discharge_kwh {
             s.total_discharge_kwh = v;
+        }
+        if let Some(v) = self.total_throughput_kwh {
+            s.total_throughput_kwh = v;
         }
     }
 
@@ -229,8 +239,10 @@ impl GraceCumulativeSamples {
             today_ac_charge_kwh: median_field!(today_ac_charge_kwh),
             total_import_kwh: median_field!(total_import_kwh),
             total_export_kwh: median_field!(total_export_kwh),
+            total_solar_kwh: median_field!(total_solar_kwh),
             total_charge_kwh: median_field!(total_charge_kwh),
             total_discharge_kwh: median_field!(total_discharge_kwh),
+            total_throughput_kwh: median_field!(total_throughput_kwh),
         }
     }
 }

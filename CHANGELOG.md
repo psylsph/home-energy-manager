@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.33.2] - 2026-06-20
+
+### Fixed
+
+- **Gen1 Hybrid daily battery energy now uses the alternative registers.**
+  Some Gen1 firmware populates `IR(36)/IR(37)` with 0 while the real daily
+  battery charge/discharge values live in `IR(183)/IR(182)` (the reference
+  library's `alt2` source). The single-phase poll block now reads
+  `IR(180-183)`, and the decoder routes daily battery energy by device type:
+  Gen1 Hybrid uses the alt2 registers, while all other single-phase models
+  continue to use `IR(36)/IR(37)`. `today_consumption_kwh` is recomputed from
+  the routed values so the dashboard consumption figure is also correct on
+  affected Gen1 systems.
+
 ## [0.33.1] - 2026-06-20
 
 ### Fixed

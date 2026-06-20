@@ -270,6 +270,7 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "evc_host": settings.evc_host,
             "evc_port": settings.evc_port,
             "disable_auto_discovery": settings.disable_auto_discovery,
+            "minimal_telemetry_mode": settings.minimal_telemetry_mode,
         }
         })),
     )
@@ -377,6 +378,9 @@ pub async fn update_settings(
     if let Some(d) = body.get("disable_auto_discovery").and_then(|v| v.as_bool()) {
         persist.disable_auto_discovery = d;
     }
+    if let Some(m) = body.get("minimal_telemetry_mode").and_then(|v| v.as_bool()) {
+        persist.minimal_telemetry_mode = m;
+    }
     if let Err(e) = persist.save() {
         tracing::warn!("Failed to persist settings: {}", e);
         return server_error(&format!("Failed to save settings: {}", e));
@@ -411,6 +415,7 @@ pub async fn update_settings(
         settings.evc_host = disk.evc_host.clone();
         settings.evc_port = disk.evc_port;
         settings.disable_auto_discovery = disk.disable_auto_discovery;
+        settings.minimal_telemetry_mode = disk.minimal_telemetry_mode;
     }
 
     let connection_changed =
@@ -469,6 +474,10 @@ fn parse_settings(body: &serde_json::Value) -> Result<PollSettings, String> {
         evc_host: String::new(),// merged from disk settings separately
         evc_port: 502,
         disable_auto_discovery,
+        minimal_telemetry_mode: body
+            .get("minimal_telemetry_mode")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     })
 }
 
@@ -926,6 +935,30 @@ pub async fn set_discharge_rate(
                 "Battery"
             };
             ok_response(&format!("{} discharge limit set to {}%", label, limit))
+        }
+        Err(e) => error_response(&format!("Validation error: {}", e)),
+    }
+}
+
+/// POST /api/control/eps — set Emergency Power Supply (EPS) mode.
+pub async fn set_eps(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<Value>) {
+    let enabled: bool = match body["enabled"].as_bool() {
+        Some(e) => e,
+        None => return error_response("Missing 'enabled' field (boolean)"),
+    };
+
+    let cmd = ControlCommand::SetEps { enabled };
+    match cmd.encode() {
+        Ok(writes) => {
+            tracing::info!("SetEps encoded: {:?}", writes);
+            queue_writes(&state, writes).await;
+            ok_response(&format!(
+                "Emergency Power Supply (EPS) mode {}",
+                if enabled { "enabled" } else { "disabled" }
+            ))
         }
         Err(e) => error_response(&format!("Validation error: {}", e)),
     }
