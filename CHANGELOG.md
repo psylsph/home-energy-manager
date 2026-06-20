@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.34.0] - 2026-06-20
+
+### Added
+
+- **Emergency Power Supply (EPS) toggle on the Control page.** Owners of
+  AC-coupled, AC three-phase, and All-in-One inverters can now turn EPS
+  (backup power during grid outages) on and off from the app. Previously
+  the inverter could do this from its own display, but the app had no way
+  to control it.
+
+- **EPS power shown on the Battery panel.** While EPS is actively feeding
+  the backup loads during a grid outage, the Status and Battery pages now
+  display the live EPS power below the main battery Power reading. The
+  row appears only when EPS is doing real work, so it stays hidden during
+  normal grid-connected operation and on inverters that don't support EPS.
+
+### Changed
+
+- **EPS and battery lifetime rows use a dash for missing data instead of
+  hiding.** The "Total Throughput" and "Battery Life Remaining" rows on
+  the Battery page now show a dash when the inverter hasn't reported a
+  value yet, rather than disappearing entirely. This makes it clearer
+  that the meter is empty rather than the battery having done no work.
+
+### Fixed
+
+- **EPS toggle is only shown on inverters that support it.** DC hybrids
+  and pure three-phase inverters don't have an EPS output stage, so the
+  firmware silently ignored HR 317 writes and the toggle did nothing.
+  The toggle is now hidden on those models, and the backend API returns
+  a clear error if the endpoint is hit manually. EPS remains visible for
+  AC-coupled, AC three-phase, and All-in-One inverters.
+
 ## [0.33.2] - 2026-06-20
 
 ### Fixed

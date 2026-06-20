@@ -489,6 +489,27 @@ impl DeviceType {
             Self::Gateway | Self::Ems | Self::EmsCommercial | Self::PvInverter
         )
     }
+
+    /// Whether this device exposes the Emergency Power Supply (EPS) enable
+    /// register at HR 317.
+    ///
+    /// Mirrors givenergy-modbus `_AC_CONFIG_BLOCK_MODELS`: EPS is AC-coupled
+    /// (and AC-three-phase) and All-in-One only. DC hybrids (Gen1/2/3/4,
+    /// Polar, Gen3+, AIO Commercial) have no AC output stage and lack the
+    /// register; writing HR 317 there is silently dropped by the firmware
+    /// (or worse, corrupts unrelated state). Used by `set_eps` to refuse the
+    /// write and by the frontend to hide the toggle.
+    pub fn supports_eps(&self) -> bool {
+        matches!(
+            self,
+            Self::ACCoupled
+                | Self::ACCoupledMk2
+                | Self::ACThreePhase
+                | Self::AllInOne6kW
+                | Self::AllInOne3_6kW
+                | Self::AllInOne5kW
+        )
+    }
 }
 
 /// Serde default for max slot counts (2 = safe for all models).
@@ -657,6 +678,25 @@ pub struct InverterSnapshot {
     pub battery_power: i32,
     pub grid_power: i32,
     pub home_power: i32,
+    /// Instantaneous Emergency Power Supply (EPS) output power in watts
+    /// (IR(31) `p_backup`).
+    ///
+    /// Only meaningful on device families with an AC output stage that
+    /// supports EPS mode (see [`DeviceType::supports_eps`]) — single-phase
+    /// AC-coupled (3001/3002) and residential All-in-One (80xx). Other
+    /// families poll IR 1000-1414 instead of IR 0-59, where EPS
+    /// telemetry lives at IR 1180-1239 (not currently captured). On those
+    /// models this field stays at its default of 0.
+    ///
+    /// The reference library (`givenergy-modbus` `p_backup`, max=50000) and
+    /// GivTCP (`p_eps_backup`) both treat the register as uint16, so we
+    /// also store it as a non-negative value: 0 when EPS is idle or
+    /// grid-connected, >0 when feeding the backup loads during an outage.
+    /// Sanitized against a 10 kW residential ceiling; values exceeding the
+    /// int16 saturation fingerprint (≥32767) are treated as dongle
+    /// corruption and replaced with the previous reading.
+    #[serde(default)]
+    pub eps_power_w: u32,
 
     // -- PV details --
     pub pv1_voltage: f32,
@@ -1365,6 +1405,98 @@ mod tests {
         // Unknown is intentionally excluded so detection still probes the
         // standard LV BMS at 0x32.
         assert!(!DeviceType::Unknown(0).is_batteryless());
+    }
+
+    // -----------------------------------------------------------------------
+    // supports_eps on each device type — mirrors givenergy-modbus
+    // `_AC_CONFIG_BLOCK_MODELS = {AC, AC_3PH, ALL_IN_ONE}`.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn supports_eps_for_ac_coupled_and_aio_families() {
+        // AC-coupled single-phase (HR 300-359 block, HR 317 writable).
+        assert!(DeviceType::ACCoupled.supports_eps());
+        assert!(DeviceType::ACCoupledMk2.supports_eps());
+
+        // AC three-phase — same AC config block at HR 300-359.
+        assert!(DeviceType::ACThreePhase.supports_eps());
+
+        // Residential All-in-One (DTC family 0x80) carries the AC output
+        // stage and exposes HR 317.
+        assert!(DeviceType::AllInOne6kW.supports_eps());
+        assert!(DeviceType::AllInOne3_6kW.supports_eps());
+        assert!(DeviceType::AllInOne5kW.supports_eps());
+    }
+
+    #[test]
+    fn supports_eps_rejects_dc_hybrid_and_pure_three_phase() {
+        // DC hybrids have no AC output stage — HR 317 is undefined.
+        assert!(!DeviceType::Gen1Hybrid.supports_eps());
+        assert!(!DeviceType::Gen2Hybrid.supports_eps());
+        assert!(!DeviceType::Gen3Hybrid.supports_eps());
+        assert!(!DeviceType::Gen4Hybrid.supports_eps());
+        assert!(!DeviceType::PolarHybrid.supports_eps());
+        assert!(!DeviceType::Gen3PlusHybrid.supports_eps());
+
+        // Pure three-phase (no AC-coupled prefix) and AIO Commercial lack
+        // HR 317 — they expose EPS telemetry in IR 1180-1239 but not the
+        // enable register. Confirm via the reference library's
+        // _AC_CONFIG_BLOCK_MODELS exclusion.
+        assert!(!DeviceType::ThreePhase.supports_eps());
+        assert!(!DeviceType::AioCommercial.supports_eps());
+        assert!(!DeviceType::HybridHvGen3.supports_eps());
+        assert!(!DeviceType::AllInOneHybrid.supports_eps());
+
+        // Devices with no inverter control surface at all.
+        assert!(!DeviceType::Gateway.supports_eps());
+        assert!(!DeviceType::Ems.supports_eps());
+        assert!(!DeviceType::EmsCommercial.supports_eps());
+        assert!(!DeviceType::PvInverter.supports_eps());
+
+        // Unknown is conservatively rejected so the API returns a clear
+        // error rather than writing to a register we can't prove exists.
+        assert!(!DeviceType::Unknown(0).supports_eps());
+    }
+
+    #[test]
+    fn supports_eps_matches_extra_poll_blocks_for_ac_config() {
+        // The set of devices that poll HR 300-359 (and therefore can read
+        // back HR 317 on the next snapshot) must equal the set that supports
+        // EPS, otherwise we either:
+        //   - poll HR 317 on a device that ignores it (wasted cycle), or
+        //   - miss the EPS state on a device that genuinely has it.
+        // Models whose `extra_poll_blocks()` include `AC_CONFIG_BLOCK`:
+        //   - ACCoupled, ACCoupledMk2 → &[AC_CONFIG_BLOCK]
+        //   - ACThreePhase             → AC_EXTENDED_AND_THREE_PHASE_BLOCKS
+        //   - AllInOne{6kW,3_6kW,5kW}  → EXTENDED_AND_AC_CONFIG_BLOCKS
+        // All other families (DC hybrids, pure three-phase, AIO Commercial,
+        // AIO Hybrid, HV Gen3, Gateway, EMS, PV inverter) deliberately
+        // don't poll HR 300-359.
+        let ac_block_models = [
+            DeviceType::ACCoupled,
+            DeviceType::ACCoupledMk2,
+            DeviceType::ACThreePhase,
+            DeviceType::AllInOne6kW,
+            DeviceType::AllInOne3_6kW,
+            DeviceType::AllInOne5kW,
+            DeviceType::AllInOneHybrid,
+            DeviceType::HybridHvGen3,
+            DeviceType::ThreePhase,
+            DeviceType::AioCommercial,
+            DeviceType::Gateway,
+        ];
+        for dt in ac_block_models {
+            let has_ac_config = dt
+                .extra_poll_blocks()
+                .iter()
+                .any(|b| b.start == 300);
+            assert_eq!(
+                dt.supports_eps(),
+                has_ac_config,
+                "supports_eps / AC_CONFIG_BLOCK polling mismatch for {:?}",
+                dt
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
