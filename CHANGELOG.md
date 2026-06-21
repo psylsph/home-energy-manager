@@ -2,6 +2,47 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Force Charge / Discharge Duration control** under Battery and Power
+  Controls. A slider (1–1440 minutes, default 30) sets how long the Quick
+  Action buttons should force the inverter to run. Persisted to
+  localStorage. Matches GivTCP's behaviour where the user picks a
+  duration and the inverter auto-reverts when the slot ends.
+
+- **Stop Force Charge** button now restores the inverter to its pre-force-charge
+  state instead of switching to Eco mode (which left the user's discharge
+  schedule silently disabled and a Max-Power user stuck in Eco). The
+  pre-state is captured on Force Charge start and replayed on Stop, mirroring
+  GivTCP's `forceCharge`/`FCResume`. Restores `HR_ENABLE_CHARGE`,
+  `HR_ENABLE_CHARGE_TARGET`, `HR_ENABLE_DISCHARGE`, `HR_CHARGE_TARGET_SOC`,
+  `HR_CHARGE_SLOT_1_START/END`, and `HR_BATTERY_POWER_MODE` to their prior
+  values. Three-phase models also restore `HR_3PH_FORCE_CHARGE_ENABLE` and
+  `HR_3PH_AC_CHARGE_ENABLE`.
+
+- **Stop Force Discharge** button now restores the inverter to its
+  pre-force-discharge state, mirroring GivTCP's `forceExport`/`FEResume`.
+  Restores both discharge slots, the discharge rate, the enable flags, and
+  the battery power mode.
+
+- **`POST /api/control/force-charge/stop`** and
+  **`POST /api/control/force-discharge/stop`** endpoints. Both return 400
+  if no force operation is in progress (defensive — won't clobber a
+  working schedule if the user double-clicks).
+
+- **Force Discharge now honours the duration slider.** Previously the
+  Quick Action always wrote a 00:00–23:59 discharge slot. Now the
+  discharge slot is `now → now+minutes` (or 3PH equivalent), matching
+  GivTCP's `forceExport` `set_mode_storage(discharge_slot_1=TimeSlot{now, now+exportTime})`.
+  The no-body path still produces a full-day slot for backward
+  compatibility with any existing callers.
+
+- **`battery_power_mode` on `InverterSnapshot`** (HR 27 raw value).
+  Required to restore the user's pre-force-charge power mode (0 = export,
+  1 = eco) on Stop. Default 1 (eco) on uninitialised snapshots for safety.
+
 ## [0.34.3] - 2026-06-21
 
 ### Fixed

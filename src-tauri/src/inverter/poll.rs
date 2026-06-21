@@ -177,6 +177,85 @@ impl Default for PollSettings {
 // Shared application state
 // ---------------------------------------------------------------------------
 
+/// Snapshot of inverter registers captured at the moment Force Charge is
+/// started, used to restore the inverter to its pre-force-charge state when
+/// the user clicks Stop Charge. Mirrors the `revert` dict GivTCP builds in
+/// `forceCharge` (`write.py:1134`).
+///
+/// All fields are *pre-force-charge* values, captured before the force-charge
+/// writes are applied. Restoration writes these values back. A value of
+/// `None` in an `Option<_>` field means "no previous value known" and the
+/// corresponding write is skipped.
+#[derive(Debug, Clone)]
+pub struct ForceChargeRevert {
+    /// Whether the schedule charge flag (HR 20) was enabled before force charge.
+    pub enable_charge: bool,
+    /// Whether the schedule discharge flag (HR 59) was enabled before force
+    /// charge. `ForceCharge` start writes `HR_ENABLE_DISCHARGE=0` to clear
+    /// any stale discharge flag, so on stop we must restore the pre-value
+    /// or the user's discharge schedule is left disabled.
+    pub enable_discharge: bool,
+    /// The charge target SOC (HR 116 / HR 1111) before force charge.
+    pub target_soc: u8,
+    /// Battery power mode (HR 27) before force charge: 0 = export, 1 = eco.
+    /// `ForceCharge` start writes `HR_BATTERY_POWER_MODE=1`, so on stop we
+    /// must restore the pre-value (e.g. 0 for users in Max-Power/Timed
+    /// Export mode before they hit Force Charge).
+    pub battery_power_mode: u8,
+    /// Battery charge rate (HR 111 / HR 313) before force charge, if known.
+    pub charge_rate: Option<u8>,
+    /// Charge slot 1 start time (HH,MM) before force charge, if any was set.
+    /// `None` means no slot was configured (write 00:00–00:00 to clear).
+    pub charge_slot_1_start: Option<(u8, u8)>,
+    /// Charge slot 1 end time (HH,MM) before force charge, if any was set.
+    pub charge_slot_1_end: Option<(u8, u8)>,
+    /// Whether the inverter was in a "force charge enable" state (HR 1123) for
+    /// three-phase models. None for single-phase where this register does not
+    /// exist; Some(false) for the typical "not force-charging" pre-state.
+    pub three_phase_force_charge_enable: Option<bool>,
+    /// Whether AC charge was enabled (HR 1112) for three-phase models.
+    pub three_phase_ac_charge_enable: Option<bool>,
+    /// Battery pause mode (HR 318) for AC-coupled models, if the field is
+    /// present in the snapshot. None means "not present on this model" and
+    /// the restore write is skipped.
+    pub battery_pause_mode: Option<u8>,
+}
+
+/// Snapshot of inverter registers captured at the moment Force Discharge is
+/// started, used to restore the inverter to its pre-force-discharge state
+/// when the user clicks Stop Discharge. Mirrors the `revert` dict GivTCP
+/// builds in `forceExport` (`write.py:980-1010`).
+///
+/// All fields are *pre-force-discharge* values, captured before the
+/// force-discharge writes are applied. Restoration writes these values back.
+/// A value of `None` in an `Option<_>` field means "no previous value known"
+/// and the corresponding write is skipped.
+#[derive(Debug, Clone)]
+pub struct ForceDischargeRevert {
+    /// Whether the schedule charge flag (HR 20) was enabled before force discharge.
+    pub enable_charge: bool,
+    /// Whether the schedule discharge flag (HR 59) was enabled before force discharge.
+    pub enable_discharge: bool,
+    /// Battery discharge rate (HR 112 / HR 314) before force discharge, if known.
+    pub discharge_rate: Option<u8>,
+    /// Discharge slot 1 start time (HH,MM) before force discharge, if any was set.
+    /// `None` means no slot was configured (write 00:00–00:00 to clear).
+    pub discharge_slot_1_start: Option<(u8, u8)>,
+    /// Discharge slot 1 end time (HH,MM) before force discharge, if any was set.
+    pub discharge_slot_1_end: Option<(u8, u8)>,
+    /// Discharge slot 2 start time (HH,MM) before force discharge, if any was set.
+    pub discharge_slot_2_start: Option<(u8, u8)>,
+    /// Discharge slot 2 end time (HH,MM) before force discharge, if any was set.
+    pub discharge_slot_2_end: Option<(u8, u8)>,
+    /// Whether the inverter was in a "force discharge enable" state (HR 1122)
+    /// for three-phase models. None for single-phase.
+    pub three_phase_force_discharge_enable: Option<bool>,
+    /// Whether the inverter was in a "force charge enable" state (HR 1123) for
+    /// three-phase models. The force-discharge encoder writes 0 to this
+    /// register, so we need to restore its prior value.
+    pub three_phase_force_charge_enable: Option<bool>,
+}
+
 /// Shared state accessible from HTTP handlers, the WebSocket endpoint, etc.
 pub struct AppState {
     /// Most recently decoded snapshot (or `None` if never polled).
@@ -193,6 +272,15 @@ pub struct AppState {
     pub pending_writes: Arc<Mutex<Vec<Vec<RegisterWrite>>>>,
     /// Signaled when new writes are queued so the poll loop wakes immediately.
     pub write_notify: Arc<Notify>,
+    /// Captured pre-state for an in-progress Force Charge, used to restore
+    /// the inverter to its prior configuration when the user clicks Stop
+    /// Charge. Set on `force_charge` start, cleared on stop. Mirrors the
+    /// pre-state snapshot GivTCP captures in `forceCharge`/`FCResume`.
+    pub force_charge_revert: Arc<Mutex<Option<ForceChargeRevert>>>,
+    /// Captured pre-state for an in-progress Force Discharge, used to restore
+    /// the inverter to its prior configuration when the user clicks Stop
+    /// Discharge. Set on `force_discharge` start, cleared on stop.
+    pub force_discharge_revert: Arc<Mutex<Option<ForceDischargeRevert>>>,
     /// SQLite history database (set after startup).
     pub history: Arc<Mutex<Option<Arc<HistoryDb>>>>,
     /// Ring buffer of recent log lines for the developer console.
@@ -255,6 +343,8 @@ impl AppState {
             settings: Arc::new(Mutex::new(PollSettings::default())),
             pending_writes: Arc::new(Mutex::new(Vec::new())),
             write_notify: Arc::new(Notify::new()),
+            force_charge_revert: Arc::new(Mutex::new(None)),
+            force_discharge_revert: Arc::new(Mutex::new(None)),
             history: Arc::new(Mutex::new(None)),
             log_ring: Arc::new(crate::server::logs::LogRing::new(2000)),
             connected_clients: Arc::new(parking_lot::Mutex::new(ConnectedClients::new())),
@@ -297,6 +387,8 @@ impl AppState {
             settings: Arc::new(Mutex::new(PollSettings::default())),
             pending_writes: Arc::new(Mutex::new(Vec::new())),
             write_notify: Arc::new(Notify::new()),
+            force_charge_revert: Arc::new(Mutex::new(None)),
+            force_discharge_revert: Arc::new(Mutex::new(None)),
             history: Arc::new(Mutex::new(None)),
             log_ring,
             connected_clients: Arc::new(parking_lot::Mutex::new(ConnectedClients::new())),
