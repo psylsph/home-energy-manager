@@ -1014,10 +1014,17 @@ fn decode_holding_300_359(data: &[u16], snap: &mut InverterSnapshot) {
 /// (BATTERY_RESERVE_PERCENT) that the lower config block (1080-1124)
 /// doesn't reach. Additional registers are decoded by the three-phase
 /// register getter (inverter_threephase.py).
-fn decode_holding_1000_1079(_data: &[u16], _snap: &mut InverterSnapshot, _raw: &mut RawConfig) {
-    // Currently a no-op — this block is read to prevent "Unknown block"
-    // warnings. HR 1005 and 1078 are in SAFE_WRITE_REGS but not yet
-    // displayed on the dashboard.
+fn decode_holding_1000_1079(data: &[u16], snap: &mut InverterSnapshot, _raw: &mut RawConfig) {
+    // HR 1078: battery_power_cutoff — three-phase battery power derating
+    // percentage (0-100%). Distinct from battery_soc_reserve (HR 1109,
+    // decoded in decode_holding_1080_1124). Confirmed by givenergy-modbus
+    // `inverter_threephase.py:269` and GivTCP `threephase.py`.
+    //
+    // HR 1005 (real_time_control) is a transient write-only flag — writing 1
+    // commits pending settings to EEPROM on three-phase models (the mirror of
+    // single-phase HR 166 ENABLE_RTC). It is not a persistent setting and is
+    // not useful to display, so we skip decoding it here.
+    snap.battery_power_cutoff = get_reg(data, 1078 - 1000) as u8;
 }
 
 fn decode_holding_1080_1124(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawConfig) {
@@ -1039,6 +1046,10 @@ fn decode_holding_1080_1124(data: &[u16], snap: &mut InverterSnapshot, raw: &mut
     snap.enable_charge = get_reg(data, 1112 - 1080) != 0 || get_reg(data, 1123 - 1080) != 0;
     snap.enable_discharge = get_reg(data, 1122 - 1080) != 0;
     raw.enable_discharge = snap.enable_discharge;
+
+    // HR 1124: battery_maintenance_mode (0=off, 1=discharge, 2=charge, 3=standby).
+    // Per givenergy-modbus inverter_threephase.py:309 BatteryMaintenance enum.
+    snap.battery_maintenance_mode = get_reg(data, 1124 - 1080) as u8;
 }
 
 // ===========================================================================
@@ -1135,6 +1146,7 @@ fn decode_input_1060_1119(data: &[u16], snap: &mut InverterSnapshot) {
         i_phase_1: i1,
         i_phase_2: i2,
         i_phase_3: i3,
+        i_ln: 0.0,
         i_total,
         // Three-phase inverters have no per-phase signed grid power registers.
         // IR(1083-1085) carry unsigned load-only power (p_load_ac1..3), not net
@@ -1195,6 +1207,7 @@ fn decode_input_1240_1299(data: &[u16], snap: &mut InverterSnapshot) {
             i_phase_1: 0.0,
             i_phase_2: 0.0,
             i_phase_3: 0.0,
+            i_ln: 0.0,
             i_total: 0.0,
             p_active_phase_1: p_meter2 as i32,
             p_active_phase_2: 0,
@@ -1307,6 +1320,7 @@ pub fn decode_meter_data(data: &[u16], address: u8) -> MeterData {
         i_phase_1: get(3) as f32 * 0.01,
         i_phase_2: get(4) as f32 * 0.01,
         i_phase_3: get(5) as f32 * 0.01,
+        i_ln: get(6) as f32 * 0.01, // IR(66): neutral-line current
         i_total: get(7) as f32 * 0.01,
         p_active_phase_1: signed(8),
         p_active_phase_2: signed(9),
@@ -1393,6 +1407,10 @@ fn decode_battery_block(data: &[u16], index: usize) -> BatteryModule {
     let cap_design = ((get_reg(data, 86 - 60) as u32) << 16) | (get_reg(data, 87 - 60) as u32);
     let cap_remaining = ((get_reg(data, 88 - 60) as u32) << 16) | (get_reg(data, 89 - 60) as u32);
 
+    // Secondary design capacity: IR(101-102) cap_design2 (uint32 0.01 Ah).
+    // Matches givenergy-modbus battery.py:68 and GivTCP battery.py.
+    let cap_design2 = ((get_reg(data, 101 - 60) as u32) << 16) | (get_reg(data, 102 - 60) as u32);
+
     // Raw status/warning bytes: IR(90-94) are undocumented by the public
     // register maps, so expose them verbatim for field investigation.
     let ir90 = get_reg(data, 90 - 60);
@@ -1426,6 +1444,7 @@ fn decode_battery_block(data: &[u16], index: usize) -> BatteryModule {
         bms_firmware,
         capacity_ah: cap_calibrated as f32 * 0.01,
         design_capacity_ah: cap_design as f32 * 0.01,
+        design_capacity_2_ah: cap_design2 as f32 * 0.01,
         remaining_capacity_ah: cap_remaining as f32 * 0.01,
         bms_status_registers,
         bms_status,
@@ -1956,6 +1975,7 @@ pub fn decode_hv_bmu_block(data: &[u16], index: usize) -> crate::inverter::model
         bms_firmware: 0,
         capacity_ah: 0.0, // Pack-level; comes from the BCU cluster.
         design_capacity_ah: 0.0,
+        design_capacity_2_ah: 0.0,
         remaining_capacity_ah: 0.0,
         bms_status_registers: Vec::new(),
         bms_status: Vec::new(),
@@ -2047,6 +2067,37 @@ mod tests {
         );
         assert_eq!(module.bms_status, vec![1, 2, 14, 16, 32, 64, 128]);
         assert_eq!(module.bms_warnings, vec![165, 90]);
+    }
+
+    #[test]
+    fn decode_meter_data_includes_neutral_line_current_ir66() {
+        let mut data = vec![0u16; 30];
+        // IR(66) = i_ln at offset 6: 250 → 2.50 A
+        data[6] = 250;
+        // IR(67) = i_total at offset 7: 500 → 5.00 A
+        data[7] = 500;
+
+        let meter = decode_meter_data(&data, 0x01);
+        assert_eq!(meter.i_ln, 2.50, "IR(66) i_ln must be decoded");
+        assert_eq!(meter.i_total, 5.00);
+    }
+
+    #[test]
+    fn decode_battery_block_decodes_cap_design2_from_ir101_102() {
+        let mut data = vec![0u16; 60];
+        // IR(86-87): cap_design = 200 Ah (0.01 Ah units → 20000)
+        data[86 - 60] = 0;
+        data[87 - 60] = 20000;
+        // IR(101-102): cap_design2 = 198 Ah (slight calibration drift)
+        data[101 - 60] = 0;
+        data[102 - 60] = 19800;
+
+        let module = decode_battery_block(&data, 0);
+        assert_eq!(module.design_capacity_ah, 200.0);
+        assert_eq!(
+            module.design_capacity_2_ah, 198.0,
+            "IR(101-102) cap_design2 must be decoded"
+        );
     }
 
     fn test_blocks() -> Vec<BlockRead> {
@@ -2635,6 +2686,77 @@ mod tests {
         assert_eq!(snap.target_soc, 95);
         assert!(snap.enable_charge);
         assert!(snap.enable_discharge);
+    }
+
+    /// HR 1078 (battery_power_cutoff) is decoded from the three-phase high
+    /// config block (HR 1000-1079). Previously this block was a no-op and
+    /// the register was discarded.
+    #[test]
+    fn three_phase_decodes_battery_power_cutoff_from_hr1078() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x4001; // Three Phase
+
+        let mut high_config = vec![0u16; 80]; // HR 1000-1079
+        high_config[1078 - 1000] = 65; // battery_power_cutoff = 65%
+
+        let mut three_phase = vec![0u16; 45];
+        three_phase[1109 - 1080] = 20; // battery_soc_reserve = 20
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                1000,
+                80,
+                "holding_1000_1079",
+                high_config,
+            ),
+            make_block(
+                RegisterType::Holding,
+                1080,
+                45,
+                "holding_1080_1124",
+                three_phase,
+            ),
+        ];
+
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.device_type, DeviceType::ThreePhase);
+        assert_eq!(
+            snap.battery_power_cutoff, 65,
+            "HR 1078 battery_power_cutoff must be decoded"
+        );
+        // battery_reserve (SOC floor) must still come from HR 1109, not HR 1078
+        assert_eq!(snap.battery_reserve, 20);
+    }
+
+    /// HR 1124 (battery_maintenance_mode) is the last register in the
+    /// three-phase config block (HR 1080-1124, offset 44). Previously
+    /// discarded — now decoded into snapshot.battery_maintenance_mode.
+    #[test]
+    fn three_phase_decodes_battery_maintenance_mode_from_hr1124() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x4001; // Three Phase
+
+        let mut three_phase = vec![0u16; 45];
+        three_phase[1124 - 1080] = 2; // battery_maintenance_mode = CHARGE
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                1080,
+                45,
+                "holding_1080_1124",
+                three_phase,
+            ),
+        ];
+
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.device_type, DeviceType::ThreePhase);
+        assert_eq!(snap.battery_maintenance_mode, 2);
     }
 
     #[test]

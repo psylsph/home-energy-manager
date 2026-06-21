@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.36.2] - 2026-06-21
+
+### Fixed
+
+- **Three-phase battery power derating setting now read correctly.** The app
+  was polling the register but silently discarding it, so the battery power
+  cutoff percentage never appeared on three-phase models. It's now decoded
+  properly.
+
+- **Three-phase battery maintenance mode now read.** The register was in the
+  polled range but wasn't being decoded, so maintenance mode (off / discharge /
+  charge / standby) was invisible on three-phase models.
+
+- **Battery secondary capacity register now decoded.** The app now reads the
+  second design capacity value from the battery management system, which can
+  help detect calibration drift between the two capacity registers.
+
+- **Meter neutral-line current now read.** External CT clamp meters report
+  neutral-line current on a dedicated register that the app was skipping. It's
+  now decoded alongside the phase currents.
+
 ## [0.36.1] - 2026-06-21
 
 ### Fixed
