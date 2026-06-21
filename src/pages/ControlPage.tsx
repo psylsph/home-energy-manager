@@ -1666,6 +1666,18 @@ export default function ControlPage() {
   const [chargeRateSaving, setChargeRateSaving] = useState(false);
   const [dischargeRateSaving, setDischargeRateSaving] = useState(false);
   const [activePowerSaving, setActivePowerSaving] = useState(false);
+  // Duration (in minutes) for Force Charge and Force Discharge quick actions.
+  // Backend clamps to 1..=1439; 1440 means "until stopped" (writes a
+  // full-day slot) and is the upper bound of the slider for symmetry with
+  // the existing 1..=1440 cooldown clamp on alerts. Persisted to
+  // localStorage so the choice survives page reloads.
+  const [forceDurationMinutes, setForceDurationMinutes] = useState<number>(() => {
+    if (typeof window === 'undefined') return 30;
+    const raw = window.localStorage.getItem('forceDurationMinutes');
+    const parsed = raw == null ? NaN : Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) && parsed >= 1 && parsed <= 1440 ? parsed : 30;
+  });
+  const [forceDurationSaving, setForceDurationSaving] = useState(false);
 
   // Limit slots shown to what the inverter model supports
   // (e.g. AC Coupled only has 1 charge slot; Gen3 has 10).
@@ -1832,10 +1844,20 @@ export default function ControlPage() {
                 setForceChargeLoading(true);
                 try {
                   if (forceChargeActive) {
-                    await apiPost('/api/control/mode', { mode: 'eco' });
+                    // Stop Charge: restore the inverter to its pre-force-charge
+                    // state via the dedicated endpoint. The backend snapshots
+                    // the relevant registers on Force Charge start and replays
+                    // them here (HR_ENABLE_CHARGE, HR_CHARGE_TARGET_SOC, the
+                    // charge slot, and three-phase force/AC-charge flags).
+                    await apiPost('/api/control/force-charge/stop');
                     setLocalForceChargeOverride(false);
                   } else {
-                    await apiPost('/api/control/force-charge', { minutes: 30 });
+                    // Clamp 1440 → 1439 to match the backend's 1..=1439 slot clamp.
+                    // 1440 on the slider represents "full day" which the backend
+                    // expresses as a 00:00→23:59 slot — the Quick Action still
+                    // works in that case because the slot remains non-zero.
+                    const minutes = Math.min(forceDurationMinutes, 1439);
+                    await apiPost('/api/control/force-charge', { minutes });
                     setLocalForceChargeOverride(true);
                   }
                 } catch (e: unknown) { console.warn("Slot save failed:", e); }
@@ -1864,10 +1886,20 @@ export default function ControlPage() {
                 setForceDischargeLoading(true);
                 try {
                   if (forceDischargeActive) {
-                    await apiPost('/api/control/mode', { mode: 'eco' });
+                    // Stop Discharge: restore the inverter to its pre-force-discharge
+                    // state via the dedicated endpoint. The backend snapshots the
+                    // relevant registers (HR_ENABLE_DISCHARGE, the discharge slots,
+                    // three-phase force flags) on Force Discharge start and replays
+                    // them here.
+                    await apiPost('/api/control/force-discharge/stop');
                     setLocalForceDischargeOverride(false);
                   } else {
-                    await apiPost('/api/control/force-discharge');
+                    // Mirror the force-charge path: pass the duration slider
+                    // value so the discharge slot is `now → now+minutes`
+                    // instead of the encoder's default 00:00–23:59. Clamp
+                    // 1440 → 1439 to match the backend's 1..=1439 slot clamp.
+                    const minutes = Math.min(forceDurationMinutes, 1439);
+                    await apiPost('/api/control/force-discharge', { minutes });
                     setLocalForceDischargeOverride(true);
                   }
                 } catch (e: unknown) { console.warn("Slot save failed:", e); }
@@ -2145,6 +2177,50 @@ export default function ControlPage() {
               </div>
             </div>
           )}
+          {/* Force Charge / Discharge Duration */}
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-text-secondary text-sm">Force Charge / Discharge Duration</span>
+                <p className="text-text-secondary text-xs mt-0.5">
+                  How long the Quick Action force-charge slot should run. Applies when the inverter needs an explicit charge window.
+                </p>
+              </div>
+              <span className="font-mono text-text-primary text-sm">
+                {forceDurationMinutes >= 1440
+                  ? '24h'
+                  : forceDurationMinutes >= 60
+                    ? `${Math.floor(forceDurationMinutes / 60)}h ${forceDurationMinutes % 60 ? `${forceDurationMinutes % 60}m` : ''}`.trim()
+                    : `${forceDurationMinutes}m`}
+              </span>
+            </div>
+            <div className="flex items-center gap-3">
+              <input
+                type="range"
+                min={1}
+                max={1440}
+                step={1}
+                value={forceDurationMinutes}
+                onChange={(e) => setForceDurationMinutes(Math.max(1, Math.min(1440, Number(e.target.value))))}
+                className="flex-1"
+              />
+              <button
+                onClick={async () => {
+                  setForceDurationSaving(true);
+                  try {
+                    // Persist so the choice survives page reloads.
+                    localStorage.setItem('forceDurationMinutes', String(forceDurationMinutes));
+                  } finally {
+                    setForceDurationSaving(false);
+                  }
+                }}
+                disabled={forceDurationSaving}
+                className="px-3 py-1.5 bg-battery/20 text-battery rounded-lg text-xs font-medium hover:bg-battery/30 transition disabled:opacity-50"
+              >
+                {forceDurationSaving ? '...' : 'Save'}
+              </button>
+            </div>
+          </div>
           {/* Reserve SOC */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">

@@ -636,6 +636,13 @@ fn default_soc_reserve() -> u8 {
     4
 }
 
+/// Default battery power mode for an uninitialised snapshot. Eco (1) is
+/// the safe default — "export" (0) could drain the battery to grid if a
+/// control path runs against a never-decoded snapshot.
+fn default_eco_mode() -> u8 {
+    1
+}
+
 fn default_grid_online() -> bool {
     true
 }
@@ -820,6 +827,12 @@ pub struct InverterSnapshot {
     /// Charge target SOC (HR 116 / HR 1111), clamped to min 4 to protect battery.
     #[serde(default = "default_soc_reserve")]
     pub target_soc: u8,
+    /// Raw battery power mode register (HR 27): 0 = export, 1 = self-consumption (eco).
+    /// Stored alongside the derived `BatteryMode` enum so the stop-charge
+    /// path can restore the exact pre-force-charge mode (0 or 1) instead
+    /// of always defaulting to eco.
+    #[serde(default = "default_eco_mode")]
+    pub battery_power_mode: u8,
     pub enable_charge: bool,
     pub enable_charge_target: bool,
     pub enable_discharge: bool,

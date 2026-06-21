@@ -722,6 +722,10 @@ fn decode_holding_0_59(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawC
 
     // Battery power mode: HR(27) — 0=export, 1=eco
     raw.battery_power_mode = get_reg(data, 27);
+    // Mirror the raw register onto the snapshot so the stop-charge
+    // restore path can write the exact pre-force-charge mode (0 or 1)
+    // back to HR 27.
+    snap.battery_power_mode = (raw.battery_power_mode & 0x01) as u8;
 
     // Battery calibration stage: HR(29) — 0=off, 5=balance
     snap.battery_calibration_stage = get_reg(data, 29) as u8;
