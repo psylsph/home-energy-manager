@@ -142,6 +142,13 @@ pub enum ControlCommand {
     SetBatterySocReserve { reserve: u16 },
     /// Set charge target SOC (4-100).
     SetChargeTargetSoc { soc: u16 },
+    /// Set the global charge target SOC register only (HR 116), without
+    /// arming the enable_charge_target flag (HR 20). Mirrors GivTCP's
+    /// `set_charge_target_only`, which `setChargeSlot` calls when writing a
+    /// scheduled charge slot so models that key off the global register
+    /// (notably the All-in-One) honour the target without triggering
+    /// immediate "winter mode" force-charging.
+    SetChargeTargetSocOnly { soc: u16 },
     /// Clear the charge-target enable flag (HR 20 = 0). Used when configuring
     /// a schedule charge slot so a stale force-charge flag doesn't keep
     /// snapshotForceCharge asserted. Standalone enable (HR 20 = 1) always
@@ -276,6 +283,12 @@ impl ControlCommand {
                     rw(HR_ENABLE_CHARGE_TARGET, enable),
                     rw(HR_CHARGE_TARGET_SOC, *soc),
                 ]
+            }
+            ControlCommand::SetChargeTargetSocOnly { soc } => {
+                // Write HR 116 only — do not touch the enable_charge_target
+                // flag (HR 20). Matches GivTCP set_charge_target_only.
+                validate_range(*soc, 4, 100, "target SOC")?;
+                vec![rw(HR_CHARGE_TARGET_SOC, *soc)]
             }
             ControlCommand::ClearChargeTargetFlag => {
                 vec![rw(HR_ENABLE_CHARGE_TARGET, 0)]
@@ -1206,6 +1219,26 @@ mod tests {
         assert_eq!(writes[0].value, 1);
         assert_eq!(writes[1].address, HR_CHARGE_TARGET_SOC);
         assert_eq!(writes[1].value, 80);
+    }
+
+    #[test]
+    fn set_charge_target_soc_only_encodes_without_touching_enable_flag() {
+        // Mirrors GivTCP set_charge_target_only: writes HR 116 only, leaves
+        // the enable_charge_target flag (HR 20) untouched so a scheduled
+        // charge slot doesn't arm immediate "winter mode" force-charging.
+        let cmd = ControlCommand::SetChargeTargetSocOnly { soc: 80 };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].address, HR_CHARGE_TARGET_SOC);
+        assert_eq!(writes[0].value, 80);
+        assert!(!writes.iter().any(|w| w.address == HR_ENABLE_CHARGE_TARGET));
+    }
+
+    #[test]
+    fn set_charge_target_soc_only_validates_range() {
+        assert!(ControlCommand::SetChargeTargetSocOnly { soc: 3 }.encode().is_err());
+        assert!(ControlCommand::SetChargeTargetSocOnly { soc: 101 }.encode().is_err());
+        assert!(ControlCommand::SetChargeTargetSocOnly { soc: 100 }.encode().is_ok());
     }
 
     #[test]
