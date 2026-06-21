@@ -87,7 +87,7 @@ export default function BatteryPage() {
                   {isExpanded && (
                     <div className="bg-bg-elevated/50 rounded-b-xl px-4 pb-4 pt-2 space-y-3 border-t border-bg-elevated">
                       {/* Module info row */}
-                      <div className="grid grid-cols-[20rem_1fr] gap-x-6 gap-y-1 text-xs">
+                      <div className="grid grid-cols-[max-content_1fr] gap-x-3 sm:gap-x-6 gap-y-1 text-xs min-w-0">
                         {m.serial && (
                           <>
                             <span className="text-text-secondary">Serial</span>
@@ -128,7 +128,7 @@ export default function BatteryPage() {
                         )}
                         {m.design_capacity_ah > 0 && m.capacity_ah > 0 && (
                           <>
-                            <span className="text-text-secondary">State of Health (current vs design capacity)</span>
+                            <span className="text-text-secondary">State of Health</span>
                             <span className="text-text-primary font-mono text-right">{(m.capacity_ah / m.design_capacity_ah * 100).toFixed(0)}%</span>
                           </>
                         )}
@@ -157,7 +157,7 @@ export default function BatteryPage() {
                           <>
                             <span className="text-text-secondary">Total Throughput</span>
                             <span className="text-text-primary font-mono text-right">{`${s.total_throughput_kwh.toFixed(0)} kWh`}</span>
-                            <span className="text-text-secondary">Battery Life Remaining (warranty throughput remaining)</span>
+                            <span className="text-text-secondary">Battery Life Remaining</span>
                             <span className="text-text-primary font-mono text-right">{(() => {
                               const RATED_THROUGHPUT_MWH_PER_KWH = 10;
                               const throughputUsed = s.total_throughput_kwh / (s.battery_capacity_kwh * RATED_THROUGHPUT_MWH_PER_KWH * 1000);
