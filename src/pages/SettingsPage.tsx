@@ -1028,7 +1028,7 @@ const VALID_INTERVALS = [5, 10, 15, 20];
               <label className="flex flex-col gap-1">
                 <span className="text-text-secondary text-xs font-sans">App API Token (from pushover.net/apps/build)</span>
                 <input
-                  type="password" placeholder="azGDOReMYyI6o6qRc2jwL9..."
+                  type="password" placeholder="Your App API Token"
                   value={alertsConfig.pushover_app_token}
                   onChange={(e) => setAlertsConfig((p) => ({ ...p, pushover_app_token: e.target.value }))}
                   className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
@@ -1037,7 +1037,7 @@ const VALID_INTERVALS = [5, 10, 15, 20];
               <label className="flex flex-col gap-1">
                 <span className="text-text-secondary text-xs font-sans">User Key (from your Pushover account)</span>
                 <input
-                  type="password" placeholder="uQiRzpo4DXghDmr9Qmy"
+                  type="password" placeholder="Your User Key"
                   value={alertsConfig.pushover_user_key}
                   onChange={(e) => setAlertsConfig((p) => ({ ...p, pushover_user_key: e.target.value }))}
                   className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"

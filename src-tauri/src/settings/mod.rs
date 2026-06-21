@@ -683,12 +683,12 @@ mod tests {
         assert_eq!(cfg.pushover_app_token, "");
         assert_eq!(cfg.pushover_user_key, "");
 
-        cfg.pushover_app_token = "azGDOReMYyI6o6qRc2jwL9".to_string();
-        cfg.pushover_user_key = "uQiRzpo4DXghDmr9Qmy".to_string();
+        cfg.pushover_app_token = "test-app-token-123".to_string();
+        cfg.pushover_user_key = "test-user-key-456".to_string();
         let json = serde_json::to_string(&cfg).unwrap();
         let decoded: AlertsConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.pushover_app_token, "azGDOReMYyI6o6qRc2jwL9");
-        assert_eq!(decoded.pushover_user_key, "uQiRzpo4DXghDmr9Qmy");
+        assert_eq!(decoded.pushover_app_token, "test-app-token-123");
+        assert_eq!(decoded.pushover_user_key, "test-user-key-456");
     }
 
     /// A settings.json written before Pushover shipped (no pushover_* keys)
