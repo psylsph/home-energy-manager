@@ -16,7 +16,7 @@ Don't want to be stuck at your computer to check on your solar? You can open the
 
 ### Step 1: Install the app on your PC
 
-> **Windows security notice:** Windows SmartScreen may warn that the app is from an unknown publisher because it is not code-signed. The installer is scanned clean by VirusTotal. If your antivirus flags it as malware, please report a security vulnerability at <https://github.com/psylsph/home-energy-manager/issues>.
+> **Windows security notice:** Windows SmartScreen may warn that the app is from an unknown publisher because it is not code-signed. The installer is scanned clean by VirusTotal. If your antivirus flags it as malware, please report a security vulnerability at <https://github.com/psylsph/home-energy-manager/issues>. If your antivirus flags the app, see [Bypassing the SmartScreen warning](#bypassing-the-smartscreen-warning) below.
 
 1. On your PC, open a web browser and go to the [**Releases page**](https://github.com/psylsph/home-energy-manager/releases/latest)
 2. Download the `.msi` file (pick the latest one at the top)
@@ -101,6 +101,41 @@ Now you can open it with one tap, just like a normal app.
 2. Double-click it to run the installer
 3. Follow the prompts — the app installs like any other Windows program
 4. Launch **Home Energy Manager** from your Start menu
+
+#### "Windows protected your PC" — how to bypass the SmartScreen warning
+
+<a id="bypassing-the-smartscreen-warning"></a>
+
+The first time you run the installer (or the app itself), Windows may pop up a blue full-screen message saying **"Windows protected your PC"** and refuse to open the file. That's Microsoft Defender SmartScreen being cautious because the app isn't code-signed by a known publisher. It doesn't mean the app is dangerous — it just means Microsoft doesn't recognise the developer yet. The installer has been scanned by VirusTotal and comes back clean.
+
+**If you see the blue "Windows protected your PC" screen:**
+
+1. **Don't click "Don't run"** — but don't panic either. Just look at the message for a moment.
+2. The **"More info"** link is small and grey, just below the main warning text. **Click that.**
+3. A new line will appear at the bottom: **"Run anyway"**. **Click that.**
+4. Windows will ask once more if you're sure. Click **Yes** (or **Run**).
+5. The installer (or app) will now open normally. You only have to do this once per machine — after that, Windows remembers your choice.
+
+**If Edge keeps flagging the download as "suspicious" or "uncommon":**
+
+When you click the `.msi` link in Microsoft Edge, it may show a banner at the top of the downloads panel saying something like *"This file is not commonly downloaded and could be unsafe."* Or the download might just refuse to start. That's Edge being extra cautious.
+
+1. Click the **three dots (⋯)** next to the warning in the downloads panel
+2. Choose **"Keep"** or **"Download anyway"**
+3. Edge will save the file. Once saved, follow the blue-screen steps above to actually run it.
+
+**If your antivirus (Norton, McAfee, Bitdefender, Kaspersky, etc.) deletes or quarantines the installer:**
+
+This is the same root cause — the app isn't code-signed, so some security suites get jumpy.
+
+1. Open your antivirus program
+2. Find the **quarantine** or **threat history** section
+3. Look for an entry named **"givenergy-local"** or **"home-energy-manager"**
+4. Choose **"Restore"** or **"Allow"** (the exact wording depends on your antivirus)
+5. Add the folder you downloaded the file to (usually `Downloads`) to the antivirus's **exclusions / allowlist** so it doesn't get flagged again
+6. Now follow the blue-screen steps above to run it
+
+**If you're still stuck:** see the [FAQ](./FAQ.md) for more help, or open an issue at <https://github.com/psylsph/home-energy-manager/issues> and someone will walk you through it.
 
 ### macOS
 
