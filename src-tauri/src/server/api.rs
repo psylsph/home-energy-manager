@@ -1029,20 +1029,31 @@ pub async fn set_charge_slot(
             // to show as true when the user simply configured a schedule slot.
             if enabled {
                 if !device_type.uses_three_phase_schedule_slots() {
-                    if device_type.uses_extended_schedule_slots() || target_soc >= 100 {
-                        // Clear the force-charge target flag (HR 20 = 0) so a
-                        // stale force-charge flag from a previous operation
-                        // doesn't keep snapshotForceCharge
-                        // (enable_charge && enable_charge_target) asserted.
-                        //
-                        // For extended-slot models (Gen3+ hybrid, AIO, HV Gen3):
-                        // per-slot target SOCs are managed in the HR240-299
-                        // extended block, so the global HR20 flag is unused.
-                        //
-                        // For all models when target SOC is 100% ("charge to
-                        // full" / default): no target limit is needed, so the
-                        // flag is cleared. The battery charges to 100% during
-                        // the slot window.
+                    if target_soc >= 100 {
+                        // Charge to full ("charge to 100%" / default): no
+                        // target limit is needed, so clear the charge target
+                        // flag so a stale force-charge flag from a previous
+                        // operation doesn't keep snapshotForceCharge asserted.
+                        if let Ok(flag_writes) = (ControlCommand::ClearChargeTargetFlag).encode() {
+                            writes.extend(flag_writes);
+                        }
+                    } else if device_type.uses_extended_schedule_slots() {
+                        // Extended-slot models (Gen3+ hybrid, AIO, HV Gen3):
+                        // write the GLOBAL charge target SOC (HR 116) so models
+                        // that key off the global register — notably the
+                        // All-in-One, confirmed by GivTCP's setChargeSlot →
+                        // set_charge_target_only — actually honour the target.
+                        // Per-slot HR 242 is written below for models that use
+                        // it. The enable_charge_target flag (HR 20) is left
+                        // cleared so we don't arm immediate "winter mode"
+                        // force-charging.
+                        if let Ok(target_writes) = (ControlCommand::SetChargeTargetSocOnly {
+                            soc: target_soc as u16,
+                        })
+                        .encode()
+                        {
+                            writes.extend(target_writes);
+                        }
                         if let Ok(flag_writes) = (ControlCommand::ClearChargeTargetFlag).encode() {
                             writes.extend(flag_writes);
                         }
@@ -2649,6 +2660,61 @@ mod tests {
             let enable = writes.iter().find(|w| w.address == HR_ENABLE_CHARGE);
             assert!(enable.is_some(), "must set HR_ENABLE_CHARGE");
             assert_eq!(enable.unwrap().value, 1);
+        })
+        .await;
+    }
+
+    /// The All-in-One honours the GLOBAL charge target SOC (HR 116) — confirmed
+    /// by GivTCP's setChargeSlot → set_charge_target_only. Configuring a charge
+    /// slot with an explicit target SOC < 100% must therefore write HR 116 (in
+    /// addition to the per-slot HR 242), otherwise the AIO ignores the target
+    /// and charges to 100% (issue: "SOC target just jumps back").
+    #[tokio::test]
+    async fn set_charge_slot_writes_global_hr116_for_aio() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_CHARGE_TARGET_SOC, HR_CHARGE_TARGET_SOC_1, HR_ENABLE_CHARGE,
+                HR_ENABLE_CHARGE_TARGET,
+            };
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            let body = serde_json::json!({
+                "slot": 1,
+                "start_hour": 6, "start_minute": 0,
+                "end_hour": 10, "end_minute": 0,
+                "enabled": true,
+                "target_soc": 80,
+            });
+            let _ = set_charge_slot(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            // Global charge target SOC must be written (HR 116).
+            let global = writes.iter().find(|w| w.address == HR_CHARGE_TARGET_SOC);
+            assert!(
+                global.is_some(),
+                "AIO charge slot must write the global charge target SOC (HR 116)"
+            );
+            assert_eq!(global.unwrap().value, 80);
+            // Per-slot target SOC (HR 242) is also written for extended-slot models.
+            let per_slot = writes.iter().find(|w| w.address == HR_CHARGE_TARGET_SOC_1);
+            assert!(per_slot.is_some(), "extended-slot model must write per-slot HR 242");
+            assert_eq!(per_slot.unwrap().value, 80);
+            // enable_charge armed, force-charge flag cleared.
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_ENABLE_CHARGE)
+                    .unwrap()
+                    .value,
+                1
+            );
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_ENABLE_CHARGE_TARGET)
+                    .unwrap()
+                    .value,
+                0
+            );
         })
         .await;
     }

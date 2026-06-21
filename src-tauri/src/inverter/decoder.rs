@@ -896,14 +896,22 @@ fn decode_holding_240_299(data: &[u16], snap: &mut InverterSnapshot) {
     }
 
     // Per-slot target SOCs for slots 1-2 (HR 242, 245) — these augment
-    // the global target_soc set in decode_holding_60_119
-    let t1 = (get_reg(data, 242 - 240) as u8).clamp(4, 100);
-    let t2 = (get_reg(data, 245 - 240) as u8).clamp(4, 100);
+    // the global target_soc set in decode_holding_60_119.
+    //
+    // A raw 0 means "no per-slot target set" and must fall back to the global
+    // value applied above. The previous `clamp(4, 100)` turned a raw 0 into 4,
+    // which then passed the `> 0` guard and overwrote the correct global value
+    // with 4% — so a slot SOC appeared to "jump back" after a write that the
+    // inverter didn't echo back into the per-slot register (observed on the
+    // All-in-One, which honours the global HR 116). Check the raw value before
+    // clamping.
+    let t1 = get_reg(data, 242 - 240) as u8;
+    let t2 = get_reg(data, 245 - 240) as u8;
     if snap.charge_slots[0].enabled && t1 > 0 {
-        snap.charge_slots[0].target_soc = t1;
+        snap.charge_slots[0].target_soc = t1.clamp(4, 100);
     }
     if snap.charge_slots[1].enabled && t2 > 0 {
-        snap.charge_slots[1].target_soc = t2;
+        snap.charge_slots[1].target_soc = t2.clamp(4, 100);
     }
 
     // Extended discharge slots 3-10 at HR 276-298, same pattern
@@ -938,14 +946,16 @@ fn decode_holding_240_299(data: &[u16], snap: &mut InverterSnapshot) {
         }
     }
 
-    // Per-slot discharge target SOCs for slots 1-2 (HR 272, 275)
-    let dt1 = (get_reg(data, 272 - 240) as u8).clamp(4, 100);
-    let dt2 = (get_reg(data, 275 - 240) as u8).clamp(4, 100);
+    // Per-slot discharge target SOCs for slots 1-2 (HR 272, 275). As above,
+    // a raw 0 means "not set" — fall back to the global value rather than
+    // clamping it to 4%.
+    let dt1 = get_reg(data, 272 - 240) as u8;
+    let dt2 = get_reg(data, 275 - 240) as u8;
     if snap.discharge_slots[0].enabled && dt1 > 0 {
-        snap.discharge_slots[0].target_soc = dt1;
+        snap.discharge_slots[0].target_soc = dt1.clamp(4, 100);
     }
     if snap.discharge_slots[1].enabled && dt2 > 0 {
-        snap.discharge_slots[1].target_soc = dt2;
+        snap.discharge_slots[1].target_soc = dt2.clamp(4, 100);
     }
 }
 
@@ -958,10 +968,22 @@ fn decode_holding_300_359(data: &[u16], snap: &mut InverterSnapshot) {
     snap.ac_export_priority = get_reg(data, 311 - 300) as u8;
 
     // HR 313/314: AC-coupled charge/discharge power percentage limits.
-    // AC-coupled inverters do not use the DC hybrid HR 111/112 registers,
-    // so expose these through the existing charge_rate/discharge_rate fields.
-    snap.charge_rate = get_reg(data, 313 - 300) as u8;
-    snap.discharge_rate = get_reg(data, 314 - 300) as u8;
+    // Only AC-coupled inverters expose their real limits here — their DC-hybrid
+    // HR 111/112 registers read as 0 (see decode_holding_60_119). The
+    // All-in-One family also polls this block (for EPS / pause / export
+    // priority) but keys its real charge/discharge limit off HR 111/112 —
+    // confirmed by GivTCP read.py, which uses `battery_charge_limit` (HR 111)
+    // for every non-3-phase / non-Gateway model including the AIO. On the AIO
+    // HR 313 reads ~100, so copying it unconditionally would overwrite the
+    // correct HR 111 value and make the charge-power limit always revert to
+    // max. Gate the copy on actual AC-coupled models only.
+    if matches!(
+        snap.device_type,
+        DeviceType::ACCoupled | DeviceType::ACCoupledMk2
+    ) {
+        snap.charge_rate = get_reg(data, 313 - 300) as u8;
+        snap.discharge_rate = get_reg(data, 314 - 300) as u8;
+    }
 
     // HR 317: EPS enable (bool)
     snap.ac_eps_enabled = get_reg(data, 317 - 300) != 0;
@@ -2886,6 +2908,117 @@ mod tests {
         assert_eq!(snap.device_type, DeviceType::ACCoupled);
         assert_eq!(snap.charge_rate, 77);
         assert_eq!(snap.discharge_rate, 88);
+    }
+
+    /// The All-in-One polls the AC-config block (HR 300-359) for EPS / pause /
+    /// export priority, but its authoritative charge/discharge limit is the
+    /// DC-hybrid HR 111/112 (confirmed by GivTCP read.py). HR 313/314 read
+    /// ~100 on the AIO, so the AC-config decoder must NOT copy them over the
+    /// real HR 111 value — otherwise the charge-power limit always reverts to
+    /// max (issue: "charge power limit reverts to 6 kW in HEM but stays at
+    /// 3 kW in Home Assistant").
+    #[test]
+    fn aio_charge_limit_uses_hr111_not_ac_block_hr313() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x8001; // All-in-One 6kW
+
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[111 - 60] = 25; // real charge limit on HR 111 (-> ~3 kW)
+        holding_60_data[112 - 60] = 30; // real discharge limit on HR 112
+
+        let mut ac_config = vec![0u16; 60];
+        ac_config[313 - 300] = 100; // stale / default — must NOT override
+        ac_config[314 - 300] = 100;
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+            make_block(RegisterType::Holding, 300, 60, "holding_300_359", ac_config),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.device_type, DeviceType::AllInOne6kW);
+        assert_eq!(
+            snap.charge_rate, 25,
+            "AIO charge limit must come from HR 111, not the AC-config HR 313"
+        );
+        assert_eq!(snap.discharge_rate, 30);
+    }
+
+    /// A raw 0 in the per-slot target SOC register (HR 242/245) means "no
+    /// per-slot target set" — the slot must fall back to the global target
+    /// (HR 116), not clamp to 4%. Previously the clamp(4,100) turned 0 into 4
+    /// and overwrote the global, so the SOC appeared to jump back to 4%.
+    #[test]
+    fn per_slot_target_soc_zero_falls_back_to_global() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x8001; // AIO (extended slots)
+
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[94 - 60] = 600; // charge slot 1 start 06:00 -> enabled
+        holding_60_data[95 - 60] = 1000; // charge slot 1 end 10:00
+        holding_60_data[116 - 60] = 80; // global charge target SOC
+
+        // Extended block: HR 242/245 read 0 (inverter did not echo a per-slot
+        // target). Must fall back to the global 80, NOT clamp to 4.
+        let extended = vec![0u16; 60];
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+            make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert!(snap.charge_slots[0].enabled);
+        assert_eq!(
+            snap.charge_slots[0].target_soc, 80,
+            "raw-0 per-slot SOC must fall back to the global target, not clamp to 4"
+        );
+    }
+
+    /// When the per-slot register DOES hold a value, it overrides the global
+    /// (clamped to the valid range). Regression guard for the fallback fix.
+    #[test]
+    fn per_slot_target_soc_nonzero_overrides_global() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x8001;
+
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[94 - 60] = 600;
+        holding_60_data[95 - 60] = 1000;
+        holding_60_data[116 - 60] = 80; // global
+
+        let mut extended = vec![0u16; 60];
+        extended[242 - 240] = 60; // per-slot override for slot 1
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+            make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert!(snap.charge_slots[0].enabled);
+        assert_eq!(snap.charge_slots[0].target_soc, 60);
     }
 
     #[test]

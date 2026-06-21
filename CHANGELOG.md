@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.36.1] - 2026-06-21
+
+### Fixed
+
+- **All-in-One charge power limit reverting to maximum.** On All-in-One
+  inverters, setting a lower charge power limit (e.g. 3 kW) would appear to
+  work briefly, then silently jump back to the full 6 kW. The app was
+  mistakenly reading the charge limit from a register that only applies to
+  AC-coupled inverters; the All-in-One uses a different register that was
+  being overwritten. Charge and discharge power limits now stay where you set
+  them on All-in-One models.
+
+- **Scheduled charge target jumping back to 4%.** When configuring a charge
+  schedule slot with a specific target state of charge, the target would
+  sometimes snap back to 4% on the next poll. The inverter reports "no target
+  set" as a zero in the per-slot register, which the app was treating as a
+  valid minimum value (4%) instead of falling back to the global target. Slot
+  targets now fall back correctly to the global charge target when the
+  inverter hasn't echoed a per-slot value.
+
+- **All-in-One charge schedule not honouring the target SOC.** Configuring a
+  charge slot with a target below 100% on an All-in-One inverter would charge
+  to 100% anyway — the app wasn't writing the global target register that the
+  All-in-One keys off. The global target is now written alongside the
+  per-slot value so the charge stops at your chosen level.
+
+### Added
+
+- **Comprehensive register audit documentation.** Added a detailed comparison
+  of how every inverter, battery, and meter register is interpreted across the
+  app, GivTCP, and the community reference library. This internal reference
+  documents every known difference and confirms the sign conventions, scaling,
+  and register addresses are correct.
+
 ## [0.36.0] - 2026-06-21
 
 ### Added
