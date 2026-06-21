@@ -10,51 +10,51 @@ import { render, screen, act, cleanup } from '@testing-library/react';
 // The two network hooks and the api module are stubbed so <App/> mounts in
 // jsdom without a backend or a real WebSocket.
 
-vi.mock('./pages/StatusPage', () => ({
+vi.mock('../src/pages/StatusPage', () => ({
   default: function StatusPageMock() {
     throw new Error('Status exploded');
   },
 }));
-vi.mock('./pages/PowerPage', () => ({
+vi.mock('../src/pages/PowerPage', () => ({
   default: () => <div data-testid="mock-Power">Power</div>,
 }));
-vi.mock('./pages/BatteryPage', () => ({
+vi.mock('../src/pages/BatteryPage', () => ({
   default: () => <div data-testid="mock-Battery">Battery</div>,
 }));
-vi.mock('./pages/SolarPage', () => ({
+vi.mock('../src/pages/SolarPage', () => ({
   default: () => <div data-testid="mock-Solar">Solar</div>,
 }));
-vi.mock('./pages/InverterPage', () => ({
+vi.mock('../src/pages/InverterPage', () => ({
   default: () => <div data-testid="mock-Inverter">Inverter</div>,
 }));
-vi.mock('./pages/MetersPage', () => ({
+vi.mock('../src/pages/MetersPage', () => ({
   default: () => <div data-testid="mock-Meters">Meters</div>,
 }));
-vi.mock('./pages/HistoryPage', () => ({
+vi.mock('../src/pages/HistoryPage', () => ({
   default: () => <div data-testid="mock-History">History</div>,
 }));
-vi.mock('./pages/ControlPage', () => ({
+vi.mock('../src/pages/ControlPage', () => ({
   default: () => <div data-testid="mock-Control">Control</div>,
 }));
-vi.mock('./pages/SettingsPage', () => ({
+vi.mock('../src/pages/SettingsPage', () => ({
   default: () => <div data-testid="mock-Settings">Settings</div>,
 }));
-vi.mock('./pages/LogsPage', () => ({
+vi.mock('../src/pages/LogsPage', () => ({
   default: () => <div data-testid="mock-Logs">Logs</div>,
 }));
 
-vi.mock('./hooks/useWebSocket', () => ({ useWebSocket: () => {} }));
-vi.mock('./hooks/useGridOutageNotifications', () => ({
+vi.mock('../src/hooks/useWebSocket', () => ({ useWebSocket: () => {} }));
+vi.mock('../src/hooks/useGridOutageNotifications', () => ({
   useGridOutageNotifications: () => {},
 }));
-vi.mock('./lib/api', () => ({
+vi.mock('../src/lib/api', () => ({
   apiGet: vi.fn().mockResolvedValue({ ok: true, data: {} }),
   fetchHistory: vi.fn().mockResolvedValue({}),
   isTauri: false,
 }));
 
 // Imported after the vi.mock() calls above (factories are hoisted regardless).
-import App from './App';
+import App from '../src/App';
 
 // ---------------------------------------------------------------------------
 // Helpers

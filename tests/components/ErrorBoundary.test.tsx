@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act, cleanup } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import ErrorBoundary from './ErrorBoundary';
+import ErrorBoundary from '../../src/components/ErrorBoundary';
 
 // A child that always throws during render.
 function Boom({ message = 'kaboom' }: { message?: string }): ReactNode {

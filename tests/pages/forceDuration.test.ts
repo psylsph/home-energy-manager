@@ -19,7 +19,7 @@ import {
   clampDurationMinutes,
   formatDurationLabel,
   readPersistedDuration,
-} from './forceDuration';
+} from '../../src/pages/forceDuration';
 
 describe('formatDurationLabel', () => {
   it('formats sub-hour values as minutes', () => {

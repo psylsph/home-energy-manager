@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatOperatingHours, formatBatteryMode } from './format';
+import { formatOperatingHours, formatBatteryMode } from '../../src/lib/format';
 
 /**
  * Tests for `formatOperatingHours` — the helper that turns a raw

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { removeSpikes, isCumulativeField, SPIKE_THRESHOLDS } from './chartSeries';
-import type { TimePoint } from './types';
+import { removeSpikes, isCumulativeField, SPIKE_THRESHOLDS } from '../../src/lib/chartSeries';
+import type { TimePoint } from '../../src/lib/types';
 
 /** Build a `TimePoint[]` from bare values at 1s spacing (ts is irrelevant to the maths). */
 function series(values: number[]): TimePoint[] {

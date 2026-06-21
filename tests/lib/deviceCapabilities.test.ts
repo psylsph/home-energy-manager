@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { deviceSupportsEps } from './deviceCapabilities';
+import { deviceSupportsEps } from '../../src/lib/deviceCapabilities';
 
 /**
  * The EPS-supporting set mirrors the backend's `DeviceType::supports_eps`
