@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.34.3] - 2026-06-21
+
+### Fixed
+
+- **Gateway battery power direction is now correct.** On Gateway (parallel
+  AIO) installs the battery flow arrow, the `battery_power` value, the
+  derived grid power and the per-AIO power figures were all inverted
+  relative to real hardware. A user on v0.34.2 reported the classic symptom
+  (issue #78): solar 6.3 kW and home 0.6 kW, yet the app showed the battery
+  *discharging* at −5.5 kW with 11.2 kW grid export — physically impossible,
+  since export cannot exceed solar + battery discharge.
+
+  **Root cause:** the GivEnergy gateway's `p_aio_total` register (IR 1702)
+  and the per-AIO `p_aioN_inverter` registers (IR 1816–1818) use the
+  **opposite** wire sign to a standard inverter's `p_battery` (IR 52): raw
+  **+ = charging**, − = discharging. GivTCP confirms this by negating the
+  value (`GivTCP/read.py:1556`: `Battery_Power = -GEInv.p_aio_total`). The
+  v0.32.0 sign-convention change mapped these verbatim on the (incorrect)
+  assumption that the gateway shared IR(52)'s + = discharge convention. The
+  decoder now **negates** `p_aio_total` and the per-AIO registers on decode so
+  HEM's internal + = discharge convention matches the rest of the app. This
+  also makes the derived grid-power balance (`solar + battery − home`)
+  produce sensible figures again. (Issue #78.)
+
 ## [0.34.2] - 2026-06-20
 
 ### Fixed
