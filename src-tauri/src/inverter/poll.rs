@@ -2282,6 +2282,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             let token = config.telegram_bot_token.clone();
                                             let chat_id = config.telegram_chat_id.clone();
                                             let ntfy_text = text.clone();
+                                            let pushover_text = text.clone();
                                             let cleared_names = cleared
                                                 .iter()
                                                 .map(|a| a.human_name())
@@ -2320,6 +2321,28 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                     Err(e) => tracing::warn!("ntfy cleared alert failed: {e}"),
                                                 }
                                             });
+
+                                            let pushover_token = config.pushover_app_token.clone();
+                                            let pushover_user = config.pushover_user_key.clone();
+                                            tokio::task::spawn_blocking(move || {
+                                                if pushover_token.is_empty()
+                                                    || pushover_user.is_empty()
+                                                {
+                                                    return;
+                                                }
+                                                match crate::alerts::send_pushover_message(
+                                                    &pushover_token,
+                                                    &pushover_user,
+                                                    &pushover_text,
+                                                ) {
+                                                    Ok(()) => tracing::warn!(
+                                                        "Pushover cleared alert sent"
+                                                    ),
+                                                    Err(e) => tracing::warn!(
+                                                        "Pushover cleared alert failed: {e}"
+                                                    ),
+                                                }
+                                            });
                                         }
 
                                         if !to_send.is_empty() {
@@ -2329,6 +2352,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             let token = config.telegram_bot_token.clone();
                                             let chat_id = config.telegram_chat_id.clone();
                                             let ntfy_text = text.clone();
+                                            let pushover_text = text.clone();
 
                                             if !token.is_empty() && !chat_id.is_empty() {
                                                 tokio::task::spawn_blocking(move || {
@@ -2362,6 +2386,27 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                 ) {
                                                     Ok(()) => tracing::warn!("ntfy alert sent"),
                                                     Err(e) => tracing::warn!("ntfy alert failed: {e}"),
+                                                }
+                                            });
+
+                                            // Also send via Pushover if both credentials configured
+                                            let pushover_token = config.pushover_app_token.clone();
+                                            let pushover_user = config.pushover_user_key.clone();
+                                            tokio::task::spawn_blocking(move || {
+                                                if pushover_token.is_empty()
+                                                    || pushover_user.is_empty()
+                                                {
+                                                    return;
+                                                }
+                                                match crate::alerts::send_pushover_message(
+                                                    &pushover_token,
+                                                    &pushover_user,
+                                                    &pushover_text,
+                                                ) {
+                                                    Ok(()) => tracing::warn!("Pushover alert sent"),
+                                                    Err(e) => tracing::warn!(
+                                                        "Pushover alert failed: {e}"
+                                                    ),
                                                 }
                                             });
                                         }

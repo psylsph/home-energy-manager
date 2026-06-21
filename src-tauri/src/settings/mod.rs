@@ -387,6 +387,15 @@ pub struct AlertsConfig {
     #[serde(default = "default_ntfy_server")]
     pub ntfy_server: String,
 
+    /// Pushover app API token. Each user registers their own application at
+    /// <https://pushover.net/apps/build> (per Pushover's guidance for
+    /// distributed OSS apps) and pastes the token here.
+    #[serde(default)]
+    pub pushover_app_token: String,
+    /// Pushover user key (from the user's Pushover account settings).
+    #[serde(default)]
+    pub pushover_user_key: String,
+
     // -- Daily consumption report --
     /// Whether to send a daily consumption report.
     pub daily_report_enabled: bool,
@@ -417,6 +426,8 @@ impl Default for AlertsConfig {
             solar_clipping_ceiling_w: 0,
             ntfy_topic: String::new(),
             ntfy_server: default_ntfy_server(),
+            pushover_app_token: String::new(),
+            pushover_user_key: String::new(),
             daily_report_enabled: false,
             daily_report_hour: 8,
             daily_report_minute: 0,
@@ -660,6 +671,55 @@ mod tests {
         assert_eq!(decoded.load_limiter_trigger_delay_minutes, 10);
         assert_eq!(decoded.load_limiter_start_hour, 16);
         assert_eq!(decoded.load_limiter_end_hour, 20);
+    }
+
+    /// AlertsConfig pushover fields must survive a full JSON round-trip and
+    /// default to empty strings (so existing on-disk `settings.json` files
+    /// written before Pushover shipped still load without error). See #101.
+    #[test]
+    fn alerts_config_pushover_roundtrip_and_defaults() {
+        let mut cfg = AlertsConfig::default();
+        // Defaults are empty — forward-compat with pre-#101 settings files.
+        assert_eq!(cfg.pushover_app_token, "");
+        assert_eq!(cfg.pushover_user_key, "");
+
+        cfg.pushover_app_token = "azGDOReMYyI6o6qRc2jwL9".to_string();
+        cfg.pushover_user_key = "uQiRzpo4DXghDmr9Qmy".to_string();
+        let json = serde_json::to_string(&cfg).unwrap();
+        let decoded: AlertsConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.pushover_app_token, "azGDOReMYyI6o6qRc2jwL9");
+        assert_eq!(decoded.pushover_user_key, "uQiRzpo4DXghDmr9Qmy");
+    }
+
+    /// A settings.json written before Pushover shipped (no pushover_* keys)
+    /// must still deserialize into the current struct, with the pushover
+    /// fields filling in as empty-string defaults via `#[serde(default)]`.
+    #[test]
+    fn legacy_alerts_config_without_pushover_loads() {
+        let legacy = r#"{
+            "enabled": false,
+            "telegram_bot_token": "",
+            "telegram_chat_id": "",
+            "cooldown_minutes": 30,
+            "batt_temp_min": 0.0,
+            "batt_temp_max": 0.0,
+            "soc_min": 4,
+            "soc_max": 100,
+            "grid_offline_enabled": false,
+            "battery_over_temp_enabled": false,
+            "solar_clipping_enabled": false,
+            "solar_clipping_ceiling_w": 0,
+            "ntfy_topic": "",
+            "ntfy_server": "https://ntfy.sh",
+            "daily_report_enabled": false,
+            "daily_report_hour": 8,
+            "daily_report_minute": 0
+        }"#;
+        let decoded: AlertsConfig = serde_json::from_str(legacy).unwrap();
+        assert_eq!(decoded.pushover_app_token, "");
+        assert_eq!(decoded.pushover_user_key, "");
+        assert_eq!(decoded.cooldown_minutes, 30);
+        assert_eq!(decoded.ntfy_server, "https://ntfy.sh");
     }
 
     #[test]

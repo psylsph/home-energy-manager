@@ -98,6 +98,8 @@ const VALID_INTERVALS = [5, 10, 15, 20];
     solar_clipping_enabled: false, solar_clipping_ceiling_w: 0,
     ntfy_topic: '',
     ntfy_server: 'https://ntfy.sh',
+    pushover_app_token: '',
+    pushover_user_key: '',
   });
   const [alertsSaving, setAlertsSaving] = useState(false);
   const [alertsTesting, setAlertsTesting] = useState(false);
@@ -968,7 +970,7 @@ const VALID_INTERVALS = [5, 10, 15, 20];
             <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
               <h3 className="text-text-primary text-sm font-sans font-medium">ntfy Push Notifications</h3>
               <p className="text-text-secondary/70 text-xs font-sans">
-                <strong className="text-green-400">Recommended</strong> — Free push notifications via&nbsp;
+                Free push notifications via&nbsp;
                 <button onClick={() => openExternal('https://ntfy.sh')} className="text-flow-active underline hover:opacity-80 inline">ntfy.sh</button>.
                 Install the app on your phone and subscribe to the topic below.
                 A topic is auto-generated from your inverter serial (unique to you) — edit it only if you want a custom one.
@@ -1008,6 +1010,36 @@ const VALID_INTERVALS = [5, 10, 15, 20];
                   type="text" placeholder="https://ntfy.sh"
                   value={alertsConfig.ntfy_server}
                   onChange={(e) => setAlertsConfig((p) => ({ ...p, ntfy_server: e.target.value }))}
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                />
+              </label>
+            </div>
+
+            {/* Pushover */}
+            <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
+              <h3 className="text-text-primary text-sm font-sans font-medium">Pushover</h3>
+              <p className="text-text-secondary/70 text-xs font-sans">
+                Paid-once-per-platform push notifications via{' '}
+                <button onClick={() => openExternal('https://pushover.net')} className="text-flow-active underline hover:opacity-80 inline">Pushover</button>.
+                Create an application at{' '}
+                <button onClick={() => openExternal('https://pushover.net/apps/build')} className="text-flow-active underline hover:opacity-80 inline">pushover.net/apps/build</button>{' '}
+                to get your App API Token, then copy your User Key from your Pushover account settings.
+              </p>
+              <label className="flex flex-col gap-1">
+                <span className="text-text-secondary text-xs font-sans">App API Token (from pushover.net/apps/build)</span>
+                <input
+                  type="password" placeholder="azGDOReMYyI6o6qRc2jwL9..."
+                  value={alertsConfig.pushover_app_token}
+                  onChange={(e) => setAlertsConfig((p) => ({ ...p, pushover_app_token: e.target.value }))}
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-text-secondary text-xs font-sans">User Key (from your Pushover account)</span>
+                <input
+                  type="password" placeholder="uQiRzpo4DXghDmr9Qmy"
+                  value={alertsConfig.pushover_user_key}
+                  onChange={(e) => setAlertsConfig((p) => ({ ...p, pushover_user_key: e.target.value }))}
                   className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
                 />
               </label>
@@ -1131,7 +1163,7 @@ const VALID_INTERVALS = [5, 10, 15, 20];
           </button>
           <button
             onClick={handleAlertsTest}
-            disabled={alertsTesting || (!alertsConfig.telegram_bot_token || !alertsConfig.telegram_chat_id) && !effectiveNtfyTopic}
+            disabled={alertsTesting || ((!alertsConfig.telegram_bot_token || !alertsConfig.telegram_chat_id) && !effectiveNtfyTopic && (!alertsConfig.pushover_app_token || !alertsConfig.pushover_user_key))}
             className="bg-bg-elevated text-text-primary font-sans font-semibold text-sm px-4 py-2 rounded-lg hover:opacity-80 disabled:opacity-40 transition-opacity border border-white/5 sm:w-auto"
           >
             {alertsTesting ? 'Sending…' : 'Send Test Notification'}

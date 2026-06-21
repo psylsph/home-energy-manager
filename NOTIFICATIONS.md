@@ -2,8 +2,9 @@
 
 Home Energy Manager can send push notifications when your inverter detects
 issues — battery temperature warnings, grid outages, solar clipping, and more.
-Two notification methods are supported: **Telegram** and **ntfy**. They work
-independently, so you can set up one or both.
+Three notification methods are supported: **Telegram**, **ntfy**, and
+**Pushover**. They work independently, so you can set up one, two, or all
+three.
 
 ---
 
@@ -112,8 +113,52 @@ self-hosting instructions.
 
 ---
 
+## Pushover
+
+[Pushover](https://pushover.net) is a paid-once-per-platform notification
+service (US$5 per platform — iOS, Android, or desktop). It is a credentialed
+service: you register an application to get an **App API Token**, and you
+have a **User Key** on your account. Two credentials, similar in spirit to
+Telegram's bot token + chat ID pair.
+
+> **Free for the first 10,000 messages per month** per account — comfortably
+> above the volume an inverter-alert app would generate.
+
+### Step 1: Create an application
+
+1. Sign up at [pushover.net](https://pushover.net) (if you haven't already).
+2. Go to <https://pushover.net/apps/build> and create a new application
+   (e.g. name it "Home Energy Manager").
+3. You'll be given an **App API Token** (a long string).
+4. Your **User Key** is shown on the main dashboard after you log in.
+
+**Copy both** — you will paste them into the app.
+
+### Step 2: Install the app
+
+- **Android:** [Google Play Store](https://play.google.com/store/apps/details?id=net.superblock.pushover)
+- **iOS:** [Apple App Store](https://apps.apple.com/app/pushover/id506088175)
+- **Desktop:** [pushover.net/downloads](https://pushover.net/downloads)
+
+### Step 3: Enter them in the app
+
+1. Open the Home Energy Manager dashboard.
+2. Go to **Settings** → scroll to **Notifications** → **Pushover**.
+3. Paste the **App API Token** and **User Key**.
+4. Click **Save Notification Settings** — then click
+   **Send Test Notification** to verify.
+
+### Troubleshooting
+
+- **"Pushover API 400"** — Double-check both the App API Token and User Key
+  are pasted correctly (no surrounding whitespace).
+- **No notification** — Make sure the Pushover app is installed on at least
+  one device and logged into the same account as your User Key.
+
+---
+
 ## Both together
 
-You can enable both Telegram and ntfy at the same time. They work
-independently — if one service has a temporary issue, you will still get
-alerts through the other.
+You can enable Telegram, ntfy, and Pushover at the same time — or any
+combination. They work independently — if one service has a temporary issue,
+you will still get alerts through the others.
