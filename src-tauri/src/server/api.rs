@@ -1945,6 +1945,12 @@ pub async fn set_alerts(
     if let Some(v) = body.get("ntfy_server").and_then(|v| v.as_str()) {
         config.ntfy_server = v.to_string();
     }
+    if let Some(v) = body.get("pushover_app_token").and_then(|v| v.as_str()) {
+        config.pushover_app_token = v.to_string();
+    }
+    if let Some(v) = body.get("pushover_user_key").and_then(|v| v.as_str()) {
+        config.pushover_user_key = v.to_string();
+    }
 
     // Reset debounce so toggling an alert off/on immediately re-enables
     // notification delivery on the next poll cycle.
@@ -1972,13 +1978,15 @@ pub async fn test_alerts(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
 
     let has_telegram = !config.telegram_bot_token.is_empty() && !config.telegram_chat_id.is_empty();
     let has_ntfy = !config.ntfy_topic.is_empty();
+    let has_pushover =
+        !config.pushover_app_token.is_empty() && !config.pushover_user_key.is_empty();
 
-    if !has_telegram && !has_ntfy {
+    if !has_telegram && !has_ntfy && !has_pushover {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "ok": false,
-                "message": "No notification channels configured. Set up Telegram or ntfy first."
+                "message": "No notification channels configured. Set up Telegram, ntfy, or Pushover first."
             })),
         );
     }
@@ -2018,6 +2026,24 @@ pub async fn test_alerts(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
             Ok(Ok(())) => results.push("ntfy: OK".into()),
             Ok(Err(e)) => results.push(format!("ntfy: {e}")),
             Err(_) => results.push("ntfy: internal error".into()),
+        }
+    }
+
+    if has_pushover {
+        let token = config.pushover_app_token.clone();
+        let user_key = config.pushover_user_key.clone();
+        let r = tokio::task::spawn_blocking(move || {
+            crate::alerts::send_pushover_message(
+                &token,
+                &user_key,
+                "\u{2705} Test Alert\n\nThis is a test from Home Energy Manager.",
+            )
+        })
+        .await;
+        match r {
+            Ok(Ok(())) => results.push("Pushover: OK".into()),
+            Ok(Err(e)) => results.push(format!("Pushover: {e}")),
+            Err(_) => results.push("Pushover: internal error".into()),
         }
     }
 
@@ -4391,6 +4417,95 @@ mod tests {
             assert!(
                 state.force_charge_revert.lock().await.is_some(),
                 "discharge stop should not touch the charge revert"
+            );
+        })
+        .await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Alerts config: Pushover channel (issue #101)
+    // -----------------------------------------------------------------------
+
+    /// POST /api/alerts must accept `pushover_app_token` and
+    /// `pushover_user_key`, store them on the live `alert_config`, AND
+    /// persist them to `settings.json` so they survive a restart.
+    #[tokio::test]
+    async fn set_alerts_persists_pushover_credentials() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "enabled": true,
+                "pushover_app_token": "app-token-123",
+                "pushover_user_key": "user-key-456",
+            });
+            let (status, _) = set_alerts(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            // Live in-memory state is updated immediately.
+            let cfg = state.alert_config.lock().await.clone();
+            assert_eq!(cfg.pushover_app_token, "app-token-123");
+            assert_eq!(cfg.pushover_user_key, "user-key-456");
+            assert!(cfg.enabled);
+
+            // Reload from disk — the persistence write must have landed.
+            let reloaded = crate::settings::Settings::load();
+            assert_eq!(reloaded.alerts_config.pushover_app_token, "app-token-123");
+            assert_eq!(reloaded.alerts_config.pushover_user_key, "user-key-456");
+        })
+        .await;
+    }
+
+    /// Omitting the Pushover fields from the POST body must leave them
+    /// untouched (the API does partial updates). This guards against a
+    /// future regression that would wipe credentials whenever the frontend
+    /// sends an unrelated field.
+    #[tokio::test]
+    async fn set_alerts_pushover_fields_are_optional_partial_update() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            // Seed existing Pushover credentials.
+            {
+                let mut cfg = state.alert_config.lock().await;
+                cfg.pushover_app_token = "pre-existing-token".to_string();
+                cfg.pushover_user_key = "pre-existing-user".to_string();
+            }
+
+            // POST an unrelated field with no Pushover keys in the body.
+            let body = serde_json::json!({ "cooldown_minutes": 15 });
+            let (status, _) = set_alerts(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let cfg = state.alert_config.lock().await.clone();
+            assert_eq!(
+                cfg.pushover_app_token, "pre-existing-token",
+                "partial update must not wipe the app token"
+            );
+            assert_eq!(
+                cfg.pushover_user_key, "pre-existing-user",
+                "partial update must not wipe the user key"
+            );
+            assert_eq!(cfg.cooldown_minutes, 15);
+        })
+        .await;
+    }
+
+    /// `test_alerts` must short-circuit with a 400 BEFORE any HTTP call when
+    /// no channel (Telegram, ntfy, or Pushover) is configured. This is the
+    /// network-free path of the gate, so it's safe to assert without mocking.
+    #[tokio::test]
+    async fn test_alerts_rejects_when_no_channel_configured() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let (status, res) = test_alerts(State(state.clone())).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "no channel configured should be a 400, not a network call"
+            );
+            let msg = res.get("message").and_then(|v| v.as_str()).unwrap_or("");
+            assert!(
+                msg.contains("Pushover"),
+                "gate message should mention Pushover, got: {msg}"
             );
         })
         .await;

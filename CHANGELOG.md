@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.36.0] - 2026-06-21
+
+### Added
+
+- **Pushover** as a third notification channel alongside Telegram and ntfy.
+  Pushover is a paid-once-per-platform push notification service that
+  requires two credentials — an App API Token (register your own application
+  at <https://pushover.net/apps/build>, per Pushover's guidance for
+  distributed OSS apps) and your account's User Key. Alerts and all-clear
+  notifications fan out to all three channels in parallel; the daily
+  consumption report remains Telegram-only for now. Closes #101.
+
 ## [0.35.0] - 2026-06-21
 
 ### Added

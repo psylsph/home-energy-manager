@@ -220,8 +220,10 @@ pub fn evaluate_alerts(snapshot: &InverterSnapshot, config: &AlertsConfig) -> Ve
     }
     let has_telegram = !config.telegram_bot_token.is_empty() && !config.telegram_chat_id.is_empty();
     let has_ntfy = !config.ntfy_topic.is_empty();
+    let has_pushover =
+        !config.pushover_app_token.is_empty() && !config.pushover_user_key.is_empty();
 
-    if !has_telegram && !has_ntfy {
+    if !has_telegram && !has_ntfy && !has_pushover {
         return Vec::new();
     }
 
@@ -531,6 +533,60 @@ pub fn send_ntfy_message(topic: &str, server: &str, text: &str) -> Result<(), St
         Ok(())
     } else {
         Err(format!("ntfy API {} at {}", status, server_display))
+    }
+}
+
+/// Send a notification via the Pushover API.
+///
+/// Pushover is a paid-once-per-platform push notification service. Unlike
+/// ntfy (topic-based pub/sub) it is credentialed: the app registers for an
+/// app API token (<https://pushover.net/apps/build>) and each recipient has
+/// a user key — two credentials, similar in spirit to Telegram's bot-token +
+/// chat-id pair.
+///
+/// The message is sent as plain text (no `html=1`). Pushover uses the app
+/// name (set at registration) as the notification title, so the alert
+/// messages' built-in headers (`⚡ HEM Alert — …`) carry through as the body.
+/// Priority defaults to `0` (normal) to match the flat priority of the
+/// existing Telegram/ntfy channels.
+///
+/// Uses `ureq` (synchronous) — call from `tokio::task::spawn_blocking`.
+/// Pushover accepts `application/json`, so this mirrors
+/// [`send_telegram_message`] rather than form-encoding.
+pub fn send_pushover_message(app_token: &str, user_key: &str, text: &str) -> Result<(), String> {
+    let url = "https://api.pushover.net/1/messages.json";
+
+    let payload = serde_json::json!({
+        "token": app_token,
+        "user": user_key,
+        "message": text,
+    });
+
+    let body = serde_json::to_string(&payload).map_err(|e| format!("Failed to serialize: {e}"))?;
+
+    let resp = match ureq::post(url)
+        .content_type("application/json")
+        .send(&body)
+    {
+        Ok(r) => r,
+        Err(ureq::Error::StatusCode(code)) => {
+            return Err(format!(
+                "Pushover API {} (check app token and user key)",
+                code
+            ));
+        }
+        Err(e) => return Err(format!("HTTP transport error: {e}")),
+    };
+
+    let status = resp.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        let text = resp
+            .into_body()
+            .read_to_string()
+            .unwrap_or_else(|_| "<read error>".to_string());
+        Err(format!("Pushover API {}: {}", status, text))
     }
 }
 
@@ -1210,6 +1266,8 @@ mod tests {
             solar_clipping_ceiling_w: 0,
             ntfy_topic: String::new(),
             ntfy_server: "https://ntfy.sh".to_string(),
+            pushover_app_token: String::new(),
+            pushover_user_key: String::new(),
             daily_report_enabled: false,
             daily_report_hour: 8,
             daily_report_minute: 0,
@@ -1240,6 +1298,65 @@ mod tests {
     fn test_no_alerts_without_chat_id() {
         let mut config = alerts_config();
         config.telegram_chat_id.clear();
+        let alerts = evaluate_alerts(&make_snapshot(), &config);
+        assert!(alerts.is_empty());
+    }
+
+    #[test]
+    fn test_no_alerts_when_no_channel_configured() {
+        // All three channels empty → evaluate_alerts must short-circuit.
+        let mut config = alerts_config();
+        config.telegram_bot_token.clear();
+        config.telegram_chat_id.clear();
+        config.ntfy_topic.clear();
+        config.pushover_app_token.clear();
+        config.pushover_user_key.clear();
+        let alerts = evaluate_alerts(&make_snapshot(), &config);
+        assert!(alerts.is_empty());
+    }
+
+    #[test]
+    fn test_pushover_alone_enables_gate() {
+        // Pushover is the only configured channel — alerts must still fire.
+        // make_snapshot() has battery_temperature=35, batt_temp_max=45 → no
+        // temp alert, so drive a SOC-high trigger instead.
+        let mut snap = make_snapshot();
+        snap.soc = 99;
+        let mut config = alerts_config();
+        config.telegram_bot_token.clear();
+        config.telegram_chat_id.clear();
+        config.ntfy_topic.clear();
+        config.pushover_app_token = "app-token".to_string();
+        config.pushover_user_key = "user-key".to_string();
+        let alerts = evaluate_alerts(&snap, &config);
+        assert!(
+            alerts.contains(&AlertType::BatterySocHigh),
+            "pushover-only config should still evaluate thresholds"
+        );
+    }
+
+    #[test]
+    fn test_ntfy_alone_enables_gate() {
+        // ntfy is the only configured channel — alerts must still fire.
+        let mut snap = make_snapshot();
+        snap.soc = 99;
+        let mut config = alerts_config();
+        config.telegram_bot_token.clear();
+        config.telegram_chat_id.clear();
+        config.ntfy_topic = "hem-test".to_string();
+        let alerts = evaluate_alerts(&snap, &config);
+        assert!(alerts.contains(&AlertType::BatterySocHigh));
+    }
+
+    #[test]
+    fn test_pushover_missing_user_key_blocks_gate() {
+        // Only the app token is set (no user key) — not a valid Pushover
+        // config, so the gate must short-circuit.
+        let mut config = alerts_config();
+        config.telegram_bot_token.clear();
+        config.telegram_chat_id.clear();
+        config.pushover_app_token = "app-token".to_string();
+        // user_key stays empty
         let alerts = evaluate_alerts(&make_snapshot(), &config);
         assert!(alerts.is_empty());
     }
