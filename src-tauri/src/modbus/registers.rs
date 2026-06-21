@@ -135,7 +135,7 @@ pub const IR_TODAY_IMPORT_ENERGY: u16 = 26;
 /// Grid power in watts, signed (positive = exporting, negative = importing).
 pub const IR_GRID_POWER: u16 = 30;
 /// AC charge energy today in 0.1 kWh units (e_ac_charge_today, NOT house consumption).
-pub const IR_TODAY_CONSUMPTION: u16 = 35;
+pub const IR_TODAY_AC_CHARGE: u16 = 35;
 /// Battery charge energy today in 0.1 kWh units.
 pub const IR_TODAY_CHARGE_ENERGY: u16 = 36;
 /// Battery discharge energy today in 0.1 kWh units.
@@ -495,8 +495,8 @@ pub const SAFE_WRITE_REGS: &[u16] = &[
     318, 319, 320, // Three-phase controls
     1108, 1109, 1110, 1111, 1112, 1113, 1114, 1115, 1116, 1118, 1119, 1120, 1121, 1122, 1123,
     1005, // REAL_TIME_CONTROL (three-phase mirror of HR166)
-    1078, // BATTERY_RESERVE_PERCENT (three-phase)
-    // EMS plant-level control / discharge slots
+    1078, // BATTERY_POWER_CUTOFF (three-phase battery power derating %)
+    // EMS plant-level control / plant_status + discharge slots
     2040, 2044, 2045, 2046, 2047, 2048, 2049, 2050, 2051, 2052,
     // EMS charge and export slots (givenergy-modbus WRITE_SAFE_REGISTERS)
     2053, 2054, 2055, 2056, 2057, 2058, 2059, 2060, 2061, 2062, 2063, 2064, 2065, 2066, 2067, 2068,

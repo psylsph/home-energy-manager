@@ -534,6 +534,9 @@ pub struct MeterData {
     pub i_phase_1: f32,
     pub i_phase_2: f32,
     pub i_phase_3: f32,
+    /// Neutral-line current in A (IR 66).
+    #[serde(default)]
+    pub i_ln: f32,
     /// Total current in A.
     pub i_total: f32,
     /// Phase 1-3 active power in W (signed, positive = import).
@@ -596,6 +599,11 @@ pub struct BatteryModule {
     /// Design / nameplate capacity in Ah (IR 86-87, uint32 0.01 Ah).
     #[serde(default)]
     pub design_capacity_ah: f32,
+    /// Secondary design capacity in Ah (IR 101-102, uint32 0.01 Ah).
+    /// Can indicate calibration drift vs `design_capacity_ah`. Both
+    /// reference libraries decode this; GivTCP reads it for display.
+    #[serde(default)]
+    pub design_capacity_2_ah: f32,
     /// Remaining / available capacity in Ah (IR 88-89, uint32 0.01 Ah).
     #[serde(default)]
     pub remaining_capacity_ah: f32,
@@ -966,6 +974,19 @@ pub struct InverterSnapshot {
     /// Serial of the primary (master) AIO — IR(1627-1631).
     #[serde(default)]
     pub first_inverter_serial: String,
+
+    // -- Three-phase high config (HR 1000-1079) --
+    /// Battery power cutoff percentage (HR 1078, three-phase only).
+    /// Limits max battery power output as a percentage of rated power.
+    /// Distinct from `battery_reserve` (HR 1109 = SOC floor). 0 on non-3ph
+    /// models where the register is unmapped.
+    #[serde(default)]
+    pub battery_power_cutoff: u8,
+    /// Battery maintenance mode (HR 1124, three-phase only).
+    /// 0=off, 1=discharge, 2=charge, 3=standby (per givenergy-modbus
+    /// BatteryMaintenance enum). 0 on non-3ph models.
+    #[serde(default)]
+    pub battery_maintenance_mode: u8,
 }
 
 // ===========================================================================
