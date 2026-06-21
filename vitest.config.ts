@@ -18,7 +18,7 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
-    include: ['src/**/*.test.{ts,tsx}'],
+    include: ['tests/**/*.test.{ts,tsx}'],
     exclude: ['node_modules', 'dist', 'e2e', 'src-tauri'],
   },
 });

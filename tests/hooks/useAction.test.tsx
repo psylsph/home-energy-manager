@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { useAction } from './useAction';
-import { apiPost } from '../lib/api';
+import { useAction } from '../../src/hooks/useAction';
+import { apiPost } from '../../src/lib/api';
 
 // Replace only apiPost — the hook uses nothing else from this module, so a
 // partial mock keeps the rest of the real module intact.
-vi.mock('../lib/api', () => ({
+vi.mock('../../src/lib/api', () => ({
   apiPost: vi.fn(),
 }));
 
