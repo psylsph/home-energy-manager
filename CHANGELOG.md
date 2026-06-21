@@ -43,6 +43,22 @@ All notable changes to this project will be documented in this file.
   Required to restore the user's pre-force-charge power mode (0 = export,
   1 = eco) on Stop. Default 1 (eco) on uninitialised snapshots for safety.
 
+### Tests
+
+- Added 17 vitest tests for the `forceDuration` helpers (label
+  formatting, slider clamping, localStorage round-trip).
+- Added 16 Playwright mock-based E2E tests in `e2e/force-stop.spec.ts`
+  verifying the exact Modbus register writes produced by Force
+  Charge/Discharge start and stop, including the silent-disable
+  regression for `HR_ENABLE_DISCHARGE` and the slot-restoration
+  ordering.
+- Added 8 Playwright simulator-based E2E tests in
+  `e2e/local-force-stop.spec.ts` and 8 in `e2e/local-force-duration.spec.ts`
+  exercising the start→stop flow against the real GivEnergy simulator
+  (full Modbus TCP stack on port 18899).
+- Added a `Force Charge` / `Force Discharge` revert-independence
+  Rust test (22 force-related Rust tests in total, all passing).
+
 ## [0.34.3] - 2026-06-21
 
 ### Fixed

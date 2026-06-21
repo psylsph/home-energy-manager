@@ -2177,13 +2177,14 @@ export default function ControlPage() {
               </div>
             </div>
           )}
-          {/* Force Charge / Discharge Duration */}
+          {/* Quick Action Duration */}
           <div className="space-y-1">
             <div className="flex items-center justify-between">
               <div>
-                <span className="text-text-secondary text-sm">Force Charge / Discharge Duration</span>
+                <span className="text-text-secondary text-sm">Quick Action Duration</span>
                 <p className="text-text-secondary text-xs mt-0.5">
-                  How long the Quick Action force-charge slot should run. Applies when the inverter needs an explicit charge window.
+                  How long the Quick Action force-charge / force-discharge slot
+                  should run. Applies to both Quick Action buttons.
                 </p>
               </div>
               <span className="font-mono text-text-primary text-sm">

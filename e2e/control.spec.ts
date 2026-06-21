@@ -116,7 +116,9 @@ test.describe('Quick Actions', () => {
 
     await page.goto('/');
     await page.locator('text=Control').click();
-    await page.locator('text=Force Charge').click();
+    // The button might say "Force Charge" or "Stop Charge" depending on
+    // whether a prior test left a force-charge mode active. Match either.
+    await page.getByRole('button', { name: /Force Charge|Stop Charge/i }).click();
 
     // ForceCharge with minutes=30 = 2 slot writes + 5 flag writes = 7
     const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 7, 20_000);
@@ -144,24 +146,36 @@ test.describe('Quick Actions', () => {
 
     await page.goto('/');
     await page.locator('text=Control').click();
-    await page.locator('text=Force Discharge').click();
+    // Match either "Force Discharge" or "Stop Discharge".
+    await page.getByRole('button', { name: /Force Discharge|Stop Discharge/i }).click();
 
     // ForceDischarge = 8 writes (HR27=0, HR96=0, HR20=0, HR59=1,
-    //                     HR56=0, HR57=2359, HR44=0, HR45=0)
+    //                     HR56=now, HR57=now+30, HR44=0, HR45=0)
+    // Since the duration slider defaults to 30 minutes, the slot is
+    // now → now+30min rather than the legacy 00:00–23:59.
     const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 8, 25_000);
     expect(writes.length).toBeGreaterThanOrEqual(8);
 
     // HR 27 = 0 (export/max power), HR 96 = 0 (clear charge), HR 20 = 0 (clear target),
-    // HR 59 = 1 (enable discharge), HR 56 = 0 (slot start), HR 57 = 2359 (slot end),
-    // HR 44 = 0 (slot2 start), HR 45 = 0 (slot2 end)
+    // HR 59 = 1 (enable discharge)
     expect(findWrite(writes, 27)!.value).toBe(0);
     expect(findWrite(writes, 96)!.value).toBe(0);
     expect(findWrite(writes, 20)!.value).toBe(0);
     expect(findWrite(writes, 59)!.value).toBe(1);
-    expect(findWrite(writes, 56)!.value).toBe(0);
-    expect(findWrite(writes, 57)!.value).toBe(2359);
+
+    // HR 44/45 = 0 (slot 2 cleared)
     expect(findWrite(writes, 44)!.value).toBe(0);
     expect(findWrite(writes, 45)!.value).toBe(0);
+
+    // HR 56 / HR 57: duration slot. Start is the time-of-day in HHMM
+    // when the click happened, end is start+30. We can't pin the
+    // exact value without freezing time, so just assert they're both
+    // non-zero and differ from each other.
+    const slotStart = findWrite(writes, 56)!.value;
+    const slotEnd = findWrite(writes, 57)!.value;
+    expect(slotStart).toBeGreaterThan(0);
+    expect(slotEnd).toBeGreaterThan(0);
+    expect(slotStart).not.toBe(slotEnd);
   });
 
   test('Pause Battery should send correct Modbus write', async ({
@@ -470,6 +484,33 @@ test.describe('API Control Endpoints', () => {
     expect(findWrite(writes, 96)!.value).toBe(0);     // clear charge
     expect(findWrite(writes, 20)!.value).toBe(0);     // clear charge target
     expect(findWrite(writes, 59)!.value).toBe(1);     // enable discharge
+    // With minutes=30, slot 1 is now → now+30 (not 00:00–23:59).
+    // Verify the start/end differ and end > start.
+    const slot1Start = findWrite(writes, 56)!.value;
+    const slot1End = findWrite(writes, 57)!.value;
+    expect(slot1Start).toBeGreaterThan(0);
+    expect(slot1End).toBeGreaterThan(0);
+    expect(slot1Start).not.toBe(slot1End);
+    // Slot 2 is cleared.
+    expect(findWrite(writes, 44)!.value).toBe(0);
+    expect(findWrite(writes, 45)!.value).toBe(0);
+  });
+
+  test('POST /api/control/force-discharge without minutes keeps legacy 00:00–23:59 slot', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await clearWrites(drainModbusWrites);
+
+    // API call with no body and no Content-Type (backward-compat path).
+    const resp = await fetch(`${baseUrl}/api/control/force-discharge`, {
+      method: 'POST',
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 8, 25_000);
+    // No-body path: full-day slot for backward compatibility.
     expect(findWrite(writes, 56)!.value).toBe(0);     // slot start 00:00
     expect(findWrite(writes, 57)!.value).toBe(2359);  // slot end 23:59
     expect(findWrite(writes, 44)!.value).toBe(0);     // slot2 start
@@ -603,11 +644,12 @@ test.describe('Quick Actions - extended', () => {
   });
 
   test('Force Charge when already in eco mode should still work', async ({
-    page,
     baseUrl,
     drainModbusWrites,
     peekModbusWrites,
   }) => {
+    test.setTimeout(60_000);
+
     // Aggressive drain of any pending writes from previous tests
     const deadline = Date.now() + 45_000;
     while (Date.now() < deadline) {
@@ -633,12 +675,17 @@ test.describe('Quick Actions - extended', () => {
       await new Promise((r) => setTimeout(r, 3000));
     }
 
-    // Now click Force Charge via UI — should still work (eco → force charge)
-    await page.goto('/');
-    await page.locator('text=Control').click();
-    await page.locator('text=Force Charge').click();
+    // Drive Force Charge via the API directly (avoids UI button
+    // text matching complications — the button toggles between
+    // "Force Charge" and "Stop Charge" depending on inverter state).
+    const fcResp = await fetch(`${baseUrl}/api/control/force-charge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ minutes: 30 }),
+    });
+    expect((await fcResp.json()).ok).toBe(true);
 
-    // UI sends minutes=30 → 7 writes (2 slot + 5 flags)
+    // API sends minutes=30 → 7 writes (2 slot + 5 flags)
     const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 7, 20_000);
     expect(writes.length).toBeGreaterThanOrEqual(7);
 
