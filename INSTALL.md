@@ -4,6 +4,93 @@ How to install, update, and run Home Energy Manager on different platforms. For 
 
 ---
 
+## Using the App on Your Phone
+
+Don't want to be stuck at your computer to check on your solar? You can open the app on your phone too. It's a web page, so there's nothing extra to install on the phone — just point your phone's browser at it and you're done. This section assumes you're running the app on a Windows PC that's left turned on (not in headless/server mode).
+
+### What you'll need
+
+- A Windows PC running Home Energy Manager, **left turned on**
+- Your phone connected to the **same Wi-Fi network** as that PC (e.g. both on `home-wifi`, not one on Wi-Fi and one on mobile data)
+- The **IP address** of the PC (we'll show you how to find this in Step 2)
+
+### Step 1: Install the app on your PC
+
+> **Windows security notice:** Windows SmartScreen may warn that the app is from an unknown publisher because it is not code-signed. The installer is scanned clean by VirusTotal. If your antivirus flags it as malware, please report a security vulnerability at <https://github.com/psylsph/home-energy-manager/issues>.
+
+1. On your PC, open a web browser and go to the [**Releases page**](https://github.com/psylsph/home-energy-manager/releases/latest)
+2. Download the `.msi` file (pick the latest one at the top)
+3. Once it finishes downloading, double-click it to run the installer
+4. Follow the prompts — the app installs like any other Windows program
+5. Launch **Home Energy Manager** from your **Start menu**
+
+You'll see a window pop up showing your inverter data. Leave it open — the phone will be talking to this window in a moment.
+
+> 💡 **Tip:** Set the app to start automatically when Windows boots. Right-click **Start → Settings → Apps → Startup**, find Home Energy Manager, and turn the toggle on. That way the app's always running, even after a restart.
+
+### Step 2: Find your PC's IP address
+
+This is the little number that identifies your computer on your home network. It looks something like `192.168.1.42` or `10.0.0.25`.
+
+**On Windows:**
+
+1. Press the **Windows key + R** to open the Run box
+2. Type `cmd` and press **Enter** to open a black command-prompt window
+3. Type `ipconfig` and press **Enter**
+4. Look for the line that says **IPv4 Address** under your Wi-Fi or Ethernet adapter — that's your number. It'll look like `192.168.1.42`.
+
+> 💡 **Write this number down** — you'll need it in a moment. In the examples below we'll pretend yours is `192.168.1.42`. Replace it with your actual one.
+
+### Step 3: Open it on your phone
+
+1. On your phone, open your web browser (Safari on iPhone, Chrome on Android — any browser works)
+2. In the address bar at the top, type: `http://192.168.1.42:7337`
+   - Replace `192.168.1.42` with the number you wrote down in Step 2
+   - The `:7337` part is the **port** — always include it, with the colon in front
+3. Press **Go** or the enter key on your keyboard
+
+You should see the Home Energy Manager dashboard appear, just like on your computer. 🎉
+
+### Step 4: Add it to your home screen (optional, but nice)
+
+This puts a little app-style icon on your phone so you can open it like a regular app:
+
+**On iPhone (Safari):**
+
+1. Tap the **Share button** (the square with the arrow pointing up)
+2. Scroll down and tap **Add to Home Screen**
+3. Give it a name like "Energy" and tap **Add**
+
+**On Android (Chrome):**
+
+1. Tap the **three dots** (⋮) in the top-right corner
+2. Tap **Add to Home screen** or **Install app**
+3. Give it a name like "Energy" and tap **Add**
+
+Now you can open it with one tap, just like a normal app.
+
+### It doesn't work — what now?
+
+**Phone says "can't connect" or "site not found":**
+
+- Double-check you're on the **same Wi-Fi network** as the PC running the app (not on mobile data, not on a guest network, not on a 5GHz vs 2.4GHz split if your router separates them — most modern routers don't, but some do)
+- Double-check the IP address. If your PC goes to sleep, or you restart your router, the number can change. Just run through Step 2 again to get the new one.
+  - To stop the number changing, open **Settings → Network & Internet → Wi-Fi → your network → IP assignment → Edit**, and switch from **Automatic (DHCP)** to **Manual**. Turn on IPv4 and fill in the same IP address as before. That locks it in.
+- Make sure the Home Energy Manager window is still open on your PC (it has to be running for the phone to reach it)
+- Some antivirus or firewall programs (Norton, McAfee, even Windows Defender Firewall) can block the connection. If nothing else works, try temporarily disabling your firewall to see if that's the culprit.
+
+**Phone says "this site is not secure" or shows a warning:**
+
+- That's normal and expected. The app talks to your inverter over your local network, so it uses plain `http://` (no `s`). Your data never leaves your house — it's only your phone talking to your PC. You can safely tap "Proceed" or "Visit this website".
+
+**It works at home but not when I'm out:**
+
+- That's expected! When you're out and about, your phone isn't on your home Wi-Fi anymore, so it can't reach the PC. To use the app away from home you'd need to set up a VPN back to your house, or expose the app to the internet (which is more advanced and outside the scope of this guide). The easy and safe option is just to use it on your home Wi-Fi.
+
+**Tip for an always-reliable setup:** Set your PC to **never sleep** while plugged in (**Settings → System → Power → Screen and sleep → When plugged in, PC goes to sleep after → Never**) and turn on the **Startup** toggle for the app (see Step 1). That way the dashboard is always reachable from your phone whenever you're home. For a truly hands-off setup that runs 24/7 without your PC being on, see the [Raspberry Pi (headless server)](#raspberry-pi-headless-server) section below.
+
+---
+
 ## Quick Install
 
 ### Windows
