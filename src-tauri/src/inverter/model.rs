@@ -924,8 +924,9 @@ pub struct InverterSnapshot {
     /// Per-AIO state of charge % — IR(1801-1803). 0 if the slot is absent.
     #[serde(default)]
     pub per_aio_soc: [u16; 3],
-    /// Per-AIO inverter power (W, GivEnergy sign: + = discharging/out).
-    /// IR(1816-1818). 0 if the slot is absent.
+    /// Per-AIO inverter power (W, HEM sign: + = discharging/out, − = charging).
+    /// IR(1816-1818), negated on decode from the inverted GE wire convention
+    /// (raw + = charging) to match HEM's + = discharge. 0 if the slot is absent.
     #[serde(default)]
     pub per_aio_power: [i32; 3],
     /// Per-AIO battery charge energy today (kWh) — IR(1705/1708/1711).

@@ -155,6 +155,30 @@ The API routes inspect `device_type` to choose the right command. The frontend (
 
 Known limitation: register 32 (charge slot 2 end time) consistently returns exception 67 on some inverters despite being in the safe-write list. `enable_charge` flag still updates correctly.
 
+## Battery power sign convention
+
+HEM convention (uniform across device families and the frontend):
+**`battery_power` positive = discharging, negative = charging.** The frontend
+labels (`PowerPage.tsx`: `value > 0 ? 'Discharging' : 'Charging'`), the
+`BatteryState` enum, history charting, and the gateway grid-power derivation
+all assume this.
+
+| Path | Raw register | Raw wire sign | Decode action |
+|---|---|---|---|
+| Single-phase | `p_battery` IR(52) | **+ = discharge** (reference) | verbatim |
+| Three-phase / HV | `p_discharge - p_charge` (IR 1136-1139) | derived | computed, + = discharge |
+| Gateway aggregate | `p_aio_total` IR(1702) | **+ = charging** (opposite!) | **negate** |
+| Gateway per-AIO | `p_aioN_inverter` IR(1816-1818) | **+ = charging** (same as p_aio_total) | **negate** |
+
+The gateway exception is confirmed by `GivTCP/read.py:1556`:
+`Battery_Power = -GEInv.p_aio_total`. Forgetting the negate on gateway
+inverts the battery arrow AND the derived grid power (since
+`grid = solar + battery − home`), producing impossible readings like
+solar 6 kW / home 0.6 kW with battery "discharging" 5.5 kW and
+11 kW export (issue #78). See `decode_gateway_1660_1719` /
+`decode_gateway_1780_1830` and the gateway sign-convention tests in
+`decoder.rs` (`sign_convention_gateway_*`).
+
 ## Build artifacts
 
 - `dist/` — Vite output
