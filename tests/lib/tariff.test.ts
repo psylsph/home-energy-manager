@@ -211,6 +211,38 @@ describe('updateTariffSlot cascades end-change to next slot start', () => {
     const after = updateTariffSlot(cfg, 1, 'end', '10:00');
     expect(isTariffConfigValid(after)).toBe(true);
   });
+
+  test('changing a middle slot\'s start cascades backward to the previous slot\'s end', () => {
+    // Symmetric to the end cascade: editing a non-first slot's start
+    // moves the previous slot's end to match, keeping the day tiled.
+    const cfg: TariffConfig = {
+      slots: [
+        { start: '00:00', end: '06:00', rate: 0.10 },
+        { start: '06:00', end: '18:00', rate: 0.20 },
+        { start: '18:00', end: '23:59', rate: 0.30 },
+      ],
+    };
+    const after = updateTariffSlot(cfg, 2, 'start', '14:00');
+    expect(after.slots[1]!.end).toBe('14:00');
+    expect(after.slots[2]!.start).toBe('14:00');
+    expect(after.slots[2]!.end).toBe('23:59');
+    expect(isTariffConfigValid(after)).toBe(true);
+  });
+
+  test('changing the first slot\'s start does NOT cascade', () => {
+    // First slot's start is fixed at 00:00 by validation; the function
+    // shouldn't crash or mutate neighbours if asked.
+    const cfg: TariffConfig = {
+      slots: [
+        { start: '00:00', end: '12:00', rate: 0.10 },
+        { start: '12:00', end: '23:59', rate: 0.20 },
+      ],
+    };
+    const after = updateTariffSlot(cfg, 0, 'rate', 0.50);
+    expect(after.slots[0]!.rate).toBe(0.50);
+    expect(after.slots[0]!.start).toBe('00:00');
+    expect(after.slots[1]!.start).toBe('12:00');
+  });
 });
 
 describe('removeTariffSlot', () => {

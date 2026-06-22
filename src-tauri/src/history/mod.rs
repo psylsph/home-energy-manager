@@ -1070,6 +1070,39 @@ mod tests {
     }
 
     #[test]
+    fn cumulative_point_repair_allows_utc_midnight_reset() {
+        // Regression test for the BST/timezone-east-of-UTC bug: the
+        // inverter's today_*_kwh counters reset at UTC midnight, not local
+        // midnight. In BST (UTC+1) a reading at 23:30 UTC falls on the next
+        // local day, but its value is still yesterday's final counter. The
+        // repair must compare UTC dates (not local), otherwise it clamps the
+        // legitimate midnight reset as a "same-day decrease".
+        //
+        // Fixed UTC timestamps so the test is timezone-independent in its
+        // setup; it relies on the system running in BST (or any zone east
+        // of UTC) for the local/UTC dates to actually diverge.
+        //   base         = 2024-06-22 12:00 UTC = 13:00 BST (local June 22)
+        //   before_reset = 2024-06-22 23:30 UTC = 00:30 BST (local June 23)
+        //   after_reset  = 2024-06-23 00:30 UTC = 01:30 BST (local June 23)
+        let base: i64 = 1_719_057_600_000; // 2024-06-22 12:00:00 UTC
+        let before_reset: i64 = base + (23 * 60 + 30 - 12 * 60) * 60 * 1000; // +11.5h
+        let after_reset: i64 = before_reset + 60 * 60 * 1000; // +1h
+        let mut points = vec![
+            TimePoint { t: base, v: 12.5 },
+            TimePoint { t: before_reset, v: 12.5 },
+            TimePoint { t: after_reset, v: 0.3 },
+        ];
+
+        repair_cumulative_points(&mut points);
+        let values: Vec<f64> = points.iter().map(|p| p.v).collect();
+        // The UTC-day reset must be allowed through, NOT clamped to 12.5.
+        // (If the repair used same_local_day instead of same_utc_day, points
+        // at 23:30 UTC and 00:30 UTC the next day would both fall on the
+        // same local day in BST, and the reset would be incorrectly clamped.)
+        assert_eq!(values, vec![12.5, 12.5, 0.3]);
+    }
+
+    #[test]
     fn cumulative_counter_query_repairs_same_day_plateau() {
         let db = test_db();
         let base_ms = local_noon_ms(0);
