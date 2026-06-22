@@ -3643,12 +3643,12 @@ mod tests {
         // offset 0, t_cell_01 at offset 30, serial at offset 54.
         let mut d = vec![0u16; 60];
         // 24 cell voltages, ~3.2V each = 3200 mV. Vary slightly to verify sum.
-        for i in 0..24 {
-            d[i] = (3200 + i as u16) % 3400;
+        for (i, slot) in d.iter_mut().enumerate().take(24) {
+            *slot = (3200 + i as u16) % 3400;
         }
         // 24 cell temperatures, ~25-28 °C (0.1 °C).
-        for i in 0..24 {
-            d[30 + i] = 250 + i as u16;
+        for (i, slot) in d.iter_mut().enumerate().skip(30).take(24) {
+            *slot = 250 + (i - 30) as u16;
         }
         // Serial at offsets 54-58: "BM0000001"-ish (Latin-1, 5 regs).
         d[54] = 0x4234; // 'B','4'
