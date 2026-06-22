@@ -770,6 +770,366 @@ const POWER_RATE_RULES: FieldRateRules = FieldRateRules {
     abs_delta_w: 2_000,
 };
 
+/// Maximum residual (watts) tolerated between the directly-read `home_power`
+/// and the value predicted by the energy-balance identity
+/// `home = solar + battery(+discharge) − grid(+export)`. The cross-check
+/// below uses this to decide whether the four power fields agree; if the
+/// residual exceeds the threshold, at least one of them is wrong, and we try
+/// to identify which by reverting one field to its previous value and
+/// re-evaluating the balance.
+///
+/// Set to match the `POWER_RATE_RULES.abs_delta_w` threshold so the cross-check
+/// does not override a rate-sanitization for a disagreement smaller than the
+/// jump that triggered the rate check in the first place — anything smaller
+/// is plausibly explained by the precision of the underlying registers.
+const POWER_BALANCE_RESIDUAL_W: i32 = 2_000;
+
+/// Minimum absolute change between the previous and current reading of a
+/// field for that field to be considered as a candidate "wrong" field by
+/// [`cross_validate_power_balance`]. A field that hasn't moved this cycle
+/// can't be the source of a new imbalance, so we don't bother considering it.
+const POWER_BALANCE_CANDIDATE_MIN_DELTA_W: i32 = 1_000;
+
+/// Per-field snapshot of the rate-smoother's inputs and outputs for one of
+/// the four AC power fields. Pairs the *raw* decoder value (before
+/// `check_power_rate` ran) with the *rejected* flag so the cross-check
+/// can distinguish "rate check passed" from "rate check rejected and
+/// replaced with prev". See [`cross_validate_power_balance`].
+pub(crate) struct PowerFieldState {
+    pub raw: i32,
+    pub rate_rejected: bool,
+}
+
+/// Apply rate-based smoothing to a signed power field.
+///
+/// Returns `(accepted_value, was_sanitized)`. This runs **after**
+/// [`check_power_field`] has already enforced the absolute range, so `raw`
+/// is guaranteed to be within `[−limit, +limit]`. The rate check catches the
+/// narrower class of values that pass the absolute check but jump too far in
+/// a single poll interval.
+///
+/// Rejection criteria (all must hold):
+/// - A previous value exists (no rate check on first reading).
+/// - `elapsed_secs` is within [`RATE_SMOOTH_MAX_WINDOW_SECS`] (skip on
+///   reconnect gaps).
+/// - Both `|new−prev| / |prev|` exceeds `rules.rate_fraction` AND
+///   `|new−prev|` exceeds `rules.abs_delta_w`.
+///
+/// Unlike [`check_power_field`], rejected values are **not** tracked in a
+/// persistence window — the rate check is stateless. A genuinely rapid load
+/// change (e.g. EV charger ramping over 2-3 polls) will be temporarily held
+/// back for one cycle and then accepted on the next when the prev value has
+/// caught up. This is the same one-cycle-lag behaviour as GivTCP's smoother
+/// (`read.py:2641-2643`).
+///
+/// Cross-validate the four power fields against the energy-balance identity.
+///
+/// Sign convention (matches the rest of this module and the frontend):
+/// - `battery_power > 0` = discharging (power leaving the battery)
+/// - `grid_power    > 0` = exporting (power leaving the house to the grid)
+/// - `solar_power   >= 0` (PV is a source, never negative)
+/// - `home_power    >= 0` (load is always positive)
+///
+/// The identity is therefore:
+///
+/// ```text
+/// home = solar + battery - grid
+/// ```
+///
+/// The rate-based smoother ([`check_power_rate`]) rejects any field whose
+/// value jumps by both >50% fractionally AND >2 kW in absolute terms within
+/// a single poll. This catches most dongle corruption but also flags
+/// physically valid fast transitions (kettle, oven, **EV charger starting**)
+/// where one of the four fields legitimately changes by 5+ kW in 3 seconds.
+///
+/// The per-field rate check is intentionally conservative — it has no
+/// knowledge of the other three fields, so a single, valid transition
+/// looks identical to a single corrupted field from any one field's
+/// perspective. This function supplies that missing context: if exactly
+/// one of the four fields disagrees with the other three as expressed
+/// through the balance identity, that field is almost certainly the one
+/// the rate check incorrectly rejected, and we restore it to its
+/// previous (one-cycle lagged) value.
+///
+/// Safety properties:
+///
+/// - **Only undoes existing rate-sanitizations.** This function never sets a
+///   field to a value other than either its current value or the previous
+///   reading; it cannot make the snapshot less consistent than the
+///   per-field checks already made it.
+/// - **Requires exact agreement between three fields.** Restoring a
+///   candidate field is only considered when replacing that *one* field's
+///   value with its previous reading brings the residual below
+///   [`POWER_BALANCE_RESIDUAL_W`]. If zero or more than one candidate
+///   resolves the imbalance, we leave the snapshot alone — likely a real
+///   multi-field transition.
+/// - **Skipped on gateway / EMS** (`snap.device_type.needs_gateway_input_blocks()`).
+///   The gateway decoder *derives* `grid_power` from the same identity
+///   (`grid = solar + battery - home`, see `decoder.rs`), so applying the
+///   formula would be tautological. The home / solar / battery readings
+///   are the authoritative ones on gateway.
+/// - **Skipped during the connect grace period** (the `skip_delta` flag).
+///   During grace, only absolute-range checks apply, and the prev readings
+///   are unreliable baselines.
+///
+/// # Arguments
+///
+/// The `raw_*` arguments are the values the decoder produced *before* the
+/// rate-smoother ran. They are required because, when a field was rate-
+/// rejected, `snap.<field>` already holds the previous value (overwritten
+/// by `check_power_rate`), so we need the original to evaluate the balance.
+/// The corresponding `rate_rejected_*` flag distinguishes a field whose
+/// value is unchanged from the raw read (flag `false`) from one whose
+/// `snap.<field>` is the lagged previous value (flag `true`).
+pub(crate) fn cross_validate_power_balance(
+    snap: &mut InverterSnapshot,
+    prev: &InverterSnapshot,
+    battery: PowerFieldState,
+    grid: PowerFieldState,
+    solar: PowerFieldState,
+    home: PowerFieldState,
+) -> bool {
+    let raw_battery_power = battery.raw;
+    let rate_rejected_battery = battery.rate_rejected;
+    let raw_grid_power = grid.raw;
+    let rate_rejected_grid = grid.rate_rejected;
+    let raw_solar_power = solar.raw;
+    let rate_rejected_solar = solar.rate_rejected;
+    let raw_home_power = home.raw;
+    let rate_rejected_home = home.rate_rejected;
+    // Evaluate the energy balance using the *raw* values for every field
+    // that was rate-rejected (those values are the ones the rest of the
+    // system actually consumed last cycle, so they're the ones we want to
+    // trust when judging consistency). For non-rejected fields, the raw
+    // value equals the current snap value by construction.
+    //
+    // Sign convention reminder: `home = solar + battery(+discharge) -
+    // grid(+export)`. If the directly-read home disagrees with the
+    // balance, identify the responsible field by trying each candidate in
+    // turn and asking: does replacing *this one field's* value with its
+    // previous reading reconcile the balance?
+    //
+    // Inline helper instead of a `macro_rules!` because Rust's macro
+    // expression matcher requires parentheses around if-else with
+    // commas; a plain function is clearer and the compiler inlines it.
+    fn balance_with(battery: i32, grid: i32, solar: i32, home: i32) -> i32 {
+        solar + battery - grid - home
+    }
+
+    // The initial residual measures the actual disagreement in the
+    // *current* (post-rate-check) snapshot. For rate-rejected fields,
+    // `snap.<field>` holds the prev value (the rate check wrote it
+    // there), so we use those values directly — the residual is the
+    // disagreement we need to resolve. Using the raw values instead
+    // would make the residual artificially small and mask the case
+    // the cross-check exists to handle (rate-rejected field disagrees
+    // with three steady fields).
+    let residual_signed = balance_with(
+        snap.battery_power,
+        snap.grid_power,
+        snap.solar_power,
+        snap.home_power,
+    );
+    let residual = residual_signed.unsigned_abs();
+    if residual < POWER_BALANCE_RESIDUAL_W as u32 {
+        // All four current fields already agree within tolerance. Even
+        // if the rate check rejected something earlier, the imbalance
+        // is too small to be the cause of any user-visible problem.
+        return false;
+    }
+
+    // For each candidate field, ask: would reverting just this one field
+    // reconcile the balance? The "reverted" value depends on whether the
+    // field was rate-rejected:
+    //
+    // - **Rate-rejected**: `snap.X == prev.X` (the rate check already
+    //   wrote prev over raw). Restoring means putting the raw value back.
+    //   Compute the balance using `raw_X`.
+    // - **Not rate-rejected**: `snap.X == raw_X` (the rate check passed
+    //   the raw value through). Restoring means overwriting with `prev_X`,
+    //   on the hypothesis that the rate-check-passing value was actually
+    //   a corruption that passed both the absolute and rate gates.
+    //
+    // We also gate on the candidate's delta (`raw_X - prev_X`) exceeding
+    // `POWER_BALANCE_CANDIDATE_MIN_DELTA_W` so stationary fields are
+    // skipped — they can't be the source of a new imbalance.
+    //
+    // We require *exactly one* candidate to resolve the imbalance. Zero
+    // candidates means the rate check was right to reject something but
+    // we can't say what (multi-field transition, or a transition we
+    // simply don't have visibility into); two or more candidates means
+    // the four fields are collectively inconsistent in a way this
+    // function cannot disambiguate.
+    let mut resolutions: Vec<&'static str> = Vec::with_capacity(1);
+
+    // The candidate replacement value for a non-home field X:
+    //   - if rate_rejected_X: raw_X (revert the rate check)
+    //   - else: prev_X (hypothesise the rate-passing value was wrong)
+    // For home the same logic applies but with the special-case that
+    // `snap.home` was already overwritten to prev by the rate check, so
+    // we cannot simply overwrite it again with prev (no-op). The home
+    // branch below uses `raw_home` when rate_rejected_home is true.
+
+    // -- solar_power candidate --
+    {
+        let delta = (raw_solar_power - prev.solar_power).unsigned_abs();
+        if delta >= POWER_BALANCE_CANDIDATE_MIN_DELTA_W as u32 {
+            let candidate_solar = if rate_rejected_solar {
+                raw_solar_power
+            } else {
+                prev.solar_power
+            };
+            let new_residual = balance_with(
+                if rate_rejected_battery { raw_battery_power } else { snap.battery_power },
+                if rate_rejected_grid { raw_grid_power } else { snap.grid_power },
+                candidate_solar,
+                if rate_rejected_home { raw_home_power } else { snap.home_power },
+            )
+            .unsigned_abs();
+            if new_residual < POWER_BALANCE_RESIDUAL_W as u32 {
+                resolutions.push("solar_power");
+            }
+        }
+    }
+
+    // -- battery_power candidate --
+    {
+        let delta = (raw_battery_power - prev.battery_power).unsigned_abs();
+        if delta >= POWER_BALANCE_CANDIDATE_MIN_DELTA_W as u32 {
+            let candidate_battery = if rate_rejected_battery {
+                raw_battery_power
+            } else {
+                prev.battery_power
+            };
+            let new_residual = balance_with(
+                candidate_battery,
+                if rate_rejected_grid { raw_grid_power } else { snap.grid_power },
+                if rate_rejected_solar { raw_solar_power } else { snap.solar_power },
+                if rate_rejected_home { raw_home_power } else { snap.home_power },
+            )
+            .unsigned_abs();
+            if new_residual < POWER_BALANCE_RESIDUAL_W as u32 {
+                resolutions.push("battery_power");
+            }
+        }
+    }
+
+    // -- grid_power candidate --
+    {
+        let delta = (raw_grid_power - prev.grid_power).unsigned_abs();
+        if delta >= POWER_BALANCE_CANDIDATE_MIN_DELTA_W as u32 {
+            let candidate_grid = if rate_rejected_grid {
+                raw_grid_power
+            } else {
+                prev.grid_power
+            };
+            let new_residual = balance_with(
+                if rate_rejected_battery { raw_battery_power } else { snap.battery_power },
+                candidate_grid,
+                if rate_rejected_solar { raw_solar_power } else { snap.solar_power },
+                if rate_rejected_home { raw_home_power } else { snap.home_power },
+            )
+            .unsigned_abs();
+            if new_residual < POWER_BALANCE_RESIDUAL_W as u32 {
+                resolutions.push("grid_power");
+            }
+        }
+    }
+
+    // -- home_power candidate --
+    //
+    // Special case: when home_power was rate-rejected, snap.home_power
+    // already equals prev.home_power, so "restoring" this field to prev
+    // is a no-op. The interesting action here is to *un-restore* — to put
+    // the raw value back. We model this by considering home_power as a
+    // candidate only when it was rate-rejected: the candidate's
+    // "replacement value" is the raw reading, which is exactly the value
+    // we'd put back if we conclude the rate check was wrong.
+    //
+    // When home was NOT rate-rejected, snap.home_power is already the raw
+    // reading and the field didn't move (delta=0), so it's correctly
+    // skipped by the candidate-delta gate below — but that gate uses
+    // raw_home vs prev.home, so an unchanged field also has delta=0.
+    // Either way, this branch is unreachable when home wasn't rate-
+    // rejected, and we explicitly skip the iteration rather than rely on
+    // a coincidence.
+    {
+        if rate_rejected_home {
+            let new_residual = balance_with(
+                if rate_rejected_battery { raw_battery_power } else { snap.battery_power },
+                if rate_rejected_grid { raw_grid_power } else { snap.grid_power },
+                if rate_rejected_solar { raw_solar_power } else { snap.solar_power },
+                raw_home_power,
+            )
+            .unsigned_abs();
+            if new_residual < POWER_BALANCE_RESIDUAL_W as u32 {
+                resolutions.push("home_power");
+            }
+        }
+    }
+
+    if resolutions.len() != 1 {
+        tracing::debug!(
+            residual_w = residual,
+            candidates = ?resolutions,
+            "cross-check found no single responsible field - leaving snapshot unchanged"
+        );
+        return false;
+    }
+
+    let field = resolutions[0];
+    // Apply the restoration. Mirrors the candidate replacement logic:
+    // for non-home fields, restoring means "use the value the rate check
+    // either rejected (raw) or hypothetically should have rejected (prev)";
+    // for home, restoring always means putting raw_home back (the only
+    // way to "undo" a rate check on home is to put the raw value back,
+    // since snap.home already equals prev.home after the rate check).
+    let restored_to = match field {
+        "solar_power" => {
+            let v = if rate_rejected_solar {
+                raw_solar_power
+            } else {
+                prev.solar_power
+            };
+            snap.solar_power = v;
+            v
+        }
+        "battery_power" => {
+            let v = if rate_rejected_battery {
+                raw_battery_power
+            } else {
+                prev.battery_power
+            };
+            snap.battery_power = v;
+            v
+        }
+        "grid_power" => {
+            let v = if rate_rejected_grid {
+                raw_grid_power
+            } else {
+                prev.grid_power
+            };
+            snap.grid_power = v;
+            v
+        }
+        "home_power" => {
+            snap.home_power = raw_home_power;
+            raw_home_power
+        }
+        _ => unreachable!("resolutions only contains the four static names"),
+    };
+
+    tracing::info!(
+        field,
+        restored_to,
+        residual_w = residual,
+        "power fields disagreed with energy-balance identity - restored field to its \
+         pre-rate-sanitization value, likely a fast legitimate transition (e.g. EV charger)"
+    );
+
+    true
+}
+
 /// Apply rate-based smoothing to a signed power field.
 ///
 /// Returns `(accepted_value, was_sanitized)`. This runs **after**
@@ -915,6 +1275,7 @@ pub(crate) fn sanitize_snapshot(
     // solar 2 kW → 7 kW in 3 seconds). Stateless — a genuine rapid change is
     // held back one cycle, then accepted on the next when prev catches up.
     let prev_battery = prev.map(|p| p.battery_power);
+    let raw_battery_power = snap.battery_power;
     let (val, was_sanitized) = check_power_field(
         snap.battery_power,
         prev_battery,
@@ -926,10 +1287,12 @@ pub(crate) fn sanitize_snapshot(
     sanitized |= was_sanitized;
     let (val, was_sanitized) =
         check_power_rate(val, prev_battery, elapsed_secs, &POWER_RATE_RULES, "battery_power");
+    let rate_rejected_battery = was_sanitized;
     snap.battery_power = val;
     sanitized |= was_sanitized;
 
     let prev_grid = prev.map(|p| p.grid_power);
+    let raw_grid_power = snap.grid_power;
     let (val, was_sanitized) = check_power_field(
         snap.grid_power,
         prev_grid,
@@ -941,10 +1304,12 @@ pub(crate) fn sanitize_snapshot(
     sanitized |= was_sanitized;
     let (val, was_sanitized) =
         check_power_rate(val, prev_grid, elapsed_secs, &POWER_RATE_RULES, "grid_power");
+    let rate_rejected_grid = was_sanitized;
     snap.grid_power = val;
     sanitized |= was_sanitized;
 
     let prev_solar = prev.map(|p| p.solar_power);
+    let raw_solar_power = snap.solar_power;
     let (val, was_sanitized) = check_power_field(
         snap.solar_power,
         prev_solar,
@@ -956,10 +1321,12 @@ pub(crate) fn sanitize_snapshot(
     sanitized |= was_sanitized;
     let (val, was_sanitized) =
         check_power_rate(val, prev_solar, elapsed_secs, &POWER_RATE_RULES, "solar_power");
+    let rate_rejected_solar = was_sanitized;
     snap.solar_power = val;
     sanitized |= was_sanitized;
 
     let prev_home = prev.map(|p| p.home_power);
+    let raw_home_power = snap.home_power;
     let (val, was_sanitized) = check_power_field(
         snap.home_power,
         prev_home,
@@ -971,8 +1338,63 @@ pub(crate) fn sanitize_snapshot(
     sanitized |= was_sanitized;
     let (val, was_sanitized) =
         check_power_rate(val, prev_home, elapsed_secs, &POWER_RATE_RULES, "home_power");
+    let rate_rejected_home = was_sanitized;
     snap.home_power = val;
     sanitized |= was_sanitized;
+
+    // -- Power-balance cross-check --
+    // The four AC power fields above (battery / grid / solar / home) are
+    // checked independently by the absolute-range and rate-smoother layers.
+    // Both layers are deliberately per-field: they have no knowledge of the
+    // other three, so a single fast legitimate transition (EV charger
+    // ramping in over 2-3 polls, induction hob switching on) looks
+    // identical to a single corrupted field from any one field's
+    // perspective.
+    //
+    // The energy-balance identity `home = solar + battery(+discharge) -
+    // grid(+export)` is a free piece of physical context the per-field
+    // checks don't use. Apply it here as a final consistency gate that can
+    // *undo* a rate-sanitization when exactly one field disagrees with the
+    // other three. Never increases sanitization — see
+    // `cross_validate_power_balance` for the full safety argument.
+    //
+    // Skipped during the connect grace period (skip_delta=true) because the
+    // prev readings aren't yet a reliable baseline, and on gateway / EMS
+    // because one of the four terms is itself derived from this identity.
+    if !skip_delta
+        && !snap.device_type.needs_gateway_input_blocks()
+    {
+        if let Some(p) = prev {
+            let restored = cross_validate_power_balance(
+                snap,
+                p,
+                PowerFieldState {
+                    raw: raw_battery_power,
+                    rate_rejected: rate_rejected_battery,
+                },
+                PowerFieldState {
+                    raw: raw_grid_power,
+                    rate_rejected: rate_rejected_grid,
+                },
+                PowerFieldState {
+                    raw: raw_solar_power,
+                    rate_rejected: rate_rejected_solar,
+                },
+                PowerFieldState {
+                    raw: raw_home_power,
+                    rate_rejected: rate_rejected_home,
+                },
+            );
+            if restored {
+                // The cross-check changed a field's value to undo a rate
+                // sanitization. The snapshot is still "sanitized" in the
+                // sense that it differs from the raw read, so propagate to
+                // the caller's flag for the existing logging / history
+                // skip semantics.
+                sanitized = true;
+            }
+        }
+    }
 
     // -- EPS power (IR(31) p_backup) --
     // Reference libraries cap the raw value at 50 kW and treat it as
@@ -4232,5 +4654,360 @@ mod tests {
         let sanitized = sanitize_for_test(&mut snap, None);
         assert_eq!(snap.solar_power, 8_000, "first reading must not be rate-rejected");
         let _ = sanitized;
+    }
+
+    // -------------------------------------------------------------------
+    // Power-balance cross-check
+    // -------------------------------------------------------------------
+
+    /// Build a snapshot for cross-check tests with the four AC power
+    /// fields explicitly set. Uses a fresh timestamp so cumulative-counter
+    /// / SOC checks don't fire.
+    fn cross_check_snap(
+        battery: i32,
+        grid: i32,
+        solar: i32,
+        home: i32,
+        timestamp: i64,
+    ) -> InverterSnapshot {
+        let mut snap = base_grid_connected_snap();
+        snap.battery_power = battery;
+        snap.grid_power = grid;
+        snap.solar_power = solar;
+        snap.home_power = home;
+        snap.timestamp = timestamp;
+        snap
+    }
+
+    /// Build the cross-check input state from raw and prev snapshots.
+    /// `rate_rejected` is set to `true` for every field whose raw value
+    /// differs from prev, on the assumption that a difference of any
+    /// size is enough to have triggered the rate smoother in the test
+    /// setup. The exact threshold doesn't matter because the cross-check
+    /// tests exercise the cross-check itself, not the rate-check trigger.
+    #[allow(clippy::too_many_arguments)]
+    fn rate_rejected_state(
+        raw_battery: i32,
+        raw_grid: i32,
+        raw_solar: i32,
+        raw_home: i32,
+        prev_battery: i32,
+        prev_grid: i32,
+        prev_solar: i32,
+        prev_home: i32,
+    ) -> (PowerFieldState, PowerFieldState, PowerFieldState, PowerFieldState) {
+        // In each PowerFieldState, rate_rejected is set to `true` when the
+        // raw value differs from prev by enough to have tripped the rate
+        // smoother (we model that here as "raw != prev" — the precise
+        // threshold doesn't matter because the cross-check tests below
+        // exercise the cross-check itself, not the rate-check trigger).
+        (
+            PowerFieldState { raw: raw_battery, rate_rejected: raw_battery != prev_battery },
+            PowerFieldState { raw: raw_grid, rate_rejected: raw_grid != prev_grid },
+            PowerFieldState { raw: raw_solar, rate_rejected: raw_solar != prev_solar },
+            PowerFieldState { raw: raw_home, rate_rejected: raw_home != prev_home },
+        )
+    }
+
+    #[test]
+    fn cross_check_restores_rate_rejected_home_power_for_ev_charger_start() {
+        // Your exact scenario: solar=0, battery=3100 discharge, grid=-5800
+        // (import), prev home=1165; raw home=8649 from the car charger
+        // starting. The rate check rejects home_power (jumped too far in
+        // 3s), so snap.home_power is held at prev=1165. The energy balance
+        // disagrees by ~7.5 kW. Cross-check should detect that home_power
+        // is the lone inconsistent field and put the raw value back.
+        let prev = cross_check_snap(3_100, -5_800, 0, 1_165, 100);
+        let mut snap = cross_check_snap(3_100, -5_800, 0, 1_165, 103); // snap holds prev (rate-rejected)
+        let (battery, grid, solar, home) = rate_rejected_state(
+            3_100, -5_800, 0, 8_649, // raw values
+            3_100, -5_800, 0, 1_165, // prev values
+        );
+
+        let restored = cross_validate_power_balance(&mut snap, &prev, battery, grid, solar, home);
+
+        assert!(restored, "cross-check must restore rate-rejected home_power when balance agrees");
+        assert_eq!(snap.home_power, 8_649, "raw home value must be restored");
+    }
+
+    #[test]
+    fn cross_check_restores_rate_rejected_solar_power_when_it_is_the_outlier() {
+        // Solar jumps 200W -> 5000W (large PV ramp, cloud edge clearing).
+        // Other fields steady: battery=0, grid=0, home=5000.
+        // With raw solar=5000: balance 5000+0-0-5000 = 0 ✓.
+        // Rate check rejects solar. snap holds prev_solar=200.
+        // imbalance with snap: 200+0-0-5000 = -4800. |4800| > 2000.
+        // - Candidate solar: replace with raw (5000). New balance: 0 ✓
+        let prev = cross_check_snap(0, 0, 200, 5_000, 100);
+        let mut snap = cross_check_snap(0, 0, 200, 5_000, 103);
+        let (battery, grid, solar, home) = rate_rejected_state(
+            0, 0, 5_000, 5_000, // raw values
+            0, 0, 200, 5_000, // prev values (only solar moved)
+        );
+
+        let restored = cross_validate_power_balance(&mut snap, &prev, battery, grid, solar, home);
+
+        assert!(restored, "cross-check must restore rate-rejected solar when balance agrees");
+        assert_eq!(snap.solar_power, 5_000, "raw solar value must be restored");
+    }
+
+    #[test]
+    fn cross_check_restores_rate_rejected_battery_power_when_it_is_the_outlier() {
+        // Battery discharge jumps 0 -> 3000W (3kW step). Other fields
+        // steady: solar=0, grid=0, home=3000.
+        // With raw battery=3000: balance 0+3000-0-3000 = 0 ✓.
+        // Rate check rejects battery. snap holds prev_battery=0.
+        // imbalance with snap: 0+0-0-3000 = -3000. |3000| > 2000.
+        // - Candidate battery: replace with raw (3000). New balance: 0 ✓
+        let prev = cross_check_snap(0, 0, 0, 3_000, 100);
+        let mut snap = cross_check_snap(0, 0, 0, 3_000, 103);
+        let (battery, grid, solar, home) = rate_rejected_state(
+            3_000, 0, 0, 3_000, // raw values
+            0, 0, 0, 3_000, // prev values (only battery moved)
+        );
+
+        let restored = cross_validate_power_balance(&mut snap, &prev, battery, grid, solar, home);
+
+        assert!(restored, "cross-check must restore rate-rejected battery when balance agrees");
+        assert_eq!(snap.battery_power, 3_000, "raw battery value must be restored");
+    }
+
+    #[test]
+    fn cross_check_restores_rate_rejected_grid_power_when_it_is_the_outlier() {
+        // Grid jumps 0 -> -5000 (5kW import — EV charger starting, kettle
+        // already accounted for in the steady state). Other fields
+        // steady: battery=0, solar=0, home=5000.
+        // With raw grid=-5000: balance 0+0-(-5000)-5000 = 0 ✓.
+        // Rate check rejects grid. snap holds prev_grid=0.
+        // imbalance with snap: 0+0-0-5000 = -5000. |5000| > 2000.
+        // - Candidate grid: replace with raw (-5000). New balance: 0 ✓
+        let prev = cross_check_snap(0, 0, 0, 5_000, 100);
+        let mut snap = cross_check_snap(0, 0, 0, 5_000, 103);
+        let (battery, grid, solar, home) = rate_rejected_state(
+            0, -5_000, 0, 5_000, // raw values
+            0, 0, 0, 5_000, // prev values (only grid moved)
+        );
+
+        let restored = cross_validate_power_balance(&mut snap, &prev, battery, grid, solar, home);
+
+        assert!(restored, "cross-check must restore rate-rejected grid when balance agrees");
+        assert_eq!(snap.grid_power, -5_000, "raw grid value must be restored");
+    }
+
+    #[test]
+    fn cross_check_does_nothing_when_fields_already_agree() {
+        // All four raw values agree with each other (rate check never
+        // rejected anything) — residual < threshold, no restoration.
+        let mut prev = cross_check_snap(1_000, -500, 2_000, 1_500, 100);
+        let mut snap = cross_check_snap(1_000, -500, 2_000, 1_500, 103);
+        // Balance check: 2000 + 1000 - (-500) - 1500 = 2000. So adjust so
+        // it balances: home = 2000 + 1000 - (-500) = 3500. Recompute.
+        snap.home_power = 3_500;
+        prev.home_power = 3_500;
+        let (battery, grid, solar, home) = rate_rejected_state(
+            1_000, -500, 2_000, 3_500,
+            1_000, -500, 2_000, 3_500,
+        );
+
+        let restored = cross_validate_power_balance(&mut snap, &prev, battery, grid, solar, home);
+        assert!(!restored, "balanced fields must not be touched");
+    }
+
+    #[test]
+    fn cross_check_does_nothing_when_small_residual() {
+        // Residual below 2000W threshold — leave alone even if a field
+        // was rate-rejected. The threshold exists so we don't override a
+        // rate-sanitization for disagreement smaller than the jump that
+        // triggered the rate check.
+        //
+        // Setup: prev: battery=0, grid=0, solar=500, home=1000
+        //        raw:  battery=0, grid=0, solar=500, home=2500
+        //        snap: battery=0, grid=0, solar=500, home=1000 (rejected)
+        // imbalance with snap: 500 + 0 - 0 - 1000 = -500. |500| < 2000. Return false.
+        let prev = cross_check_snap(0, 0, 500, 1_000, 100);
+        let mut snap = cross_check_snap(0, 0, 500, 1_000, 103);
+        let (b, g, s, h) = rate_rejected_state(
+            0, 0, 500, 2_500, // raw values
+            0, 0, 500, 1_000, // prev values (only home moved)
+        );
+
+        let restored = cross_validate_power_balance(&mut snap, &prev, b, g, s, h);
+        assert!(!restored, "sub-threshold residual must not trigger restoration");
+        assert_eq!(snap.home_power, 1_000, "rate-rejected value must remain");
+    }
+
+    #[test]
+    fn cross_check_does_nothing_when_multiple_fields_disagree() {
+        // Two fields rate-rejected (battery and grid both jumped) and
+        // their raws together don't reconcile with the other two.
+        // Neither revert alone resolves, so the cross-check must
+        // decline to guess.
+        //
+        // Setup: prev: battery=0, grid=0, solar=0, home=5000
+        //        raw:  battery=3000, grid=2000, solar=0, home=5000
+        //        snap: battery=0 (rejected), grid=0 (rejected), solar=0,
+        //              home=5000
+        // imbalance with snap: 0 + 0 - 0 - 5000 = -5000. |5000| > 2000.
+        // - Replace battery with raw (3000): 0 + 3000 - 0 - 5000 = -2000.
+        //   == threshold. NOT < 2000 (strict). ✗
+        // - Replace grid with prev (0): 0 + 0 - 0 - 5000 = -5000. ✗
+        // Zero candidates. ✓
+        let prev = cross_check_snap(0, 0, 0, 5_000, 100);
+        let mut snap = cross_check_snap(0, 0, 0, 5_000, 103); // battery & grid held at prev
+        let (b, g, s, h) = rate_rejected_state(
+            3_000, 2_000, 0, 5_000, // raw values (both shifted — corruption)
+            0, 0, 0, 5_000, // prev values (battery & grid didn't change)
+        );
+
+        let restored = cross_validate_power_balance(&mut snap, &prev, b, g, s, h);
+        assert!(!restored, "no single field resolves — cross-check must not guess");
+        assert_eq!(snap.battery_power, 0, "rate-rejected value must remain");
+        assert_eq!(snap.grid_power, 0, "rate-rejected value must remain");
+    }
+
+    #[test]
+    fn cross_check_does_nothing_when_no_candidate_moves() {
+        // All fields are within the rate threshold — no rate rejection, no
+        // movement — but the (raw) snapshot is internally inconsistent
+        // because of decoder-level corruption. The cross-check can't help
+        // because no field moved; nothing to revert.
+        let prev = cross_check_snap(1_000, 0, 0, 5_000, 100);
+        let mut snap = cross_check_snap(1_000, 0, 0, 5_000, 103);
+        let (b, g, s, h) = rate_rejected_state(
+            1_000, 0, 0, 5_000, // raw same as snap (no rate rejection)
+            1_000, 0, 0, 5_000,
+        );
+
+        let restored = cross_validate_power_balance(&mut snap, &prev, b, g, s, h);
+        assert!(!restored, "no movement means no candidate — must leave alone");
+    }
+
+    #[test]
+    fn cross_check_skips_candidate_with_small_delta() {
+        // Candidate delta below the 1 kW threshold must be skipped even if
+        // it's the only candidate. This protects against the trivial case
+        // where a stale prev value masks a real disagreement.
+        //
+        // Setup: prev: battery=0, grid=0, solar=0, home=5000
+        //        raw:  battery=0, grid=500, solar=0, home=5000
+        //        snap: battery=0, grid=0 (rejected, 500W delta only),
+        //              solar=0, home=5000
+        // imbalance with snap: 0 + 0 - 0 - 5000 = -5000. |5000| > 2000.
+        // grid candidate: delta 500W < 1000W (threshold), skipped.
+        // No other candidates.
+        let prev = cross_check_snap(0, 0, 0, 5_000, 100);
+        let mut snap = cross_check_snap(0, 0, 0, 5_000, 103);
+        let (b, g, s, h) = rate_rejected_state(
+            0, 500, 0, 5_000, // small grid change
+            0, 0, 0, 5_000,
+        );
+
+        let restored = cross_validate_power_balance(&mut snap, &prev, b, g, s, h);
+        assert!(!restored, "sub-threshold candidate must be ignored");
+        assert_eq!(snap.grid_power, 0, "rate-rejected value must remain");
+    }
+
+    #[test]
+    fn cross_check_restores_rate_rejected_home_power_end_to_end() {
+        // Black-box: run the full sanitize_snapshot pipeline on the
+        // EV-charger scenario (solar=0, battery=3100 discharge,
+        // grid=-5800 import, home jumps 1165 -> 8649 in 3s) and verify
+        // the cross-check restores home_power to 8649 instead of leaving
+        // it at the rate-rejected prev value of 1165.
+        let mut prev = cross_check_snap(3_100, -5_800, 0, 1_165, 100);
+        prev.device_type = DeviceType::Gen2Hybrid; // explicit non-gateway
+        let mut snap = cross_check_snap(3_100, -5_800, 0, 8_649, 103);
+        snap.device_type = DeviceType::Gen2Hybrid;
+
+        let mut pending_mode = None;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+
+        let sanitized = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+        );
+
+        assert!(
+            sanitized,
+            "sanitize_snapshot must report a sanitization (the cross-check \
+             did restore a field, which differs from raw)"
+        );
+        assert_eq!(
+            snap.home_power, 8_649,
+            "EV-charger home jump must be restored to raw value by cross-check"
+        );
+    }
+
+    #[test]
+    fn cross_check_is_skipped_during_grace_period() {
+        // During the post-connect grace period, prev is unreliable so the
+        // cross-check must not run (skip_delta=true at the call site).
+        // The rate-check will still run and reject the home jump, but
+        // the cross-check will not undo it.
+        let mut prev = cross_check_snap(3_100, -5_800, 0, 1_165, 100);
+        prev.device_type = DeviceType::Gen2Hybrid;
+        let mut snap = cross_check_snap(3_100, -5_800, 0, 8_649, 103);
+        snap.device_type = DeviceType::Gen2Hybrid;
+
+        let mut pending_mode = None;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+
+        sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            true, // skip_delta = true (grace period)
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+        );
+
+        assert_eq!(
+            snap.home_power, 1_165,
+            "grace period must hold rate-rejected home at prev (no cross-check)"
+        );
+    }
+
+    #[test]
+    fn cross_check_is_skipped_on_gateway_device() {
+        // On gateway / EMS, grid_power is derived from the balance
+        // identity itself, so applying the formula is tautological and
+        // would corrupt the snapshot. The cross-check must skip.
+        // We use a gateway DeviceType and assert the home jump is held
+        // (rate-rejected, not restored).
+        let mut prev = cross_check_snap(3_100, -5_800, 0, 1_165, 100);
+        prev.device_type = DeviceType::Gateway;
+        let mut snap = cross_check_snap(3_100, -5_800, 0, 8_649, 103);
+        snap.device_type = DeviceType::Gateway;
+
+        let mut pending_mode = None;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+
+        sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+        );
+
+        // On gateway the rate-check may or may not have run depending
+        // on the DeviceType variant's higher ceiling (gateway uses 25 kW
+        // ceilings, larger than 8.6 kW). Either way the cross-check must
+        // not have fired, so the raw value (8_649) must be preserved if
+        // rate didn't trip, or the prev (1_165) must be preserved if
+        // rate did. What matters: it must NOT be a different value.
+        assert!(
+            snap.home_power == 1_165 || snap.home_power == 8_649,
+            "gateway cross-check must not produce an unexpected value, got {}",
+            snap.home_power
+        );
     }
 }

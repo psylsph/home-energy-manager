@@ -3611,7 +3611,7 @@ mod tests {
     #[test]
     fn validate_hv_bcu_rejects_empty_block() {
         // All-zero registers: no pack_software_version → not a real BCU.
-        assert!(!validate_hv_bcu(&vec![0u16; 60]));
+        assert!(!validate_hv_bcu(&[0u16; 60]));
     }
 
     #[test]
@@ -3690,7 +3690,7 @@ mod tests {
     #[test]
     fn validate_hv_bmu_rejects_empty_block() {
         // All-zero serial → not a real module.
-        assert!(!validate_hv_bmu(&vec![0u16; 60]));
+        assert!(!validate_hv_bmu(&[0u16; 60]));
     }
 
     #[test]

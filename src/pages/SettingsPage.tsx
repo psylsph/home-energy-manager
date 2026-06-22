@@ -10,6 +10,10 @@ import {
   updateTariffSlot,
   halfHourOptions,
   MAX_TARIFF_SLOTS,
+  validateTariffConfig,
+  isTariffConfigValid,
+  FINAL_SLOT_END_MINUTES,
+  parseHHMM,
 } from '../lib/tariff';
 import { useInverterStore } from '../store/useInverterStore';
 
@@ -34,6 +38,32 @@ function TariffSlotEditor({
   config: TariffConfig;
   onChange: (cfg: TariffConfig) => void;
 }) {
+  const errors = validateTariffConfig(config);
+  // Index validation errors by slot for inline display.
+  const errorsBySlot = new Map<number, string[]>();
+  for (const err of errors) {
+    if (err.slotIndex < 0) continue;
+    const list = errorsBySlot.get(err.slotIndex) ?? [];
+    list.push(err.message);
+    errorsBySlot.set(err.slotIndex, list);
+  }
+
+  // Allowed options for a slot's end select: must be ≥ slot start AND ≤
+  // next slot's start (or `23:59` if last). Prevents the user from
+  // creating gaps or overlaps in the picker.
+  const optionsForEnd = (i: number, slot: { start: string; end: string }) => {
+    const startMin = parseHHMM(slot.start) ?? 0;
+    const nextStartMin =
+      i + 1 < config.slots.length
+        ? parseHHMM(config.slots[i + 1]!.start) ?? FINAL_SLOT_END_MINUTES
+        : FINAL_SLOT_END_MINUTES;
+    return TIME_OPTIONS.filter((t) => {
+      const m = parseHHMM(t);
+      if (m === null) return false;
+      return m >= startMin && m <= nextStartMin;
+    });
+  };
+
   return (
     <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
       <div className="flex items-center justify-between">
@@ -48,58 +78,99 @@ function TariffSlotEditor({
         )}
       </div>
 
-      {config.slots.map((slot, i) => (
-        <div key={i} className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2 items-end">
-          <label className="flex flex-col gap-1">
-            <span className="text-text-secondary text-xs font-sans">Start</span>
-            <select
-              value={slot.start}
-              onChange={(e) => onChange(updateTariffSlot(config, i, 'start', e.target.value))}
-              disabled={i === 0}
-              className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors disabled:opacity-40"
-            >
-              {TIME_OPTIONS.map((t) => (
-                <option key={t} value={t}>{t}</option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-text-secondary text-xs font-sans">End</span>
-            <select
-              value={slot.end}
-              onChange={(e) => onChange(updateTariffSlot(config, i, 'end', e.target.value))}
-              className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-            >
-              {TIME_OPTIONS.map((t) => (
-                <option key={t} value={t}>{t}</option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-text-secondary text-xs font-sans">Rate (p/kWh)</span>
-            <input
-              type="number" step="0.1" min="0"
-              value={Math.round(slot.rate * 1000) / 10}
-              onChange={(e) => onChange(updateTariffSlot(config, i, 'rate', Number(e.target.value) / 100))}
-              className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-            />
-          </label>
-          {config.slots.length > 1 && (
-            <button
-              onClick={() => onChange(removeTariffSlot(config, i))}
-              className="text-text-secondary hover:text-red-400 text-sm font-sans pb-2 transition-colors"
-              title="Remove window"
-            >
-              ✕
-            </button>
-          )}
-        </div>
-      ))}
+      {config.slots.map((slot, i) => {
+        const isFirst = i === 0;
+        const isLast = i === config.slots.length - 1;
+        const slotErrors = errorsBySlot.get(i) ?? [];
+        // The end <select> is locked to `23:59` for the last slot so the day
+        // is always tiled through to the end. Intermediate slots allow
+        // choosing an end up to (but not past) the next slot's start.
+        const endOptions = optionsForEnd(i, slot);
+        return (
+          <div key={i} className="flex flex-col gap-1">
+            <div className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2 items-end">
+              <label className="flex flex-col gap-1">
+                <span className="text-text-secondary text-xs font-sans">Start</span>
+                <select
+                  value={slot.start}
+                  // First slot is locked to 00:00 (always tile the start of
+                  // the day). Later slots' starts are forced by contiguity
+                  // to the previous slot's end, so their selects are also
+                  // disabled — editing the previous slot's end moves this
+                  // slot's start along with it.
+                  onChange={(e) => onChange(updateTariffSlot(config, i, 'start', e.target.value))}
+                  disabled={!isFirst}
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors disabled:opacity-40"
+                >
+                  {TIME_OPTIONS.map((t) => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-text-secondary text-xs font-sans">End</span>
+                <select
+                  value={slot.end}
+                  onChange={(e) => onChange(updateTariffSlot(config, i, 'end', e.target.value))}
+                  disabled={isLast}
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors disabled:opacity-40"
+                >
+                  {endOptions.map((t) => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-text-secondary text-xs font-sans">Rate (p/kWh)</span>
+                <input
+                  type="number" step="0.1" min="0"
+                  value={Math.round(slot.rate * 1000) / 10}
+                  onChange={(e) => onChange(updateTariffSlot(config, i, 'rate', Number(e.target.value) / 100))}
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                />
+              </label>
+              {config.slots.length > 1 && (
+                <button
+                  onClick={() => onChange(removeTariffSlot(config, i))}
+                  className="text-text-secondary hover:text-red-400 text-sm font-sans pb-2 transition-colors"
+                  title="Remove window"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+            {slotErrors.length > 0 && (
+              <ul className="text-red-400 text-xs font-sans pl-1">
+                {slotErrors.map((msg, j) => (
+                  <li key={j}>{msg}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        );
+      })}
 
       {config.slots.length === 1 && (
         <p className="text-text-secondary/60 text-xs font-sans">
           Flat rate for the whole day. Add windows for time-of-use tariffs (e.g. Octopus Flux, Cosy, Eco7).
         </p>
+      )}
+      {!isTariffConfigValid(config) && (
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-red-400 text-xs font-sans">
+            Tariff configuration is invalid — windows must cover the full 24 hours contiguously with no overlaps. Saving is disabled.
+          </p>
+          <button
+            // Recovery affordance: if the user lands in an unsaveable state
+            // (e.g. after editing settings.json by hand), this resets to a
+            // valid flat-rate config using the first slot's rate as a
+            // reasonable default.
+            onClick={() => onChange(flatTariffConfig(config.slots[0]?.rate ?? 0.15))}
+            className="text-flow-active text-xs font-sans hover:opacity-80 transition-opacity whitespace-nowrap"
+          >
+            Reset to flat rate
+          </button>
+        </div>
       )}
     </div>
   );
@@ -160,6 +231,16 @@ const VALID_INTERVALS = [5, 10, 15, 20];
   const [evcDiscoverResults, setEvcDiscoverResults] = useState<DiscoveredEvc[]>([]);
   const [evcDiscoverError, setEvcDiscoverError] = useState('');
   const [disableAutoDiscovery, setDisableAutoDiscovery] = useState(false);
+
+  // Start on login (issue #117). The actual platform autostart entry is
+  // managed by tauri-plugin-autostart; the persisted preference is the
+  // source of truth and the Rust startup self-heal re-applies it.
+  const [autostartEnabled, setAutostartEnabled] = useState(false);
+  // `null` while we haven't asked the OS yet — we only show the toggle's
+  // actual state if the plugin was reachable. The toggle is hidden
+  // entirely in headless mode (no Tauri shell to register).
+  const autostartSupported =
+    typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
   // Tariffs
   const [importTariffCfg, setImportTariffCfg] = useState<TariffConfig>(() => defaultTariffConfig());
@@ -229,6 +310,7 @@ const VALID_INTERVALS = [5, 10, 15, 20];
         setEvcHost(s.evc_host ?? '');
         setEvcPort(s.evc_port ?? 502);
         setDisableAutoDiscovery(s.disable_auto_discovery ?? false);
+        setAutostartEnabled(s.autostart_enabled ?? false);
         setSettingsLoaded(true);
       } catch (e: unknown) {
         console.warn('Failed to load settings:', e);
@@ -349,6 +431,13 @@ const VALID_INTERVALS = [5, 10, 15, 20];
 
   // Save tariffs
   const handleTariffSave = async () => {
+    // Re-check validity client-side as a defence-in-depth before posting —
+    // the Save button is also disabled when invalid, but a programmatic
+    // invocation (e.g. tests) should still be rejected.
+    if (!isTariffConfigValid(importTariffCfg) || !isTariffConfigValid(exportTariffCfg)) {
+      flash('Tariff configuration is invalid', false);
+      return;
+    }
     setSaving(true);
     try {
       await apiPost('/api/settings', {
@@ -356,8 +445,12 @@ const VALID_INTERVALS = [5, 10, 15, 20];
         export_tariff_config: exportTariffCfg,
       });
       flash('Tariff rates saved', true);
-    } catch {
-      flash('Failed to save tariffs', false);
+    } catch (err) {
+      // Surface the server's validation error (e.g. 400 with a message)
+      // so the user sees *why* the save failed even though the UI looks
+      // valid (e.g. a JSON file edited by hand).
+      const msg = err instanceof Error ? err.message : String(err);
+      flash(msg || 'Failed to save tariffs', false);
     }
     setSaving(false);
   };
@@ -401,6 +494,39 @@ const VALID_INTERVALS = [5, 10, 15, 20];
       flash('Failed to Send Message — check API key and settings', false);
     }
     setAlertsTesting(false);
+  };
+
+  // Flip the platform autostart entry and persist the new preference.
+  // We optimistically apply the new value locally so the toggle reflects
+  // the user's click immediately, then save to disk; if the platform
+  // call fails we still keep the preference (the Rust self-heal in
+  // lib.rs will retry on the next launch). Issue #117.
+  const handleAutostartToggle = async (next: boolean) => {
+    if (!autostartSupported) return;
+    const previous = autostartEnabled;
+    setAutostartEnabled(next);
+    try {
+      // Apply the OS-level entry FIRST so the disk persistence matches
+      // the actual platform state. If the user later rolls back the
+      // toggle we still want both sides to be in sync.
+      const { enable, disable } = await import('@tauri-apps/plugin-autostart');
+      if (next) await enable();
+      else await disable();
+      await apiPost('/api/settings', { autostart_enabled: next });
+      flash(
+        next
+          ? 'Will start automatically when you log in'
+          : 'Will no longer start automatically when you log in',
+        true,
+      );
+    } catch (e) {
+      // Revert the optimistic UI update so the toggle matches the real
+      // state. The persisted preference is whatever the server wrote
+      // last, which may be the opposite of what the user just clicked.
+      setAutostartEnabled(previous);
+      const msg = e instanceof Error ? e.message : String(e);
+      flash(`Failed to ${next ? 'enable' : 'disable'} auto-start: ${msg}`, false);
+    }
   };
 
   // Discover
@@ -617,6 +743,7 @@ const VALID_INTERVALS = [5, 10, 15, 20];
             }}
           />
         </div>
+
       </section>
 
       {/* ─── Section 2: Remote / Mobile Network Access ─── */}
@@ -734,53 +861,84 @@ const VALID_INTERVALS = [5, 10, 15, 20];
       </section>
 
 
-      {/* ─── Section 4: Refresh Interval ─── */}
-      <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-3">
-        <h2 className="text-text-primary text-lg font-semibold font-sans">Refresh Interval</h2>
 
-        <div className="flex gap-2">
-          {VALID_INTERVALS.map((s) => (
+      {/* ─── Section 3: App ─── */}
+      {/* Behavioural settings for the app itself — how often it polls,
+          what port it serves on, and whether to start on login. Issue #117
+          brought Start on Login in; the other two were previously scattered
+          around this page (Sections 3b and 4) and have been moved here so
+          the three "how the app runs" controls live together. */}
+      <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
+        <h2 className="text-text-primary text-lg font-semibold font-sans">App</h2>
+
+        {/* Refresh Interval */}
+        <div className="flex flex-col gap-2">
+          <span className="text-text-primary text-sm font-sans font-medium">Refresh Interval</span>
+          <p className="text-text-secondary text-xs font-sans">
+            How often the app polls the inverter for fresh data.
+          </p>
+          <div className="flex gap-2">
+            {VALID_INTERVALS.map((s) => (
+              <button
+                key={s}
+                onClick={() => handleIntervalChange(s)}
+                className={`flex-1 py-2 rounded-lg text-sm font-mono transition ${
+                  intervalSecs === s
+                    ? 'bg-flow-active text-white font-semibold'
+                    : 'bg-bg-elevated text-text-primary hover:bg-bg-elevated/80'
+                }`}
+              >
+                {s}s
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* HTTP Port */}
+        <div className="flex flex-col gap-2">
+          <span className="text-text-primary text-sm font-sans font-medium">HTTP Port</span>
+          <p className="text-text-secondary text-xs font-sans">
+            Change to run multiple instances on the same machine. Requires restart.
+          </p>
+          <div className="flex items-center gap-3">
+            <input
+              type="number"
+              min={1024}
+              max={65535}
+              value={httpPort}
+              onChange={(e) => setHttpPort(Number(e.target.value))}
+              className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-transparent focus:outline-none focus:border-accent"
+            />
             <button
-              key={s}
-              onClick={() => handleIntervalChange(s)}
-              className={`flex-1 py-2 rounded-lg text-sm font-mono transition ${
-                intervalSecs === s
-                  ? 'bg-flow-active text-white font-semibold'
-                  : 'bg-bg-elevated text-text-primary hover:bg-bg-elevated/80'
-              }`}
+              onClick={handleHttpPortSave}
+              className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
             >
-              {s}s
+              Save
             </button>
-          ))}
+          </div>
         </div>
+
+        {/* Start on Login (issue #117). Hidden in headless mode because
+            there's no Tauri shell to register as an autostart entry —
+            headless / Pi users should manage the systemd service
+            directly (see INSTALL.md). */}
+        {autostartSupported && (
+          <div className="flex items-center justify-between">
+            <div className="flex flex-col gap-0.5">
+              <span className="text-text-primary text-sm font-sans font-medium">Start on Login</span>
+              <span className="text-text-secondary text-xs font-sans">
+                Launch the app automatically when you log in. On Windows this adds an entry to the Startup apps list; on macOS a LaunchAgent; on Linux a desktop autostart file.
+              </span>
+            </div>
+            <Toggle
+              checked={autostartEnabled}
+              onChange={handleAutostartToggle}
+            />
+          </div>
+        )}
       </section>
 
-      {/* ─── Section 3b: HTTP Port ─── */}
-      <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-3">
-        <h2 className="text-text-primary text-lg font-semibold font-sans">HTTP Port</h2>
-        <p className="text-text-secondary text-sm font-sans">
-          Change to run multiple instances on the same machine. Requires restart.
-        </p>
-
-        <div className="flex items-center gap-3">
-          <input
-            type="number"
-            min={1024}
-            max={65535}
-            value={httpPort}
-            onChange={(e) => setHttpPort(Number(e.target.value))}
-            className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-transparent focus:outline-none focus:border-accent"
-          />
-          <button
-            onClick={handleHttpPortSave}
-            className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
-          >
-            Save
-          </button>
-        </div>
-      </section>
-
-      {/* ─── Section 3.5: Panel Controls ─── */}
+      {/* ─── Section 4: Panel Controls ─── */}
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
         <h2 className="text-text-primary text-lg font-semibold font-sans">Panel Controls</h2>
 
@@ -797,6 +955,7 @@ const VALID_INTERVALS = [5, 10, 15, 20];
               ['solar', 'Solar'],
               ['meters', 'Meters'],
               ['history', 'History'],
+              ['control', 'Control'],
             ] as const).map(([key, label]) => (
               <label key={key} className="flex items-center gap-2 cursor-pointer select-none bg-bg-elevated rounded-xl px-4 py-3 border border-white/5 hover:border-white/10 transition-colors">
                 <input
@@ -902,8 +1061,13 @@ const VALID_INTERVALS = [5, 10, 15, 20];
 
         <button
           onClick={handleTariffSave}
-          disabled={saving}
-          className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 transition-opacity self-start"
+          disabled={saving || !isTariffConfigValid(importTariffCfg) || !isTariffConfigValid(exportTariffCfg)}
+          title={
+            !isTariffConfigValid(importTariffCfg) || !isTariffConfigValid(exportTariffCfg)
+              ? 'Tariff configuration is invalid — see errors above.'
+              : undefined
+          }
+          className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity self-start"
         >
           {saving ? 'Saving…' : 'Save Tariffs'}
         </button>

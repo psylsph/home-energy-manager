@@ -214,7 +214,7 @@ fn timestamp_to_local_minutes(ts: i64) -> u16 {
 }
 
 /// Find the `[start, end)` boundaries (in minutes) of the tariff slot that
-/// covers the given minute. Returns `(0, 1440)` as a safe fallback if no slot
+/// covers the given minute. Returns `(0, 1439)` as a safe fallback if no slot
 /// matches (the caller already has a rate from `rate_for_minutes`).
 fn find_window_bounds(
     cfg: &crate::settings::TariffConfig,
@@ -231,13 +231,19 @@ fn find_window_bounds(
             return (start, end);
         }
     }
-    (0, 1440)
+    // 1439 = 23:59, the latest representable clock time (the final tariff
+    // slot's inclusive end). Used purely for display in the Telegram summary
+    // when the bucket doesn't match any defined window.
+    (0, 1439)
 }
 
-/// Convert minutes-since-midnight to "HH:MM" string. 1440 → "24:00".
+/// Convert minutes-since-midnight to "HH:MM" string. Minutes are clamped
+/// to `[0, 1439]` so `"23:59"` (1439) is the maximum representable clock
+/// time — the final tariff slot's inclusive end.
 fn minutes_to_hhmm(minutes: u16) -> String {
-    let h = minutes / 60;
-    let m = minutes % 60;
+    let clamped = minutes.min(23 * 60 + 59);
+    let h = clamped / 60;
+    let m = clamped % 60;
     format!("{h:02}:{m:02}")
 }
 
@@ -1037,7 +1043,7 @@ fn render_donut(title: &str, items: &[(&str, f64, &str)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    
 
     fn dummy_reading(
         ts: i64,

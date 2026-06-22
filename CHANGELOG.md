@@ -2,71 +2,86 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.36.5] - 2026-06-22
+## [0.37.0] - 2026-06-22
 
 ### Added
 
-- **Multi-window time-of-use tariff support.** The tariff configuration
-  has been generalised from a fixed peak/off-peak 2-rate model to an
-  arbitrary list of time windows, each with its own price. This unlocks
-  Octopus Flux, Cosy, Agile, and any other time-of-use tariff without
-  losing the simple flat-rate use case. The Settings page now exposes a
-  tariff-slot editor where you can add, remove, and re-time up to six
-  windows per tariff (import and export separately). The History page
-  cost charts use the new lookup so each minute of energy is priced
-  against the correct window. The daily HTML report and Telegram
-  `/today` summary also use the slot-aware rate, so off-peak charging and
-  peak export income are calculated correctly.
+- **Multi-window time-of-use tariffs.** The flat peak/off-peak rate is
+  gone. You can now define up to six rate windows for import and export
+  separately, which unlocks Octopus Flux, Cosy, Agile, and similar
+  tariffs. The Settings page has a slot editor; existing two-rate
+  settings.json files migrate transparently on first load. History cost
+  charts, the daily HTML report, and the Telegram `/today` summary all
+  pick up the new rate automatically.
 
-  Existing `settings.json` files with the old `{peak_rate, off_peak_*,
-  off_peak_end}` shape are still readable — the new `TariffConfig`
-  `Deserialize` migrates them to three slots that reproduce the previous
-  behaviour exactly (default 28.5p peak, 9p off-peak, off-peak
-  00:30–05:30). After the next save, only the new `slots` shape is
-  written. A new `src/lib/tariff.ts` module holds the shared lookup
-  helpers (`parseHHMM`, `rateForTimestamp`, `defaultTariffConfig`,
-  `flatTariffConfig`, `addTariffSlot`, etc.) so the frontend, HistoryPage,
-  and Rust side stay aligned.
+- **"Start on Login" toggle.** Settings → App now has a switch that
+  registers the app to launch when you log in, matching whatever your
+  OS's "Startup apps" panel would do (registry entry on Windows,
+  LaunchAgent on macOS, `.desktop` file on Linux). Headless / Pi installs
+  hide it because the systemd service is the equivalent there. Fixes
+  [#117](https://github.com/psylsph/home-energy-manager/issues/117).
 
-  Two new E2E tests cover the slot-based round-trip via `/api/settings`.
+- **Temperature tab on the History page.** New chart tab alongside
+  Battery, Solar, Grid, Home and Cost. Plots inverter and battery
+  temperatures and a derived `Battery − Inverter` differential so you
+  can see how the two thermal paths drift apart through a charge cycle.
 
 ### Improved
 
-- **Control page section rename.** "Battery & Power Limits" is now "Battery
-  and Power Controls" so the heading reads cleanly without a `&` glyph in
-  the middle of a sentence.
+- **"Today" tiles show the full energy balance.** The Status page used
+  to display a single "Consumption" figure, which silently hid today's
+  net battery charge. The tile grid is now six cells — Solar, Home Use,
+  Battery Charged, Battery Discharged, Import, Export — that balance:
+  `home_use + charge − discharge ≈ solar + import − export`. Each tile
+  has a tooltip explaining what it includes, and the energy-balance
+  formula is shown under the grid. Closes #122.
+
+- **Control page section renamed.** "Battery & Power Limits" → "Battery
+  and Power Controls". The `&` no longer breaks up the sentence.
+
+- **Control tab is hideable.** Settings → Panel Controls → Panel
+  Visibility now lists the Control tab alongside the other bottom-nav
+  tabs, so users who don't use manual override can hide it. Fixes #120.
+
+- **Tariff slots use real clock times.** The final slot's `end` is now
+  `"23:59"` instead of the sentinel `"24:00"` (which isn't a real time
+  and required special-case handling everywhere). Old `"24:00"` shapes
+  in settings.json migrate transparently on read.
 
 ### Fixed
 
-- **External links now open in the default browser in release builds.**
-  `tauri-plugin-opener` was previously initialised only inside the
-  `cfg!(debug_assertions)` branch, so on packaged builds the
-  Settings → About link and the Telegram / ntfy / Pushover help URLs
-  opened inside the WebView2 process instead of handing off to the
-  operating system's default browser. The plugin is now registered
-  unconditionally, and the About link is rendered as a button that
-  calls the existing `openExternal` helper instead of a plain
-  `<a target="_blank">` (which WebView2 also intercepts). Fixes
+- **External links open in your default browser.** Settings → About and
+  the Telegram / ntfy / Pushover help URLs were opening inside the
+  WebView2 process on packaged builds because `tauri-plugin-opener` was
+  only initialised in debug mode. The plugin is now registered
+  unconditionally and the About link is a button that calls the existing
+  `openExternal` helper. Fixes
   [#118](https://github.com/psylsph/home-energy-manager/issues/118).
-  Also adds `AUDIT.md` to `.gitignore` — it is a scratch reference
-  document, not something to ship.
 
-## [0.36.4] - 2026-06-22
+- **`POST /api/reconnect` resets the zombie-dongle back-off.** If you
+  clicked Reconnect while the poll loop was deep in a long
+  zombie-dongle back-off sleep (up to 10 minutes), it only triggered
+  one extra poll before falling back asleep. The reconnect handler now
+  also bumps the outer back-off counter so the next retry happens
+  immediately.
 
-### Improved
-
-- **"Today" tiles now show the full energy balance.** The Status page
-  summary tiles previously displayed a single "Consumption" figure, which
-  hid where battery charging fits into the home-level energy balance
-  (`solar + import = export + home_use + charge − discharge`). Users
-  checking that `import + solar − export` matched the displayed
-  consumption would always see a gap equal to today's net battery charge.
-  The tile grid is now six cells: **Solar Today**, **Home Use**, **Battery
-  Charged**, **Battery Discharged**, **Import**, **Export**. The numbers
-  now balance: `home_use + charge − discharge ≈ solar + import − export`.
-  Each tile carries a tooltip explaining what it includes and excludes,
-  and the energy-balance formula is shown as a footer line under the grid.
-  Closes #122.
+- **Power-balance cross-check stops false alarms on legitimate fast
+  transitions.** The rate-based smoother (added in 0.36.3) was correctly
+  rejecting dongle corruption spikes but was also catching fast but
+  physically valid transitions — most noticeably an EV charger ramping
+  in over a single three-second poll, which would log a spurious
+  `home_power jumped too far` warning and hold the home-load figure at
+  the previous value for one cycle. The new cross-check runs after the
+  per-field absolute and rate checks and uses the energy-balance
+  identity `home = solar + battery − grid` to identify the field that's
+  actually inconsistent with the other three. When exactly one field
+  disagrees with the rest, that field's rate sanitisation is undone and
+  the raw reading is restored. It can only undo a rate sanitisation
+  (never add a new one), it's gated on a 2 kW residual and 1 kW
+  per-field movement so genuine corruption where all four fields
+  disagree together is left alone, and it's skipped during the
+  post-connect grace period and on gateway/EMS installs where
+  `grid_power` is derived from the same identity.
 
 ## [0.36.3] - 2026-06-22
 
