@@ -2132,8 +2132,12 @@ pub async fn test_alerts(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
 ///
 /// Bumps the settings version to wake the poll loop, which detects
 /// the version change and disconnects, then reconnects with a fresh
-/// TCP session. Useful for clearing a dongle that has become
-/// unresponsive or when the user suspects a connection issue.
+/// TCP session. Also increments `reconnect_request` so the poll loop
+/// resets its back-off state (`backoff` and `consecutive_dead_sessions`)
+/// — without this, a manual "Reconnect" against a chronically-hung
+/// dongle would only fire one extra attempt before the loop fell back
+/// into a 10-minute zombie-dongle back-off sleep, which is not what the
+/// user expects when they click "Retry now".
 pub async fn post_reconnect(
     State(state): State<Arc<AppState>>,
 ) -> (StatusCode, Json<Value>) {
@@ -2142,6 +2146,15 @@ pub async fn post_reconnect(
     let mut settings = state.settings.lock().await;
     settings.version = settings.version.wrapping_add(1);
     drop(settings);
+
+    // Also increment the reconnect-request counter so the poll loop
+    // resets its back-off timers on the next outer-loop iteration.
+    // Without this, the post-reconnect attempt is followed by another
+    // 10-minute sleep (when consecutive_dead_sessions ≥ 5), which
+    // makes the button feel unresponsive.
+    state
+        .reconnect_request
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     state.write_notify.notify_one();
     tracing::info!("Reconnect requested — bumped settings version to force cycle");

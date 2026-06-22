@@ -327,6 +327,15 @@ pub struct AppState {
     pub connected_since: Arc<std::sync::Mutex<Option<std::time::SystemTime>>>,
     /// How many consecutive TCP connect attempts have failed since the last success.
     pub connect_failures: Arc<std::sync::atomic::AtomicU32>,
+    /// Monotonic counter incremented by `POST /api/reconnect` (and any other
+    /// path that wants a forced reconnect). The poll loop watches this and
+    /// resets its back-off state (`backoff` and `consecutive_dead_sessions`)
+    /// when it advances, so a manual "Reconnect" doesn't get swallowed by a
+    /// 10-minute zombie-dongle back-off. Uses a counter rather than
+    /// `tokio::sync::Notify` so we never lose a signal that arrived between
+    /// checks — the next outer-loop iteration is guaranteed to see the
+    /// newer value.
+    pub reconnect_request: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl AppState {
@@ -364,6 +373,7 @@ impl AppState {
             latest_evc: Arc::new(Mutex::new(None)),
             connected_since: Arc::new(std::sync::Mutex::new(None)),
             connect_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            reconnect_request: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 }
@@ -408,6 +418,7 @@ impl AppState {
             latest_evc: Arc::new(Mutex::new(None)),
             connected_since: Arc::new(std::sync::Mutex::new(None)),
             connect_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            reconnect_request: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 }
@@ -548,6 +559,14 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
     // chronically hung dongle isn't hammered every few seconds. Reset to 0
     // the moment a session yields at least one good poll.
     let mut consecutive_dead_sessions: u32 = 0;
+    // Snapshot of `state.reconnect_request` at the start of the current
+    // outer-loop iteration. Compared at the top of every iteration so a
+    // manual `POST /api/reconnect` (which increments the counter) resets
+    // the back-off state below. Without this, a user click during a long
+    // zombie-dongle back-off sleep would only trigger one extra attempt
+    // before the loop fell asleep again for another 10 minutes.
+    let mut last_seen_reconnect_request: u32 =
+        state.reconnect_request.load(std::sync::atomic::Ordering::Relaxed);
     // When we last ran LAN discovery (to avoid scanning too often).
     let mut last_discovery_time: Option<Instant> = None;
     // After this many consecutive failures, trigger auto-discovery.
@@ -556,6 +575,26 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
     const DISCOVERY_COOLDOWN: Duration = Duration::from_secs(300);
 
     loop {
+        // ---- Manual reconnect request? ----
+        // `POST /api/reconnect` (and any other path that wants to bypass the
+        // back-off schedule) bumps `state.reconnect_request`. If it's advanced
+        // since the last iteration, reset the back-off timers so the user's
+        // click actually retries quickly rather than getting swallowed by a
+        // 10-minute zombie-dongle sleep.
+        let current_reconnect_request = state
+            .reconnect_request
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if current_reconnect_request != last_seen_reconnect_request {
+            tracing::info!(
+                from = last_seen_reconnect_request,
+                to = current_reconnect_request,
+                "Manual reconnect requested — resetting back-off state"
+            );
+            backoff = Duration::from_secs(5);
+            consecutive_dead_sessions = 0;
+            last_seen_reconnect_request = current_reconnect_request;
+        }
+
         // ---- Read current settings ----
         let settings = state.settings.lock().await.clone();
 
@@ -2851,13 +2890,47 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
         }
 
         // ---- Back-off before retry ----
+        // Wake early if a manual `POST /api/reconnect` arrives mid-sleep.
+        // Without this, the user can click "Retry now" during a 10-minute
+        // zombie-dongle back-off and see no effect for up to 10 minutes
+        // (the increment is still detected at the top of the next outer
+        // iteration, but only after the sleep completes).
         let delay = backoff.max(dead_session_backoff(consecutive_dead_sessions));
         tracing::debug!(
             "Retrying connection in {:?} (dead_sessions={})",
             delay,
             consecutive_dead_sessions
         );
-        tokio::time::sleep(delay).await;
+        let sleep_start = tokio::time::Instant::now();
+        let sleep_deadline = sleep_start + delay;
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= sleep_deadline {
+                break;
+            }
+            // Tick once per second so we can notice a fresh reconnect
+            // request without burning the full delay. We don't use a
+            // Notify here because `reconnect_request` is a counter, not a
+            // notification — the comparison loop is the wake mechanism.
+            let remaining = sleep_deadline - now;
+            tokio::select! {
+                _ = tokio::time::sleep(remaining.min(Duration::from_secs(1))) => {}
+                _ = state.write_notify.notified() => {
+                    tracing::debug!("Write notification received during back-off, waking early");
+                    break;
+                }
+            }
+            // Has a manual reconnect been requested since we went to sleep?
+            let cur_req = state
+                .reconnect_request
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if cur_req != last_seen_reconnect_request {
+                tracing::info!(
+                    "Manual reconnect requested during back-off — waking early"
+                );
+                break;
+            }
+        }
         backoff = (backoff * 2).min(Duration::from_secs(60));
     }
 }
@@ -2905,6 +2978,42 @@ mod tests {
             let state = AppState::new();
             // Can obtain a receiver from the broadcast channel.
             let _rx = state.tx.subscribe();
+        });
+    }
+
+    /// `reconnect_request` is the signal `POST /api/reconnect` uses to
+    /// tell the poll loop to reset its back-off state. It must start at
+    /// 0 (so the poll loop's initial snapshot doesn't see a fake request)
+    /// and be cheaply incrementable from the API handler without holding
+    /// any mutexes.
+    #[test]
+    fn reconnect_request_starts_at_zero() {
+        crate::test_util::with_isolated_config_dir(|| {
+            let state = AppState::new();
+            assert_eq!(
+                state.reconnect_request.load(std::sync::atomic::Ordering::Relaxed),
+                0
+            );
+        });
+    }
+
+    /// Each `fetch_add` must be observable on the next load — the poll
+    /// loop uses this property to detect "user clicked Reconnect" without
+    /// any coordination primitive beyond the atomic itself.
+    #[test]
+    fn reconnect_request_increment_is_observable() {
+        crate::test_util::with_isolated_config_dir(|| {
+            let state = AppState::new();
+            state
+                .reconnect_request
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            state
+                .reconnect_request
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(
+                state.reconnect_request.load(std::sync::atomic::Ordering::Relaxed),
+                2
+            );
         });
     }
 
