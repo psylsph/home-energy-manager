@@ -48,19 +48,31 @@ function TariffSlotEditor({
     errorsBySlot.set(err.slotIndex, list);
   }
 
-  // Allowed options for a slot's end select: must be ≥ slot start AND ≤
-  // next slot's start (or `23:59` if last). Prevents the user from
-  // creating gaps or overlaps in the picker.
-  const optionsForEnd = (i: number, slot: { start: string; end: string }) => {
+  // Allowed options for a slot's end select: must be ≥ slot start.
+  // The end is freely selectable up to 23:59 — changing it cascades
+  // forward to update the next slot's start, keeping the day tiled.
+  const optionsForEnd = (slot: { start: string; end: string }) => {
     const startMin = parseHHMM(slot.start) ?? 0;
-    const nextStartMin =
-      i + 1 < config.slots.length
-        ? parseHHMM(config.slots[i + 1]!.start) ?? FINAL_SLOT_END_MINUTES
-        : FINAL_SLOT_END_MINUTES;
     return TIME_OPTIONS.filter((t) => {
       const m = parseHHMM(t);
       if (m === null) return false;
-      return m >= startMin && m <= nextStartMin;
+      return m >= startMin;
+    });
+  };
+
+  // Allowed options for a slot's start select: must be ≥ previous slot's
+  // end (or `00:00` if first) AND ≤ this slot's end. Prevents the user
+  // from creating gaps or overlaps when editing start directly.
+  const optionsForStart = (i: number, slot: { start: string; end: string }) => {
+    const prevEndMin =
+      i > 0
+        ? parseHHMM(config.slots[i - 1]!.end) ?? 0
+        : 0;
+    const endMin = parseHHMM(slot.end) ?? FINAL_SLOT_END_MINUTES;
+    return TIME_OPTIONS.filter((t) => {
+      const m = parseHHMM(t);
+      if (m === null) return false;
+      return m >= prevEndMin && m <= endMin;
     });
   };
 
@@ -84,8 +96,9 @@ function TariffSlotEditor({
         const slotErrors = errorsBySlot.get(i) ?? [];
         // The end <select> is locked to `23:59` for the last slot so the day
         // is always tiled through to the end. Intermediate slots allow
-        // choosing an end up to (but not past) the next slot's start.
-        const endOptions = optionsForEnd(i, slot);
+        // choosing any end from the slot's start onward — changing it
+        // cascades forward to update the next slot's start automatically.
+        const endOptions = optionsForEnd(slot);
         return (
           <div key={i} className="flex flex-col gap-1">
             <div className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2 items-end">
@@ -93,18 +106,20 @@ function TariffSlotEditor({
                 <span className="text-text-secondary text-xs font-sans">Start</span>
                 <select
                   value={slot.start}
-                  // First slot is locked to 00:00 (always tile the start of
-                  // the day). Later slots' starts are forced by contiguity
-                  // to the previous slot's end, so their selects are also
-                  // disabled — editing the previous slot's end moves this
-                  // slot's start along with it.
+                  // First slot is locked to 00:00 (the day must start at
+                  // midnight). All other slots can have their start edited
+                  // directly — changing it cascades backward to update the
+                  // previous slot's end, keeping the day tiled.
                   onChange={(e) => onChange(updateTariffSlot(config, i, 'start', e.target.value))}
-                  disabled={!isFirst}
+                  disabled={isFirst}
                   className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors disabled:opacity-40"
                 >
-                  {TIME_OPTIONS.map((t) => (
-                    <option key={t} value={t}>{t}</option>
-                  ))}
+                  {isFirst
+                    ? <option value={slot.start}>{slot.start}</option>
+                    : optionsForStart(i, slot).map((t) => (
+                        <option key={t} value={t}>{t}</option>
+                      ))
+                  }
                 </select>
               </label>
               <label className="flex flex-col gap-1">
