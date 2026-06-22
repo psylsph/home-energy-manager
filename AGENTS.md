@@ -5,6 +5,7 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 ## General rules
 
 - **Never close GitHub issues or PRs** without explicit permission from the project owner.
+- **GitHub issue comments should read like a person wrote them.** That means no bullet-point recaps, no `**What changed**` / `**Verified**` / `**Why**` headings, no verification-checklist blocks at the end. Same goes for PR descriptions and review replies. Write the way you'd actually reply to a colleague in chat — acknowledge what they said, explain the substance, point at the fix. Technical detail is fine; changelog formatting is not.
 
 ## Stack
 
