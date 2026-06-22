@@ -116,12 +116,6 @@ function SummaryTilesInner({ snapshot: s }: Props) {
           </div>
         ))}
       </div>
-      <p
-        className="text-text-secondary/60 text-[11px] font-mono leading-snug"
-        title="Home-level energy balance: every kWh of solar or import must end up somewhere."
-      >
-        Solar + Import = Export + Home Use + Battery Charged − Battery Discharged
-      </p>
     </div>
   );
 }
