@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use crate::inverter::encoder::{ControlCommand, RegisterWrite};
 use crate::inverter::model::DeviceType;
 use crate::inverter::poll::{AppState, ForceChargeRevert, ForceDischargeRevert, PollSettings};
+use crate::settings::TariffConfig;
 use crate::modbus::registers::encode_hhmm;
 
 // ---------------------------------------------------------------------------
@@ -609,6 +610,7 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "evc_port": settings.evc_port,
             "disable_auto_discovery": settings.disable_auto_discovery,
             "minimal_telemetry_mode": settings.minimal_telemetry_mode,
+            "autostart_enabled": settings.autostart_enabled,
         }
         })),
     )
@@ -648,25 +650,23 @@ pub async fn update_settings(
         .and_then(|v| v.as_f64())
         .unwrap_or(export_tariff_default);
 
-    // Update tariff config objects if provided
-    let import_tariff_config = body
-        .get("import_tariff_config")
-        .and_then(|v| {
-            if v.is_null() {
-                return None;
-            }
-            serde_json::from_value::<crate::settings::TariffConfig>(v.clone()).ok()
-        })
-        .or(import_tariff_config_default);
-    let export_tariff_config = body
-        .get("export_tariff_config")
-        .and_then(|v| {
-            if v.is_null() {
-                return None;
-            }
-            serde_json::from_value::<crate::settings::TariffConfig>(v.clone()).ok()
-        })
-        .or(export_tariff_config_default);
+    // Update tariff config objects if provided. Server-side validation
+    // rejects any malformed or invalid config with a 400 — we never silently
+    // replace with defaults because that would lose the user's edits without
+    // explanation. The UI also validates before posting, so this is defence
+    // in depth (hand-edited settings.json, direct API calls, etc.).
+    let import_tariff_config =
+        match parse_and_validate_tariff(body.get("import_tariff_config"), "import_tariff_config") {
+            Ok(v) => v,
+            Err(e) => return error_response(&e),
+        };
+    let import_tariff_config = import_tariff_config.or(import_tariff_config_default);
+    let export_tariff_config =
+        match parse_and_validate_tariff(body.get("export_tariff_config"), "export_tariff_config") {
+            Ok(v) => v,
+            Err(e) => return error_response(&e),
+        };
+    let export_tariff_config = export_tariff_config.or(export_tariff_config_default);
 
     // Build the disk-persist struct from the request body and current
     // disk state. Save to disk BEFORE touching the in-memory settings,
@@ -718,6 +718,14 @@ pub async fn update_settings(
     }
     if let Some(m) = body.get("minimal_telemetry_mode").and_then(|v| v.as_bool()) {
         persist.minimal_telemetry_mode = m;
+    }
+    // Persist the user's autostart preference. The actual platform
+    // autostart entry is driven from the frontend via the
+    // @tauri-apps/plugin-autostart JS bindings (so the toast and
+    // toggling happen client-side), and the startup self-heal path in
+    // lib.rs re-applies it after a crash/restart. See issue #117.
+    if let Some(a) = body.get("autostart_enabled").and_then(|v| v.as_bool()) {
+        persist.autostart_enabled = a;
     }
     if let Err(e) = persist.save() {
         tracing::warn!("Failed to persist settings: {}", e);
@@ -817,6 +825,36 @@ fn parse_settings(body: &serde_json::Value) -> Result<PollSettings, String> {
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
     })
+}
+
+/// Parse and validate an optional tariff config from a request body field.
+///
+/// Returns `Ok(None)` when the field is missing or `null` (the caller should
+/// fall back to the existing on-disk value). Returns `Err(msg)` when the
+/// field is present but malformed or fails validation — the message is
+/// surfaced to the user as a 400 response.
+///
+/// Validation enforces (see [`TariffConfig::validate`]):
+/// - non-empty slot list
+/// - all slots parse as `HH:MM` in `[00:00, 23:59]`
+/// - rates are finite and non-negative
+/// - first slot starts at `00:00`, last slot ends at `23:59`
+/// - contiguous, non-overlapping tiling of the full day
+fn parse_and_validate_tariff(
+    value: Option<&serde_json::Value>,
+    field_name: &str,
+) -> Result<Option<TariffConfig>, String> {
+    let Some(v) = value else {
+        return Ok(None);
+    };
+    if v.is_null() {
+        return Ok(None);
+    }
+    let cfg = serde_json::from_value::<TariffConfig>(v.clone())
+        .map_err(|e| format!("{field_name} is malformed: {e}"))?;
+    cfg.validate()
+        .map_err(|e| format!("{field_name} invalid: {e}"))?;
+    Ok(Some(cfg))
 }
 
 // ---------------------------------------------------------------------------
@@ -4633,6 +4671,160 @@ mod tests {
             assert!(
                 msg.contains("Pushover"),
                 "gate message should mention Pushover, got: {msg}"
+            );
+        })
+        .await;
+    }
+
+    // -------------------------------------------------------------------
+    // Tariff config validation in update_settings — server is the last
+    // line of defence against malformed/overlapping/incomplete configs
+    // sneaking in via hand-edited settings.json or direct API calls.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn update_settings_accepts_valid_tariff_config() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "import_tariff_config": {
+                    "slots": [
+                        { "start": "00:00", "end": "05:30", "rate": 0.10 },
+                        { "start": "05:30", "end": "23:59", "rate": 0.30 },
+                    ],
+                },
+            });
+            let (status, json) = update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json.get("ok").and_then(|v| v.as_bool()), Some(true));
+            // The tariff config is persisted to disk by update_settings;
+            // verify by reloading from the isolated config dir.
+            let saved = crate::settings::Settings::load();
+            assert_eq!(saved.import_tariff_config.as_ref().unwrap().slots.len(), 2);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_settings_rejects_overlapping_tariff_config() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "import_tariff_config": {
+                    "slots": [
+                        { "start": "00:00", "end": "06:00", "rate": 0.20 },
+                        { "start": "05:00", "end": "23:59", "rate": 0.30 },
+                    ],
+                },
+            });
+            let (status, json) = update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let err = json.get("error").and_then(|v| v.as_str()).unwrap_or("");
+            assert!(err.contains("overlap"), "got: {err}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_settings_rejects_gap_in_tariff_config() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "import_tariff_config": {
+                    "slots": [
+                        { "start": "00:00", "end": "05:00", "rate": 0.20 },
+                        { "start": "06:00", "end": "23:59", "rate": 0.30 },
+                    ],
+                },
+            });
+            let (status, json) = update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let err = json.get("error").and_then(|v| v.as_str()).unwrap_or("");
+            assert!(err.contains("gap"), "got: {err}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_settings_rejects_last_slot_not_at_23_59() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "import_tariff_config": {
+                    "slots": [
+                        { "start": "00:00", "end": "20:00", "rate": 0.20 },
+                    ],
+                },
+            });
+            let (status, json) = update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let err = json.get("error").and_then(|v| v.as_str()).unwrap_or("");
+            assert!(err.contains("23:59"), "got: {err}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_settings_rejects_legacy_24_00_end() {
+        // "24:00" used to be the legacy end-of-day marker. With the new
+        // model (final slot ends at "23:59" inclusive), "24:00" must be
+        // rejected rather than silently broken.
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "import_tariff_config": {
+                    "slots": [
+                        { "start": "00:00", "end": "24:00", "rate": 0.20 },
+                    ],
+                },
+            });
+            let (status, _) = update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_settings_rejects_negative_rate() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "export_tariff_config": {
+                    "slots": [
+                        { "start": "00:00", "end": "23:59", "rate": -0.10 },
+                    ],
+                },
+            });
+            let (status, json) = update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let err = json.get("error").and_then(|v| v.as_str()).unwrap_or("");
+            assert!(err.contains("negative"), "got: {err}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_settings_keeps_existing_config_when_field_omitted() {
+        // When the request doesn't mention tariff config, the on-disk value
+        // must be preserved (not overwritten with defaults).
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            // Seed a known config on disk via a first call.
+            let seed = serde_json::json!({
+                "import_tariff_config": {
+                    "slots": [{ "start": "00:00", "end": "23:59", "rate": 0.42 }],
+                },
+            });
+            let _ = update_settings(State(state.clone()), Json(seed)).await;
+            // Now send an unrelated update with no tariff field.
+            let body = serde_json::json!({ "interval_secs": 30 });
+            let (status, _) = update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let saved = crate::settings::Settings::load();
+            assert_eq!(
+                saved.import_tariff_config.as_ref().unwrap().slots[0].rate,
+                0.42,
+                "omitted tariff_config must not overwrite"
             );
         })
         .await;

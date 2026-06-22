@@ -241,7 +241,7 @@ function Layout() {
           {page('/power', <PowerPage />, true)}
           {page('/battery', <BatteryPage />, true)}
           {page('/history', <HistoryPage />, true)}
-          {page('/control', <ControlPage />)}
+          {page('/control', <ControlPage />, true)}
           {page('/settings', <SettingsPage />)}
           {page('/solar', <SolarPage />, true)}
           {page('/meters', <MetersPage />, true)}

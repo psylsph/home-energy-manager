@@ -1,6 +1,6 @@
 [package]
 name = "givenergy-local"
-version = "0.36.5"
+version = "0.37.0"
 description = "Home Energy Manager — Monitor and control GivEnergy inverters"
 authors = ["Stuart Harding"]
 edition = "2021"
@@ -18,6 +18,11 @@ log = "0.4.31"
 tauri = { version = "2.11.2", features = ["image-png"] }
 tauri-plugin-log = "2"
 tauri-plugin-opener = "2"
+# tauri-plugin-autostart: write the platform-appropriate autostart entry
+# (HKCU\...\Run on Windows, LaunchAgent on macOS, ~/.config/autostart/*.desktop
+# on Linux) so the user can flip a single "Start on login" toggle in the
+# Settings page instead of digging into OS settings (issue #117).
+tauri-plugin-autostart = "2"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

@@ -157,10 +157,11 @@ test.describe('Settings Page - Energy Tariffs', () => {
 
   test('should accept and read back slot-based tariff config', async ({ baseUrl }) => {
     // Post the new slots shape — a Flux-like tariff with 3 windows.
+    // Final slot ends at "23:59" (inclusive) — "24:00" is no longer valid.
     const slots = [
       { start: '00:00', end: '16:00', rate: 0.35 },
       { start: '16:00', end: '19:00', rate: 0.15 },
-      { start: '19:00', end: '24:00', rate: 0.35 },
+      { start: '19:00', end: '23:59', rate: 0.35 },
     ];
     const resp = await fetch(`${baseUrl}/api/settings`, {
       method: 'POST',
@@ -214,6 +215,95 @@ test.describe('Settings Page - Energy Tariffs', () => {
     expect(getData.data.import_tariff_config).not.toBeNull();
     expect(getData.data.import_tariff_config.slots).toBeDefined();
     expect(getData.data.import_tariff_config.slots.length).toBeGreaterThanOrEqual(2);
+  });
+
+  test('should reject tariff config with a gap (no 24-hour coverage)', async ({ baseUrl }) => {
+    // Slot 1 ends at 05:00 but slot 2 starts at 06:00 — leaves 06:00–23:59 uncovered.
+    const resp = await fetch(`${baseUrl}/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        host: '127.0.0.1',
+        port: 18899,
+        serial: '',
+        poll_interval: 5,
+        http_port: 17337,
+        import_tariff_config: {
+          slots: [
+            { start: '00:00', end: '05:00', rate: 0.20 },
+            { start: '06:00', end: '23:59', rate: 0.30 },
+          ],
+        },
+      }),
+    });
+    expect(resp.status).toBe(400);
+    const data = await resp.json();
+    expect(data.ok).toBe(false);
+    expect(String(data.error).toLowerCase()).toContain('gap');
+  });
+
+  test('should reject tariff config with overlapping windows', async ({ baseUrl }) => {
+    const resp = await fetch(`${baseUrl}/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        host: '127.0.0.1',
+        port: 18899,
+        serial: '',
+        poll_interval: 5,
+        http_port: 17337,
+        import_tariff_config: {
+          slots: [
+            { start: '00:00', end: '06:00', rate: 0.20 },
+            { start: '05:00', end: '23:59', rate: 0.30 },
+          ],
+        },
+      }),
+    });
+    expect(resp.status).toBe(400);
+    const data = await resp.json();
+    expect(data.ok).toBe(false);
+    expect(String(data.error).toLowerCase()).toContain('overlap');
+  });
+
+  test('should reject tariff config where the last slot does not end at 23:59', async ({ baseUrl }) => {
+    const resp = await fetch(`${baseUrl}/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        host: '127.0.0.1',
+        port: 18899,
+        serial: '',
+        poll_interval: 5,
+        http_port: 17337,
+        import_tariff_config: {
+          slots: [{ start: '00:00', end: '20:00', rate: 0.20 }],
+        },
+      }),
+    });
+    expect(resp.status).toBe(400);
+    const data = await resp.json();
+    expect(String(data.error)).toContain('23:59');
+  });
+
+  test('should reject the legacy "24:00" end time', async ({ baseUrl }) => {
+    // "24:00" was the pre-v0.37 sentinel. With the new model the final
+    // slot must end at "23:59" (inclusive), so "24:00" must now fail.
+    const resp = await fetch(`${baseUrl}/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        host: '127.0.0.1',
+        port: 18899,
+        serial: '',
+        poll_interval: 5,
+        http_port: 17337,
+        import_tariff_config: {
+          slots: [{ start: '00:00', end: '24:00', rate: 0.20 }],
+        },
+      }),
+    });
+    expect(resp.status).toBe(400);
   });
 });
 

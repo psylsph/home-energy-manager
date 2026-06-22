@@ -1364,11 +1364,11 @@ mod tests {
                 let hour = 6 + hour_offset;
                 // Solar power: ramp 0→800W (06-08), hold 800W (08-16), drop (16-18)
                 let solar_w = if hour < 8 {
-                    (hour as i32 - 6) * 400
+                    (hour - 6) * 400
                 } else if hour < 16 {
                     800
                 } else {
-                    (18 - hour as i32) * 400
+                    (18 - hour) * 400
                 };
 
                 let delta_hours = 5.0 / 60.0;

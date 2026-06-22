@@ -156,7 +156,7 @@ export interface ScheduleSlot {
 
 export interface TariffSlot {
   start: string;   // "HH:MM"
-  end: string;     // "HH:MM" — "24:00" allowed for final slot
+  end: string;     // "HH:MM" — "23:59" for final slot (inclusive, covers minute 1439)
   rate: number;    // £/kWh
 }
 
@@ -178,6 +178,11 @@ export interface PollSettings {
   evc_host: string;
   evc_port: number;
   disable_auto_discovery: boolean;
+  /** Whether the user has opted in to launching the app on system login.
+   *  Wired through tauri-plugin-autostart (HKCU\…\Run on Windows,
+   *  LaunchAgent on macOS, ~/.config/autostart/*.desktop on Linux).
+   *  See issue #117. */
+  autostart_enabled: boolean;
 }
 
 export interface DiscoveredInverter {

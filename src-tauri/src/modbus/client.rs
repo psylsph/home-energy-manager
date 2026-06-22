@@ -1574,8 +1574,8 @@ mod tests {
             "input_1300_1359",
             "input_1360_1413",
         ]));
-        assert!(names.iter().any(|name| *name == "holding_240_299"));
-        assert!(names.iter().any(|name| *name == "holding_1080_1124"));
+        assert!(names.contains(&"holding_240_299"));
+        assert!(names.contains(&"holding_1080_1124"));
     }
 
     #[test]
@@ -1596,14 +1596,14 @@ mod tests {
         ]));
         // Should also poll three-phase config (HR 1080-1124) for write registers
         // and extended slots (HR 240-299) for slots 3-10.
-        assert!(names.iter().any(|name| *name == "holding_240_299"));
-        assert!(names.iter().any(|name| *name == "holding_1080_1124"));
+        assert!(names.contains(&"holding_240_299"));
+        assert!(names.contains(&"holding_1080_1124"));
         // And the EMS / Gateway plant-level holding block (HR 2040-2075) so
         // the round-trip on the export limit (HR 2071) actually populates
         // the snapshot. Without this, writes to HR 2071 succeed but the
         // next poll has nothing to read back and the UI shows "unconfigured".
         assert!(
-            names.iter().any(|name| *name == "holding_2040_2075"),
+            names.contains(&"holding_2040_2075"),
             "Gateway must poll the EMS plant-level holding block (HR 2040-2075)"
         );
     }

@@ -1,0 +1,99 @@
+import { describe, it, expect } from 'vitest';
+import { computeTempDifferential } from '../../src/lib/temperatureChart';
+
+/**
+ * Tests for `computeTempDifferential` — the pure-data helper that powers
+ * the "Battery − Inverter (°C)" chart on the History page's Temperature tab.
+ *
+ * The function takes a row per bucketed timestamp and adds a `_temp_diff`
+ * field equal to `battery_temperature - inverter_temperature`. Missing
+ * data is represented as `NaN` so the chart leaves a gap rather than
+ * drawing a misleading zero.
+ */
+describe('computeTempDifferential', () => {
+  it('subtracts inverter from battery on a normal row', () => {
+    const rows = [{ t: 1000, battery_temperature: 25, inverter_temperature: 40 }];
+    const result = computeTempDifferential(rows);
+    expect(result[0]._temp_diff).toBe(-15);
+  });
+
+  it('produces a positive value when the battery is warmer than the inverter', () => {
+    // Cold morning: battery self-heating on a quiet inverter.
+    const rows = [{ t: 1000, battery_temperature: 18, inverter_temperature: 12 }];
+    expect(computeTempDifferential(rows)[0]._temp_diff).toBe(6);
+  });
+
+  it('produces a negative value when the inverter is running hotter', () => {
+    // Hot afternoon: inverter working hard.
+    const rows = [{ t: 1000, battery_temperature: 28, inverter_temperature: 55 }];
+    expect(computeTempDifferential(rows)[0]._temp_diff).toBe(-27);
+  });
+
+  it('handles negative temperatures on a cold winter night', () => {
+    // Both below zero — arithmetic must still hold.
+    const rows = [{ t: 1000, battery_temperature: -5, inverter_temperature: -8 }];
+    expect(computeTempDifferential(rows)[0]._temp_diff).toBe(3);
+  });
+
+  it('returns NaN when battery temperature is missing', () => {
+    // A row with only the inverter reading — happens at inverter startup
+    // before the BMS data has been polled. The merged row simply omits
+    // the missing key, so the function must handle undefined values.
+    const rows: { t: number; battery_temperature?: number; inverter_temperature: number }[] =
+      [{ t: 1000, inverter_temperature: 30 }];
+    const result = computeTempDifferential(rows);
+    expect(Number.isNaN(result[0]._temp_diff as number)).toBe(true);
+  });
+
+  it('returns NaN when inverter temperature is missing', () => {
+    const rows: { t: number; battery_temperature: number; inverter_temperature?: number }[] =
+      [{ t: 1000, battery_temperature: 22 }];
+    expect(Number.isNaN(computeTempDifferential(rows)[0]._temp_diff as number)).toBe(true);
+  });
+
+  it('returns NaN when both fields are missing', () => {
+    const rows = [{ t: 1000 }];
+    expect(Number.isNaN(computeTempDifferential(rows)[0]._temp_diff as number)).toBe(true);
+  });
+
+  it('returns NaN for an empty row object', () => {
+    const rows = [{}];
+    expect(Number.isNaN(computeTempDifferential(rows)[0]._temp_diff as number)).toBe(true);
+  });
+
+  it('returns an empty array for an empty input', () => {
+    expect(computeTempDifferential([])).toEqual([]);
+  });
+
+  it('preserves the input row shape for downstream chart fields', () => {
+    // The function must not strip t or any other field the chart needs.
+    const rows = [{ t: 1234, battery_temperature: 25, inverter_temperature: 40 }];
+    const result = computeTempDifferential(rows);
+    expect(result[0].t).toBe(1234);
+    expect(result[0].battery_temperature).toBe(25);
+    expect(result[0].inverter_temperature).toBe(40);
+    expect(result[0]._temp_diff).toBe(-15);
+  });
+
+  it('does not mutate the input rows', () => {
+    // Defensive: ChartDef.preprocess runs once per chart in the same tab,
+    // so reusing the merged row across charts must not double-add _temp_diff.
+    const rows = [{ t: 1000, battery_temperature: 25, inverter_temperature: 40 }];
+    const original = JSON.parse(JSON.stringify(rows));
+    computeTempDifferential(rows);
+    expect(rows).toEqual(original);
+  });
+
+  it('handles many rows in a single pass', () => {
+    // Mirrors a bucketed time series: every bucket has both readings.
+    const rows = Array.from({ length: 100 }, (_, i) => ({
+      t: 1000 + i * 60_000,
+      battery_temperature: 20 + (i % 10),
+      inverter_temperature: 30 + (i % 5),
+    }));
+    const result = computeTempDifferential(rows);
+    expect(result).toHaveLength(100);
+    expect(result[0]._temp_diff).toBe(20 - 30);
+    expect(result[99]._temp_diff).toBe(29 - 34);
+  });
+});

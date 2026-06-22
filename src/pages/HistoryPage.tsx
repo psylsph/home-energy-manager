@@ -33,6 +33,7 @@ import { useInverterStore } from '../store/useInverterStore';
 import type { SeriesLegendItem } from '../components/SeriesLegend';
 import type { HistoryRange, PollSettings, TariffConfig } from '../lib/types';
 import { rateForTimestamp, defaultTariffConfig, flatTariffConfig } from '../lib/tariff';
+import { computeTempDifferential } from '../lib/temperatureChart';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -43,7 +44,7 @@ interface TimePoint {
   v: number;
 }
 
-type MetricTab = 'battery' | 'solar' | 'grid' | 'home' | 'cost';
+type MetricTab = 'battery' | 'solar' | 'grid' | 'home' | 'cost' | 'temperature';
 
 interface ChartDef {
   key: string;
@@ -65,6 +66,7 @@ const TABS: { key: MetricTab; label: string }[] = [
   { key: 'solar', label: 'Solar' },
   { key: 'grid', label: 'Grid' },
   { key: 'home', label: 'Home' },
+  { key: 'temperature', label: 'Temperature' },
   { key: 'cost', label: 'Cost' },
 ];
 
@@ -147,6 +149,29 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
           title: 'Load Energy Today (kWh)',
           unit: 'kWh',
           fields: [{ field: 'home_energy_today_kwh', color: '#14B8A6' }],
+        },
+      ];
+    case 'temperature':
+      return [
+        {
+          key: 'battery-temp',
+          title: 'Battery Temperature',
+          unit: '°C',
+          fields: [{ field: 'battery_temperature', color: '#22C55E' }],
+        },
+        {
+          key: 'inverter-temp',
+          title: 'Inverter Temperature',
+          unit: '°C',
+          fields: [{ field: 'inverter_temperature', color: '#F59E0B' }],
+        },
+        {
+          key: 'temp-differential',
+          title: 'Battery − Inverter (°C)',
+          unit: '°C',
+          fields: [{ field: '_temp_diff', color: '#A78BFA' }],
+          requires: ['battery_temperature', 'inverter_temperature'],
+          preprocess: (merged) => computeTempDifferential(merged),
         },
       ];
     case 'cost':
@@ -386,6 +411,7 @@ function ChartCard({ chart, data, range, domain, ticks }: {
             tickFormatter={(v: number) =>
               chart.unit === '£' ? `£${v.toFixed(2)}`
                 : chart.unit === 'kWh' ? `${v.toFixed(1)}`
+                : chart.unit === '°C' ? `${v.toFixed(1)}°`
                 : `${Math.round(v)}`
             }
           />
@@ -406,6 +432,7 @@ function ChartCard({ chart, data, range, domain, ticks }: {
               const n = typeof value === 'number' ? value : 0;
               if (chart.unit === '£') return [`£${n.toFixed(2)}`, ''];
               if (chart.unit === 'kWh') return [`${n.toFixed(1)} ${chart.unit}`, ''];
+              if (chart.unit === '°C') return [`${n.toFixed(1)} °C`, ''];
               return [`${Math.round(n)} ${chart.unit}`, ''];
             }}
           />

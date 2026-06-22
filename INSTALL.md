@@ -26,7 +26,7 @@ Don't want to be stuck at your computer to check on your solar? You can open the
 
 You'll see a window pop up showing your inverter data. Leave it open — the phone will be talking to this window in a moment.
 
-> 💡 **Tip:** Set the app to start automatically when Windows boots. Right-click **Start → Settings → Apps → Startup**, find Home Energy Manager, and turn the toggle on. That way the app's always running, even after a restart.
+> 💡 **Tip:** If you want the app to start automatically when Windows boots, open it once, go to **Settings → App → Start on Login** and turn the toggle on. That way the app's always running, even after a restart. (You can also still manage this from the OS-level **Start → Settings → Apps → Startup** panel — the app reads back whatever is registered there.)
 
 ### Step 2: Find your PC's IP address
 

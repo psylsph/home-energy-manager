@@ -241,6 +241,17 @@ pub fn run() {
             // instead of inside the WebView2 webview process.
             let _ = app.handle().plugin(tauri_plugin_opener::init());
 
+            // tauri-plugin-autostart gives the user a "Start on login"
+            // toggle in Settings. On Windows this writes the
+            // HKCU\…\Run registry key; on macOS a LaunchAgent plist; on
+            // Linux a .desktop file under ~/.config/autostart/. Android
+            // is unsupported by the plugin. See issue #117.
+            #[cfg(desktop)]
+            let _ = app.handle().plugin(tauri_plugin_autostart::init(
+                tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+                None,
+            ));
+
             if cfg!(debug_assertions) {
                 let _ = app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -265,6 +276,7 @@ pub fn run() {
             // sequences cannot diverge. `http_port` is captured first because
             // `app_settings` is moved into the helper.
             let http_port = app_settings.http_port;
+            let autostart_enabled = app_settings.autostart_enabled;
             let state = match tauri::async_runtime::block_on(initialize_app_state(
                 app_settings,
                 log_ring,
@@ -272,6 +284,31 @@ pub fn run() {
                 Some(s) => s,
                 None => return Ok(()),
             };
+
+            // Self-heal the platform autostart entry. If the user has
+            // enabled "Start on login" but the OS-level autostart entry
+            // is missing (e.g. the registry key was wiped by another
+            // process, or macOS removed the LaunchAgent after an OS
+            // update — see tauri-apps/plugins-workspace#771), re-add it
+            // now. Failures are non-fatal — the user can re-flip the
+            // toggle in Settings. See issue #117.
+            #[cfg(desktop)]
+            if autostart_enabled {
+                use tauri_plugin_autostart::ManagerExt;
+                let manager = app.handle().autolaunch();
+                match manager.is_enabled() {
+                    Ok(true) => tracing::info!("Autostart entry present on startup"),
+                    Ok(false) => {
+                        tracing::warn!(
+                            "Autostart preference is enabled but platform entry is missing; re-enabling"
+                        );
+                        if let Err(e) = manager.enable() {
+                            tracing::warn!("Autostart self-heal failed: {e}");
+                        }
+                    }
+                    Err(e) => tracing::warn!("Autostart is_enabled() check failed: {e}"),
+                }
+            }
 
             // Spawn the HTTP server on LAN interfaces.
             let server_state = state.clone();
@@ -594,6 +631,8 @@ mod tests {
             s.auto_winter_saved_enable_target = Some(true);
             s.auto_winter_saved_target_soc = Some(77);
             s.alerts_config.enabled = true;
+            // Issue #117: the autostart preference should be saved/restored.
+            s.autostart_enabled = true;
             s.save().expect("settings save");
 
             let loaded = Settings::load();
@@ -694,6 +733,38 @@ mod tests {
                 "load limiter state should stay Idle"
             );
             assert!(state.history.lock().await.is_some());
+        })
+        .await;
+    }
+
+    /// The autostart preference must survive a settings.json save/load
+    /// round-trip. `initialize_app_state` doesn't read it (the self-heal
+    /// path in `run()` reads it directly from `Settings::load()`), so the
+    /// important contract is: write to disk, reload, observe the same
+    /// value. Issue #117.
+    #[tokio::test]
+    async fn autostart_preference_round_trips_through_disk() {
+        with_isolated_config_dir_async(|| async {
+            let mut s = Settings::load();
+            s.autostart_enabled = true;
+            s.save().expect("settings save");
+
+            let reloaded = Settings::load();
+            assert!(
+                reloaded.autostart_enabled,
+                "autostart preference should persist across save/load"
+            );
+
+            // Flipping back to false must also stick.
+            let mut s2 = Settings::load();
+            s2.autostart_enabled = false;
+            s2.save().expect("settings save");
+
+            let reloaded2 = Settings::load();
+            assert!(
+                !reloaded2.autostart_enabled,
+                "disabling autostart should also persist"
+            );
         })
         .await;
     }

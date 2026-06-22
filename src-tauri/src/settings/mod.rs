@@ -16,14 +16,18 @@ static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 
 /// A single tariff time window with a rate in £/kWh.
 ///
-/// The day is tiled by an ordered list of these slots covering `[00:00, 24:00)`.
-/// The `end` field may be `"24:00"` (internally minute 1440) for the final
-/// slot to complete the tiling.
+/// The day is tiled by an ordered list of these slots covering `[00:00, 23:59]`.
+/// The `end` field may be `"23:59"` (internally minute 1439) for the final
+/// slot — that slot is **inclusive** on both ends, so `23:59` covers minute
+/// 1439 (the last minute of the day). All earlier slots use the half-open
+/// convention `[start, end)`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TariffSlot {
     /// Start time in "HH:MM" format (24h).
     pub start: String,
-    /// End time in "HH:MM" format (24h). Use "24:00" for the final slot.
+    /// End time in "HH:MM" format (24h). Use "23:59" for the final slot
+    /// (inclusive — covers minute 1439). Intermediate slots are half-open,
+    /// so e.g. "05:30" means up-to-but-not-including 05:30.
     pub end: String,
     /// Electricity rate in £/kWh for this window.
     pub rate: f64,
@@ -33,17 +37,20 @@ pub struct TariffSlot {
 ///
 /// This generalizes the previous fixed peak/off-peak model to support any
 /// time-of-use tariff (Octopus Flux, Cosy, Agile, flat, etc.). The day is
-/// tiled by an ascending list of [`TariffSlot`]s. See
-/// [`rate_for_minutes`](Self::rate_for_minutes) for the lookup logic.
+/// tiled by an ascending list of [`TariffSlot`]s. All slots except the last
+/// are half-open `[start, end)`; the final slot is closed `[start, end]`,
+/// using `"23:59"` (minute 1439) so it covers the very last minute of the
+/// day. See [`rate_for_minutes`](Self::rate_for_minutes) for the lookup
+/// logic.
 ///
 /// **Backward compatibility:** a custom `Deserialize` accepts both the old
 /// shape (`peak_rate`, `off_peak_rate`, `off_peak_start`, `off_peak_end`)
-/// and the new shape (`slots`). Old files are migrated to 3 slots that
+/// and the new shape (`slots`). Old files are migrated to slots that
 /// reproduce the exact previous behaviour, including midnight-crossing
 /// windows. After the first save, only the new `slots` shape is written.
 #[derive(Debug, Clone, Serialize)]
 pub struct TariffConfig {
-    /// Time windows in ascending order by start, tiling `[00:00, 24:00)`.
+    /// Time windows in ascending order by start, tiling `[00:00, 23:59]`.
     pub slots: Vec<TariffSlot>,
 }
 
@@ -63,9 +70,12 @@ impl Default for TariffConfig {
                     end: "05:30".to_string(),
                     rate: 0.09,
                 },
+                // Final slot: end is inclusive so "23:59" covers minute 1439
+                // (the last minute of the day). Half-hour granularity means
+                // there's no cleaner real-time representation.
                 TariffSlot {
                     start: "05:30".to_string(),
-                    end: "24:00".to_string(),
+                    end: "23:59".to_string(),
                     rate: 0.285,
                 },
             ],
@@ -74,49 +84,149 @@ impl Default for TariffConfig {
 }
 
 /// Parse a `"HH:MM"` time string into minutes since midnight.
-/// Returns `None` if the string is malformed. `"24:00"` is accepted → 1440.
+/// Returns `None` if the string is malformed. `"23:59"` → 1439 (no
+/// `"24:00"` — the final slot uses `"23:59"` and is treated as inclusive).
 pub(crate) fn parse_hhmm_to_minutes(s: &str) -> Option<u16> {
     let mut it = s.split(':');
     let h: u16 = it.next()?.trim().parse().ok()?;
     let m: u16 = it.next()?.trim().parse().ok()?;
-    if h > 24 || m > 59 {
+    if h > 23 || m > 59 {
         return None;
     }
-    let mins = h * 60 + m;
-    if mins > 1440 {
-        return None;
-    }
-    Some(mins)
+    Some(h * 60 + m)
 }
 
 impl TariffConfig {
     /// Look up the rate for a given minute of the day `[0, 1440)`.
     ///
-    /// Lookup = first slot whose `[start, end)` contains the minute. If no
-    /// slot covers the minute (tail gap from a hand-edited/malformed file),
-    /// fall back to the **last slot's rate** to defend against gaps at the
-    /// end of the day. Returns `None` only when there are zero slots.
+    /// Lookup = first slot whose `[start, end)` contains the minute. The
+    /// **final slot** is closed `[start, end]` so its `end = "23:59"` covers
+    /// minute 1439 (the last minute of the day). If no slot covers the
+    /// minute (tail gap from a hand-edited/malformed file), fall back to
+    /// the **last slot's rate** to defend against gaps at the end of the
+    /// day. Returns `None` only when there are zero slots.
     pub fn rate_for_minutes(&self, minutes: u16) -> Option<f64> {
         if self.slots.is_empty() {
             return None;
         }
-        for slot in &self.slots {
+        let last_idx = self.slots.len() - 1;
+        for (i, slot) in self.slots.iter().enumerate() {
             let Some(start) = parse_hhmm_to_minutes(&slot.start) else {
                 continue;
             };
             let Some(end) = parse_hhmm_to_minutes(&slot.end) else {
                 continue;
             };
-            // Normal window (start < end): minute in [start, end).
-            // We don't handle midnight-crossing within a single slot — the
-            // model tiles the day with non-crossing windows. The legacy
-            // deserializer splits crossing windows into non-crossing slots.
-            if end > start && minutes >= start && minutes < end {
+            if i == last_idx {
+                // Final slot: closed [start, end] so "23:59" (1439) is hit.
+                // We require end >= start to guard against malformed input.
+                if end >= start && minutes >= start && minutes <= end {
+                    return Some(slot.rate);
+                }
+            } else if end > start && minutes >= start && minutes < end {
                 return Some(slot.rate);
             }
         }
         // Tail gap fallback: use the last slot's rate.
         self.slots.last().map(|s| s.rate)
+    }
+
+    /// Validate the config for well-formedness. Returns `Ok(())` if every
+    /// slot is parseable, rates are finite non-negative numbers, and the
+    /// slots tile the full day contiguously (first starts at 00:00, last
+    /// ends at 23:59, no gaps or overlaps). Returns `Err(msg)` with a
+    /// human-readable description of the first failure otherwise.
+    ///
+    /// This is the server-side counterpart to the frontend's
+    /// `validateTariffConfig` — both must stay in sync. Mirroring the rules
+    /// here means a hand-edited `settings.json` or a direct API call
+    /// cannot poison the rate lookup.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.slots.is_empty() {
+            return Err("at least one tariff window is required".into());
+        }
+
+        // Parse + per-slot checks.
+        let parsed: Vec<(u16, u16)> = self
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let start = parse_hhmm_to_minutes(&s.start);
+                let end = parse_hhmm_to_minutes(&s.end);
+                match (start, end) {
+                    (Some(s), Some(e)) if s <= e => Ok((s, e)),
+                    (Some(_), Some(_)) => Err(format!(
+                        "slot {}: end ({}) must be at or after start ({})",
+                        i + 1,
+                        s.end,
+                        s.start
+                    )),
+                    (None, _) => Err(format!(
+                        "slot {}: start (\"{}\") is not a valid HH:MM time",
+                        i + 1,
+                        s.start
+                    )),
+                    (_, None) => Err(format!(
+                        "slot {}: end (\"{}\") is not a valid HH:MM time",
+                        i + 1,
+                        s.end
+                    )),
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for (i, slot) in self.slots.iter().enumerate() {
+            if !slot.rate.is_finite() {
+                return Err(format!("slot {}: rate must be a finite number", i + 1));
+            }
+            if slot.rate < 0.0 {
+                return Err(format!("slot {}: rate cannot be negative", i + 1));
+            }
+        }
+
+        // First slot must start at 00:00.
+        if parsed[0].0 != 0 {
+            return Err(format!(
+                "slot 1: must start at 00:00 (currently {})",
+                self.slots[0].start
+            ));
+        }
+        // Last slot must end at 23:59 (inclusive end-of-day marker).
+        const LAST_MIN: u16 = 23 * 60 + 59;
+        let last = parsed.last().unwrap();
+        if last.1 != LAST_MIN {
+            return Err(format!(
+                "slot {}: must end at 23:59 (currently {})",
+                self.slots.len(),
+                self.slots.last().unwrap().end
+            ));
+        }
+        // Contiguous tiling: each slot's start == previous slot's end.
+        for i in 1..parsed.len() {
+            let prev_end = parsed[i - 1].1;
+            let curr_start = parsed[i].0;
+            if curr_start > prev_end {
+                return Err(format!(
+                    "gap between slot {} (ends {}) and slot {} (starts {}): windows must cover the full 24 hours contiguously",
+                    i,
+                    self.slots[i - 1].end,
+                    i + 1,
+                    self.slots[i].start
+                ));
+            }
+            if curr_start < prev_end {
+                return Err(format!(
+                    "slot {} (starts {}) overlaps slot {} (ends {})",
+                    i + 1,
+                    self.slots[i].start,
+                    i,
+                    self.slots[i - 1].end
+                ));
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -181,9 +291,9 @@ impl<'de> serde::Deserialize<'de> for TariffConfig {
 ///
 /// Two cases:
 /// - `start <= end` (normal off-peak inside the day):
-///   `[00:00→start]=peak`, `[start→end]=off_peak`, `[end→24:00]=peak`
+///   `[00:00→start]=peak`, `[start→end]=off_peak`, `[end→23:59]=peak`
 /// - `start > end` (crosses midnight):
-///   `[00:00→end]=off_peak`, `[end→start]=peak`, `[start→24:00]=off_peak`
+///   `[00:00→end]=off_peak`, `[end→start]=peak`, `[start→23:59]=off_peak`
 ///
 /// Adjacent slots with the same rate are merged so the output is minimal.
 fn legacy_to_slots(
@@ -205,26 +315,29 @@ fn legacy_to_slots(
             );
             return vec![TariffSlot {
                 start: "00:00".to_string(),
-                end: "24:00".to_string(),
+                end: "23:59".to_string(),
                 rate: peak_rate,
             }];
         }
     };
 
     // Build raw segments as (start_minute, end_minute, rate).
+    // 23:59 is the latest representable end-of-day clock time; the final
+    // slot is treated as inclusive in `rate_for_minutes`.
+    const LAST_MIN: u16 = 23 * 60 + 59; // 1439
     let raw: Vec<(u16, u16, f64)> = if op_start <= op_end {
         // Normal: off-peak is inside the day.
         vec![
             (0, op_start, peak_rate),
             (op_start, op_end, off_peak_rate),
-            (op_end, 1440, peak_rate),
+            (op_end, LAST_MIN, peak_rate),
         ]
     } else {
         // Crosses midnight: off-peak wraps around.
         vec![
             (0, op_end, off_peak_rate),
             (op_end, op_start, peak_rate),
-            (op_start, 1440, off_peak_rate),
+            (op_start, LAST_MIN, off_peak_rate),
         ]
     };
 
@@ -241,7 +354,7 @@ fn legacy_to_slots(
 
     // Merge adjacent slots with the same rate (e.g. peak before and after
     // a normal off-peak window collapses into one peak slot spanning
-    // 00:00→start + end→24:00 when the off-peak window is in the middle).
+    // 00:00→start + end→23:59 when the off-peak window is in the middle).
     let mut merged: Vec<TariffSlot> = Vec::with_capacity(slots.len());
     for slot in slots.drain(..) {
         if let Some(last) = merged.last_mut() {
@@ -257,7 +370,7 @@ fn legacy_to_slots(
         // Shouldn't happen, but defend against degenerate input.
         return vec![TariffSlot {
             start: "00:00".to_string(),
-            end: "24:00".to_string(),
+            end: "23:59".to_string(),
             rate: peak_rate,
         }];
     }
@@ -273,18 +386,21 @@ fn legacy_to_slots(
             },
         );
     }
-    // Ensure the last slot ends at 24:00.
-    if merged.last().unwrap().end != "24:00" {
-        merged.last_mut().unwrap().end = "24:00".to_string();
+    // Ensure the last slot ends at 23:59 (inclusive — covers minute 1439).
+    if merged.last().unwrap().end != "23:59" {
+        merged.last_mut().unwrap().end = "23:59".to_string();
     }
 
     merged
 }
 
-/// Convert minutes-since-midnight to "HH:MM" string. 1440 → "24:00".
+/// Convert minutes-since-midnight to "HH:MM" string. Minutes are clamped
+/// to `[0, 1439]` so `"23:59"` (1439) is the maximum representable clock
+/// time — the final tariff slot's inclusive end.
 fn minutes_to_hhmm(minutes: u16) -> String {
-    let h = minutes / 60;
-    let m = minutes % 60;
+    let clamped = minutes.min(23 * 60 + 59);
+    let h = clamped / 60;
+    let m = clamped % 60;
     format!("{h:02}:{m:02}")
 }
 
@@ -536,6 +652,15 @@ pub struct Settings {
     /// Alert thresholds and Brevo email integration.
     #[serde(default)]
     pub alerts_config: AlertsConfig,
+
+    /// Whether the user opted in to launching the app automatically when
+    /// they log in (Windows: HKCU\…\Run, macOS: LaunchAgent,
+    /// Linux: ~/.config/autostart/*.desktop). Persisted so the in-app
+    /// toggle can show the right state on next launch, and so the startup
+    /// self-heal path can re-enable the OS-level autostart entry if the
+    /// platform silently removed it (see plugins-workspace#771). See #117.
+    #[serde(default)]
+    pub autostart_enabled: bool,
 }
 
 fn default_http_port() -> u16 {
@@ -726,6 +851,7 @@ impl Default for Settings {
             alerts_config: AlertsConfig::default(),
             disable_auto_discovery: true,
             minimal_telemetry_mode: false,
+            autostart_enabled: false,
         }
     }
 }
@@ -866,6 +992,10 @@ mod tests {
         assert_eq!(s.load_limiter_start_hour, 0);
         assert_eq!(s.load_limiter_end_hour, 0);
         assert!(!s.load_limiter_active_persisted);
+        // Autostart must default to OFF — we never silently register the
+        // app to launch on login, the user has to opt in via Settings.
+        // See issue #117.
+        assert!(!s.autostart_enabled);
     }
 
     #[test]
@@ -910,6 +1040,7 @@ mod tests {
             alerts_config: AlertsConfig::default(),
             disable_auto_discovery: true,
             minimal_telemetry_mode: true,
+            autostart_enabled: true,
         };
         let json = serde_json::to_string(&s).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
@@ -932,6 +1063,7 @@ mod tests {
         assert_eq!(decoded.load_limiter_trigger_delay_minutes, 10);
         assert_eq!(decoded.load_limiter_start_hour, 16);
         assert_eq!(decoded.load_limiter_end_hour, 20);
+        assert!(decoded.autostart_enabled);
     }
 
     /// AlertsConfig pushover fields must survive a full JSON round-trip and
@@ -1029,6 +1161,7 @@ mod tests {
             alerts_config: AlertsConfig::default(),
             disable_auto_discovery: true,
             minimal_telemetry_mode: false,
+            autostart_enabled: false,
         };
 
         // We can't easily override the settings path for testing,
@@ -1431,7 +1564,9 @@ mod tests {
         assert_eq!(cfg.slots.len(), 3);
         assert_eq!(cfg.slots[0].start, "00:00");
         assert_eq!(cfg.slots[1].rate, 0.09); // off-peak
-        assert_eq!(cfg.slots.last().unwrap().end, "24:00");
+        // Final slot ends at "23:59" (the latest representable clock time);
+        // its end is inclusive so it covers minute 1439.
+        assert_eq!(cfg.slots.last().unwrap().end, "23:59");
     }
 
     #[test]
@@ -1475,6 +1610,56 @@ mod tests {
         };
         // 22:00 = minute 1320 → no slot covers it → fallback to last rate.
         assert_eq!(cfg.rate_for_minutes(1320), Some(0.20));
+        // Last slot is the only slot AND its end (20:00 = 1200) is inclusive
+        // since it's the final slot → 20:00 (minute 1200) itself is covered.
+        assert_eq!(cfg.rate_for_minutes(1200), Some(0.20));
+    }
+
+    /// The final slot is inclusive on both ends so its "23:59" end actually
+    /// covers minute 1439 — without this the last minute of the day would
+    /// be uncovered by the new model.
+    #[test]
+    fn tariff_final_slot_is_inclusive() {
+        let cfg = TariffConfig::default();
+        // 23:59 = minute 1439 → final slot (peak)
+        assert_eq!(cfg.rate_for_minutes(1439), Some(0.285));
+        // 23:58 = minute 1438 → final slot (peak)
+        assert_eq!(cfg.rate_for_minutes(1438), Some(0.285));
+        // 23:59 → still peak (inclusive), not the off-peak slot which ended
+        // at 05:30.
+        assert_ne!(cfg.rate_for_minutes(1439), Some(0.09));
+    }
+
+    /// Intermediate slots are still half-open: a slot ending at "05:30"
+    /// covers up-to-but-not-including minute 330.
+    #[test]
+    fn tariff_intermediate_slot_is_half_open() {
+        let cfg = TariffConfig {
+            slots: vec![
+                TariffSlot {
+                    start: "00:00".to_string(),
+                    end: "05:30".to_string(),
+                    rate: 0.10,
+                },
+                TariffSlot {
+                    start: "05:30".to_string(),
+                    end: "23:59".to_string(),
+                    rate: 0.30,
+                },
+            ],
+        };
+        // 05:29 = minute 329 → first slot
+        assert_eq!(cfg.rate_for_minutes(329), Some(0.10));
+        // 05:30 = minute 330 → second slot (first slot's end is exclusive)
+        assert_eq!(cfg.rate_for_minutes(330), Some(0.30));
+    }
+
+    /// parse_hhmm_to_minutes rejects "24:00" (no longer a valid clock time).
+    #[test]
+    fn tariff_parser_rejects_24_00() {
+        assert_eq!(parse_hhmm_to_minutes("24:00"), None);
+        assert_eq!(parse_hhmm_to_minutes("23:59"), Some(1439));
+        assert_eq!(parse_hhmm_to_minutes("00:00"), Some(0));
     }
 
     /// Legacy peak/off-peak JSON must deserialize into slots that reproduce
@@ -1488,7 +1673,7 @@ mod tests {
             "off_peak_end": "05:30"
         }"#;
         let cfg: TariffConfig = serde_json::from_str(legacy).unwrap();
-        // Should produce 3 slots: peak(00:00-00:30), off-peak(00:30-05:30), peak(05:30-24:00).
+        // Should produce 3 slots: peak(00:00-00:30), off-peak(00:30-05:30), peak(05:30-23:59).
         assert_eq!(cfg.slots.len(), 3);
         // 02:00 → off-peak
         assert_eq!(cfg.rate_for_minutes(120), Some(0.10));
@@ -1496,6 +1681,9 @@ mod tests {
         assert_eq!(cfg.rate_for_minutes(720), Some(0.30));
         // 00:00 → peak (before off-peak starts)
         assert_eq!(cfg.rate_for_minutes(0), Some(0.30));
+        // Last slot is "23:59" (inclusive) — verify the migrated shape uses
+        // the new clock-time representation.
+        assert_eq!(cfg.slots.last().unwrap().end, "23:59");
     }
 
     /// Legacy midnight-crossing off-peak window (start > end) must
@@ -1519,6 +1707,9 @@ mod tests {
         assert_eq!(cfg.rate_for_minutes(720), Some(0.30));
         // 23:30 → off-peak (after 23:00)
         assert_eq!(cfg.rate_for_minutes(23 * 60 + 30), Some(0.10));
+        // Migrated final slot is "23:59" inclusive (the rest of the day
+        // after 23:00 is off-peak per the legacy midnight-crossing window).
+        assert_eq!(cfg.slots.last().unwrap().end, "23:59");
     }
 
     /// New shape (explicit slots) round-trips through serialize/deserialize.
@@ -1538,7 +1729,7 @@ mod tests {
                 },
                 TariffSlot {
                     start: "19:00".to_string(),
-                    end: "24:00".to_string(),
+                    end: "23:59".to_string(),
                     rate: 0.35,
                 },
             ],
@@ -1550,6 +1741,8 @@ mod tests {
         assert_eq!(decoded.rate_for_minutes(1020), Some(0.15));
         // 20:00 = minute 1200 → last slot (peak)
         assert_eq!(decoded.rate_for_minutes(1200), Some(0.35));
+        // 23:59 = minute 1439 → last slot (peak, inclusive)
+        assert_eq!(decoded.rate_for_minutes(1439), Some(0.35));
     }
 
     /// Legacy unparseable times → safe fallback (flat peak day).
@@ -1602,5 +1795,163 @@ mod tests {
                 "minute {minute}: old={old_rate} new={new_rate} mismatch"
             );
         }
+    }
+
+    // ======================================================================
+    // TariffConfig::validate tests (server-side validation, mirrored by
+    // frontend's validateTariffConfig).
+    // ======================================================================
+
+    #[test]
+    fn validate_default_passes() {
+        assert!(TariffConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn validate_flat_passes() {
+        let cfg = TariffConfig {
+            slots: vec![TariffSlot {
+                start: "00:00".to_string(),
+                end: "23:59".to_string(),
+                rate: 0.20,
+            }],
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_empty_slots() {
+        let cfg = TariffConfig { slots: vec![] };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_first_slot_not_at_midnight() {
+        let cfg = TariffConfig {
+            slots: vec![TariffSlot {
+                start: "01:00".to_string(),
+                end: "23:59".to_string(),
+                rate: 0.20,
+            }],
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("00:00"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_last_slot_not_at_23_59() {
+        let cfg = TariffConfig {
+            slots: vec![TariffSlot {
+                start: "00:00".to_string(),
+                end: "22:00".to_string(),
+                rate: 0.20,
+            }],
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("23:59"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_gap_between_slots() {
+        let cfg = TariffConfig {
+            slots: vec![
+                TariffSlot {
+                    start: "00:00".to_string(),
+                    end: "05:00".to_string(),
+                    rate: 0.20,
+                },
+                // Gap: next slot starts at 06:00 instead of 05:00.
+                TariffSlot {
+                    start: "06:00".to_string(),
+                    end: "23:59".to_string(),
+                    rate: 0.30,
+                },
+            ],
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("gap"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_overlapping_slots() {
+        let cfg = TariffConfig {
+            slots: vec![
+                TariffSlot {
+                    start: "00:00".to_string(),
+                    end: "06:00".to_string(),
+                    rate: 0.20,
+                },
+                // Overlap: starts at 05:00, before the previous ends at 06:00.
+                TariffSlot {
+                    start: "05:00".to_string(),
+                    end: "23:59".to_string(),
+                    rate: 0.30,
+                },
+            ],
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("overlap"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_negative_rate() {
+        let cfg = TariffConfig {
+            slots: vec![TariffSlot {
+                start: "00:00".to_string(),
+                end: "23:59".to_string(),
+                rate: -0.10,
+            }],
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_non_finite_rate() {
+        let cfg = TariffConfig {
+            slots: vec![TariffSlot {
+                start: "00:00".to_string(),
+                end: "23:59".to_string(),
+                rate: f64::NAN,
+            }],
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_malformed_time_string() {
+        let cfg = TariffConfig {
+            slots: vec![TariffSlot {
+                start: "garbage".to_string(),
+                end: "23:59".to_string(),
+                rate: 0.20,
+            }],
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_24_00_time_string() {
+        // "24:00" is no longer a valid time — the final slot must be
+        // "23:59" (inclusive).
+        let cfg = TariffConfig {
+            slots: vec![TariffSlot {
+                start: "00:00".to_string(),
+                end: "24:00".to_string(),
+                rate: 0.20,
+            }],
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_start_after_end() {
+        let cfg = TariffConfig {
+            slots: vec![TariffSlot {
+                start: "10:00".to_string(),
+                end: "09:00".to_string(),
+                rate: 0.20,
+            }],
+        };
+        assert!(cfg.validate().is_err());
     }
 }
