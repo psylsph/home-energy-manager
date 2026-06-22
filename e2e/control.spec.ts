@@ -1357,7 +1357,6 @@ test.describe('Inverter Types', () => {
     setHoldingReg,
     resetModbus,
     drainModbusWrites,
-    _peekModbusWrites,
   }) => {
     await resetModbus();
     await setHoldingReg(0, 0x3001); // AC Coupled
@@ -1380,7 +1379,6 @@ test.describe('Inverter Types', () => {
     setHoldingReg,
     resetModbus,
     drainModbusWrites,
-    _peekModbusWrites,
   }) => {
     await resetModbus();
     await setHoldingReg(0, 0x1001); // Gen1

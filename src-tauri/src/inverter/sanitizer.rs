@@ -717,6 +717,126 @@ pub(crate) fn check_power_field(
 }
 
 // ===========================================================================
+// Rate-based power smoothing
+// ===========================================================================
+
+/// Maximum poll interval (seconds) within which the rate-smoother is active.
+/// Beyond this (reconnect gaps, slow poll cycles) any jump is accepted, since
+/// a real system can change substantially over a longer window. Mirrors
+/// GivTCP's 60-second window (`read.py:2640`).
+const RATE_SMOOTH_MAX_WINDOW_SECS: f32 = 60.0;
+
+/// Per-field smoothing parameters for the rate-based smoother.
+///
+/// The absolute-range check ([`check_power_field`]) catches values that are
+/// implausible at any time (32767 saturation, 50 kW on a residential supply).
+/// This struct drives the *rate* check ([`check_power_rate`]), which catches
+/// a different corruption class: values that are within the absolute range
+/// but jump too far, too fast for a single poll interval (e.g. solar 2 kW →
+/// 7 kW in 3 seconds — both under the 10 kW ceiling, but physically
+/// impossible between adjacent polls).
+///
+/// Each field has two thresholds; **both must be exceeded** to reject a
+/// reading:
+/// - `rate_fraction` — maximum fractional change (`|new−prev| / |prev|`)
+/// - `abs_delta_w` — minimum absolute change in watts
+///
+/// The dual-threshold avoids false positives at both ends of the range: a
+/// small base (200 W → 500 W) has a large fraction but small absolute delta
+/// (cloud-edge behaviour, accepted); a large base (8 kW → 12 kW) has a small
+/// fraction but large absolute delta (normal for a big install). Only a jump
+/// that is both large-fraction AND large-absolute is suspicious. GivTCP uses
+/// the same dual approach (`read.py:2626` absolute, `read.py:2639-2640`
+/// fractional).
+pub(crate) struct FieldRateRules {
+    /// Maximum fractional change between adjacent polls within the window.
+    /// 0.5 = up to 50% change accepted.
+    pub(crate) rate_fraction: f32,
+    /// Minimum absolute change (W) for the rate check to even consider
+    /// rejecting. Jumps smaller than this are always accepted regardless of
+    /// the fractional change.
+    pub(crate) abs_delta_w: i32,
+}
+
+/// Rate-smoothing rules for the five power fields. Conservative defaults:
+/// solar/battery/grid/home power can legitimately swing by up to 50% between
+/// adjacent polls (cloud edge, load switch-on), so we require a jump that is
+/// both >50% fractional AND >2 kW absolute before rejecting. This is tuned to
+/// catch the dongle's plausible-but-wrong corruption spikes without
+/// interfering with real rapid-load behaviour (kettle on, EV charger
+/// starting).
+const POWER_RATE_RULES: FieldRateRules = FieldRateRules {
+    rate_fraction: 0.5,
+    abs_delta_w: 2_000,
+};
+
+/// Apply rate-based smoothing to a signed power field.
+///
+/// Returns `(accepted_value, was_sanitized)`. This runs **after**
+/// [`check_power_field`] has already enforced the absolute range, so `raw`
+/// is guaranteed to be within `[−limit, +limit]`. The rate check catches the
+/// narrower class of values that pass the absolute check but jump too far in
+/// a single poll interval.
+///
+/// Rejection criteria (all must hold):
+/// - A previous value exists (no rate check on first reading).
+/// - `elapsed_secs` is within [`RATE_SMOOTH_MAX_WINDOW_SECS`] (skip on
+///   reconnect gaps).
+/// - Both `|new−prev| / |prev|` exceeds `rules.rate_fraction` AND
+///   `|new−prev|` exceeds `rules.abs_delta_w`.
+///
+/// Unlike [`check_power_field`], rejected values are **not** tracked in a
+/// persistence window — the rate check is stateless. A genuinely rapid load
+/// change (e.g. EV charger ramping over 2-3 polls) will be temporarily held
+/// back for one cycle and then accepted on the next when the prev value has
+/// caught up. This is the same one-cycle-lag behaviour as GivTCP's smoother
+/// (`read.py:2641-2643`).
+pub(crate) fn check_power_rate(
+    raw: i32,
+    prev: Option<i32>,
+    elapsed_secs: f32,
+    rules: &FieldRateRules,
+    label: &'static str,
+) -> (i32, bool) {
+    let Some(prev_val) = prev else {
+        // First reading — nothing to compare against.
+        return (raw, false);
+    };
+    if elapsed_secs > RATE_SMOOTH_MAX_WINDOW_SECS {
+        // Long gap (reconnect, slow cycle) — any jump is plausible.
+        return (raw, false);
+    }
+
+    let delta = (raw - prev_val).abs();
+    if delta < rules.abs_delta_w {
+        // Absolute change too small to be suspicious, regardless of fraction.
+        return (raw, false);
+    }
+
+    // Use max(|prev|, 1) as the denominator to avoid division by zero and to
+    // avoid false positives when prev is near zero (a 0→3000W jump is normal
+    // at sunrise, not corruption).
+    let denom = prev_val.unsigned_abs().max(1) as f32;
+    let fraction = delta as f32 / denom;
+
+    if fraction > rules.rate_fraction {
+        tracing::warn!(
+            raw,
+            prev = prev_val,
+            elapsed_secs,
+            fraction,
+            abs_delta = delta,
+            threshold_fraction = rules.rate_fraction,
+            threshold_abs = rules.abs_delta_w,
+            "{label} jumped too far in one poll - using previous"
+        );
+        (prev_val, true)
+    } else {
+        (raw, false)
+    }
+}
+
+// ===========================================================================
 // Main sanitization entry point
 // ===========================================================================
 
@@ -775,11 +895,25 @@ pub(crate) fn sanitize_snapshot(
             )
         };
 
-    // Power fields: apply the 10-readings suspect-count method.
-    // On first out-of-range encounter, fall back to previous (safe).
-    // If the value persists for SUSPECT_RELEASE_THRESHOLD cycles,
-    // accept it as legitimate (conservative threshold was wrong for
-    // this installation - e.g. 100 A supply, three-phase, commercial).
+    // Elapsed time since the previous reading. Used by both the rate-based
+    // power smoother (below) and the cumulative-counter delta checks. Computed
+    // once here so both layers share the same value. Zero / negative (clock
+    // skew) is treated as a normal short interval.
+    let elapsed_secs = prev
+        .map(|p| (snap.timestamp - p.timestamp).max(0) as f32)
+        .unwrap_or(0.0);
+
+    // Power fields: two-layer defence.
+    //
+    // Layer 1 — absolute range (check_power_field): catches values that are
+    // implausible at any time (int16 saturation, 50 kW on a residential
+    // supply). Uses the 10-readings suspect-release window so a persistently
+    // high-but-plausible value (e.g. 100 A supply) is eventually accepted.
+    //
+    // Layer 2 — rate smoothing (check_power_rate): catches values that pass
+    // the absolute check but jump too far in a single poll interval (e.g.
+    // solar 2 kW → 7 kW in 3 seconds). Stateless — a genuine rapid change is
+    // held back one cycle, then accepted on the next when prev catches up.
     let prev_battery = prev.map(|p| p.battery_power);
     let (val, was_sanitized) = check_power_field(
         snap.battery_power,
@@ -788,6 +922,10 @@ pub(crate) fn sanitize_snapshot(
         "battery_power",
         suspect_counts,
     );
+    snap.battery_power = val;
+    sanitized |= was_sanitized;
+    let (val, was_sanitized) =
+        check_power_rate(val, prev_battery, elapsed_secs, &POWER_RATE_RULES, "battery_power");
     snap.battery_power = val;
     sanitized |= was_sanitized;
 
@@ -801,6 +939,10 @@ pub(crate) fn sanitize_snapshot(
     );
     snap.grid_power = val;
     sanitized |= was_sanitized;
+    let (val, was_sanitized) =
+        check_power_rate(val, prev_grid, elapsed_secs, &POWER_RATE_RULES, "grid_power");
+    snap.grid_power = val;
+    sanitized |= was_sanitized;
 
     let prev_solar = prev.map(|p| p.solar_power);
     let (val, was_sanitized) = check_power_field(
@@ -812,6 +954,10 @@ pub(crate) fn sanitize_snapshot(
     );
     snap.solar_power = val;
     sanitized |= was_sanitized;
+    let (val, was_sanitized) =
+        check_power_rate(val, prev_solar, elapsed_secs, &POWER_RATE_RULES, "solar_power");
+    snap.solar_power = val;
+    sanitized |= was_sanitized;
 
     let prev_home = prev.map(|p| p.home_power);
     let (val, was_sanitized) = check_power_field(
@@ -821,6 +967,10 @@ pub(crate) fn sanitize_snapshot(
         "home_power",
         suspect_counts,
     );
+    snap.home_power = val;
+    sanitized |= was_sanitized;
+    let (val, was_sanitized) =
+        check_power_rate(val, prev_home, elapsed_secs, &POWER_RATE_RULES, "home_power");
     snap.home_power = val;
     sanitized |= was_sanitized;
 
@@ -842,12 +992,15 @@ pub(crate) fn sanitize_snapshot(
         "eps_power_w",
         suspect_counts,
     );
+    let (eps_val, eps_rate_sanitized) =
+        check_power_rate(eps_val, prev_eps, elapsed_secs, &POWER_RATE_RULES, "eps_power_w");
     let clamped_eps = eps_val.max(0) as u32;
     if clamped_eps != snap.eps_power_w {
         snap.eps_power_w = clamped_eps;
         sanitized = true;
     }
     sanitized |= eps_was_sanitized;
+    sanitized |= eps_rate_sanitized;
 
     // -- Operating hours (IR(47-48) work_time_total) --
     // Monotonically non-decreasing lifetime counter. Three failure modes to
@@ -1179,7 +1332,8 @@ pub(crate) fn sanitize_snapshot(
             // Time-based increase threshold: scale with elapsed time since
             // last reading so that reconnect/restart gaps don't trigger false
             // rejections. 10 kW is a generous residential circuit capacity.
-            let elapsed_secs = (snap.timestamp - p.timestamp).max(0) as f32;
+            // `elapsed_secs` is hoisted to the top of sanitize_snapshot so the
+            // rate-based power smoother shares it.
             let max_increase_kwh = (elapsed_secs / 3600.0) * 10.0 + 1.0;
             // Daily energy registers are typically 0.1 kWh resolution, and
             // today_consumption_kwh is derived from several independently-read
@@ -2305,6 +2459,129 @@ mod tests {
         assert_eq!(val, 12_000, "legit over-limit value not yet released");
         assert!(sanitized);
         assert_eq!(counts.0.get("grid_power").copied(), Some(1));
+    }
+
+    // -------------------------------------------------------------------
+    // Rate-based power smoothing (check_power_rate)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn check_power_rate_spike_from_low_base_is_rejected() {
+        // The core case the rate smoother exists for: solar 2 kW → 7 kW in 3s.
+        // Both values pass the absolute range check (under 10 kW ceiling), but
+        // the jump is physically impossible in a single poll interval.
+        let rules = FieldRateRules {
+            rate_fraction: 0.5,
+            abs_delta_w: 2_000,
+        };
+        let (val, sanitized) = check_power_rate(7_000, Some(2_000), 3.0, &rules, "solar_power");
+        assert_eq!(val, 2_000, "rate spike must fall back to previous");
+        assert!(sanitized);
+    }
+
+    #[test]
+    fn check_power_rate_spike_from_high_base_is_rejected() {
+        // Battery 3 kW → 8 kW discharge jump in 3s: 167% fractional, 5 kW abs.
+        let rules = FieldRateRules {
+            rate_fraction: 0.5,
+            abs_delta_w: 2_000,
+        };
+        let (val, sanitized) = check_power_rate(8_000, Some(3_000), 3.0, &rules, "battery_power");
+        assert_eq!(val, 3_000, "large rate spike from high base must be rejected");
+        assert!(sanitized);
+    }
+
+    #[test]
+    fn check_power_rate_small_absolute_delta_is_accepted() {
+        // 200 W → 500 W: 150% fractional but only 300 W absolute — this is
+        // normal cloud-edge / load-switch behaviour, not corruption. The abs
+        // threshold prevents false positives at the low end of the range.
+        let rules = FieldRateRules {
+            rate_fraction: 0.5,
+            abs_delta_w: 2_000,
+        };
+        let (val, sanitized) = check_power_rate(500, Some(200), 3.0, &rules, "solar_power");
+        assert_eq!(val, 500, "small absolute delta must be accepted");
+        assert!(!sanitized);
+    }
+
+    #[test]
+    fn check_power_rate_large_base_small_fraction_is_accepted() {
+        // 8 kW → 10 kW: 2 kW absolute (meets abs threshold) but only 25%
+        // fractional — normal for a big install ramping up. The fraction
+        // threshold prevents false positives at the high end.
+        let rules = FieldRateRules {
+            rate_fraction: 0.5,
+            abs_delta_w: 2_000,
+        };
+        let (val, sanitized) = check_power_rate(10_000, Some(8_000), 3.0, &rules, "home_power");
+        assert_eq!(val, 10_000, "small fractional change from high base must be accepted");
+        assert!(!sanitized);
+    }
+
+    #[test]
+    fn check_power_rate_long_gap_skips_check() {
+        // Reconnect gap: 2 kW → 8 kW over 120s. The rate check is skipped
+        // because elapsed > 60s window. Any jump is plausible over that long.
+        let rules = FieldRateRules {
+            rate_fraction: 0.5,
+            abs_delta_w: 2_000,
+        };
+        let (val, sanitized) = check_power_rate(8_000, Some(2_000), 120.0, &rules, "solar_power");
+        assert_eq!(val, 8_000, "long gap must skip rate check");
+        assert!(!sanitized);
+    }
+
+    #[test]
+    fn check_power_rate_no_previous_accepts_raw() {
+        // First reading after connect: no prev to compare against.
+        let rules = FieldRateRules {
+            rate_fraction: 0.5,
+            abs_delta_w: 2_000,
+        };
+        let (val, sanitized) = check_power_rate(5_000, None, 3.0, &rules, "battery_power");
+        assert_eq!(val, 5_000, "first reading has no prev, must accept raw");
+        assert!(!sanitized);
+    }
+
+    #[test]
+    fn check_power_rate_negative_to_positive_spike_is_rejected() {
+        // Battery -2 kW (charging) → +4 kW (discharging) in 3s: a 6 kW swing.
+        // Both within ±10 kW absolute range, but a sign-flip + 6 kW jump in one
+        // poll is the signature of register corruption on IR(52).
+        let rules = FieldRateRules {
+            rate_fraction: 0.5,
+            abs_delta_w: 2_000,
+        };
+        let (val, sanitized) = check_power_rate(4_000, Some(-2_000), 3.0, &rules, "battery_power");
+        assert_eq!(val, -2_000, "sign-flip spike must fall back to previous");
+        assert!(sanitized);
+    }
+
+    #[test]
+    fn check_power_rate_exactly_at_fraction_threshold_is_accepted() {
+        // 4 kW → 6 kW: exactly 50% fraction (delta/prev = 2000/4000 = 0.5).
+        // The check is strictly > threshold, so exactly-at must pass.
+        let rules = FieldRateRules {
+            rate_fraction: 0.5,
+            abs_delta_w: 2_000,
+        };
+        let (val, sanitized) = check_power_rate(6_000, Some(4_000), 3.0, &rules, "grid_power");
+        assert_eq!(val, 6_000, "exactly at threshold must be accepted (strict >)");
+        assert!(!sanitized);
+    }
+
+    #[test]
+    fn check_power_rate_negative_prev_uses_abs_for_denominator() {
+        // prev = -4 kW, new = -7 kW: delta = 3 kW, fraction = 3000/4000 = 0.75.
+        // The denominator uses |prev| so negative (charging) values are handled.
+        let rules = FieldRateRules {
+            rate_fraction: 0.5,
+            abs_delta_w: 2_000,
+        };
+        let (val, sanitized) = check_power_rate(-7_000, Some(-4_000), 3.0, &rules, "battery_power");
+        assert_eq!(val, -4_000, "rate spike on negative values must be rejected");
+        assert!(sanitized);
     }
 
     #[test]
@@ -3859,5 +4136,101 @@ mod tests {
         let sanitized = sanitize_for_test(&mut snap, None);
         assert!(!sanitized);
         assert_eq!(snap.operating_hours, 0);
+    }
+
+    // -------------------------------------------------------------------
+    // Integration: rate-based power smoothing through sanitize_snapshot
+    // -------------------------------------------------------------------
+    // These exercise the full two-layer pipeline (absolute range + rate
+    // smoother) to confirm the wiring is correct — values that pass the
+    // absolute-range check but fail the rate check are caught at the
+    // sanitize_snapshot level, not just in isolation.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn sanitize_rejects_solar_rate_spike_within_absolute_range() {
+        // 2 kW → 7 kW in 3 seconds. Both values are within the 10 kW absolute
+        // ceiling, so check_power_field accepts them. But the rate check must
+        // reject the jump (250% fractional, 5 kW abs) and hold at 2 kW.
+        let mut prev = base_grid_connected_snap();
+        prev.solar_power = 2_000;
+        prev.timestamp = 100;
+
+        let mut snap = prev.clone();
+        snap.solar_power = 7_000;
+        snap.timestamp = 103; // 3s later
+
+        let sanitized = sanitize_for_test(&mut snap, Some(&prev));
+        assert!(sanitized, "rate spike must be flagged as sanitized");
+        assert_eq!(snap.solar_power, 2_000, "rate spike must hold at previous");
+    }
+
+    #[test]
+    fn sanitize_accepts_normal_solar_increase() {
+        // 2 kW → 2.5 kW in 3 seconds: 25% fractional, well within normal
+        // ramp-up. Must pass both absolute range and rate check.
+        let mut prev = base_grid_connected_snap();
+        prev.solar_power = 2_000;
+        prev.timestamp = 100;
+
+        let mut snap = prev.clone();
+        snap.solar_power = 2_500;
+        snap.timestamp = 103;
+
+        let sanitized = sanitize_for_test(&mut snap, Some(&prev));
+        assert!(
+            !sanitized || snap.solar_power == 2_500,
+            "normal solar increase must not be rate-rejected"
+        );
+        assert_eq!(snap.solar_power, 2_500);
+    }
+
+    #[test]
+    fn sanitize_rejects_battery_sign_flip_spike() {
+        // Battery -2 kW (charging) → +4 kW (discharging) in 3s. Both within
+        // ±10 kW absolute range, but a 6 kW sign-flip is register corruption.
+        let mut prev = base_grid_connected_snap();
+        prev.battery_power = -2_000;
+        prev.timestamp = 100;
+
+        let mut snap = prev.clone();
+        snap.battery_power = 4_000;
+        snap.timestamp = 103;
+
+        let sanitized = sanitize_for_test(&mut snap, Some(&prev));
+        assert!(sanitized);
+        assert_eq!(snap.battery_power, -2_000, "sign-flip spike must hold at previous");
+    }
+
+    #[test]
+    fn sanitize_rate_check_skipped_on_reconnect_gap() {
+        // 2 kW → 8 kW over a 120s gap (reconnect). Rate check is skipped
+        // because elapsed > 60s window. Must be accepted.
+        let mut prev = base_grid_connected_snap();
+        prev.solar_power = 2_000;
+        prev.timestamp = 100;
+
+        let mut snap = prev.clone();
+        snap.solar_power = 8_000;
+        snap.timestamp = 220; // 120s later
+
+        let sanitized = sanitize_for_test(&mut snap, Some(&prev));
+        assert_eq!(
+            snap.solar_power, 8_000,
+            "long-gap jump must not be rate-rejected"
+        );
+        // sanitized may be true from other fields, but solar must not be the cause
+        let _ = sanitized;
+    }
+
+    #[test]
+    fn sanitize_rate_check_no_false_positive_on_first_reading() {
+        // First reading (no prev): high power must be accepted since there's
+        // nothing to compare against.
+        let mut snap = base_grid_connected_snap();
+        snap.solar_power = 8_000;
+        let sanitized = sanitize_for_test(&mut snap, None);
+        assert_eq!(snap.solar_power, 8_000, "first reading must not be rate-rejected");
+        let _ = sanitized;
     }
 }

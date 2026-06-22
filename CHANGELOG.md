@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.36.3] - 2026-06-22
+
+### Improved
+
+- **Better protection against sudden power spikes from the data adapter.**
+  The app now catches readings that look plausible on their own but jump
+  unrealistically fast between updates — for example solar power leaping
+  from 2 kW to 7 kW in a single three-second poll. Both values are within
+  the normal range, but such a rapid swing is physically impossible and
+  was passing through the existing checks. The new rate-based filter holds
+  the previous reading for one cycle, then lets the real value through
+  once it catches up. This mirrors the multi-layer corruption defence used
+  by GivTCP.
+
 ## [0.36.2] - 2026-06-21
 
 ### Fixed
