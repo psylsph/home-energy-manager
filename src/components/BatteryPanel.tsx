@@ -139,7 +139,7 @@ function BatteryPanelInner({ snapshot: s }: Props) {
           <span className="text-text-secondary">Voltage</span>
           <span className="text-text-primary font-mono text-right">{formatVoltage(s.battery_voltage)}</span>
           <span className="text-text-secondary">Current</span>
-          <span className="text-text-primary font-mono text-right">{formatCurrent(s.battery_current)}</span>
+          <span className="text-text-primary font-mono text-right">{formatCurrent(Math.abs(s.battery_current))}</span>
           <span className="text-text-secondary">Temperature</span>
           <span className="text-text-primary font-mono text-right">{formatTemp(s.battery_temperature)}</span>
           <span className="text-text-secondary">Mode</span>

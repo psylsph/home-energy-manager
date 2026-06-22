@@ -832,6 +832,14 @@ pub struct InverterSnapshot {
     /// Max AC output power in watts (per device model).
     #[serde(default)]
     pub max_ac_power_w: u32,
+    /// Export power limit in watts (0 = unlimited / not configured).
+    ///
+    /// Single-phase / AC-coupled models: read from HR(26) `grid_port_max_power_output`
+    /// (raw uint16 W). Three-phase / HV models: read from HR(1063) `p_export_limit`
+    /// (deci-W, /10 → W). EMS/Gateway plant-level: HR(2071) (raw W). The field
+    /// stores whichever source was decoded for the current device type.
+    #[serde(default)]
+    pub export_limit_w: u32,
     /// Charge target SOC (HR 116 / HR 1111), clamped to min 4 to protect battery.
     #[serde(default = "default_soc_reserve")]
     pub target_soc: u8,

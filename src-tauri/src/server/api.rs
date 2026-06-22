@@ -1349,6 +1349,54 @@ pub async fn set_active_power_rate(
     }
 }
 
+/// POST /api/control/export-limit — set the inverter export power limit.
+///
+/// Routes the write to the correct register based on the active device type:
+///   - EMS / Gateway / EmsCommercial → HR 2071 (`SetEmsExportLimit`, raw W)
+///   - Three-phase / HV / AIO        → HR 1063 (`SetThreePhaseExportLimit`, deci-W)
+///   - All other models                → 400 (single-phase models have no
+///     user-writable export limit register in the givenergy-modbus reference;
+///
+///     HR(26) is read-only `grid_port_max_power_output`. The UI is expected
+///     to gate this control on `deviceSupportsExportLimit` so the endpoint
+///     rejects out-of-gauge requests cleanly.)
+pub async fn set_export_limit(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<Value>) {
+    let watts: u16 = match body["watts"].as_u64() {
+        Some(w) => w as u16,
+        None => return error_response("Missing 'watts' field"),
+    };
+
+    let device_type = latest_device_type(&state).await;
+    let cmd = if device_type.needs_gateway_input_blocks()
+        || matches!(
+            device_type,
+            DeviceType::Ems | DeviceType::EmsCommercial
+        )
+    {
+        // EMS / Gateway plant-level (HR 2071).
+        ControlCommand::SetEmsExportLimit { watts }
+    } else if device_type.needs_three_phase_input_blocks() {
+        // Three-phase / HV / AIO plant-level (HR 1063, deci-W).
+        ControlCommand::SetThreePhaseExportLimit { watts }
+    } else {
+        return error_response(
+            "Export limit control is not available on this inverter (single-phase / AC-coupled)",
+        );
+    };
+
+    match cmd.encode() {
+        Ok(writes) => {
+            tracing::info!("SetExportLimit ({:?}) encoded: {:?}", device_type, writes);
+            queue_writes(&state, writes).await;
+            ok_response(&format!("Export limit set to {} W", watts))
+        }
+        Err(e) => error_response(&format!("Validation error: {}", e)),
+    }
+}
+
 /// POST /api/control/pause — pause the battery (restore to Eco mode).
 ///
 /// Disables discharge, restores self-consumption mode, clears any stale

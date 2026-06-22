@@ -19,6 +19,7 @@ use crate::modbus::registers::{
     HR_3PH_DISCHARGE_SLOT_1_START,
     HR_3PH_DISCHARGE_SLOT_2_END,
     HR_3PH_DISCHARGE_SLOT_2_START,
+    HR_3PH_EXPORT_LIMIT,
     HR_3PH_FORCE_CHARGE_ENABLE,
     HR_3PH_FORCE_DISCHARGE_ENABLE,
     HR_ACTIVE_POWER_RATE,
@@ -33,6 +34,7 @@ use crate::modbus::registers::{
     HR_BATTERY_PAUSE_SLOT_1_START,
     HR_BATTERY_POWER_MODE,
     HR_BATTERY_SOC_RESERVE,
+    HR_EMS_EXPORT_POWER_LIMIT,
     HR_CHARGE_SLOT_10_END,
     HR_CHARGE_SLOT_10_START,
     HR_CHARGE_SLOT_1_END,
@@ -242,6 +244,13 @@ pub enum ControlCommand {
     ThreePhaseForceDischarge,
     /// Three-phase Cosy exit: clear HR 1123, 1112, 1122 and restore eco mode.
     ThreePhaseCosyExit,
+    /// Set EMS/Gateway plant-level export power limit (HR 2071, W).
+    /// Only present on EMS / Gateway / EmsCommercial hardware.
+    SetEmsExportLimit { watts: u16 },
+    /// Set three-phase plant-level export power limit (HR 1063, deci-W).
+    /// Distinct from single-phase HR(26) (raw W) and EMS HR(2071).
+    /// Routes through the three-phase high config block.
+    SetThreePhaseExportLimit { watts: u16 },
 }
 
 impl ControlCommand {
@@ -513,6 +522,25 @@ impl ControlCommand {
                     rw(HR_3PH_FORCE_DISCHARGE_ENABLE, 0), // clear force discharge
                     rw(HR_BATTERY_POWER_MODE, 1),         // eco mode (common register)
                 ]
+            }
+            ControlCommand::SetEmsExportLimit { watts } => {
+                // HR 2071 — EMS/Gateway plant-level export power limit.
+                // Per GivTCP entity_lut.py:89 the `Export_Limit` entity is
+                // bounded [0..22000] W (22 kW is the practical upper limit
+                // for residential and small commercial plants). The
+                // givenergy-modbus `set_export_limit` write allows 0-65000,
+                // but 65 kW would only be sensible for utility-scale sites.
+                // Match the entity LUT ceiling so the UI slider and API
+                // validation agree.
+                validate_range(*watts, 0, 22_000, "EMS export limit")?;
+                vec![rw(HR_EMS_EXPORT_POWER_LIMIT, *watts)]
+            }
+            ControlCommand::SetThreePhaseExportLimit { watts } => {
+                // HR 1063 — three-phase plant-level export power limit (deci-W).
+                // Same [0..22000] W ceiling as SetEmsExportLimit. Convert W to
+                // deci-W (raw register value = W × 10).
+                validate_range(*watts, 0, 22_000, "three-phase export limit")?;
+                vec![rw(HR_3PH_EXPORT_LIMIT, (*watts).saturating_mul(10))]
             }
             ControlCommand::SyncClock => {
                 let now = Utc::now();
@@ -1208,6 +1236,42 @@ mod tests {
     fn set_active_power_rate_validates() {
         let cmd = ControlCommand::SetActivePowerRate { rate: 101 };
         assert!(cmd.encode().is_err());
+    }
+
+    #[test]
+    fn set_ems_export_limit_encodes() {
+        // 3680 W = typical UK G98/G99 DNO-imposed 16A single-phase limit.
+        let cmd = ControlCommand::SetEmsExportLimit { watts: 3680 };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].address, HR_EMS_EXPORT_POWER_LIMIT);
+        assert_eq!(writes[0].value, 3680);
+    }
+
+    #[test]
+    fn set_ems_export_limit_validates_range() {
+        // 0 disables the limit; max is 22 kW per GivTCP entity_lut.py:89.
+        assert!(ControlCommand::SetEmsExportLimit { watts: 0 }.encode().is_ok());
+        assert!(ControlCommand::SetEmsExportLimit { watts: 22_000 }.encode().is_ok());
+        assert!(ControlCommand::SetEmsExportLimit { watts: 22_001 }.encode().is_err());
+    }
+
+    #[test]
+    fn set_three_phase_export_limit_converts_to_deci_w() {
+        // 5000 W → 50_000 deci-W register value (HR 1063 is /10 W).
+        let cmd = ControlCommand::SetThreePhaseExportLimit { watts: 5000 };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].address, HR_3PH_EXPORT_LIMIT);
+        assert_eq!(writes[0].value, 50_000);
+    }
+
+    #[test]
+    fn set_three_phase_export_limit_validates_range() {
+        // 0 disables the limit; max is 22 kW per GivTCP entity_lut.py:89.
+        assert!(ControlCommand::SetThreePhaseExportLimit { watts: 0 }.encode().is_ok());
+        assert!(ControlCommand::SetThreePhaseExportLimit { watts: 22_000 }.encode().is_ok());
+        assert!(ControlCommand::SetThreePhaseExportLimit { watts: 22_001 }.encode().is_err());
     }
 
     #[test]

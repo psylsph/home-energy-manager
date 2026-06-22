@@ -207,6 +207,7 @@ function AutoWinterSection() {
   const [coldThreshold, setColdThreshold] = useState(8);
   const [recoveryThreshold, setRecoveryThreshold] = useState(12);
   const [targetSoc, setTargetSoc] = useState(80);
+
   const [debounce, setDebounce] = useState(10);
   const [saving, setSaving] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
@@ -2304,7 +2305,7 @@ export default function ControlPage() {
           <div className="space-y-1">
             <div className="flex items-center justify-between">
               <span className="text-text-secondary text-sm">Inverter Active Power Limit</span>
-              <span className="font-mono text-text-primary text-sm">{activePowerRate ?? '—'}%{activePowerKw != null && activePowerWatts != null && activePowerWatts > 0 ? `(${activePowerKw})` : ''}</span>
+              <span className="font-mono text-text-primary text-sm whitespace-nowrap">{activePowerRate ?? '—'}%{activePowerKw != null && activePowerWatts != null && activePowerWatts > 0 ? `(${activePowerKw})` : ''}</span>
             </div>
             <div className="flex items-center gap-3">
               <input

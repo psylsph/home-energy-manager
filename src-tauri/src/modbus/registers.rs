@@ -258,6 +258,20 @@ pub const HR_ENABLE_EPS: u16 = 317;
 /// below the reserve level even in timed modes.
 pub const HR_BATTERY_DISCHARGE_MIN_POWER_RESERVE: u16 = 114;
 
+/// Export power limit (W) — read from all single-phase / AC-coupled models.
+/// GivTCP `baseinverter.py:55` defines `grid_port_max_power_output` as HR(26).
+pub const HR_EXPORT_LIMIT: u16 = 26;
+
+/// Three-phase export power limit (deci-W, /10 → W) — read/write on three-phase / HV models.
+/// givenergy-modbus `threephase.py:91` maps `p_export_limit` → HR(1063).
+/// Distinct from single-phase HR(26) which uses raw uint16 W.
+pub const HR_3PH_EXPORT_LIMIT: u16 = 1063;
+
+/// Export power limit for EMS/Gateway plant-level control (W).
+/// GivTCP `commands.py:215` — HR 2071 in the EMS plant-level block (2040-2071).
+/// Only present on EMS/Gateway hardware; writing on non-EMS models silently fails.
+pub const HR_EMS_EXPORT_POWER_LIMIT: u16 = 2071;
+
 // ===========================================================================
 // Extended charge slots 3-10 (HR 246-268) — Gen3, AIO, HV Gen3
 // ===========================================================================
@@ -504,6 +518,8 @@ pub const SAFE_WRITE_REGS: &[u16] = &[
     // App-confirmed writable registers (givenergy-modbus #167)
     199, // ENABLE_INVERTER_PARALLEL_MODE
     331, // FORCE_OFF_GRID — non-damaging, but sustained islanding state
+    // Export limit — three-phase plant-level (1063, deci-W) and EMS/Gateway plant (2071, W)
+    1063, 2071,
     // Smart Load slots 1-10 (app-confirmed, bounded HHMM values)
     554, 555, 556, 557, 558, 559, 560, 561, 562, 563, 564, 565, 566, 567, 568, 569, 570, 571, 572,
     573,
@@ -743,6 +759,32 @@ pub const GATEWAY_INPUT_BLOCKS: &[RegisterBlock] = &[
     GATEWAY_INPUT_BLOCK_4,
     GATEWAY_INPUT_BLOCK_5,
 ];
+
+// ===========================================================================
+// EMS / Gateway plant-level holding registers (HR 2040-2075)
+// ===========================================================================
+//
+// Per givenergy-modbus `commands.py:327` and the EMS plant model, the
+// plant-level holding register block is exactly 36 registers (HR 2040-2075).
+// Key registers:
+//   HR 2040  EMS_PLANT_ENABLE              (bool)
+//   HR 2044-2052  EMS_DISCHARGE_SLOT_1..3 + target SOC
+//   HR 2053-2061  EMS_CHARGE_SLOT_1..3 + target SOC
+//   HR 2062-2070  EXPORT_SLOT_1..3 + target SOC
+//   HR 2071  EXPORT_POWER_LIMIT             (uint16 W — GivTCP `set_export_limit`)
+//   HR 2072  CAR_CHARGE_MODE
+//   HR 2073  CAR_CHARGE_BOOST
+//
+// Only polled on EMS / Gateway / EmsCommercial devices — see the device-type
+// extra_poll_blocks() routing in `inverter::model`.
+//
+// 36-register block starting at HR 2040 covers HR 2040-2075 inclusive.
+pub const EMS_PLANT_HOLDING_BLOCK: RegisterBlock = RegisterBlock {
+    start: 2040,
+    count: 36,
+    register_type: RegisterType::Holding,
+    name: "holding_2040_2075",
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
