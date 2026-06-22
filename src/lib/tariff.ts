@@ -208,9 +208,11 @@ export function removeTariffSlot(cfg: TariffConfig, index: number): TariffConfig
  * Update a single field of a slot at the given index.
  *
  * For `end` edits on a non-final slot, the next slot's `start` is
- * **cascaded** to match so the tiling stays contiguous. This is what
- * makes the disabled start-select work: the user only ever edits an end,
- * and every later slot's start follows along automatically.
+ * **cascaded** to match so the tiling stays contiguous.
+ * For `start` edits on a non-first slot, the previous slot's `end` is
+ * **cascaded** to match so the tiling stays contiguous.
+ * This is what makes the start-select work: the user edits a start or end,
+ * and the adjacent slot's boundary follows along automatically.
  */
 export function updateTariffSlot(
   cfg: TariffConfig,
@@ -225,6 +227,11 @@ export function updateTariffSlot(
   if (field === 'end' && index + 1 < newSlots.length) {
     const newEnd = value as string;
     newSlots[index + 1] = { ...newSlots[index + 1]!, start: newEnd };
+  }
+  // Cascade start-change → previous slot's end so the day stays tiled.
+  if (field === 'start' && index > 0) {
+    const newStart = value as string;
+    newSlots[index - 1] = { ...newSlots[index - 1]!, end: newStart };
   }
   return { slots: newSlots };
 }

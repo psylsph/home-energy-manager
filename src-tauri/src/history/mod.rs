@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use chrono::{Local, TimeZone, Timelike};
+use chrono::{TimeZone, Timelike};
 use rusqlite::{params, Connection, Result as SqlResult};
 use serde::Serialize;
 
@@ -83,19 +83,19 @@ fn is_cumulative_field(field: &str) -> bool {
     CUMULATIVE_FIELDS.contains(&field)
 }
 
-fn local_date_for_timestamp_ms(timestamp_ms: i64) -> Option<chrono::NaiveDate> {
+fn utc_date_for_timestamp_ms(timestamp_ms: i64) -> Option<chrono::NaiveDate> {
     let secs = timestamp_ms.div_euclid(1000);
     let nanos = (timestamp_ms.rem_euclid(1000) as u32) * 1_000_000;
-    Local
+    chrono::Utc
         .timestamp_opt(secs, nanos)
         .earliest()
         .map(|dt| dt.date_naive())
 }
 
-fn same_local_day(a_ms: i64, b_ms: i64) -> bool {
+fn same_utc_day(a_ms: i64, b_ms: i64) -> bool {
     match (
-        local_date_for_timestamp_ms(a_ms),
-        local_date_for_timestamp_ms(b_ms),
+        utc_date_for_timestamp_ms(a_ms),
+        utc_date_for_timestamp_ms(b_ms),
     ) {
         (Some(a), Some(b)) => a == b,
         _ => false,
@@ -105,11 +105,17 @@ fn same_local_day(a_ms: i64, b_ms: i64) -> bool {
 /// Repair cumulative daily counters after aggregation.
 ///
 /// The inverter's `today_*_kwh` fields are cumulative counters: they should
-/// only rise within a local day and reset around midnight. Older app versions
-/// could persist plausible-but-wrong low values after reconnects; MAX bucket
-/// aggregation does not fix a whole bad bucket/plateau. This display-side
-/// repair clamps same-day decreases to the previous good value while allowing
-/// a normal day-boundary reset.
+/// only rise within a UTC day and reset around UTC midnight. Older app
+/// versions could persist plausible-but-wrong low values after reconnects;
+/// MAX bucket aggregation does not fix a whole bad bucket/plateau. This
+/// display-side repair clamps same-UTC-day decreases to the previous good
+/// value while allowing a normal day-boundary reset.
+///
+/// UTC is used (not local time) because the inverter's internal clock runs
+/// on UTC — its `today_*_kwh` counters reset at UTC midnight regardless of
+/// the system timezone. Using local time would incorrectly clamp the reset
+/// in timezones east of UTC (e.g. BST, where 23:00–23:59 UTC falls on the
+/// next local day but still carries yesterday's counter values).
 fn repair_cumulative_points(points: &mut [TimePoint]) {
     let mut last_t: Option<i64> = None;
     let mut last_v: Option<f64> = None;
@@ -117,7 +123,7 @@ fn repair_cumulative_points(points: &mut [TimePoint]) {
 
     for point in points {
         if let (Some(prev_t), Some(prev_v)) = (last_t, last_v) {
-            if same_local_day(prev_t, point.t) && point.v < prev_v {
+            if same_utc_day(prev_t, point.t) && point.v < prev_v {
                 point.v = prev_v;
                 repaired += 1;
             }
@@ -312,8 +318,8 @@ impl HistoryDb {
                         CASE \
                           WHEN LAG({col}) OVER (ORDER BY timestamp) IS NULL THEN {col} \
                           -- Midnight rollover: counter reset to near-zero \
-                          WHEN LAG({col}) OVER (ORDER BY timestamp) > 50.0 \
-                               AND {col} < 10.0 \
+                          WHEN {col} < 1.0 \
+                               AND LAG({col}) OVER (ORDER BY timestamp) > 1.0 \
                             THEN {col} \
                           -- Zero clamp artifact: prev was 0 (old sanitizer bug) and \
                           -- current jumped by > 5 kWh (implausible for one interval). \
@@ -387,6 +393,167 @@ impl HistoryDb {
                 "INSERT OR REPLACE INTO meta (key, value) VALUES ('repair_v2_done', '1')",
             );
         } // end if !repair_done
+
+        // ---- repair_v3: undo v2's incorrect midnight-rollover threshold ----
+        // repair_v2 used `LAG(col) > 50.0 AND col < 10.0` to detect midnight
+        // counter resets. For today_charge_kwh and today_discharge_kwh (typical
+        // 5-15 kWh/day) the threshold was never reached, so the repair incorrectly
+        // carried yesterday's final value into today, inflating chart data.
+        //
+        // v3 fixes the threshold to `col < 1.0 AND LAG(col) > 1.0` and restores
+        // pre-v2 original data from the backup that v2 created before modifying rows.
+        let v3_done: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'repair_v3_done' AND value = '1')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+
+        if !v3_done {
+            let v2_ran: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'repair_v2_done' AND value = '1')",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+
+            if v2_ran {
+                let backup_path = path.with_extension("db.bak");
+                if backup_path.exists() {
+                    tracing::info!(
+                        "repair_v3: restoring original data from backup"
+                    );
+                    let bak_str = backup_path.to_string_lossy().replace('\'', "''");
+                    if let Err(e) = conn.execute(
+                        &format!("ATTACH DATABASE '{}' AS bak", bak_str),
+                        [],
+                    ) {
+                        tracing::warn!("repair_v3: failed to attach backup: {e}");
+                    } else {
+                        let energy_cols = [
+                            "today_solar_kwh",
+                            "today_import_kwh",
+                            "today_export_kwh",
+                            "today_charge_kwh",
+                            "today_discharge_kwh",
+                            "today_consumption_kwh",
+                            "today_ac_charge_kwh",
+                        ];
+                        for col in &energy_cols {
+                            // Try to restore each column. If the backup table
+                            // doesn't have this column, the UPDATE will fail
+                            // with "no such column" — we catch and skip.
+                            let sql = format!(
+                                "UPDATE readings SET {col} = (\
+                                  SELECT {col} FROM bak.readings \
+                                  WHERE bak.readings.timestamp = main.readings.timestamp\
+                                ) WHERE timestamp IN (\
+                                  SELECT timestamp FROM bak.readings \
+                                  WHERE {col} IS NOT NULL\
+                                )"
+                            );
+                            if let Err(e) = conn.execute(&sql, []) {
+                                tracing::debug!(
+                                    "repair_v3: could not restore {col}: {e}"
+                                );
+                            }
+                        }
+                        if let Err(e) = conn.execute_batch("DETACH bak") {
+                            tracing::warn!("repair_v3: failed to detach backup: {e}");
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        "repair_v3: no backup found at {} — cannot automatically restore",
+                        backup_path.display()
+                    );
+                }
+            }
+
+            // Re-run the corrected repair with the fixed threshold, either on
+            // restored data (if v2 corrupted it) or on the original database.
+            // This uses the same logic as the v2 block above, repeated here so
+            // the fixed threshold applies even if v2 already ran.
+            let v3_energy_cols = [
+                "today_solar_kwh",
+                "today_import_kwh",
+                "today_export_kwh",
+                "today_charge_kwh",
+                "today_discharge_kwh",
+                "today_consumption_kwh",
+                "today_ac_charge_kwh",
+            ];
+            for col in &v3_energy_cols {
+                let repair_sql_v3 = format!(
+                    "CREATE TABLE IF NOT EXISTS _repair_v3_{col} AS \
+                     SELECT timestamp, {col} AS orig, \
+                            CASE \
+                              WHEN LAG({col}) OVER (ORDER BY timestamp) IS NULL THEN {col} \
+                              -- Midnight rollover: counter reset to near-zero \
+                              WHEN {col} < 1.0 \
+                                   AND LAG({col}) OVER (ORDER BY timestamp) > 1.0 \
+                                THEN {col} \
+                              -- Zero clamp artifact: prev was 0 (old sanitizer bug) and \
+                              -- current jumped by > 5 kWh (implausible for one interval). \
+                              -- Replace with the value BEFORE the 0 to avoid cost spikes. \
+                              WHEN LAG({col}) OVER (ORDER BY timestamp) = 0.0 \
+                                   AND {col} > 5.0 \
+                                   AND LAG({col}, 2, 0) OVER (ORDER BY timestamp) > 0.0 \
+                                THEN LAG({col}, 2, {col}) OVER (ORDER BY timestamp) \
+                              -- Zero clamp artifact: current value IS the 0, replace with prev \
+                              WHEN {col} = 0.0 \
+                                   AND LAG({col}) OVER (ORDER BY timestamp) > 1.0 \
+                                   AND LEAD({col}, 1, {col}) OVER (ORDER BY timestamp) > LAG({col}) OVER (ORDER BY timestamp) \
+                                THEN LAG({col}) OVER (ORDER BY timestamp) \
+                              -- Small decrease (glitch): replace with previous \
+                              WHEN {col} < LAG({col}) OVER (ORDER BY timestamp) \
+                                THEN LAG({col}) OVER (ORDER BY timestamp) \
+                              ELSE {col} \
+                            END AS repaired \
+                     FROM readings \
+                     WHERE {col} IS NOT NULL \
+                     ORDER BY timestamp"
+                );
+                let _ = conn.execute_batch(&repair_sql_v3);
+
+                let count: i64 = conn
+                    .query_row(
+                        &format!(
+                            "SELECT COUNT(*) FROM _repair_v3_{col} WHERE orig != repaired"
+                        ),
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(0);
+
+                if count > 0 {
+                    tracing::info!(
+                        "repair_v3: repairing {count} {col} values"
+                    );
+                    let apply_sql = format!(
+                        "UPDATE readings SET {col} = (\
+                          SELECT repaired FROM _repair_v3_{col} \
+                          WHERE _repair_v3_{col}.timestamp = readings.timestamp\
+                        ) WHERE timestamp IN (\
+                          SELECT timestamp FROM _repair_v3_{col} WHERE orig != repaired\
+                        )"
+                    );
+                    if let Err(e) = conn.execute_batch(&apply_sql) {
+                        tracing::warn!("repair_v3: failed to repair {col}: {e}");
+                    }
+                }
+
+                let _ = conn.execute_batch(&format!(
+                    "DROP TABLE IF EXISTS _repair_v3_{col}"
+                ));
+            }
+
+            let _ = conn.execute_batch(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('repair_v3_done', '1')",
+            );
+        }
 
         tracing::info!("History database opened at {}", path.display());
         Ok(Self {
@@ -1190,9 +1357,9 @@ mod tests {
         let base = 1700000000i64;
 
         db.insert_reading(&make_snapshot_with_kwh(base, 150.0, 80.0));
-        db.insert_reading(&make_snapshot_with_kwh(base + 60, 5.0, 1.0)); // midnight reset
-        db.insert_reading(&make_snapshot_with_kwh(base + 120, 8.0, 2.0));
-        db.insert_reading(&make_snapshot_with_kwh(base + 180, 15.0, 5.0));
+        db.insert_reading(&make_snapshot_with_kwh(base + 60, 0.5, 1.0)); // midnight reset
+        db.insert_reading(&make_snapshot_with_kwh(base + 120, 2.0, 2.0));
+        db.insert_reading(&make_snapshot_with_kwh(base + 180, 6.0, 5.0));
 
         // Execute the repair SQL directly and check results
         let conn = db.conn.lock().unwrap();
@@ -1200,8 +1367,8 @@ mod tests {
             SELECT timestamp, today_import_kwh AS orig,
                    CASE
                      WHEN LAG(today_import_kwh) OVER (ORDER BY timestamp) IS NULL THEN today_import_kwh
-                     WHEN LAG(today_import_kwh) OVER (ORDER BY timestamp) > 50.0
-                          AND today_import_kwh < 10.0
+                     WHEN today_import_kwh < 1.0
+                          AND LAG(today_import_kwh) OVER (ORDER BY timestamp) > 1.0
                        THEN today_import_kwh
                      WHEN today_import_kwh < LAG(today_import_kwh) OVER (ORDER BY timestamp)
                        THEN LAG(today_import_kwh) OVER (ORDER BY timestamp)
@@ -1227,17 +1394,17 @@ mod tests {
         // Row 0: 150.0 → keep 150.0
         assert!((rows[0].1 - 150.0).abs() < 0.01);
         assert!((rows[0].2 - 150.0).abs() < 0.01);
-        // Row 1: 5.0 → midnight rollover, keep 5.0 (NOT replace with 150.0!)
-        assert!((rows[1].1 - 5.0).abs() < 0.01, "orig should be 5.0");
+        // Row 1: 0.5 → midnight rollover, keep 0.5 (NOT replace with 150.0!)
+        assert!((rows[1].1 - 0.5).abs() < 0.01, "orig should be 0.5");
         assert!(
-            (rows[1].2 - 5.0).abs() < 0.01,
-            "repaired should be 5.0 (midnight rollover kept), got {}",
+            (rows[1].2 - 0.5).abs() < 0.01,
+            "repaired should be 0.5 (midnight rollover kept), got {}",
             rows[1].2
         );
-        // Row 2: 8.0 → normal increase from 5.0, keep 8.0
-        assert!((rows[2].2 - 8.0).abs() < 0.01);
-        // Row 3: 15.0 → normal increase, keep 15.0
-        assert!((rows[3].2 - 15.0).abs() < 0.01);
+        // Row 2: 2.0 → normal increase from 0.5, keep 2.0
+        assert!((rows[2].2 - 2.0).abs() < 0.01);
+        // Row 3: 6.0 → normal increase, keep 6.0
+        assert!((rows[3].2 - 6.0).abs() < 0.01);
     }
 
     #[test]
@@ -1999,5 +2166,216 @@ mod tests {
         assert!(read(3_000).abs() < 1e-6, "midnight-reset row left at 0, got {}", read(3_000));
         assert!((read(4_000) - 9.1).abs() < 1e-6, "already-populated row untouched, got {}", read(4_000));
         assert!(read(5_000).abs() < 1e-6, "no-consumption-data row left at 0, got {}", read(5_000));
+    }
+    #[test]
+    fn repair_v3_restores_from_backup_and_fixes_midnight_rollover() {
+        // Simulate a database that was corrupted by repair_v2's incorrect
+        // midnight-rollover threshold (prev > 50.0 AND cur < 10.0).
+        //
+        // v2 carried yesterday's final today_charge_kwh (8.5) into today's
+        // first rows instead of keeping the midnight reset (~0). v3 should
+        // restore original values from the backup and re-run the corrected
+        // repair with the fixed threshold (cur < 1.0 AND prev > 1.0).
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        static V3_COUNTER: AtomicU32 = AtomicU32::new(1000);
+        let id = V3_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("givenergy-v3-test-{id}"));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("history.db");
+        let backup_path = path.with_extension("db.bak");
+
+        // ---- Step 1: create original (uncorrupted) data ----
+        // Day 1: today_charge_kwh climbs 0 -> 8.5
+        // Day 2: today_charge_kwh climbs 0 -> 7.2 (midnight reset)
+        let day1_noon = 1705320000i64;      // 2024-01-15 12:00 UTC
+        let day2_midnight = 1705363200i64;  // 2024-01-16 00:00 UTC
+        let day2_noon = 1705406400i64;      // 2024-01-16 12:00 UTC
+
+        // Write original data to the backup file first (pre-v2 state)
+        // Remove any stale backup from a previous run.
+        let _ = std::fs::remove_file(&backup_path);
+        {
+            let bak_conn = Connection::open(&backup_path).unwrap();
+            bak_conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS readings (
+                    timestamp INTEGER PRIMARY KEY,
+                    today_charge_kwh REAL,
+                    today_discharge_kwh REAL
+                )"
+            ).unwrap();
+            // Day 1: 0 -> 8.5
+            bak_conn.execute(
+                "INSERT INTO readings (timestamp, today_charge_kwh, today_discharge_kwh) VALUES (?1, ?2, ?3)",
+                rusqlite::params![day1_noon, 0.0, 0.0],
+            ).unwrap();
+            bak_conn.execute(
+                "INSERT INTO readings (timestamp, today_charge_kwh, today_discharge_kwh) VALUES (?1, ?2, ?3)",
+                rusqlite::params![day1_noon + 300, 2.1, 0.0],
+            ).unwrap();
+            bak_conn.execute(
+                "INSERT INTO readings (timestamp, today_charge_kwh, today_discharge_kwh) VALUES (?1, ?2, ?3)",
+                rusqlite::params![day1_noon + 600, 5.3, 0.0],
+            ).unwrap();
+            bak_conn.execute(
+                "INSERT INTO readings (timestamp, today_charge_kwh, today_discharge_kwh) VALUES (?1, ?2, ?3)",
+                rusqlite::params![day1_noon + 900, 8.5, 0.0],
+            ).unwrap();
+            // Day 2: 0 -> 7.2 (midnight reset)
+            bak_conn.execute(
+                "INSERT INTO readings (timestamp, today_charge_kwh, today_discharge_kwh) VALUES (?1, ?2, ?3)",
+                rusqlite::params![day2_midnight + 60, 0.3, 0.0],
+            ).unwrap();
+            bak_conn.execute(
+                "INSERT INTO readings (timestamp, today_charge_kwh, today_discharge_kwh) VALUES (?1, ?2, ?3)",
+                rusqlite::params![day2_midnight + 300, 1.8, 0.0],
+            ).unwrap();
+            bak_conn.execute(
+                "INSERT INTO readings (timestamp, today_charge_kwh, today_discharge_kwh) VALUES (?1, ?2, ?3)",
+                rusqlite::params![day2_noon, 4.5, 0.0],
+            ).unwrap();
+            bak_conn.execute(
+                "INSERT INTO readings (timestamp, today_charge_kwh, today_discharge_kwh) VALUES (?1, ?2, ?3)",
+                rusqlite::params![day2_noon + 600, 7.2, 0.0],
+            ).unwrap();
+        }
+
+        // ---- Step 2: create main database with v2-corrupted data ----
+        // Copy backup to main, then corrupt day 2 data (carry forward 8.5)
+        std::fs::copy(&backup_path, &path).unwrap();
+        {
+            let main_conn = Connection::open(&path).unwrap();
+            // Corrupt day 2: set all day 2 values to 8.5 (v2 bug: carried forward)
+            main_conn.execute(
+                "UPDATE readings SET today_charge_kwh = 8.5 WHERE timestamp >= ?1",
+                rusqlite::params![day2_midnight],
+            ).unwrap();
+            // Set repair_v2_done meta flag so v3 knows v2 previously ran
+            main_conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            ).unwrap();
+            main_conn.execute_batch(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('repair_v2_done', '1')"
+            ).unwrap();
+        }
+
+        // ---- Step 3: open the database (triggers v3 migration) ----
+        let db = HistoryDb::open(&path).unwrap();
+        let conn = db.conn.lock().unwrap();
+
+        // ---- Step 4: verify data is corrected ----
+        // Day 1 should be unchanged (wasn't corrupted)
+        let d1_r1: f64 = conn.query_row(
+            "SELECT today_charge_kwh FROM readings WHERE timestamp = ?",
+            rusqlite::params![day1_noon],
+            |row| row.get(0),
+        ).unwrap();
+        assert!((d1_r1 - 0.0).abs() < 0.01, "day1 start should be 0.0, got {d1_r1}");
+
+        let d1_r4: f64 = conn.query_row(
+            "SELECT today_charge_kwh FROM readings WHERE timestamp = ?",
+            rusqlite::params![day1_noon + 900],
+            |row| row.get(0),
+        ).unwrap();
+        assert!((d1_r4 - 8.5).abs() < 0.01, "day1 end should be 8.5, got {d1_r4}");
+
+        // Day 2 should be restored from backup (not carrying forward 8.5)
+        let d2_r1: f64 = conn.query_row(
+            "SELECT today_charge_kwh FROM readings WHERE timestamp = ?",
+            rusqlite::params![day2_midnight + 60],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(
+            (d2_r1 - 0.3).abs() < 0.01,
+            "day2 first row should be 0.3 (midnight reset), got {d2_r1}"
+        );
+
+        let d2_r2: f64 = conn.query_row(
+            "SELECT today_charge_kwh FROM readings WHERE timestamp = ?",
+            rusqlite::params![day2_midnight + 300],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(
+            (d2_r2 - 1.8).abs() < 0.01,
+            "day2 second row should be 1.8, got {d2_r2}"
+        );
+
+        let d2_r3: f64 = conn.query_row(
+            "SELECT today_charge_kwh FROM readings WHERE timestamp = ?",
+            rusqlite::params![day2_noon],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(
+            (d2_r3 - 4.5).abs() < 0.01,
+            "day2 noon should be 4.5, got {d2_r3}"
+        );
+
+        let d2_r4: f64 = conn.query_row(
+            "SELECT today_charge_kwh FROM readings WHERE timestamp = ?",
+            rusqlite::params![day2_noon + 600],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(
+            (d2_r4 - 7.2).abs() < 0.01,
+            "day2 end should be 7.2, got {d2_r4}"
+        );
+
+        // Verify v3 meta flag was set
+        let v3_flag: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'repair_v3_done' AND value = '1')",
+            [],
+            |row| row.get(0),
+        ).unwrap_or(false);
+        assert!(v3_flag, "repair_v3_done meta flag should be set");
+
+        // Clean up
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repair_v3_skips_when_already_done() {
+        // Verify that v3 does NOT re-run if the meta flag is already set.
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        static V3_SKIP_COUNTER: AtomicU32 = AtomicU32::new(2000);
+        let id = V3_SKIP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("givenergy-v3-skip-{id}"));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("history.db");
+
+        // Create a database with v3 already marked done
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS readings (
+                    timestamp INTEGER PRIMARY KEY,
+                    today_charge_kwh REAL
+                )"
+            ).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            ).unwrap();
+            conn.execute_batch(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('repair_v3_done', '1')"
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO readings (timestamp, today_charge_kwh) VALUES (100, 5.0)",
+                [],
+            ).unwrap();
+        }
+
+        // Open -- v3 should skip because flag is set
+        let db = HistoryDb::open(&path).unwrap();
+        let conn = db.conn.lock().unwrap();
+
+        // Data should be untouched
+        let val: f64 = conn.query_row(
+            "SELECT today_charge_kwh FROM readings WHERE timestamp = 100",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert!((val - 5.0).abs() < 0.01, "data should be unchanged, got {val}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
