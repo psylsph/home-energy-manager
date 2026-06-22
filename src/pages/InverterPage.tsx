@@ -1,6 +1,7 @@
 import { useInverterStore } from '../store/useInverterStore';
 import { formatPower, formatVoltage, formatCurrent, formatTemp, formatEnergy, formatPercent, formatFrequency, formatOperatingHours, formatBatteryMode } from '../lib/format';
 import ColdBatteryWarning from '../components/ColdBatteryWarning';
+import { deviceSupportsExportLimit } from '../lib/deviceCapabilities';
 
 export default function InverterPage() {
   const { snapshot, connectionState } = useInverterStore();
@@ -46,6 +47,21 @@ export default function InverterPage() {
           <span className="text-text-primary font-mono text-right">{formatPower(s.max_battery_power_w)}</span>
           <span className="text-text-secondary">Max AC Output</span>
           <span className="text-text-primary font-mono text-right">{formatPower(s.max_ac_power_w)}</span>
+          {/* Grid Export Limit — only shown for device families that actually
+              implement a configurable export-limit register (three-phase /
+              HV / AIO hybrids use HR 1063; Gateway / EMS use HR 2071).
+              Single-phase / AC-coupled hybrids only expose HR(26)
+              `grid_port_max_power_output`, which is the read-only rated
+              hardware max output, not an export-limit setting — so the row is
+              hidden for them rather than showing a misleading value. */}
+          {deviceSupportsExportLimit(s) && (
+            <>
+              <span className="text-text-secondary">Grid Export Limit</span>
+              <span className="text-text-primary font-mono text-right whitespace-nowrap">
+                {s.export_limit_w > 0 ? `${(s.export_limit_w / 1000).toFixed(2)} kW` : 'No limit set'}
+              </span>
+            </>
+          )}
           <span className="text-text-secondary">Battery Capacity</span>
           <span className="text-text-primary font-mono text-right">{s.battery_capacity_kwh.toFixed(1)} kWh</span>
           <span className="text-text-secondary">Inverter Time</span>
@@ -229,7 +245,7 @@ export default function InverterPage() {
           <span className="text-text-secondary">Voltage</span>
           <span className="text-text-primary font-mono text-right">{formatVoltage(s.battery_voltage)}</span>
           <span className="text-text-secondary">Current</span>
-          <span className="text-text-primary font-mono text-right">{formatCurrent(s.battery_current)}</span>
+          <span className="text-text-primary font-mono text-right">{formatCurrent(Math.abs(s.battery_current))}</span>
           <span className="text-text-secondary">Power</span>
           <span className="text-text-primary font-mono text-right">{formatPower(s.battery_power)}</span>
           <span className="text-text-secondary">Temperature</span>

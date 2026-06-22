@@ -101,6 +101,18 @@ fn model_specific_blocks_in_poll_order(
         blocks.extend(super::registers::GATEWAY_INPUT_BLOCKS.iter());
     }
 
+    // EMS / Gateway plant-level holding registers (HR 2040-2075) — read on
+    // any batteryless device (Gateway, EMS, EmsCommercial) so the
+    // round-trip on the export limit (HR 2071) and other plant-level
+    // config (plant enable, discharge/charge/export slots, car-charge
+    // mode/boost) actually populates the snapshot. Without this, writes
+    // to HR 2071 succeed but the next poll has nothing to read back and
+    // the snapshot shows "unconfigured" even though the inverter is
+    // honouring the new limit.
+    if device_type.is_batteryless() {
+        blocks.push(&super::registers::EMS_PLANT_HOLDING_BLOCK);
+    }
+
     blocks.extend(device_type.extra_poll_blocks().iter());
     blocks
 }
@@ -1586,6 +1598,14 @@ mod tests {
         // and extended slots (HR 240-299) for slots 3-10.
         assert!(names.iter().any(|name| *name == "holding_240_299"));
         assert!(names.iter().any(|name| *name == "holding_1080_1124"));
+        // And the EMS / Gateway plant-level holding block (HR 2040-2075) so
+        // the round-trip on the export limit (HR 2071) actually populates
+        // the snapshot. Without this, writes to HR 2071 succeed but the
+        // next poll has nothing to read back and the UI shows "unconfigured".
+        assert!(
+            names.iter().any(|name| *name == "holding_2040_2075"),
+            "Gateway must poll the EMS plant-level holding block (HR 2040-2075)"
+        );
     }
 
     #[test]

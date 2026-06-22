@@ -70,6 +70,15 @@ export interface InverterSnapshot {
   active_power_rate: number;
   max_battery_power_w: number;
   max_ac_power_w: number;
+  /**
+   * Export power limit in watts (0 = unlimited / not configured).
+   * Populated only for models that expose the relevant register:
+   *   - Single-phase / AC-coupled: read from HR(26) `grid_port_max_power_output`
+   *   - Three-phase / HV / AIO: read from HR(1063) `p_export_limit` (deci-W)
+   *   - EMS / Gateway: read from HR(2071)
+   * On other models this stays at its default of 0.
+   */
+  export_limit_w: number;
   target_soc: number;
   enable_charge_target: boolean;
   enable_charge: boolean;

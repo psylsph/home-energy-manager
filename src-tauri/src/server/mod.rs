@@ -58,6 +58,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/api/control/active-power-rate",
             post(api::set_active_power_rate),
         )
+        .route("/api/control/export-limit", post(api::set_export_limit))
         .route("/api/control/pause", post(api::pause_battery))
         .route("/api/control/force-charge", post(api::force_charge))
         .route("/api/control/force-charge/stop", post(api::force_charge_stop))

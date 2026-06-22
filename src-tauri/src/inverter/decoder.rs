@@ -228,6 +228,8 @@ fn block_key(block: &crate::modbus::registers::RegisterBlock) -> &'static str {
         (RegisterType::Input, 1720) => "input_1720_1779",
         (RegisterType::Input, 1780) => "input_1780_1830",
         (RegisterType::Input, 1831) => "input_1831_1859",
+        // EMS / Gateway plant-level holding registers (HR 2040-2075).
+        (RegisterType::Holding, 2040) => "holding_2040_2075",
         _ => "unknown",
     }
 }
@@ -289,6 +291,11 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
             "input_1720_1779" => decode_gateway_1720_1779(data, &mut snap),
             "input_1780_1830" => decode_gateway_1780_1830(data, &mut snap),
             "input_1831_1859" => decode_gateway_1831_1859(data, &mut snap),
+            // EMS / Gateway plant-level holding registers (HR 2040-2075).
+            // Polled only on batteryless / Gateway / EMS device types — the
+            // encoder writes plant-level config (e.g. export limit HR 2071)
+            // and the round-trip needs to read it back.
+            "holding_2040_2075" => decode_holding_2040_2075(data, &mut snap),
             _ => {
                 log::warn!("Unknown block '{}' in decode_snapshot", key);
             }
@@ -767,6 +774,12 @@ fn decode_holding_0_59(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawC
         .max_battery_power_w
         .min((battery_capacity_w / 2.0) as u32);
 
+    // Export power limit: HR(26) — single-phase / AC-coupled / Gen1-4.
+    // Three-phase models use HR(1063) in the high config block instead.
+    if !snap.device_type.needs_three_phase_input_blocks() {
+        snap.export_limit_w = get_reg(data, 26) as u32;
+    }
+
     // Charge slot 2: HR(31-32)
     snap.charge_slots[1] = decode_timeslot(data, 31, 32);
 
@@ -1015,6 +1028,30 @@ fn decode_holding_300_359(data: &[u16], snap: &mut InverterSnapshot) {
 /// doesn't reach. Additional registers are decoded by the three-phase
 /// register getter (inverter_threephase.py).
 fn decode_holding_1000_1079(data: &[u16], snap: &mut InverterSnapshot, _raw: &mut RawConfig) {
+    // HR 1063: p_export_limit — three-phase / HV plant-level export power
+    // limit. Per givenergy-modbus threephase.py:91 the register is `C.deci`
+    // (deci-watts = raw × 0.1 W). Divide the raw value by 10 to store watts.
+    //
+    // Reject the 0xFFFF uninitialised-register fingerprint: 65535 / 10 ≈
+    // 6553 W would display as "6.55 kW" — plausible but not configured —
+    // and the snapshotter can't distinguish a real 6.5 kW setting from a
+    // never-populated register. Treat as "not configured" (0) and let
+    // the next successful poll populate the real value once the firmware
+    // has written it.
+    //
+    // Only decode HR 1063 for devices that actually use it. Batteryless
+    // devices (Gateway, EMS) get their export limit from HR 2071 via
+    // decode_holding_2040_2075 — this block runs after that one and would
+    // overwrite the correct value with 0xFFFF (uninitialised on Gateway).
+    if !snap.device_type.is_batteryless() {
+        let raw_export = get_reg(data, 1063 - 1000);
+        snap.export_limit_w = if raw_export == 0xFFFF {
+            0
+        } else {
+            raw_export as u32 / 10
+        };
+    }
+
     // HR 1078: battery_power_cutoff — three-phase battery power derating
     // percentage (0-100%). Distinct from battery_soc_reserve (HR 1109,
     // decoded in decode_holding_1080_1124). Confirmed by givenergy-modbus
@@ -1917,6 +1954,30 @@ fn decode_gateway_1831_1859(data: &[u16], snap: &mut InverterSnapshot) {
     }
 }
 
+/// HR 2040-2075: EMS / Gateway plant-level holding registers.
+///
+/// Only polled on batteryless / Gateway / EMS device types (see
+/// `EMS_PLANT_HOLDING_BLOCK` in `modbus/registers.rs`). The block is the
+/// round-trip target for plant-level writes (export limit, plant enable,
+/// discharge / charge / export slots, car-charge mode/boost). The current
+/// `InverterSnapshot` only needs HR 2071 (`EXPORT_POWER_LIMIT`) to
+/// reflect the user's export-limit setting; remaining registers are
+/// future work.
+fn decode_holding_2040_2075(data: &[u16], snap: &mut InverterSnapshot) {
+    // HR 2071: EXPORT_POWER_LIMIT — uint16 W (no scaling). The same
+    // register the encoder writes via `SetEmsExportLimit`.
+    //
+    // Reject 0xFFFF (uninitialised) the same way HR 1063 is treated: 65535
+    // is never a valid residential export limit and shouldn't be displayed
+    // as "65.5 kW".
+    let raw_export = get_reg(data, 2071 - 2040);
+    snap.export_limit_w = if raw_export == 0xFFFF {
+        0
+    } else {
+        raw_export as u32
+    };
+}
+
 // ===========================================================================
 // HV BMU (Battery Module Unit) per-cell decode
 // ===========================================================================
@@ -2729,6 +2790,135 @@ mod tests {
         );
         // battery_reserve (SOC floor) must still come from HR 1109, not HR 1078
         assert_eq!(snap.battery_reserve, 20);
+    }
+
+    /// HR 1063 (p_export_limit) is decoded from the three-phase high config
+    /// block (HR 1000-1079). The register is `C.deci` per givenergy-modbus
+    /// `threephase.py:91` (deci-watts: raw / 10 = W). A raw value of 60000
+    /// represents 6000 W = 6 kW. Regression test for the earlier bug where
+    /// the value was *multiplied* by 10, producing "600 kW" in the UI.
+    #[test]
+    fn three_phase_decodes_export_limit_from_hr1063() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x4001; // Three Phase
+
+        let mut high_config = vec![0u16; 80]; // HR 1000-1079
+        high_config[1063 - 1000] = 60_000; // 6000 W = 6 kW (deci-W register)
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                1000,
+                80,
+                "holding_1000_1079",
+                high_config,
+            ),
+        ];
+
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.device_type, DeviceType::ThreePhase);
+        assert_eq!(
+            snap.export_limit_w, 6000,
+            "HR 1063 raw 60_000 deci-W must decode to 6000 W"
+        );
+    }
+
+    /// HR 1063 returning 0xFFFF (uninitialised register) must be treated as
+    /// "not configured" (0 W) so the UI doesn't display a plausible-but-wrong
+    /// 6.5 kW value. The next successful poll after the firmware writes the
+    /// register will populate the real value.
+    #[test]
+    fn three_phase_treats_uninitialised_export_limit_as_zero() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x4001; // Three Phase
+
+        let mut high_config = vec![0u16; 80]; // HR 1000-1079
+        high_config[1063 - 1000] = 0xFFFF; // uninitialised fingerprint
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                1000,
+                80,
+                "holding_1000_1079",
+                high_config,
+            ),
+        ];
+
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.export_limit_w, 0, "0xFFFF must be treated as 0 W");
+    }
+
+    /// HR 2071 (EXPORT_POWER_LIMIT) is decoded from the EMS / Gateway
+    /// plant-level holding block (HR 2040-2075). Raw uint16 W, no scaling.
+    /// Regression test: writes to HR 2071 used to succeed but the read
+    /// path was missing, so the UI always showed "unconfigured" even
+    /// though the inverter was honouring the new limit.
+    #[test]
+    fn gateway_decodes_export_limit_from_hr2071() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x7001; // Gateway
+
+        let mut plant_holding = vec![0u16; 36]; // HR 2040-2075
+        plant_holding[2071 - 2040] = 6_300; // 6300 W = 6.3 kW
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                2040,
+                36,
+                "holding_2040_2075",
+                plant_holding,
+            ),
+        ];
+
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.device_type, DeviceType::Gateway);
+        assert_eq!(
+            snap.export_limit_w, 6_300,
+            "HR 2071 raw 6300 W must decode to 6300 W (no scaling)"
+        );
+    }
+
+    /// Gateway with both HR 1000-1079 (three-phase high config) and HR 2040-2075
+    /// (EMS plant holding) blocks polled. The three-phase decoder must NOT
+    /// overwrite export_limit_w from HR 1063 (which is 0xFFFF on Gateway) with
+    /// the correct value from HR 2071. Regression test for the bug where
+    /// decode_holding_1000_1079 unconditionally set export_limit_w from HR 1063,
+    /// clobbering the HR 2071 value set by decode_holding_2040_2075.
+    #[test]
+    fn gateway_export_limit_from_hr2071_not_clobbered_by_hr1063() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x7001; // Gateway
+
+        // Three-phase high config block (HR 1000-1079) — HR 1063 is 0xFFFF
+        // (uninitialised on Gateway). Must NOT overwrite the HR 2071 value.
+        let mut high_config = vec![0u16; 80];
+        high_config[1063 - 1000] = 0xFFFF;
+
+        // EMS plant holding block (HR 2040-2075) — HR 2071 = 9200 W
+        let mut plant_holding = vec![0u16; 36];
+        plant_holding[2071 - 2040] = 9_200;
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 1000, 80, "holding_1000_1079", high_config),
+            make_block(RegisterType::Holding, 2040, 36, "holding_2040_2075", plant_holding),
+        ];
+
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.device_type, DeviceType::Gateway);
+        assert_eq!(
+            snap.export_limit_w, 9_200,
+            "Gateway export limit must come from HR 2071 (9200 W), not HR 1063 (0xFFFF → 0)"
+        );
     }
 
     /// HR 1124 (battery_maintenance_mode) is the last register in the

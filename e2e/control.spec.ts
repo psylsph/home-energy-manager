@@ -1295,4 +1295,106 @@ test.describe('Inverter Types', () => {
     const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 1, 15_000);
     expect(writes.length).toBeGreaterThanOrEqual(1);
   });
+
+  // ---------------------------------------------------------------------------
+  // Export Power Limit — device-type-specific behaviour
+  // ---------------------------------------------------------------------------
+
+  test('Gateway (HR0=0x7001): export limit writes HR 2071', async ({
+    baseUrl,
+    setHoldingReg,
+    resetModbus,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await resetModbus();
+    await setHoldingReg(0, 0x7001); // Gateway
+    await setHoldingReg(21, 100);
+
+    await clearWrites(drainModbusWrites);
+
+    const resp = await fetch(`${baseUrl}/api/control/export-limit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ watts: 9200 }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 1, 15_000);
+    expect(writes.length).toBeGreaterThanOrEqual(1);
+    expect(writes[0].address).toBe(2071);
+    expect(writes[0].value).toBe(9200);
+  });
+
+  test('Three Phase (HR0=0x4001): export limit writes HR 1063 (deci-W)', async ({
+    baseUrl,
+    setHoldingReg,
+    resetModbus,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await resetModbus();
+    await setHoldingReg(0, 0x4001); // Three Phase
+    await setHoldingReg(21, 100);
+
+    await clearWrites(drainModbusWrites);
+
+    const resp = await fetch(`${baseUrl}/api/control/export-limit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ watts: 6000 }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 1, 15_000);
+    expect(writes.length).toBeGreaterThanOrEqual(1);
+    expect(writes[0].address).toBe(1063);
+    expect(writes[0].value).toBe(60000); // 6000 W × 10 = 60000 deci-W
+  });
+
+  test('AC Coupled (HR0=0x3001): export limit returns 400 (read-only)', async ({
+    baseUrl,
+    setHoldingReg,
+    resetModbus,
+    drainModbusWrites,
+    _peekModbusWrites,
+  }) => {
+    await resetModbus();
+    await setHoldingReg(0, 0x3001); // AC Coupled
+    await setHoldingReg(21, 100);
+
+    await clearWrites(drainModbusWrites);
+
+    const resp = await fetch(`${baseUrl}/api/control/export-limit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ watts: 3000 }),
+    });
+    expect(resp.status).toBe(400);
+    const body = await resp.json();
+    expect(body.ok).toBe(false);
+  });
+
+  test('Gen1 (HR0=0x1001): export limit returns 400 (read-only)', async ({
+    baseUrl,
+    setHoldingReg,
+    resetModbus,
+    drainModbusWrites,
+    _peekModbusWrites,
+  }) => {
+    await resetModbus();
+    await setHoldingReg(0, 0x1001); // Gen1
+    await setHoldingReg(21, 100);
+
+    await clearWrites(drainModbusWrites);
+
+    const resp = await fetch(`${baseUrl}/api/control/export-limit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ watts: 3000 }),
+    });
+    expect(resp.status).toBe(400);
+    const body = await resp.json();
+    expect(body.ok).toBe(false);
+  });
 });

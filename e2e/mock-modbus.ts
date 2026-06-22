@@ -42,8 +42,8 @@ export interface RegisterWrite {
 /** Input registers (read-only telemetry), 120 registers. */
 const inputRegs = new Uint16Array(120);
 
-/** Holding registers (read/write config), 360 registers. */
-const holdingRegs = new Uint16Array(360);
+/** Holding registers (read/write config), 2100 registers (covers HR 2040-2075 for Gateway). */
+const holdingRegs = new Uint16Array(2100);
 
 /** All register writes received by the server, in order. */
 const writes: RegisterWrite[] = [];

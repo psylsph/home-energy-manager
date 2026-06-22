@@ -254,11 +254,12 @@ impl GraceCumulativeSamples {
 /// Preserve optional-block-only fields from the previous snapshot when the
 /// block that supplies them was not read this cycle.
 ///
-/// Three optional register blocks are conditionally polled based on device
-/// type — AC config (HR 300-359), extended slots (HR 240-299) and three-phase
-/// config (HR 1080-1124). When such a block is missed for one poll (timeout,
-/// exception or corruption skip), this carries the previous snapshot's values
-/// forward instead of letting the UI flash defaults/zeros for a cycle.
+/// Four optional register blocks are conditionally polled based on device
+/// type — AC config (HR 300-359), extended slots (HR 240-299), three-phase
+/// config (HR 1080-1124) and EMS plant holding (HR 2040-2075). When such a
+/// block is missed for one poll (timeout, exception or corruption skip), this
+/// carries the previous snapshot's values forward instead of letting the UI
+/// flash defaults/zeros for a cycle.
 ///
 /// The `has_*_block` flags reflect the blocks actually returned this cycle.
 /// Returns `true` if any field was restored.
@@ -268,6 +269,7 @@ pub(crate) fn carry_forward_optional_block_values(
     has_ac_config_block: bool,
     has_extended_slots_block: bool,
     has_three_phase_config_block: bool,
+    has_ems_plant_block: bool,
 ) -> bool {
     let Some(prev) = prev else { return false };
     let mut changed = false;
@@ -382,6 +384,26 @@ pub(crate) fn carry_forward_optional_block_values(
                 "Extended schedule block missing - carrying forward previous extended slot data"
             );
         }
+    }
+
+    // EMS / Gateway plant-level holding registers (HR 2040-2075). When this
+    // block is missed, carry forward the export limit (HR 2071) so the UI
+    // doesn't flash "unconfigured" for one cycle.
+    if !has_ems_plant_block
+        && matches!(
+            snap.device_type,
+            DeviceType::Gateway | DeviceType::Ems | DeviceType::EmsCommercial
+        )
+        && snap.device_type == prev.device_type
+        && snap.export_limit_w == 0
+        && prev.export_limit_w > 0
+    {
+        tracing::warn!(
+            prev_export = prev.export_limit_w,
+            "EMS plant block missing - carrying forward export limit"
+        );
+        snap.export_limit_w = prev.export_limit_w;
+        changed = true;
     }
 
     changed
@@ -2925,7 +2947,7 @@ mod tests {
         };
 
         let changed =
-            carry_forward_optional_block_values(&mut snap, Some(&prev), false, true, true);
+            carry_forward_optional_block_values(&mut snap, Some(&prev), false, true, true, true);
         assert!(changed);
         assert_eq!(snap.charge_rate, 80);
         assert_eq!(snap.discharge_rate, 70);
@@ -2952,7 +2974,7 @@ mod tests {
             ..Default::default()
         };
 
-        let changed = carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, true);
+        let changed = carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, true, true);
         assert!(!changed);
         assert_eq!(snap.charge_rate, 20);
         assert_eq!(snap.discharge_rate, 30);
@@ -2980,7 +3002,7 @@ mod tests {
         };
 
         let changed =
-            carry_forward_optional_block_values(&mut snap, Some(&prev), true, false, true);
+            carry_forward_optional_block_values(&mut snap, Some(&prev), true, false, true, true);
         assert!(changed);
         assert_eq!(snap.charge_slots[0].target_soc, 80);
         assert_eq!(snap.discharge_slots[1].target_soc, 40);
@@ -3005,7 +3027,7 @@ mod tests {
             ..Default::default()
         };
 
-        let changed = carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, true);
+        let changed = carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, true, true);
         assert!(!changed);
         assert!(!snap.charge_slots[2].enabled);
     }
@@ -3026,7 +3048,7 @@ mod tests {
         };
 
         let changed =
-            carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, false);
+            carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, false, true);
         assert!(changed);
         assert_eq!(snap.charge_rate, 81);
         assert_eq!(snap.discharge_rate, 72);
@@ -3461,7 +3483,7 @@ mod tests {
         };
 
         let changed =
-            carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, false);
+            carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, false, true);
         assert!(changed);
         assert_eq!(snap.charge_rate, 75);
         assert_eq!(snap.discharge_rate, 65);
@@ -3485,7 +3507,7 @@ mod tests {
         };
 
         let changed =
-            carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, false);
+            carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, false, true);
         assert!(changed);
         assert_eq!(snap.charge_rate, 60);
         assert_eq!(snap.discharge_rate, 55);
@@ -3509,7 +3531,7 @@ mod tests {
         };
 
         let changed =
-            carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, false);
+            carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, false, true);
         assert!(changed);
         assert_eq!(snap.charge_rate, 70);
         assert_eq!(snap.discharge_rate, 60);
@@ -3533,7 +3555,7 @@ mod tests {
         };
 
         let changed =
-            carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, false);
+            carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, false, true);
         assert!(changed);
         assert_eq!(snap.charge_rate, 80);
         assert_eq!(snap.discharge_rate, 70);
@@ -3562,7 +3584,7 @@ mod tests {
         };
 
         let changed =
-            carry_forward_optional_block_values(&mut snap, Some(&prev), false, true, true);
+            carry_forward_optional_block_values(&mut snap, Some(&prev), false, true, true, true);
         assert!(changed);
         assert_eq!(snap.charge_rate, 90);
         assert_eq!(snap.discharge_rate, 85);
@@ -3593,7 +3615,7 @@ mod tests {
         };
 
         let changed =
-            carry_forward_optional_block_values(&mut snap, Some(&prev), true, false, true);
+            carry_forward_optional_block_values(&mut snap, Some(&prev), true, false, true, true);
         assert!(changed);
         assert_eq!(snap.charge_slots[0].target_soc, 75);
         assert_eq!(snap.discharge_slots[1].target_soc, 50);
@@ -3608,7 +3630,7 @@ mod tests {
             device_type: DeviceType::ACCoupled,
             ..Default::default()
         };
-        let changed = carry_forward_optional_block_values(&mut snap, None, false, true, true);
+        let changed = carry_forward_optional_block_values(&mut snap, None, false, true, true, true);
         assert!(!changed);
     }
 
@@ -3624,7 +3646,7 @@ mod tests {
             ..Default::default()
         };
         let changed =
-            carry_forward_optional_block_values(&mut snap, Some(&prev), false, true, true);
+            carry_forward_optional_block_values(&mut snap, Some(&prev), false, true, true, true);
         assert!(!changed);
     }
 

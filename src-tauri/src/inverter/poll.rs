@@ -927,6 +927,11 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         && b.block.start == 1080
                                         && b.block.count == 45
                                 });
+                                let has_ems_plant_block = blocks.iter().any(|b| {
+                                    b.block.register_type == crate::modbus::registers::RegisterType::Holding
+                                        && b.block.start == 2040
+                                        && b.block.count == 36
+                                });
 
                                 // Cache the device type for subsequent polls.
                                 // This enables model-aware polling (extra blocks).
@@ -1603,6 +1608,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         has_ac_config_block,
                                         has_extended_slots_block,
                                         has_three_phase_config_block,
+                                        has_ems_plant_block,
                                     ) {
                                         s = true;
                                     }
