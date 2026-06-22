@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.36.5] - 2026-06-22
+
+### Added
+
+- **Multi-window time-of-use tariff support.** The tariff configuration
+  has been generalised from a fixed peak/off-peak 2-rate model to an
+  arbitrary list of time windows, each with its own price. This unlocks
+  Octopus Flux, Cosy, Agile, and any other time-of-use tariff without
+  losing the simple flat-rate use case. The Settings page now exposes a
+  tariff-slot editor where you can add, remove, and re-time up to six
+  windows per tariff (import and export separately). The History page
+  cost charts use the new lookup so each minute of energy is priced
+  against the correct window. The daily HTML report and Telegram
+  `/today` summary also use the slot-aware rate, so off-peak charging and
+  peak export income are calculated correctly.
+
+  Existing `settings.json` files with the old `{peak_rate, off_peak_*,
+  off_peak_end}` shape are still readable — the new `TariffConfig`
+  `Deserialize` migrates them to three slots that reproduce the previous
+  behaviour exactly (default 28.5p peak, 9p off-peak, off-peak
+  00:30–05:30). After the next save, only the new `slots` shape is
+  written. A new `src/lib/tariff.ts` module holds the shared lookup
+  helpers (`parseHHMM`, `rateForTimestamp`, `defaultTariffConfig`,
+  `flatTariffConfig`, `addTariffSlot`, etc.) so the frontend, HistoryPage,
+  and Rust side stay aligned.
+
+  Two new E2E tests cover the slot-based round-trip via `/api/settings`.
+
+### Improved
+
+- **Control page section rename.** "Battery & Power Limits" is now "Battery
+  and Power Controls" so the heading reads cleanly without a `&` glyph in
+  the middle of a sentence.
+
 ## [0.36.4] - 2026-06-22
 
 ### Improved

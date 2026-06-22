@@ -204,30 +204,45 @@ fn parse_hhmm(s: &str) -> Option<u16> {
     Some(h * 60 + m)
 }
 
-/// Returns `true` if the local wall-clock time of `ts` falls within the
-/// configured off-peak window. Handles windows that cross midnight
-/// (e.g. 23:00 → 05:30). Returns `false` if the window strings can't be parsed.
-fn is_off_peak(ts: i64, off_peak_start: &str, off_peak_end: &str) -> bool {
-    let (Some(start), Some(end)) = (parse_hhmm(off_peak_start), parse_hhmm(off_peak_end)) else {
-        return false;
-    };
+/// Convert a Unix timestamp to minutes-of-day in the local timezone.
+fn timestamp_to_local_minutes(ts: i64) -> u16 {
     let Some(dt) = chrono::DateTime::from_timestamp(ts, 0) else {
-        return false;
+        return 0;
     };
     let local = dt.with_timezone(&chrono::Local);
-    let mins: u32 = local.hour() * 60 + local.minute();
-    let start = start as u32;
-    let end = end as u32;
-    if start <= end {
-        mins >= start && mins < end
-    } else {
-        // crosses midnight
-        mins >= start || mins < end
+    (local.hour() * 60 + local.minute()) as u16
+}
+
+/// Find the `[start, end)` boundaries (in minutes) of the tariff slot that
+/// covers the given minute. Returns `(0, 1440)` as a safe fallback if no slot
+/// matches (the caller already has a rate from `rate_for_minutes`).
+fn find_window_bounds(
+    cfg: &crate::settings::TariffConfig,
+    minutes: u16,
+) -> (u16, u16) {
+    for slot in &cfg.slots {
+        let Some(start) = parse_hhmm(&slot.start) else {
+            continue;
+        };
+        let Some(end) = parse_hhmm(&slot.end) else {
+            continue;
+        };
+        if end > start && minutes >= start && minutes < end {
+            return (start, end);
+        }
     }
+    (0, 1440)
+}
+
+/// Convert minutes-since-midnight to "HH:MM" string. 1440 → "24:00".
+fn minutes_to_hhmm(minutes: u16) -> String {
+    let h = minutes / 60;
+    let m = minutes % 60;
+    format!("{h:02}:{m:02}")
 }
 
 /// Build a concise plain-text daily summary for Telegram, including a
-/// peak/off-peak cost split derived from the configured tariffs.
+/// per-window cost split derived from the configured tariffs.
 ///
 /// Returns `None` if there's insufficient data to integrate.
 pub fn generate_daily_summary_text(
@@ -237,36 +252,53 @@ pub fn generate_daily_summary_text(
 ) -> Option<String> {
     let t = compute_daily_totals(rows)?;
 
-    // Resolve tariff rates, preferring the structured peak/off-peak config and
-    // falling back to the legacy flat rate.
-    let imp_cfg = settings.import_tariff_config.as_ref();
-    let peak_rate = imp_cfg
-        .map(|c| c.peak_rate)
-        .unwrap_or(settings.import_tariff);
-    let off_peak_rate = imp_cfg
-        .map(|c| c.off_peak_rate)
-        .unwrap_or(settings.import_tariff);
-    let (op_start, op_end) = match imp_cfg {
-        Some(c) => (c.off_peak_start.as_str(), c.off_peak_end.as_str()),
-        None => ("", ""),
-    };
+    // Resolve the import tariff config, falling back to the legacy flat
+    // scalar when the structured config is absent.
+    let imp_cfg = settings
+        .import_tariff_config
+        .clone()
+        .unwrap_or_default();
+    let flat_import = settings.import_tariff;
+    // Use the flat rate when the config has a single slot covering the whole
+    // day at the same rate (or when no structured config exists).
+    let use_flat_import = imp_cfg.slots.len() <= 1;
+
+    // Export rate: use the peak slot rate from the export config, or the flat
+    // export scalar. Export tariffs are typically flat (SEG doesn't vary by
+    // time of day), so we use a single rate.
     let export_rate = settings
         .export_tariff_config
         .as_ref()
-        .map(|c| c.peak_rate)
+        .and_then(|c| c.rate_for_minutes(0))
         .unwrap_or(settings.export_tariff);
 
-    // Split import cost between peak and off-peak using the hourly buckets.
+    // Accumulate import cost and per-window kWh using rate_for_minutes.
     let mut import_cost = 0.0_f64;
-    let mut off_peak_import_kwh = 0.0_f64;
-    let mut peak_import_kwh = 0.0_f64;
+    // (start_min, end_min, rate, kwh) — grouped by unique rate+band.
+    let mut window_kwh: Vec<(u16, u16, f64, f64)> = Vec::new();
     for (ts, (imp_kwh, _)) in &t.hourly_import_export {
-        if is_off_peak(*ts, op_start, op_end) {
-            import_cost += imp_kwh * off_peak_rate;
-            off_peak_import_kwh += imp_kwh;
+        let rate = if use_flat_import {
+            flat_import
         } else {
-            import_cost += imp_kwh * peak_rate;
-            peak_import_kwh += imp_kwh;
+            // Convert timestamp to minutes-of-day in local timezone.
+            let mins = timestamp_to_local_minutes(*ts);
+            imp_cfg.rate_for_minutes(mins).unwrap_or(flat_import)
+        };
+        import_cost += imp_kwh * rate;
+
+        // Find or create the per-window accumulator.
+        // We approximate the window boundary by the hour bucket — each
+        // hourly bucket maps to the slot that covers its start minute.
+        let bucket_start_min = timestamp_to_local_minutes(*ts);
+        // Find the actual slot boundaries for display.
+        let (ws, we) = find_window_bounds(&imp_cfg, bucket_start_min);
+        if let Some(entry) = window_kwh
+            .iter_mut()
+            .find(|(s, e, r, _)| *s == ws && *e == we && (*r - rate).abs() < 1e-12)
+        {
+            entry.3 += imp_kwh;
+        } else {
+            window_kwh.push((ws, we, rate, *imp_kwh));
         }
     }
     let export_income = t.export_kwh * export_rate;
@@ -295,18 +327,18 @@ pub fn generate_daily_summary_text(
         "📥 Import: <b>{:.1} kWh</b> — £{:.2}\n",
         t.import_kwh, import_cost
     ));
-    if off_peak_import_kwh > 0.0 || peak_import_kwh > 0.0 {
-        // Only show the peak/off-peak breakdown if structured tariffs are configured.
-        // Without an off-peak window, all import is classified as peak and showing
-        // "0.0 off-peak" is misleading.
-        if !op_start.is_empty() && !op_end.is_empty() {
-            msg.push_str(&format!(
-                "   ↳ peak {:.1} kWh @ {:.3}p · off-peak {:.1} kWh @ {:.3}p\n",
-                peak_import_kwh,
-                peak_rate * 100.0,
-                off_peak_import_kwh,
-                off_peak_rate * 100.0
-            ));
+    // Show per-window breakdown when there are multiple distinct rates.
+    if window_kwh.len() > 1 {
+        for (ws, we, rate, kwh) in &window_kwh {
+            if *kwh > 0.0 {
+                msg.push_str(&format!(
+                    "   ↳ {}–{} @ {:.1}p: {:.1} kWh\n",
+                    minutes_to_hhmm(*ws),
+                    minutes_to_hhmm(*we),
+                    rate * 100.0,
+                    kwh
+                ));
+            }
         }
     }
     msg.push_str(&format!(
@@ -1119,33 +1151,31 @@ mod tests {
     }
 
     #[test]
-    fn test_is_off_peak_window() {
-        // Off-peak 00:30–05:30. Use a timestamp whose local time is 03:00.
-        // We anchor on any date and just check the window logic via the hour.
-        let midday = chrono::Local
-            .with_ymd_and_hms(2026, 6, 18, 12, 0, 0)
-            .unwrap()
-            .timestamp();
-        let night = chrono::Local
-            .with_ymd_and_hms(2026, 6, 18, 3, 0, 0)
-            .unwrap()
-            .timestamp();
-        assert!(!is_off_peak(midday, "00:30", "05:30"));
-        assert!(is_off_peak(night, "00:30", "05:30"));
+    fn test_off_peak_window_via_rate_for_minutes() {
+        // Off-peak 00:30–05:30 via the new slots model (migrated from legacy).
+        let cfg = crate::settings::TariffConfig::default();
+        let midday_mins = 12 * 60; // 720
+        let night_mins = 3 * 60; // 180
+        // Peak at midday, off-peak at night.
+        assert!(cfg.rate_for_minutes(midday_mins).unwrap() > cfg.rate_for_minutes(night_mins).unwrap());
     }
 
     #[test]
-    fn test_is_off_peak_midnight_crossing() {
-        // 23:00–05:30 crosses midnight.
-        let late = chrono::Local
-            .with_ymd_and_hms(2026, 6, 18, 23, 30, 0)
-            .unwrap()
-            .timestamp();
-        let noon = chrono::Local
-            .with_ymd_and_hms(2026, 6, 18, 12, 0, 0)
-            .unwrap()
-            .timestamp();
-        assert!(is_off_peak(late, "23:00", "05:30"));
-        assert!(!is_off_peak(noon, "23:00", "05:30"));
+    fn test_midnight_crossing_via_legacy_migration() {
+        // 23:00–05:30 crosses midnight. Migrate legacy fields to slots and
+        // verify the rate at every relevant minute.
+        let legacy = r#"{
+            "peak_rate": 0.30,
+            "off_peak_rate": 0.10,
+            "off_peak_start": "23:00",
+            "off_peak_end": "05:30"
+        }"#;
+        let cfg: crate::settings::TariffConfig = serde_json::from_str(legacy).unwrap();
+        // 23:30 → off-peak
+        assert_eq!(cfg.rate_for_minutes(23 * 60 + 30), Some(0.10));
+        // 03:00 → off-peak (past midnight)
+        assert_eq!(cfg.rate_for_minutes(3 * 60), Some(0.10));
+        // 12:00 → peak
+        assert_eq!(cfg.rate_for_minutes(12 * 60), Some(0.30));
     }
 }

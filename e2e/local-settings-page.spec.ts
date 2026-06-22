@@ -108,6 +108,11 @@ test.describe('Settings Page - Energy Tariffs', () => {
     await expect(page.locator('text=Save Tariffs')).toBeVisible({ timeout: 10_000 });
   });
 
+  test('should show Add window button for time-of-use tariffs', async ({ page }) => {
+    await page.goto('/#/settings');
+    await expect(page.locator('text=Add window').first()).toBeVisible({ timeout: 10_000 });
+  });
+
   test('should save tariff settings via API', async ({ baseUrl }) => {
     const resp = await fetch(`${baseUrl}/api/settings`, {
       method: 'POST',
@@ -148,6 +153,67 @@ test.describe('Settings Page - Energy Tariffs', () => {
     expect(data.ok).toBe(true);
     expect(data.data.import_tariff).toBe(0.35);
     expect(data.data.export_tariff).toBe(0.12);
+  });
+
+  test('should accept and read back slot-based tariff config', async ({ baseUrl }) => {
+    // Post the new slots shape — a Flux-like tariff with 3 windows.
+    const slots = [
+      { start: '00:00', end: '16:00', rate: 0.35 },
+      { start: '16:00', end: '19:00', rate: 0.15 },
+      { start: '19:00', end: '24:00', rate: 0.35 },
+    ];
+    const resp = await fetch(`${baseUrl}/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        host: '127.0.0.1',
+        port: 18899,
+        serial: '',
+        poll_interval: 5,
+        http_port: 17337,
+        import_tariff_config: { slots },
+      }),
+    });
+    const data = await resp.json();
+    expect(data.ok).toBe(true);
+
+    // Read back — the slots should be preserved.
+    const getResp = await fetch(`${baseUrl}/api/settings`);
+    const getData = await getResp.json();
+    expect(getData.data.import_tariff_config).not.toBeNull();
+    expect(getData.data.import_tariff_config.slots).toHaveLength(3);
+    expect(getData.data.import_tariff_config.slots[0].rate).toBe(0.35);
+    expect(getData.data.import_tariff_config.slots[1].rate).toBe(0.15);
+  });
+
+  test('should accept legacy peak/off-peak tariff and migrate to slots', async ({ baseUrl }) => {
+    // Post the OLD shape — must still be accepted (backward compat).
+    const resp = await fetch(`${baseUrl}/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        host: '127.0.0.1',
+        port: 18899,
+        serial: '',
+        poll_interval: 5,
+        http_port: 17337,
+        import_tariff_config: {
+          peak_rate: 0.30,
+          off_peak_rate: 0.10,
+          off_peak_start: '00:30',
+          off_peak_end: '05:30',
+        },
+      }),
+    });
+    const data = await resp.json();
+    expect(data.ok).toBe(true);
+
+    // Read back — should have been migrated to the new slots shape.
+    const getResp = await fetch(`${baseUrl}/api/settings`);
+    const getData = await getResp.json();
+    expect(getData.data.import_tariff_config).not.toBeNull();
+    expect(getData.data.import_tariff_config.slots).toBeDefined();
+    expect(getData.data.import_tariff_config.slots.length).toBeGreaterThanOrEqual(2);
   });
 });
 

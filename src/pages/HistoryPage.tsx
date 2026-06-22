@@ -32,6 +32,7 @@ import { SeriesLegend } from '../components/SeriesLegend';
 import { useInverterStore } from '../store/useInverterStore';
 import type { SeriesLegendItem } from '../components/SeriesLegend';
 import type { HistoryRange, PollSettings, TariffConfig } from '../lib/types';
+import { rateForTimestamp, defaultTariffConfig, flatTariffConfig } from '../lib/tariff';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -66,19 +67,6 @@ const TABS: { key: MetricTab; label: string }[] = [
   { key: 'home', label: 'Home' },
   { key: 'cost', label: 'Cost' },
 ];
-
-function isOffPeak(ts: number, start: string, end: string): boolean {
-  const d = new Date(ts);
-  const minutes = d.getHours() * 60 + d.getMinutes();
-  const [sh, sm] = start.split(':').map(Number);
-  const [eh, em] = end.split(':').map(Number);
-  const startMins = sh * 60 + sm;
-  const endMins = eh * 60 + em;
-  if (startMins <= endMins) {
-    return minutes >= startMins && minutes < endMins;
-  }
-  return minutes >= startMins || minutes < endMins;
-}
 
 function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCfg: TariffConfig): ChartDef[] {
   switch (tab) {
@@ -206,8 +194,7 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
               } else if (raw != null) {
                 prev = raw;
               }
-              const rate = isOffPeak(row.t, importTariffCfg.off_peak_start, importTariffCfg.off_peak_end)
-                ? importTariffCfg.off_peak_rate : importTariffCfg.peak_rate;
+              const rate = rateForTimestamp(importTariffCfg, row.t) ?? importTariffCfg.slots[0]?.rate ?? 0;
               acc += delta * rate;
               return { ...row, _import_cost: acc };
             });
@@ -235,8 +222,7 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
                 if (delta > 2) delta = 0;
               }
               if (raw != null) prev = raw;
-              const rate = isOffPeak(row.t, exportTariffCfg.off_peak_start, exportTariffCfg.off_peak_end)
-                ? exportTariffCfg.off_peak_rate : exportTariffCfg.peak_rate;
+              const rate = rateForTimestamp(exportTariffCfg, row.t) ?? exportTariffCfg.slots[0]?.rate ?? 0;
               acc += delta * rate;
               return { ...row, _export_income: acc };
             });
@@ -584,12 +570,10 @@ export default function HistoryPage() {
     ? trimDomainStartToFirstDataPoint(xDomain, data)
     : xDomain;
 
-  const [importTariffCfg, setImportTariffCfg] = useState<TariffConfig>({
-    peak_rate: 0.285, off_peak_rate: 0.09, off_peak_start: '00:30', off_peak_end: '05:30',
-  });
-  const [exportTariffCfg, setExportTariffCfg] = useState<TariffConfig>({
-    peak_rate: 0.15, off_peak_rate: 0.05, off_peak_start: '00:30', off_peak_end: '05:30',
-  });
+  const [importTariffCfg, setImportTariffCfg] = useState<TariffConfig>(() => defaultTariffConfig());
+  const [exportTariffCfg, setExportTariffCfg] = useState<TariffConfig>(() =>
+    flatTariffConfig(0.15),
+  );
 
   useEffect(() => {
     (async () => {
@@ -598,12 +582,12 @@ export default function HistoryPage() {
         if (res.data.import_tariff_config) {
           setImportTariffCfg(res.data.import_tariff_config);
         } else if (res.data.import_tariff) {
-          setImportTariffCfg((p) => ({ ...p, peak_rate: res.data.import_tariff! }));
+          setImportTariffCfg(flatTariffConfig(res.data.import_tariff));
         }
         if (res.data.export_tariff_config) {
           setExportTariffCfg(res.data.export_tariff_config);
         } else if (res.data.export_tariff) {
-          setExportTariffCfg((p) => ({ ...p, peak_rate: res.data.export_tariff! }));
+          setExportTariffCfg(flatTariffConfig(res.data.export_tariff));
         }
       } catch { /* use defaults */ }
     })();

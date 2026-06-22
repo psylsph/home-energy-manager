@@ -187,10 +187,10 @@ test.describe('Control Page - Discharge Schedule', () => {
   });
 });
 
-test.describe('Control Page - Battery & Power Limits', () => {
-  test('should show Battery & Power Limits heading', async ({ page }) => {
+test.describe('Control Page - Battery and Power Controls', () => {
+  test('should show Battery and Power Controls heading', async ({ page }) => {
     await page.goto('/#/control');
-    await expect(page.locator('text=Battery & Power Limits')).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('text=Battery and Power Controls')).toBeVisible({ timeout: 15_000 });
   });
 
   test('should show Minimum SOC section', async ({ page }) => {
