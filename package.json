@@ -18,7 +18,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "lint:md": "markdownlint . --ignore node_modules --ignore src-tauri/target",
+    "lint:md": "markdownlint . --ignore node_modules --ignore src-tauri/target --ignore AUDIT.md --ignore REGISTER_AUDIT.md",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",

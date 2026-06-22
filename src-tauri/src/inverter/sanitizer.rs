@@ -2394,11 +2394,13 @@ mod tests {
         // module data available, battery_temperature is overridden with the
         // module average. Capacity and max_power come from HR(55)/decoder and
         // must be left alone.
-        let mut snap = InverterSnapshot::default();
-        snap.device_type = DeviceType::Gen3Hybrid;
-        snap.battery_temperature = 31.5; // garbage-ish IR(56) value
-        snap.battery_capacity_kwh = 5.12;
-        snap.max_battery_power_w = 3600;
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            battery_temperature: 31.5, // garbage-ish IR(56) value
+            battery_capacity_kwh: 5.12,
+            max_battery_power_w: 3600,
+            ..Default::default()
+        };
         snap.battery_modules = vec![
             BatteryModule {
                 index: 0,
@@ -2422,26 +2424,28 @@ mod tests {
     #[test]
     fn derive_battery_fields_from_bms_three_phase_from_modules() {
         // Two modules: 100Ah + 200Ah at 76.8V nominal (three-phase) = 23.04 kWh.
-        let mut snap = InverterSnapshot::default();
-        snap.device_type = DeviceType::ThreePhase;
-        // Garbage left by the single-phase IR(56)/HR(55) decode paths.
-        snap.battery_temperature = 999.0;
-        snap.battery_capacity_kwh = 0.0;
-        snap.max_battery_power_w = 0;
-        snap.battery_modules = vec![
-            BatteryModule {
-                index: 0,
-                capacity_ah: 100.0,
-                temperature: 28.0,
-                ..Default::default()
-            },
-            BatteryModule {
-                index: 1,
-                capacity_ah: 200.0,
-                temperature: 31.5,
-                ..Default::default()
-            },
-        ];
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::ThreePhase,
+            // Garbage left by the single-phase IR(56)/HR(55) decode paths.
+            battery_temperature: 999.0,
+            battery_capacity_kwh: 0.0,
+            max_battery_power_w: 0,
+            battery_modules: vec![
+                BatteryModule {
+                    index: 0,
+                    capacity_ah: 100.0,
+                    temperature: 28.0,
+                    ..Default::default()
+                },
+                BatteryModule {
+                    index: 1,
+                    capacity_ah: 200.0,
+                    temperature: 31.5,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
         derive_battery_fields_from_bms(&mut snap, None);
         // Capacity: 300Ah * 76.8V / 1000 = 23.04 kWh.
         assert!((snap.battery_capacity_kwh - 23.04).abs() < 0.01);
@@ -2455,14 +2459,16 @@ mod tests {
     fn derive_battery_fields_from_bms_capacity_caps_max_power() {
         // Small battery: capacity-derived cap is below the hardware limit.
         // 50Ah at 76.8V = 3.84 kWh -> cap at 1920W < 6000W hardware limit.
-        let mut snap = InverterSnapshot::default();
-        snap.device_type = DeviceType::ThreePhase;
-        snap.battery_modules = vec![BatteryModule {
-            index: 0,
-            capacity_ah: 50.0,
-            temperature: 25.0,
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::ThreePhase,
+            battery_modules: vec![BatteryModule {
+                index: 0,
+                capacity_ah: 50.0,
+                temperature: 25.0,
+                ..Default::default()
+            }],
             ..Default::default()
-        }];
+        };
         derive_battery_fields_from_bms(&mut snap, None);
         assert!((snap.battery_capacity_kwh - 3.84).abs() < 0.01);
         // Temperature: single module, so average = 25.0.
@@ -2474,12 +2480,14 @@ mod tests {
     fn derive_battery_fields_from_bms_clears_garbage_when_no_bms() {
         // BMS read error and no HV cluster: no modules.
         // Must clear the garbage IR(56) value and fall back to hardware max.
-        let mut snap = InverterSnapshot::default();
-        snap.device_type = DeviceType::ThreePhase;
-        snap.battery_temperature = 999.0; // garbage from IR(56)
-        snap.battery_capacity_kwh = 999.0; // garbage from HR(55)
-        snap.max_battery_power_w = 0;
-        snap.battery_modules = vec![];
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::ThreePhase,
+            battery_temperature: 999.0, // garbage from IR(56)
+            battery_capacity_kwh: 999.0, // garbage from HR(55)
+            max_battery_power_w: 0,
+            battery_modules: vec![],
+            ..Default::default()
+        };
         derive_battery_fields_from_bms(&mut snap, None);
         assert!(
             snap.battery_temperature.is_nan(),
@@ -2512,43 +2520,45 @@ mod tests {
             nominal_capacity_ah: 51.0,
             remaining_capacity_ah: 44.0,
         };
-        let mut snap = InverterSnapshot::default();
-        snap.device_type = DeviceType::ThreePhase;
-        snap.battery_voltage = 0.0; // inverter IR block missed / garbage
-        snap.battery_current = 0.0;
-        snap.soc = 0; // inverter IR(1132) returned 0
-                      // Garbage left by the single-phase IR(56)/HR(55) decode paths.
-        snap.battery_temperature = 999.0;
-        snap.battery_capacity_kwh = 999.0;
-        snap.max_battery_power_w = 0;
-        // BMU modules with accurate cell-probe temperatures.
-        snap.battery_modules = vec![
-            BatteryModule {
-                index: 0,
-                temperature: 18.5,
-                ..Default::default()
-            },
-            BatteryModule {
-                index: 1,
-                temperature: 19.0,
-                ..Default::default()
-            },
-            BatteryModule {
-                index: 2,
-                temperature: 18.8,
-                ..Default::default()
-            },
-            BatteryModule {
-                index: 3,
-                temperature: 19.2,
-                ..Default::default()
-            },
-            BatteryModule {
-                index: 4,
-                temperature: 18.6,
-                ..Default::default()
-            },
-        ];
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::ThreePhase,
+            battery_voltage: 0.0, // inverter IR block missed / garbage
+            battery_current: 0.0,
+            soc: 0, // inverter IR(1132) returned 0
+            // Garbage left by the single-phase IR(56)/HR(55) decode paths.
+            battery_temperature: 999.0,
+            battery_capacity_kwh: 999.0,
+            max_battery_power_w: 0,
+            // BMU modules with accurate cell-probe temperatures.
+            battery_modules: vec![
+                BatteryModule {
+                    index: 0,
+                    temperature: 18.5,
+                    ..Default::default()
+                },
+                BatteryModule {
+                    index: 1,
+                    temperature: 19.0,
+                    ..Default::default()
+                },
+                BatteryModule {
+                    index: 2,
+                    temperature: 18.8,
+                    ..Default::default()
+                },
+                BatteryModule {
+                    index: 3,
+                    temperature: 19.2,
+                    ..Default::default()
+                },
+                BatteryModule {
+                    index: 4,
+                    temperature: 18.6,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
         derive_battery_fields_from_bms(&mut snap, Some(&cluster));
         // Capacity: 5 × 51Ah × 76.8V / 1000 = 19.58 kWh.
         assert!((snap.battery_capacity_kwh - 19.584).abs() < 0.01);
@@ -2586,15 +2596,17 @@ mod tests {
             nominal_capacity_ah: 51.0,
             remaining_capacity_ah: 44.0,
         };
-        let mut snap = InverterSnapshot::default();
-        snap.device_type = DeviceType::ThreePhase;
-        snap.battery_temperature = 999.0;
-        snap.battery_capacity_kwh = 999.0;
-        snap.battery_voltage = 0.0;
-        snap.battery_current = 0.0;
-        snap.soc = 0;
-        snap.max_battery_power_w = 0;
-        snap.battery_modules = vec![];
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::ThreePhase,
+            battery_temperature: 999.0,
+            battery_capacity_kwh: 999.0,
+            battery_voltage: 0.0,
+            battery_current: 0.0,
+            soc: 0,
+            max_battery_power_w: 0,
+            battery_modules: vec![],
+            ..Default::default()
+        };
         derive_battery_fields_from_bms(&mut snap, Some(&cluster));
         // Temperature: NaN - no modules to average, and IR(68) is untrusted.
         assert!(
@@ -2629,10 +2641,9 @@ mod tests {
         // restart latched a corrupted-high `today_consumption_kwh = 44.5`,
         // then every correct reading (~43.4) was rejected as a "decrease".
         // The median of the three grace readings picks the true value.
-        let mk = |consumption: f32| {
-            let mut s = GraceCumulativeSamples::default();
-            s.today_consumption_kwh = Some(consumption);
-            s
+        let mk = |consumption: f32| GraceCumulativeSamples {
+            today_consumption_kwh: Some(consumption),
+            ..Default::default()
         };
         let samples = [mk(43.4), mk(44.5), mk(43.5)];
         let median = GraceCumulativeSamples::median(&samples);
@@ -3220,7 +3231,7 @@ mod tests {
 
         // Counter should be reset after release
         assert!(
-            delta_corrections.0.get("today_consumption_kwh").is_none()
+            !delta_corrections.0.contains_key("today_consumption_kwh")
                 || *delta_corrections.0.get("today_consumption_kwh").unwrap() == 0
         );
     }
@@ -3291,7 +3302,7 @@ mod tests {
             &mut suspect_counts,
         );
         assert!(
-            delta_corrections.0.get("today_consumption_kwh").is_none(),
+            !delta_corrections.0.contains_key("today_consumption_kwh"),
             "counter should be reset after normal increase"
         );
     }
@@ -3361,7 +3372,7 @@ mod tests {
         // Counter is cleared after release so a later legitimate jump isn't
         // mistaken for another stuck baseline.
         assert!(
-            delta_corrections.0.get("today_export_kwh").is_none()
+            !delta_corrections.0.contains_key("today_export_kwh")
                 || *delta_corrections.0.get("today_export_kwh").unwrap() == 0
         );
     }
@@ -3431,7 +3442,7 @@ mod tests {
             &mut suspect_counts,
         );
         assert!(
-            delta_corrections.0.get("today_import_kwh").is_none(),
+            !delta_corrections.0.contains_key("today_import_kwh"),
             "a normal reading must reset the fast-jump counter"
         );
     }
@@ -3522,7 +3533,7 @@ mod tests {
             }
         }
         assert!(
-            delta_corrections.0.get("total_export_kwh").is_none()
+            !delta_corrections.0.contains_key("total_export_kwh")
                 || *delta_corrections.0.get("total_export_kwh").unwrap() == 0
         );
     }
