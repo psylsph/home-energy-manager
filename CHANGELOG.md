@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.37.1] - 2026-06-22
 
 ### Added
 
@@ -12,6 +12,29 @@ All notable changes to this project will be documented in this file.
   (the Modbus application processor is more forgiving at slower
   cadences, and the in-loop zombie-dongle watchdog has a longer grace
   window to ride out transient slow responses).
+
+### Fixed
+
+- **Tariff slot editor was over-restrictive.** Adding a new window
+  locked both the new row's start and end times: the start `<select>`
+  was disabled for all non-first slots, and the end `<select>` was
+  capped at the next slot's start. You can now edit a non-first slot's
+  start directly (constrained between the previous slot's end and this
+  slot's end), and an intermediate slot's end is freely selectable up to
+  `23:59`. Changing a start cascades backward to the previous slot's
+  end, mirroring the existing forward cascade for end changes — the
+  day stays tiled automatically.
+
+- **Battery energy didn't reset at midnight for Today / 24h.** The
+  inverter's `today_*_kwh` counters reset at UTC midnight, but the
+  history repair compared timestamps using local-day boundaries. In
+  timezones east of UTC (e.g. BST, UTC+1) a reading at 23:30 UTC falls
+  on the next local day, so the repair saw the 00:30 UTC reset as a
+  "same-day decrease" and carried yesterday's final counter value into
+  today. The repair now compares UTC dates. The History page chart
+  also shifts fetched timestamps from UTC to local time so the reset
+  appears at 00:00 on the local-time X-axis; readings from 00:00–01:00
+  that still carry yesterday's values are trimmed from the Today view.
 
 ## [0.37.0] - 2026-06-22
 
