@@ -1196,14 +1196,15 @@ const VALID_INTERVALS = [5, 10, 15, 20];
       {/* ─── Section 7: About ─── */}
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-2">
         <h2 className="text-text-primary text-lg font-semibold font-sans">About</h2>
-        <a
-          href="https://psylsph.github.io/home-energy-manager/"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-flow-active text-sm font-sans hover:underline mt-1"
+        <button
+          type="button"
+          onClick={() =>
+            openExternal('https://psylsph.github.io/home-energy-manager/')
+          }
+          className="text-flow-active text-sm font-sans hover:underline mt-1 text-left"
         >
           psylsph.github.io/home-energy-manager
-        </a>
+        </button>
       </section>
     </div>
   );

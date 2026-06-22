@@ -235,13 +235,18 @@ pub fn run() {
             let log_ring = Arc::new(LogRing::new(2000));
             init_tracing(&log_ring);
 
+            // tauri-plugin-opener is required in release builds so that
+            // external links (Settings → About, Telegram/ntfy/Pushover help
+            // URLs, NOTIFICATIONS.md) open in the user's default browser
+            // instead of inside the WebView2 webview process.
+            let _ = app.handle().plugin(tauri_plugin_opener::init());
+
             if cfg!(debug_assertions) {
                 let _ = app.handle().plugin(
                     tauri_plugin_log::Builder::default()
                         .level(log::LevelFilter::Info)
                         .build(),
                 );
-                let _ = app.handle().plugin(tauri_plugin_opener::init());
             }
 
             // Load persisted settings (or use defaults)
