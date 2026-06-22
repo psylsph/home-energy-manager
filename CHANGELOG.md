@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.36.4] - 2026-06-22
+
+### Improved
+
+- **"Today" tiles now show the full energy balance.** The Status page
+  summary tiles previously displayed a single "Consumption" figure, which
+  hid where battery charging fits into the home-level energy balance
+  (`solar + import = export + home_use + charge − discharge`). Users
+  checking that `import + solar − export` matched the displayed
+  consumption would always see a gap equal to today's net battery charge.
+  The tile grid is now six cells: **Solar Today**, **Home Use**, **Battery
+  Charged**, **Battery Discharged**, **Import**, **Export**. The numbers
+  now balance: `home_use + charge − discharge ≈ solar + import − export`.
+  Each tile carries a tooltip explaining what it includes and excludes,
+  and the energy-balance formula is shown as a footer line under the grid.
+  Closes #122.
+
 ## [0.36.3] - 2026-06-22
 
 ### Improved
