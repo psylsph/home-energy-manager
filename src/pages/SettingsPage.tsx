@@ -205,6 +205,13 @@ function StoreQr({ url, alt }: { url: string; alt: string }) {
   return <img src={dataUrl} alt={alt} className="w-[120px] h-[120px] rounded-lg" />;
 }
 
+/// Snap a poll interval to the nearest valid value (5, 10, 15, 20, 30, 45, or 60).
+const VALID_INTERVALS = [5, 10, 15, 20, 30, 45, 60];
+
+const clampInterval = (v: number) => VALID_INTERVALS.reduce((a, b) =>
+  Math.abs(b - v) < Math.abs(a - v) ? b : a
+);
+
 export default function SettingsPage() {
   const {
     connectionState,
@@ -224,9 +231,6 @@ export default function SettingsPage() {
   const [host, setHost] = useState('');
   const [port, setPort] = useState(8899);
   const [serial, setSerial] = useState('');
-
-/// Snap a poll interval to the nearest valid value (5, 10, 15, or 20).
-const VALID_INTERVALS = [5, 10, 15, 20];
 
   // Discover
   const [discovering, setDiscovering] = useState(false);
@@ -297,9 +301,6 @@ const VALID_INTERVALS = [5, 10, 15, 20];
 
   // Load settings on mount
   useEffect(() => {
-    const clampInterval = (v: number) => [5, 10, 15, 20].reduce((a, b) =>
-      Math.abs(b - v) < Math.abs(a - v) ? b : a
-    );
     (async () => {
       try {
         const res = await apiGet<{ok: boolean, data: PollSettings}>('/api/settings');

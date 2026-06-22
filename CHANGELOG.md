@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Longer refresh interval options.** Settings → App now offers 30 s,
+  45 s, and 60 s alongside the existing 5/10/15/20 s buttons. Helpful
+  for users on borderline dongles that wedge under a tight poll loop
+  (the Modbus application processor is more forgiving at slower
+  cadences, and the in-loop zombie-dongle watchdog has a longer grace
+  window to ride out transient slow responses).
+
 ## [0.37.0] - 2026-06-22
 
 ### Added
