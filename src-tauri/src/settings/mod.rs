@@ -14,29 +14,278 @@ use std::sync::Mutex;
 /// directory" when the temp was already renamed by another save.
 static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 
-/// Tariff configuration with peak and off-peak rates.
+/// A single tariff time window with a rate in £/kWh.
+///
+/// The day is tiled by an ordered list of these slots covering `[00:00, 24:00)`.
+/// The `end` field may be `"24:00"` (internally minute 1440) for the final
+/// slot to complete the tiling.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TariffSlot {
+    /// Start time in "HH:MM" format (24h).
+    pub start: String,
+    /// End time in "HH:MM" format (24h). Use "24:00" for the final slot.
+    pub end: String,
+    /// Electricity rate in £/kWh for this window.
+    pub rate: f64,
+}
+
+/// Tariff configuration as a list of time windows, each with its own price.
+///
+/// This generalizes the previous fixed peak/off-peak model to support any
+/// time-of-use tariff (Octopus Flux, Cosy, Agile, flat, etc.). The day is
+/// tiled by an ascending list of [`TariffSlot`]s. See
+/// [`rate_for_minutes`](Self::rate_for_minutes) for the lookup logic.
+///
+/// **Backward compatibility:** a custom `Deserialize` accepts both the old
+/// shape (`peak_rate`, `off_peak_rate`, `off_peak_start`, `off_peak_end`)
+/// and the new shape (`slots`). Old files are migrated to 3 slots that
+/// reproduce the exact previous behaviour, including midnight-crossing
+/// windows. After the first save, only the new `slots` shape is written.
+#[derive(Debug, Clone, Serialize)]
 pub struct TariffConfig {
-    /// Peak rate in £/kWh.
-    pub peak_rate: f64,
-    /// Off-peak rate in £/kWh.
-    pub off_peak_rate: f64,
-    /// Off-peak start time in "HH:MM" format (24h).
-    pub off_peak_start: String,
-    /// Off-peak end time in "HH:MM" format (24h).
-    /// Can be before `off_peak_start` to indicate crossing midnight.
-    pub off_peak_end: String,
+    /// Time windows in ascending order by start, tiling `[00:00, 24:00)`.
+    pub slots: Vec<TariffSlot>,
 }
 
 impl Default for TariffConfig {
     fn default() -> Self {
+        // Same default rates as the previous peak/off-peak model:
+        //   peak 28.5p/kWh, off-peak 9p/kWh, off-peak 00:30–05:30.
         Self {
-            peak_rate: 0.285,
-            off_peak_rate: 0.09,
-            off_peak_start: "00:30".to_string(),
-            off_peak_end: "05:30".to_string(),
+            slots: vec![
+                TariffSlot {
+                    start: "00:00".to_string(),
+                    end: "00:30".to_string(),
+                    rate: 0.285,
+                },
+                TariffSlot {
+                    start: "00:30".to_string(),
+                    end: "05:30".to_string(),
+                    rate: 0.09,
+                },
+                TariffSlot {
+                    start: "05:30".to_string(),
+                    end: "24:00".to_string(),
+                    rate: 0.285,
+                },
+            ],
         }
     }
+}
+
+/// Parse a `"HH:MM"` time string into minutes since midnight.
+/// Returns `None` if the string is malformed. `"24:00"` is accepted → 1440.
+pub(crate) fn parse_hhmm_to_minutes(s: &str) -> Option<u16> {
+    let mut it = s.split(':');
+    let h: u16 = it.next()?.trim().parse().ok()?;
+    let m: u16 = it.next()?.trim().parse().ok()?;
+    if h > 24 || m > 59 {
+        return None;
+    }
+    let mins = h * 60 + m;
+    if mins > 1440 {
+        return None;
+    }
+    Some(mins)
+}
+
+impl TariffConfig {
+    /// Look up the rate for a given minute of the day `[0, 1440)`.
+    ///
+    /// Lookup = first slot whose `[start, end)` contains the minute. If no
+    /// slot covers the minute (tail gap from a hand-edited/malformed file),
+    /// fall back to the **last slot's rate** to defend against gaps at the
+    /// end of the day. Returns `None` only when there are zero slots.
+    pub fn rate_for_minutes(&self, minutes: u16) -> Option<f64> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        for slot in &self.slots {
+            let Some(start) = parse_hhmm_to_minutes(&slot.start) else {
+                continue;
+            };
+            let Some(end) = parse_hhmm_to_minutes(&slot.end) else {
+                continue;
+            };
+            // Normal window (start < end): minute in [start, end).
+            // We don't handle midnight-crossing within a single slot — the
+            // model tiles the day with non-crossing windows. The legacy
+            // deserializer splits crossing windows into non-crossing slots.
+            if end > start && minutes >= start && minutes < end {
+                return Some(slot.rate);
+            }
+        }
+        // Tail gap fallback: use the last slot's rate.
+        self.slots.last().map(|s| s.rate)
+    }
+}
+
+// --- Custom Deserialize: accept both legacy (peak/off-peak) and new (slots) ---
+
+impl<'de> serde::Deserialize<'de> for TariffConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Shape {
+            /// New shape: explicit list of time windows.
+            New { slots: Vec<TariffSlot> },
+            /// Legacy shape: two scalars + one off-peak window.
+            Legacy {
+                peak_rate: f64,
+                off_peak_rate: f64,
+                off_peak_start: String,
+                off_peak_end: String,
+            },
+        }
+
+        match Shape::deserialize(deserializer)? {
+            Shape::New { slots } => {
+                if slots.is_empty() {
+                    // Empty slots list → use default (safe fallback).
+                    Ok(TariffConfig::default())
+                } else {
+                    Ok(TariffConfig { slots })
+                }
+            }
+            Shape::Legacy {
+                peak_rate,
+                off_peak_rate,
+                off_peak_start,
+                off_peak_end,
+            } => {
+                // Synthesize slots that reproduce the exact legacy behaviour.
+                let slots = legacy_to_slots(
+                    peak_rate,
+                    off_peak_rate,
+                    &off_peak_start,
+                    &off_peak_end,
+                );
+                tracing::info!(
+                    peak_rate,
+                    off_peak_rate,
+                    off_peak_start,
+                    off_peak_end,
+                    n_slots = slots.len(),
+                    "Migrated legacy tariff config to slots"
+                );
+                Ok(TariffConfig { slots })
+            }
+        }
+    }
+}
+
+/// Convert legacy peak/off-peak fields into a tiled list of slots.
+///
+/// Two cases:
+/// - `start <= end` (normal off-peak inside the day):
+///   `[00:00→start]=peak`, `[start→end]=off_peak`, `[end→24:00]=peak`
+/// - `start > end` (crosses midnight):
+///   `[00:00→end]=off_peak`, `[end→start]=peak`, `[start→24:00]=off_peak`
+///
+/// Adjacent slots with the same rate are merged so the output is minimal.
+fn legacy_to_slots(
+    peak_rate: f64,
+    off_peak_rate: f64,
+    off_peak_start: &str,
+    off_peak_end: &str,
+) -> Vec<TariffSlot> {
+    let start = parse_hhmm_to_minutes(off_peak_start);
+    let end = parse_hhmm_to_minutes(off_peak_end);
+
+    let (op_start, op_end) = match (start, end) {
+        (Some(s), Some(e)) => (s, e),
+        // Malformed times → can't determine the window, emit a flat day at peak.
+        _ => {
+            tracing::warn!(
+                off_peak_start, off_peak_end,
+                "Legacy tariff has unparseable off-peak times, using flat peak rate"
+            );
+            return vec![TariffSlot {
+                start: "00:00".to_string(),
+                end: "24:00".to_string(),
+                rate: peak_rate,
+            }];
+        }
+    };
+
+    // Build raw segments as (start_minute, end_minute, rate).
+    let raw: Vec<(u16, u16, f64)> = if op_start <= op_end {
+        // Normal: off-peak is inside the day.
+        vec![
+            (0, op_start, peak_rate),
+            (op_start, op_end, off_peak_rate),
+            (op_end, 1440, peak_rate),
+        ]
+    } else {
+        // Crosses midnight: off-peak wraps around.
+        vec![
+            (0, op_end, off_peak_rate),
+            (op_end, op_start, peak_rate),
+            (op_start, 1440, off_peak_rate),
+        ]
+    };
+
+    // Convert to TariffSlot strings, then merge adjacent same-rate slots.
+    let mut slots: Vec<TariffSlot> = raw
+        .into_iter()
+        .filter(|(s, e, _)| *s < *e) // drop zero-length segments
+        .map(|(s, e, r)| TariffSlot {
+            start: minutes_to_hhmm(s),
+            end: minutes_to_hhmm(e),
+            rate: r,
+        })
+        .collect();
+
+    // Merge adjacent slots with the same rate (e.g. peak before and after
+    // a normal off-peak window collapses into one peak slot spanning
+    // 00:00→start + end→24:00 when the off-peak window is in the middle).
+    let mut merged: Vec<TariffSlot> = Vec::with_capacity(slots.len());
+    for slot in slots.drain(..) {
+        if let Some(last) = merged.last_mut() {
+            if (last.rate - slot.rate).abs() < 1e-12 && last.end == slot.start {
+                last.end = slot.end;
+                continue;
+            }
+        }
+        merged.push(slot);
+    }
+
+    if merged.is_empty() {
+        // Shouldn't happen, but defend against degenerate input.
+        return vec![TariffSlot {
+            start: "00:00".to_string(),
+            end: "24:00".to_string(),
+            rate: peak_rate,
+        }];
+    }
+
+    // Ensure the first slot starts at 00:00.
+    if merged[0].start != "00:00" {
+        merged.insert(
+            0,
+            TariffSlot {
+                start: "00:00".to_string(),
+                end: merged[0].start.clone(),
+                rate: peak_rate,
+            },
+        );
+    }
+    // Ensure the last slot ends at 24:00.
+    if merged.last().unwrap().end != "24:00" {
+        merged.last_mut().unwrap().end = "24:00".to_string();
+    }
+
+    merged
+}
+
+/// Convert minutes-since-midnight to "HH:MM" string. 1440 → "24:00".
+fn minutes_to_hhmm(minutes: u16) -> String {
+    let h = minutes / 60;
+    let m = minutes % 60;
+    format!("{h:02}:{m:02}")
 }
 
 /// A cosy charging slot stored locally (not written to inverter registers).
@@ -555,6 +804,18 @@ impl Settings {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create settings dir: {}", e))?;
         }
+
+        // Keep a rolling backup of the previous good version so any user can
+        // manually revert if a save corrupts their config (e.g. a migration
+        // that rewrites settings on first load). The .bak always holds the
+        // file as it was *before* this save.
+        let bak_path = path.with_extension("json.bak");
+        if path.exists() {
+            if let Err(e) = fs::copy(&path, &bak_path) {
+                tracing::warn!("Failed to create settings backup: {e}");
+            }
+        }
+
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize settings: {}", e))?;
 
@@ -1158,5 +1419,188 @@ mod tests {
     #[test]
     fn find_next_slot_returns_none_when_empty() {
         assert!(find_next_cosy_slot(0, &[] as &[CosySlot]).is_none());
+    }
+
+    // ======================================================================
+    // TariffConfig slot-based model tests
+    // ======================================================================
+
+    #[test]
+    fn tariff_default_has_three_slots() {
+        let cfg = TariffConfig::default();
+        assert_eq!(cfg.slots.len(), 3);
+        assert_eq!(cfg.slots[0].start, "00:00");
+        assert_eq!(cfg.slots[1].rate, 0.09); // off-peak
+        assert_eq!(cfg.slots.last().unwrap().end, "24:00");
+    }
+
+    #[test]
+    fn tariff_rate_for_minutes_finds_off_peak() {
+        let cfg = TariffConfig::default();
+        // 02:00 = minute 120 → off-peak (00:30–05:30)
+        assert_eq!(cfg.rate_for_minutes(120), Some(0.09));
+    }
+
+    #[test]
+    fn tariff_rate_for_minutes_finds_peak() {
+        let cfg = TariffConfig::default();
+        // 12:00 = minute 720 → peak
+        assert_eq!(cfg.rate_for_minutes(720), Some(0.285));
+    }
+
+    #[test]
+    fn tariff_rate_for_minutes_boundary() {
+        let cfg = TariffConfig::default();
+        // 00:30 = minute 30 → start of off-peak (inclusive)
+        assert_eq!(cfg.rate_for_minutes(30), Some(0.09));
+        // 05:30 = minute 330 → end of off-peak (exclusive) → peak
+        assert_eq!(cfg.rate_for_minutes(330), Some(0.285));
+    }
+
+    #[test]
+    fn tariff_rate_for_minutes_empty_returns_none() {
+        let cfg = TariffConfig { slots: vec![] };
+        assert_eq!(cfg.rate_for_minutes(0), None);
+    }
+
+    #[test]
+    fn tariff_rate_for_minutes_tail_gap_uses_last_rate() {
+        // Hand-edited config with a gap at the end: last slot ends at 20:00.
+        let cfg = TariffConfig {
+            slots: vec![TariffSlot {
+                start: "00:00".to_string(),
+                end: "20:00".to_string(),
+                rate: 0.20,
+            }],
+        };
+        // 22:00 = minute 1320 → no slot covers it → fallback to last rate.
+        assert_eq!(cfg.rate_for_minutes(1320), Some(0.20));
+    }
+
+    /// Legacy peak/off-peak JSON must deserialize into slots that reproduce
+    /// the exact same rate at every minute of the day.
+    #[test]
+    fn tariff_legacy_deserialize_normal_window() {
+        let legacy = r#"{
+            "peak_rate": 0.30,
+            "off_peak_rate": 0.10,
+            "off_peak_start": "00:30",
+            "off_peak_end": "05:30"
+        }"#;
+        let cfg: TariffConfig = serde_json::from_str(legacy).unwrap();
+        // Should produce 3 slots: peak(00:00-00:30), off-peak(00:30-05:30), peak(05:30-24:00).
+        assert_eq!(cfg.slots.len(), 3);
+        // 02:00 → off-peak
+        assert_eq!(cfg.rate_for_minutes(120), Some(0.10));
+        // 12:00 → peak
+        assert_eq!(cfg.rate_for_minutes(720), Some(0.30));
+        // 00:00 → peak (before off-peak starts)
+        assert_eq!(cfg.rate_for_minutes(0), Some(0.30));
+    }
+
+    /// Legacy midnight-crossing off-peak window (start > end) must
+    /// deserialize correctly.
+    #[test]
+    fn tariff_legacy_deserialize_midnight_cross() {
+        let legacy = r#"{
+            "peak_rate": 0.30,
+            "off_peak_rate": 0.10,
+            "off_peak_start": "23:00",
+            "off_peak_end": "05:00"
+        }"#;
+        let cfg: TariffConfig = serde_json::from_str(legacy).unwrap();
+        // 02:00 → off-peak (past midnight, before 05:00)
+        assert_eq!(cfg.rate_for_minutes(120), Some(0.10));
+        // 04:59 → off-peak
+        assert_eq!(cfg.rate_for_minutes(299), Some(0.10));
+        // 05:00 → peak
+        assert_eq!(cfg.rate_for_minutes(300), Some(0.30));
+        // 12:00 → peak
+        assert_eq!(cfg.rate_for_minutes(720), Some(0.30));
+        // 23:30 → off-peak (after 23:00)
+        assert_eq!(cfg.rate_for_minutes(23 * 60 + 30), Some(0.10));
+    }
+
+    /// New shape (explicit slots) round-trips through serialize/deserialize.
+    #[test]
+    fn tariff_new_shape_roundtrip() {
+        let cfg = TariffConfig {
+            slots: vec![
+                TariffSlot {
+                    start: "00:00".to_string(),
+                    end: "16:00".to_string(),
+                    rate: 0.35,
+                },
+                TariffSlot {
+                    start: "16:00".to_string(),
+                    end: "19:00".to_string(),
+                    rate: 0.15,
+                },
+                TariffSlot {
+                    start: "19:00".to_string(),
+                    end: "24:00".to_string(),
+                    rate: 0.35,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let decoded: TariffConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.slots.len(), 3);
+        // 17:00 = minute 1020 → middle slot (cheap rate)
+        assert_eq!(decoded.rate_for_minutes(1020), Some(0.15));
+        // 20:00 = minute 1200 → last slot (peak)
+        assert_eq!(decoded.rate_for_minutes(1200), Some(0.35));
+    }
+
+    /// Legacy unparseable times → safe fallback (flat peak day).
+    #[test]
+    fn tariff_legacy_malformed_times_falls_back() {
+        let legacy = r#"{
+            "peak_rate": 0.30,
+            "off_peak_rate": 0.10,
+            "off_peak_start": "garbage",
+            "off_peak_end": "also-garbage"
+        }"#;
+        let cfg: TariffConfig = serde_json::from_str(legacy).unwrap();
+        // Should fall back to a flat day at peak rate.
+        assert_eq!(cfg.slots.len(), 1);
+        assert_eq!(cfg.rate_for_minutes(0), Some(0.30));
+        assert_eq!(cfg.rate_for_minutes(720), Some(0.30));
+    }
+
+    /// Empty slots array in new shape → default config (safe fallback).
+    #[test]
+    fn tariff_empty_slots_uses_default() {
+        let json = r#"{ "slots": [] }"#;
+        let cfg: TariffConfig = serde_json::from_str(json).unwrap();
+        assert!(!cfg.slots.is_empty(), "empty slots must fall back to default");
+        assert_eq!(cfg.slots[0].start, "00:00");
+    }
+
+    /// The default config (same rates as old default) must produce
+    /// bit-identical cost outcomes to the old peak/off-peak model at every
+    /// minute. This is the golden regression test: if rate_for_minutes
+    /// diverges from the old is_off_peak logic anywhere, cost graphs change.
+    #[test]
+    fn tariff_default_matches_legacy_at_every_minute() {
+        let cfg = TariffConfig::default();
+        let old_peak = 0.285_f64;
+        let old_off_peak = 0.09_f64;
+        // Old off-peak window: 00:30–05:30 (minutes 30–330).
+        let old_off_peak_start: u16 = 30;
+        let old_off_peak_end: u16 = 330;
+
+        for minute in 0..1440u16 {
+            let old_rate = if minute >= old_off_peak_start && minute < old_off_peak_end {
+                old_off_peak
+            } else {
+                old_peak
+            };
+            let new_rate = cfg.rate_for_minutes(minute).unwrap();
+            assert!(
+                (old_rate - new_rate).abs() < 1e-12,
+                "minute {minute}: old={old_rate} new={new_rate} mismatch"
+            );
+        }
     }
 }

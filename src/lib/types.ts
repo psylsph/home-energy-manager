@@ -154,11 +154,14 @@ export interface ScheduleSlot {
   target_soc: number;
 }
 
+export interface TariffSlot {
+  start: string;   // "HH:MM"
+  end: string;     // "HH:MM" — "24:00" allowed for final slot
+  rate: number;    // £/kWh
+}
+
 export interface TariffConfig {
-  peak_rate: number;
-  off_peak_rate: number;
-  off_peak_start: string;
-  off_peak_end: string;
+  slots: TariffSlot[];
 }
 
 export interface PollSettings {
