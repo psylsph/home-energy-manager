@@ -36,6 +36,21 @@ All notable changes to this project will be documented in this file.
   and Power Controls" so the heading reads cleanly without a `&` glyph in
   the middle of a sentence.
 
+### Fixed
+
+- **External links now open in the default browser in release builds.**
+  `tauri-plugin-opener` was previously initialised only inside the
+  `cfg!(debug_assertions)` branch, so on packaged builds the
+  Settings → About link and the Telegram / ntfy / Pushover help URLs
+  opened inside the WebView2 process instead of handing off to the
+  operating system's default browser. The plugin is now registered
+  unconditionally, and the About link is rendered as a button that
+  calls the existing `openExternal` helper instead of a plain
+  `<a target="_blank">` (which WebView2 also intercepts). Fixes
+  [#118](https://github.com/psylsph/home-energy-manager/issues/118).
+  Also adds `AUDIT.md` to `.gitignore` — it is a scratch reference
+  document, not something to ship.
+
 ## [0.36.4] - 2026-06-22
 
 ### Improved
