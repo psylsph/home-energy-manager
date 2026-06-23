@@ -261,3 +261,15 @@ macOS 26.5 blocks ad-hoc signed binaries inside `/Applications`. Three issues: (
 2. Update `CHANGELOG.md` with a new heading
 3. Commit, then **immediately tag** (`vX.Y.Z`) — match the changelog heading exactly. Every version heading must have a corresponding git tag. Push both.
 4. GitHub Actions builds for macOS (ARM + x64), Linux, Windows and creates a GitHub Release
+
+### Changelog style
+
+The changelog is for users, not developers. Each entry should be a short
+bullet that leads with a bold one-line summary and adds one or two
+sentences of substance — what the user will notice, what they can now
+do, what stops being broken. Avoid exhaustive technical detail: no
+register numbers, no algorithm names, no `**What changed**` /
+`**Verified**` /`**Why**` headings, no "Files touched" lists. Reference
+issue/PR numbers only when the entry closes a specific user-reported
+issue. The existing entries in `CHANGELOG.md` are the canonical
+examples of the voice and length to match.

@@ -699,11 +699,19 @@ pub(crate) fn check_power_field(
         suspect_counts.0.remove(label);
         (raw_value, false)
     } else if let Some(pv) = prev_value {
-        tracing::warn!(
+        // INFO rather than WARN: these over-limit-but-not-saturated values
+        // are often legitimate readings on installations that exceed the
+        // soft limit (e.g. 100 A UK supply regularly hits 16-18 kW during
+        // EV charging; 3-phase homes can legitimately see 20+ kW). The
+        // 10-cycle persistence window releases the raw value if it stays
+        // consistently over-limit. Only int16 saturation (handled above)
+        // stays at WARN — that is the unambiguous dongle memory-leak
+        // corruption fingerprint.
+        tracing::info!(
             raw = raw_value,
             prev = pv,
             count = *count,
-            "{label} out of range - using previous"
+            "{label} out of range - using previous (release after 10 cycles if persistent)"
         );
         (pv, true)
     } else {
@@ -1130,6 +1138,23 @@ pub(crate) fn cross_validate_power_balance(
     true
 }
 
+/// Tracks how many consecutive poll cycles the rate check has rejected a
+/// power field. After [`RATE_RELEASE_THRESHOLD`] consecutive rejections the
+/// raw value is accepted, because the inverter is consistently reporting a
+/// different value than the carried-forward prev — a legitimate sustained
+/// transition (EV charger off, big load shed) rather than transient
+/// corruption. A passing poll resets the counter so a later transient spike
+/// starts a fresh window.
+#[derive(Default)]
+pub(crate) struct RateReleaseCounts(HashMap<&'static str, u8>);
+
+/// Consecutive rate-rejections before raw is accepted. Tuned for residential
+/// power fields where 3 consecutive polls (~9 s at 3 s poll interval) is
+/// long enough to be sure the inverter is consistently reporting the new
+/// state, but short enough that the UI doesn't show stale numbers for tens
+/// of seconds while a real transition propagates.
+pub(crate) const RATE_RELEASE_THRESHOLD: u8 = 3;
+
 /// Apply rate-based smoothing to a signed power field.
 ///
 /// Returns `(accepted_value, was_sanitized)`. This runs **after**
@@ -1145,18 +1170,17 @@ pub(crate) fn cross_validate_power_balance(
 /// - Both `|new−prev| / |prev|` exceeds `rules.rate_fraction` AND
 ///   `|new−prev|` exceeds `rules.abs_delta_w`.
 ///
-/// Unlike [`check_power_field`], rejected values are **not** tracked in a
-/// persistence window — the rate check is stateless. A genuinely rapid load
-/// change (e.g. EV charger ramping over 2-3 polls) will be temporarily held
-/// back for one cycle and then accepted on the next when the prev value has
-/// caught up. This is the same one-cycle-lag behaviour as GivTCP's smoother
-/// (`read.py:2641-2643`).
+/// Per-field rejection counts are tracked in [`RateReleaseCounts`]. After
+/// [`RATE_RELEASE_THRESHOLD`] consecutive rejections, the raw value is
+/// accepted: the inverter is consistently reporting a new steady state
+/// rather than spiking transiently. A passing poll resets the counter.
 pub(crate) fn check_power_rate(
     raw: i32,
     prev: Option<i32>,
     elapsed_secs: f32,
     rules: &FieldRateRules,
     label: &'static str,
+    release_counts: &mut RateReleaseCounts,
 ) -> (i32, bool) {
     let Some(prev_val) = prev else {
         // First reading — nothing to compare against.
@@ -1164,34 +1188,92 @@ pub(crate) fn check_power_rate(
     };
     if elapsed_secs > RATE_SMOOTH_MAX_WINDOW_SECS {
         // Long gap (reconnect, slow cycle) — any jump is plausible.
+        release_counts.0.remove(label);
         return (raw, false);
     }
 
     let delta = (raw - prev_val).abs();
     if delta < rules.abs_delta_w {
         // Absolute change too small to be suspicious, regardless of fraction.
+        release_counts.0.remove(label);
         return (raw, false);
     }
 
-    // Use max(|prev|, 1) as the denominator to avoid division by zero and to
-    // avoid false positives when prev is near zero (a 0→3000W jump is normal
-    // at sunrise, not corruption).
+    // When the previous value is near zero, the fraction check is meaningless:
+    // any non-trivial jump has effectively infinite fraction against a 0 W
+    // denominator. The absolute-delta gate above is the real defence here —
+    // it already accepted anything within `abs_delta_w`. Skip the fraction
+    // check so single-poll transitions from idle (battery wakeup, grid
+    // kicking in to cover a load surge, solar sunrise ramp) are not falsely
+    // flagged as corruption.
+    //
+    // The threshold is a small absolute wattage below which "prev" is
+    // effectively zero for rate-checking purposes. 500 W covers true-idle
+    // states across all four power fields (battery at rest, pre-dawn solar,
+    // grid sitting at near-zero flow) without letting through the more
+    // nuanced transitions (e.g. home power going from 1 kW of always-on
+    // loads to 8 kW on EV-charger start) that the cross-check is designed
+    // to adjudicate.
+    const RATE_PREV_FLOOR_W: u32 = 500;
+    if prev_val.unsigned_abs() < RATE_PREV_FLOOR_W {
+        release_counts.0.remove(label);
+        return (raw, false);
+    }
+
+    // Use max(|prev|, 1) as the denominator to avoid division by zero. (The
+    // low-base early-return above means prev is always >= 500 W here, so
+    // the `max(_, 1)` is just defensive belt-and-braces.)
     let denom = prev_val.unsigned_abs().max(1) as f32;
     let fraction = delta as f32 / denom;
 
     if fraction > rules.rate_fraction {
-        tracing::warn!(
-            raw,
-            prev = prev_val,
-            elapsed_secs,
-            fraction,
-            abs_delta = delta,
-            threshold_fraction = rules.rate_fraction,
-            threshold_abs = rules.abs_delta_w,
-            "{label} jumped too far in one poll - using previous"
-        );
-        (prev_val, true)
+        let count = release_counts.0.entry(label).or_insert(0);
+        *count += 1;
+        if *count >= RATE_RELEASE_THRESHOLD {
+            // Sustained new value from the inverter — release. After this we
+            // accept raw and clear the counter so a future transient spike
+            // starts a fresh window rather than immediately inheriting the
+            // accumulated count.
+            tracing::info!(
+                raw,
+                prev = prev_val,
+                elapsed_secs,
+                fraction,
+                abs_delta = delta,
+                rejected_cycles = *count,
+                "{label} sustained at new value across consecutive polls - accepting raw (likely sustained transition)"
+            );
+            release_counts.0.remove(label);
+            (raw, false)
+        } else if *count >= 2 {
+            // Repeated rejection after the first INFO; downgrade to DEBUG to
+            // avoid log spam while we wait for the release to fire (or for
+            // the inverter to report something closer to prev).
+            tracing::debug!(
+                raw,
+                prev = prev_val,
+                elapsed_secs,
+                fraction,
+                abs_delta = delta,
+                rejected_cycles = *count,
+                "{label} rate-rejected for consecutive polls"
+            );
+            (prev_val, true)
+        } else {
+            tracing::info!(
+                raw,
+                prev = prev_val,
+                elapsed_secs,
+                fraction,
+                abs_delta = delta,
+                threshold_fraction = rules.rate_fraction,
+                threshold_abs = rules.abs_delta_w,
+                "{label} jumped too far in one poll - using previous (cross-check may restore)"
+            );
+            (prev_val, true)
+        }
     } else {
+        release_counts.0.remove(label);
         (raw, false)
     }
 }
@@ -1233,6 +1315,7 @@ pub(crate) fn sanitize_snapshot(
     pending_mode: &mut Option<BatteryMode>,
     delta_corrections: &mut DeltaCorrectionCounts,
     suspect_counts: &mut ConsecutiveSuspectCounts,
+    rate_release_counts: &mut RateReleaseCounts,
 ) -> bool {
     let mut sanitized = false;
     let max_battery_power: i32 = 10_000; // 10 kW - residential battery limit
@@ -1285,8 +1368,14 @@ pub(crate) fn sanitize_snapshot(
     );
     snap.battery_power = val;
     sanitized |= was_sanitized;
-    let (val, was_sanitized) =
-        check_power_rate(val, prev_battery, elapsed_secs, &POWER_RATE_RULES, "battery_power");
+    let (val, was_sanitized) = check_power_rate(
+        val,
+        prev_battery,
+        elapsed_secs,
+        &POWER_RATE_RULES,
+        "battery_power",
+        rate_release_counts,
+    );
     let rate_rejected_battery = was_sanitized;
     snap.battery_power = val;
     sanitized |= was_sanitized;
@@ -1302,8 +1391,14 @@ pub(crate) fn sanitize_snapshot(
     );
     snap.grid_power = val;
     sanitized |= was_sanitized;
-    let (val, was_sanitized) =
-        check_power_rate(val, prev_grid, elapsed_secs, &POWER_RATE_RULES, "grid_power");
+    let (val, was_sanitized) = check_power_rate(
+        val,
+        prev_grid,
+        elapsed_secs,
+        &POWER_RATE_RULES,
+        "grid_power",
+        rate_release_counts,
+    );
     let rate_rejected_grid = was_sanitized;
     snap.grid_power = val;
     sanitized |= was_sanitized;
@@ -1319,8 +1414,14 @@ pub(crate) fn sanitize_snapshot(
     );
     snap.solar_power = val;
     sanitized |= was_sanitized;
-    let (val, was_sanitized) =
-        check_power_rate(val, prev_solar, elapsed_secs, &POWER_RATE_RULES, "solar_power");
+    let (val, was_sanitized) = check_power_rate(
+        val,
+        prev_solar,
+        elapsed_secs,
+        &POWER_RATE_RULES,
+        "solar_power",
+        rate_release_counts,
+    );
     let rate_rejected_solar = was_sanitized;
     snap.solar_power = val;
     sanitized |= was_sanitized;
@@ -1336,8 +1437,14 @@ pub(crate) fn sanitize_snapshot(
     );
     snap.home_power = val;
     sanitized |= was_sanitized;
-    let (val, was_sanitized) =
-        check_power_rate(val, prev_home, elapsed_secs, &POWER_RATE_RULES, "home_power");
+    let (val, was_sanitized) = check_power_rate(
+        val,
+        prev_home,
+        elapsed_secs,
+        &POWER_RATE_RULES,
+        "home_power",
+        rate_release_counts,
+    );
     let rate_rejected_home = was_sanitized;
     snap.home_power = val;
     sanitized |= was_sanitized;
@@ -1414,8 +1521,14 @@ pub(crate) fn sanitize_snapshot(
         "eps_power_w",
         suspect_counts,
     );
-    let (eps_val, eps_rate_sanitized) =
-        check_power_rate(eps_val, prev_eps, elapsed_secs, &POWER_RATE_RULES, "eps_power_w");
+    let (eps_val, eps_rate_sanitized) = check_power_rate(
+        eps_val,
+        prev_eps,
+        elapsed_secs,
+        &POWER_RATE_RULES,
+        "eps_power_w",
+        rate_release_counts,
+    );
     let clamped_eps = eps_val.max(0) as u32;
     if clamped_eps != snap.eps_power_w {
         snap.eps_power_w = clamped_eps;
@@ -1463,26 +1576,51 @@ pub(crate) fn sanitize_snapshot(
     }
 
     // SOC: if 0 but power is flowing, clearly a garbled register
+    //
+    // Only carry-forward when the previous reading was meaningfully above
+    // zero — i.e. the jump to 0 looks like a register glitch rather than a
+    // legitimate 1%-resolution rounding tick. The SOC register is integer
+    // percentage, so prev=1 → snap=0 happens any time the underlying SOC
+    // crosses 0.5% during the last fraction of a discharge, and that's not
+    // corruption. prev=50 → snap=0 in a single poll interval is corruption.
     if snap.soc == 0 && (snap.solar_power > 0 || snap.battery_power != 0 || snap.grid_power != 0) {
         if let Some(p) = prev {
-            tracing::warn!(
-                prev_soc = p.soc,
-                "SOC=0 with live power - using previous SOC"
-            );
-            snap.soc = p.soc;
-            sanitized = true;
+            if p.soc > 2 {
+                tracing::warn!(
+                    prev_soc = p.soc,
+                    "SOC=0 with live power and prev was far above 0 - using previous SOC",
+                );
+                snap.soc = p.soc;
+                sanitized = true;
+            }
+            // prev was 0, 1, or 2: accept the 0 reading as a rounding tick
+            // (or a true depleted battery with solar covering the load).
         }
     }
 
     // SOC: if 100 but battery is actively charging at high power, impossible
+    //
+    // Same threshold reasoning as the SOC=0 case above. The 99 → 100 tick is
+    // a legitimate 1%-resolution rounding transition that happens whenever
+    // the underlying SOC crosses 99.5% during the tail of a charge cycle; the
+    // BMS then cuts off the charge current a moment later. Carrying prev=99
+    // forward in this case re-fires the warning every poll (the inverter
+    // legitimately keeps reporting 100% for a few cycles after the tick
+    // while charging is still winding down). Only carry-forward when prev
+    // was meaningfully below 100 — a jump from 50% to 100% in one poll is
+    // still corruption and still gets caught.
     if snap.soc == 100 && snap.battery_power < -2000 {
         if let Some(p) = prev {
-            tracing::warn!(
-                prev_soc = p.soc,
-                "SOC=100 while charging >2000W - using previous SOC"
-            );
-            snap.soc = p.soc;
-            sanitized = true;
+            if p.soc < 98 {
+                tracing::warn!(
+                    prev_soc = p.soc,
+                    "SOC=100 while charging >2000W and prev was far below 100 - using previous SOC",
+                );
+                snap.soc = p.soc;
+                sanitized = true;
+            }
+            // prev was 98 or 99: accept the 100 reading as a rounding tick
+            // (the underlying SOC just crossed 99.5%).
         }
     }
 
@@ -1760,43 +1898,43 @@ pub(crate) fn sanitize_snapshot(
             // Daily energy registers are typically 0.1 kWh resolution, and
             // today_consumption_kwh is derived from several independently-read
             // cumulative counters on single-phase models. If one term updates a
-            // poll before another, the derived value can wobble by one or two
-            // ticks (e.g. 1.6 → 1.4) even though the underlying registers are
-            // healthy. Treat small decreases as reading noise: keep the
-            // displayed/history value monotonic, but don't warn or trigger an
-            // immediate re-poll.
-            let decrease_noise_tolerance_kwh = 0.25;
+            // poll before another, the derived value can wobble by up to five
+            // ticks (one tick per term in the energy-balance formula). Treat
+            // small decreases as reading noise: keep the displayed/history value
+            // monotonic, but don't warn or trigger an immediate re-poll. The
+            // per-field tolerance is passed into the macro below — derived
+            // fields (today_consumption_kwh) get a larger 0.5 kWh tolerance to
+            // absorb the wobble; direct-read fields stay at 0.25 kWh.
 
             macro_rules! check_energy_delta {
-            ($name:literal, $value:expr, $prev:expr) => {
+            ($name:literal, $value:expr, $prev:expr, $tolerance:expr) => {
                 let raw = $value;
                 let prev_val = $prev;
 
-                // If prev is 0 or near-zero, it may have been clamped by
-                // the absolute range check (corrupted) or be a genuine
-                // start-of-day reading.
+                // If prev is 0 or near-zero, it was almost certainly set by
+                // the grace-period median: the dongle often returns 0 for
+                // daily counters during the first few reads after a TCP
+                // connect while its registers warm up. The median-of-3
+                // hardening then poisons the post-grace baseline with 0.
                 //
-                // Previously we skipped the delta check entirely when
-                // prev < 1.0, but this allowed corrupted values through
-                // (e.g. 42.5 after prev was clamped to 0). Instead, we now
-                // use a tighter absolute ceiling scaled by elapsed time.
-                // The absolute range check above already validates against
-                // the 200 kWh daily max, so we only need to catch jumps
-                // that are plausible daily values but implausible deltas.
+                // The absolute range check above already gated `raw` against
+                // max_daily_kwh, so any value reaching here is physically
+                // plausible. Accept it directly — the rate-limit branch below
+                // is meaningless when prev is essentially zero (any non-zero
+                // raw looks "infinitely fast" relative to 0). Clamping to
+                // max_increase_kwh as we did previously caused the field to
+                // freeze at a stuck-low value until the consecutive-correction
+                // release fired ~30 s later (every poll spamming "Daily energy
+                // jumped too fast" against the false baseline).
                 if prev_val < 1.0 {
-                    // prev is unreliable - apply a tighter max-increase check.
-                    // Since prev could be a genuine start-of-day 0, accept
-                    // raw only if it's a plausible single-interval increase.
                     if raw > max_increase_kwh {
-                        tracing::warn!(
+                        tracing::debug!(
                             field = $name, raw, prev = prev_val,
                             elapsed_secs, max_increase_kwh,
-                            "Daily energy jumped from near-zero baseline - clamping to max_increase",
+                            "Daily energy increased from near-zero baseline (likely grace-period median) - accepting raw",
                         );
-                        $value = max_increase_kwh;
-                        sanitized = true;
                     }
-                    // Otherwise accept raw (plausible increase from 0)
+                    // Accept raw; absolute range already validated it.
                 }
                 // Midnight rollover: counter legitimately reset to ~0.
                 // Allow if raw is small and prev was large.
@@ -1804,13 +1942,16 @@ pub(crate) fn sanitize_snapshot(
                     // Legitimate midnight reset - accept raw as-is
                     delta_corrections.0.remove($name);
                 }
-                // Tiny one-tick decreases are normal read noise; carry the
-                // previous value forward silently so cumulative values remain
-                // monotonic without spamming warnings or forcing a re-poll.
-                else if raw < prev_val && raw + decrease_noise_tolerance_kwh >= prev_val {
+                // Tiny decreases are normal read noise; carry the previous
+                // value forward silently so cumulative values remain monotonic
+                // without spamming warnings or forcing a re-poll. The
+                // tolerance comes from the macro argument — wider for the
+                // derived today_consumption_kwh, tighter for direct-register
+                // fields where single-tick wobble is the typical maximum.
+                else if raw < prev_val && raw + ($tolerance as f32) >= prev_val {
                     tracing::debug!(
                         field = $name, raw, prev = prev_val,
-                        tolerance_kwh = decrease_noise_tolerance_kwh,
+                        tolerance_kwh = $tolerance as f32,
                         "Daily energy decreased within noise tolerance - carrying forward previous",
                     );
                     $value = prev_val;
@@ -1839,7 +1980,16 @@ pub(crate) fn sanitize_snapshot(
                         $value = prev_val;
                         sanitized = true;
                     } else {
-                        tracing::warn!(
+                        // INFO rather than WARN: most of these are a corrupted
+                        // grace-period baseline that the consecutive-correction
+                        // release will accept after ~10 cycles (the real value
+                        // is consistently lower than the baseline). Some are
+                        // genuine register corruption, but those are also
+                        // released after 10 cycles if persistent. Only int16
+                        // saturation (handled by check_power_field) and the
+                        // absolute-range ceiling above stay at WARN — those
+                        // are unambiguous corruption signatures.
+                        tracing::info!(
                             field = $name, raw, prev = prev_val,
                             "Daily energy decreased (register corruption) - using previous",
                         );
@@ -1884,7 +2034,14 @@ pub(crate) fn sanitize_snapshot(
                         $value = prev_val;
                         sanitized = true;
                     } else {
-                        tracing::warn!(
+                        // INFO rather than WARN: most of these are the
+                        // stuck-baseline recovery case (real value is higher
+                        // than a corrupted-low grace baseline); the
+                        // consecutive-correction release accepts after ~10
+                        // cycles. Genuine large jumps would trip the
+                        // absolute-range check above (raw > 200 kWh) which
+                        // still logs at WARN.
+                        tracing::info!(
                             field = $name, raw, prev = prev_val,
                             elapsed_secs, max_increase_kwh,
                             "Daily energy jumped too fast - using previous",
@@ -1900,36 +2057,47 @@ pub(crate) fn sanitize_snapshot(
             };
         }
 
-            check_energy_delta!("today_solar_kwh", snap.today_solar_kwh, p.today_solar_kwh);
+            check_energy_delta!("today_solar_kwh", snap.today_solar_kwh, p.today_solar_kwh, 0.25_f32);
             check_energy_delta!(
                 "today_import_kwh",
                 snap.today_import_kwh,
-                p.today_import_kwh
+                p.today_import_kwh,
+                0.25_f32
             );
             check_energy_delta!(
                 "today_export_kwh",
                 snap.today_export_kwh,
-                p.today_export_kwh
+                p.today_export_kwh,
+                0.25_f32
             );
             check_energy_delta!(
                 "today_charge_kwh",
                 snap.today_charge_kwh,
-                p.today_charge_kwh
+                p.today_charge_kwh,
+                0.25_f32
             );
             check_energy_delta!(
                 "today_discharge_kwh",
                 snap.today_discharge_kwh,
-                p.today_discharge_kwh
+                p.today_discharge_kwh,
+                0.25_f32
             );
             check_energy_delta!(
                 "today_consumption_kwh",
                 snap.today_consumption_kwh,
-                p.today_consumption_kwh
+                p.today_consumption_kwh,
+                // Derived on single-phase from five independent cumulative
+                // registers; can wobble by up to five ticks (0.5 kWh) when
+                // those registers tick at slightly different times. Wider
+                // tolerance absorbs the wobble without flagging real
+                // decreases that happen to land within it.
+                0.5_f32
             );
             check_energy_delta!(
                 "today_ac_charge_kwh",
                 snap.today_ac_charge_kwh,
-                p.today_ac_charge_kwh
+                p.today_ac_charge_kwh,
+                0.25_f32
             );
 
             // Lifetime total energy delta check:
@@ -1942,30 +2110,36 @@ pub(crate) fn sanitize_snapshot(
             let max_lifetime_increase_kwh = (elapsed_secs / 3600.0) * max_lifetime_rate_kw + 1.0;
 
             macro_rules! check_total_energy_delta {
-            ($name:literal, $value:expr, $prev:expr) => {
+            ($name:literal, $value:expr, $prev:expr, $tolerance:expr) => {
                 let raw = $value;
                 let prev_val = $prev;
 
+                // Same grace-period baseline reasoning as the daily-counter
+                // branch above: prev ≈ 0 usually means the grace-period
+                // median returned 0 while the dongle warmed up. The absolute
+                // range check has already validated `raw` against
+                // max_lifetime_kwh, so accept it directly rather than
+                // clamping — clamping here froze the lifetime total at a
+                // stuck-low value for ~30 s in the same way the daily
+                // counter did.
                 if prev_val < 1.0 {
-                    // prev is unreliable (near-zero from initial clamp)
                     if raw > max_lifetime_increase_kwh {
-                        tracing::warn!(
+                        tracing::debug!(
                             field = $name, raw, prev = prev_val,
                             elapsed_secs, max = max_lifetime_increase_kwh,
-                            "Lifetime total jumped from near-zero baseline - clamping",
+                            "Lifetime total increased from near-zero baseline (likely grace-period median) - accepting raw",
                         );
-                        $value = prev_val + max_lifetime_increase_kwh;
-                        sanitized = true;
                     }
+                    // Accept raw.
                 }
                 // Lifetime counters NEVER reset - any decrease is corruption.
                 // (No midnight rollover check needed.)
                 // Tiny one-tick decreases are normal read noise; carry
                 // previous value forward silently.
-                else if raw < prev_val && raw + decrease_noise_tolerance_kwh >= prev_val {
+                else if raw < prev_val && raw + ($tolerance as f32) >= prev_val {
                     tracing::debug!(
                         field = $name, raw, prev = prev_val,
-                        tolerance_kwh = decrease_noise_tolerance_kwh,
+                        tolerance_kwh = $tolerance as f32,
                         "Lifetime total decreased within noise tolerance - carrying forward",
                     );
                     $value = prev_val;
@@ -1992,7 +2166,12 @@ pub(crate) fn sanitize_snapshot(
                         $value = prev_val;
                         sanitized = true;
                     } else {
-                        tracing::warn!(
+                        // INFO rather than WARN: same reasoning as the daily-
+                        // counter branch above. The consecutive-correction
+                        // release accepts after ~10 cycles if the lower raw
+                        // value persists, so the initial hold is tentative
+                        // not conclusive.
+                        tracing::info!(
                             field = $name, raw, prev = prev_val,
                             "Lifetime total decreased (register corruption) - using previous",
                         );
@@ -2029,7 +2208,11 @@ pub(crate) fn sanitize_snapshot(
                         $value = prev_val;
                         sanitized = true;
                     } else {
-                        tracing::warn!(
+                        // INFO rather than WARN: same reasoning as the daily-
+                        // counter branch above. The lifetime absolute range
+                        // check above (100,000 kWh ceiling) still fires at
+                        // WARN for values clearly out of plausible range.
+                        tracing::info!(
                             field = $name, raw, prev = prev_val,
                             elapsed_secs, max = max_lifetime_increase_kwh,
                             "Lifetime total jumped too fast - using previous",
@@ -2048,22 +2231,26 @@ pub(crate) fn sanitize_snapshot(
             check_total_energy_delta!(
                 "total_import_kwh",
                 snap.total_import_kwh,
-                p.total_import_kwh
+                p.total_import_kwh,
+                0.25_f32
             );
             check_total_energy_delta!(
                 "total_export_kwh",
                 snap.total_export_kwh,
-                p.total_export_kwh
+                p.total_export_kwh,
+                0.25_f32
             );
             check_total_energy_delta!(
                 "total_charge_kwh",
                 snap.total_charge_kwh,
-                p.total_charge_kwh
+                p.total_charge_kwh,
+                0.25_f32
             );
             check_total_energy_delta!(
                 "total_discharge_kwh",
                 snap.total_discharge_kwh,
-                p.total_discharge_kwh
+                p.total_discharge_kwh,
+                0.25_f32
             );
         }
     } // skip_delta
@@ -2907,7 +3094,7 @@ mod tests {
             rate_fraction: 0.5,
             abs_delta_w: 2_000,
         };
-        let (val, sanitized) = check_power_rate(7_000, Some(2_000), 3.0, &rules, "solar_power");
+        let (val, sanitized) = check_power_rate(7_000, Some(2_000), 3.0, &rules, "solar_power", &mut RateReleaseCounts::default());
         assert_eq!(val, 2_000, "rate spike must fall back to previous");
         assert!(sanitized);
     }
@@ -2919,7 +3106,7 @@ mod tests {
             rate_fraction: 0.5,
             abs_delta_w: 2_000,
         };
-        let (val, sanitized) = check_power_rate(8_000, Some(3_000), 3.0, &rules, "battery_power");
+        let (val, sanitized) = check_power_rate(8_000, Some(3_000), 3.0, &rules, "battery_power", &mut RateReleaseCounts::default());
         assert_eq!(val, 3_000, "large rate spike from high base must be rejected");
         assert!(sanitized);
     }
@@ -2933,7 +3120,7 @@ mod tests {
             rate_fraction: 0.5,
             abs_delta_w: 2_000,
         };
-        let (val, sanitized) = check_power_rate(500, Some(200), 3.0, &rules, "solar_power");
+        let (val, sanitized) = check_power_rate(500, Some(200), 3.0, &rules, "solar_power", &mut RateReleaseCounts::default());
         assert_eq!(val, 500, "small absolute delta must be accepted");
         assert!(!sanitized);
     }
@@ -2947,7 +3134,7 @@ mod tests {
             rate_fraction: 0.5,
             abs_delta_w: 2_000,
         };
-        let (val, sanitized) = check_power_rate(10_000, Some(8_000), 3.0, &rules, "home_power");
+        let (val, sanitized) = check_power_rate(10_000, Some(8_000), 3.0, &rules, "home_power", &mut RateReleaseCounts::default());
         assert_eq!(val, 10_000, "small fractional change from high base must be accepted");
         assert!(!sanitized);
     }
@@ -2960,7 +3147,7 @@ mod tests {
             rate_fraction: 0.5,
             abs_delta_w: 2_000,
         };
-        let (val, sanitized) = check_power_rate(8_000, Some(2_000), 120.0, &rules, "solar_power");
+        let (val, sanitized) = check_power_rate(8_000, Some(2_000), 120.0, &rules, "solar_power", &mut RateReleaseCounts::default());
         assert_eq!(val, 8_000, "long gap must skip rate check");
         assert!(!sanitized);
     }
@@ -2972,7 +3159,7 @@ mod tests {
             rate_fraction: 0.5,
             abs_delta_w: 2_000,
         };
-        let (val, sanitized) = check_power_rate(5_000, None, 3.0, &rules, "battery_power");
+        let (val, sanitized) = check_power_rate(5_000, None, 3.0, &rules, "battery_power", &mut RateReleaseCounts::default());
         assert_eq!(val, 5_000, "first reading has no prev, must accept raw");
         assert!(!sanitized);
     }
@@ -2986,7 +3173,7 @@ mod tests {
             rate_fraction: 0.5,
             abs_delta_w: 2_000,
         };
-        let (val, sanitized) = check_power_rate(4_000, Some(-2_000), 3.0, &rules, "battery_power");
+        let (val, sanitized) = check_power_rate(4_000, Some(-2_000), 3.0, &rules, "battery_power", &mut RateReleaseCounts::default());
         assert_eq!(val, -2_000, "sign-flip spike must fall back to previous");
         assert!(sanitized);
     }
@@ -2999,7 +3186,7 @@ mod tests {
             rate_fraction: 0.5,
             abs_delta_w: 2_000,
         };
-        let (val, sanitized) = check_power_rate(6_000, Some(4_000), 3.0, &rules, "grid_power");
+        let (val, sanitized) = check_power_rate(6_000, Some(4_000), 3.0, &rules, "grid_power", &mut RateReleaseCounts::default());
         assert_eq!(val, 6_000, "exactly at threshold must be accepted (strict >)");
         assert!(!sanitized);
     }
@@ -3012,8 +3199,87 @@ mod tests {
             rate_fraction: 0.5,
             abs_delta_w: 2_000,
         };
-        let (val, sanitized) = check_power_rate(-7_000, Some(-4_000), 3.0, &rules, "battery_power");
+        let (val, sanitized) = check_power_rate(-7_000, Some(-4_000), 3.0, &rules, "battery_power", &mut RateReleaseCounts::default());
         assert_eq!(val, -4_000, "rate spike on negative values must be rejected");
+        assert!(sanitized);
+    }
+
+    #[test]
+    fn check_power_rate_low_base_skips_fraction_check() {
+        // Production false-positive: battery idle (0 W) → 3 kW discharge in
+        // 23 s when a load surge kicks in. The old `max(|prev|, 1)` denom
+        // computed fraction = 3089 (effectively infinite) against the 0 W
+        // base, rejecting every legitimate wakeup.
+        //
+        // Fix: when |prev| is below the absolute-delta gate, the fraction
+        // check is meaningless — "3000 W as a fraction of 0 W" has no useful
+        // answer. The absolute check above already gated `abs_delta_w`, so
+        // trust it and skip the fraction.
+        let rules = FieldRateRules {
+            rate_fraction: 0.5,
+            abs_delta_w: 2_000,
+        };
+        // Battery wakeup from idle.
+        let (val, sanitized) = check_power_rate(3_089, Some(0), 23.0, &rules, "battery_power", &mut RateReleaseCounts::default());
+        assert_eq!(
+            val, 3_089,
+            "battery wakeup from 0 W must be accepted (low base skips fraction)"
+        );
+        assert!(!sanitized);
+        // Grid kicking in to cover a load surge (negative to slightly less
+        // negative). |prev| below the gate, so the same rule applies.
+        let (val, sanitized) =
+            check_power_rate(-3_000, Some(-200), 23.0, &rules, "grid_power", &mut RateReleaseCounts::default());
+        assert_eq!(val, -3_000, "low-magnitude grid transitions must be accepted");
+        assert!(!sanitized);
+        // Solar pre-dawn → first rays of sunrise.
+        let (val, sanitized) = check_power_rate(2_500, Some(0), 23.0, &rules, "solar_power", &mut RateReleaseCounts::default());
+        assert_eq!(val, 2_500, "sunrise onset from 0 W must be accepted");
+        assert!(!sanitized);
+    }
+
+    #[test]
+    fn check_power_rate_low_base_still_rejects_above_abs_delta_via_field_limit() {
+        // The low-base skip is purely about the *fraction* check. The
+        // absolute-range check (`check_power_field`) still runs first in
+        // `sanitize_snapshot`, so an int16-saturation value (|raw| >=
+        // HARD_CORRUPTION_CEILING) is rejected there. This test pins that
+        // contract: check_power_rate alone trusts values up to its own
+        // abs_delta_w gate, but values above that fall through to the
+        // field-level check that callers compose it with.
+        let rules = FieldRateRules {
+            rate_fraction: 0.5,
+            abs_delta_w: 2_000,
+        };
+        // |raw|=5000 against prev=0: above 2 kW gate, but fraction check is
+        // skipped because prev < 2 kW. Accept — caller is responsible for
+        // checking against `max_battery_power` etc. beforehand.
+        let (val, sanitized) = check_power_rate(5_000, Some(0), 23.0, &rules, "battery_power", &mut RateReleaseCounts::default());
+        assert_eq!(val, 5_000, "check_power_rate accepts up to abs_delta_w");
+        assert!(!sanitized);
+    }
+
+    #[test]
+    fn check_power_rate_exactly_at_low_base_threshold_applies_fraction() {
+        // |prev| == abs_delta_w (2000 W) means prev is NOT below the
+        // threshold, so the fraction check still runs. The `check_power_rate_
+        // spike_from_high_base_is_rejected` test covers the positive case;
+        // this test pins the exact boundary so a future "off by one" doesn't
+        // accidentally widen the low-base exemption to legitimate steady-
+        // state reads.
+        let rules = FieldRateRules {
+            rate_fraction: 0.5,
+            abs_delta_w: 2_000,
+        };
+        let (val, sanitized) = check_power_rate(
+            7_000,
+            Some(2_000),
+            3.0,
+            &rules,
+            "solar_power",
+            &mut RateReleaseCounts::default(),
+        );
+        assert_eq!(val, 2_000, "exact boundary must still apply fraction check");
         assert!(sanitized);
     }
 
@@ -3041,6 +3307,8 @@ mod tests {
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
 
+        let mut rate_release_counts = RateReleaseCounts::default();
+
         let sanitized = sanitize_snapshot(
             &mut snap,
             Some(&prev),
@@ -3048,6 +3316,7 @@ mod tests {
             &mut pending_mode,
             &mut delta_corrections,
             &mut suspect_counts,
+            &mut rate_release_counts,
         );
 
         assert!(
@@ -3081,6 +3350,8 @@ mod tests {
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
 
+        let mut rate_release_counts = RateReleaseCounts::default();
+
         let sanitized = sanitize_snapshot(
             &mut snap,
             Some(&prev),
@@ -3088,6 +3359,7 @@ mod tests {
             &mut pending_mode,
             &mut delta_corrections,
             &mut suspect_counts,
+            &mut rate_release_counts,
         );
 
         assert!(
@@ -3098,28 +3370,43 @@ mod tests {
     }
 
     #[test]
-    fn daily_energy_near_zero_clamp_does_not_add_previous_twice() {
+    fn daily_energy_near_zero_baseline_accepts_raw_without_clamping() {
+        // Reproduces the production false-positive pattern: a grace-period
+        // median of ~0 poisons the post-grace baseline, then the next real
+        // reading (e.g. 8.7 kWh morning consumption) was clamped to
+        // max_increase_kwh ≈ 1 kWh by the prev<1.0 branch. That clamped value
+        // then triggered ten more cycles of "too fast" warnings before the
+        // consecutive-correction release fired, leaving today_import_kwh
+        // stuck at a false ~1 kWh for ~30 s after every reconnect.
+        //
+        // The fix: when prev < 1.0 (grace-period median likely returned 0
+        // during dongle warmup) accept raw directly. The absolute range
+        // check above already validated the value against the 200 kWh daily
+        // ceiling, so the rate-limit branch below the prev<1.0 guard has
+        // nothing useful to say when prev is essentially zero.
         let prev = InverterSnapshot {
             timestamp: 100,
             battery_mode: BatteryMode::Eco,
             grid_voltage: 230.0,
             grid_frequency: 50.0,
             battery_reserve: 4,
-            today_consumption_kwh: 0.9,
+            today_import_kwh: 0.0,
             ..Default::default()
         };
         let mut snap = InverterSnapshot {
-            timestamp: 113,
+            timestamp: 103,
             battery_mode: BatteryMode::Eco,
             grid_voltage: 230.0,
             grid_frequency: 50.0,
             battery_reserve: 4,
-            today_consumption_kwh: 1.1,
+            today_import_kwh: 8.7,
             ..Default::default()
         };
         let mut pending_mode = None;
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
+
+        let mut rate_release_counts = RateReleaseCounts::default();
 
         let sanitized = sanitize_snapshot(
             &mut snap,
@@ -3128,16 +3415,61 @@ mod tests {
             &mut pending_mode,
             &mut delta_corrections,
             &mut suspect_counts,
+            &mut rate_release_counts,
         );
 
-        assert!(sanitized);
-        let expected_ceiling = (13.0 / 3600.0) * 10.0 + 1.0;
-        assert!((snap.today_consumption_kwh - expected_ceiling).abs() < 0.0001);
-        assert!(snap.today_consumption_kwh < 1.1);
+        assert!(
+            !sanitized,
+            "prev<1.0 must accept raw - no clamping and no delta-counter increment"
+        );
+        assert_eq!(
+            snap.today_import_kwh, 8.7,
+            "raw value must be accepted unchanged"
+        );
+        assert!(
+            !delta_corrections.0.contains_key("today_import_kwh"),
+            "no consecutive-correction counter should be accumulated for the first post-grace reading"
+        );
+
+        // Same scenario on the very next poll: prev now reflects the just-
+        // accepted 8.7 reading (the field didn't get poisoned by the clamp),
+        // and a small follow-up increment is accepted as a normal increase
+        // — no warning spam.
+        let prev = snap.clone();
+        let mut snap = InverterSnapshot {
+            timestamp: 106,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            battery_reserve: 4,
+            today_import_kwh: 8.9,
+            ..Default::default()
+        };
+        let mut pending_mode = None;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+
+        let mut rate_release_counts = RateReleaseCounts::default();
+        let sanitized = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+            &mut rate_release_counts,
+        );
+        assert!(!sanitized, "normal follow-up increase must not be flagged");
+        assert_eq!(snap.today_import_kwh, 8.9);
     }
 
     #[test]
     fn daily_energy_material_decrease_is_sanitized() {
+        // today_consumption_kwh gets the wider 0.5 kWh noise tolerance
+        // (derived from five independent cumulative registers on single-
+        // phase). Pick a decrease well outside that tolerance so this
+        // exercises the genuine register-corruption branch, not the noise
+        // tolerance.
         let prev = InverterSnapshot {
             timestamp: 100,
             battery_mode: BatteryMode::Eco,
@@ -3153,12 +3485,14 @@ mod tests {
             grid_voltage: 230.0,
             grid_frequency: 50.0,
             battery_reserve: 4,
-            today_consumption_kwh: 7.3,
+            today_consumption_kwh: 6.5, // 1.1 kWh drop - well past 0.5 kWh tolerance
             ..Default::default()
         };
         let mut pending_mode = None;
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
+
+        let mut rate_release_counts = RateReleaseCounts::default();
 
         let sanitized = sanitize_snapshot(
             &mut snap,
@@ -3167,10 +3501,63 @@ mod tests {
             &mut pending_mode,
             &mut delta_corrections,
             &mut suspect_counts,
+            &mut rate_release_counts,
         );
 
         assert!(sanitized);
         assert_eq!(snap.today_consumption_kwh, prev.today_consumption_kwh);
+    }
+
+    #[test]
+    fn daily_energy_derived_wobble_within_wider_tolerance_is_not_repoll() {
+        // The single-phase today_consumption_kwh wobble can reach 5 ticks
+        // (0.5 kWh) when each of the five terms in the energy-balance
+        // formula ticks at a slightly different poll. The wider 0.5 kWh
+        // tolerance absorbs this so the dashboard doesn't get a re-poll for
+        // a derived-counter quirk.
+        let prev = InverterSnapshot {
+            timestamp: 100,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            battery_reserve: 4,
+            today_consumption_kwh: 48.1,
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            timestamp: 103,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            battery_reserve: 4,
+            today_consumption_kwh: 47.6, // 0.5 kWh drop - at the tolerance boundary
+            ..Default::default()
+        };
+        let mut pending_mode = None;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+
+        let mut rate_release_counts = RateReleaseCounts::default();
+
+        let sanitized = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+            &mut rate_release_counts,
+        );
+
+        assert!(
+            !sanitized,
+            "0.5 kWh derived wobble must not force immediate re-poll"
+        );
+        assert_eq!(snap.today_consumption_kwh, prev.today_consumption_kwh);
+        assert!(
+            !delta_corrections.0.contains_key("today_consumption_kwh"),
+            "within-tolerance wobble must not start a correction counter"
+        );
     }
 
     #[test]
@@ -3183,6 +3570,8 @@ mod tests {
         let raw_consumption = 7.1;
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
+
+        let mut rate_release_counts = RateReleaseCounts::default();
 
         for i in 0..DELTA_CORRECTION_RELEASE_THRESHOLD {
             let prev = InverterSnapshot {
@@ -3210,6 +3599,7 @@ mod tests {
                 &mut pending_mode,
                 &mut delta_corrections,
                 &mut suspect_counts,
+            &mut rate_release_counts,
             );
 
             if i < DELTA_CORRECTION_RELEASE_THRESHOLD - 1 {
@@ -3242,6 +3632,8 @@ mod tests {
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
 
+        let mut rate_release_counts = RateReleaseCounts::default();
+
         // First 3 cycles: decrease → correction
         for i in 0..3u8 {
             let prev = InverterSnapshot {
@@ -3268,6 +3660,7 @@ mod tests {
                 &mut pending_mode,
                 &mut delta_corrections,
                 &mut suspect_counts,
+            &mut rate_release_counts,
             );
         }
         assert_eq!(
@@ -3300,6 +3693,7 @@ mod tests {
             &mut pending_mode,
             &mut delta_corrections,
             &mut suspect_counts,
+            &mut rate_release_counts,
         );
         assert!(
             !delta_corrections.0.contains_key("today_consumption_kwh"),
@@ -3322,6 +3716,8 @@ mod tests {
         let raw_export = 18.5;
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
+
+        let mut rate_release_counts = RateReleaseCounts::default();
 
         for i in 0..DELTA_CORRECTION_RELEASE_THRESHOLD {
             let prev = InverterSnapshot {
@@ -3350,6 +3746,7 @@ mod tests {
                 &mut pending_mode,
                 &mut delta_corrections,
                 &mut suspect_counts,
+            &mut rate_release_counts,
             );
 
             if i < DELTA_CORRECTION_RELEASE_THRESHOLD - 1 {
@@ -3385,6 +3782,8 @@ mod tests {
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
 
+        let mut rate_release_counts = RateReleaseCounts::default();
+
         // 2 cycles of stuck-baseline jump (below the release threshold of 10).
         for i in 0..2u8 {
             let prev = InverterSnapshot {
@@ -3411,6 +3810,7 @@ mod tests {
                 &mut pending_mode,
                 &mut delta_corrections,
                 &mut suspect_counts,
+            &mut rate_release_counts,
             );
         }
         assert_eq!(*delta_corrections.0.get("today_import_kwh").unwrap(), 2);
@@ -3440,6 +3840,7 @@ mod tests {
             &mut pending_mode,
             &mut delta_corrections,
             &mut suspect_counts,
+            &mut rate_release_counts,
         );
         assert!(
             !delta_corrections.0.contains_key("today_import_kwh"),
@@ -3454,6 +3855,8 @@ mod tests {
         // against the fix weakening real corruption detection.
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
+
+        let mut rate_release_counts = RateReleaseCounts::default();
 
         let prev = InverterSnapshot {
             timestamp: 100,
@@ -3479,6 +3882,7 @@ mod tests {
             &mut pending_mode,
             &mut delta_corrections,
             &mut suspect_counts,
+            &mut rate_release_counts,
         );
         assert_eq!(
             snap.today_solar_kwh, 2.0,
@@ -3498,6 +3902,8 @@ mod tests {
         let raw_total = 5000.0;
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
+
+        let mut rate_release_counts = RateReleaseCounts::default();
 
         for i in 0..DELTA_CORRECTION_RELEASE_THRESHOLD {
             let prev = InverterSnapshot {
@@ -3524,6 +3930,7 @@ mod tests {
                 &mut pending_mode,
                 &mut delta_corrections,
                 &mut suspect_counts,
+            &mut rate_release_counts,
             );
 
             if i < DELTA_CORRECTION_RELEASE_THRESHOLD - 1 {
@@ -3573,6 +3980,8 @@ mod tests {
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
 
+        let mut rate_release_counts = RateReleaseCounts::default();
+
         let sanitized = sanitize_snapshot(
             &mut snap,
             Some(&prev),
@@ -3580,6 +3989,7 @@ mod tests {
             &mut pending_mode,
             &mut delta_corrections,
             &mut suspect_counts,
+            &mut rate_release_counts,
         );
 
         assert!(!sanitized, "valid full-day slot must not force a re-poll");
@@ -3619,6 +4029,8 @@ mod tests {
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
 
+        let mut rate_release_counts = RateReleaseCounts::default();
+
         let sanitized = sanitize_snapshot(
             &mut snap,
             Some(&prev),
@@ -3626,6 +4038,7 @@ mod tests {
             &mut pending_mode,
             &mut delta_corrections,
             &mut suspect_counts,
+            &mut rate_release_counts,
         );
 
         assert!(
@@ -3894,6 +4307,8 @@ mod tests {
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
 
+        let mut rate_release_counts = RateReleaseCounts::default();
+
         let sanitized = sanitize_snapshot(
             &mut snap,
             Some(&prev),
@@ -3901,6 +4316,7 @@ mod tests {
             &mut pending_mode,
             &mut delta_corrections,
             &mut suspect_counts,
+            &mut rate_release_counts,
         );
 
         assert!(
@@ -3943,6 +4359,8 @@ mod tests {
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
 
+        let mut rate_release_counts = RateReleaseCounts::default();
+
         let sanitized = sanitize_snapshot(
             &mut snap,
             Some(&prev),
@@ -3950,6 +4368,7 @@ mod tests {
             &mut pending_mode,
             &mut delta_corrections,
             &mut suspect_counts,
+            &mut rate_release_counts,
         );
 
         assert!(
@@ -3993,6 +4412,8 @@ mod tests {
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
 
+        let mut rate_release_counts = RateReleaseCounts::default();
+
         let sanitized = sanitize_snapshot(
             &mut snap,
             Some(&prev),
@@ -4000,6 +4421,7 @@ mod tests {
             &mut pending_mode,
             &mut delta_corrections,
             &mut suspect_counts,
+            &mut rate_release_counts,
         );
 
         assert!(
@@ -4042,6 +4464,8 @@ mod tests {
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
 
+        let mut rate_release_counts = RateReleaseCounts::default();
+
         let sanitized = sanitize_snapshot(
             &mut snap,
             Some(&prev),
@@ -4049,6 +4473,7 @@ mod tests {
             &mut pending_mode,
             &mut delta_corrections,
             &mut suspect_counts,
+            &mut rate_release_counts,
         );
 
         assert!(
@@ -4089,6 +4514,8 @@ mod tests {
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
 
+        let mut rate_release_counts = RateReleaseCounts::default();
+
         let sanitized = sanitize_snapshot(
             &mut snap,
             Some(&prev),
@@ -4096,6 +4523,7 @@ mod tests {
             &mut pending_mode,
             &mut delta_corrections,
             &mut suspect_counts,
+            &mut rate_release_counts,
         );
 
         assert!(
@@ -4156,6 +4584,8 @@ mod tests {
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
 
+        let mut rate_release_counts = RateReleaseCounts::default();
+
         let sanitized = sanitize_snapshot(
             &mut snap,
             Some(&prev),
@@ -4163,6 +4593,7 @@ mod tests {
             &mut pending_mode,
             &mut delta_corrections,
             &mut suspect_counts,
+            &mut rate_release_counts,
         );
 
         // Exactly 10 min (duration <= 10) + start <= 10 = suspicious
@@ -4393,6 +4824,8 @@ mod tests {
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
 
+        let mut rate_release_counts = RateReleaseCounts::default();
+
         let sanitized = sanitize_snapshot(
             &mut snap,
             Some(&prev),
@@ -4400,6 +4833,7 @@ mod tests {
             &mut pending_mode,
             &mut delta_corrections,
             &mut suspect_counts,
+            &mut rate_release_counts,
         );
 
         assert!(
@@ -4418,6 +4852,7 @@ mod tests {
         let mut pending_mode = None;
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
+        let mut rate_release_counts = RateReleaseCounts::default();
         sanitize_snapshot(
             snap,
             prev,
@@ -4425,6 +4860,7 @@ mod tests {
             &mut pending_mode,
             &mut delta_corrections,
             &mut suspect_counts,
+            &mut rate_release_counts,
         )
     }
 
@@ -4636,6 +5072,101 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_accepts_legit_soc_rounding_tick_to_100_while_charging() {
+        // The production false-positive pattern: SOC register is 1%
+        // resolution, so the underlying 99.5% reading rounds up to 100 while
+        // the BMS is still in the tail of a charge cycle. The old code carried
+        // prev=99 forward, which then re-fired the same warning every poll
+        // because the inverter legitimately keeps reporting 100% for a few
+        // cycles after the tick. With the threshold fix, a prev.soc of 99 or
+        // 98 is accepted as a legitimate rounding tick.
+        //
+        // The snap state is energy-balanced (solar 3 kW charges battery at
+        // 3 kW, no other flow) so the cross-check doesn't restore the battery
+        // value to prev before the SOC check gets a chance to run.
+        let mut prev = base_grid_connected_snap();
+        prev.soc = 99;
+        prev.timestamp = 100;
+
+        let mut snap = prev.clone();
+        snap.soc = 100;
+        snap.solar_power = 3_000;
+        snap.battery_power = -3_000; // charging at 3 kW from solar
+        snap.timestamp = 103;
+
+        let sanitized = sanitize_for_test(&mut snap, Some(&prev));
+        assert!(
+            !sanitized,
+            "99→100 rounding tick during charging must not force a re-poll"
+        );
+        assert_eq!(snap.soc, 100, "the tick to 100 must be accepted");
+    }
+
+    #[test]
+    fn sanitize_carries_forward_soc_100_jump_from_far_below() {
+        // The genuine corruption case the threshold protects: prev=50 → snap=100
+        // in a single poll is impossible and must still be caught. Snap is
+        // energy-balanced so the cross-check doesn't interfere.
+        let mut prev = base_grid_connected_snap();
+        prev.soc = 50;
+        prev.timestamp = 100;
+
+        let mut snap = prev.clone();
+        snap.soc = 100;
+        snap.solar_power = 3_000;
+        snap.battery_power = -3_000;
+        snap.timestamp = 103;
+
+        let sanitized = sanitize_for_test(&mut snap, Some(&prev));
+        assert!(sanitized);
+        assert_eq!(snap.soc, 50, "jump from 50% to 100% must carry forward prev");
+    }
+
+    #[test]
+    fn sanitize_accepts_legit_soc_rounding_tick_to_zero_with_live_power() {
+        // Same shape at the bottom of the SOC range: prev=1 → snap=0 while
+        // solar is producing is a legitimate rounding tick as the battery
+        // crosses 0.5% during the tail of a discharge. The BMS then cuts off
+        // discharge (battery_power goes to 0); meanwhile solar covers the load.
+        let mut prev = base_grid_connected_snap();
+        prev.soc = 1;
+        prev.timestamp = 100;
+
+        let mut snap = prev.clone();
+        snap.soc = 0;
+        snap.battery_power = -2_500; // actually charging (solar surplus)
+        snap.solar_power = 4_000;
+        snap.timestamp = 103;
+
+        let sanitized = sanitize_for_test(&mut snap, Some(&prev));
+        assert!(
+            !sanitized,
+            "1→0 rounding tick during live power must not force a re-poll"
+        );
+        assert_eq!(snap.soc, 0, "the tick to 0 must be accepted");
+    }
+
+    #[test]
+    fn sanitize_carries_forward_soc_zero_jump_from_far_above() {
+        // The genuine corruption case at the low end: prev=80 → snap=0 in one
+        // poll while solar/battery are active is impossible and must still
+        // be caught.
+        let mut prev = base_grid_connected_snap();
+        prev.soc = 80;
+        prev.timestamp = 100;
+
+        let mut snap = prev.clone();
+        snap.soc = 0;
+        snap.battery_power = -2_500;
+        snap.solar_power = 4_000;
+        snap.timestamp = 103;
+
+        let sanitized = sanitize_for_test(&mut snap, Some(&prev));
+        assert!(sanitized);
+        assert_eq!(snap.soc, 80, "jump from 80% to 0% must carry forward prev");
+    }
+
+    #[test]
     fn sanitize_rate_check_skipped_on_reconnect_gap() {
         // 2 kW → 8 kW over a 120s gap (reconnect). Rate check is skipped
         // because elapsed > 60s window. Must be accepted.
@@ -4665,6 +5196,159 @@ mod tests {
         let sanitized = sanitize_for_test(&mut snap, None);
         assert_eq!(snap.solar_power, 8_000, "first reading must not be rate-rejected");
         let _ = sanitized;
+    }
+
+    #[test]
+    fn sanitize_ev_charger_on_off_settles_within_three_polls() {
+        // The user's EV-charger scenario: home_power jumps from ~80 W of
+        // always-on loads to ~8 kW when a car charger switches on, and back
+        // down to ~80 W when it switches off. The two directions exercise
+        // different sanitiser paths:
+        //
+        //  - **ON** (prev ~80 W → raw ~8000 W): the previous value is below
+        //    the 500 W low-base floor, so the rate check's fraction gate is
+        //    meaningless against a near-zero denominator. The absolute-delta
+        //    gate alone accepts raw. No release needed.
+        //
+        //  - **OFF** (prev ~8000 W → raw ~80 W): the previous value is well
+        //    above the low-base floor, so the rate check fires on every
+        //    field (fraction ≈ 0.99 against the 8 kW base, abs_delta ≈ 7920
+        //    against the 2 kW gate). The cross-check can't adjudicate because
+        //    home, battery, and grid all move together. Without a release
+        //    mechanism the carried-forward prev would freeze the dashboard
+        //    at the EV-on values indefinitely. The release count fires on
+        //    the third consecutive rejection and accepts raw.
+        //
+        // Both snap states are energy-balanced so the cross-check's residual
+        // check stays below its 2 kW threshold on the steady state (and the
+        // held prev state in the off direction) — meaning the test exercises
+        // the rate-check release path in isolation, not the cross-check.
+        #[allow(clippy::too_many_arguments)] // 8 args is verbose but each is a distinct field of the test fixture
+        fn run_one_poll(
+            rate_release_counts: &mut RateReleaseCounts,
+            timestamp: i64,
+            home_prev: i32,
+            home_raw: i32,
+            battery_prev: i32,
+            battery_raw: i32,
+            grid_prev: i32,
+            grid_raw: i32,
+        ) -> i32 {
+            let mut prev = base_grid_connected_snap();
+            prev.home_power = home_prev;
+            prev.battery_power = battery_prev;
+            prev.grid_power = grid_prev;
+            prev.timestamp = timestamp;
+
+            let mut snap = prev.clone();
+            snap.home_power = home_raw;
+            snap.battery_power = battery_raw;
+            snap.grid_power = grid_raw;
+            snap.timestamp = timestamp + 3;
+
+            let mut pending_mode = None;
+            let mut delta_corrections = DeltaCorrectionCounts::default();
+            let mut suspect_counts = ConsecutiveSuspectCounts::default();
+            sanitize_snapshot(
+                &mut snap,
+                Some(&prev),
+                false,
+                &mut pending_mode,
+                &mut delta_corrections,
+                &mut suspect_counts,
+                rate_release_counts,
+            );
+            snap.home_power
+        }
+
+        // -- EV charger switches ON --
+        // home 80 → 8000 W, battery 0 → 2500 W (discharge), grid 0 → -5500 W
+        // (import). All prev values are below the 500 W low-base floor so the
+        // fraction gate is skipped; raw is accepted on every cycle.
+        let mut rate_release_counts = RateReleaseCounts::default();
+        let mut timestamp = 1000;
+
+        let home_on_1 = run_one_poll(
+            &mut rate_release_counts,
+            timestamp,
+            80, 8_000,
+            0, 2_500,
+            0, -5_500,
+        );
+        assert_eq!(
+            home_on_1, 8_000,
+            "EV ON cycle 1: home 80→8000 must be accepted immediately via low-base skip"
+        );
+        timestamp += 3;
+
+        let home_on_2 = run_one_poll(
+            &mut rate_release_counts,
+            timestamp,
+            8_000, 8_000, // steady state at the new reading
+            2_500, 2_500,
+            -5_500, -5_500,
+        );
+        assert_eq!(home_on_2, 8_000, "EV ON steady state passes through unchanged");
+        timestamp += 3;
+
+        // -- EV charger switches OFF --
+        // home 8000 → 80 W, battery 2500 → 0 W (idle), grid -5500 → -80 W
+        // (imports just the always-on loads). All prev values are now above
+        // the 500 W floor, so the rate check fires on every field. The
+        // carried-forward prev holds for two cycles, then the release on
+        // cycle 3 accepts the new values.
+        let home_off_1 = run_one_poll(
+            &mut rate_release_counts,
+            timestamp,
+            8_000, 80,
+            2_500, 0,
+            -5_500, -80,
+        );
+        assert_eq!(
+            home_off_1, 8_000,
+            "EV OFF cycle 1: rate check rejects and home held at prev (8 kW)"
+        );
+        timestamp += 3;
+
+        let home_off_2 = run_one_poll(
+            &mut rate_release_counts,
+            timestamp,
+            8_000, 80,
+            2_500, 0,
+            -5_500, -80,
+        );
+        assert_eq!(
+            home_off_2, 8_000,
+            "EV OFF cycle 2: still rate-rejected, held at prev"
+        );
+        timestamp += 3;
+
+        let home_off_3 = run_one_poll(
+            &mut rate_release_counts,
+            timestamp,
+            8_000, 80,
+            2_500, 0,
+            -5_500, -80,
+        );
+        assert_eq!(
+            home_off_3, 80,
+            "EV OFF cycle 3: RATE_RELEASE_THRESHOLD reached, raw 80 W is accepted"
+        );
+        timestamp += 3;
+
+        // Steady state at the new reading: rate counter is reset, delta
+        // check passes (no movement), raw passes through.
+        let home_off_steady = run_one_poll(
+            &mut rate_release_counts,
+            timestamp,
+            80, 80,
+            0, 0,
+            -80, -80,
+        );
+        assert_eq!(
+            home_off_steady, 80,
+            "EV OFF steady state: no further rate-reject, no release"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -4934,6 +5618,8 @@ mod tests {
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
 
+        let mut rate_release_counts = RateReleaseCounts::default();
+
         let sanitized = sanitize_snapshot(
             &mut snap,
             Some(&prev),
@@ -4941,6 +5627,7 @@ mod tests {
             &mut pending_mode,
             &mut delta_corrections,
             &mut suspect_counts,
+            &mut rate_release_counts,
         );
 
         assert!(
@@ -4969,6 +5656,8 @@ mod tests {
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
 
+        let mut rate_release_counts = RateReleaseCounts::default();
+
         sanitize_snapshot(
             &mut snap,
             Some(&prev),
@@ -4976,6 +5665,7 @@ mod tests {
             &mut pending_mode,
             &mut delta_corrections,
             &mut suspect_counts,
+            &mut rate_release_counts,
         );
 
         assert_eq!(
@@ -5000,6 +5690,8 @@ mod tests {
         let mut delta_corrections = DeltaCorrectionCounts::default();
         let mut suspect_counts = ConsecutiveSuspectCounts::default();
 
+        let mut rate_release_counts = RateReleaseCounts::default();
+
         sanitize_snapshot(
             &mut snap,
             Some(&prev),
@@ -5007,6 +5699,7 @@ mod tests {
             &mut pending_mode,
             &mut delta_corrections,
             &mut suspect_counts,
+            &mut rate_release_counts,
         );
 
         // On gateway the rate-check may or may not have run depending
