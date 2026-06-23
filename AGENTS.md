@@ -125,7 +125,7 @@ GivEnergy dongle frequently returns corrupted register values. The sanitizer in 
 ### Connect sequence
 
 ```
-Connect → 500ms delay → drain TCP → 3× warmup reads (discarded)
+Connect → 500ms delay → drain TCP → 1× warmup read (discarded)
 → clear latest_snapshot → 3 grace readings (absolute check only)
   └─ cumulative counters median-of-3 on final grace reading
 → full absolute + delta checks

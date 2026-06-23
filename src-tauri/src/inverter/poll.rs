@@ -711,36 +711,32 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     }
                 }
 
-                // Warmup reads: discard the first register reads after connect.
-                // The dongle's internal state can be stale after a TCP reconnect,
-                // causing the first reads to return garbage values (e.g.
-                // today_import_kwh = 0.6 when the real value is 39.0). We do
-                // multiple warmup reads because a single discard isn't enough -
-                // the dongle can return corrupted data for several reads.
+                // Warmup read: discard the first register read after connect.
+                // The dongle's internal state can be stale after a TCP
+                // reconnect, causing the first read to return garbage values
+                // (e.g. today_import_kwh = 0.6 when the real value is 39.0).
+                // A single discard read is enough — residual corruption is
+                // caught downstream by the absolute-range sanitizer and the
+                // grace-period median-of-3 baseline. (We used to do 3 warmup
+                // reads, but that predates those defenses and on a slow dongle
+                // it could delay the first UI update by 30 s+. GivTCP does one
+                // full refresh after connect then enters its watch loop.)
                 //
-                // Bail on the FIRST failing read: if the dongle can't serve one
-                // multi-block read it won't serve the next two either, so
-                // reconnecting now saves ~2× the per-read timeout.
+                // Bail on the failing read: if the dongle can't serve one
+                // multi-block read it won't serve another, so reconnecting now
+                // saves the per-read timeout.
                 if !session_unusable {
-                    for i in 0..3 {
-                        match client.read_all_standard().await {
-                            Ok(blocks) => {
-                                tracing::debug!(
-                                    "Warmup read {}/3 - OK ({} blocks)",
-                                    i + 1,
-                                    blocks.len()
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Warmup read {}/3 - FAILED: {e} - ending session",
-                                    i + 1
-                                );
-                                session_unusable = true;
-                                break;
-                            }
+                    match client.read_all_standard().await {
+                        Ok(blocks) => {
+                            tracing::debug!(
+                                blocks = blocks.len(),
+                                "Warmup read OK"
+                            );
                         }
-                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        Err(e) => {
+                            tracing::warn!("Warmup read FAILED: {e} - ending session");
+                            session_unusable = true;
+                        }
                     }
                 }
 

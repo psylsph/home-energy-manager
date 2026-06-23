@@ -239,7 +239,7 @@ impl ModbusClient {
             serial_suspect: false,
             slave: 0x11, // canonical GivEnergy inverter address for detection
             writer: None,
-            timeout: Duration::from_secs(5),
+            timeout: Self::IO_TIMEOUT,
             inter_request_delay: Self::INTER_REQUEST_DELAY_DEFAULT,
             pending: Arc::new(Mutex::new(HashMap::new())),
             connected: Arc::new(AtomicBool::new(false)),
@@ -295,10 +295,23 @@ impl ModbusClient {
         self.inter_request_delay = delay;
     }
 
+    /// Default timeout for a single read/write operation on the TCP socket.
+    ///
+    /// Matches the 3 s per-request timeout GivTCP ships in production
+    /// (`watch_plant(timeout=3)`). A healthy dongle answers in ~50 ms, so this
+    /// window is only ever consumed by a *failing* dongle — a shorter ceiling
+    /// there means retries, warmup, and the inner-loop 3-strike reconnect all
+    /// trigger sooner instead of dragging out 5 s at a time.
+    pub const IO_TIMEOUT: Duration = Duration::from_secs(3);
+
     /// Timeout for a single-register liveness probe — well inside any healthy
     /// dongle's ~50 ms response time, so a silent ("zombie") dongle fails in
     /// one round-trip instead of cascading through the full block-read retry
     /// sequence (~minutes).
+    ///
+    /// Numerically equal to [`IO_TIMEOUT`]; kept as a distinct constant so the
+    /// probe's fast-fail-on-zombie property holds even if a caller raises the
+    /// operational timeout via [`ModbusClient::set_timeout`].
     pub const LIVENESS_TIMEOUT: Duration = Duration::from_secs(3);
 
     /// Cheap single-register read used to confirm the dongle is actually
@@ -2430,7 +2443,7 @@ mod tests {
         });
 
         let mut client = ModbusClient::new("127.0.0.1", port, "TEST123456");
-        client.set_timeout(Duration::from_secs(5)); // default (should not be used by probe)
+        client.set_timeout(Duration::from_secs(5)); // explicit non-default value (must survive probe)
         client.connect().await.unwrap();
 
         let start = std::time::Instant::now();
