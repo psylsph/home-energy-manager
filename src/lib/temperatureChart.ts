@@ -40,3 +40,28 @@ export function computeTempDifferential(rows: TemperatureInput[]): TemperatureRo
     return out;
   });
 }
+
+/**
+ * Compute the battery-minus-external (ambient) temperature differential
+ * for each row.
+ *
+ * Used by the "Battery − Ambient (°C)" chart on the History page. A
+ * positive value means the battery is running warmer than the outside air
+ * — expected when charging/discharging hard or when the inverter is in a
+ * warm loft. A value near zero means the battery tracks ambient closely
+ * (typical of a garage installation with light load). Large negative
+ * values in winter suggest the battery is being kept warm by its own
+ * BMS heating or by the heated indoor space it's installed in.
+ *
+ * Missing data (either field absent on a row) is represented as `NaN` so
+ * Recharts leaves a visible gap rather than drawing a misleading zero.
+ */
+export function computeBatteryExternalDifferential(rows: TemperatureInput[]): TemperatureRow[] {
+  return rows.map((row) => {
+    const batt = row.battery_temperature;
+    const ext = row.external_temperature;
+    const out: TemperatureRow = { ...row } as TemperatureRow;
+    out._batt_ext_diff = batt != null && ext != null ? batt - ext : Number.NaN;
+    return out;
+  });
+}
