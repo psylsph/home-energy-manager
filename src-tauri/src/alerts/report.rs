@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use chrono::Timelike;
 
 /// A single reading row from the history database.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ReadingRow {
     pub timestamp: i64,
     pub solar_power: Option<i32>,

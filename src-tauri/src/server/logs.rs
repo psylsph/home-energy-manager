@@ -16,6 +16,18 @@ use serde_json::{json, Value};
 // Ring buffer
 // ---------------------------------------------------------------------------
 
+/// Default capture level for a freshly-created [`LogRing`].
+///
+/// INFO (2) captures the events that actually matter when diagnosing a
+/// problem from the developer console or the automated support bundle
+/// (issue #125): connection/disconnect, grace-period baselines, config
+/// saves, write confirmations, alert evaluations. WARN alone hides all of
+/// that and a user raising a ticket typically has nothing useful in the
+/// ring. The buffer is capped ([`LogRingInner::capacity`], 2000 lines), so
+/// the higher rate just evicts older entries sooner — the newest context,
+/// which is what's almost always wanted, is always retained.
+const DEFAULT_CAPTURE_LEVEL: u8 = 2; // INFO
+
 /// A fixed-capacity ring buffer of log lines.
 ///
 /// Thread-safe via `parking_lot::Mutex`. Old entries are
@@ -46,9 +58,7 @@ impl LogRing {
                 cursor: 0,
                 len: 0,
             }),
-            min_level: AtomicU8::new(1), // default: WARN — INFO floods the
-                                         // ring and the developer console
-                                         // with routine per-poll lines
+            min_level: AtomicU8::new(DEFAULT_CAPTURE_LEVEL),
         }
     }
 

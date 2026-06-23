@@ -341,6 +341,14 @@ pub struct AppState {
     /// checks — the next outer-loop iteration is guaranteed to see the
     /// newer value.
     pub reconnect_request: Arc<std::sync::atomic::AtomicU32>,
+    /// Unix-millis timestamp of the most recent successful support-bundle
+    /// submission (#125). Compared against the current time in the submit
+    /// handler to enforce [`crate::support::SUBMIT_COOLDOWN_SECS`], so a
+    /// double-click or a stuck UI can't flood the shared support topic. Uses
+    /// an atomic (not a mutex) because the rate-limit check is a single
+    /// load/compare/store with no data structure to protect. `0` means "no
+    /// submission has been made yet".
+    pub last_support_submit_ms: Arc<std::sync::atomic::AtomicI64>,
 }
 
 impl AppState {
@@ -379,6 +387,7 @@ impl AppState {
             connected_since: Arc::new(std::sync::Mutex::new(None)),
             connect_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             reconnect_request: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            last_support_submit_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             weather: Arc::new(Mutex::new(crate::weather::WeatherState {
                 config: crate::settings::Settings::load().weather_config,
                 ..Default::default()
@@ -428,6 +437,7 @@ impl AppState {
             connected_since: Arc::new(std::sync::Mutex::new(None)),
             connect_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             reconnect_request: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            last_support_submit_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             weather: Arc::new(Mutex::new(crate::weather::WeatherState {
                 config: crate::settings::Settings::load().weather_config,
                 ..Default::default()
