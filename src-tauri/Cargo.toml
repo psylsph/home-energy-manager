@@ -40,6 +40,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # HTTP client for Octopus API
 ureq = { version = "3", features = ["json"] }
+percent-encoding = "2"
 
 # Error handling
 thiserror = "2"

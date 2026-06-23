@@ -323,6 +323,11 @@ pub struct AppState {
     pub alert_debounce: Arc<Mutex<crate::alerts::AlertDebounce>>,
     /// Last date a daily consumption report was sent.
     pub last_report_date: Arc<Mutex<Option<chrono::NaiveDate>>>,
+    /// Weather subsystem state — current config, last fetch result, backfill
+    /// progress. Always present (not `Option<…>` like `history`) so the API
+    /// layer doesn't have to special-case "weather not yet initialised".
+    /// Mirror of `Settings::weather_config` lives inside the struct.
+    pub weather: Arc<Mutex<crate::weather::WeatherState>>,
     /// Wall-clock time when the current connection was established (None if disconnected).
     pub connected_since: Arc<std::sync::Mutex<Option<std::time::SystemTime>>>,
     /// How many consecutive TCP connect attempts have failed since the last success.
@@ -374,6 +379,10 @@ impl AppState {
             connected_since: Arc::new(std::sync::Mutex::new(None)),
             connect_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             reconnect_request: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            weather: Arc::new(Mutex::new(crate::weather::WeatherState {
+                config: crate::settings::Settings::load().weather_config,
+                ..Default::default()
+            })),
         }
     }
 }
@@ -419,6 +428,10 @@ impl AppState {
             connected_since: Arc::new(std::sync::Mutex::new(None)),
             connect_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             reconnect_request: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            weather: Arc::new(Mutex::new(crate::weather::WeatherState {
+                config: crate::settings::Settings::load().weather_config,
+                ..Default::default()
+            })),
         }
     }
 }

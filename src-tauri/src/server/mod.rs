@@ -84,6 +84,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Email alerts
         .route("/api/alerts", get(api::get_alerts).post(api::set_alerts))
         .route("/api/alerts/test", post(api::test_alerts))
+        // Weather (Open-Meteo integration)
+        .route("/api/weather", get(api::get_weather).post(api::set_weather))
+        .route("/api/weather/backfill", post(api::backfill_weather))
         // Reconnect control
         .route("/api/reconnect", post(api::post_reconnect))
         // Discovery
