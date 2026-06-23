@@ -93,21 +93,28 @@ fn charge_slot_command_for_device(
     start: u16,
     end: u16,
 ) -> Result<ControlCommand, String> {
+    // When `enabled` is false, force the slot times to the (0, 0) sentinel
+    // before dispatch so the matching arm below emits a slot-register write
+    // with start/end both zero. This mirrors how `discharge_slot_command_for_device`
+    // always writes the slot registers (start, end) on disable, and is the
+    // prerequisite for the slot toggling to round-trip through the UI:
+    // leaving the previous times in HR 94/95 (or HR 243/244 on Gen3/AIO)
+    // makes the next decode see the slot as configured, so the UI shows the
+    // toggle as ON again after the user turned it OFF.
     let (start, end) = if enabled { (start, end) } else { (0, 0) };
-    match (device_type.uses_three_phase_schedule_slots(), slot, enabled) {
-        (true, 1, _) => Ok(ControlCommand::SetThreePhaseChargeSlot1 { start, end }),
-        (true, 2, _) => Ok(ControlCommand::SetThreePhaseChargeSlot2 { start, end }),
-        (true, 3..=10, _) => Ok(ControlCommand::SetChargeSlotN { slot, start, end }),
-        (false, _, false) => Ok(ControlCommand::SetEnableCharge { enabled: false }),
-        (false, 1, true) => Ok(ControlCommand::SetChargeSlot1 { start, end }),
+    match (device_type.uses_three_phase_schedule_slots(), slot) {
+        (true, 1) => Ok(ControlCommand::SetThreePhaseChargeSlot1 { start, end }),
+        (true, 2) => Ok(ControlCommand::SetThreePhaseChargeSlot2 { start, end }),
+        (true, 3..=10) => Ok(ControlCommand::SetChargeSlotN { slot, start, end }),
+        (false, 1) => Ok(ControlCommand::SetChargeSlot1 { start, end }),
         // Gen3/AIO/HV-Gen3 use HR 243-244 for charge slot 2 (the extended-block
         // copy is authoritative on these models; classic HR 31-32 may be stale).
-        (false, 2, true) if device_type.supports_gen3_extended() => {
+        (false, 2) if device_type.supports_gen3_extended() => {
             Ok(ControlCommand::SetGen3ChargeSlot2 { start, end })
         }
-        (false, 2, true) => Ok(ControlCommand::SetChargeSlot2 { start, end }),
-        (false, 3..=10, true) => Ok(ControlCommand::SetChargeSlotN { slot, start, end }),
-        (_, _, _) => Err(format!("Unsupported charge slot {}", slot)),
+        (false, 2) => Ok(ControlCommand::SetChargeSlot2 { start, end }),
+        (false, 3..=10) => Ok(ControlCommand::SetChargeSlotN { slot, start, end }),
+        (_, _) => Err(format!("Unsupported charge slot {}", slot)),
     }
 }
 
@@ -1128,6 +1135,25 @@ pub async fn set_charge_slot(
                     .encode()
                     {
                         writes.extend(target_writes);
+                    }
+                }
+            } else {
+                // Disabling a slot: the slot register write above (from
+                // `charge_slot_command_for_device`) has already zeroed the
+                // slot times, so the next decode will see the slot as
+                // unconfigured and the UI toggle will round-trip correctly
+                // (fix for issue #106: AIO charge slot toggle reverted to ON
+                // after navigating away and back). On single-phase models
+                // also clear the master enable_charge flag (HR 96) so the
+                // inverter actually stops honouring the (now-cleared) slot —
+                // this mirrors the `SetEnableCharge { enabled: true }` write
+                // in the `if enabled` branch above. Three-phase manages its
+                // enable bits via ThreePhaseForceCharge etc., not here.
+                if !device_type.uses_three_phase_schedule_slots() {
+                    if let Ok(disable_writes) =
+                        (ControlCommand::SetEnableCharge { enabled: false }).encode()
+                    {
+                        writes.extend(disable_writes);
                     }
                 }
             }
@@ -2166,6 +2192,213 @@ pub async fn test_alerts(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
 }
 
 // ---------------------------------------------------------------------------
+// Support bundle submission (issue #125)
+// ---------------------------------------------------------------------------
+
+/// POST /api/support/submit — assemble a support bundle and deliver it via
+/// ntfy to the shared [`crate::support::SUPPORT_NTFY_TOPIC`] topic.
+///
+/// Gathers the current snapshot, the developer log ring, a sanitised view of
+/// the alert/notification settings (secrets redacted), and an optional recent
+/// history tail, packs them into a single JSON bundle, and uploads it to the
+/// hard-coded public ntfy.sh server. The maintainer subscribes to that one
+/// topic and receives every submission; each bundle is disambiguated by its
+/// serial-derived ID (see [`crate::support::generate_bundle_id`]). When the
+/// user supplies a GitHub issue number, an ntfy `Click` header deep-links the
+/// notification straight to that issue.
+///
+/// Rate-limited to one submission per [`crate::support::SUBMIT_COOLDOWN_SECS`]
+/// to stop double-clicks or a stuck UI from flooding the shared topic.
+pub async fn submit_support_bundle(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<Value>) {
+    // Parse + validate the request before touching any shared state, so a
+    // malformed body can't hold locks or burn the rate-limit token.
+    let request: crate::support::SupportRequest = match serde_json::from_value(body) {
+        Ok(r) => r,
+        Err(e) => {
+            return error_response(&format!("Invalid request body: {e}"));
+        }
+    };
+    if let Err(e) = crate::support::validate_request(&request) {
+        return error_response(&e);
+    }
+
+    // Rate limit: only a successful delivery stamps the timestamp below, so a
+    // failed attempt does NOT consume the cooldown window — the user can retry
+    // immediately after a network error rather than being locked out.
+    let now_ms = chrono::Local::now().timestamp_millis();
+    let last_ms = state
+        .last_support_submit_ms
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if last_ms > 0 {
+        let elapsed_secs = (now_ms - last_ms) / 1000;
+        if elapsed_secs < crate::support::SUBMIT_COOLDOWN_SECS {
+            let wait = crate::support::SUBMIT_COOLDOWN_SECS - elapsed_secs;
+            return error_response(&format!(
+                "Please wait {wait} more second{} before submitting another bundle.",
+                if wait == 1 { "" } else { "s" }
+            ));
+        }
+    }
+
+    // Gather inputs under short-lived locks, cloning what we need so the
+    // (synchronous, blocking) delivery never holds a lock across an await.
+    let snapshot = state.latest_snapshot.lock().await.clone();
+    let logs = state.log_ring.read_all();
+    let log_capture_level = {
+        let code = state
+            .log_ring
+            .min_level
+            .load(std::sync::atomic::Ordering::Relaxed);
+        match code {
+            0 => "ERROR",
+            1 => "WARN",
+            2 => "INFO",
+            3 => "DEBUG",
+            4 => "TRACE",
+            _ => "INFO",
+        }
+        .to_string()
+    };
+    let (host, port, serial, interval_secs) = {
+        let s = state.settings.lock().await;
+        (s.host.clone(), s.port, s.serial.clone(), s.interval_secs)
+    };
+    let alerts_config = state.alert_config.lock().await.clone();
+
+    // History tail: today's readings, capped to the newest N. Best-effort —
+    // a missing/unwritable DB must not block the rest of the bundle.
+    let history_rows = if request.include_history {
+        let db_guard = state.history.lock().await;
+        if let Some(db) = db_guard.as_ref() {
+            let today = chrono::Local::now().date_naive();
+            match db.get_readings_for_date(today) {
+                Ok(rows) => crate::support::cap_history_rows(rows),
+                Err(e) => {
+                    tracing::warn!("Support bundle history query failed: {e}");
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    let inputs = crate::support::BundleInputs {
+        snapshot,
+        logs,
+        log_capture_level,
+        host,
+        port,
+        serial,
+        interval_secs,
+        alerts_config,
+        history_rows,
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        platform: std::env::consts::OS.to_string(),
+        request,
+    };
+
+    let bundle = match crate::support::build_bundle(inputs) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("Support bundle build failed: {e}");
+            return error_response(&e);
+        }
+    };
+
+    let size_bytes = bundle.json.len();
+    let bundle_id = bundle.id.clone();
+    let title = format!("HEM Support: {}", bundle.id);
+    let click = bundle.issue_url.clone();
+
+    tracing::info!(
+        bundle_id = %bundle_id,
+        size_bytes,
+        issue_number = ?bundle.issue_number,
+        "Submitting support bundle to ntfy"
+    );
+
+    // Deliver on a blocking thread — ureq is synchronous. ntfy always wins
+    // (the topic is hard-coded, independent of the user's alert config) so
+    // every user can submit regardless of whether they have set up alerts.
+    let manifest_summary = bundle.manifest_summary.clone();
+    let filename = bundle.filename.clone();
+    let json_body = bundle.json.clone();
+    let click_for_task = click.clone();
+    let ntfy_result = tokio::task::spawn_blocking(move || {
+        crate::alerts::send_ntfy_attachment(
+            crate::support::SUPPORT_NTFY_TOPIC,
+            crate::support::SUPPORT_NTFY_SERVER,
+            &filename,
+            "application/json",
+            &crate::alerts::NtfyMessage {
+                title: &title,
+                message: &manifest_summary,
+                tags: "package,support",
+                click: click_for_task.as_deref(),
+            },
+            &json_body,
+        )
+    })
+    .await;
+
+    let sent_to = match ntfy_result {
+        Ok(Ok(())) => {
+            // Only stamp the rate-limit timestamp on a successful delivery.
+            state.last_support_submit_ms.store(
+                chrono::Local::now().timestamp_millis(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            serde_json::json!([{ "channel": "ntfy", "ok": true }])
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("Support bundle ntfy delivery failed: {e}");
+            serde_json::json!([{ "channel": "ntfy", "ok": false, "error": e }])
+        }
+        Err(join_err) => {
+            tracing::warn!("Support bundle delivery task failed: {join_err}");
+            serde_json::json!([{
+                "channel": "ntfy",
+                "ok": false,
+                "error": format!("internal error: {join_err}")
+            }])
+        }
+    };
+
+    let any_ok = sent_to
+        .as_array()
+        .map(|a| a.iter().any(|r| r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)))
+        .unwrap_or(false);
+
+    let message = if any_ok {
+        format!("Bundle {bundle_id} submitted.")
+    } else {
+        "Bundle was assembled but could not be delivered. Check your internet connection and try again."
+            .to_string()
+    };
+    let status = if any_ok {
+        StatusCode::OK
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    (
+        status,
+        Json(json!({
+            "ok": any_ok,
+            "bundle_id": bundle_id,
+            "size_bytes": size_bytes,
+            "sent_to": sent_to,
+            "message": message,
+        })),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Reconnect endpoint
 // ---------------------------------------------------------------------------
 
@@ -2631,9 +2864,15 @@ mod tests {
                 .unwrap(),
             ControlCommand::SetThreePhaseDischargeSlot2 { start: 0, end: 0 }
         ));
+        // Single-phase charge-slot disable now mirrors discharge-slot behaviour:
+        // the slot time registers are zeroed so the next decode sees the slot
+        // as unconfigured. The master enable_charge flag (HR 96) is cleared
+        // separately by the `set_charge_slot` handler in its `else` branch —
+        // see `aio_slot_disable_writes_both_slot_times_and_hr96` for the
+        // end-to-end regression test (issue #106).
         assert!(matches!(
             charge_slot_command_for_device(DeviceType::Gen3Hybrid, 1, false, 130, 530).unwrap(),
-            ControlCommand::SetEnableCharge { enabled: false }
+            ControlCommand::SetChargeSlot1 { start: 0, end: 0 }
         ));
         assert!(matches!(
             discharge_slot_command_for_device(DeviceType::Gen3Hybrid, 1, false, 1600, 1900)
@@ -2950,6 +3189,57 @@ mod tests {
                     .value,
                 0
             );
+        })
+        .await;
+    }
+
+    /// Disabling a charge slot on the All-in-One must zero BOTH the slot times
+    /// (HR 94/95) AND the master enable_charge flag (HR 96). Without both, the
+    /// next decode sees the slot as still configured and the UI shows the
+    /// toggle as ON again after the user navigated away and back (issue #106:
+    /// "it will turn it on and off but when it is off if I leave settings tab
+    /// and return back to settings it'll show it as being turned on when it
+    /// isn't really on"). Regression guard for the `(false, _, false)` arm of
+    /// `charge_slot_command_for_device` plus the matching `else` branch in
+    /// `set_charge_slot`.
+    #[tokio::test]
+    async fn aio_slot_disable_writes_both_slot_times_and_hr96() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_ENABLE_CHARGE,
+            };
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            // Slot 1, times don't matter for the disable path (handler zeros
+            // them), but we send plausible times so any future change that
+            // forwards them through unchanged still has a valid HHMM pair.
+            let body = serde_json::json!({
+                "slot": 1,
+                "start_hour": 6, "start_minute": 0,
+                "end_hour": 10, "end_minute": 0,
+                "enabled": false,
+            });
+            let _ = set_charge_slot(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            // Slot 1 times must be zeroed so the decode sees the slot as
+            // unconfigured.
+            let start = writes
+                .iter()
+                .find(|w| w.address == HR_CHARGE_SLOT_1_START)
+                .expect("AIO charge slot disable must zero HR 94 (slot 1 start)");
+            assert_eq!(start.value, 0, "slot 1 start must be cleared on disable");
+            let end = writes
+                .iter()
+                .find(|w| w.address == HR_CHARGE_SLOT_1_END)
+                .expect("AIO charge slot disable must zero HR 95 (slot 1 end)");
+            assert_eq!(end.value, 0, "slot 1 end must be cleared on disable");
+            // Master enable_charge must be cleared so the inverter actually
+            // stops honouring the (now-cleared) slot.
+            let enable = writes
+                .iter()
+                .find(|w| w.address == HR_ENABLE_CHARGE)
+                .expect("AIO charge slot disable must clear HR 96 (enable_charge)");
+            assert_eq!(enable.value, 0, "HR 96 must be 0 on disable");
         })
         .await;
     }
@@ -4962,6 +5252,97 @@ mod tests {
                 0.42,
                 "omitted tariff_config must not overwrite"
             );
+        })
+        .await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Support bundle submission (#125).
+    //
+    // Only the validation and rate-limit paths are exercised here because they
+    // return *before* the ntfy delivery call — the success path hits the live
+    // public ntfy.sh server and is covered by the Playwright E2E test.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn support_submit_rejects_empty_description() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "description": "   ",
+                "category": "other",
+            });
+            let (status, res) = submit_support_bundle(State(state), Json(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(!res["ok"].as_bool().unwrap_or(true));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn support_submit_rejects_invalid_category() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "description": "something is broken",
+                "category": "bogus",
+            });
+            let (status, res) = submit_support_bundle(State(state), Json(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let err = res["error"].as_str().unwrap_or("");
+            assert!(err.contains("Invalid category"), "got {err}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn support_submit_rejects_invalid_issue_number() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "description": "something is broken",
+                "category": "other",
+                "issue_number": "not-a-number",
+            });
+            let (status, res) = submit_support_bundle(State(state), Json(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let err = res["error"].as_str().unwrap_or("");
+            assert!(err.contains("Issue number"), "got {err}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn support_submit_rejects_malformed_body() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            // Missing required `description` field → deserialise error.
+            let body = serde_json::json!({ "category": "other" });
+            let (status, _) = submit_support_bundle(State(state), Json(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        })
+        .await;
+    }
+
+    /// A submission made within the cooldown window must be rejected *before*
+    /// any network delivery. Pre-seeding `last_support_submit_ms` simulates a
+    /// successful prior submission without having to hit ntfy.sh.
+    #[tokio::test]
+    async fn support_submit_rate_limits_within_cooldown() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            state.last_support_submit_ms.store(
+                chrono::Local::now().timestamp_millis(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            let body = serde_json::json!({
+                "description": "follow-up issue",
+                "category": "other",
+            });
+            let (status, res) = submit_support_bundle(State(state), Json(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let err = res["error"].as_str().unwrap_or("");
+            assert!(err.contains("wait"), "expected cooldown message, got {err}");
         })
         .await;
     }
