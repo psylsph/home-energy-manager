@@ -59,10 +59,22 @@ const ALLOWED_FIELDS: &[&str] = &[
     "discharge_rate",
     "battery_reserve",
     "target_soc",
+    // Weather observations live in the separate `weather_observations`
+    // table — see `is_weather_field`. Listed here so the standard SQL-
+    // injection whitelist accepts the field name on the history endpoint.
+    "external_temperature",
 ];
 
 fn is_allowed_field(field: &str) -> bool {
     ALLOWED_FIELDS.contains(&field)
+}
+
+/// True for fields that live in the `weather_observations` table rather
+/// than `readings`. The frontend sends them through `/api/history` like any
+/// other field; the query layer routes them here so the rest of the pipeline
+/// (bucket aggregation, TimePoint shape) is identical.
+fn is_weather_field(field: &str) -> bool {
+    field == "external_temperature"
 }
 
 /// Cumulative counter fields that monotonically increase within a day and
@@ -178,6 +190,23 @@ CREATE TABLE IF NOT EXISTS readings (
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+-- Weather observations are kept in their own table so they can be polled
+-- on a different cadence to the inverter (15 min vs every poll cycle) and
+-- so historical backfill can insert in bulk without churning the inverter
+-- readings table. The `source` column distinguishes live fetches from
+-- archive backfill for debugging — both write into the same row keyed by
+-- timestamp, so the most-recent observation wins. Resolved lat/lon are
+-- persisted per row so a user can audit which grid cell the actual reading
+-- came from (Open-Meteo can pick a cell several km from the requested
+-- coords).
+CREATE TABLE IF NOT EXISTS weather_observations (
+    timestamp     INTEGER PRIMARY KEY,
+    temperature_c REAL NOT NULL,
+    source        TEXT NOT NULL,
+    latitude      REAL,
+    longitude     REAL,
+    fetched_at    INTEGER NOT NULL
 );
 ";
 
@@ -802,17 +831,32 @@ impl HistoryDb {
                 "AVG"
             };
 
+            let table = if is_weather_field(field) {
+                "weather_observations"
+            } else {
+                "readings"
+            };
+            // Weather observations store temperature in `temperature_c` rather
+            // than the requested field name, so the SELECT has to alias the
+            // column. Every other field shares its name with the column.
+            let select_col = if is_weather_field(field) {
+                "temperature_c".to_string()
+            } else {
+                format!("\"{field}\"")
+            };
+
             let sql = format!(
                 "SELECT \
                     ((timestamp / {bucket}) * {bucket}) * 1000 AS t_bucket, \
-                    {agg}(\"{field}\") AS v \
-                 FROM readings \
-                 WHERE timestamp >= ?1 AND timestamp < ?2 AND \"{field}\" IS NOT NULL \
+                    {agg}({select_col}) AS v \
+                 FROM {table} \
+                 WHERE timestamp >= ?1 AND timestamp < ?2 AND {select_col} IS NOT NULL \
                  GROUP BY t_bucket \
                  ORDER BY t_bucket",
                 bucket = bucket_secs,
                 agg = agg,
-                field = field,
+                table = table,
+                select_col = select_col,
             );
 
             let mut stmt = conn
@@ -841,6 +885,54 @@ impl HistoryDb {
         }
 
         Ok(result)
+    }
+
+    /// Insert one weather observation.
+    ///
+    /// `source` is `"current"` for live fetches or `"backfill"` for archive
+    /// pulls. Both write into the same row keyed by `timestamp`; the most
+    /// recent observation wins, so a live fetch that overlaps with a slow
+    /// backfill naturally supersedes it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_weather(
+        &self,
+        timestamp: i64,
+        temperature_c: f32,
+        source: &str,
+        latitude: Option<f32>,
+        longitude: Option<f32>,
+        fetched_at: i64,
+    ) {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("History DB lock poisoned: {e}");
+                return;
+            }
+        };
+
+        if let Err(e) = conn.execute(
+            "INSERT OR REPLACE INTO weather_observations \
+                (timestamp, temperature_c, source, latitude, longitude, fetched_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![timestamp, temperature_c, source, latitude, longitude, fetched_at],
+        ) {
+            tracing::warn!("Failed to insert weather observation: {e}");
+        }
+    }
+
+    /// Return the earliest (timestamp, source) pair from `weather_observations`,
+    /// or `None` if the table is empty. Used to report a "first weather data
+    /// point" status to the frontend, and as the lower bound for resumption
+    /// when the user disables + re-enables weather.
+    pub fn earliest_weather_observation(&self) -> Option<(i64, String)> {
+        let conn = self.conn.lock().ok()?;
+        conn.query_row(
+            "SELECT timestamp, source FROM weather_observations ORDER BY timestamp ASC LIMIT 1",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .ok()
     }
 
     /// Fetch all readings for a given local date (midnight-to-midnight).
@@ -2410,5 +2502,234 @@ mod tests {
         assert!((val - 5.0).abs() < 0.01, "data should be unchanged, got {val}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ==================================================================
+    // Weather observations tests
+    // ==================================================================
+
+    #[test]
+    fn weather_table_created_on_open() {
+        // The schema SQL must create the weather_observations table so
+        // existing history.db files (without the table) get it on first
+        // launch of the new code path.
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='weather_observations'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "weather_observations table must exist after open");
+    }
+
+    #[test]
+    fn external_temperature_is_whitelisted() {
+        // The query_history loop accepts it; without the whitelist entry
+        // the field is silently dropped (SQL-injection defence).
+        assert!(is_allowed_field("external_temperature"));
+        assert!(is_weather_field("external_temperature"));
+        // Spot-check that the original whitelist is unaffected.
+        assert!(is_allowed_field("battery_temperature"));
+        assert!(!is_weather_field("battery_temperature"));
+    }
+
+    #[test]
+    fn insert_and_query_weather() {
+        let db = test_db();
+        // Insert hourly observations across one day. Use a recent range so
+        // the very-large `range_secs` query used by the test framework
+        // covers them.
+        let base = 1700000000i64;
+        for hour in 0..24 {
+            db.insert_weather(
+                base + hour * 3600,
+                10.0 + hour as f32 * 0.5,
+                "current",
+                Some(51.5),
+                Some(-0.13),
+                base + hour * 3600,
+            );
+        }
+
+        let result = db
+            .query_history(
+                100_000_000,
+                3600,
+                0,
+                &["external_temperature".to_string()],
+                None,
+            )
+            .unwrap();
+
+        let points: Vec<TimePoint> =
+            serde_json::from_value(result.get("external_temperature").cloned().unwrap()).unwrap();
+        assert_eq!(points.len(), 24, "all 24 hourly observations should appear");
+        // Values are AVG-aggregated per bucket, so each bucket has a single
+        // point equal to the inserted value (one observation per bucket).
+        assert!((points[0].v - 10.0).abs() < 0.01);
+        assert!((points[23].v - (10.0 + 23.0 * 0.5)).abs() < 0.01);
+    }
+
+    #[test]
+    fn insert_weather_upserts_on_conflict() {
+        // Same timestamp, two writes — second one wins. This is the
+        // mechanism that lets a live fetch supersede a slow backfill.
+        let db = test_db();
+        let ts = 1700000000i64;
+        db.insert_weather(ts, 12.0, "backfill", None, None, ts);
+        db.insert_weather(ts, 14.5, "current", Some(51.5), Some(-0.13), ts);
+
+        let count: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM weather_observations WHERE timestamp = ?1",
+                rusqlite::params![ts],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "upsert must collapse to a single row");
+
+        let value: f64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT temperature_c FROM weather_observations WHERE timestamp = ?1",
+                rusqlite::params![ts],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!((value - 14.5).abs() < 0.01, "latest write must win");
+        let source: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT source FROM weather_observations WHERE timestamp = ?1",
+                rusqlite::params![ts],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(source, "current");
+    }
+
+    #[test]
+    fn weather_query_respects_window() {
+        // The same bucketing parameters as query_history — start/end filter
+        // is honoured so a History tab query for "last 24h" doesn't pull in
+        // every backfilled row since 1940.
+        let db = test_db();
+        let base = 1700000000i64;
+        for hour in 0..48 {
+            db.insert_weather(base + hour * 3600, 15.0, "backfill", None, None, base);
+        }
+
+        // Explicit window covering the last 6 hours of the populated range.
+        let start = base + 42 * 3600;
+        let end = base + 48 * 3600;
+        let result = db
+            .query_history(
+                100_000_000,
+                3600,
+                0,
+                &["external_temperature".to_string()],
+                Some((start, end)),
+            )
+            .unwrap();
+
+        let points: Vec<TimePoint> =
+            serde_json::from_value(result.get("external_temperature").cloned().unwrap()).unwrap();
+        assert_eq!(points.len(), 6, "only the in-window buckets should be returned");
+    }
+
+    #[test]
+    fn weather_query_returns_empty_for_no_data() {
+        let db = test_db();
+        let result = db
+            .query_history(
+                100_000_000,
+                3600,
+                0,
+                &["external_temperature".to_string()],
+                None,
+            )
+            .unwrap();
+        let points: Vec<TimePoint> =
+            serde_json::from_value(result.get("external_temperature").cloned().unwrap()).unwrap();
+        assert!(points.is_empty(), "empty table must yield an empty response");
+    }
+
+    #[test]
+    fn weather_query_is_silently_dropped_for_unknown_field() {
+        // Belt-and-braces: an unknown field name passes through
+        // query_history without error, just doesn't appear in the result.
+        // SQL injection defence — keep this guard.
+        let db = test_db();
+        let result = db
+            .query_history(
+                100_000_000,
+                3600,
+                0,
+                &["external_temperature".to_string(), "DROP TABLE readings".to_string()],
+                None,
+            )
+            .unwrap();
+        assert!(result.contains_key("external_temperature"));
+        assert!(!result.contains_key("DROP TABLE readings"));
+    }
+
+    #[test]
+    fn earliest_weather_observation_returns_minimum() {
+        let db = test_db();
+        assert!(db.earliest_weather_observation().is_none(), "empty table");
+
+        let db = test_db();
+        // Insert out-of-order to verify the SQL actually orders rather than
+        // relying on insertion order.
+        db.insert_weather(2000, 14.0, "backfill", None, None, 2000);
+        db.insert_weather(1000, 12.0, "backfill", None, None, 1000);
+        db.insert_weather(1500, 13.0, "current", None, None, 1500);
+
+        let (ts, source) = db.earliest_weather_observation().unwrap();
+        assert_eq!(ts, 1000);
+        assert_eq!(source, "backfill");
+    }
+
+    #[test]
+    fn weather_coexists_with_readings() {
+        // End-to-end shape check: insert both an inverter reading and a
+        // weather observation at the same timestamp, then query both
+        // fields together. The result map must carry both keys with
+        // matching bucket timestamps so the frontend can chart them on the
+        // same axes.
+        let db = test_db();
+        let ts = 1700000000i64;
+        db.insert_reading(&make_snapshot(ts, 50, 1000));
+        db.insert_weather(ts, 18.5, "current", Some(51.5), Some(-0.13), ts);
+
+        let result = db
+            .query_history(
+                100_000_000,
+                3600,
+                0,
+                &[
+                    "soc".to_string(),
+                    "external_temperature".to_string(),
+                ],
+                None,
+            )
+            .unwrap();
+
+        let soc: Vec<TimePoint> = serde_json::from_value(result.get("soc").cloned().unwrap()).unwrap();
+        let ext: Vec<TimePoint> =
+            serde_json::from_value(result.get("external_temperature").cloned().unwrap()).unwrap();
+        assert_eq!(soc.len(), 1);
+        assert_eq!(ext.len(), 1);
+        assert_eq!(soc[0].t, ext[0].t, "both must share the bucketed timestamp");
     }
 }
