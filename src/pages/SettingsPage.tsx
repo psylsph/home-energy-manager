@@ -946,81 +946,6 @@ export default function SettingsPage() {
         )}
       </section>
 
-      {/* ─── Section 2b: EV Charger ─── */}
-      <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-3">
-        <h2 className="text-text-primary text-lg font-semibold font-sans">EV Charger</h2>
-        <p className="text-text-secondary text-xs font-sans">
-          Optional. Connect a GivEnergy EV Charger on your local network for read-only monitoring. Uses standard Modbus TCP (port 502), not the proprietary inverter protocol.
-        </p>
-
-        <label className="flex flex-col gap-1">
-          <span className="text-text-secondary text-xs font-sans">Charger Address</span>
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={evcHost}
-              onChange={(e) => setEvcHost(e.target.value)}
-              placeholder="Leave blank to disable"
-              className="min-w-0 flex-1 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-            />
-            {developerMode && (
-              <input
-                type="number"
-                value={evcPort}
-                onChange={(e) => setEvcPort(Number(e.target.value))}
-                title="EV Charger Modbus port"
-                className="w-[5.5em] shrink-0 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-              />
-            )}
-          </div>
-        </label>
-
-        <div className="flex gap-3 pt-1">
-          <button
-            onClick={handleEvcSave}
-            className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
-          >
-            Save
-          </button>
-          <button
-            onClick={handleEvcDiscover}
-            disabled={evcDiscovering}
-            className="bg-bg-elevated text-text-primary font-sans text-sm px-5 py-2 rounded-lg hover:bg-bg-base transition-colors disabled:opacity-40"
-          >
-            {evcDiscovering ? 'Scanning…' : 'Scan Network'}
-          </button>
-        </div>
-
-        {/* EVC discover results */}
-        {evcDiscoverError && <p className="text-red-400 text-sm font-sans">{evcDiscoverError}</p>}
-        {evcDiscoverResults.length > 0 && (
-          <div className="flex flex-col gap-2 mt-1">
-            <span className="text-text-secondary text-xs font-sans">Discovered EV Chargers</span>
-            {evcDiscoverResults.map((charger, i) => (
-              <div
-                key={i}
-                className="bg-bg-elevated rounded-lg px-4 py-3 flex items-center justify-between"
-              >
-                <div className="flex flex-col gap-0.5">
-                  <span className="text-text-primary text-sm font-mono">{charger.host}:{charger.port}</span>
-                  <span className="text-text-secondary text-xs font-sans">
-                    {charger.serial ?? 'Standard Modbus TCP device'}
-                  </span>
-                </div>
-                <button
-                  onClick={() => applyDiscoveredEvc(charger)}
-                  className="bg-flow-active/20 text-flow-active text-xs font-sans font-semibold px-3 py-1.5 rounded-md hover:bg-flow-active/30 transition-colors"
-                >
-                  Use
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-
-
-
       {/* ─── Section 3: App ─── */}
       {/* Behavioural settings for the app itself — how often it polls,
           what port it serves on, and whether to start on login. Issue #117
@@ -1097,106 +1022,6 @@ export default function SettingsPage() {
         )}
       </section>
 
-      {/* ─── Section 4: Panel Controls ─── */}
-      <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
-        <h2 className="text-text-primary text-lg font-semibold font-sans">Panel Controls</h2>
-
-        {/* ── Sub-section: Panel Visibility ── */}
-        <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
-          <h3 className="text-text-primary text-sm font-sans font-medium">Panel Visibility</h3>
-          <p className="text-text-secondary text-xs font-sans">
-            Hide panels you don't use from the bottom navigation bar
-          </p>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-            {([
-              ['power', 'Power'],
-              ['battery', 'Battery'],
-              ['solar', 'Solar'],
-              ['meters', 'Meters'],
-              ['history', 'History'],
-              ['control', 'Control'],
-            ] as const).map(([key, label]) => (
-              <label key={key} className="flex items-center gap-2 cursor-pointer select-none bg-bg-elevated rounded-xl px-4 py-3 border border-white/5 hover:border-white/10 transition-colors">
-                <input
-                  type="checkbox"
-                  checked={!hiddenPanels.includes(key)}
-                  onChange={() => {
-                    setHiddenPanels(prev =>
-                      prev.includes(key)
-                        ? prev.filter(p => p !== key)
-                        : [...prev, key]
-                    );
-                  }}
-                  className="w-4 h-4 accent-battery rounded"
-                />
-                <span className="text-text-primary text-sm font-sans">{label}</span>
-              </label>
-            ))}
-          </div>
-          <button
-            onClick={handlePanelSave}
-            className="self-start bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
-          >
-            {panelSaving ? 'Saving…' : 'Save Panel Visibility'}
-          </button>
-        </div>
-
-        {/* ── Sub-section: Panel Graphs ── */}
-        <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
-          <h3 className="text-text-primary text-sm font-sans font-medium">Panel Graphs</h3>
-          <p className="text-text-secondary text-xs font-sans">
-            Toggle the trend charts on the Battery and Solar tabs, and choose their time scale
-          </p>
-
-          {/* Show graphs toggle */}
-          <div className="flex items-center justify-between">
-            <span className="text-text-primary text-sm font-sans">Show Graphs</span>
-            <Toggle
-              checked={panelGraphsEnabled}
-              onChange={setPanelGraphsEnabled}
-            />
-          </div>
-
-          {/* Time scale selector — disabled when graphs are off */}
-          <div className={`flex flex-col gap-2 transition-opacity ${panelGraphsEnabled ? '' : 'opacity-40 pointer-events-none'}`}>
-            <span className="text-text-secondary text-xs font-sans">Time Scale</span>
-            <div className="flex gap-2">
-              {([
-                ['today', 'Today'],
-                ['24h', 'Rolling 24H'],
-              ] as const).map(([key, label]) => (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => setPanelGraphsScale(key)}
-                  className={`flex-1 py-2 rounded-lg text-sm font-sans transition ${
-                    panelGraphsScale === key
-                      ? 'bg-flow-active text-white font-semibold'
-                      : 'bg-bg-elevated text-text-primary hover:bg-bg-elevated/80'
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Y-axis lock toggle */}
-          <div className="flex items-center justify-between">
-            <span className="text-text-primary text-sm font-sans">Lock Y-axis scale</span>
-            <Toggle
-              checked={panelGraphsYLock}
-              onChange={setPanelGraphsYLock}
-            />
-          </div>
-          {panelGraphsYLock && (
-            <p className="text-text-secondary text-xs font-sans">
-              Charts Y-axis locks to a clean ceiling based on the data maximum instead of auto-fitting
-            </p>
-          )}
-        </div>
-      </section>
-
       {/* ─── Section 4: Energy Tariffs ─── */}
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
         <h2 className="text-text-primary text-lg font-semibold font-sans">Energy Tariffs</h2>
@@ -1232,7 +1057,157 @@ export default function SettingsPage() {
         </button>
       </section>
 
-      {/* ─── Section 4.5: Notifications ─── */}
+      {/* ─── Section 5: Local Weather (Open-Meteo) ─── */}
+      <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-text-primary text-lg font-semibold font-sans">Local Weather</h2>
+          <button
+            onClick={() => openExternal('https://open-meteo.com/')}
+            className="text-flow-active text-xs font-sans underline hover:opacity-80 transition-opacity"
+          >
+            Open-Meteo ↗
+          </button>
+        </div>
+        <p className="text-text-secondary text-xs font-sans">
+          Fetch the local ambient temperature from the free Open-Meteo API and overlay it on the History page temperature charts. No API key required. Enter your postcode to resolve your location automatically, or enter latitude/longitude manually (useful outside the UK or for self-hosted Open-Meteo instances).
+        </p>
+
+        <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <span className="text-text-primary text-sm font-sans">Enable Weather</span>
+            <Toggle
+              checked={weatherState?.config.enabled ?? false}
+              onChange={(v) => {
+                // Optimistic toggle — persist immediately, like the alerts
+                // enable switch above.
+                setWeatherState((p) => p ? { ...p, config: { ...p.config, enabled: v } } : p);
+                apiPost('/api/weather', { enabled: v })
+                  .then(() => flash(v ? 'Weather enabled' : 'Weather disabled', true))
+                  .catch((e) => flash(e instanceof Error ? e.message : 'Failed to save', false));
+              }}
+            />
+          </div>
+        </div>
+
+        {(weatherState?.config.enabled ?? false) && (
+          <div className="flex flex-col gap-4">
+            <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
+              <h3 className="text-text-primary text-sm font-sans font-medium">Location</h3>
+              <label className="flex flex-col gap-1">
+                <span className="text-text-secondary text-xs font-sans">Postcode (UK — resolved via api.postcodes.io)</span>
+                <input
+                  type="text"
+                  placeholder="e.g. SW1A 1AA"
+                  value={weatherPostcode}
+                  onChange={(e) => setWeatherPostcode(e.target.value)}
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                />
+              </label>
+
+              <div className="flex items-center gap-3 my-1">
+                <div className="flex-1 h-px bg-white/5" />
+                <span className="text-text-secondary/60 text-[10px] font-sans uppercase tracking-wide">or manual coordinates</span>
+                <div className="flex-1 h-px bg-white/5" />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <label className="flex flex-col gap-1">
+                  <span className="text-text-secondary text-xs font-sans">Latitude</span>
+                  <input
+                    type="number"
+                    step="any"
+                    placeholder="51.501"
+                    value={weatherLat}
+                    onChange={(e) => setWeatherLat(e.target.value)}
+                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-text-secondary text-xs font-sans">Longitude</span>
+                  <input
+                    type="number"
+                    step="any"
+                    placeholder="-0.141"
+                    value={weatherLon}
+                    onChange={(e) => setWeatherLon(e.target.value)}
+                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                  />
+                </label>
+              </div>
+
+              {/* Resolved location + last-fetch status */}
+              {weatherState && (weatherState.config.latitude != null || weatherState.last_fetched_temperature_c != null) && (
+                <div className="text-text-secondary/80 text-xs font-sans flex flex-col gap-1 mt-1">
+                  {weatherState.config.latitude != null && weatherState.config.longitude != null && (
+                    <span>
+                      Resolved grid cell:{' '}
+                      <code className="font-mono">
+                        {(weatherState.grid_cell_latitude ?? weatherState.config.latitude).toFixed(3)},
+                        {' '}{(weatherState.grid_cell_longitude ?? weatherState.config.longitude).toFixed(3)}
+                      </code>
+                    </span>
+                  )}
+                  {weatherState.last_fetched_temperature_c != null && weatherState.last_fetch_at && (
+                    <span>
+                      Last reading: <strong className="text-text-primary">{weatherState.last_fetched_temperature_c.toFixed(1)}°C</strong>{' '}
+                      ({new Date(weatherState.last_fetch_at).toLocaleString()})
+                    </span>
+                  )}
+                </div>
+              )}
+              {weatherState?.last_error && (
+                <p className="text-red-400/80 text-xs font-sans mt-1">
+                  {weatherState.last_error}
+                </p>
+              )}
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-2">
+              <button
+                onClick={handleWeatherSave}
+                disabled={weatherSaving}
+                className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-4 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 transition-opacity sm:w-auto"
+              >
+                {weatherSaving ? 'Saving…' : 'Save Location'}
+              </button>
+              <button
+                onClick={handleWeatherBackfill}
+                disabled={weatherBackfilling || weatherState?.config.latitude == null}
+                title={weatherState?.config.latitude == null ? 'Save a location first' : undefined}
+                className="bg-bg-elevated text-text-primary font-sans font-semibold text-sm px-4 py-2 rounded-lg hover:opacity-80 disabled:opacity-40 transition-opacity border border-white/5 sm:w-auto"
+              >
+                {weatherBackfilling ? 'Backfilling…' : 'Backfill History'}
+              </button>
+            </div>
+
+            {weatherBackfilling && (
+              <p className="text-text-secondary/70 text-xs font-sans">
+                Fetching historical weather one month at a time from the Open-Meteo archive. This runs in the background — you can leave this page.
+              </p>
+            )}
+            {weatherState?.config.last_backfill_completed && !weatherBackfilling && (
+              <p className="text-text-secondary/70 text-xs font-sans">
+                History backfilled through{' '}
+                <strong className="text-text-primary">{weatherState.config.last_backfill_completed}</strong>.
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* CC BY 4.0 attribution — required by the Open-Meteo licence */}
+        <p className="text-text-secondary/60 text-[11px] font-sans">
+          Weather data by{' '}
+          <button
+            onClick={() => openExternal('https://open-meteo.com/')}
+            className="text-flow-active underline hover:opacity-80 inline"
+          >
+            Open-Meteo.com
+          </button>
+          {' '}— licensed under CC BY 4.0.
+        </p>
+      </section>
+
+      {/* ─── Section 6: Notifications ─── */}
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
         <div className="flex items-center justify-between">
           <h2 className="text-text-primary text-lg font-semibold font-sans">Notifications</h2>
@@ -1517,157 +1492,182 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      {/* ─── Section 4.6: Local Weather (Open-Meteo) ─── */}
+      {/* ─── Section 7: Panel Controls ─── */}
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
-        <div className="flex items-center justify-between">
-          <h2 className="text-text-primary text-lg font-semibold font-sans">Local Weather</h2>
+        <h2 className="text-text-primary text-lg font-semibold font-sans">Panel Controls</h2>
+
+        {/* ── Sub-section: Panel Visibility ── */}
+        <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
+          <h3 className="text-text-primary text-sm font-sans font-medium">Panel Visibility</h3>
+          <p className="text-text-secondary text-xs font-sans">
+            Hide panels you don't use from the bottom navigation bar
+          </p>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            {([
+              ['power', 'Power'],
+              ['battery', 'Battery'],
+              ['solar', 'Solar'],
+              ['meters', 'Meters'],
+              ['history', 'History'],
+              ['control', 'Control'],
+            ] as const).map(([key, label]) => (
+              <label key={key} className="flex items-center gap-2 cursor-pointer select-none bg-bg-elevated rounded-xl px-4 py-3 border border-white/5 hover:border-white/10 transition-colors">
+                <input
+                  type="checkbox"
+                  checked={!hiddenPanels.includes(key)}
+                  onChange={() => {
+                    setHiddenPanels(prev =>
+                      prev.includes(key)
+                        ? prev.filter(p => p !== key)
+                        : [...prev, key]
+                    );
+                  }}
+                  className="w-4 h-4 accent-battery rounded"
+                />
+                <span className="text-text-primary text-sm font-sans">{label}</span>
+              </label>
+            ))}
+          </div>
           <button
-            onClick={() => openExternal('https://open-meteo.com/')}
-            className="text-flow-active text-xs font-sans underline hover:opacity-80 transition-opacity"
+            onClick={handlePanelSave}
+            className="self-start bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
           >
-            Open-Meteo ↗
+            {panelSaving ? 'Saving…' : 'Save Panel Visibility'}
           </button>
         </div>
-        <p className="text-text-secondary text-xs font-sans">
-          Fetch the local ambient temperature from the free Open-Meteo API and overlay it on the History page temperature charts. No API key required. Enter your postcode to resolve your location automatically, or enter latitude/longitude manually (useful outside the UK or for self-hosted Open-Meteo instances).
-        </p>
 
+        {/* ── Sub-section: Panel Graphs ── */}
         <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
+          <h3 className="text-text-primary text-sm font-sans font-medium">Panel Graphs</h3>
+          <p className="text-text-secondary text-xs font-sans">
+            Toggle the trend charts on the Battery and Solar tabs, and choose their time scale
+          </p>
+
+          {/* Show graphs toggle */}
           <div className="flex items-center justify-between">
-            <span className="text-text-primary text-sm font-sans">Enable Weather</span>
+            <span className="text-text-primary text-sm font-sans">Show Graphs</span>
             <Toggle
-              checked={weatherState?.config.enabled ?? false}
-              onChange={(v) => {
-                // Optimistic toggle — persist immediately, like the alerts
-                // enable switch above.
-                setWeatherState((p) => p ? { ...p, config: { ...p.config, enabled: v } } : p);
-                apiPost('/api/weather', { enabled: v })
-                  .then(() => flash(v ? 'Weather enabled' : 'Weather disabled', true))
-                  .catch((e) => flash(e instanceof Error ? e.message : 'Failed to save', false));
-              }}
+              checked={panelGraphsEnabled}
+              onChange={setPanelGraphsEnabled}
             />
           </div>
-        </div>
 
-        {(weatherState?.config.enabled ?? false) && (
-          <div className="flex flex-col gap-4">
-            <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
-              <h3 className="text-text-primary text-sm font-sans font-medium">Location</h3>
-              <label className="flex flex-col gap-1">
-                <span className="text-text-secondary text-xs font-sans">Postcode (UK — resolved via api.postcodes.io)</span>
-                <input
-                  type="text"
-                  placeholder="e.g. SW1A 1AA"
-                  value={weatherPostcode}
-                  onChange={(e) => setWeatherPostcode(e.target.value)}
-                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                />
-              </label>
-
-              <div className="flex items-center gap-3 my-1">
-                <div className="flex-1 h-px bg-white/5" />
-                <span className="text-text-secondary/60 text-[10px] font-sans uppercase tracking-wide">or manual coordinates</span>
-                <div className="flex-1 h-px bg-white/5" />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <label className="flex flex-col gap-1">
-                  <span className="text-text-secondary text-xs font-sans">Latitude</span>
-                  <input
-                    type="number"
-                    step="any"
-                    placeholder="51.501"
-                    value={weatherLat}
-                    onChange={(e) => setWeatherLat(e.target.value)}
-                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                  />
-                </label>
-                <label className="flex flex-col gap-1">
-                  <span className="text-text-secondary text-xs font-sans">Longitude</span>
-                  <input
-                    type="number"
-                    step="any"
-                    placeholder="-0.141"
-                    value={weatherLon}
-                    onChange={(e) => setWeatherLon(e.target.value)}
-                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                  />
-                </label>
-              </div>
-
-              {/* Resolved location + last-fetch status */}
-              {weatherState && (weatherState.config.latitude != null || weatherState.last_fetched_temperature_c != null) && (
-                <div className="text-text-secondary/80 text-xs font-sans flex flex-col gap-1 mt-1">
-                  {weatherState.config.latitude != null && weatherState.config.longitude != null && (
-                    <span>
-                      Resolved grid cell:{' '}
-                      <code className="font-mono">
-                        {(weatherState.grid_cell_latitude ?? weatherState.config.latitude).toFixed(3)},
-                        {' '}{(weatherState.grid_cell_longitude ?? weatherState.config.longitude).toFixed(3)}
-                      </code>
-                    </span>
-                  )}
-                  {weatherState.last_fetched_temperature_c != null && weatherState.last_fetch_at && (
-                    <span>
-                      Last reading: <strong className="text-text-primary">{weatherState.last_fetched_temperature_c.toFixed(1)}°C</strong>{' '}
-                      ({new Date(weatherState.last_fetch_at).toLocaleString()})
-                    </span>
-                  )}
-                </div>
-              )}
-              {weatherState?.last_error && (
-                <p className="text-red-400/80 text-xs font-sans mt-1">
-                  {weatherState.last_error}
-                </p>
-              )}
+          {/* Time scale selector — disabled when graphs are off */}
+          <div className={`flex flex-col gap-2 transition-opacity ${panelGraphsEnabled ? '' : 'opacity-40 pointer-events-none'}`}>
+            <span className="text-text-secondary text-xs font-sans">Time Scale</span>
+            <div className="flex gap-2">
+              {([
+                ['today', 'Today'],
+                ['24h', 'Rolling 24H'],
+              ] as const).map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setPanelGraphsScale(key)}
+                  className={`flex-1 py-2 rounded-lg text-sm font-sans transition ${
+                    panelGraphsScale === key
+                      ? 'bg-flow-active text-white font-semibold'
+                      : 'bg-bg-elevated text-text-primary hover:bg-bg-elevated/80'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
-
-            <div className="flex flex-col sm:flex-row gap-2">
-              <button
-                onClick={handleWeatherSave}
-                disabled={weatherSaving}
-                className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-4 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 transition-opacity sm:w-auto"
-              >
-                {weatherSaving ? 'Saving…' : 'Save Location'}
-              </button>
-              <button
-                onClick={handleWeatherBackfill}
-                disabled={weatherBackfilling || weatherState?.config.latitude == null}
-                title={weatherState?.config.latitude == null ? 'Save a location first' : undefined}
-                className="bg-bg-elevated text-text-primary font-sans font-semibold text-sm px-4 py-2 rounded-lg hover:opacity-80 disabled:opacity-40 transition-opacity border border-white/5 sm:w-auto"
-              >
-                {weatherBackfilling ? 'Backfilling…' : 'Backfill History'}
-              </button>
-            </div>
-
-            {weatherBackfilling && (
-              <p className="text-text-secondary/70 text-xs font-sans">
-                Fetching historical weather one month at a time from the Open-Meteo archive. This runs in the background — you can leave this page.
-              </p>
-            )}
-            {weatherState?.config.last_backfill_completed && !weatherBackfilling && (
-              <p className="text-text-secondary/70 text-xs font-sans">
-                History backfilled through{' '}
-                <strong className="text-text-primary">{weatherState.config.last_backfill_completed}</strong>.
-              </p>
-            )}
           </div>
-        )}
 
-        {/* CC BY 4.0 attribution — required by the Open-Meteo licence */}
-        <p className="text-text-secondary/60 text-[11px] font-sans">
-          Weather data by{' '}
-          <button
-            onClick={() => openExternal('https://open-meteo.com/')}
-            className="text-flow-active underline hover:opacity-80 inline"
-          >
-            Open-Meteo.com
-          </button>
-          {' '}— licensed under CC BY 4.0.
-        </p>
+          {/* Y-axis lock toggle */}
+          <div className="flex items-center justify-between">
+            <span className="text-text-primary text-sm font-sans">Lock Y-axis scale</span>
+            <Toggle
+              checked={panelGraphsYLock}
+              onChange={setPanelGraphsYLock}
+            />
+          </div>
+          {panelGraphsYLock && (
+            <p className="text-text-secondary text-xs font-sans">
+              Charts Y-axis locks to a clean ceiling based on the data maximum instead of auto-fitting
+            </p>
+          )}
+        </div>
       </section>
 
-      {/* ─── Section 5: Developer Mode ─── */}
+      {/* ─── Section 8: EV Charger ─── */}
+      <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-3">
+        <h2 className="text-text-primary text-lg font-semibold font-sans">EV Charger</h2>
+        <p className="text-text-secondary text-xs font-sans">
+          Optional. Connect a GivEnergy EV Charger on your local network for read-only monitoring. Uses standard Modbus TCP (port 502), not the proprietary inverter protocol.
+        </p>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-text-secondary text-xs font-sans">Charger Address</span>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={evcHost}
+              onChange={(e) => setEvcHost(e.target.value)}
+              placeholder="Leave blank to disable"
+              className="min-w-0 flex-1 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+            />
+            {developerMode && (
+              <input
+                type="number"
+                value={evcPort}
+                onChange={(e) => setEvcPort(Number(e.target.value))}
+                title="EV Charger Modbus port"
+                className="w-[5.5em] shrink-0 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+              />
+            )}
+          </div>
+        </label>
+
+        <div className="flex gap-3 pt-1">
+          <button
+            onClick={handleEvcSave}
+            className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
+          >
+            Save
+          </button>
+          <button
+            onClick={handleEvcDiscover}
+            disabled={evcDiscovering}
+            className="bg-bg-elevated text-text-primary font-sans text-sm px-5 py-2 rounded-lg hover:bg-bg-base transition-colors disabled:opacity-40"
+          >
+            {evcDiscovering ? 'Scanning…' : 'Scan Network'}
+          </button>
+        </div>
+
+        {/* EVC discover results */}
+        {evcDiscoverError && <p className="text-red-400 text-sm font-sans">{evcDiscoverError}</p>}
+        {evcDiscoverResults.length > 0 && (
+          <div className="flex flex-col gap-2 mt-1">
+            <span className="text-text-secondary text-xs font-sans">Discovered EV Chargers</span>
+            {evcDiscoverResults.map((charger, i) => (
+              <div
+                key={i}
+                className="bg-bg-elevated rounded-lg px-4 py-3 flex items-center justify-between"
+              >
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-text-primary text-sm font-mono">{charger.host}:{charger.port}</span>
+                  <span className="text-text-secondary text-xs font-sans">
+                    {charger.serial ?? 'Standard Modbus TCP device'}
+                  </span>
+                </div>
+                <button
+                  onClick={() => applyDiscoveredEvc(charger)}
+                  className="bg-flow-active/20 text-flow-active text-xs font-sans font-semibold px-3 py-1.5 rounded-md hover:bg-flow-active/30 transition-colors"
+                >
+                  Use
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+
+
+      {/* ─── Section 9: Developer Mode ─── */}
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-3">
         <h2 className="text-text-primary text-lg font-semibold font-sans">Developer</h2>
         <div className="flex items-center justify-between">
@@ -1678,7 +1678,7 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      {/* ─── Section 7: About ─── */}
+      {/* ─── Section 10: About ─── */}
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-2">
         <h2 className="text-text-primary text-lg font-semibold font-sans">About</h2>
         <button
