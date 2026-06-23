@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.38.0] - 2026-06-23
+
+### Added
+
+- **Local weather integration with Open-Meteo.** The History page's
+  Temperature tab now overlays the actual outside air temperature
+  alongside your battery and inverter readings, plus a Battery − Ambient
+  differential chart so you can see how much your battery is cooking
+  relative to the weather outside. The app fetches the current ambient
+  temperature every 15 minutes from the free, keyless Open-Meteo API and
+  backfills historical data from the Open-Meteo archive (one calendar
+  month per tick, resumable across restarts). A new Local Weather
+  section in Settings takes a UK postcode (resolved to coordinates via
+  api.postcodes.io) or manual lat/lon for users outside the UK or on a
+  self-hosted Open-Meteo instance, with a one-click "Backfill History"
+  button that runs in the background and reports progress as it goes.
+  Addresses [#121](https://github.com/psylsph/home-energy-manager/issues/121).
+
+### Changed
+
+- **Settings page reordered into a logical flow.** The sections used
+  to be numbered inconsistently (two "4"s, a jump from 5 to 7) and the
+  grouping was muddled — optional hardware (EV Charger) sat in the
+  middle of the getting-started flow, and the data-enrichment sections
+  (Tariffs, Weather) were buried after the display settings. The page
+  now runs setup-first (Inverter, Remote Access), then how the app runs
+  (App), then data sources (Tariffs, Weather, Notifications), then
+  display (Panel Controls), with optional and advanced sections
+  (EV Charger, Developer) pushed to the bottom. Only the order and the
+  section-comment numbers changed — no content was rewritten.
+
 ## [0.37.4] - 2026-06-23
 
 ### Added
