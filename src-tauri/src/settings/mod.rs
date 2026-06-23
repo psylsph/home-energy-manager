@@ -672,6 +672,11 @@ pub struct Settings {
     /// Persisted active flag so a crash/restart can detect the limiter was mid-pause.
     #[serde(default)]
     pub load_limiter_active_persisted: bool,
+    /// Persisted battery SOC reserve saved before the load limiter paused
+    /// discharge. `Some` means the limiter was active when last saved.
+    /// Restored on restart so the user's custom reserve isn't lost.
+    #[serde(default)]
+    pub load_limiter_saved_reserve: Option<u16>,
 
     /// Panels hidden from the bottom navigation bar (e.g. ["power", "battery", "solar", "meters", "history"]) .
     #[serde(default)]
@@ -722,6 +727,18 @@ pub struct Settings {
     /// platform silently removed it (see plugins-workspace#771). See #117.
     #[serde(default)]
     pub autostart_enabled: bool,
+
+    // -- Read-only API (external access) --
+    /// API key for the read-only external API server.
+    /// When non-empty, a second HTTP server is started on `api_port` that
+    /// serves only `GET /api/snapshot` with Bearer-token authentication.
+    /// The main server on `http_port` is unaffected (full access, no auth).
+    #[serde(default)]
+    pub api_key: String,
+    /// Port for the read-only external API server (default 7338).
+    /// Only started when `api_key` is also non-empty. Set to 0 to disable.
+    #[serde(default = "default_api_port")]
+    pub api_port: u16,
 }
 
 fn default_http_port() -> u16 {
@@ -763,6 +780,10 @@ fn default_aw_debounce() -> u32 {
 
 fn default_agile_region() -> String {
     "A".to_string()
+}
+
+fn default_api_port() -> u16 {
+    7338
 }
 
 fn default_agile_charge_threshold() -> f64 {
@@ -903,6 +924,7 @@ impl Default for Settings {
             load_limiter_end_hour: 0,
             load_limiter_end_minute: 0,
             load_limiter_active_persisted: false,
+            load_limiter_saved_reserve: None,
             import_tariff_config: None,
             export_tariff_config: None,
             agile_enabled: false,
@@ -919,6 +941,8 @@ impl Default for Settings {
             disable_auto_discovery: true,
             minimal_telemetry_mode: false,
             autostart_enabled: false,
+            api_key: String::new(),
+            api_port: 7338,
         }
     }
 }
@@ -1063,6 +1087,9 @@ mod tests {
         // app to launch on login, the user has to opt in via Settings.
         // See issue #117.
         assert!(!s.autostart_enabled);
+        // Read-only API key must be empty by default; port must default to 7338.
+        assert_eq!(s.api_key, "");
+        assert_eq!(s.api_port, 7338);
     }
 
     #[test]
@@ -1091,6 +1118,7 @@ mod tests {
             load_limiter_end_hour: 20,
             load_limiter_end_minute: 0,
             load_limiter_active_persisted: false,
+            load_limiter_saved_reserve: None,
             evc_host: String::new(),
             evc_port: default_evc_port(),
             import_tariff_config: None,
@@ -1116,6 +1144,8 @@ mod tests {
             disable_auto_discovery: true,
             minimal_telemetry_mode: true,
             autostart_enabled: true,
+            api_key: String::new(),
+            api_port: 0,
         };
         let json = serde_json::to_string(&s).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
@@ -1256,6 +1286,38 @@ mod tests {
         assert!(decoded.enabled);
     }
 
+    /// `settings.json` written before the read-only API feature shipped
+    /// (no `api_key` or `api_port` keys) must still load, with `api_key`
+    /// defaulting to "" and `api_port` defaulting to 7338.
+    ///
+    /// This is the critical upgrade-path bug that was fixed by changing
+    /// `#[serde(default)]` on `api_port` to `#[serde(default = "default_api_port")]`
+    /// — previously serde used `u16::default()` = 0, which disabled the
+    /// read-only server on every upgrade until the user manually re-entered
+    /// the port.
+    #[test]
+    fn legacy_settings_without_api_fields_loads_with_default_port() {
+        let legacy = r#"{
+            "host": "192.168.1.50",
+            "port": 8899,
+            "serial": "",
+            "poll_interval": 60,
+            "auto_connect": true,
+            "import_tariff": 0.285,
+            "export_tariff": 0.15,
+            "hidden_panels": [],
+            "evc_host": "",
+            "disable_auto_discovery": true,
+            "minimal_telemetry_mode": false
+        }"#;
+        let decoded: Settings = serde_json::from_str(legacy).unwrap();
+        assert_eq!(decoded.api_key, "", "api_key should default to empty string");
+        assert_eq!(
+            decoded.api_port, 7338,
+            "api_port should default to 7338 (not 0) for legacy settings files"
+        );
+    }
+
     #[test]
     fn save_and_load() {
         // Use a temp dir to avoid polluting real settings
@@ -1286,6 +1348,7 @@ mod tests {
             load_limiter_end_hour: 0,
             load_limiter_end_minute: 0,
             load_limiter_active_persisted: false,
+            load_limiter_saved_reserve: None,
             evc_host: "192.168.1.200".to_string(),
             evc_port: 502,
             import_tariff_config: None,
@@ -1304,6 +1367,8 @@ mod tests {
             disable_auto_discovery: true,
             minimal_telemetry_mode: false,
             autostart_enabled: false,
+            api_key: String::new(),
+            api_port: 0,
         };
 
         // We can't easily override the settings path for testing,
