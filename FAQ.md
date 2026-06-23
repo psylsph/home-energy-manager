@@ -168,10 +168,10 @@ Alternatively, use the **Scan Network** button on the Settings page.
 
 ---
 
-### How do I set up Telegram or ntfy notifications?
+### How do I set up Telegram, ntfy, or Pushover notifications?
 
 See the **[Notification Setup Guide](NOTIFICATIONS.md)** for step-by-step
-instructions on both Telegram and ntfy.
+instructions on all three channels.
 
 ---
 

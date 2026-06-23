@@ -64,6 +64,31 @@ to your phone.
 - **No notification for a specific alert** — Check that the relevant toggle
   is enabled under **Alert Triggers** (e.g. Grid Offline, Solar Clipping).
 
+### Talking to your bot
+
+Your Telegram bot also accepts slash commands in the same chat. Send any of
+these to get a reply from the current inverter state — no need to open the
+dashboard.
+
+| Command | What you get back |
+|---|---|
+| `/status` | A live snapshot: solar, home, battery (power + SOC), grid, temperatures, and today's generation / import / export totals. |
+| `/today` | Today's energy totals with a peak / off-peak cost split derived from your configured tariffs and a net cost. |
+| `/report` | Yesterday's full consumption report as an HTML attachment, with the same numbers as a short caption underneath. Needs at least a few hours of history to be useful. |
+| `/battery` | Overall battery state plus a per-module BMS breakdown (SOC, voltage, temperature, remaining capacity, cycle count) when the inverter reports it. |
+| `/mode` | The current battery mode, reserve and target SOC, charge / discharge rate limits, and any active automation (Cosy, Agile, auto-winter, load limiter). |
+| `/version` | App version, device type, inverter serial, and ARM / DSP firmware versions. |
+| `/help` | Lists every command the bot understands. |
+
+Type `/` in the chat and Telegram will auto-suggest the list above — the bot
+registers its menu with Telegram the first time it polls, so the suggestions
+appear once the app is running and connected.
+
+> **Security:** the bot only replies to the chat id configured under
+> **Chat ID** above. Anyone else who messages the bot is silently ignored —
+> this is deliberate, and matters more as we add commands that touch the
+> inverter.
+
 ---
 
 ## ntfy
