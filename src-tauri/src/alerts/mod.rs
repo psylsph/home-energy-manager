@@ -1322,7 +1322,7 @@ pub fn spawn_telegram_poller(state: std::sync::Arc<crate::inverter::poll::AppSta
                     let delay = backoff.record_failure();
                     let consecutive = backoff.consecutive_failures();
                     match poll_error_severity(&err) {
-                        PollErrorSeverity::Info => tracing::info!(
+                        PollErrorSeverity::Info => tracing::debug!(
                             "Telegram poll timed out (benign — long-poll returned \
                              no updates); retrying in ~{delay:?} \
                              (consecutive timeouts: {consecutive})"
