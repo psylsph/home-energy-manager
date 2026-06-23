@@ -285,6 +285,7 @@ export default function SettingsPage() {
     batt_temp_min: 0, batt_temp_max: 0,
     soc_min: 4, soc_max: 100,
     grid_offline_enabled: false, battery_over_temp_enabled: false,
+    connection_lost_enabled: false,
     solar_clipping_enabled: false, solar_clipping_ceiling_w: 0,
     ntfy_topic: '',
     ntfy_server: 'https://ntfy.sh',
@@ -1327,6 +1328,18 @@ export default function SettingsPage() {
                   />
                 </label>
               )}
+              <div className="flex items-center justify-between">
+                <span className="text-text-primary text-sm font-sans">
+                  Connection Lost
+                  <span className="block text-text-secondary text-xs font-sans">
+                    Notify when contact with the inverter is dropped and restored
+                  </span>
+                </span>
+                <Toggle
+                  checked={alertsConfig.connection_lost_enabled}
+                  onChange={(v) => setAlertsConfig((p) => ({ ...p, connection_lost_enabled: v }))}
+                />
+              </div>
               <div className="flex flex-col gap-1">
                 <span className="text-text-primary text-sm font-sans font-medium">Cooldown Timer</span>
                 <label className="flex items-center justify-between gap-2">

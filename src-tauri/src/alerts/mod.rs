@@ -44,6 +44,11 @@ pub enum AlertType {
     /// cloud-edge spike above the ceiling does not fire it.
     SolarClipping,
     GridOffline,
+    /// The poll loop has lost contact with the inverter (connection dropped
+    /// and reconnection is in progress). This is a connection-state event
+    /// rather than a snapshot-derived alert, so it is fired by the poll
+    /// loop directly rather than by [`evaluate_alerts`].
+    ConnectionLost,
 }
 
 impl AlertType {
@@ -62,6 +67,7 @@ impl AlertType {
             // the threshold-based alert.
             Self::BatteryOverTemp => "Inverter Battery Warning",
             Self::SolarClipping => "Solar Clipping",
+            Self::ConnectionLost => "Inverter Connection Lost",
         }
     }
 }
@@ -328,6 +334,95 @@ pub fn build_cleared_message(snapshot: &InverterSnapshot, alerts: &[AlertType]) 
     ));
 
     msg
+}
+
+/// Build a "lost contact" notification message. Fired by the poll loop
+/// (not by [`evaluate_alerts`], which has no access to connection state).
+pub fn build_connection_lost_message(host: &str) -> String {
+    let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let mut msg = format!("📡 HEM Connection Lost — {}\n", time);
+    msg.push_str("━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    msg.push_str(&format!(
+        "Lost contact with inverter at <b>{host}</b>.\nReconnection is in progress."
+    ));
+    msg
+}
+
+/// Build a "contact restored" notification message.
+pub fn build_connection_restored_message(host: &str) -> String {
+    let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let mut msg = format!("✅ HEM Connection Restored — {}\n", time);
+    msg.push_str("━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    msg.push_str(&format!("Contact with <b>{host}</b> re-established."));
+    msg
+}
+
+/// Send a connection-lost notification to all configured channels. Called
+/// from the poll loop's disconnect path. Honours the `connection_lost_enabled`
+/// toggle and the standard channel-config gates.
+pub async fn send_connection_lost_notification(state: &std::sync::Arc<crate::inverter::poll::AppState>, host: &str) {
+    let config = state.alert_config.lock().await.clone();
+    if !config.enabled || !config.connection_lost_enabled {
+        return;
+    }
+    let text = build_connection_lost_message(host);
+    let token = config.telegram_bot_token.clone();
+    let chat_id = config.telegram_chat_id.clone();
+    let ntfy_topic = config.ntfy_topic.clone();
+    let ntfy_server = config.ntfy_server.clone();
+    let pushover_token = config.pushover_app_token.clone();
+    let pushover_key = config.pushover_user_key.clone();
+    let text_clone = text.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        if !token.is_empty() && !chat_id.is_empty() {
+            if let Err(e) = send_telegram_message(&token, &chat_id, &text_clone) {
+                tracing::warn!("Telegram connection-lost notification failed: {e}");
+            }
+        }
+        if !ntfy_topic.is_empty() {
+            if let Err(e) = send_ntfy_message(&ntfy_topic, &ntfy_server, &text_clone) {
+                tracing::warn!("ntfy connection-lost notification failed: {e}");
+            }
+        }
+        if !pushover_token.is_empty() && !pushover_key.is_empty() {
+            if let Err(e) = send_pushover_message(&pushover_token, &pushover_key, &text_clone) {
+                tracing::warn!("Pushover connection-lost notification failed: {e}");
+            }
+        }
+    }).await;
+}
+
+/// Send a connection-restored notification to all configured channels.
+pub async fn send_connection_restored_notification(state: &std::sync::Arc<crate::inverter::poll::AppState>, host: &str) {
+    let config = state.alert_config.lock().await.clone();
+    if !config.enabled || !config.connection_lost_enabled {
+        return;
+    }
+    let text = build_connection_restored_message(host);
+    let token = config.telegram_bot_token.clone();
+    let chat_id = config.telegram_chat_id.clone();
+    let ntfy_topic = config.ntfy_topic.clone();
+    let ntfy_server = config.ntfy_server.clone();
+    let pushover_token = config.pushover_app_token.clone();
+    let pushover_key = config.pushover_user_key.clone();
+    let text_clone = text.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        if !token.is_empty() && !chat_id.is_empty() {
+            if let Err(e) = send_telegram_message(&token, &chat_id, &text_clone) {
+                tracing::warn!("Telegram connection-restored notification failed: {e}");
+            }
+        }
+        if !ntfy_topic.is_empty() {
+            if let Err(e) = send_ntfy_message(&ntfy_topic, &ntfy_server, &text_clone) {
+                tracing::warn!("ntfy connection-restored notification failed: {e}");
+            }
+        }
+        if !pushover_token.is_empty() && !pushover_key.is_empty() {
+            if let Err(e) = send_pushover_message(&pushover_token, &pushover_key, &text_clone) {
+                tracing::warn!("Pushover connection-restored notification failed: {e}");
+            }
+        }
+    }).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1262,6 +1357,7 @@ mod tests {
             soc_max: 95,
             grid_offline_enabled: false,
             battery_over_temp_enabled: false,
+            connection_lost_enabled: false,
             solar_clipping_enabled: false,
             solar_clipping_ceiling_w: 0,
             ntfy_topic: String::new(),

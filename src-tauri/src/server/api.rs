@@ -2011,6 +2011,9 @@ pub async fn set_alerts(
     if let Some(v) = body.get("grid_offline_enabled").and_then(|v| v.as_bool()) {
         config.grid_offline_enabled = v;
     }
+    if let Some(v) = body.get("connection_lost_enabled").and_then(|v| v.as_bool()) {
+        config.connection_lost_enabled = v;
+    }
     if let Some(v) = body
         .get("battery_over_temp_enabled")
         .and_then(|v| v.as_bool())

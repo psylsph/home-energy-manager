@@ -654,6 +654,9 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     connected_since_epoch_ms,
                 });
 
+                // Notify if we just reconnected and the user opted in.
+                crate::alerts::send_connection_restored_notification(&state, &settings.host).await;
+
                 // Allow the dongle time to initialise after TCP connect.
                 // The GivEnergy dongle has a slow processor and may return
                 // Modbus exception code 67 (busy/not-ready) if queried too soon.
@@ -2782,6 +2785,9 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     host: settings.host.clone(),
                     connected_since_epoch_ms: None,
                 });
+
+                // Notify if the user has opted in to connection-lost alerts.
+                crate::alerts::send_connection_lost_notification(&state, &settings.host).await;
             }
             Err(e) => {
                 tracing::warn!(

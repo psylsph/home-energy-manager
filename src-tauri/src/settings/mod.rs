@@ -742,6 +742,10 @@ pub struct AlertsConfig {
     pub soc_max: u8,
     /// Alert on grid loss.
     pub grid_offline_enabled: bool,
+    /// Alert when the poll loop loses contact with the inverter. A single
+    /// notification fires on disconnect, and a second on reconnect.
+    #[serde(default)]
+    pub connection_lost_enabled: bool,
     /// Alert on battery over-temperature flag.
     pub battery_over_temp_enabled: bool,
     /// Alert when solar generation sustains above the clipping ceiling.
@@ -795,6 +799,7 @@ impl Default for AlertsConfig {
             soc_min: 4,
             soc_max: 100,
             grid_offline_enabled: false,
+            connection_lost_enabled: false,
             battery_over_temp_enabled: false,
             solar_clipping_enabled: false,
             solar_clipping_ceiling_w: 0,

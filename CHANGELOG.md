@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.37.2] - 2026-06-22
+
+### Added
+
+- **Connection-lost notifications.** Settings → Alerts now has a
+  "Connection Lost" toggle. When enabled, you'll get a notification
+  through the same channel you already have set up (Telegram, ntfy,
+  or Pushover) the moment the app drops contact with the inverter,
+  plus a follow-up when it comes back. Fits well with the
+  push-notification setup for battery warnings — if the dongle dies
+  overnight, you'll know before the morning kettle. Closes
+  [#115](https://github.com/psylsph/home-energy-manager/issues/115).
+
 ## [0.37.1] - 2026-06-22
 
 ### Added
