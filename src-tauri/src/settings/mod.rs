@@ -505,6 +505,62 @@ pub fn find_next_cosy_slot<'a>(
     best.map(|(idx, slot, until)| (idx, slot, until as u16))
 }
 
+/// Local weather integration settings.
+///
+/// Drives the optional Phase-2 weather fetcher (Open-Meteo forecast for
+/// current conditions, Open-Meteo archive for historical backfill). Every
+/// field carries `#[serde(default)]` so a `settings.json` written before
+/// this feature shipped loads unchanged — see the `legacy_*` tests in
+/// this module.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeatherConfig {
+    /// Master toggle. When false the fetcher skips every cycle and the
+    /// History tab shows the standard "No data available" empty state.
+    #[serde(default)]
+    pub enabled: bool,
+    /// User-entered postcode (display only; we re-resolve to lat/lon on
+    /// enable and store the coords). Persisted so the Settings UI can
+    /// show what the user originally typed.
+    #[serde(default)]
+    pub postcode: String,
+    /// Resolved latitude. Populated by the backend after a successful
+    /// postcode lookup, or by manual coordinate entry.
+    #[serde(default)]
+    pub latitude: Option<f64>,
+    /// Resolved longitude. See `latitude`.
+    #[serde(default)]
+    pub longitude: Option<f64>,
+    /// Last calendar date (UTC) that the backfill loop has fully
+    /// populated. The loop advances this by one day per successful
+    /// monthly chunk, so a crash mid-backfill resumes from the last
+    /// completed month on next launch.
+    #[serde(default)]
+    pub last_backfill_completed: Option<chrono::NaiveDate>,
+    /// URL of the Open-Meteo *forecast* endpoint. Defaults to the
+    /// free non-commercial API; a self-hosted instance can be configured
+    /// here. The archive endpoint is derived by swapping `api.` for
+    /// `archive-api.`.
+    #[serde(default = "default_open_meteo_base_url")]
+    pub open_meteo_base_url: String,
+}
+
+impl Default for WeatherConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            postcode: String::new(),
+            latitude: None,
+            longitude: None,
+            last_backfill_completed: None,
+            open_meteo_base_url: default_open_meteo_base_url(),
+        }
+    }
+}
+
+pub(crate) fn default_open_meteo_base_url() -> String {
+    "https://api.open-meteo.com".to_string()
+}
+
 /// Application settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -652,6 +708,11 @@ pub struct Settings {
     /// Alert thresholds and Brevo email integration.
     #[serde(default)]
     pub alerts_config: AlertsConfig,
+
+    /// Local weather integration. Drives the Phase-2 Open-Meteo fetcher.
+    /// See [`WeatherConfig`].
+    #[serde(default)]
+    pub weather_config: WeatherConfig,
 
     /// Whether the user opted in to launching the app automatically when
     /// they log in (Windows: HKCU\…\Run, macOS: LaunchAgent,
@@ -854,6 +915,7 @@ impl Default for Settings {
             agile_state_persisted: String::new(),
             hidden_panels: Vec::new(),
             alerts_config: AlertsConfig::default(),
+            weather_config: WeatherConfig::default(),
             disable_auto_discovery: true,
             minimal_telemetry_mode: false,
             autostart_enabled: false,
@@ -1043,6 +1105,14 @@ mod tests {
             agile_state_persisted: "discharging".to_string(),
             hidden_panels: Vec::new(),
             alerts_config: AlertsConfig::default(),
+            weather_config: WeatherConfig {
+                enabled: true,
+                postcode: "SW1A 1AA".to_string(),
+                latitude: Some(51.501009),
+                longitude: Some(-0.141588),
+                last_backfill_completed: Some(chrono::NaiveDate::from_ymd_opt(2025, 1, 15).unwrap()),
+                open_meteo_base_url: "https://api.open-meteo.com".to_string(),
+            },
             disable_auto_discovery: true,
             minimal_telemetry_mode: true,
             autostart_enabled: true,
@@ -1069,6 +1139,19 @@ mod tests {
         assert_eq!(decoded.load_limiter_start_hour, 16);
         assert_eq!(decoded.load_limiter_end_hour, 20);
         assert!(decoded.autostart_enabled);
+        // Weather config roundtrips with all fields populated.
+        assert!(decoded.weather_config.enabled);
+        assert_eq!(decoded.weather_config.postcode, "SW1A 1AA");
+        assert_eq!(decoded.weather_config.latitude, Some(51.501009));
+        assert_eq!(decoded.weather_config.longitude, Some(-0.141588));
+        assert_eq!(
+            decoded.weather_config.last_backfill_completed,
+            Some(chrono::NaiveDate::from_ymd_opt(2025, 1, 15).unwrap())
+        );
+        assert_eq!(
+            decoded.weather_config.open_meteo_base_url,
+            "https://api.open-meteo.com"
+        );
     }
 
     /// AlertsConfig pushover fields must survive a full JSON round-trip and
@@ -1120,6 +1203,59 @@ mod tests {
         assert_eq!(decoded.ntfy_server, "https://ntfy.sh");
     }
 
+    /// `settings.json` written before the weather feature shipped (no
+    /// `weather_config` key at all) must still load. The struct's
+    /// `#[serde(default)]` on every field produces `WeatherConfig::default()`
+    /// — enabled is false, lat/lon are None, the URL stays at the
+    /// non-commercial endpoint.
+    #[test]
+    fn legacy_settings_without_weather_loads() {
+        // Minimal Settings JSON missing every optional field. Real legacy
+        // files have many more fields; serde ignores unknowns not present
+        // in the struct, so the absence of `weather_config` is the only
+        // thing we exercise here.
+        let legacy = r#"{
+            "host": "192.168.1.50",
+            "port": 8899,
+            "serial": "",
+            "poll_interval": 60,
+            "auto_connect": true,
+            "import_tariff": 0.285,
+            "export_tariff": 0.15,
+            "hidden_panels": [],
+            "evc_host": "",
+            "disable_auto_discovery": true,
+            "minimal_telemetry_mode": false
+        }"#;
+        let decoded: Settings = serde_json::from_str(legacy).unwrap();
+        // Defaults populated via #[serde(default)] on WeatherConfig fields.
+        assert!(!decoded.weather_config.enabled);
+        assert_eq!(decoded.weather_config.postcode, "");
+        assert_eq!(decoded.weather_config.latitude, None);
+        assert_eq!(decoded.weather_config.longitude, None);
+        assert_eq!(decoded.weather_config.last_backfill_completed, None);
+        assert_eq!(
+            decoded.weather_config.open_meteo_base_url,
+            "https://api.open-meteo.com"
+        );
+    }
+
+    /// WeatherConfig JSON missing the optional `open_meteo_base_url` field
+    /// defaults to the non-commercial endpoint. Mirrors the same
+    /// forward-compat pattern as the alert-config test above.
+    #[test]
+    fn weather_config_without_base_url_defaults() {
+        let legacy = r#"{
+            "enabled": true,
+            "postcode": "SW1A 1AA",
+            "latitude": 51.501,
+            "longitude": -0.141
+        }"#;
+        let decoded: WeatherConfig = serde_json::from_str(legacy).unwrap();
+        assert_eq!(decoded.open_meteo_base_url, "https://api.open-meteo.com");
+        assert!(decoded.enabled);
+    }
+
     #[test]
     fn save_and_load() {
         // Use a temp dir to avoid polluting real settings
@@ -1164,6 +1300,7 @@ mod tests {
             agile_state_persisted: String::new(),
             hidden_panels: Vec::new(),
             alerts_config: AlertsConfig::default(),
+            weather_config: WeatherConfig::default(),
             disable_auto_discovery: true,
             minimal_telemetry_mode: false,
             autostart_enabled: false,

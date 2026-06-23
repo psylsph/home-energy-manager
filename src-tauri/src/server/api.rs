@@ -2448,6 +2448,139 @@ pub async fn reboot_inverter(State(state): State<Arc<AppState>>) -> (StatusCode,
     }
 }
 
+// ---------------------------------------------------------------------------
+// Weather (Open-Meteo integration)
+// ---------------------------------------------------------------------------
+
+/// Resolve a UK postcode to lat/lon via api.postcodes.io. Returns the
+/// canonicalised postcode string alongside the coordinates so the caller
+/// can persist both. `None` means the lookup failed (network error, 404,
+/// or malformed body) — the caller surfaces the failure to the user.
+fn lookup_postcode(postcode: &str) -> Option<(String, f64, f64)> {
+    let trimmed = postcode.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let url = format!(
+        "https://api.postcodes.io/postcodes/{}",
+        percent_encoding::utf8_percent_encode(
+            trimmed,
+            percent_encoding::NON_ALPHANUMERIC,
+        )
+    );
+    // postcodes.io is a low-volume, trusted UK government-backed API. We
+    // reuse the shared weather agent (10 s timeout, no idle pooling) —
+    // consistent with how we talk to Open-Meteo.
+    let resp = crate::weather::weather_agent().get(&url).call().ok()?;
+    let mut resp = resp;
+    let body = resp.body_mut().read_to_string().ok()?;
+    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
+    if json.get("status").and_then(|v| v.as_u64()) != Some(200) {
+        return None;
+    }
+    let result = json.get("result")?;
+    let lat = result.get("latitude")?.as_f64()?;
+    let lon = result.get("longitude")?.as_f64()?;
+    let canonical = result
+        .get("postcode")
+        .and_then(|v| v.as_str())
+        .unwrap_or(trimmed)
+        .to_string();
+    Some((canonical, lat, lon))
+}
+
+/// GET /api/weather — return the current weather subsystem state.
+///
+/// Includes the persisted config, the most recent live fetch result, the
+/// resolved Open-Meteo grid cell, and backfill progress. The Settings UI
+/// polls this to render the current state and backfill spinner.
+pub async fn get_weather(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let ws = state.weather.lock().await.clone();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "data": ws,
+        })),
+    )
+}
+
+/// POST /api/weather — update the weather config.
+///
+/// Accepts a partial update: any of `enabled`, `postcode`, `latitude`,
+/// `longitude`, `open_meteo_base_url`. When `postcode` is provided without
+/// coordinates, the server resolves it via api.postcodes.io and stores the
+/// resulting lat/lon. When coordinates are provided directly they take
+/// precedence (manual override for non-UK users or self-hosters).
+pub async fn set_weather(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<Value>) {
+    let mut ws = state.weather.lock().await;
+
+    if let Some(v) = body.get("enabled").and_then(|v| v.as_bool()) {
+        ws.config.enabled = v;
+    }
+    if let Some(v) = body.get("postcode").and_then(|v| v.as_str()) {
+        ws.config.postcode = v.to_string();
+    }
+    // Manual coordinate override — takes precedence over any postcode.
+    if let Some(lat) = body.get("latitude").and_then(|v| v.as_f64()) {
+        ws.config.latitude = Some(lat);
+    }
+    if let Some(lon) = body.get("longitude").and_then(|v| v.as_f64()) {
+        ws.config.longitude = Some(lon);
+    }
+    if let Some(v) = body.get("open_meteo_base_url").and_then(|v| v.as_str()) {
+        let trimmed = v.trim_end_matches('/');
+        if !trimmed.is_empty() {
+            ws.config.open_meteo_base_url = trimmed.to_string();
+        }
+    }
+
+    // If we have a postcode but no coordinates, try to resolve now so the
+    // user gets immediate feedback (rather than waiting for the next poll
+    // tick). Failure is non-fatal — the user can enter coords manually.
+    if !ws.config.postcode.is_empty() && (ws.config.latitude.is_none() || ws.config.longitude.is_none()) {
+        match lookup_postcode(&ws.config.postcode) {
+            Some((canonical, lat, lon)) => {
+                ws.config.postcode = canonical;
+                ws.config.latitude = Some(lat);
+                ws.config.longitude = Some(lon);
+            }
+            None => {
+                tracing::info!(
+                    postcode = %ws.config.postcode,
+                    "postcode lookup failed; leaving coordinates unset",
+                );
+            }
+        }
+    }
+
+    let config_clone = ws.config.clone();
+    drop(ws);
+
+    // Persist to settings.json so the config survives a restart.
+    let mut app_settings = crate::settings::Settings::load();
+    app_settings.weather_config = config_clone;
+    if let Err(e) = app_settings.save() {
+        tracing::warn!("Failed to persist weather config: {e}");
+        return server_error(&format!("Failed to save: {e}"));
+    }
+
+    tracing::info!("Weather config updated");
+    ok_response("Weather config updated")
+}
+
+/// POST /api/weather/backfill — kick off a one-shot backfill of historical
+/// weather data from Open-Meteo's archive endpoint. Returns immediately;
+/// the frontend polls `GET /api/weather` for `backfill_in_progress` and
+/// `last_backfill_completed` to track progress.
+pub async fn backfill_weather(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    crate::weather::spawn_backfill(state.clone());
+    ok_response("Backfill started")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

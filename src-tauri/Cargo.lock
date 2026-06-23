@@ -1663,6 +1663,7 @@ dependencies = [
  "local-ip-address",
  "log",
  "parking_lot",
+ "percent-encoding",
  "rusqlite",
  "serde",
  "serde_json",

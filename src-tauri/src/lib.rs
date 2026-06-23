@@ -5,6 +5,7 @@ pub mod inverter;
 pub mod modbus;
 pub mod server;
 pub mod settings;
+pub mod weather;
 #[cfg(test)]
 mod test_util;
 
@@ -455,6 +456,13 @@ pub fn run() {
                 evc::run_evc_poll_loop(evc_state).await;
             });
 
+            // Spawn the weather fetcher. Ids for ~15 min on a missing config;
+            // runs forever otherwise. See weather::run_weather_loop.
+            let weather_state = state.clone();
+            tauri::async_runtime::spawn(async move {
+                weather::run_weather_loop(weather_state).await;
+            });
+
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -570,6 +578,13 @@ pub fn run_headless(args: &[String]) {
         let evc_state = state.clone();
         tokio::spawn(async move {
             evc::run_evc_poll_loop(evc_state).await;
+        });
+
+        // Spawn the weather fetcher (same code path as the Tauri-windowed
+        // mode — see `run_weather_loop`).
+        let weather_state = state.clone();
+        tokio::spawn(async move {
+            weather::run_weather_loop(weather_state).await;
         });
 
         // Start the HTTP server
