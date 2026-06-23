@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.37.4] - 2026-06-23
+
+### Added
+
+- **Read-only URL (`?RO`) for sharing the dashboard with the family.**
+  The Settings page → Remote / Mobile Network Access section now
+  shows a read-only version of the LAN URL with `?RO` appended.
+  Visiting the URL with that flag hides the Control and Settings tabs
+  from the bottom navigation in the visitor's browser, and the flag
+  is pinned in localStorage so it stays hidden across reloads. The
+  owner's browser is unaffected — each browser keeps its own setting.
+  Intended for a household-shared dashboard link (e.g. for a partner
+  or kids) where the goal is to prevent accidental changes, not
+  security. Display-only, trust-based — no server-side enforcement.
+  Closes
+  [#114](https://github.com/psylsph/home-energy-manager/issues/114).
+
 ## [0.37.3] - 2026-06-23
 
 ### Fixed

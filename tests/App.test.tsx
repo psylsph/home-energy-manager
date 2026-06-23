@@ -55,6 +55,7 @@ vi.mock('../src/lib/api', () => ({
 
 // Imported after the vi.mock() calls above (factories are hoisted regardless).
 import App from '../src/App';
+import { useInverterStore } from '../src/store/useInverterStore';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -139,5 +140,94 @@ describe('<App/> route-level ErrorBoundary coverage (issue 3.4)', () => {
     await navigate(route);
     render(<App />);
     expect(screen.getByTestId(testId)).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Read-only mode (?RO URL param, issue #114)
+// ---------------------------------------------------------------------------
+//
+// The store is a module-level singleton, so we have to reset the readOnly
+// flag in beforeEach in addition to clearing localStorage — otherwise a
+// previous test's URL param would leave the store in read-only mode and
+// pollute the next test's assertions.
+
+describe('<App/> read-only mode (issue #114)', () => {
+  beforeEach(() => {
+    silenceConsoleError();
+    localStorage.clear();
+    useInverterStore.setState({ readOnly: false });
+  });
+
+  afterEach(() => {
+    cleanup();
+    localStorage.clear();
+    useInverterStore.setState({ readOnly: false });
+    window.location.hash = '';
+  });
+
+  it('hides Control and Settings nav links when ?RO is in the URL', async () => {
+    await navigate('/?RO');
+    render(<App />);
+
+    // Non-protected tabs are still visible.
+    expect(screen.getByRole('link', { name: 'Status' })).toBeDefined();
+    expect(screen.getByRole('link', { name: 'Battery' })).toBeDefined();
+    expect(screen.getByRole('link', { name: 'History' })).toBeDefined();
+
+    // The two tabs the issue asks to hide are gone from the bottom bar.
+    expect(screen.queryByRole('link', { name: 'Control' })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Settings' })).toBeNull();
+  });
+
+  it('shows Control and Settings nav links on the default URL (no ?RO)', async () => {
+    await navigate('/');
+    render(<App />);
+    expect(screen.getByRole('link', { name: 'Control' })).toBeDefined();
+    expect(screen.getByRole('link', { name: 'Settings' })).toBeDefined();
+  });
+
+  it('persists the read-only flag to localStorage when ?RO is visited', async () => {
+    await navigate('/?RO');
+    render(<App />);
+    expect(localStorage.getItem('readOnly')).toBe('true');
+    // The store mirrors the persisted value so subsequent renders don't
+    // need to re-read storage on every paint.
+    expect(useInverterStore.getState().readOnly).toBe(true);
+  });
+
+  it('keeps read-only mode in subsequent visits via the persisted localStorage flag', async () => {
+    // Simulate a previous visit that already set the flag — the user
+    // bookmarked the URL, then returns to it without the ?RO param.
+    localStorage.setItem('readOnly', 'true');
+    useInverterStore.setState({ readOnly: true });
+
+    await navigate('/battery');
+    render(<App />);
+    expect(screen.queryByRole('link', { name: 'Control' })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Settings' })).toBeNull();
+  });
+
+  it('hides Control and Settings for ?RO combined with any path', async () => {
+    // The URL param is the trigger, not the route — confirms the param
+    // works regardless of where the user lands first.
+    await navigate('/battery?RO');
+    render(<App />);
+    expect(screen.queryByRole('link', { name: 'Control' })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Settings' })).toBeNull();
+  });
+
+  it('hides Control and Settings when ?RO is in window.location.search (before the hash)', async () => {
+    // HashRouter ignores ?query before the `#`, so the app has to read
+    // `window.location.search` directly. Simulate the natural bookmark
+    // form (`http://host/?RO`) by pushing it onto the history API.
+    await act(async () => {
+      window.history.pushState({}, '', '/?RO');
+      window.dispatchEvent(new Event('popstate'));
+    });
+    render(<App />);
+    expect(screen.queryByRole('link', { name: 'Control' })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Settings' })).toBeNull();
+    expect(localStorage.getItem('readOnly')).toBe('true');
   });
 });

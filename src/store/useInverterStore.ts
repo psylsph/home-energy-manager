@@ -9,6 +9,14 @@ interface InverterState {
   connectedHost: string | null;
   developerMode: boolean;
   themeMode: ThemeMode;
+  /**
+   * Read-only mode hides the Control and Settings tabs from the bottom
+   * navigation. Set initially by visiting the app with a `?RO` URL
+   * parameter (intended for sharing a household dashboard link with
+   * non-admin users — see issue #114). Persisted to localStorage so
+   * the flag sticks in the same browser across reloads.
+   */
+  readOnly: boolean;
 
   /** Panels hidden from the bottom navigation. */
   hiddenPanels: string[];
@@ -41,6 +49,7 @@ interface InverterState {
   setConnection: (state: ConnectionState, host?: string, connectedSince?: number | null) => void;
   setDeveloperMode: (enabled: boolean) => void;
   setThemeMode: (mode: ThemeMode) => void;
+  setReadOnly: (enabled: boolean) => void;
 
   setChartRange: (range: HistoryRange) => void;
   setPanelGraphsEnabled: (enabled: boolean) => void;
@@ -94,6 +103,20 @@ function loadThemeMode(): ThemeMode {
   }
 }
 
+function loadReadOnly(): boolean {
+  try {
+    return localStorage.getItem('readOnly') === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function saveReadOnly(enabled: boolean) {
+  try {
+    localStorage.setItem('readOnly', String(enabled));
+  } catch { /* ignore */ }
+}
+
 function loadPanelGraphsEnabled(): boolean {
   try {
     const stored = localStorage.getItem('panelGraphsEnabled');
@@ -144,6 +167,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   connectFailures: 0,
   developerMode: loadDeveloperMode(),
   themeMode: loadThemeMode(),
+  readOnly: loadReadOnly(),
 
   hiddenPanels: [],
   chartRange: loadChartRange(),
@@ -176,6 +200,10 @@ export const useInverterStore = create<InverterState>((set) => ({
       localStorage.setItem('themeMode', mode);
     } catch { /* ignore */ }
     set({ themeMode: mode });
+  },
+  setReadOnly: (enabled) => {
+    saveReadOnly(enabled);
+    set({ readOnly: enabled });
   },
 
   setChartRange: (range) => {

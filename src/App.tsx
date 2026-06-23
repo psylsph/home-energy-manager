@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import MetersPage from './pages/MetersPage';
-import { HashRouter, Routes, Route, NavLink, Navigate } from 'react-router-dom';
+import { HashRouter, Routes, Route, NavLink, Navigate, useSearchParams } from 'react-router-dom';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useGridOutageNotifications } from './hooks/useGridOutageNotifications';
 import type { PollSettings } from './lib/types';
@@ -170,10 +170,28 @@ function LogsIcon() {
   );
 }
 
+/**
+ * Returns true if the current URL carries the `?RO` read-only flag in
+ * either the hash search params (e.g. `#/battery?RO`) or the URL search
+ * string (e.g. `http://host/?RO`). See issue #114 — the latter is the
+ * natural form a user would bookmark, but HashRouter doesn't surface it
+ * through `useSearchParams` so we read `window.location.search` directly.
+ */
+function urlHasRO(hashSearchParams: URLSearchParams): boolean {
+  if (hashSearchParams.has('RO')) return true;
+  if (typeof window === 'undefined') return false;
+  try {
+    return new URLSearchParams(window.location.search).has('RO');
+  } catch {
+    return false;
+  }
+}
+
 function Layout() {
   useWebSocket();
   useGridOutageNotifications();
-  const { developerMode, themeMode, hiddenPanels, setHiddenPanels, setEvcHost } = useInverterStore();
+  const [searchParams] = useSearchParams();
+  const { developerMode, themeMode, hiddenPanels, readOnly, setHiddenPanels, setEvcHost, setReadOnly } = useInverterStore();
 
   // Load hidden panels from settings on mount
   useEffect(() => {
@@ -190,12 +208,36 @@ function Layout() {
     })();
   }, [setHiddenPanels, setEvcHost]);
 
+  // Read-only mode (?RO URL parameter, issue #114). When the URL carries
+  // `?RO`, hide the Control and Settings nav icons so a household-shared
+  // dashboard link (e.g. for a partner or kids) can't accidentally toggle
+  // settings. The localStorage flag is set immediately, so the link is
+  // sticky in this browser after the first visit — no need to keep the
+  // param in the address bar.
+  //
+  // HashRouter reads the path from `window.location.hash` and ignores
+  // `window.location.search`, so `?RO` placed before the `#` (the natural
+  // form a user would bookmark — `http://host/?RO`) is invisible to
+  // `useSearchParams`. We check both positions so the feature works
+  // regardless of where the param is typed.
+  useEffect(() => {
+    if (urlHasRO(searchParams)) {
+      setReadOnly(true);
+    }
+  }, [searchParams, setReadOnly]);
+
   useEffect(() => {
     document.documentElement.dataset.theme = themeMode;
   }, [themeMode]);
 
+  // Treat the URL flag as well as the persisted flag as "read-only" so the
+  // very first render after navigating to `?RO` already hides the icons
+  // (no one-frame flash of the Control/Settings tabs).
+  const isReadOnly = readOnly || urlHasRO(searchParams);
+
   const visibleItems = NAV_ITEMS.filter(item => {
     const key = item.to.replace(/^\//, '');
+    if (isReadOnly && (key === 'control' || key === 'settings')) return false;
     return !key || !hiddenPanels.includes(key);
   });
 
