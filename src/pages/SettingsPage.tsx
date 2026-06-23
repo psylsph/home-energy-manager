@@ -365,6 +365,11 @@ export default function SettingsPage() {
 
   // Network URL — use LAN IP if available, otherwise fall back to getApiBase()
   const lanUrl = lanIp ? `http://${lanIp}:${getServerPort()}` : getApiBase();
+  // Read-only URL — same as lanUrl with the `?RO` flag appended, which
+  // hides the Control and Settings nav icons in the visitor's browser
+  // (issue #114). Sticky via localStorage, so the recipient only needs
+  // to visit it once.
+  const lanReadOnlyUrl = `${lanUrl}?RO`;
 
   // Save connection
   const handleConnect = async () => {
@@ -576,8 +581,7 @@ export default function SettingsPage() {
     if (inv.serial) setSerial(inv.serial);
   };
 
-  const copyUrl = () => {
-    const text = lanUrl;
+  const copyUrl = (text: string) => {
     if (navigator.clipboard && window.isSecureContext) {
       navigator.clipboard.writeText(text).then(() => flash('URL copied!', true));
     } else {
@@ -772,7 +776,7 @@ export default function SettingsPage() {
             {lanUrl}
           </code>
           <button
-            onClick={copyUrl}
+            onClick={() => copyUrl(lanUrl)}
             className="bg-bg-elevated text-text-primary font-sans text-sm px-4 py-2 rounded-lg hover:bg-bg-base transition-colors shrink-0"
           >
             Copy
@@ -781,6 +785,28 @@ export default function SettingsPage() {
 
         <p className="text-text-secondary text-xs font-sans">
           Access this dashboard from any device on your network
+        </p>
+
+        {/* Read-only link (issue #114) — share this with family members
+            who only need to view the data. Visiting the URL with the `?RO`
+            flag hides the Control and Settings tabs in that browser, and
+            the flag is pinned via localStorage so it stays hidden across
+            reloads. No server-side enforcement — the link keeps anyone
+            with browser devtools out of the way, but isn't a security
+            boundary. */}
+        <div className="flex items-center gap-3 mt-2">
+          <code className="bg-bg-elevated text-flow-active rounded-lg px-4 py-2 text-sm font-mono flex-1 min-w-0 select-all overflow-hidden text-ellipsis whitespace-nowrap">
+            {lanReadOnlyUrl}
+          </code>
+          <button
+            onClick={() => copyUrl(lanReadOnlyUrl)}
+            className="bg-bg-elevated text-text-primary font-sans text-sm px-4 py-2 rounded-lg hover:bg-bg-base transition-colors shrink-0"
+          >
+            Copy
+          </button>
+        </div>
+        <p className="text-text-secondary text-xs font-sans">
+          Read-only link — hides Control and Settings in the visitor's browser (safe to share with family)
         </p>
 
         {clients.length > 0 && (

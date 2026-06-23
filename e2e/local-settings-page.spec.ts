@@ -315,12 +315,31 @@ test.describe('Settings Page - Network Access', () => {
 
   test('should show URL with port', async ({ page }) => {
     await page.goto('/#/settings');
-    await expect(page.locator('text=/17337/')).toBeVisible({ timeout: 10_000 });
+    // Two URLs are now shown side-by-side (main + read-only). The main
+    // one is the first <code> element on the page.
+    await expect(page.locator('code', { hasText: /17337/ }).first()).toBeVisible({ timeout: 10_000 });
   });
 
   test('should show Copy button', async ({ page }) => {
     await page.goto('/#/settings');
-    await expect(page.locator('text=Copy')).toBeVisible({ timeout: 10_000 });
+    // Two Copy buttons now (one per URL). The main one's button is first.
+    await expect(page.getByRole('button', { name: 'Copy' }).first()).toBeVisible({ timeout: 10_000 });
+  });
+
+  test('should show read-only URL with ?RO suffix (issue #114)', async ({ page }) => {
+    await page.goto('/#/settings');
+    // The read-only URL is the LAN URL with `?RO` appended. The element
+    // is rendered inside a <code> tag like the main URL.
+    const readOnlyLink = page.locator('code', { hasText: /\?RO$/ });
+    await expect(readOnlyLink).toBeVisible({ timeout: 10_000 });
+
+    // It must use the same LAN IP and port as the main URL — same host
+    // the user would share for the dashboard itself.
+    const mainUrl = await page.locator('code', { hasText: /:\d+$/ }).first().innerText();
+    expect(readOnlyLink).toHaveText(`${mainUrl}?RO`);
+
+    // Helpful copy: tells the visitor what hiding the URL does.
+    await expect(page.locator('text=Read-only link')).toBeVisible();
   });
 });
 
