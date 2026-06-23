@@ -101,7 +101,7 @@ function TariffSlotEditor({
         const endOptions = optionsForEnd(slot);
         return (
           <div key={i} className="flex flex-col gap-1">
-            <div className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2 items-end">
+            <div className="grid grid-cols-2 sm:grid-cols-[1fr_1fr_1fr_auto] gap-2 items-end">
               <label className="flex flex-col gap-1">
                 <span className="text-text-secondary text-xs font-sans">Start</span>
                 <select

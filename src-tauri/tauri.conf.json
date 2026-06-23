@@ -64,7 +64,10 @@
       "rpm": {
         "provides": ["GivEnergy-Local"],
         "conflicts": ["GivEnergy-Local"],
-        "obsoletes": ["GivEnergy-Local"]
+        "obsoletes": ["GivEnergy-Local"],
+        "files": {
+          "/usr/share/givenergy-local/dist": "../dist"
+        }
       }
     }
   }
