@@ -99,6 +99,7 @@ export default async function globalSetup(_config: FullConfig) {
         ...process.env,
         HOME: configDir,
         GIVENERGY_LOCAL_CONFIG_DIR: path.join(configDir, '.givenergy-local'),
+        RUST_LOG: process.env.RUST_LOG || 'info',
       },
     },
   );
