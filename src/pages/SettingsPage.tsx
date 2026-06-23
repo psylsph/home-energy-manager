@@ -1287,7 +1287,7 @@ export default function SettingsPage() {
                 <strong className="text-green-400">Recommended</strong> — Send alerts when critical conditions are detected. Create a bot via{' '}
                 <button onClick={() => openExternal('https://t.me/botfather')} className="text-flow-active underline hover:opacity-80 inline">@BotFather</button> on Telegram, get your bot token, then send /start to your bot and get your chat ID from{' '}
                 <button onClick={() => openExternal('https://t.me/userinfobot')} className="text-flow-active underline hover:opacity-80 inline">@userinfobot</button>.
-                Interactive messaging (reply to alerts directly from Telegram) will be available in a future release.
+                Once configured, send <code>/status</code>, <code>/today</code>, <code>/battery</code>, or <code>/help</code> in the chat to ask your inverter a question. The bot only replies to this chat id.
               </p>
               <label className="flex flex-col gap-1">
                 <span className="text-text-secondary text-xs font-sans">Bot Token (from @BotFather)</span>
