@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **Headless mode on `.rpm` and AppImage installs now serves the web UI automatically.** Previously these installs ran in API-only mode (no dashboard) because the bundled frontend sat at the Tauri resource path (`/usr/lib/givenergy-local/dist/`), which the headless `--dist` search list never checked. The resolver now also looks there, so `.deb`, `.rpm`, and AppImage all serve the UI out of the box. The `.rpm` bundle now places `dist/` at `/usr/share/givenergy-local/dist/` too, matching the `.deb` and Docker conventions. If no `dist/` can be found at any of the search paths, the warning now lists every path it tried plus concrete remediation steps.
+
 ## [0.38.0] - 2026-06-23
 
 ### Added

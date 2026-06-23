@@ -708,21 +708,33 @@ export default function HistoryPage() {
 
   return (
     <div className="flex flex-col gap-4 max-w-4xl mx-auto">
-      {/* Tab bar */}
-      <div className="flex gap-1 bg-bg-surface rounded-xl p-1">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => handleTabChange(t.key)}
-            className={`flex-1 px-3 py-2 rounded-lg text-sm font-sans font-medium transition-colors ${
-              tab === t.key
-                ? 'bg-flow-active/20 text-flow-active'
-                : 'text-text-secondary hover:text-text-primary'
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
+      {/* Tab bar — dropdown on mobile, buttons on desktop */}
+      <div className="bg-bg-surface rounded-xl p-2 min-w-0">
+        <select
+          value={tab}
+          onChange={(e) => handleTabChange(e.target.value as MetricTab)}
+          className="sm:hidden w-full bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-sans font-medium outline-none border border-white/10"
+          aria-label="Select metric"
+        >
+          {TABS.map((t) => (
+            <option key={t.key} value={t.key}>{t.label}</option>
+          ))}
+        </select>
+        <div className="hidden sm:flex gap-1">
+          {TABS.map((t) => (
+            <button
+              key={t.key}
+              onClick={() => handleTabChange(t.key)}
+              className={`flex-1 px-3 py-2 rounded-lg text-sm font-sans font-medium transition-colors ${
+                tab === t.key
+                  ? 'bg-flow-active/20 text-flow-active'
+                  : 'text-text-secondary hover:text-text-primary'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Time range */}

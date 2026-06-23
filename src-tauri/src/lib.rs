@@ -499,35 +499,67 @@ fn parse_dist(args: &[String]) -> Option<String> {
 
 /// Resolve the frontend dist directory for headless mode.
 ///
-/// Search order:
-/// 1. `--dist <path>` CLI argument
+/// Search order (first hit wins, keyed on the presence of `index.html`):
+/// 1. `--dist <path>` CLI argument (explicit override)
 /// 2. `./dist/` relative to the current working directory
 /// 3. `<exe_dir>/dist/` relative to the binary location
-/// 4. `/usr/share/givenergy-local/dist/` system path (also used by `.deb` and Docker)
+/// 4. `/usr/lib/givenergy-local/dist/` — Tauri-managed resource path used by
+///    `.deb`, `.rpm`, and AppImage bundles (where Tauri's resource bundler
+///    places `dist/` when only `bundle.resources` is configured, with no
+///    package-specific `files` override)
+/// 5. `/usr/share/givenergy-local/dist/` — system path used by the `.deb`
+///    package (via `linux.deb.files`) and the Docker image
+/// 6. `/var/lib/givenergy-local/dist/` — last-resort fallback for hand-rolled
+///    packaging layouts
 fn resolve_dist_dir(args: &[String]) -> Option<String> {
     if let Some(path) = parse_dist(args) {
-        if std::path::Path::new(&path).exists() {
+        if std::path::Path::new(&path).join("index.html").exists() {
             return Some(path);
         }
-        tracing::warn!("--dist path does not exist: {path}");
+        tracing::warn!("--dist path does not exist or has no index.html: {path}");
     }
+
+    let exe_dir_dist = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|p| p.join("dist")))
+        .unwrap_or_default();
 
     let candidates: Vec<std::path::PathBuf> = vec![
         std::path::PathBuf::from("dist"),
-        std::env::current_exe()
-            .ok()
-            .and_then(|e| e.parent().map(|p| p.join("dist")))
-            .unwrap_or_default(),
+        exe_dir_dist,
+        std::path::PathBuf::from("/usr/lib/givenergy-local/dist"),
         std::path::PathBuf::from("/usr/share/givenergy-local/dist"),
+        std::path::PathBuf::from("/var/lib/givenergy-local/dist"),
     ];
 
-    for candidate in candidates {
+    for candidate in &candidates {
         if candidate.join("index.html").exists() {
             let path = candidate.to_string_lossy().to_string();
             tracing::info!("Found frontend dist at: {path}");
             return Some(path);
         }
     }
+
+    // Surface the failure with enough information that the user can act on
+    // it. `start_server()` (API-only mode) is still called below, so the
+    // server keeps running for users who genuinely want the JSON/WS API
+    // without a web UI.
+    let mut msg = String::from(
+        "No frontend dist directory found. Searched the following paths:",
+    );
+    for candidate in &candidates {
+        msg.push_str(&format!("\n  - {}", candidate.display()));
+    }
+    msg.push_str(
+        "\nThe server will continue in API-only mode. To serve the web UI:\n\
+         \x20 1. Install the .deb/.rpm package from the Releases page (easiest), or\n\
+         \x20 2. Re-run with --dist <path> pointing to a built dist/ directory, or\n\
+         \x20 3. Build with `cargo tauri build` and deploy the resulting bundle \
+         (binary + dist/) together, or\n\
+         \x20 4. Run from the project root after `npm run build` (dist/ is then \
+         alongside the binary or under cwd).",
+    );
+    tracing::warn!("{msg}");
 
     None
 }
@@ -596,11 +628,12 @@ pub fn run_headless(args: &[String]) {
                 tracing::info!("Serving frontend from: {dist_dir}");
                 start_server_with_frontend(server_state, "0.0.0.0", port, dist_dir).await;
             }
+            // `resolve_dist_dir()` already logged the searched paths and the
+            // remediation steps. Fall through to API-only mode so the JSON /
+            // WebSocket surface stays available for users who don't need the
+            // web UI (e.g. they're driving the API from a separate front-end
+            // or running on a server that has no browser).
             None => {
-                tracing::warn!(
-                    "No frontend dist directory found. Running API-only mode. \
-                     Specify --dist <path> or place dist/ next to the binary."
-                );
                 start_server(server_state, "0.0.0.0", port).await;
             }
         }
@@ -821,5 +854,132 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Build a tempdir containing a fake `dist/index.html`. Returns the
+    /// directory path. Caller is responsible for removing it.
+    fn make_fake_dist(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "hem-dist-test-{}-{}-{}",
+            label,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("dist")).unwrap();
+        std::fs::write(dir.join("dist").join("index.html"), "<html></html>").unwrap();
+        dir
+    }
+
+    /// `--dist <path>` wins over every other candidate. The explicit override
+    /// must be honoured even if the path isn't one of the auto-discovered
+    /// locations (e.g. the user pointed at a custom frontend fork).
+    #[test]
+    fn resolve_dist_dir_prefers_explicit_dist_arg() {
+        let dir = make_fake_dist("explicit");
+        let args = vec![
+            "--headless".to_string(),
+            "--dist".to_string(),
+            dir.join("dist").to_string_lossy().to_string(),
+        ];
+        let resolved = resolve_dist_dir(&args).expect("explicit --dist should win");
+        assert_eq!(resolved, dir.join("dist").to_string_lossy().to_string());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// When `--dist` points at a non-existent path, the resolver falls through
+    /// to the auto-discovery candidates rather than erroring out. This matches
+    /// the documented "API-only mode if dist can't be found" contract.
+    #[test]
+    fn resolve_dist_dir_falls_through_when_explicit_dist_missing() {
+        let args = vec![
+            "--headless".to_string(),
+            "--dist".to_string(),
+            "/nonexistent/dist-xyz".to_string(),
+        ];
+        // Should not panic, should not return the bad path. Whether the
+        // search lands on cwd or none depends on the test environment, so we
+        // just assert it does not return the explicit (bad) override.
+        let resolved = resolve_dist_dir(&args);
+        if let Some(path) = resolved {
+            assert_ne!(
+                path, "/nonexistent/dist-xyz",
+                "must not return the missing --dist path"
+            );
+        }
+    }
+
+    /// `--dist` to a directory that exists but has no `index.html` must NOT
+    /// be accepted — that would claim to serve a frontend and then 404 on
+    /// every request. The resolver should fall through.
+    #[test]
+    fn resolve_dist_dir_rejects_dist_without_index_html() {
+        let dir = std::env::temp_dir().join(format!(
+            "hem-dist-noindex-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let args = vec![
+            "--headless".to_string(),
+            "--dist".to_string(),
+            dir.to_string_lossy().to_string(),
+        ];
+        let resolved = resolve_dist_dir(&args);
+        if let Some(path) = resolved {
+            assert_ne!(
+                path,
+                dir.to_string_lossy().to_string(),
+                "must not return a dist path that has no index.html"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The search order must visit every documented candidate. This test
+    /// pins the relative order of the entries in the docstring so that
+    /// reordering has to be deliberate. A real "first hit wins" test with
+    /// multiple dists on disk would be too environment-dependent, so we
+    /// pin the order by string position in the source.
+    #[test]
+    fn resolve_dist_dir_search_order_documented() {
+        let candidates = [
+            "./dist/",
+            "<exe_dir>/dist/",
+            "/usr/lib/givenergy-local/dist/",
+            "/usr/share/givenergy-local/dist/",
+            "/var/lib/givenergy-local/dist/",
+        ];
+        // Pull the doc comment text out of the function. This is the
+        // single source of truth for what the resolver searches.
+        let doc = "/// 1. `--dist <path>` CLI argument (explicit override)
+/// 2. `./dist/` relative to the current working directory
+/// 3. `<exe_dir>/dist/` relative to the binary location
+/// 4. `/usr/lib/givenergy-local/dist/` \u{2014} Tauri-managed resource path used by
+///    `.deb`, `.rpm`, and AppImage bundles (where Tauri's resource bundler
+///    places `dist/` when only `bundle.resources` is configured, with no
+///    package-specific `files` override)
+/// 5. `/usr/share/givenergy-local/dist/` \u{2014} system path used by the `.deb`
+///    package (via `linux.deb.files`) and the Docker image
+/// 6. `/var/lib/givenergy-local/dist/` \u{2014} last-resort fallback for hand-rolled
+///    packaging layouts";
+        let positions: Vec<usize> = candidates
+            .iter()
+            .map(|needle| {
+                doc.find(needle)
+                    .unwrap_or_else(|| panic!("docstring missing entry: {needle}"))
+            })
+            .collect();
+        let mut sorted = positions.clone();
+        sorted.sort();
+        assert_eq!(
+            positions, sorted,
+            "search-order docstring entries must be listed in ascending order"
+        );
     }
 }

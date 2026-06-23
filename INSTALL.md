@@ -218,7 +218,14 @@ You can run Home Energy Manager without a desktop window — it serves the full 
 
 ### Option 1: Native
 
-Build from source and run in the background:
+Build from source and run in the background. The most common gotcha here is
+that a bare `cargo build --release` does **not** embed the frontend — you end
+up with a binary that has no UI to serve. The fix is to either build a proper
+package (the `.deb` / `.rpm` route above) or, if you just want a standalone
+binary, build it with `cargo tauri build --no-bundle` and then deploy the
+`dist/` folder alongside the binary.
+
+**Recommended: build a self-contained bundle for your distro**
 
 ```bash
 # 1. Install build dependencies
@@ -228,20 +235,47 @@ cargo install tauri-cli
 # 2. Build the frontend
 npm run build
 
-# 3. Build the app
-cd src-tauri && cargo build --release
-
-# 4. Run headless
-nohup ./target/release/givenergy-local --headless > givenergy-local.log 2>&1 &
+# 3. Build a native package (creates .deb on Debian/Ubuntu, .rpm on Fedora/RHEL)
+cargo tauri build --bundles deb,rpm
 ```
 
-Then open `http://your-machine-ip:7337` in any browser on your network.
+The resulting `.deb` / `.rpm` is in `src-tauri/target/release/bundle/`. Install
+it the normal way for your distro and `givenergy-local` will be on your `PATH`
+with the web UI bundled at the right system path — no further setup needed.
 
-If you already have a built `dist/` folder from a previous build, you can point to it:
+**Alternative: hand-deployed binary + dist/**
+
+If you just want a single binary to copy to a server, use Tauri's no-bundle
+build and keep `dist/` next to the binary:
 
 ```bash
-./target/release/givenergy-local --headless --dist /path/to/dist
+# 1. Build dependencies
+npm install
+cargo install tauri-cli
+
+# 2. Build the frontend
+npm run build
+
+# 3. Build the binary (no installer; dist/ stays where it is)
+cargo tauri build --no-bundle
+
+# 4. Deploy the binary AND the dist/ folder together
+sudo mkdir -p /opt/givenergy-local
+sudo cp src-tauri/target/release/givenergy-local /opt/givenergy-local/
+sudo cp -r dist /opt/givenergy-local/
+
+# 5. Run headless
+nohup /opt/givenergy-local/givenergy-local --headless \
+  > /var/log/givenergy-local.log 2>&1 &
 ```
+
+The binary searches for `dist/` next to itself first, so this layout just
+works. If you ever need to put `dist/` somewhere else, point at it with
+`--dist /path/to/dist`.
+
+> If you ever see the binary start in "API-only mode" (no web UI), check the
+> log for "No frontend dist directory found" — it lists every path it searched
+> and how to fix the layout.
 
 #### Raspberry Pi (headless server)
 

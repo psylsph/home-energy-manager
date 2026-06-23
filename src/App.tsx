@@ -85,7 +85,7 @@ const NAV_ITEMS = [
 
 function StatusIcon() {
   return (
-    <svg className="w-7 h-7 sm:w-5 sm:h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0a1 1 0 01-1-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 01-1 1" />
     </svg>
   );
@@ -93,7 +93,7 @@ function StatusIcon() {
 
 function HistoryIcon() {
   return (
-    <svg className="w-7 h-7 sm:w-5 sm:h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
     </svg>
   );
@@ -109,7 +109,7 @@ function PowerIcon() {
 
 function ControlIcon() {
   return (
-    <svg className="w-7 h-7 sm:w-5 sm:h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
       <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
     </svg>
@@ -118,7 +118,7 @@ function ControlIcon() {
 
 function BatteryIcon() {
   return (
-    <svg className="w-7 h-7 sm:w-5 sm:h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
       <rect x="2" y="7" width="18" height="10" rx="2" />
       <path strokeLinecap="round" d="M22 11v2" />
       <rect x="4" y="9" width="14" height="6" rx="1" fill="currentColor" opacity="0.3" />
@@ -128,7 +128,7 @@ function BatteryIcon() {
 
 function SettingsIcon() {
   return (
-    <svg className="w-7 h-7 sm:w-5 sm:h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
     </svg>
   );
@@ -136,7 +136,7 @@ function SettingsIcon() {
 
 function SolarIcon() {
   return (
-    <svg className="w-7 h-7 sm:w-5 sm:h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
       <circle cx="12" cy="12" r="3" />
       <path strokeLinecap="round" d="M12 2v2m0 16v2m-9-9H1m20 0h-2M4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M4.93 19.07l1.41-1.41m11.32-11.32l1.41-1.41" />
     </svg>
@@ -145,7 +145,7 @@ function SolarIcon() {
 
 function InverterIcon() {
   return (
-    <svg className="w-7 h-7 sm:w-5 sm:h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
       <rect x="4" y="4" width="16" height="16" rx="2" />
       <path strokeLinecap="round" d="M8 8h8M8 12h8M8 16h5" />
     </svg>
@@ -154,7 +154,7 @@ function InverterIcon() {
 
 function MeterIcon() {
   return (
-    <svg className="w-7 h-7 sm:w-5 sm:h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" />
       <path strokeLinecap="round" strokeLinejoin="round" d="M14 2v6h6M16 13H8M16 17H8M10 9H8" />
       <circle cx="11" cy="15" r="1" fill="currentColor" />
@@ -164,7 +164,7 @@ function MeterIcon() {
 
 function LogsIcon() {
   return (
-    <svg className="w-7 h-7 sm:w-5 sm:h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0021 18V6a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 6v12a2.25 2.25 0 002.25 2.25z" />
     </svg>
   );
@@ -213,7 +213,8 @@ function Layout() {
   // dashboard link (e.g. for a partner or kids) can't accidentally toggle
   // settings. The localStorage flag is set immediately, so the link is
   // sticky in this browser after the first visit — no need to keep the
-  // param in the address bar.
+  // param in the address bar. Visiting without `?RO` clears the flag so
+  // a normal visit restores the full nav.
   //
   // HashRouter reads the path from `window.location.hash` and ignores
   // `window.location.search`, so `?RO` placed before the `#` (the natural
@@ -221,9 +222,7 @@ function Layout() {
   // `useSearchParams`. We check both positions so the feature works
   // regardless of where the param is typed.
   useEffect(() => {
-    if (urlHasRO(searchParams)) {
-      setReadOnly(true);
-    }
+    setReadOnly(urlHasRO(searchParams));
   }, [searchParams, setReadOnly]);
 
   useEffect(() => {
@@ -295,11 +294,13 @@ function Layout() {
       {/* Bottom navigation
           Each link uses flex-1 + min-w-0 so the row shares the full width
           equally and never overflows, no matter how narrow the viewport is.
-          - <sm:  icon-only, 16px icon, tight vertical padding
+          - <sm:  icon-only, 20px icon, tight vertical padding
           - sm+:  icon-only, 20px icon, slightly larger padding
           - md+:  icon + text label
-          A title/aria-label keeps icon-only modes discoverable. */}
-      <nav className="sticky bottom-0 bg-bg-surface/90 backdrop-blur-md border-t border-white/5 px-0 pt-1 pb-safe flex items-stretch z-30">
+          On very narrow viewports the nav scrolls horizontally so items
+          never get cut off. A title/aria-label keeps icon-only modes
+          discoverable. */}
+      <nav className="sticky bottom-0 bg-bg-surface/90 backdrop-blur-md border-t border-white/5 px-0 pt-1 pb-safe flex items-stretch z-30 overflow-x-auto">
         {visibleItems.map(({ to, label, icon: Icon }) => (
           <NavLink
             key={to}
