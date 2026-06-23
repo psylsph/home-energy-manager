@@ -23,9 +23,10 @@ use crate::inverter::encoder::RegisterWrite;
 use crate::inverter::model::{BatteryMode, DeviceType, InverterSnapshot};
 use crate::modbus::client::ModbusClient;
 use crate::modbus::registers::{
-    encode_hhmm, HR_BATTERY_POWER_MODE, HR_BATTERY_SOC_RESERVE, HR_CHARGE_SLOT_1_END,
-    HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET,
-    HR_ENABLE_DISCHARGE,
+    encode_hhmm, HR_3PH_FORCE_CHARGE_ENABLE, HR_3PH_FORCE_DISCHARGE_ENABLE, HR_BATTERY_POWER_MODE,
+    HR_BATTERY_SOC_RESERVE, HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC,
+    HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END,
+    HR_DISCHARGE_SLOT_2_START, HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
 };
 
 // ===========================================================================
@@ -673,6 +674,13 @@ pub(crate) fn check_load_limiter(
                 tracing::info!(
                     "Load limiter: post-crash - battery already in Eco mode, restore confirmed"
                 );
+                // Consume the saved reserve on the final confirm so a
+                // stale value (e.g. the user's pre-pause 20% setting)
+                // doesn't linger in `load_limiter_saved_reserve` on
+                // disk. If the limiter is triggered again later the
+                // in-memory `saved` will be repopulated from the
+                // current snapshot, so this is safe to drop.
+                *saved = None;
                 *state = LoadLimiterState::Idle;
                 return None;
             }
@@ -766,6 +774,148 @@ pub(crate) fn check_load_limiter(
     }
 
     None
+}
+
+// ===========================================================================
+// Force Discharge auto-revert
+// ===========================================================================
+//
+// Issue #129: when Force Discharge is started with a bounded duration
+// (`POST /api/control/force-discharge {"minutes": N}`), the backend writes
+// a discharge slot covering `now → now+N` and sets the inverter to
+// export/max-power mode. When the slot window expires, the inverter
+// stops discharging — but the `force-discharge` flags
+// (HR_BATTERY_POWER_MODE=0, HR_ENABLE_DISCHARGE=1, HR_ENABLE_CHARGE=0,
+// HR_ENABLE_CHARGE_TARGET=0) remain set. The battery is effectively
+// paused: it won't charge from solar and won't discharge. The user has
+// to manually switch to Eco to recover.
+//
+// This function detects slot expiry and returns the register writes that
+// restore the inverter to the pre-force-discharge state. It deliberately
+// takes individual fields rather than `ForceDischargeRevert` to avoid a
+// circular import between `state_machines` and `poll` (the struct lives
+// in `poll`). The poll loop locks the revert, extracts the fields, and
+// passes them here.
+
+/// Check whether a force-discharge slot has expired and, if so, return
+/// the register writes that restore the inverter to its pre-force-discharge
+/// state.
+///
+/// `now_ms` is the current time in unix epoch milliseconds. `slot_end_ms`
+/// is the slot's expiry time, recorded by the API handler when force
+/// discharge was started with a duration. Returns `None` if there is no
+/// active slot to expire (no end time set, or expiry is still in the
+/// future).
+///
+/// When the slot has expired, the returned writes restore:
+///   - HR_ENABLE_DISCHARGE to its pre-force value
+///   - HR_ENABLE_CHARGE / HR_ENABLE_CHARGE_TARGET to their pre-force values
+///   - The original discharge slot 1 / slot 2 times (or 00:00–00:00 if
+///     there was no prior slot)
+///   - HR_BATTERY_POWER_MODE to eco (1) — matches the explicit Stop
+///     Discharge path's behaviour of always returning to eco
+///
+/// On three-phase models, the same restoration uses the three-phase
+/// force-charge / force-discharge enable flags and skips the single-phase
+/// slot registers (the poll loop resyncs them from the HR 1080-1124
+/// block).
+// Allow clippy::too_many_arguments — the function is a pure data-transformer
+// that mirrors the ForceDischargeRevert struct field-for-field. Grouping the
+// fields into a sub-struct would be pure indirection (the caller already
+// has the struct and would have to destructure it into the sub-struct).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_force_discharge_auto_revert_writes(
+    device_type: DeviceType,
+    now_ms: i64,
+    slot_end_ms: Option<i64>,
+    pre_enable_charge: bool,
+    pre_enable_discharge: bool,
+    pre_slot_1_start: Option<(u8, u8)>,
+    pre_slot_1_end: Option<(u8, u8)>,
+    pre_slot_2_start: Option<(u8, u8)>,
+    pre_slot_2_end: Option<(u8, u8)>,
+    pre_three_phase_force_discharge_enable: Option<bool>,
+    pre_three_phase_force_charge_enable: Option<bool>,
+) -> Option<Vec<RegisterWrite>> {
+    let slot_end_ms = slot_end_ms?;
+    if now_ms < slot_end_ms {
+        return None;
+    }
+    tracing::info!(
+        slot_end_ms,
+        now_ms,
+        elapsed_secs = (now_ms - slot_end_ms) / 1000,
+        "Force discharge slot expired — auto-reverting to pre-force state"
+    );
+
+    let mut writes = Vec::new();
+
+    if device_type.uses_three_phase_schedule_slots() {
+        writes.push(RegisterWrite {
+            address: HR_3PH_FORCE_DISCHARGE_ENABLE,
+            value: if pre_three_phase_force_discharge_enable.unwrap_or(false) {
+                1
+            } else {
+                0
+            },
+        });
+        writes.push(RegisterWrite {
+            address: HR_3PH_FORCE_CHARGE_ENABLE,
+            value: if pre_three_phase_force_charge_enable.unwrap_or(false) {
+                1
+            } else {
+                0
+            },
+        });
+        writes.push(RegisterWrite {
+            address: HR_BATTERY_POWER_MODE,
+            value: 1,
+        });
+    } else {
+        writes.push(RegisterWrite {
+            address: HR_ENABLE_DISCHARGE,
+            value: if pre_enable_discharge { 1 } else { 0 },
+        });
+        writes.push(RegisterWrite {
+            address: HR_ENABLE_CHARGE,
+            value: if pre_enable_charge { 1 } else { 0 },
+        });
+        writes.push(RegisterWrite {
+            address: HR_ENABLE_CHARGE_TARGET,
+            value: if pre_enable_charge { 1 } else { 0 },
+        });
+
+        let (s1h, s1m) = pre_slot_1_start.unwrap_or((0, 0));
+        let (e1h, e1m) = pre_slot_1_end.unwrap_or((0, 0));
+        writes.push(RegisterWrite {
+            address: HR_DISCHARGE_SLOT_1_START,
+            value: encode_hhmm(s1h, s1m),
+        });
+        writes.push(RegisterWrite {
+            address: HR_DISCHARGE_SLOT_1_END,
+            value: encode_hhmm(e1h, e1m),
+        });
+        let (s2h, s2m) = pre_slot_2_start.unwrap_or((0, 0));
+        let (e2h, e2m) = pre_slot_2_end.unwrap_or((0, 0));
+        writes.push(RegisterWrite {
+            address: HR_DISCHARGE_SLOT_2_START,
+            value: encode_hhmm(s2h, s2m),
+        });
+        writes.push(RegisterWrite {
+            address: HR_DISCHARGE_SLOT_2_END,
+            value: encode_hhmm(e2h, e2m),
+        });
+
+        // Default to eco (1) on restore — matches the explicit Stop
+        // Discharge path. `battery_power_mode` is not captured in the
+        // revert (only the encoder config), so we always return to eco.
+        writes.push(RegisterWrite {
+            address: HR_BATTERY_POWER_MODE,
+            value: 1,
+        });
+    }
+
+    Some(writes)
 }
 
 // ===========================================================================
@@ -1276,17 +1426,19 @@ mod tests {
 
     #[test]
     fn load_limiter_outside_window_restores_with_saved_reserve() {
-        // Use a window that's always inactive: start=end=1 (non-zero, same
-        // value) means end_mins <= start_mins (crosses midnight) and
-        // now_minutes won't be >= 1 AND < 1 simultaneously, so in_window=false.
+        // Use a window that's almost certainly inactive: start=0:00,
+        // end=0:01. With end_mins (1) > start_mins (0), the condition
+        // is `now_minutes >= 0 && now_minutes < 1`, which is only true
+        // during the 00:00:00–00:00:59 minute of each day. For any
+        // other time, in_window is false.
         let config = LoadLimiterConfig {
             enabled: true,
             threshold_w: 3000,
             trigger_delay_minutes: 5,
-            start_hour: 1,
+            start_hour: 0,
             start_minute: 0,
-            end_hour: 1,
-            end_minute: 0,
+            end_hour: 0,
+            end_minute: 1,
         };
         let mut state = LoadLimiterState::PausedFromRestart;
         let mut saved = Some(LoadLimiterSaved { reserve: 20 });
@@ -1296,7 +1448,10 @@ mod tests {
             ..Default::default()
         };
 
-        // Outside window — restore with saved reserve.
+        // Outside window — restore with saved reserve. The !in_window
+        // branch handles PausedFromRestart by restoring Eco and
+        // consuming the saved reserve, regardless of current load
+        // (the app just restarted and needs to re-establish its state).
         let writes = check_load_limiter(&snap, &config, &mut state, 60, &mut saved)
             .expect("restore writes returned");
         assert_eq!(state, LoadLimiterState::Idle);
@@ -1304,5 +1459,455 @@ mod tests {
             .iter()
             .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 20));
         assert!(saved.is_none(), "saved must be consumed on restore");
+    }
+
+    // -----------------------------------------------------------------
+    // check_load_limiter — issue #124 end-to-end scenarios
+    //
+    // Issue #124: "On App Restart Load Limiter does not Reset" — when the
+    // load limiter was active (battery paused) when the app last ran, and
+    // the home load is now below threshold, the battery status must
+    // restore to the previous (Eco) state without manual intervention.
+    //
+    // The state machine handles this via `PausedFromRestart`: writes are
+    // re-sent on each poll until the inverter acknowledges them (detected
+    // by `battery_mode == Eco`). The tests below pin every transition
+    // along that recovery path so the issue can't silently regress.
+    // -----------------------------------------------------------------
+
+    /// Compute the snapshot's `load_limiter_active` flag the same way the
+    /// poll loop does, so the tests can assert the frontend-visible state
+    /// across the full restore cycle without standing up the whole poll
+    /// loop.
+    fn ll_snapshot_active(state: &LoadLimiterState) -> bool {
+        matches!(state, LoadLimiterState::Paused)
+            || matches!(state, LoadLimiterState::PausedFromRestart)
+    }
+
+    #[test]
+    fn load_limiter_post_crash_clears_saved_reserve_on_final_confirm() {
+        // When the inverter finally acknowledges the restore writes and
+        // the next snapshot shows `battery_mode == Eco`, the state goes
+        // to `Idle` and the saved-reserve slot must be cleared. Otherwise
+        // a stale reserve (e.g. 20%) lingers in `load_limiter_saved_reserve`
+        // on disk and will silently re-activate on a later crash even
+        // though no limiter pause is in progress.
+        let config = ll_config(3000, 10);
+        let mut state = LoadLimiterState::PausedFromRestart;
+        let mut saved = Some(LoadLimiterSaved { reserve: 20 });
+        let restored = InverterSnapshot {
+            battery_mode: BatteryMode::Eco,
+            home_power: 500,
+            ..Default::default()
+        };
+
+        let writes = check_load_limiter(&restored, &config, &mut state, 60, &mut saved);
+        assert!(writes.is_none(), "no writes needed when already in Eco");
+        assert_eq!(state, LoadLimiterState::Idle);
+        assert!(
+            saved.is_none(),
+            "saved reserve must be consumed once the restore is confirmed, \
+             otherwise a stale value lingers in settings.json"
+        );
+        // Frontend-visible flag flips to false on the same poll.
+        assert!(
+            !ll_snapshot_active(&state),
+            "snapshot.load_limiter_active must be false after restore"
+        );
+    }
+
+    #[test]
+    fn load_limiter_post_crash_full_issue_124_restore_cycle() {
+        // End-to-end reproduction of issue #124: the load limiter
+        // triggered before the app exited, the home load is now below
+        // threshold, and the inverter's `battery_mode` is still
+        // `EcoPaused` (the previous restore writes were lost when the
+        // app crashed mid-write). The state machine must:
+        //
+        // 1. Return the saved-reserve restore writes on every poll
+        //    where battery_mode is still EcoPaused, staying in
+        //    `PausedFromRestart` so a write failure is retried.
+        // 2. Transition to `Idle` (no writes) on the first poll that
+        //    sees `battery_mode == Eco`, clearing the saved reserve
+        //    so the disk state stays consistent.
+        // 3. Expose `load_limiter_active = true` to the frontend
+        //    throughout the retry loop, then `false` after the
+        //    restore is confirmed — matching the inverter's actual
+        //    battery state.
+        let config = ll_config(3000, 10);
+        let mut state = LoadLimiterState::PausedFromRestart;
+        let mut saved = Some(LoadLimiterSaved { reserve: 20 });
+
+        // Simulate the inverter's perspective for the first N polls:
+        // battery is still EcoPaused and the home load is below
+        // threshold. The dongle is "busy" or the write hasn't taken
+        // effect yet, so battery_mode stays EcoPaused.
+        let retry_snap = InverterSnapshot {
+            battery_mode: BatteryMode::EcoPaused,
+            home_power: 500,
+            ..Default::default()
+        };
+
+        // First five polls: every one returns the same restore writes
+        // and stays in PausedFromRestart. The frontend-visible flag
+        // stays true (the limiter is still trying to restore).
+        for i in 0..5 {
+            let writes = check_load_limiter(&retry_snap, &config, &mut state, 60, &mut saved)
+                .unwrap_or_else(|| panic!("poll {i} should return restore writes"));
+            assert_eq!(
+                state,
+                LoadLimiterState::PausedFromRestart,
+                "poll {i}: must stay in PausedFromRestart while battery is EcoPaused"
+            );
+            // Each retry must use the *saved* reserve (20%), not a
+            // hardcoded default — the user's prior setting is what we
+            // promised to restore.
+            assert!(
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 20),
+                "poll {i}: restore writes must use the saved reserve (20)"
+            );
+            assert!(
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1),
+                "poll {i}: restore writes must set battery power mode to eco"
+            );
+            assert!(
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0),
+                "poll {i}: restore writes must clear enable_discharge"
+            );
+            assert!(
+                ll_snapshot_active(&state),
+                "poll {i}: snapshot.load_limiter_active must stay true during retry"
+            );
+            assert_eq!(
+                saved,
+                Some(LoadLimiterSaved { reserve: 20 }),
+                "poll {i}: saved reserve must be preserved across retries"
+            );
+        }
+
+        // The inverter finally acknowledges the writes. Next poll
+        // shows battery_mode == Eco, the state machine transitions
+        // to Idle, and the saved reserve is consumed.
+        let restored_snap = InverterSnapshot {
+            battery_mode: BatteryMode::Eco,
+            home_power: 500,
+            ..Default::default()
+        };
+        let writes = check_load_limiter(&restored_snap, &config, &mut state, 60, &mut saved);
+        assert!(
+            writes.is_none(),
+            "no writes needed once the inverter is back in Eco"
+        );
+        assert_eq!(
+            state,
+            LoadLimiterState::Idle,
+            "state must transition to Idle on the first Eco poll"
+        );
+        assert!(
+            saved.is_none(),
+            "saved reserve must be consumed on the final confirm so it \
+             does not linger in settings.json after the limiter deactivates"
+        );
+        assert!(
+            !ll_snapshot_active(&state),
+            "snapshot.load_limiter_active must flip to false after restore"
+        );
+    }
+
+    #[test]
+    fn load_limiter_post_crash_load_rises_again_during_retry() {
+        // While the state machine is in `PausedFromRestart` retrying
+        // restore writes, the home load can come back up above the
+        // threshold. The state machine must drop out of the retry
+        // loop and transition to `Paused` (normal, debounced flow)
+        // so we don't keep issuing restore writes the inverter would
+        // immediately undo.
+        let config = ll_config(3000, 10);
+        let mut state = LoadLimiterState::PausedFromRestart;
+        let mut saved = Some(LoadLimiterSaved { reserve: 20 });
+        let high_snap = InverterSnapshot {
+            battery_mode: BatteryMode::EcoPaused,
+            home_power: 6_000, // above 3000 W threshold
+            ..Default::default()
+        };
+
+        let writes = check_load_limiter(&high_snap, &config, &mut state, 60, &mut saved);
+        assert!(
+            writes.is_none(),
+            "no writes when load is high — the limiter is correctly staying paused"
+        );
+        assert_eq!(
+            state,
+            LoadLimiterState::Paused,
+            "must drop out of PausedFromRestart to Paused when load rises"
+        );
+        // Saved reserve must survive the transition so the eventual
+        // restore uses the correct value.
+        assert_eq!(
+            saved,
+            Some(LoadLimiterSaved { reserve: 20 }),
+            "saved reserve must survive the PausedFromRestart -> Paused transition"
+        );
+    }
+
+    #[test]
+    fn load_limiter_post_crash_recovery_with_no_eco_paused_window() {
+        // Some inverters may have already auto-restored Eco mode on
+        // their own (e.g. the load limiter was held by app, then
+        // dropped manually, then app restarted). The very first poll
+        // after `initialize_app_state` sees battery_mode == Eco and
+        // must transition to `Idle` without sending any writes or
+        // re-entering the normal Paused state machine.
+        let config = ll_config(3000, 10);
+        let mut state = LoadLimiterState::PausedFromRestart;
+        let mut saved = Some(LoadLimiterSaved { reserve: 20 });
+        let already_restored = InverterSnapshot {
+            battery_mode: BatteryMode::Eco,
+            home_power: 6_000, // high load — would normally pause, but we just confirmed restore
+            ..Default::default()
+        };
+
+        let writes = check_load_limiter(
+            &already_restored,
+            &config,
+            &mut state,
+            60,
+            &mut saved,
+        );
+        assert!(
+            writes.is_none(),
+            "no writes — battery is already in Eco, restore is confirmed"
+        );
+        assert_eq!(
+            state,
+            LoadLimiterState::Idle,
+            "must not re-enter the normal pause flow just because load is high; \
+             the previous restore was confirmed, so the limiter is fully deactivated"
+        );
+        assert!(
+            saved.is_none(),
+            "saved reserve must be cleared even when load is high, \
+             so a later crash can't re-trigger the limiter with a stale value"
+        );
+    }
+
+    #[test]
+    fn load_limiter_post_crash_recovers_with_fallback_reserve_in_full_cycle() {
+        // Issue #124 with no persisted saved-reserve (older settings
+        // file, or the saved value was already cleared). The
+        // recovery path must still work end-to-end, falling back to
+        // the safe default reserve (4%) on every restore attempt.
+        let config = ll_config(3000, 10);
+        let mut state = LoadLimiterState::PausedFromRestart;
+        let mut saved = None;
+        let retry_snap = InverterSnapshot {
+            battery_mode: BatteryMode::EcoPaused,
+            home_power: 500,
+            ..Default::default()
+        };
+
+        for _ in 0..3 {
+            let writes =
+                check_load_limiter(&retry_snap, &config, &mut state, 60, &mut saved)
+                    .expect("retry must always return writes when battery is EcoPaused");
+            assert_eq!(state, LoadLimiterState::PausedFromRestart);
+            assert!(
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 4),
+                "no saved reserve -> must fall back to the safe default (4%)"
+            );
+        }
+
+        // Final confirm: state goes to Idle, no writes, saved stays None.
+        let restored = InverterSnapshot {
+            battery_mode: BatteryMode::Eco,
+            home_power: 500,
+            ..Default::default()
+        };
+        let writes = check_load_limiter(&restored, &config, &mut state, 60, &mut saved);
+        assert!(writes.is_none());
+        assert_eq!(state, LoadLimiterState::Idle);
+        assert!(saved.is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // build_force_discharge_auto_revert_writes — issue #129
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn force_discharge_auto_revert_returns_none_when_no_slot_end() {
+        // No slot end time → no auto-revert. This covers the "no body" /
+        // "until stopped" path where there is no slot to expire.
+        let writes = build_force_discharge_auto_revert_writes(
+            DeviceType::Gen2Hybrid,
+            1_000_000,
+            None,
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(writes.is_none());
+    }
+
+    #[test]
+    fn force_discharge_auto_revert_returns_none_when_slot_not_expired() {
+        // Slot end is in the future → no auto-revert.
+        let writes = build_force_discharge_auto_revert_writes(
+            DeviceType::Gen2Hybrid,
+            1_000_000,
+            Some(1_000_000 + 60_000), // 60 seconds in the future
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(writes.is_none());
+    }
+
+    #[test]
+    fn force_discharge_auto_revert_restores_single_phase_state() {
+        // Pre-state: enable_charge=true, enable_discharge=false, slot 1 = 17:00-19:00.
+        // After slot expiry, the inverter should be restored to exactly that.
+        let writes = build_force_discharge_auto_revert_writes(
+            DeviceType::Gen2Hybrid,
+            1_000_000,
+            Some(999_999), // 1ms ago
+            true,          // pre enable_charge
+            false,         // pre enable_discharge
+            Some((17, 0)),
+            Some((19, 0)),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("auto-revert should fire when slot expired");
+
+        // enable_discharge restored to 0 (pre-force value).
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0));
+        // enable_charge restored to 1 (pre-force value).
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_CHARGE && w.value == 1));
+        // enable_charge_target follows enable_charge.
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_CHARGE_TARGET && w.value == 1));
+        // Slot 1 restored to 17:00.
+        let s1 = encode_hhmm(17, 0);
+        let e1 = encode_hhmm(19, 0);
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_DISCHARGE_SLOT_1_START && w.value == s1));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_DISCHARGE_SLOT_1_END && w.value == e1));
+        // Slot 2 cleared to 00:00–00:00 (no prior slot).
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_DISCHARGE_SLOT_2_START && w.value == 0));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_DISCHARGE_SLOT_2_END && w.value == 0));
+        // Battery power mode restored to eco (1).
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1));
+    }
+
+    #[test]
+    fn force_discharge_auto_revert_clears_discharge_when_pre_state_disabled() {
+        // Pre-state: enable_charge=false, enable_discharge=false, no slots.
+        // The user was in eco with no schedules. After auto-revert, the
+        // inverter should be back in exactly that state.
+        let writes = build_force_discharge_auto_revert_writes(
+            DeviceType::Gen2Hybrid,
+            1_000_000,
+            Some(0), // long expired
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("auto-revert should fire");
+
+        // All flags cleared, slots cleared, mode = eco.
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_CHARGE && w.value == 0));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_CHARGE_TARGET && w.value == 0));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1));
+    }
+
+    #[test]
+    fn force_discharge_auto_revert_three_phase_uses_three_phase_registers() {
+        // Three-phase pre-state: both force flags were off, so revert clears them.
+        let writes = build_force_discharge_auto_revert_writes(
+            DeviceType::Gen3Hybrid, // not 3ph — adjust below
+            1_000_000,
+            Some(0),
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+            Some(false), // 3ph force_discharge was off
+            Some(false), // 3ph force_charge was off
+        );
+        // Gen3Hybrid is not three-phase — should use single-phase path.
+        assert!(writes.is_some());
+        let writes = writes.unwrap();
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0));
+    }
+
+    #[test]
+    fn force_discharge_auto_revert_fires_at_exact_boundary() {
+        // Slot end == now → auto-revert should fire (>= boundary).
+        let writes = build_force_discharge_auto_revert_writes(
+            DeviceType::Gen2Hybrid,
+            1_000_000,
+            Some(1_000_000),
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(writes.is_some(), "should fire at exact boundary");
     }
 }

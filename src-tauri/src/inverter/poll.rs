@@ -68,8 +68,9 @@ use crate::inverter::sanitizer::{
     ConsecutiveSuspectCounts, DeltaCorrectionCounts, GraceCumulativeSamples, RateReleaseCounts,
 };
 use crate::inverter::state_machines::{
-    check_auto_winter, check_load_limiter, clear_cosy_slot_registers, cosy_slot_register_writes,
-    persist_agile_state, persist_cosy_active, write_registers_to_inverter,
+    build_force_discharge_auto_revert_writes, check_auto_winter, check_load_limiter,
+    clear_cosy_slot_registers, cosy_slot_register_writes, persist_agile_state,
+    persist_cosy_active, write_registers_to_inverter,
 };
 pub use crate::inverter::state_machines::{
     AgileState, AutoWinterConfig, AutoWinterSaved, AutoWinterState, LoadLimiterConfig,
@@ -254,6 +255,14 @@ pub struct ForceDischargeRevert {
     /// three-phase models. The force-discharge encoder writes 0 to this
     /// register, so we need to restore its prior value.
     pub three_phase_force_charge_enable: Option<bool>,
+    /// Unix epoch millis at which the discharge slot window ends. Set only
+    /// on the timed (minutes-bounded) path so the poll loop can auto-revert
+    /// when the slot expires — preventing the inverter from being left in
+    /// export mode with enable_discharge=1 but no active slot, which
+    /// effectively pauses the battery (no charge, no discharge). None on
+    /// the "no body" / "until stopped" path, where there is no slot to
+    /// expire. See issue #129.
+    pub force_discharge_slot_end_ms: Option<i64>,
 }
 
 /// Shared state accessible from HTTP handlers, the WebSocket endpoint, etc.
@@ -1855,6 +1864,69 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                 ),
                                             }
                                             tokio::time::sleep(Duration::from_millis(1500)).await;
+                                        }
+                                    }
+                                }
+
+                                // ---- Force Discharge auto-revert (issue #129) ----
+                                //
+                                // When Force Discharge is started with a bounded duration
+                                // (`POST /api/control/force-discharge {"minutes": N}`), the API
+                                // handler records the slot's end time in
+                                // `force_discharge_revert.force_discharge_slot_end_ms`. When
+                                // that time passes, the inverter stops discharging (the slot
+                                // window has closed) but the force-discharge flags remain
+                                // set: HR 27 = 0 (export), HR 59 = 1 (enable_discharge),
+                                // HR 96 = 0 (charge off), HR 20 = 0 (charge target off).
+                                // The battery is effectively paused — it won't charge from
+                                // solar and won't discharge. Without this auto-revert, the
+                                // user must manually click Eco to recover.
+                                //
+                                // Each poll cycle checks if the slot has expired. If so, we
+                                // take the revert (consuming it so a subsequent explicit Stop
+                                // returns the "no force discharge in progress" 400) and queue
+                                // the restoration writes via the live Modbus client (same
+                                // path as the explicit Stop button).
+                                {
+                                    let now_ms = chrono::Local::now().timestamp_millis();
+                                    let mut revert_guard = state.force_discharge_revert.lock().await;
+                                    let expired = revert_guard
+                                        .as_ref()
+                                        .and_then(|r| r.force_discharge_slot_end_ms)
+                                        .is_some_and(|end| now_ms >= end);
+
+                                    if expired {
+                                        let revert = revert_guard.take();
+                                        drop(revert_guard);
+                                        if let Some(r) = revert {
+                                            let writes = build_force_discharge_auto_revert_writes(
+                                                snapshot.device_type,
+                                                now_ms,
+                                                r.force_discharge_slot_end_ms,
+                                                r.enable_charge,
+                                                r.enable_discharge,
+                                                r.discharge_slot_1_start,
+                                                r.discharge_slot_1_end,
+                                                r.discharge_slot_2_start,
+                                                r.discharge_slot_2_end,
+                                                r.three_phase_force_discharge_enable,
+                                                r.three_phase_force_charge_enable,
+                                            );
+                                            if let Some(writes) = writes {
+                                                for w in &writes {
+                                                    match client.write_register(w.address, w.value).await {
+                                                        Ok(()) => tracing::info!(
+                                                            "Force discharge auto-revert: wrote reg {} = {}",
+                                                            w.address, w.value
+                                                        ),
+                                                        Err(e) => tracing::error!(
+                                                            "Force discharge auto-revert: write reg {} failed: {e}",
+                                                            w.address
+                                                        ),
+                                                    }
+                                                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                                                }
+                                            }
                                         }
                                     }
                                 }

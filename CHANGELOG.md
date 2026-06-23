@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.38.2] - 2026-06-23
+
+### Fixed
+
+- **Force Discharge with a duration now returns to Eco when the slot ends.** Previously, hitting Force Discharge with a 20-minute Quick Action Duration would leave the inverter in a "paused" state (export mode, discharge enabled, but no active slot — no charge from solar, no discharge) after the slot expired, requiring a manual switch back to Eco. The app now records the slot's end time and the poll loop auto-reverts to the pre-force state once the window closes. Closes [#129](https://github.com/psylsph/home-energy-manager/issues/129).
+
 ## [0.38.1] - 2026-06-23
 
 ### Added

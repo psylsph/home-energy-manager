@@ -254,3 +254,142 @@ test.describe('Force Discharge → Stop (mock Modbus)', () => {
     expect(data.ok).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Force Discharge auto-revert on slot expiry (issue #129)
+//
+// When Force Discharge is started with a bounded duration, the backend
+// records the slot's end time. When that time passes, the poll loop
+// auto-reverts the inverter to its pre-force-discharge state — preventing
+// the battery from being left "paused" (export mode, discharge enabled,
+// but no active slot; no charge from solar, no discharge).
+//
+// These tests use `minutes: 1` and wait for the slot to expire. The poll
+// loop interval is 5s in the test setup, so the auto-revert fires within
+// ~5–10s of the slot expiry (the next poll cycle after the slot ends).
+// ---------------------------------------------------------------------------
+
+test.describe('Force Discharge auto-revert (issue #129)', () => {
+
+  test('Start with minutes=1: poll loop auto-reverts after slot expires', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    // Generous timeout: this test waits for a 1-minute slot to expire
+    // plus the poll loop to detect and write the auto-revert. When run
+    // after other tests, the poll loop may be processing leftover
+    // writes, so we allow extra headroom.
+    test.setTimeout(300_000);
+    await clearWrites(drainModbusWrites);
+
+    // Give the poll loop time to finish any in-flight writes from
+    // previous tests. The poll loop processes writes at 1.5s each,
+    // and previous tests may have left several writes in the queue.
+    // A 15s wait ensures the poll loop is idle before we start.
+    await new Promise((r) => setTimeout(r, 15_000));
+
+    // Start force discharge with a 1-minute window.
+    const fdResp = await fetch(`${baseUrl}/api/control/force-discharge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ minutes: 1 }),
+    });
+    expect((await fdResp.json()).ok).toBe(true);
+
+    // Wait for the initial force-discharge writes to be processed by
+    // the poll loop (8 writes × 1.5s ≈ 12s). Drain them so the
+    // auto-revert writes can be inspected in isolation.
+    await new Promise((r) => setTimeout(r, 20_000));
+    await drainModbusWrites();
+
+    // Wait for the slot to expire. The slot is now → now+60s. The poll
+    // loop runs every 5s, so the auto-revert should fire within ~70s
+    // of the force_discharge call. We poll the mock for up to 120s.
+    //
+    // We check for HR_BATTERY_POWER_MODE=1 (eco mode) as the
+    // definitive auto-revert signal — it's always written regardless
+    // of the pre-state. Checking HR_ENABLE_DISCHARGE=0 is not reliable
+    // because the pre-state might have had it set to 1 (from a previous
+    // test), and the auto-revert restores the pre-state.
+    const startWait = Date.now();
+    let autoRevertObserved = false;
+    while (Date.now() - startWait < 120_000) {
+      const writes = await peekModbusWrites();
+      // Look for the auto-revert's HR 27=1 write. The initial force
+      // discharge writes HR 27=0, and the auto-revert writes HR 27=1.
+      // We check for the LAST write to HR 27 being 1.
+      const hr27Writes = writes.filter((w) => w.address === 27);
+      const lastHr27 = hr27Writes[hr27Writes.length - 1];
+      if (lastHr27 && lastHr27.value === 1) {
+        autoRevertObserved = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+
+    expect(
+      autoRevertObserved,
+      'auto-revert should have written HR_BATTERY_POWER_MODE=1 (eco mode)',
+    ).toBe(true);
+
+    // Drain the auto-revert writes and verify the key signal. The
+    // auto-revert always writes HR 27=1 (eco mode). Other writes
+    // restore the pre-force state, which varies depending on what
+    // previous tests left configured — we don't assert specific values
+    // for those registers here.
+    const writes = await drainModbusWrites();
+    const lastWriteAt = (addr: number) => {
+      const matches = writes.filter((w) => w.address === addr);
+      return matches[matches.length - 1];
+    };
+    // HR 27 must end as eco (1) — the auto-revert always restores
+    // this regardless of pre-state.
+    expect(lastWriteAt(27)!.value).toBe(1);
+
+    // Stop should now return 400 (revert was consumed by auto-revert).
+    const stop = await fetch(`${baseUrl}/api/control/force-discharge/stop`, { method: 'POST' });
+    const data = await stop.json();
+    expect(data.ok).toBe(false);
+    expect(data.error).toMatch(/no force discharge/i);
+  });
+
+  test('Start without minutes: no auto-revert (slot runs until stopped)', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    test.setTimeout(60_000);
+    await clearWrites(drainModbusWrites);
+
+    // No body = until stopped. The revert's slot_end is None, so the
+    // poll loop must never auto-revert.
+    const fdResp = await fetch(`${baseUrl}/api/control/force-discharge`, {
+      method: 'POST',
+    });
+    expect((await fdResp.json()).ok).toBe(true);
+
+    // Wait for the initial writes to be processed, then drain.
+    await new Promise((r) => setTimeout(r, 15_000));
+    await drainModbusWrites();
+
+    // Wait 20s — well beyond a typical poll cycle — and verify no
+    // auto-revert writes appear.
+    await new Promise((r) => setTimeout(r, 20_000));
+    const writes = await peekModbusWrites();
+    const hasEnableDischargeZero = writes.some(
+      (w) => w.address === 59 && w.value === 0,
+    );
+    const hasModeEco = writes.some(
+      (w) => w.address === 27 && w.value === 1,
+    );
+    expect(
+      hasEnableDischargeZero && hasModeEco,
+      'no-body force discharge should not auto-revert',
+    ).toBe(false);
+
+    // Clean up: explicit stop should still work.
+    const stop = await fetch(`${baseUrl}/api/control/force-discharge/stop`, { method: 'POST' });
+    expect((await stop.json()).ok).toBe(true);
+  });
+});

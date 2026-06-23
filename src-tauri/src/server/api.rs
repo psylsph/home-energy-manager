@@ -452,6 +452,10 @@ async fn capture_force_discharge_revert(
         discharge_slot_2_end: d2_end,
         three_phase_force_discharge_enable,
         three_phase_force_charge_enable,
+        // Set by the API handler when the timed (minutes-bounded) path
+        // is used, after the capture is taken. The poll loop reads this
+        // field to auto-revert when the slot window expires (issue #129).
+        force_discharge_slot_end_ms: None,
     })
 }
 
@@ -1645,8 +1649,7 @@ pub async fn force_discharge(
     let is_three_phase = device_type.uses_three_phase_schedule_slots();
 
     // Capture the pre-force-discharge state BEFORE queuing writes.
-    let revert = capture_force_discharge_revert(&state, device_type).await;
-    *state.force_discharge_revert.lock().await = revert;
+    let mut revert = capture_force_discharge_revert(&state, device_type).await;
 
     // If minutes provided, write the duration slot first (slot 1 =
     // now → now+minutes, slot 2 = cleared). The poll loop processes
@@ -1658,11 +1661,26 @@ pub async fn force_discharge(
         .and_then(|j| j.0.get("minutes").and_then(|v| v.as_u64()));
     let mut writes = Vec::new();
     if let Some(minutes) = minutes {
+        // Record the slot's end time so the poll loop can auto-revert
+        // when the window expires (issue #129). Without this, the
+        // inverter is left in export mode (HR 27=0) with enable_discharge=1
+        // and enable_charge=0 once the slot window closes — effectively
+        // pausing the battery (no charge from solar, no discharge).
+        // Compute expiry from the same `start + minutes` that the slot
+        // helper uses, so the auto-revert fires when the inverter does.
+        let clamped_minutes = minutes.clamp(1, 1439) as i64;
+        let expiry = Local::now() + ChronoDuration::minutes(clamped_minutes);
+        if let Some(r) = revert.as_mut() {
+            r.force_discharge_slot_end_ms =
+                Some(expiry.timestamp_millis());
+        }
         match force_discharge_slot_writes(device_type, minutes) {
             Ok(mut slot_writes) => writes.append(&mut slot_writes),
             Err(e) => return error_response(&format!("Failed to encode discharge slot: {}", e)),
         }
     }
+
+    *state.force_discharge_revert.lock().await = revert;
 
     // Then the force-discharge flags (mode, enable_charge=0,
     // enable_charge_target=0, enable_discharge=1, and — on the no-body
@@ -4897,6 +4915,70 @@ mod tests {
                     .iter()
                     .any(|w| w.address == HR_DISCHARGE_SLOT_1_END && w.value == 2359),
                 "no-body force discharge must keep slot 1 end = 23:59"
+            );
+        })
+        .await;
+    }
+
+    /// Issue #129: when the `minutes` path is used, the handler must
+    /// record the slot's end time in the revert so the poll loop can
+    /// auto-revert when the window expires. Without this, the inverter
+    /// is left in export mode (HR 27=0) with enable_discharge=1 but no
+    /// active slot, which effectively pauses the battery.
+    #[tokio::test]
+    async fn force_discharge_with_minutes_records_slot_end_for_auto_revert() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let before = chrono::Local::now().timestamp_millis();
+
+            let _ = force_discharge(
+                State(state.clone()),
+                Some(Json(json!({ "minutes": 30 }))),
+            )
+            .await;
+            let _ = drain_pending_writes(&state).await;
+
+            let revert = state
+                .force_discharge_revert
+                .lock()
+                .await
+                .clone()
+                .expect("revert should be set");
+            let slot_end = revert
+                .force_discharge_slot_end_ms
+                .expect("slot end must be recorded on the minutes path");
+
+            // Slot end must be in the future (30 min from "before").
+            let expected_min = before + 30 * 60 * 1000;
+            let expected_max = before + 30 * 60 * 1000 + 5_000; // 5s slack
+            assert!(
+                slot_end >= expected_min && slot_end <= expected_max,
+                "slot end should be ~30 min from now: before={before}, slot_end={slot_end}, \
+                 expected=[{expected_min}, {expected_max}]"
+            );
+        })
+        .await;
+    }
+
+    /// The no-body path must leave `force_discharge_slot_end_ms` as None
+    /// so the poll loop doesn't auto-revert — the user explicitly chose
+    /// "until stopped" and must hit Stop to end it.
+    #[tokio::test]
+    async fn force_discharge_without_minutes_leaves_slot_end_unset() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let _ = force_discharge(State(state.clone()), None).await;
+            let _ = drain_pending_writes(&state).await;
+
+            let revert = state
+                .force_discharge_revert
+                .lock()
+                .await
+                .clone()
+                .expect("revert should be set");
+            assert!(
+                revert.force_discharge_slot_end_ms.is_none(),
+                "no-body path must not set slot end (no auto-revert)"
             );
         })
         .await;
