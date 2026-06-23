@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.37.3] - 2026-06-23
+
+### Fixed
+
+- **Sanitizer false-positive spam on common transitions.** Five
+  patterns the corruption-defence layer was wrongly flagging: a
+  poisoned grace-period baseline making daily counters log
+  "jumped too fast" for ~30 s after every reconnect; battery waking
+  up from idle (0 W → 3 kW) tripping the rate-check fraction gate
+  against a zero base; single-phase consumption wobble (5 ticks of
+  derived-counter drift) flagged as corruption; the 99 → 100 SOC
+  rounding tick while charging being rejected; and the rate check
+  re-spamming every 3 s while the inverter consistently reported a
+  new steady state. A consecutive-correction release now settles
+  sustained transitions after three cycles, and the SOC and daily-
+  counter carries-forward are gated on `prev` being meaningfully away
+  from the boundary so legitimate rounding ticks are accepted.
+
+### Changed
+
+- **Downgraded a handful of `WARN` logs to `INFO`** for sanitizer
+  cases that turn out to be false positives in practice (rate-check
+  jumps, daily/lifetime energy decreased/jumped-too-fast, and the
+  soft-over-limit "out of range"). Genuine corruption signals —
+  int16 saturation, absolute-range violations, slot-time corruption,
+  and the hard limits on grid voltage / battery temperature —
+  stay at `WARN`.
+
 ## [0.37.2] - 2026-06-22
 
 ### Added

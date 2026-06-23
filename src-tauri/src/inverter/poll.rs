@@ -65,7 +65,7 @@ use crate::inverter::model::{BatteryMode, DeviceType, InverterSnapshot};
 use crate::inverter::sanitizer::{
     carry_forward_battery_modules_with, carry_forward_optional_block_values,
     derive_battery_fields_from_bms, is_block_suspicious, sanitize_snapshot, validate_battery_bms,
-    ConsecutiveSuspectCounts, DeltaCorrectionCounts, GraceCumulativeSamples,
+    ConsecutiveSuspectCounts, DeltaCorrectionCounts, GraceCumulativeSamples, RateReleaseCounts,
 };
 use crate::inverter::state_machines::{
     check_auto_winter, check_load_limiter, clear_cosy_slot_registers, cosy_slot_register_writes,
@@ -773,6 +773,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 let mut pending_mode: Option<BatteryMode> = None;
                 let mut delta_corrections = DeltaCorrectionCounts::default();
                 let mut suspect_counts = ConsecutiveSuspectCounts::default();
+                let mut rate_release_counts = RateReleaseCounts::default();
                 let mut known_device_type: Option<crate::inverter::model::DeviceType> = None;
                 let mut detected_meters: Vec<u8> = Vec::new();
                 // Battery slave addresses already announced this session, so
@@ -1643,7 +1644,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 let in_grace = readings_since_connect < GRACE_READINGS;
                                 let (sanitized, prev_modules) = {
                                     let prev = state.latest_snapshot.lock().await;
-                                    let mut s = sanitize_snapshot(&mut snapshot, prev.as_ref(), in_grace, &mut pending_mode, &mut delta_corrections, &mut suspect_counts);
+                                    let mut s = sanitize_snapshot(&mut snapshot, prev.as_ref(), in_grace, &mut pending_mode, &mut delta_corrections, &mut suspect_counts, &mut rate_release_counts);
                                     if carry_forward_optional_block_values(
                                         &mut snapshot,
                                         prev.as_ref(),
