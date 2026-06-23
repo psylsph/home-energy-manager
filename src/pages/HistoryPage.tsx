@@ -33,7 +33,8 @@ import { useInverterStore } from '../store/useInverterStore';
 import type { SeriesLegendItem } from '../components/SeriesLegend';
 import type { HistoryRange, PollSettings, TariffConfig } from '../lib/types';
 import { rateForTimestamp, defaultTariffConfig, flatTariffConfig } from '../lib/tariff';
-import { computeTempDifferential } from '../lib/temperatureChart';
+import { computeTempDifferential, computeBatteryExternalDifferential } from '../lib/temperatureChart';
+import { openExternal } from '../lib/openExternal';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -166,12 +167,26 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
           fields: [{ field: 'inverter_temperature', color: '#F59E0B' }],
         },
         {
+          key: 'external-temp',
+          title: 'Ambient Temperature',
+          unit: '°C',
+          fields: [{ field: 'external_temperature', color: '#38BDF8' }],
+        },
+        {
           key: 'temp-differential',
           title: 'Battery − Inverter (°C)',
           unit: '°C',
           fields: [{ field: '_temp_diff', color: '#A78BFA' }],
           requires: ['battery_temperature', 'inverter_temperature'],
           preprocess: (merged) => computeTempDifferential(merged),
+        },
+        {
+          key: 'batt-ext-differential',
+          title: 'Battery − Ambient (°C)',
+          unit: '°C',
+          fields: [{ field: '_batt_ext_diff', color: '#F472B6' }],
+          requires: ['battery_temperature', 'external_temperature'],
+          preprocess: (merged) => computeBatteryExternalDifferential(merged),
         },
       ];
     case 'cost':
@@ -827,6 +842,18 @@ export default function HistoryPage() {
               ticks={getHistoryXAxisTicks(range, displayDomain)}
             />
           ))}
+          {tab === 'temperature' && (
+            <p className="text-text-secondary/60 text-[11px] font-sans">
+              Ambient temperature data by{' '}
+              <button
+                onClick={() => openExternal('https://open-meteo.com/')}
+                className="text-flow-active underline hover:opacity-80 inline"
+              >
+                Open-Meteo.com
+              </button>
+              {' '}— licensed under CC BY 4.0. Configure your location in Settings.
+            </p>
+          )}
         </div>
       )}
     </div>
