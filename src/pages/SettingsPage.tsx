@@ -255,6 +255,9 @@ export default function SettingsPage() {
   // managed by tauri-plugin-autostart; the persisted preference is the
   // source of truth and the Rust startup self-heal re-applies it.
   const [autostartEnabled, setAutostartEnabled] = useState(false);
+  // Read-only API key and port (developer mode, external access).
+  const [apiKey, setApiKey] = useState('');
+  const [apiPort, setApiPort] = useState(7338);
   // `null` while we haven't asked the OS yet — we only show the toggle's
   // actual state if the plugin was reachable. The toggle is hidden
   // entirely in headless mode (no Tauri shell to register).
@@ -364,6 +367,8 @@ export default function SettingsPage() {
         setEvcPort(s.evc_port ?? 502);
         setDisableAutoDiscovery(s.disable_auto_discovery ?? false);
         setAutostartEnabled(s.autostart_enabled ?? false);
+        setApiKey(s.api_key ?? '');
+        setApiPort(s.api_port ?? 7338);
         setSettingsLoaded(true);
       } catch (e: unknown) {
         console.warn('Failed to load settings:', e);
@@ -1795,6 +1800,44 @@ export default function SettingsPage() {
           </div>
           <Toggle checked={developerMode} onChange={setDeveloperMode} />
         </div>
+        {developerMode && (
+          <div className="flex flex-col gap-3 pt-2 border-t border-bg-elevated">
+            <p className="text-text-secondary text-xs font-sans">
+              Read-only API for external access (e.g. SolarWatch). Starts a
+              second HTTP server on a separate port with Bearer-token auth.
+              Only <code className="text-text-primary">GET /api/snapshot</code> is exposed.
+            </p>
+            <label className="flex flex-col gap-1">
+              <span className="text-text-secondary text-xs font-sans">API Key</span>
+              <input
+                type="text"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder="Leave empty to disable"
+                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-text-secondary text-xs font-sans">Port</span>
+              <input
+                type="number"
+                value={apiPort || ''}
+                onChange={(e) => setApiPort(Number(e.target.value))}
+                placeholder="e.g. 7338"
+                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors w-32"
+              />
+            </label>
+            <button
+              onClick={async () => {
+                await apiPost('/api/settings', { api_key: apiKey, api_port: apiPort });
+                setMessage({ text: 'API key saved. Restart the app for the read-only server to start.', ok: true });
+              }}
+              className="self-start bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
+            >
+              Save API Key
+            </button>
+          </div>
+        )}
       </section>
 
       {/* ─── Section 10: About ─── */}

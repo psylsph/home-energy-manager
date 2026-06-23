@@ -13,7 +13,7 @@ use axum::extract::Request;
 use axum::http::header::CACHE_CONTROL;
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::{Json, Response};
+use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use serde_json::json;
@@ -263,6 +263,100 @@ pub async fn start_server_with_frontend_on_available_port(
     let _ = bound_tx.send(Err(message));
 }
 
+// ---------------------------------------------------------------------------
+// Read-only API server (external access with API key auth)
+// ---------------------------------------------------------------------------
+
+/// API key authentication middleware.
+///
+/// Checks for a `Bearer <key>` token in the `Authorization` header.
+/// Returns 401 Unauthorized if the key is missing or doesn't match.
+async fn api_key_auth(
+    req: Request,
+    next: Next,
+) -> Response {
+    let expected_key = crate::settings::Settings::load().api_key;
+
+    if expected_key.is_empty() {
+        // No key configured — deny all requests (shouldn't happen since
+        // the server isn't started without a key, but defend anyway).
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"ok": false, "error": "API key not configured"})),
+        )
+            .into_response();
+    }
+
+    let auth_header = req
+        .headers()
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if let Some(token) = auth_header.strip_prefix("Bearer ") {
+        if token == expected_key {
+            return next.run(req).await;
+        }
+    }
+
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({"ok": false, "error": "Unauthorized: invalid or missing API key"})),
+    )
+        .into_response()
+}
+
+/// Create a minimal read-only router with API key authentication.
+///
+/// Serves only `GET /api/snapshot` — no control endpoints, no settings,
+/// no WebSocket. All requests require a valid `Authorization: Bearer <key>`
+/// header matching the configured `api_key`.
+pub fn create_readonly_router(state: Arc<AppState>) -> Router {
+    use axum::response::IntoResponse;
+
+    async fn not_found_404() -> impl IntoResponse {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"ok": false, "error": "Not found"})),
+        )
+    }
+
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
+    Router::new()
+        .route("/api/snapshot", get(api::get_snapshot))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            api_key_auth,
+        ))
+        .layer(cors)
+        .with_state(state)
+        .route("/api/{*rest}", get(not_found_404))
+}
+
+/// Start the read-only API server on a separate port.
+///
+/// Only serves `GET /api/snapshot` with Bearer-token authentication.
+/// The main server on `http_port` is unaffected.
+pub async fn start_readonly_server(state: Arc<AppState>, bind_addr: &str, port: u16) {
+    let app = create_readonly_router(state).into_make_service();
+    let addr = format!("{}:{}", bind_addr, port);
+    tracing::info!("Read-only API server starting on {}", addr);
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("Failed to bind read-only API server on {}: {e}", addr);
+            return;
+        }
+    };
+    if let Err(e) = axum::serve(listener, app).await {
+        tracing::error!("Read-only API server error: {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,5 +442,144 @@ mod tests {
             cache_control_for("/manifest.json").await,
             Some("no-cache".to_string())
         );
+    }
+
+    // ======================================================================
+    // Read-only API server (external access with Bearer-token auth)
+    // ======================================================================
+
+    /// Seed the isolated config dir with a Settings that has the given
+    /// api_key and port, then return the read-only router.
+    async fn make_readonly_router_with_key(key: &str, port: u16) -> Router {
+        let mut s = crate::settings::Settings::load();
+        s.api_key = key.to_string();
+        s.api_port = port;
+        s.save().expect("settings save");
+        create_readonly_router(Arc::new(AppState::new()))
+    }
+
+    #[tokio::test]
+    async fn readonly_router_requires_bearer_token() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let app = make_readonly_router_with_key("secret-xyz", 7338).await;
+
+            // No Authorization header at all → 401.
+            let request = Request::builder()
+                .uri("/api/snapshot")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let body: serde_json::Value =
+                serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+            assert_eq!(body["error"], "Unauthorized: invalid or missing API key");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn readonly_router_rejects_wrong_bearer_token() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let app = make_readonly_router_with_key("secret-xyz", 7338).await;
+
+            // Wrong token → 401.
+            let request = Request::builder()
+                .uri("/api/snapshot")
+                .header("Authorization", "Bearer wrong-token")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn readonly_router_accepts_valid_bearer_token() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let app = make_readonly_router_with_key("secret-xyz", 7338).await;
+
+            // Valid token → 200 (snapshot may be empty, but not 401).
+            let request = Request::builder()
+                .uri("/api/snapshot")
+                .header("Authorization", "Bearer secret-xyz")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: serde_json::Value =
+                serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+            // No snapshot available yet, but the response is {ok: false, error: "..."}
+            // rather than 401.
+            assert_eq!(body["ok"], false);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn readonly_router_rejects_non_snapshot_paths() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let app = make_readonly_router_with_key("secret-xyz", 7338).await;
+
+            // Even with a valid token, /api/settings is not exposed → 404.
+            let request = Request::builder()
+                .uri("/api/settings")
+                .header("Authorization", "Bearer secret-xyz")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+            // /api/control/* paths also forbidden.
+            let request = Request::builder()
+                .uri("/api/control/mode")
+                .header("Authorization", "Bearer secret-xyz")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+            // /ws (WebSocket) not exposed on the read-only server.
+            let request = Request::builder()
+                .uri("/ws")
+                .header("Authorization", "Bearer secret-xyz")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn readonly_router_is_get_only() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let app = make_readonly_router_with_key("secret-xyz", 7338).await;
+
+            // POST to /api/snapshot is not allowed (GET only).
+            let request = Request::builder()
+                .method("POST")
+                .uri("/api/snapshot")
+                .header("Authorization", "Bearer secret-xyz")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn readonly_router_no_key_configured_returns_401() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let app = make_readonly_router_with_key("", 7338).await;
+            let request = Request::builder()
+                .uri("/api/snapshot")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        })
+        .await;
     }
 }

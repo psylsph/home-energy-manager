@@ -618,6 +618,8 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "disable_auto_discovery": settings.disable_auto_discovery,
             "minimal_telemetry_mode": settings.minimal_telemetry_mode,
             "autostart_enabled": settings.autostart_enabled,
+            "api_key": settings.api_key,
+            "api_port": settings.api_port,
         }
         })),
     )
@@ -733,6 +735,15 @@ pub async fn update_settings(
     // lib.rs re-applies it after a crash/restart. See issue #117.
     if let Some(a) = body.get("autostart_enabled").and_then(|v| v.as_bool()) {
         persist.autostart_enabled = a;
+    }
+    // Persist the read-only API key and port. The read-only server is
+    // started/stopped on the next app launch (no hot-reload of the
+    // second server). An empty key disables the read-only server.
+    if let Some(k) = body.get("api_key").and_then(|v| v.as_str()) {
+        persist.api_key = k.to_string();
+    }
+    if let Some(p) = body.get("api_port").and_then(|v| v.as_u64()) {
+        persist.api_port = p.min(u16::MAX as u64) as u16;
     }
     if let Err(e) = persist.save() {
         tracing::warn!("Failed to persist settings: {}", e);
@@ -5343,6 +5354,154 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST);
             let err = res["error"].as_str().unwrap_or("");
             assert!(err.contains("wait"), "expected cooldown message, got {err}");
+        })
+        .await;
+    }
+
+    // ======================================================================
+    // get_settings + update_settings — read-only API key/port fields
+    // ======================================================================
+
+    #[tokio::test]
+    async fn get_settings_returns_api_key_and_port() {
+        with_isolated_config_dir_async(|| async {
+            // Seed a known api_key/api_port on disk.
+            let mut s = crate::settings::Settings::load();
+            s.api_key = "test-key-456".to_string();
+            s.api_port = 9999;
+            s.save().expect("settings save");
+
+            let state = Arc::new(AppState::new());
+            let (status, body) = get_settings(State(state)).await;
+
+            assert_eq!(status, StatusCode::OK);
+            let data = &body["data"];
+            assert_eq!(data["api_key"], "test-key-456");
+            assert_eq!(data["api_port"], 9999);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_settings_returns_empty_key_by_default() {
+        with_isolated_config_dir_async(|| async {
+            // No api_key/api_port saved — should get defaults.
+            let state = Arc::new(AppState::new());
+            let (status, body) = get_settings(State(state)).await;
+
+            assert_eq!(status, StatusCode::OK);
+            let data = &body["data"];
+            assert_eq!(data["api_key"], "");
+            assert_eq!(data["api_port"], 7338);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_settings_persists_api_key_and_port() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+
+            let body = serde_json::json!({
+                "api_key": "my-api-key",
+                "api_port": 8443,
+            });
+            let (status, _) = update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            // Verify on disk from scratch.
+            let saved = crate::settings::Settings::load();
+            assert_eq!(saved.api_key, "my-api-key");
+            assert_eq!(saved.api_port, 8443);
+
+            // Verify get_settings returns them too.
+            let (_, get_body) = get_settings(State(state)).await;
+            assert_eq!(get_body["data"]["api_key"], "my-api-key");
+            assert_eq!(get_body["data"]["api_port"], 8443);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_settings_persists_api_key_only_preserves_port() {
+        with_isolated_config_dir_async(|| async {
+            // Seed a known port on disk first.
+            let mut s = crate::settings::Settings::load();
+            s.api_key = "old-key".to_string();
+            s.api_port = 7338;
+            s.save().expect("settings save");
+
+            let state = Arc::new(AppState::new());
+
+            // Now send just a new api_key, no port.
+            let body = serde_json::json!({
+                "api_key": "new-key",
+            });
+            let (status, _) = update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let saved = crate::settings::Settings::load();
+            assert_eq!(saved.api_key, "new-key", "api_key should be updated");
+            assert_eq!(
+                saved.api_port, 7338,
+                "api_port should stay at its previous value when not in the request"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_settings_persists_port_only_preserves_key() {
+        with_isolated_config_dir_async(|| async {
+            // Seed a known key on disk first.
+            let mut s = crate::settings::Settings::load();
+            s.api_key = "existing-key".to_string();
+            s.api_port = 7338;
+            s.save().expect("settings save");
+
+            let state = Arc::new(AppState::new());
+
+            // Send just a new port.
+            let body = serde_json::json!({
+                "api_port": 9090,
+            });
+            let (status, _) = update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let saved = crate::settings::Settings::load();
+            assert_eq!(
+                saved.api_key, "existing-key",
+                "api_key should stay at its previous value when not in the request"
+            );
+            assert_eq!(saved.api_port, 9090, "api_port should be updated");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_settings_clears_api_key_to_empty_string() {
+        with_isolated_config_dir_async(|| async {
+            // Seed a key on disk first.
+            let mut s = crate::settings::Settings::load();
+            s.api_key = "remove-me".to_string();
+            s.api_port = 7338;
+            s.save().expect("settings save");
+
+            let state = Arc::new(AppState::new());
+
+            // Send empty string to clear the key.
+            let body = serde_json::json!({
+                "api_key": "",
+            });
+            let (status, _) = update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let saved = crate::settings::Settings::load();
+            assert_eq!(saved.api_key, "", "api_key should be cleared to empty");
+            assert_eq!(
+                saved.api_port, 7338,
+                "api_port should not be affected when clearing api_key"
+            );
         })
         .await;
     }
