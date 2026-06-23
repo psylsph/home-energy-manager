@@ -73,7 +73,7 @@ use crate::inverter::state_machines::{
 };
 pub use crate::inverter::state_machines::{
     AgileState, AutoWinterConfig, AutoWinterSaved, AutoWinterState, LoadLimiterConfig,
-    LoadLimiterState, PriceSlot,
+    LoadLimiterSaved, LoadLimiterState, PriceSlot,
 };
 use crate::modbus::client::ModbusClient;
 use crate::modbus::registers::{HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET};
@@ -309,6 +309,8 @@ pub struct AppState {
     pub load_limiter_config: Arc<Mutex<LoadLimiterConfig>>,
     /// Load discharge limiter state machine.
     pub load_limiter_state: Arc<Mutex<LoadLimiterState>>,
+    /// Saved register values to restore when the load limiter deactivates.
+    pub load_limiter_saved: Arc<Mutex<Option<LoadLimiterSaved>>>,
     /// Whether cosy charging is currently active (force-charging in a slot).
     pub cosy_active: Arc<Mutex<bool>>,
     /// Agile Octopus state machine (Idle / Charging / Discharging).
@@ -375,6 +377,7 @@ impl AppState {
             auto_winter_saved: Arc::new(Mutex::new(None)),
             load_limiter_config: Arc::new(Mutex::new(LoadLimiterConfig::default())),
             load_limiter_state: Arc::new(Mutex::new(LoadLimiterState::default())),
+            load_limiter_saved: Arc::new(Mutex::new(None)),
             cosy_active: Arc::new(Mutex::new(
                 crate::settings::Settings::load().cosy_active_persisted,
             )),
@@ -425,6 +428,7 @@ impl AppState {
             auto_winter_saved: Arc::new(Mutex::new(None)),
             load_limiter_config: Arc::new(Mutex::new(LoadLimiterConfig::default())),
             load_limiter_state: Arc::new(Mutex::new(LoadLimiterState::default())),
+            load_limiter_saved: Arc::new(Mutex::new(None)),
             cosy_active: Arc::new(Mutex::new(
                 crate::settings::Settings::load().cosy_active_persisted,
             )),
@@ -1791,11 +1795,13 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 {
                                     let config = state.load_limiter_config.lock().await;
                                     let mut ll_state = state.load_limiter_state.lock().await;
+                                    let mut ll_saved = state.load_limiter_saved.lock().await;
                                     let writes = check_load_limiter(
                                         &snapshot,
                                         &config,
                                         &mut ll_state,
                                         poll_settings.poll_interval,
+                                        &mut ll_saved,
                                     );
 
                                     // Tag the snapshot so the frontend knows.
@@ -1805,8 +1811,27 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 
                                     let was_active = poll_settings.load_limiter_active_persisted;
                                     let now_active = snapshot.load_limiter_active;
+
+                                    // Persist saved reserve values to disk so they survive a
+                                    // crash/restart. When the limiter deactivates, saved
+                                    // becomes None — this clears the persisted values.
+                                    let persist_saved = ll_saved.clone();
                                     drop(config);
                                     drop(ll_state);
+                                    drop(ll_saved);
+
+                                    let mut app_settings = poll_settings.clone();
+                                    let saved_changed = app_settings.load_limiter_saved_reserve
+                                        != persist_saved.as_ref().map(|s| s.reserve);
+                                    if saved_changed {
+                                        app_settings.load_limiter_saved_reserve =
+                                            persist_saved.as_ref().map(|s| s.reserve);
+                                        if let Err(e) = app_settings.save() {
+                                            tracing::warn!(
+                                                "Failed to persist load limiter saved values: {e}"
+                                            );
+                                        }
+                                    }
 
                                     // Persist active flag to disk so a crash/restart can detect it.
                                     if was_active != now_active {

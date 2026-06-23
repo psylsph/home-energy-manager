@@ -106,6 +106,16 @@ pub struct AutoWinterSaved {
     pub target_soc: u8,
 }
 
+/// Register values saved just before the load limiter pauses discharge,
+/// so they can be restored when the load drops back below threshold.
+/// Persisted to disk so a crash/restart can restore the exact previous
+/// state rather than hardcoding reserve=4.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LoadLimiterSaved {
+    /// The battery SOC reserve (%) before the limiter paused discharge.
+    pub reserve: u16,
+}
+
 // ===========================================================================
 // Load discharge limiter: types + transition logic
 // ===========================================================================
@@ -131,6 +141,9 @@ pub enum LoadLimiterState {
     Paused,
     /// Restored from persistence after a crash - first poll will check
     /// load and immediately restore Eco if already below threshold.
+    /// Stays in this state until the restore writes succeed (detected by
+    /// battery mode returning to Eco), so a failed write on the first
+    /// poll after reconnect is retried on the next poll.
     PausedFromRestart,
     /// Home load dropped below threshold, counting towards restore.
     LowLoadPending {
@@ -498,6 +511,7 @@ pub(crate) fn check_load_limiter(
     config: &LoadLimiterConfig,
     state: &mut LoadLimiterState,
     poll_interval_secs: u64,
+    saved: &mut Option<LoadLimiterSaved>,
 ) -> Option<Vec<RegisterWrite>> {
     if !config.enabled {
         *state = LoadLimiterState::Idle;
@@ -550,7 +564,14 @@ pub(crate) fn check_load_limiter(
         if matches!(*state, LoadLimiterState::Paused)
             || matches!(*state, LoadLimiterState::PausedFromRestart)
         {
-            tracing::info!("Load limiter: outside activation window, restoring Eco");
+            let restore_reserve = saved
+                .take()
+                .map(|s| s.reserve)
+                .unwrap_or(4);
+            tracing::info!(
+                restore_reserve,
+                "Load limiter: outside activation window, restoring Eco"
+            );
             *state = LoadLimiterState::Idle;
             return Some(vec![
                 RegisterWrite {
@@ -563,7 +584,7 @@ pub(crate) fn check_load_limiter(
                 },
                 RegisterWrite {
                     address: HR_BATTERY_SOC_RESERVE,
-                    value: 4, // default reserve
+                    value: restore_reserve,
                 },
             ]);
         }
@@ -599,6 +620,11 @@ pub(crate) fn check_load_limiter(
                         "Load limiter: pausing battery discharge (Eco Paused)"
                     );
                     *state = LoadLimiterState::Paused;
+                    // Save the current reserve before pausing so we can
+                    // restore it later (survives crash/restart via disk).
+                    *saved = Some(LoadLimiterSaved {
+                        reserve: snap.battery_reserve as u16,
+                    });
                     return Some(vec![
                         RegisterWrite {
                             address: HR_BATTERY_POWER_MODE,
@@ -635,14 +661,35 @@ pub(crate) fn check_load_limiter(
             }
         }
         // Post-crash restart: the debounce delay already elapsed while
-        // the app was down. If the load is already below threshold,
-        // restore Eco immediately. If still high, transition to normal Paused.
+        // the app was down. If the battery is already back in Eco mode
+        // (writes from a previous poll succeeded), transition to Idle.
+        // If the load is below threshold, send restore writes but stay
+        // in PausedFromRestart so a failed write (dongle busy on first
+        // poll after reconnect) is retried on the next poll.
+        // If the load is still high, transition to normal Paused.
         LoadLimiterState::PausedFromRestart => {
-            if home_power <= threshold {
+            // Writes from a previous poll succeeded — we're restored.
+            if snap.battery_mode == BatteryMode::Eco {
                 tracing::info!(
-                    "Load limiter: post-crash - load below threshold, restoring Eco immediately"
+                    "Load limiter: post-crash - battery already in Eco mode, restore confirmed"
                 );
                 *state = LoadLimiterState::Idle;
+                return None;
+            }
+
+            if home_power <= threshold {
+                let restore_reserve = saved
+                    .as_ref()
+                    .map(|s| s.reserve)
+                    .unwrap_or(4);
+                tracing::info!(
+                    restore_reserve,
+                    "Load limiter: post-crash - load below threshold, restoring Eco"
+                );
+                // Stay in PausedFromRestart — if the write fails (dongle
+                // busy on first poll after reconnect), the next poll will
+                // retry. Once the battery mode flips to Eco, the check
+                // above transitions to Idle.
                 return Some(vec![
                     RegisterWrite {
                         address: HR_BATTERY_POWER_MODE,
@@ -654,7 +701,7 @@ pub(crate) fn check_load_limiter(
                     },
                     RegisterWrite {
                         address: HR_BATTERY_SOC_RESERVE,
-                        value: 4,
+                        value: restore_reserve,
                     },
                 ]);
             } else {
@@ -670,8 +717,13 @@ pub(crate) fn check_load_limiter(
             if home_power <= threshold {
                 *consecutive += 1;
                 if *consecutive >= debounce_count {
+                    let restore_reserve = saved
+                        .take()
+                        .map(|s| s.reserve)
+                        .unwrap_or(4);
                     tracing::info!(
-                        consecutive,
+                        consecutive = *consecutive,
+                        restore_reserve,
                         "Load limiter: restoring Eco mode - load below threshold for full delay"
                     );
                     *state = LoadLimiterState::Idle;
@@ -686,7 +738,7 @@ pub(crate) fn check_load_limiter(
                         },
                         RegisterWrite {
                             address: HR_BATTERY_SOC_RESERVE,
-                            value: 4, // default reserve
+                            value: restore_reserve,
                         },
                     ]);
                 }
@@ -928,8 +980,9 @@ mod tests {
             ..Default::default()
         };
         let mut state = LoadLimiterState::Paused;
+        let mut saved = None;
 
-        let writes = check_load_limiter(&snap, &config, &mut state, 60);
+        let writes = check_load_limiter(&snap, &config, &mut state, 60, &mut saved);
 
         assert!(writes.is_none());
         assert_eq!(state, LoadLimiterState::Idle);
@@ -939,6 +992,7 @@ mod tests {
     fn load_limiter_ignores_non_eco_mode_and_yields_to_other_automation() {
         let config = ll_config(3000, 5);
         let mut state = LoadLimiterState::Idle;
+        let mut saved = None;
 
         // Not Eco → no action, returns to Idle.
         let snap = InverterSnapshot {
@@ -946,7 +1000,7 @@ mod tests {
             home_power: 9999,
             ..Default::default()
         };
-        assert!(check_load_limiter(&snap, &config, &mut state, 60).is_none());
+        assert!(check_load_limiter(&snap, &config, &mut state, 60, &mut saved).is_none());
         assert_eq!(state, LoadLimiterState::Idle);
 
         // Eco but another automation active → no action.
@@ -956,7 +1010,7 @@ mod tests {
             auto_winter_active: true,
             ..Default::default()
         };
-        assert!(check_load_limiter(&snap, &config, &mut state, 60).is_none());
+        assert!(check_load_limiter(&snap, &config, &mut state, 60, &mut saved).is_none());
         assert_eq!(state, LoadLimiterState::Idle);
     }
 
@@ -964,21 +1018,25 @@ mod tests {
     fn load_limiter_counts_high_load_then_pauses() {
         let config = ll_config(3000, 5);
         let mut state = LoadLimiterState::Idle;
+        let mut saved = None;
         // 5-minute delay at a 1-minute poll => debounce_count = 5.
         let high = InverterSnapshot {
             battery_mode: BatteryMode::Eco,
             home_power: 4000,
+            battery_reserve: 20,
             ..Default::default()
         };
 
         // First 4 high-load polls: pending, no writes.
         for _ in 0..4 {
-            assert!(check_load_limiter(&high, &config, &mut state, 60).is_none());
+            assert!(check_load_limiter(&high, &config, &mut state, 60, &mut saved).is_none());
             assert!(matches!(state, LoadLimiterState::HighLoadPending { .. }));
         }
         // 5th: transition to Paused with restore-100 writes.
-        let writes = check_load_limiter(&high, &config, &mut state, 60).expect("pauses");
+        let writes = check_load_limiter(&high, &config, &mut state, 60, &mut saved).expect("pauses");
         assert_eq!(state, LoadLimiterState::Paused);
+        // Should have saved the original reserve (20) before pausing.
+        assert_eq!(saved, Some(LoadLimiterSaved { reserve: 20 }));
         assert!(writes
             .iter()
             .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 100));
@@ -991,6 +1049,9 @@ mod tests {
     fn load_limiter_restores_eco_when_load_drops_for_full_delay() {
         let config = ll_config(3000, 3);
         let mut state = LoadLimiterState::Paused;
+        // Pre-seed saved reserve (as if it was captured when the limiter
+        // paused discharge).
+        let mut saved = Some(LoadLimiterSaved { reserve: 20 });
         let low = InverterSnapshot {
             battery_mode: BatteryMode::Eco,
             home_power: 1000,
@@ -999,15 +1060,17 @@ mod tests {
 
         // First two low-load polls while Paused: LowLoadPending, no writes.
         for _ in 0..2 {
-            assert!(check_load_limiter(&low, &config, &mut state, 60).is_none());
+            assert!(check_load_limiter(&low, &config, &mut state, 60, &mut saved).is_none());
             assert!(matches!(state, LoadLimiterState::LowLoadPending { .. }));
         }
-        // 3rd: restore Eco (reserve back to 4).
-        let writes = check_load_limiter(&low, &config, &mut state, 60).expect("restores");
+        // 3rd: restore Eco with the saved reserve (20), not hardcoded 4.
+        let writes = check_load_limiter(&low, &config, &mut state, 60, &mut saved).expect("restores");
         assert_eq!(state, LoadLimiterState::Idle);
+        // Saved should be consumed (taken) on restore.
+        assert!(saved.is_none(), "saved must be consumed on restore");
         assert!(writes
             .iter()
-            .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 4));
+            .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 20));
         assert!(writes
             .iter()
             .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1));
@@ -1017,16 +1080,229 @@ mod tests {
     fn load_limiter_post_crash_restores_immediately_if_load_already_low() {
         let config = ll_config(3000, 10);
         let mut state = LoadLimiterState::PausedFromRestart;
+        let mut saved = None;
         let low = InverterSnapshot {
             battery_mode: BatteryMode::Eco,
             home_power: 500,
             ..Default::default()
         };
 
-        let writes = check_load_limiter(&low, &config, &mut state, 60).expect("immediate restore");
+        // Battery is already in Eco mode (writes from a previous poll
+        // succeeded) — transition to Idle without sending writes.
+        let writes = check_load_limiter(&low, &config, &mut state, 60, &mut saved);
+        assert!(writes.is_none(), "no writes needed when already in Eco");
+        assert_eq!(state, LoadLimiterState::Idle);
+    }
+
+    #[test]
+    fn load_limiter_post_crash_retries_restore_when_still_in_eco_paused() {
+        let config = ll_config(3000, 10);
+        let mut state = LoadLimiterState::PausedFromRestart;
+        let mut saved = Some(LoadLimiterSaved { reserve: 20 });
+        let low = InverterSnapshot {
+            battery_mode: BatteryMode::EcoPaused,
+            home_power: 500,
+            ..Default::default()
+        };
+
+        // Battery is still in EcoPaused mode (writes from a previous poll
+        // failed or haven't been sent yet) — return restore writes but stay
+        // in PausedFromRestart so a failed write is retried on the next poll.
+        let writes = check_load_limiter(&low, &config, &mut state, 60, &mut saved)
+            .expect("restore writes returned");
+        assert_eq!(
+            state,
+            LoadLimiterState::PausedFromRestart,
+            "must stay in PausedFromRestart until writes are confirmed"
+        );
+        // Should restore the saved reserve (20), not hardcoded 4.
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 20));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0));
+
+        // Simulate next poll: writes succeeded, battery now in Eco mode.
+        let restored = InverterSnapshot {
+            battery_mode: BatteryMode::Eco,
+            home_power: 500,
+            ..Default::default()
+        };
+        let writes = check_load_limiter(&restored, &config, &mut state, 60, &mut saved);
+        assert!(writes.is_none(), "no writes needed after restore confirmed");
+        assert_eq!(state, LoadLimiterState::Idle);
+    }
+
+    #[test]
+    fn load_limiter_post_crash_load_still_high_transitions_to_paused() {
+        let config = ll_config(3000, 10);
+        let mut state = LoadLimiterState::PausedFromRestart;
+        let mut saved = Some(LoadLimiterSaved { reserve: 20 });
+        let high = InverterSnapshot {
+            battery_mode: BatteryMode::EcoPaused,
+            home_power: 5000,
+            ..Default::default()
+        };
+
+        // Load still above threshold after restart — transition to normal Paused.
+        let writes = check_load_limiter(&high, &config, &mut state, 60, &mut saved);
+        assert!(writes.is_none(), "no writes when load still high");
+        assert_eq!(state, LoadLimiterState::Paused);
+        // Saved reserve must be preserved for when the load eventually drops.
+        assert_eq!(saved, Some(LoadLimiterSaved { reserve: 20 }));
+    }
+
+    #[test]
+    fn load_limiter_post_crash_falls_back_to_reserve_4_when_no_saved_value() {
+        let config = ll_config(3000, 10);
+        let mut state = LoadLimiterState::PausedFromRestart;
+        let mut saved = None;
+        let low = InverterSnapshot {
+            battery_mode: BatteryMode::EcoPaused,
+            home_power: 500,
+            ..Default::default()
+        };
+
+        // No saved reserve — should fall back to 4.
+        let writes = check_load_limiter(&low, &config, &mut state, 60, &mut saved)
+            .expect("restore writes returned");
+        assert_eq!(
+            state,
+            LoadLimiterState::PausedFromRestart,
+            "must stay in PausedFromRestart until writes confirmed"
+        );
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 4));
+    }
+
+    #[test]
+    fn load_limiter_low_load_pending_falls_back_to_reserve_4_when_no_saved_value() {
+        let config = ll_config(3000, 1);
+        let mut state = LoadLimiterState::Paused;
+        let mut saved = None;
+        let low = InverterSnapshot {
+            battery_mode: BatteryMode::Eco,
+            home_power: 1000,
+            ..Default::default()
+        };
+
+        // One poll with load below threshold: LowLoadPending.
+        assert!(check_load_limiter(&low, &config, &mut state, 60, &mut saved).is_none());
+        assert!(matches!(state, LoadLimiterState::LowLoadPending { consecutive: 1 }));
+
+        // Second poll: restore with fallback reserve 4.
+        let writes = check_load_limiter(&low, &config, &mut state, 60, &mut saved)
+            .expect("restores with fallback 4");
         assert_eq!(state, LoadLimiterState::Idle);
         assert!(writes
             .iter()
             .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 4));
+    }
+
+    #[test]
+    fn load_limiter_high_load_pending_resets_when_load_drops() {
+        let config = ll_config(3000, 5);
+        let mut state = LoadLimiterState::HighLoadPending { consecutive: 3 };
+        let mut saved = None;
+        let low = InverterSnapshot {
+            battery_mode: BatteryMode::Eco,
+            home_power: 1000,
+            ..Default::default()
+        };
+
+        // Load dropped below threshold — reset to Idle.
+        let writes = check_load_limiter(&low, &config, &mut state, 60, &mut saved);
+        assert!(writes.is_none());
+        assert_eq!(state, LoadLimiterState::Idle);
+    }
+
+    #[test]
+    fn load_limiter_low_load_pending_goes_back_to_paused_when_load_rises() {
+        let config = ll_config(3000, 5);
+        let mut state = LoadLimiterState::LowLoadPending { consecutive: 2 };
+        let mut saved = Some(LoadLimiterSaved { reserve: 20 });
+        let high = InverterSnapshot {
+            battery_mode: BatteryMode::Eco,
+            home_power: 5000,
+            ..Default::default()
+        };
+
+        // Load rose above threshold — go back to Paused.
+        let writes = check_load_limiter(&high, &config, &mut state, 60, &mut saved);
+        assert!(writes.is_none());
+        assert_eq!(state, LoadLimiterState::Paused);
+        // Saved reserve must be preserved.
+        assert_eq!(saved, Some(LoadLimiterSaved { reserve: 20 }));
+    }
+
+    #[test]
+    fn load_limiter_external_mode_change_while_paused_resets_to_idle() {
+        let config = ll_config(3000, 5);
+        let mut state = LoadLimiterState::Paused;
+        let mut saved = Some(LoadLimiterSaved { reserve: 20 });
+        let snap = InverterSnapshot {
+            battery_mode: BatteryMode::TimedExport,
+            home_power: 5000,
+            ..Default::default()
+        };
+
+        // Battery mode changed externally — return to Idle without writing.
+        let writes = check_load_limiter(&snap, &config, &mut state, 60, &mut saved);
+        assert!(writes.is_none());
+        assert_eq!(state, LoadLimiterState::Idle);
+    }
+
+    #[test]
+    fn load_limiter_external_mode_change_while_paused_from_restart_resets_to_idle() {
+        let config = ll_config(3000, 5);
+        let mut state = LoadLimiterState::PausedFromRestart;
+        let mut saved = Some(LoadLimiterSaved { reserve: 20 });
+        let snap = InverterSnapshot {
+            battery_mode: BatteryMode::TimedExport,
+            home_power: 5000,
+            ..Default::default()
+        };
+
+        // Battery mode changed externally while in PausedFromRestart — Idle.
+        let writes = check_load_limiter(&snap, &config, &mut state, 60, &mut saved);
+        assert!(writes.is_none());
+        assert_eq!(state, LoadLimiterState::Idle);
+    }
+
+    #[test]
+    fn load_limiter_outside_window_restores_with_saved_reserve() {
+        // Use a window that's always inactive: start=end=1 (non-zero, same
+        // value) means end_mins <= start_mins (crosses midnight) and
+        // now_minutes won't be >= 1 AND < 1 simultaneously, so in_window=false.
+        let config = LoadLimiterConfig {
+            enabled: true,
+            threshold_w: 3000,
+            trigger_delay_minutes: 5,
+            start_hour: 1,
+            start_minute: 0,
+            end_hour: 1,
+            end_minute: 0,
+        };
+        let mut state = LoadLimiterState::PausedFromRestart;
+        let mut saved = Some(LoadLimiterSaved { reserve: 20 });
+        let snap = InverterSnapshot {
+            battery_mode: BatteryMode::EcoPaused,
+            home_power: 5000,
+            ..Default::default()
+        };
+
+        // Outside window — restore with saved reserve.
+        let writes = check_load_limiter(&snap, &config, &mut state, 60, &mut saved)
+            .expect("restore writes returned");
+        assert_eq!(state, LoadLimiterState::Idle);
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 20));
+        assert!(saved.is_none(), "saved must be consumed on restore");
     }
 }

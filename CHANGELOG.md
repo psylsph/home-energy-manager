@@ -2,11 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.38.1] - 2026-06-23
+
+### Added
+
+- **One-click "Submit a Support Bundle" from Settings.** If you raise an issue, the app can now assemble a diagnostic bundle from your current snapshot, the developer log ring, and your alert settings (with secrets stripped) and ship it to the maintainer over ntfy in a couple of clicks — no copying logs by hand. Choose a category, add an optional GitHub issue number for a deep link, write a short description, and hit submit. A 60-second cooldown stops accidental double-submits. Your inverter serial number and LAN host/port are never sent, period; a non-reversible fingerprint of the serial is embedded in the bundle id so the maintainer can correlate repeats from the same install without identifying you. Closes [#125](https://github.com/psylsph/home-energy-manager/issues/125).
+
+- **Read-only API for external consumers like SolarWatch.** A second HTTP server (default port 7338) that serves only `GET /api/snapshot` with Bearer-token auth. Everything you can see in the dashboard — solar generation, battery state, grid import/export, home consumption — is exposed as JSON; nothing else is reachable from this server. Enable it from Settings → Developer: pick a key, pick a port, restart, and your LAN clients can poll the snapshot at `http://<your-hem-ip>:7338/api/snapshot` with `Authorization: Bearer <your-key>`. Addresses [#128](https://github.com/psylsph/home-energy-manager/issues/128).
 
 ### Fixed
 
-- **Headless mode on `.rpm` and AppImage installs now serves the web UI automatically.** Previously these installs ran in API-only mode (no dashboard) because the bundled frontend sat at the Tauri resource path (`/usr/lib/givenergy-local/dist/`), which the headless `--dist` search list never checked. The resolver now also looks there, so `.deb`, `.rpm`, and AppImage all serve the UI out of the box. The `.rpm` bundle now places `dist/` at `/usr/share/givenergy-local/dist/` too, matching the `.deb` and Docker conventions. If no `dist/` can be found at any of the search paths, the warning now lists every path it tried plus concrete remediation steps.
+- **Mobile layout overflows in tariff form, bottom nav, and History tab bar.** The tariff slot editor now reflows to two columns on narrow screens (Start/End on the left, Rate/Remove on the right) instead of overflowing, the bottom nav icons shrink on phones and scroll horizontally when there are too many panels to fit, and the History tab bar switches to a dropdown under the small breakpoint to match the time-range selector.
+
+- **Headless mode on `.rpm` and AppImage installs now serves the web UI automatically.** Previously these installs ran in API-only mode (no dashboard) because the bundled frontend sat at the Tauri resource path (`/usr/lib/givenergy-local/dist/`), which the headless `--dist` search list never checked. The resolver now also looks there, so `.deb`, `.rpm`, and AppImage all serve the UI out of the box. If no `dist/` can be found at any of the search paths, the warning now lists every path it tried plus concrete remediation steps.
+
+- **Modbus reconnects faster on a struggling dongle.** The per-request TCP timeout was 5s and the post-connect warmup was three full reads — both numbers originally chosen to absorb post-reconnect register garbage, which is now handled by the corruption-defence sanitizer. A failing session now reconnects in roughly a third of the time instead of sitting through 30–60s of cumulative timeouts. Closes [#127](https://github.com/psylsph/home-energy-manager/issues/127).
+
+- **Read-only API: server now starts after upgrade and the Settings page keeps your key across restarts.** Two bugs that broke the read-only API on upgrades: existing `settings.json` files written before the feature shipped loaded with `api_port: 0` (because `serde`'s default for `u16` is `0`, not `7338`), so the startup check `api_port > 0` skipped the server even with a saved key; and the Settings page's GET `/api/settings` response didn't include `api_key` or `api_port` at all, so the form came back blank after restart. Both are fixed — existing users now find the API on by default if they had a key saved, and upgrading shows the saved key in the field.
 
 ## [0.38.0] - 2026-06-23
 
