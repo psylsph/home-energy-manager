@@ -183,6 +183,10 @@ export interface PollSettings {
    *  LaunchAgent on macOS, ~/.config/autostart/*.desktop on Linux).
    *  See issue #117. */
   autostart_enabled: boolean;
+  /** API key for the read-only external API server (developer mode). */
+  api_key: string;
+  /** Port for the read-only external API server (0 = disabled). */
+  api_port: number;
 }
 
 export interface DiscoveredInverter {

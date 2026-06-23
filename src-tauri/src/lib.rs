@@ -14,7 +14,8 @@ use history::HistoryDb;
 use inverter::poll::{run_poll_loop, AppState};
 use server::logs::{LogCaptureLayer, LogRing};
 use server::{
-    start_server, start_server_with_frontend, start_server_with_frontend_on_available_port,
+    start_readonly_server, start_server, start_server_with_frontend,
+    start_server_with_frontend_on_available_port,
 };
 use settings::Settings;
 use std::sync::Arc;
@@ -182,6 +183,17 @@ async fn initialize_app_state(
         tracing::info!("Restored load limiter state: PausedFromRestart (post-crash)");
     }
 
+    // Restore the load limiter's saved reserve value so the exact previous
+    // reserve is written back (not a hardcoded default).
+    if let Some(reserve) = app_settings.load_limiter_saved_reserve {
+        let mut ll_saved = state.load_limiter_saved.lock().await;
+        *ll_saved = Some(crate::inverter::poll::LoadLimiterSaved { reserve });
+        tracing::info!(
+            "Restored load limiter saved reserve: {}%",
+            reserve,
+        );
+    }
+
     // Load persisted auto-winter saved values (original register values
     // captured before winter mode activated).
     {
@@ -280,6 +292,8 @@ pub fn run() {
             // `app_settings` is moved into the helper.
             let http_port = app_settings.http_port;
             let autostart_enabled = app_settings.autostart_enabled;
+            let api_key = app_settings.api_key.clone();
+            let api_port = app_settings.api_port;
             let state = match tauri::async_runtime::block_on(initialize_app_state(
                 app_settings,
                 log_ring,
@@ -465,6 +479,14 @@ pub fn run() {
                 weather::run_weather_loop(weather_state).await;
             });
 
+            // Start the read-only API server if configured.
+            let ro_state = state.clone();
+            if !api_key.is_empty() && api_port > 0 {
+                tauri::async_runtime::spawn(async move {
+                    start_readonly_server(ro_state, "0.0.0.0", api_port).await;
+                });
+            }
+
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -594,6 +616,10 @@ pub fn run_headless(args: &[String]) {
     // Create tokio runtime
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
 
+    // Capture read-only API config before app_settings is moved.
+    let api_key = app_settings.api_key.clone();
+    let api_port = app_settings.api_port;
+
     rt.block_on(async {
         // Initialise shared app state: identical to the Tauri-windowed path
         // via `initialize_app_state()`, so the startup sequence cannot diverge.
@@ -620,6 +646,14 @@ pub fn run_headless(args: &[String]) {
         tokio::spawn(async move {
             weather::run_weather_loop(weather_state).await;
         });
+
+        // Start the read-only API server if configured.
+        let ro_state = state.clone();
+        if !api_key.is_empty() && api_port > 0 {
+            tokio::spawn(async move {
+                start_readonly_server(ro_state, "0.0.0.0", api_port).await;
+            });
+        }
 
         // Start the HTTP server
         let server_state = state.clone();
