@@ -48,13 +48,15 @@ const BACKFILL_TICK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 /// shouldn't produce thousands of API calls in one go.
 const BACKFILL_MAX_CHUNKS_PER_TICK: u32 = 4;
 
-/// Reasonable lower bound on the backfill window. Open-Meteo's high-
-/// resolution IFS model starts in 2017; ERA5 (25 km reanalysis) goes
-/// back to 1940 but is meaningfully coarser. We cap at 2017 so a typo
-/// in the user's history DB doesn't trigger thousands of pointless API
-/// calls against low-resolution data.
-fn backfill_min_date() -> NaiveDate {
-    NaiveDate::from_ymd_opt(2017, 1, 1).expect("2017-01-01 is a valid NaiveDate")
+/// Lower bound on the backfill window: 30 days before `today`. We
+/// don't need years of archive data for the dashboard — temperature
+/// history is only displayed alongside 30-day inverter history, and
+/// capping the window keeps the Open-Meteo archive calls (one per
+/// month) cheap.
+fn backfill_min_date(today: NaiveDate) -> NaiveDate {
+    today
+        .checked_sub_signed(chrono::Duration::days(30))
+        .unwrap_or(today)
 }
 
 // ---------------------------------------------------------------------------
@@ -199,7 +201,7 @@ async fn fetch_archive_month(
     latitude: f64,
     longitude: f64,
     start: NaiveDate,
-    end_exclusive: NaiveDate,
+    end: NaiveDate,
 ) -> Result<Vec<WeatherObservation>, String> {
     let url = format!(
         "{base}/v1/archive?latitude={lat}&longitude={lon}&start_date={s}&end_date={e}&hourly=temperature_2m&timezone=UTC",
@@ -207,7 +209,7 @@ async fn fetch_archive_month(
         lat = latitude,
         lon = longitude,
         s = start.format("%Y-%m-%d"),
-        e = end_exclusive.format("%Y-%m-%d"),
+        e = end.format("%Y-%m-%d"),
     );
 
     let result: Result<serde_json::Value, String> = tokio::task::spawn_blocking(move || {
@@ -286,33 +288,37 @@ async fn fetch_archive_month(
 ///
 /// `last_completed` is the last date that's *fully* populated. We advance
 /// one month at a time and stop at `today` (UTC). Returns `None` when
-/// there's nothing left to do.
+/// there's nothing left to do. The returned `end` is *inclusive* — it's
+/// passed straight to Open-Meteo's `end_date` query parameter, which
+/// must be `<= today` (the archive only contains data up to today).
 fn next_backfill_window(last_completed: Option<NaiveDate>, today: NaiveDate) -> Option<(NaiveDate, NaiveDate)> {
     let start = match last_completed {
-        // First ever run: backfill from the configured lower bound. Real
-        // apps will have the user choose, but for now we start at
-        // `backfill_min_date()` so a typo doesn't trigger thousands of calls.
-        None => backfill_min_date(),
+        // First ever run: backfill from the 30-day-ago lower bound so
+        // a stale or empty history DB doesn't trigger years of API
+        // calls.
+        None => backfill_min_date(today),
         Some(d) => d + chrono::Duration::days(1),
     };
     if start > today {
         return None;
     }
-    let start = start.max(backfill_min_date());
-    // End is the first day of the month *after* `start`'s month, capped
-    // at today + 1 day (end_exclusive).
+    let start = start.max(backfill_min_date(today));
+    // End is the last day of `start`'s month, capped at today.
+    // Open-Meteo's `end_date` is inclusive and rejects dates beyond
+    // today with HTTP 400. We compute the *last* day of the month by
+    // taking the first of the next month and subtracting one.
     let mut year: i32 = start.year();
     let mut month: u32 = start.month();
-    let next_month_first: u32 = if month == 12 {
+    if month == 12 {
         year += 1;
-        1
+        month = 1;
     } else {
         month += 1;
-        month
-    };
-    let month_end = NaiveDate::from_ymd_opt(year, next_month_first, 1)
+    }
+    let month_end = NaiveDate::from_ymd_opt(year, month, 1)
+        .and_then(|d| d.pred_opt())
         .unwrap_or(today)
-        .min(today + chrono::Duration::days(1));
+        .min(today);
     Some((start, month_end))
 }
 
@@ -358,13 +364,13 @@ async fn run_backfill_tick(state: Arc<AppState>) {
                     );
                 }
                 // Advance `last_completed` to the last day we actually
-                // fetched — which is `window.1 - 1 day` if any rows came
-                // back, otherwise the same window start (skip the empty
-                // range and try again next tick).
+                // fetched. The window's `end` is inclusive, so on success
+                // that's just `window.1`. On an empty range we skip the
+                // window start and try again next tick.
                 let advance_to = if obs.is_empty() {
                     window.0
                 } else {
-                    window.1 - chrono::Duration::days(1)
+                    window.1
                 };
                 last_completed = Some(advance_to);
 
@@ -375,7 +381,7 @@ async fn run_backfill_tick(state: Arc<AppState>) {
                 }
                 tracing::info!(
                     start = %window.0,
-                    end_exclusive = %window.1,
+                    end = %window.1,
                     rows = obs.len(),
                     "weather backfill chunk complete",
                 );
@@ -383,7 +389,7 @@ async fn run_backfill_tick(state: Arc<AppState>) {
             Err(e) => {
                 tracing::warn!(
                     start = %window.0,
-                    end_exclusive = %window.1,
+                    end = %window.1,
                     error = %e,
                     "weather backfill chunk failed; will retry on next tick",
                 );
@@ -527,40 +533,55 @@ mod tests {
 
     #[test]
     fn next_window_first_run_starts_at_min_date() {
-        // No prior backfill — start at the 2017 lower bound.
+        // No prior backfill — start at the 30-day floor, end is the
+        // first day of the month after that floor (inclusive).
         let today = d(2025, 6, 15);
         let (start, end) = next_backfill_window(None, today).unwrap();
-        assert_eq!(start, backfill_min_date());
-        // End is the first day of the month after January, i.e. Feb 1.
-        assert_eq!(end, d(2017, 2, 1));
+        assert_eq!(start, d(2025, 5, 16));
+        assert_eq!(end, d(2025, 5, 31));
     }
 
     #[test]
-    fn next_window_advances_one_month_from_mid_month() {
-        // Last completed was 15 March — next window is 16 Mar → 1 Apr.
+    fn next_window_advances_from_clamped_floor() {
+        // Last completed is older than the 30-day floor — the start
+        // must be clamped forward to the floor.
         let today = d(2025, 6, 15);
         let (start, end) = next_backfill_window(Some(d(2025, 3, 15)), today).unwrap();
-        assert_eq!(start, d(2025, 3, 16));
-        assert_eq!(end, d(2025, 4, 1));
+        assert_eq!(start, d(2025, 5, 16));
+        assert_eq!(end, d(2025, 5, 31));
     }
 
     #[test]
-    fn next_window_wraps_year_boundary_december() {
-        // December wraps to January of the next year.
-        let today = d(2025, 6, 15);
-        let (start, end) = next_backfill_window(Some(d(2024, 12, 20)), today).unwrap();
-        assert_eq!(start, d(2024, 12, 21));
-        assert_eq!(end, d(2025, 1, 1));
-    }
-
-    #[test]
-    fn next_window_caps_end_at_today_when_month_extends_past_now() {
-        // Last completed was yesterday in the current month — the window
-        // end must be capped at today + 1 day, not the first of next month.
+    fn next_window_advances_one_day_within_floor() {
+        // Last completed is yesterday — next window is just today
+        // (the end is inclusive, so end == today).
         let today = d(2025, 6, 15);
         let (start, end) = next_backfill_window(Some(d(2025, 6, 14)), today).unwrap();
         assert_eq!(start, d(2025, 6, 15));
-        assert_eq!(end, d(2025, 6, 16));
+        assert_eq!(end, d(2025, 6, 15));
+    }
+
+    #[test]
+    fn next_window_wraps_month_boundary() {
+        // Last completed is 30 May; start is 31 May (after the 30-day
+        // floor so it isn't clamped), end is the last day of May.
+        let today = d(2025, 6, 15);
+        let (start, end) = next_backfill_window(Some(d(2025, 5, 30)), today).unwrap();
+        assert_eq!(start, d(2025, 5, 31));
+        assert_eq!(end, d(2025, 5, 31));
+    }
+
+    #[test]
+    fn next_window_caps_end_at_today() {
+        // End must never exceed today — Open-Meteo's archive rejects
+        // `end_date` in the future with HTTP 400.
+        let today = d(2025, 6, 15);
+        let (_, end) = next_backfill_window(Some(d(2025, 5, 1)), today).unwrap();
+        assert_eq!(end, d(2025, 5, 31));
+        // The single-day case is also bounded by today.
+        let (start, end) = next_backfill_window(Some(d(2025, 6, 14)), today).unwrap();
+        assert_eq!(start, d(2025, 6, 15));
+        assert_eq!(end, today);
     }
 
     #[test]
@@ -572,11 +593,12 @@ mod tests {
 
     #[test]
     fn next_window_clamps_start_below_min_date() {
-        // A bogus `last_completed` from before 2017 still clamps the start
-        // to the floor — we never fetch pre-2017 data.
+        // A bogus `last_completed` from before the 30-day window still
+        // clamps the start to the floor — we never fetch older data.
         let today = d(2025, 6, 15);
         let (start, _) = next_backfill_window(Some(d(2000, 1, 1)), today).unwrap();
-        assert_eq!(start, backfill_min_date());
+        assert_eq!(start, backfill_min_date(today));
+        assert_eq!(start, d(2025, 5, 16));
     }
 
     // --- derive_archive_base_url ----------------------------------------
