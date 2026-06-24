@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.40.1] - 2026-06-24
+
+### Fixed
+
+- **Test suite no longer fails lint.** A leftover unused type import in the cost chart unit tests was tripping the CI lint check; removing it gets the v0.40.0 release green again. No user-facing change.
+
 ## [0.40.0] - 2026-06-24
 
 ### Added
