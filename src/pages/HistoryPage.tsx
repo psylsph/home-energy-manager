@@ -650,29 +650,10 @@ export default function HistoryPage() {
       .then((result) => {
         if (!cancelled) {
           const cleaned: Record<string, TimePoint[]> = {};
-          // Convert UTC timestamps from the backend to local time so the
-          // chart's X-axis (which uses local-time domain boundaries) aligns
-          // correctly. The inverter's today_*_kwh counters reset at UTC
-          // midnight; without this shift the reset appears 1 hour late in
-          // timezones east of UTC (e.g. 01:00 in BST).
-          //
-          // `getTimezoneOffset()` returns minutes to *add* to local time to
-          // get UTC (negative for zones east of UTC), so adding it to a UTC
-          // timestamp gives the equivalent local-time epoch ms.
-          //
-          // The shift also pushes points from 00:00–01:00 local back into
-          // the previous local day (they still carry yesterday's counter
-          // values). Trim those — they're outside the Today window and would
-          // otherwise extend the X-axis to start before midnight.
-          const tzOffsetMs = new Date().getTimezoneOffset() * 60 * 1000;
-          const domainStartMs = xDomain[0];
+          // Timestamps are UTC epoch ms; new Date(t) and the local-time axis
+          // helpers localize them at render, so plot them unchanged.
           for (const [field, pts] of Object.entries(result)) {
-            cleaned[field] = removeSpikes(
-              pts
-                .map((p) => ({ t: p.t + tzOffsetMs, v: p.v }))
-                .filter((p) => p.t >= domainStartMs),
-              field,
-            );
+            cleaned[field] = removeSpikes(pts, field);
           }
           setData(cleaned);
         }
@@ -683,7 +664,7 @@ export default function HistoryPage() {
         }
       })
     return () => { cancelled = true; };
-  }, [tab, range, offset, importTariffCfg, exportTariffCfg, refreshKey, rolling, xDomain]);
+  }, [tab, range, offset, importTariffCfg, exportTariffCfg, refreshKey, rolling]);
 
   const handleTabChange = (t: MetricTab) => {
     setTab(t);
