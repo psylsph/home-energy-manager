@@ -753,10 +753,26 @@ pub async fn update_settings(
         tracing::warn!("Failed to persist settings: {}", e);
         return server_error(&format!("Failed to save settings: {}", e));
     }
-    drop(persist);
+
+    // Build the log/response message before the in-memory state update
+    // (and before `persist` is dropped) so it reflects the values that
+    // were actually written to disk. The previous format hard-coded the
+    // four connection fields, which produced a misleading
+    // `host=, port=0, serial=, interval=0s` line for every non-connection
+    // save (tariffs, read-only API key, panel visibility, etc.).
+    let fields = settings_log_fields(&body, &persist);
+    let msg = if fields.is_empty() {
+        "Settings updated: (no fields in request body)".to_string()
+    } else {
+        format!("Settings updated: {}", fields.join(", "))
+    };
+    tracing::info!("{}", msg);
+    let response = ok_response(&msg);
 
     // Now that disk is updated, apply changes to the in-memory state.
     // Lock is held briefly — no file I/O while holding it.
+    drop(persist);
+
     let mut settings = state.settings.lock().await;
 
     let prev_host = settings.host.clone();
@@ -798,13 +814,105 @@ pub async fn update_settings(
 
     drop(settings);
 
-    let msg = format!(
-        "Settings updated: host={}, port={}, serial={}, interval={}s",
-        incoming.host, incoming.port, incoming.serial, incoming.interval_secs,
-    );
+    response
+}
 
-    tracing::info!("{}", msg);
-    ok_response(&msg)
+/// Build a list of `key=value` strings for the fields that were actually
+/// present in the request body, using the **persisted** values from
+/// `persist` (so the log reflects what was just written to disk, not
+/// the raw request body).
+///
+/// The previous hard-coded log always printed host/port/serial/interval_secs
+/// with empty defaults when those fields weren't in the body, which made
+/// every non-connection save (tariffs, read-only API key, panel visibility,
+/// etc.) look like an empty connection update.
+///
+/// The read-only API key is **redacted** — its plaintext value never
+/// appears in the log, only whether it was set/cleared and its length.
+/// This prevents secrets from being captured in log files sent via the
+/// in-app support bundle feature.
+fn settings_log_fields(
+    body: &serde_json::Value,
+    persist: &crate::settings::Settings,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let is_present = |key: &str| body.get(key).is_some();
+
+    if is_present("host") {
+        out.push(format!("host={}", persist.host));
+    }
+    if is_present("port") {
+        out.push(format!("port={}", persist.port));
+    }
+    if is_present("serial") {
+        out.push(format!("serial={}", persist.serial));
+    }
+    if is_present("interval_secs") {
+        out.push(format!("interval={}s", persist.poll_interval));
+    }
+    if is_present("import_tariff") {
+        out.push(format!("import_tariff={}", persist.import_tariff));
+    }
+    if is_present("export_tariff") {
+        out.push(format!("export_tariff={}", persist.export_tariff));
+    }
+    if is_present("import_tariff_config") {
+        let slots = persist
+            .import_tariff_config
+            .as_ref()
+            .map(|c| c.slots.len())
+            .unwrap_or(0);
+        out.push(format!("import_tariff_config={} slots", slots));
+    }
+    if is_present("export_tariff_config") {
+        let slots = persist
+            .export_tariff_config
+            .as_ref()
+            .map(|c| c.slots.len())
+            .unwrap_or(0);
+        out.push(format!("export_tariff_config={} slots", slots));
+    }
+    if is_present("http_port") {
+        out.push(format!("http_port={}", persist.http_port));
+    }
+    if is_present("hidden_panels") {
+        out.push(format!("hidden_panels={} entries", persist.hidden_panels.len()));
+    }
+    if is_present("evc_host") {
+        out.push(format!("evc_host={}", persist.evc_host));
+    }
+    if is_present("evc_port") {
+        out.push(format!("evc_port={}", persist.evc_port));
+    }
+    if is_present("disable_auto_discovery") {
+        out.push(format!(
+            "disable_auto_discovery={}",
+            persist.disable_auto_discovery
+        ));
+    }
+    if is_present("minimal_telemetry_mode") {
+        out.push(format!(
+            "minimal_telemetry_mode={}",
+            persist.minimal_telemetry_mode
+        ));
+    }
+    if is_present("autostart_enabled") {
+        out.push(format!("autostart_enabled={}", persist.autostart_enabled));
+    }
+    if is_present("api_key") {
+        // Redact the key value — never log the plaintext. The length
+        // gives the user enough information to verify they pasted
+        // the right key without leaking it into log files.
+        if persist.api_key.is_empty() {
+            out.push("api_key=cleared".to_string());
+        } else {
+            out.push(format!("api_key=set ({} chars)", persist.api_key.len()));
+        }
+    }
+    if is_present("api_port") {
+        out.push(format!("api_port={}", persist.api_port));
+    }
+    out
 }
 
 fn parse_settings(body: &serde_json::Value) -> Result<PollSettings, String> {
@@ -5583,6 +5691,564 @@ mod tests {
             assert_eq!(
                 saved.api_port, 7338,
                 "api_port should not be affected when clearing api_key"
+            );
+        })
+        .await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Log-message format for POST /api/settings
+    //
+    // The previous hard-coded log always printed host/port/serial/interval_secs
+    // with empty defaults when those fields weren't in the request body, so
+    // every non-connection save (tariffs, read-only API key, panel visibility,
+    // etc.) produced the misleading line
+    //     Settings updated: host=, port=0, serial=, interval=0s
+    // regardless of what the user actually changed. These tests pin the
+    // field-aware format and the api_key redaction, and verify the values
+    // match what was actually written to settings.json on disk.
+    // -----------------------------------------------------------------------
+
+    /// Extract the `message` field from the JSON response. The handler
+    /// reuses the same string for both the response body and the log line,
+    /// so this also reflects the log content for non-tracing assertions.
+    fn response_message(json: &serde_json::Value) -> String {
+        json.get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    #[test]
+    fn settings_log_fields_lists_only_fields_present_in_body() {
+        use crate::settings::Settings;
+
+        // A body that only carries the read-only API key and port (the
+        // exact scenario that triggered the bug report). The log should
+        // mention only those two fields, NOT the four connection fields
+        // as empty defaults.
+        let body = serde_json::json!({
+            "api_key": "secret-token-1234",
+            "api_port": 7338,
+        });
+        let persist = Settings {
+            api_key: "secret-token-1234".to_string(),
+            api_port: 7338,
+            ..Default::default()
+        };
+
+        let fields = settings_log_fields(&body, &persist);
+        let joined = fields.join(", ");
+
+        assert_eq!(fields.len(), 2, "only the two fields in the body should appear, got: {joined}");
+        assert!(joined.contains("api_key="), "expected api_key entry, got: {joined}");
+        assert!(joined.contains("api_port=7338"), "expected api_port entry, got: {joined}");
+        // The bug was: these connection fields appeared as empty/0 in the
+        // log even when the body didn't carry them. They must NOT appear.
+        // Use precise matches to avoid false positives from `api_port=`
+        // (which contains the substring `port=`).
+        assert!(!joined.contains("host="), "host must not appear when absent from body, got: {joined}");
+        assert!(
+            !joined.split(',').any(|s| s.trim_start().starts_with("port=")),
+            "port must not appear when absent from body, got: {joined}"
+        );
+        assert!(!joined.contains("serial="), "serial must not appear when absent from body, got: {joined}");
+        assert!(!joined.contains("interval="), "interval must not appear when absent from body, got: {joined}");
+    }
+
+    #[test]
+    fn settings_log_fields_redacts_api_key_plaintext() {
+        use crate::settings::Settings;
+
+        let body = serde_json::json!({ "api_key": "supersecretvalue" });
+        let persist = Settings {
+            api_key: "supersecretvalue".to_string(),
+            ..Default::default()
+        };
+
+        let fields = settings_log_fields(&body, &persist);
+        let joined = fields.join(", ");
+
+        assert!(
+            !joined.contains("supersecretvalue"),
+            "api_key plaintext must NEVER appear in the log (security: log files can be exfiltrated via the support bundle), got: {joined}"
+        );
+        assert!(joined.contains("api_key=set"), "expected redacted set marker, got: {joined}");
+        assert!(joined.contains("16 chars"), "expected length hint so the user can verify the key, got: {joined}");
+    }
+
+    #[test]
+    fn settings_log_fields_reports_api_key_cleared_when_empty() {
+        use crate::settings::Settings;
+
+        let body = serde_json::json!({ "api_key": "" });
+        let persist = Settings {
+            api_key: String::new(),
+            ..Default::default()
+        };
+
+        let fields = settings_log_fields(&body, &persist);
+        let joined = fields.join(", ");
+
+        assert!(joined.contains("api_key=cleared"), "empty api_key should be reported as cleared, got: {joined}");
+    }
+
+    #[test]
+    fn settings_log_fields_uses_persisted_values_not_incoming() {
+        use crate::settings::Settings;
+
+        // Simulate: disk already has interval=30, body sends only host
+        // and port. The log must show the *persisted* interval (30s, from
+        // disk), not 0 from a missing body field. This is the exact
+        // scenario the user reported — "interval was saved as 30s but
+        // the log said interval=0s".
+        let body = serde_json::json!({ "host": "10.0.0.50", "port": 8899 });
+        let persist = Settings {
+            host: "10.0.0.50".to_string(),
+            port: 8899,
+            poll_interval: 30, // already on disk from a previous save
+            ..Default::default()
+        };
+
+        let fields = settings_log_fields(&body, &persist);
+        let joined = fields.join(", ");
+
+        // host and port are present, so they should appear.
+        assert!(joined.contains("host=10.0.0.50"), "got: {joined}");
+        assert!(joined.contains("port=8899"), "got: {joined}");
+        // interval_secs was NOT in the body, so it must not be logged
+        // (otherwise we'd be back to the misleading default-zeros case).
+        assert!(
+            !joined.contains("interval="),
+            "interval must not be reported when absent from the body, got: {joined}"
+        );
+    }
+
+    #[test]
+    fn settings_log_fields_summarises_complex_fields() {
+        use crate::settings::{Settings, TariffConfig, TariffSlot};
+
+        let body = serde_json::json!({
+            "import_tariff_config": { "slots": [] },
+            "export_tariff_config": { "slots": [] },
+            "hidden_panels": ["a", "b", "c"],
+        });
+        let persist = Settings {
+            import_tariff_config: Some(TariffConfig {
+                slots: vec![
+                    TariffSlot { start: "00:00".into(), end: "07:00".into(), rate: 0.10 },
+                    TariffSlot { start: "07:00".into(), end: "23:59".into(), rate: 0.30 },
+                ],
+            }),
+            export_tariff_config: Some(TariffConfig {
+                slots: (0..24).map(|i| TariffSlot {
+                    start: format!("{i:02}:00"),
+                    end: format!("{:02}:00", (i + 1) % 24),
+                    rate: 0.20,
+                }).collect(),
+            }),
+            hidden_panels: vec!["x".into(), "y".into(), "z".into()],
+            ..Default::default()
+        };
+
+        let fields = settings_log_fields(&body, &persist);
+        let joined = fields.join(", ");
+
+        assert!(joined.contains("import_tariff_config=2 slots"), "got: {joined}");
+        assert!(joined.contains("export_tariff_config=24 slots"), "got: {joined}");
+        assert!(joined.contains("hidden_panels=3 entries"), "got: {joined}");
+        // Don't dump the full JSON.
+        assert!(!joined.contains("rate"), "tariff slot details must not be logged, got: {joined}");
+    }
+
+    #[test]
+    fn settings_log_fields_empty_body_returns_empty() {
+        use crate::settings::Settings;
+
+        let body = serde_json::json!({});
+        let persist = Settings::default();
+
+        let fields = settings_log_fields(&body, &persist);
+        assert!(
+            fields.is_empty(),
+            "empty body should produce no log fields, got: {fields:?}"
+        );
+    }
+
+    // -- End-to-end handler tests: log format + on-disk persistence --
+
+    /// Saving the read-only API key + port must (a) log the new values
+    /// (with the key redacted) and (b) persist them to settings.json.
+    /// This is the exact scenario from the bug report.
+    #[tokio::test]
+    async fn update_settings_api_key_save_logs_and_persists_both_fields() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "api_key": "my-secret-token-12345",
+                "api_port": 8443,
+            });
+
+            let (status, json) =
+                update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let msg = response_message(&json);
+
+            // (a) The response/log message must show both fields, with
+            // the key redacted.
+            assert!(
+                msg.contains("api_key=set"),
+                "api_key must appear as redacted 'set', got: {msg}"
+            );
+            assert!(
+                msg.contains("21 chars"),
+                "api_key length must appear so the user can verify the key, got: {msg}"
+            );
+            assert!(
+                !msg.contains("my-secret-token-12345"),
+                "api_key plaintext must NEVER appear in the log, got: {msg}"
+            );
+            assert!(
+                msg.contains("api_port=8443"),
+                "api_port must appear in the log, got: {msg}"
+            );
+            // (b) The connection fields must NOT appear in the log even
+            // though the old format always printed them as 0/empty. Use
+            // precise token-prefix matches so we don't false-positive on
+            // `api_port=`, `http_port=`, `evc_port=` etc.
+            assert!(
+                !msg.split(',').any(|s| s.trim_start().starts_with("host=")),
+                "host must not appear when absent, got: {msg}"
+            );
+            assert!(
+                !msg.split(',').any(|s| s.trim_start().starts_with("port=")),
+                "port must not appear when absent, got: {msg}"
+            );
+            assert!(
+                !msg.split(',').any(|s| s.trim_start().starts_with("serial=")),
+                "serial must not appear when absent, got: {msg}"
+            );
+            assert!(
+                !msg.split(',').any(|s| s.trim_start().starts_with("interval=")),
+                "interval must not appear when absent, got: {msg}"
+            );
+
+            // (c) The values must be on disk for the next launch.
+            let saved = crate::settings::Settings::load();
+            assert_eq!(saved.api_key, "my-secret-token-12345", "api_key must be persisted");
+            assert_eq!(saved.api_port, 8443, "api_port must be persisted");
+        })
+        .await;
+    }
+
+    /// Clearing the read-only API key (sending "") must log it as
+    /// "cleared" (never the empty string itself, never a stray value)
+    /// and persist the cleared state.
+    #[tokio::test]
+    async fn update_settings_clear_api_key_logs_cleared_and_persists_empty() {
+        with_isolated_config_dir_async(|| async {
+            // Seed an existing key.
+            let mut seed = crate::settings::Settings::load();
+            seed.api_key = "old-key".to_string();
+            seed.api_port = 7338;
+            seed.save().expect("seed save");
+
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({ "api_key": "" });
+
+            let (status, json) =
+                update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let msg = response_message(&json);
+
+            assert!(
+                msg.contains("api_key=cleared"),
+                "empty key must be reported as cleared, got: {msg}"
+            );
+            // Persisted state is empty, port preserved.
+            let saved = crate::settings::Settings::load();
+            assert_eq!(saved.api_key, "", "api_key must be cleared on disk");
+            assert_eq!(saved.api_port, 7338, "api_port must be preserved when only key was sent");
+        })
+        .await;
+    }
+
+    /// Saving a tariff config must log the slot count (not the raw JSON)
+    /// and persist the parsed config to disk.
+    #[tokio::test]
+    async fn update_settings_tariff_save_logs_slot_count_and_persists_config() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "import_tariff_config": {
+                    "slots": [
+                        { "start": "00:00", "end": "07:00", "rate": 0.10 },
+                        { "start": "07:00", "end": "23:59", "rate": 0.30 },
+                    ],
+                },
+            });
+
+            let (status, json) =
+                update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let msg = response_message(&json);
+
+            assert!(
+                msg.contains("import_tariff_config=2 slots"),
+                "tariff config must be summarised by slot count, got: {msg}"
+            );
+            // Connection fields must not pollute a tariff-save log.
+            assert!(
+                !msg.split(',').any(|s| s.trim_start().starts_with("host=")),
+                "got: {msg}"
+            );
+            assert!(
+                !msg.split(',').any(|s| s.trim_start().starts_with("port=")),
+                "got: {msg}"
+            );
+            assert!(
+                !msg.split(',').any(|s| s.trim_start().starts_with("interval=")),
+                "got: {msg}"
+            );
+
+            // Persisted: the parsed config is on disk and intact.
+            let saved = crate::settings::Settings::load();
+            let cfg = saved
+                .import_tariff_config
+                .as_ref()
+                .expect("import_tariff_config must be persisted");
+            assert_eq!(cfg.slots.len(), 2);
+            assert_eq!(cfg.slots[0].start, "00:00");
+            assert_eq!(cfg.slots[0].end, "07:00");
+            assert!((cfg.slots[0].rate - 0.10).abs() < 1e-9);
+            assert_eq!(cfg.slots[1].start, "07:00");
+            assert_eq!(cfg.slots[1].end, "23:59");
+            assert!((cfg.slots[1].rate - 0.30).abs() < 1e-9);
+        })
+        .await;
+    }
+
+    /// Saving a connection (host/port/serial) must log exactly those
+    /// three fields, the interval that was already on disk must NOT
+    /// appear in the log (the user's complaint was the opposite), and
+    /// the persisted interval on disk must be unchanged.
+    #[tokio::test]
+    async fn update_settings_connection_save_logs_only_three_fields_and_preserves_disk_interval() {
+        with_isolated_config_dir_async(|| async {
+            // Seed the disk with a known interval (30s) BEFORE the save.
+            let mut seed = crate::settings::Settings::load();
+            seed.poll_interval = 30;
+            seed.host = "old-host".to_string();
+            seed.save().expect("seed save");
+
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "host": "10.0.0.99",
+                "port": 8899,
+                "serial": "SN-NEW",
+            });
+
+            let (status, json) =
+                update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let msg = response_message(&json);
+
+            // (a) The log must show exactly the three connection fields
+            // that were in the body.
+            assert!(msg.contains("host=10.0.0.99"), "got: {msg}");
+            assert!(msg.contains("port=8899"), "got: {msg}");
+            assert!(msg.contains("serial=SN-NEW"), "got: {msg}");
+            // (b) The interval was NOT in the body, so it must not appear.
+            // Previously the log would have said "interval=0s" here,
+            // which was the misleading behaviour.
+            assert!(!msg.contains("interval="), "interval must not appear when absent from body, got: {msg}");
+            // (c) And the disk value must still be 30s — the connection
+            // save did not clobber it.
+            let saved = crate::settings::Settings::load();
+            assert_eq!(saved.poll_interval, 30, "interval on disk must be unchanged");
+            assert_eq!(saved.host, "10.0.0.99", "new host must be persisted");
+            assert_eq!(saved.port, 8899, "new port must be persisted");
+            assert_eq!(saved.serial, "SN-NEW", "new serial must be persisted");
+        })
+        .await;
+    }
+
+    /// Saving the poll interval alone must log exactly the new interval
+    /// and persist it. Previously the log would also show
+    /// `host=, port=0, serial=` which was misleading.
+    #[tokio::test]
+    async fn update_settings_interval_save_logs_only_interval_and_persists_new_value() {
+        with_isolated_config_dir_async(|| async {
+            // Seed a non-default interval on disk first.
+            let mut seed = crate::settings::Settings::load();
+            seed.poll_interval = 60;
+            seed.save().expect("seed save");
+
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({ "interval_secs": 30 });
+
+            let (status, json) =
+                update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let msg = response_message(&json);
+
+            assert!(msg.contains("interval=30s"), "new interval must appear, got: {msg}");
+            // The four connection fields are not in the body, so none
+            // should appear — previously all four would show as empty/0.
+            assert!(!msg.contains("host="), "got: {msg}");
+            assert!(!msg.contains("port="), "got: {msg}");
+            assert!(!msg.contains("serial="), "got: {msg}");
+
+            let saved = crate::settings::Settings::load();
+            assert_eq!(saved.poll_interval, 30, "interval must be persisted to disk");
+        })
+        .await;
+    }
+
+    /// Multi-field save (e.g. EV charger host + port) must log exactly
+    /// the fields in the body and persist both to disk.
+    #[tokio::test]
+    async fn update_settings_evc_save_logs_both_fields_and_persists_both() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "evc_host": "ev-charger.local",
+                "evc_port": 5020,
+            });
+
+            let (status, json) =
+                update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let msg = response_message(&json);
+
+            assert!(msg.contains("evc_host=ev-charger.local"), "got: {msg}");
+            assert!(msg.contains("evc_port=5020"), "got: {msg}");
+            // The bare `host=`/`port=` connection fields must not appear;
+            // `evc_host=` / `evc_port=` are fine. Use precise token-prefix
+            // matching to avoid the substring overlap.
+            assert!(
+                !msg.split(',').any(|s| {
+                    let t = s.trim_start();
+                    t.starts_with("host=") || t.starts_with("port=")
+                }),
+                "bare host/port (no evc_ prefix) must not appear, got: {msg}"
+            );
+
+            let saved = crate::settings::Settings::load();
+            assert_eq!(saved.evc_host, "ev-charger.local");
+            assert_eq!(saved.evc_port, 5020);
+        })
+        .await;
+    }
+
+    /// Hidden-panels save must log the entry count and persist the list.
+    /// (Logging the full panel list would spam the log every save.)
+    #[tokio::test]
+    async fn update_settings_hidden_panels_save_logs_count_and_persists_list() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "hidden_panels": ["battery", "history", "inverter"],
+            });
+
+            let (status, json) =
+                update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let msg = response_message(&json);
+
+            assert!(msg.contains("hidden_panels=3 entries"), "got: {msg}");
+            // Don't dump the full list into the log.
+            assert!(!msg.contains("battery"), "panel names must not be logged, got: {msg}");
+
+            let saved = crate::settings::Settings::load();
+            assert_eq!(saved.hidden_panels, vec!["battery", "history", "inverter"]);
+        })
+        .await;
+    }
+
+    /// Toggles (autostart, auto-discovery, minimal telemetry) must log
+    /// the new value (true/false) and persist it. Previously a toggle
+    /// save would produce `host=, port=0, serial=, interval=0s` which
+    /// made it look like the connection was wiped.
+    #[tokio::test]
+    async fn update_settings_toggles_log_new_value_and_persist() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            for (field, value, expected_log, expected_disk) in [
+                ("autostart_enabled", json!(true), "autostart_enabled=true", true),
+                ("autostart_enabled", json!(false), "autostart_enabled=false", false),
+                ("disable_auto_discovery", json!(true), "disable_auto_discovery=true", true),
+                ("disable_auto_discovery", json!(false), "disable_auto_discovery=false", false),
+                ("minimal_telemetry_mode", json!(true), "minimal_telemetry_mode=true", true),
+            ] {
+                let body = serde_json::json!({ field: value });
+                let (status, json) = update_settings(State(state.clone()), Json(body)).await;
+                assert_eq!(status, StatusCode::OK);
+                let msg = response_message(&json);
+                assert!(
+                    msg.contains(expected_log),
+                    "expected `{expected_log}` in log for field {field}, got: {msg}"
+                );
+                // The misleading connection defaults must not appear.
+                assert!(!msg.contains("host="), "got: {msg}");
+                assert!(!msg.contains("interval="), "got: {msg}");
+                // Disk value must match.
+                let saved = crate::settings::Settings::load();
+                let actual = match field {
+                    "autostart_enabled" => saved.autostart_enabled,
+                    "disable_auto_discovery" => saved.disable_auto_discovery,
+                    "minimal_telemetry_mode" => saved.minimal_telemetry_mode,
+                    _ => unreachable!(),
+                };
+                assert_eq!(actual, expected_disk, "{field} must be persisted");
+            }
+        })
+        .await;
+    }
+
+    /// Save the HTTP port — must appear in the log and be persisted.
+    /// Previously this would also produce a misleading
+    /// `host=, port=0, serial=, interval=0s` line.
+    #[tokio::test]
+    async fn update_settings_http_port_save_logs_and_persists() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({ "http_port": 8080 });
+            let (status, json) = update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let msg = response_message(&json);
+            assert!(msg.contains("http_port=8080"), "got: {msg}");
+            // Use precise token-prefix matching to avoid the `port=` substring
+            // matching `http_port=`.
+            assert!(
+                !msg.split(',').any(|s| {
+                    let t = s.trim_start();
+                    t.starts_with("host=") || t.starts_with("port=")
+                }),
+                "bare host/port (no http_ prefix) must not appear, got: {msg}"
+            );
+
+            let saved = crate::settings::Settings::load();
+            assert_eq!(saved.http_port, 8080, "http_port must be persisted");
+        })
+        .await;
+    }
+
+    /// Empty body — log should explicitly say "no fields in request body"
+    /// and the disk save should still run (auto_connect is set
+    /// unconditionally — covered here as a known side effect, not a
+    /// behavioural change).
+    #[tokio::test]
+    async fn update_settings_empty_body_log_says_no_fields_and_disk_save_runs() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({});
+            let (status, json) = update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let msg = response_message(&json);
+            assert!(
+                msg.contains("no fields"),
+                "empty body should produce a 'no fields' marker, got: {msg}"
             );
         })
         .await;
