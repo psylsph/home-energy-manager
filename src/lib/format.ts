@@ -43,6 +43,23 @@ export function formatCurrent(a: number): string {
 }
 
 /**
+ * Format a power value for the energy flow diagram, clamping sub-threshold
+ * readings to zero so tiny flows don't produce visual noise.
+ *
+ * When `Math.abs(watts) < threshold`, returns `"0W"` regardless of the
+ * actual value. Otherwise delegates to [`formatPower`].
+ *
+ * @example
+ *   formatVisualPower(5, 20)   // "0W"
+ *   formatVisualPower(20, 20)  // "20W"
+ *   formatVisualPower(1500, 20) // "1.5kW"
+ */
+export function formatVisualPower(watts: number, threshold: number): string {
+  if (Math.abs(watts) < threshold) return '0W';
+  return formatPower(watts);
+}
+
+/**
  * Render a lifetime operating-hours figure as a human-friendly age.
  *
  * Examples:
@@ -99,6 +116,19 @@ export function formatOperatingHours(hours: number): string {
  *   formatBatteryMode('foo_bar_baz')    -> 'FooBarBaz'   (forward-compat)
  *   formatBatteryMode(undefined)        -> '—'
  */
+/**
+ * Format an epoch-millis timestamp to a locale time string (HH:MM:SS).
+ * Returns '—' for falsy / non-finite values.
+ */
+export function formatTimestamp(epochMs: number | null | undefined): string {
+  if (epochMs == null || !Number.isFinite(epochMs)) return '—';
+  return new Date(epochMs).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
 export function formatBatteryMode(mode: string | undefined | null): string {
   if (!mode) return '—';
   const parts = mode.split('_').filter(Boolean);

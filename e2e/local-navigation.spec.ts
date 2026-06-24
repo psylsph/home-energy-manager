@@ -53,14 +53,14 @@ test.describe('Navigation', () => {
 test.describe('Connection Indicator', () => {
   test('should show connected state in header', async ({ page }) => {
     await page.goto('/');
-    await expect(page.getByText('Connected').first()).toBeVisible({ timeout: 15_000 });
+    // The green dot + IP address signals connected state
+    await expect(page.locator('text=127.0.0.1').first()).toBeVisible({ timeout: 15_000 });
   });
 
-  test('should show connected host', async ({ page }) => {
+  test('should show last updated time in header', async ({ page }) => {
     await page.goto('/');
-    // The ConnectionIndicator in the header renders `Connected · <host>`
-    // when connected, so look for "Connected" and the IP suffix together.
-    await expect(page.getByText(/Connected · 127\.0\.0\.1/, { exact: false })).toBeVisible({ timeout: 15_000 });
+    // The header shows the IP address followed by · HH:MM:SS
+    await expect(page.getByText(/127\.0\.0\.1.*\d{1,2}:\d{2}:\d{2}/)).toBeVisible({ timeout: 15_000 });
   });
 
   test('API status endpoint returns connected', async ({ baseUrl }) => {
