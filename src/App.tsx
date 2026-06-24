@@ -1,11 +1,11 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import MetersPage from './pages/MetersPage';
 import { HashRouter, Routes, Route, NavLink, Navigate, useSearchParams } from 'react-router-dom';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useGridOutageNotifications } from './hooks/useGridOutageNotifications';
 import type { PollSettings } from './lib/types';
 import { apiGet } from './lib/api';
-import { formatPercent } from './lib/format';
+import { formatPercent, formatTimestamp } from './lib/format';
 import { gridFaultReason, gridFaultTitle, hasGridFault } from './lib/gridFault';
 import { useInverterStore } from './store/useInverterStore';
 import StatusPage from './pages/StatusPage';
@@ -55,18 +55,52 @@ function GridFaultBanner() {
 }
 
 function ConnectionIndicator() {
-  const { connectionState, connectedHost } = useInverterStore();
+  const { connectionState, connectedHost, snapshot } = useInverterStore();
   const colors: Record<string, string> = {
     connected: 'bg-green-500',
     reconnecting: 'bg-yellow-500 animate-pulse',
     disconnected: 'bg-gray-500',
   };
+
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (connectionState !== 'connected') return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [connectionState]);
+
+  const lastUpdatedMs = snapshot?.timestamp != null ? snapshot.timestamp * 1000 : null;
+  const isStale =
+    connectionState === 'connected' &&
+    lastUpdatedMs != null &&
+    now - lastUpdatedMs > 10 * 60 * 1000;
+
   return (
     <div className="flex items-center gap-2 text-text-secondary text-xs">
       <div className={`w-2 h-2 rounded-full ${colors[connectionState] || 'bg-gray-500'}`} />
-      <span className="capitalize">
-        {connectionState === 'connected' ? `Connected${connectedHost ? ` · ${connectedHost}` : ''}` : connectionState}
-      </span>
+      {connectionState === 'connected' ? (
+        <>
+          {connectedHost && (
+            <span className="font-mono">
+              {connectedHost.replace(/:.*$/, '')}
+            </span>
+          )}
+          {lastUpdatedMs != null && (
+            <span
+              className={`font-mono ${
+                isStale
+                  ? 'text-red-400 animate-pulse'
+                  : 'text-text-secondary/60'
+              }`}
+              title={new Date(lastUpdatedMs).toLocaleString()}
+            >
+              &middot; {formatTimestamp(lastUpdatedMs)}
+            </span>
+          )}
+        </>
+      ) : (
+        <span className="capitalize">{connectionState}</span>
+      )}
     </div>
   );
 }
@@ -212,9 +246,9 @@ function Layout() {
   // `?RO`, hide the Control and Settings nav icons so a household-shared
   // dashboard link (e.g. for a partner or kids) can't accidentally toggle
   // settings. The localStorage flag is set immediately, so the link is
-  // sticky in this browser after the first visit — no need to keep the
-  // param in the address bar. Visiting without `?RO` clears the flag so
-  // a normal visit restores the full nav.
+  // sticky in this browser after the first visit — navigating to other
+  // routes within the same session (or reloading) keeps the flag. See the
+  // unit + E2E tests for the sticky-persistence spec.
   //
   // HashRouter reads the path from `window.location.hash` and ignores
   // `window.location.search`, so `?RO` placed before the `#` (the natural
@@ -222,7 +256,13 @@ function Layout() {
   // `useSearchParams`. We check both positions so the feature works
   // regardless of where the param is typed.
   useEffect(() => {
-    setReadOnly(urlHasRO(searchParams));
+    if (urlHasRO(searchParams)) {
+      setReadOnly(true);
+    }
+    // When ?RO is absent, do NOT clear the flag. The store initialises
+    // readOnly from localStorage (see loadReadOnly), so a previously-set
+    // flag persists across navigations and reloads. Clearing here would
+    // make the flag vanish the moment the user navigates to another route.
   }, [searchParams, setReadOnly]);
 
   useEffect(() => {

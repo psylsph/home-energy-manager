@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { formatOperatingHours, formatBatteryMode } from '../../src/lib/format';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { formatOperatingHours, formatBatteryMode, formatVisualPower, formatTimestamp } from '../../src/lib/format';
 
 /**
  * Tests for `formatOperatingHours` — the helper that turns a raw
@@ -170,5 +170,134 @@ describe('formatBatteryMode', () => {
       // missing — same behaviour as undefined.
       expect(formatBatteryMode('___')).toBe('—');
     });
+  });
+});
+
+/**
+ * Tests for `formatVisualPower` — clamps sub-threshold readings to "0W"
+ * for the energy flow diagram, delegates to `formatPower` otherwise.
+ */
+describe('formatVisualPower', () => {
+  describe('below threshold', () => {
+    it('returns "0W" for a value just below the threshold', () => {
+      expect(formatVisualPower(19, 20)).toBe('0W');
+    });
+
+    it('returns "0W" for a tiny positive value', () => {
+      expect(formatVisualPower(5, 20)).toBe('0W');
+    });
+
+    it('returns "0W" for a tiny negative value', () => {
+      expect(formatVisualPower(-5, 20)).toBe('0W');
+    });
+
+    it('returns "0W" for zero', () => {
+      expect(formatVisualPower(0, 20)).toBe('0W');
+    });
+
+    it('returns "0W" for a value just below a non-default threshold', () => {
+      expect(formatVisualPower(49, 50)).toBe('0W');
+    });
+
+    it('returns "0W" when threshold is 0 and value is 0', () => {
+      expect(formatVisualPower(0, 0)).toBe('0W');
+    });
+  });
+
+  describe('at or above threshold', () => {
+    it('returns the formatted value when exactly at the threshold', () => {
+      expect(formatVisualPower(20, 20)).toBe('20W');
+    });
+
+    it('returns the formatted value when above the threshold', () => {
+      expect(formatVisualPower(150, 20)).toBe('150W');
+    });
+
+    it('returns kW format for large values above threshold', () => {
+      expect(formatVisualPower(1500, 20)).toBe('1.5kW');
+    });
+
+    it('returns the formatted negative value when below negative threshold', () => {
+      expect(formatVisualPower(-150, 20)).toBe('-150W');
+    });
+
+    it('returns kW format for negative values above threshold', () => {
+      expect(formatVisualPower(-2500, 20)).toBe('-2.5kW');
+    });
+
+    it('works with a non-default threshold', () => {
+      expect(formatVisualPower(50, 50)).toBe('50W');
+      expect(formatVisualPower(51, 50)).toBe('51W');
+    });
+
+    it('returns the formatted value when threshold is 0', () => {
+      expect(formatVisualPower(1, 0)).toBe('1W');
+      expect(formatVisualPower(1000, 0)).toBe('1.0kW');
+    });
+  });
+
+  describe('edge cases', () => {
+    it('handles NaN threshold gracefully', () => {
+      // NaN < 20 is false, so Math.abs(5) < NaN is false → falls through to formatPower
+      expect(formatVisualPower(5, NaN)).toBe('5W');
+    });
+
+    it('handles negative threshold as zero', () => {
+      // A negative threshold is nonsensical; Math.abs(5) < -10 is false → shows value
+      expect(formatVisualPower(5, -10)).toBe('5W');
+    });
+  });
+});
+
+/**
+ * Tests for `formatTimestamp` — converts an epoch-millis timestamp to a
+ * locale time string (HH:MM:SS), returning '—' for nullish / non-finite
+ * values.
+ */
+describe('formatTimestamp', () => {
+  beforeEach(() => {
+    // Pin the system time so toLocaleTimeString output is deterministic.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-24T14:30:00Z'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('formats a valid epoch-millis timestamp to locale time string', () => {
+    // 2026-06-24T14:30:00Z in epoch ms
+    const result = formatTimestamp(1_771_888_200_000);
+    // The exact string depends on the test runner's timezone.
+    // We just verify it's a non-empty string with colons (time format).
+    expect(result).toMatch(/\d{1,2}:\d{2}:\d{2}/);
+  });
+
+  it('returns em-dash for null', () => {
+    expect(formatTimestamp(null)).toBe('—');
+  });
+
+  it('returns em-dash for undefined', () => {
+    expect(formatTimestamp(undefined)).toBe('—');
+  });
+
+  it('returns em-dash for NaN', () => {
+    expect(formatTimestamp(NaN)).toBe('—');
+  });
+
+  it('returns em-dash for Infinity', () => {
+    expect(formatTimestamp(Infinity)).toBe('—');
+  });
+
+  it('formats negative epoch ms as a valid time string (just before 1970)', () => {
+    // -1000 ms = 1969-12-31T23:59:59.000Z — still a valid time
+    const result = formatTimestamp(-1000);
+    expect(result).toMatch(/\d{1,2}:\d{2}:\d{2}/);
+  });
+
+  it('formats zero epoch as locale time string', () => {
+    // 1970-01-01T00:00:00Z — still a valid time
+    const result = formatTimestamp(0);
+    expect(result).toMatch(/\d{1,2}:\d{2}:\d{2}/);
   });
 });
