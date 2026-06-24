@@ -3263,6 +3263,349 @@ mod tests {
         assert_eq!(snap.discharge_rate, 30);
     }
 
+    /// The All-in-One discharge limit must come from HR 112, not the AC-config
+    /// HR 314 (which reads ~100 on AIO). Mirror of the charge-limit test above.
+    #[test]
+    fn aio_discharge_limit_uses_hr112_not_ac_block_hr314() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x8001;
+
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[111 - 60] = 25;
+        holding_60_data[112 - 60] = 30; // real discharge limit on HR 112
+
+        let mut ac_config = vec![0u16; 60];
+        ac_config[313 - 300] = 100; // stale — must NOT override
+        ac_config[314 - 300] = 100; // stale — must NOT override
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_60_data),
+            make_block(RegisterType::Holding, 300, 60, "holding_300_359", ac_config),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.device_type, DeviceType::AllInOne6kW);
+        assert_eq!(
+            snap.discharge_rate, 30,
+            "AIO discharge limit must come from HR 112, not the AC-config HR 314"
+        );
+        assert_eq!(snap.charge_rate, 25);
+    }
+
+    /// The All-in-One charge slot 2 must come from the extended-block registers
+    /// HR 243/244 (not the classic HR 31/32).
+    #[test]
+    fn aio_charge_slot2_from_extended_block() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x8001;
+
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[94 - 60] = 600;  // slot 1 start 06:00
+        holding_60_data[95 - 60] = 1000; // slot 1 end 10:00
+
+        let mut extended = vec![0u16; 60];
+        extended[243 - 240] = 315;  // slot 2 start 03:15 (extended)
+        extended[244 - 240] = 415; // slot 2 end 04:15 (extended)
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_60_data),
+            make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert!(snap.charge_slots[1].enabled, "AIO charge slot 2 must be enabled");
+        assert_eq!(snap.charge_slots[1].start_hour, 3);
+        assert_eq!(snap.charge_slots[1].start_minute, 15);
+        assert_eq!(snap.charge_slots[1].end_hour, 4);
+        assert_eq!(snap.charge_slots[1].end_minute, 15);
+    }
+
+    /// The All-in-One charge slot 3 must come from the extended-block registers
+    /// HR 246/247.
+    #[test]
+    fn aio_charge_slot3_from_extended_block() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x8001;
+
+        let mut extended = vec![0u16; 60];
+        extended[246 - 240] = 1200; // slot 3 start 12:00
+        extended[247 - 240] = 1400; // slot 3 end 14:00
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", vec![0; 60]),
+            make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert!(snap.charge_slots[2].enabled, "AIO charge slot 3 must be enabled");
+        assert_eq!(snap.charge_slots[2].start_hour, 12);
+        assert_eq!(snap.charge_slots[2].end_hour, 14);
+    }
+
+    /// The extended-block HR 243/244 must override the classic HR 31/32 for
+    /// charge slot 2 on the All-in-One.
+    #[test]
+    fn aio_charge_slot2_extended_overrides_classic() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x8001;
+        holding_data[31] = 100;  // classic slot 2 start 01:00 (should be overridden)
+        holding_data[32] = 200;  // classic slot 2 end 02:00 (should be overridden)
+
+        let mut extended = vec![0u16; 60];
+        extended[243 - 240] = 315;  // extended slot 2 start 03:15 (authoritative)
+        extended[244 - 240] = 415;  // extended slot 2 end 04:15 (authoritative)
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", vec![0; 60]),
+            make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert!(snap.charge_slots[1].enabled);
+        assert_eq!(
+            snap.charge_slots[1].start_hour, 3,
+            "extended block must override classic HR 31/32"
+        );
+        assert_eq!(snap.charge_slots[1].start_minute, 15);
+    }
+
+    /// When the extended-block HR 243/244 are both 0, charge slot 2 must be
+    /// disabled on the All-in-One.
+    #[test]
+    fn aio_charge_slot2_extended_zero_disables() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x8001;
+        holding_data[31] = 100;  // classic has non-zero times
+        holding_data[32] = 200;
+
+        let extended = vec![0u16; 60]; // HR 243/244 = 0,0
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", vec![0; 60]),
+            make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert!(
+            !snap.charge_slots[1].enabled,
+            "AIO charge slot 2 must be disabled when HR 243/244 are 0"
+        );
+    }
+
+    /// The All-in-One charge slot 1 must come from HR 94/95.
+    #[test]
+    fn aio_charge_slot1_from_hr94_95() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x8001;
+
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[94 - 60] = 600;  // slot 1 start 06:00
+        holding_60_data[95 - 60] = 1000; // slot 1 end 10:00
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_60_data),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert!(snap.charge_slots[0].enabled);
+        assert_eq!(snap.charge_slots[0].start_hour, 6);
+        assert_eq!(snap.charge_slots[0].end_hour, 10);
+    }
+
+    /// The All-in-One enable_charge must come from HR 96.
+    #[test]
+    fn aio_enable_charge_from_hr96() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x8001;
+
+        // Test with HR 96 = 1
+        let mut holding_60_data_on = vec![0u16; 60];
+        holding_60_data_on[96 - 60] = 1;
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data.clone()),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_60_data_on),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert!(snap.enable_charge, "AIO enable_charge must be true from HR 96");
+
+        // Test with HR 96 = 0
+        let holding_60_data_off = vec![0u16; 60];
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_60_data_off),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert!(!snap.enable_charge, "AIO enable_charge must be false from HR 96");
+    }
+
+    /// The All-in-One charge_rate must come from HR 111.
+    #[test]
+    fn aio_charge_rate_from_hr111() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x8001;
+
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[111 - 60] = 25;
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_60_data),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.charge_rate, 25, "AIO charge_rate must come from HR 111");
+    }
+
+    /// The All-in-One discharge_rate must come from HR 112.
+    #[test]
+    fn aio_discharge_rate_from_hr112() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x8001;
+
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[112 - 60] = 30;
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_60_data),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.discharge_rate, 30, "AIO discharge_rate must come from HR 112");
+    }
+
+    /// The All-in-One global target SOC must come from HR 116.
+    #[test]
+    fn aio_global_target_soc_from_hr116() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x8001;
+
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[116 - 60] = 80;
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_60_data),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.target_soc, 80, "AIO target_soc must come from HR 116");
+    }
+
+    /// The All-in-One per-slot target SOC for slot 1 must come from HR 242.
+    #[test]
+    fn aio_per_slot_target_soc_from_hr242() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x8001;
+
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[94 - 60] = 600;  // slot 1 enabled
+        holding_60_data[95 - 60] = 1000;
+        holding_60_data[116 - 60] = 80;  // global target
+
+        let mut extended = vec![0u16; 60];
+        extended[242 - 240] = 60; // per-slot target overrides global
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_60_data),
+            make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(
+            snap.charge_slots[0].target_soc, 60,
+            "AIO per-slot target SOC must come from HR 242"
+        );
+    }
+
+    /// The All-in-One export priority must come from HR 311.
+    #[test]
+    fn aio_export_priority_from_hr311() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x8001;
+
+        let mut ac_config = vec![0u16; 60];
+        ac_config[311 - 300] = 1; // export priority = grid first
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", vec![0; 60]),
+            make_block(RegisterType::Holding, 300, 60, "holding_300_359", ac_config),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.ac_export_priority, 1, "AIO export priority must come from HR 311");
+    }
+
+    /// The All-in-One EPS enabled must come from HR 317.
+    #[test]
+    fn aio_eps_enabled_from_hr317() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x8001;
+
+        let mut ac_config = vec![0u16; 60];
+        ac_config[317 - 300] = 1; // EPS enabled
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", vec![0; 60]),
+            make_block(RegisterType::Holding, 300, 60, "holding_300_359", ac_config),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert!(snap.ac_eps_enabled, "AIO EPS must be enabled from HR 317");
+    }
+
+    /// The All-in-One battery pause mode must come from HR 318.
+    #[test]
+    fn aio_pause_mode_from_hr318() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x8001;
+
+        let mut ac_config = vec![0u16; 60];
+        ac_config[318 - 300] = 2; // pause mode = pause slot
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", vec![0; 60]),
+            make_block(RegisterType::Holding, 300, 60, "holding_300_359", ac_config),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.battery_pause_mode, 2, "AIO pause mode must come from HR 318");
+    }
+
+    /// The All-in-One battery pause slot must come from HR 319/320.
+    #[test]
+    fn aio_pause_slot_from_hr319_320() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x8001;
+
+        let mut ac_config = vec![0u16; 60];
+        ac_config[319 - 300] = 2200; // pause slot start 22:00
+        ac_config[320 - 300] = 600;  // pause slot end 06:00
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", vec![0; 60]),
+            make_block(RegisterType::Holding, 300, 60, "holding_300_359", ac_config),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert!(snap.battery_pause_slot.enabled, "AIO pause slot must be enabled");
+        assert_eq!(snap.battery_pause_slot.start_hour, 22);
+        assert_eq!(snap.battery_pause_slot.end_hour, 6);
+    }
+
     /// A raw 0 in the per-slot target SOC register (HR 242/245) means "no
     /// per-slot target set" — the slot must fall back to the global target
     /// (HR 116), not clamp to 4%. Previously the clamp(4,100) turned 0 into 4

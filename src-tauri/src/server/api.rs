@@ -3381,6 +3381,467 @@ mod tests {
         .await;
     }
 
+    /// Enabling EPS on the All-in-One must write HR 317 = 1.
+    #[tokio::test]
+    async fn aio_eps_toggle() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_ENABLE_EPS;
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            let body = serde_json::json!({ "enabled": true });
+            let _ = set_eps(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            let eps = writes
+                .iter()
+                .find(|w| w.address == HR_ENABLE_EPS)
+                .expect("AIO EPS enable must write HR 317");
+            assert_eq!(eps.value, 1, "HR 317 must be 1 on enable");
+        })
+        .await;
+    }
+
+    /// Enabling charge slot 2 on the All-in-One must write the extended-block
+    /// registers HR 243/244 (not the classic HR 31/32).
+    #[tokio::test]
+    async fn aio_charge_slot2_extended_enable() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_CHARGE_SLOT_2_GEN3_END, HR_CHARGE_SLOT_2_GEN3_START, HR_ENABLE_CHARGE,
+                HR_ENABLE_CHARGE_TARGET,
+            };
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            let body = serde_json::json!({
+                "slot": 2,
+                "start_hour": 3, "start_minute": 15,
+                "end_hour": 4, "end_minute": 15,
+                "enabled": true,
+                "target_soc": 100,
+            });
+            let _ = set_charge_slot(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            let start = writes
+                .iter()
+                .find(|w| w.address == HR_CHARGE_SLOT_2_GEN3_START)
+                .expect("AIO charge slot 2 must write HR 243");
+            assert_eq!(start.value, 315, "slot 2 start must be 03:15");
+            let end = writes
+                .iter()
+                .find(|w| w.address == HR_CHARGE_SLOT_2_GEN3_END)
+                .expect("AIO charge slot 2 must write HR 244");
+            assert_eq!(end.value, 415, "slot 2 end must be 04:15");
+            let enable = writes
+                .iter()
+                .find(|w| w.address == HR_ENABLE_CHARGE)
+                .expect("AIO charge slot 2 must set HR 96");
+            assert_eq!(enable.value, 1, "HR 96 must be 1 on enable");
+            let flag = writes
+                .iter()
+                .find(|w| w.address == HR_ENABLE_CHARGE_TARGET)
+                .expect("AIO charge slot 2 must clear HR 20");
+            assert_eq!(flag.value, 0, "HR 20 must be 0 on slot enable");
+        })
+        .await;
+    }
+
+    /// Disabling charge slot 2 on the All-in-One must zero HR 243/244 and clear HR 96.
+    #[tokio::test]
+    async fn aio_charge_slot2_extended_disable() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_CHARGE_SLOT_2_GEN3_END, HR_CHARGE_SLOT_2_GEN3_START, HR_ENABLE_CHARGE,
+            };
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            let body = serde_json::json!({
+                "slot": 2,
+                "start_hour": 3, "start_minute": 15,
+                "end_hour": 4, "end_minute": 15,
+                "enabled": false,
+            });
+            let _ = set_charge_slot(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            let start = writes
+                .iter()
+                .find(|w| w.address == HR_CHARGE_SLOT_2_GEN3_START)
+                .expect("AIO charge slot 2 disable must write HR 243");
+            assert_eq!(start.value, 0, "slot 2 start must be cleared on disable");
+            let end = writes
+                .iter()
+                .find(|w| w.address == HR_CHARGE_SLOT_2_GEN3_END)
+                .expect("AIO charge slot 2 disable must write HR 244");
+            assert_eq!(end.value, 0, "slot 2 end must be cleared on disable");
+            let enable = writes
+                .iter()
+                .find(|w| w.address == HR_ENABLE_CHARGE)
+                .expect("AIO charge slot 2 disable must clear HR 96");
+            assert_eq!(enable.value, 0, "HR 96 must be 0 on disable");
+        })
+        .await;
+    }
+
+    /// Enabling a charge slot with target_soc=100 must NOT write HR 116 (no limit).
+    #[tokio::test]
+    async fn aio_charge_slot_enable_target_soc_100() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC,
+                HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET,
+            };
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            let body = serde_json::json!({
+                "slot": 1,
+                "start_hour": 6, "start_minute": 0,
+                "end_hour": 10, "end_minute": 0,
+                "enabled": true,
+                "target_soc": 100,
+            });
+            let _ = set_charge_slot(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            let start = writes
+                .iter()
+                .find(|w| w.address == HR_CHARGE_SLOT_1_START)
+                .expect("AIO charge slot must write HR 94");
+            assert_eq!(start.value, 600);
+            let end = writes
+                .iter()
+                .find(|w| w.address == HR_CHARGE_SLOT_1_END)
+                .expect("AIO charge slot must write HR 95");
+            assert_eq!(end.value, 1000);
+            let enable = writes
+                .iter()
+                .find(|w| w.address == HR_ENABLE_CHARGE)
+                .expect("AIO charge slot must set HR 96");
+            assert_eq!(enable.value, 1);
+            let flag = writes
+                .iter()
+                .find(|w| w.address == HR_ENABLE_CHARGE_TARGET)
+                .expect("AIO charge slot must clear HR 20");
+            assert_eq!(flag.value, 0);
+            let global = writes.iter().find(|w| w.address == HR_CHARGE_TARGET_SOC);
+            assert!(global.is_none(), "HR 116 must NOT be written when target_soc=100");
+        })
+        .await;
+    }
+
+    /// Enabling charge slot 3 on the All-in-One must write HR 246/247.
+    #[tokio::test]
+    async fn aio_charge_slot3_enable() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_CHARGE_SLOT_3_END, HR_CHARGE_SLOT_3_START, HR_ENABLE_CHARGE,
+            };
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            let body = serde_json::json!({
+                "slot": 3,
+                "start_hour": 12, "start_minute": 0,
+                "end_hour": 14, "end_minute": 0,
+                "enabled": true,
+                "target_soc": 100,
+            });
+            let _ = set_charge_slot(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            let start = writes
+                .iter()
+                .find(|w| w.address == HR_CHARGE_SLOT_3_START)
+                .expect("AIO charge slot 3 must write HR 246");
+            assert_eq!(start.value, 1200);
+            let end = writes
+                .iter()
+                .find(|w| w.address == HR_CHARGE_SLOT_3_END)
+                .expect("AIO charge slot 3 must write HR 247");
+            assert_eq!(end.value, 1400);
+            let enable = writes
+                .iter()
+                .find(|w| w.address == HR_ENABLE_CHARGE)
+                .expect("AIO charge slot 3 must set HR 96");
+            assert_eq!(enable.value, 1);
+        })
+        .await;
+    }
+
+    /// Disabling charge slot 3 on the All-in-One must zero HR 246/247 and clear HR 96.
+    #[tokio::test]
+    async fn aio_charge_slot3_disable() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_CHARGE_SLOT_3_END, HR_CHARGE_SLOT_3_START, HR_ENABLE_CHARGE,
+            };
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            let body = serde_json::json!({
+                "slot": 3,
+                "start_hour": 12, "start_minute": 0,
+                "end_hour": 14, "end_minute": 0,
+                "enabled": false,
+            });
+            let _ = set_charge_slot(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            let start = writes
+                .iter()
+                .find(|w| w.address == HR_CHARGE_SLOT_3_START)
+                .expect("AIO charge slot 3 disable must write HR 246");
+            assert_eq!(start.value, 0, "slot 3 start must be cleared on disable");
+            let end = writes
+                .iter()
+                .find(|w| w.address == HR_CHARGE_SLOT_3_END)
+                .expect("AIO charge slot 3 disable must write HR 247");
+            assert_eq!(end.value, 0, "slot 3 end must be cleared on disable");
+            let enable = writes
+                .iter()
+                .find(|w| w.address == HR_ENABLE_CHARGE)
+                .expect("AIO charge slot 3 disable must clear HR 96");
+            assert_eq!(enable.value, 0, "HR 96 must be 0 on disable");
+        })
+        .await;
+    }
+
+    /// Enabling discharge slot 1 on the All-in-One must write HR 56/57.
+    #[tokio::test]
+    async fn aio_discharge_slot1_enable() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START,
+            };
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            let body = serde_json::json!({
+                "slot": 1,
+                "start_hour": 16, "start_minute": 0,
+                "end_hour": 19, "end_minute": 0,
+                "enabled": true,
+            });
+            let _ = set_discharge_slot(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            let start = writes
+                .iter()
+                .find(|w| w.address == HR_DISCHARGE_SLOT_1_START)
+                .expect("AIO discharge slot 1 must write HR 56");
+            assert_eq!(start.value, 1600);
+            let end = writes
+                .iter()
+                .find(|w| w.address == HR_DISCHARGE_SLOT_1_END)
+                .expect("AIO discharge slot 1 must write HR 57");
+            assert_eq!(end.value, 1900);
+        })
+        .await;
+    }
+
+    /// Disabling discharge slot 1 on the All-in-One must zero HR 56/57.
+    #[tokio::test]
+    async fn aio_discharge_slot1_disable() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START,
+            };
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            let body = serde_json::json!({
+                "slot": 1,
+                "start_hour": 16, "start_minute": 0,
+                "end_hour": 19, "end_minute": 0,
+                "enabled": false,
+            });
+            let _ = set_discharge_slot(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            let start = writes
+                .iter()
+                .find(|w| w.address == HR_DISCHARGE_SLOT_1_START)
+                .expect("AIO discharge slot 1 disable must write HR 56");
+            assert_eq!(start.value, 0, "slot 1 start must be cleared on disable");
+            let end = writes
+                .iter()
+                .find(|w| w.address == HR_DISCHARGE_SLOT_1_END)
+                .expect("AIO discharge slot 1 disable must write HR 57");
+            assert_eq!(end.value, 0, "slot 1 end must be cleared on disable");
+        })
+        .await;
+    }
+
+    /// Invalid slot numbers must be rejected for the All-in-One.
+    #[tokio::test]
+    async fn aio_charge_slot_invalid_slot() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            let body = serde_json::json!({
+                "slot": 0,
+                "start_hour": 6, "start_minute": 0,
+                "end_hour": 10, "end_minute": 0,
+                "enabled": true,
+            });
+            let (status, _) = set_charge_slot(State(state.clone()), Json(body)).await;
+            assert!(!status.is_success(), "slot 0 must be rejected");
+            let body = serde_json::json!({
+                "slot": 11,
+                "start_hour": 6, "start_minute": 0,
+                "end_hour": 10, "end_minute": 0,
+                "enabled": true,
+            });
+            let (status, _) = set_charge_slot(State(state.clone()), Json(body)).await;
+            assert!(!status.is_success(), "slot 11 must be rejected");
+        })
+        .await;
+    }
+
+    /// Invalid times must be rejected for the All-in-One.
+    #[tokio::test]
+    async fn aio_charge_slot_invalid_times() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            let body = serde_json::json!({
+                "slot": 1,
+                "start_hour": 24, "start_minute": 0,
+                "end_hour": 10, "end_minute": 0,
+                "enabled": true,
+            });
+            let (status, _) = set_charge_slot(State(state.clone()), Json(body)).await;
+            assert!(!status.is_success(), "hour 24 must be rejected");
+            let body = serde_json::json!({
+                "slot": 1,
+                "start_hour": 6, "start_minute": 0,
+                "end_hour": 10, "end_minute": 60,
+                "enabled": true,
+            });
+            let (status, _) = set_charge_slot(State(state.clone()), Json(body)).await;
+            assert!(!status.is_success(), "minute 60 must be rejected");
+        })
+        .await;
+    }
+
+    /// Charge limit 0 and 50 must be accepted, 51 must be rejected for AIO.
+    #[tokio::test]
+    async fn aio_charge_limit_0_50_51() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_BATTERY_CHARGE_LIMIT;
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            let body = serde_json::json!({ "limit": 0 });
+            let (status, _) = set_charge_rate(State(state.clone()), Json(body)).await;
+            assert!(status.is_success(), "charge limit 0 must be accepted");
+            let writes = drain_pending_writes(&state).await;
+            assert_eq!(writes[0].address, HR_BATTERY_CHARGE_LIMIT);
+            assert_eq!(writes[0].value, 0);
+            let body = serde_json::json!({ "limit": 50 });
+            let (status, _) = set_charge_rate(State(state.clone()), Json(body)).await;
+            assert!(status.is_success(), "charge limit 50 must be accepted");
+            let writes = drain_pending_writes(&state).await;
+            assert_eq!(writes[0].value, 50);
+            let body = serde_json::json!({ "limit": 51 });
+            let (status, _) = set_charge_rate(State(state.clone()), Json(body)).await;
+            assert!(!status.is_success(), "charge limit 51 must be rejected");
+        })
+        .await;
+    }
+
+    /// Discharge limit 0 and 50 must be accepted, 51 must be rejected for AIO.
+    #[tokio::test]
+    async fn aio_discharge_limit_0_50_51() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_BATTERY_DISCHARGE_LIMIT;
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            let body = serde_json::json!({ "limit": 0 });
+            let (status, _) = set_discharge_rate(State(state.clone()), Json(body)).await;
+            assert!(status.is_success(), "discharge limit 0 must be accepted");
+            let writes = drain_pending_writes(&state).await;
+            assert_eq!(writes[0].address, HR_BATTERY_DISCHARGE_LIMIT);
+            assert_eq!(writes[0].value, 0);
+            let body = serde_json::json!({ "limit": 50 });
+            let (status, _) = set_discharge_rate(State(state.clone()), Json(body)).await;
+            assert!(status.is_success(), "discharge limit 50 must be accepted");
+            let writes = drain_pending_writes(&state).await;
+            assert_eq!(writes[0].value, 50);
+            let body = serde_json::json!({ "limit": 51 });
+            let (status, _) = set_discharge_rate(State(state.clone()), Json(body)).await;
+            assert!(!status.is_success(), "discharge limit 51 must be rejected");
+        })
+        .await;
+    }
+
+    /// Enabling a charge slot with target_soc=4 (minimum) must write HR 116 = 4.
+    #[tokio::test]
+    async fn aio_charge_slot_target_soc_4() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC,
+                HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET,
+            };
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            let body = serde_json::json!({
+                "slot": 1,
+                "start_hour": 6, "start_minute": 0,
+                "end_hour": 10, "end_minute": 0,
+                "enabled": true,
+                "target_soc": 4,
+            });
+            let _ = set_charge_slot(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            let start = writes
+                .iter()
+                .find(|w| w.address == HR_CHARGE_SLOT_1_START)
+                .expect("AIO charge slot must write HR 94");
+            assert_eq!(start.value, 600);
+            let global = writes
+                .iter()
+                .find(|w| w.address == HR_CHARGE_TARGET_SOC)
+                .expect("AIO charge slot with target_soc=4 must write HR 116");
+            assert_eq!(global.value, 4, "HR 116 must be 4");
+            let flag = writes
+                .iter()
+                .find(|w| w.address == HR_ENABLE_CHARGE_TARGET)
+                .expect("AIO charge slot must clear HR 20");
+            assert_eq!(flag.value, 0);
+            let enable = writes
+                .iter()
+                .find(|w| w.address == HR_ENABLE_CHARGE)
+                .expect("AIO charge slot must set HR 96");
+            assert_eq!(enable.value, 1);
+        })
+        .await;
+    }
+
+    /// Enabling a charge slot with target_soc=100 when HR 116 was previously
+    /// set to 80 must NOT overwrite HR 116 (100 = no limit).
+    #[tokio::test]
+    async fn aio_charge_slot_target_soc_100_with_previous_hr116() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC,
+                HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET,
+            };
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            let body = serde_json::json!({
+                "slot": 1,
+                "start_hour": 6, "start_minute": 0,
+                "end_hour": 10, "end_minute": 0,
+                "enabled": true,
+                "target_soc": 100,
+            });
+            let _ = set_charge_slot(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            let start = writes
+                .iter()
+                .find(|w| w.address == HR_CHARGE_SLOT_1_START)
+                .expect("AIO charge slot must write HR 94");
+            assert_eq!(start.value, 600);
+            let global = writes.iter().find(|w| w.address == HR_CHARGE_TARGET_SOC);
+            assert!(global.is_none(), "HR 116 must NOT be written when target_soc=100");
+            let flag = writes
+                .iter()
+                .find(|w| w.address == HR_ENABLE_CHARGE_TARGET)
+                .expect("AIO charge slot must clear HR 20");
+            assert_eq!(flag.value, 0);
+            let enable = writes
+                .iter()
+                .find(|w| w.address == HR_ENABLE_CHARGE)
+                .expect("AIO charge slot must set HR 96");
+            assert_eq!(enable.value, 1);
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn set_eco_mode_only_emits_whitelisted_writes() {
         with_isolated_config_dir_async(|| async {
@@ -3572,6 +4033,10 @@ mod tests {
                 (DeviceType::ACCoupledMk2, HR_AC_BATTERY_CHARGE_LIMIT),
                 (DeviceType::ThreePhase, HR_3PH_BATTERY_CHARGE_LIMIT),
                 (DeviceType::HybridHvGen3, HR_3PH_BATTERY_CHARGE_LIMIT),
+                // All-in-One family uses the DC-hybrid HR 111 (not AC HR 313).
+                (DeviceType::AllInOne6kW, HR_BATTERY_CHARGE_LIMIT),
+                (DeviceType::AllInOne3_6kW, HR_BATTERY_CHARGE_LIMIT),
+                (DeviceType::AllInOne5kW, HR_BATTERY_CHARGE_LIMIT),
             ];
             for (dt, want_reg) in cases {
                 let state = make_state_with_device(dt).await;
@@ -3605,6 +4070,10 @@ mod tests {
                 (DeviceType::ACCoupledMk2, HR_AC_BATTERY_DISCHARGE_LIMIT),
                 (DeviceType::ThreePhase, HR_3PH_BATTERY_DISCHARGE_LIMIT),
                 (DeviceType::AllInOneHybrid, HR_3PH_BATTERY_DISCHARGE_LIMIT),
+                // All-in-One family uses the DC-hybrid HR 112 (not AC HR 314).
+                (DeviceType::AllInOne6kW, HR_BATTERY_DISCHARGE_LIMIT),
+                (DeviceType::AllInOne3_6kW, HR_BATTERY_DISCHARGE_LIMIT),
+                (DeviceType::AllInOne5kW, HR_BATTERY_DISCHARGE_LIMIT),
             ];
             for (dt, want_reg) in cases {
                 let state = make_state_with_device(dt).await;
@@ -3637,6 +4106,12 @@ mod tests {
             let _ = set_reserve(State(state.clone()), Json(json!({ "soc": 20 }))).await;
             let writes = drain_pending_writes(&state).await;
             assert_eq!(writes[0].address, HR_3PH_BATTERY_SOC_RESERVE);
+
+            // All-in-One uses the single-phase path (HR 110).
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            let _ = set_reserve(State(state.clone()), Json(json!({ "soc": 20 }))).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_eq!(writes[0].address, HR_BATTERY_SOC_RESERVE);
         })
         .await;
     }
@@ -3661,6 +4136,16 @@ mod tests {
             assert!(
                 writes.iter().any(|w| w.address == HR_3PH_CHARGE_TARGET_SOC),
                 "three-phase force charge must target HR_3PH_CHARGE_TARGET_SOC"
+            );
+
+            // All-in-One uses the single-phase path (HR 116).
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            let _ = force_charge(State(state.clone()), None).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert!(
+                writes.iter().any(|w| w.address == HR_CHARGE_TARGET_SOC),
+                "AIO force charge must target HR_CHARGE_TARGET_SOC"
             );
         })
         .await;
@@ -3727,6 +4212,18 @@ mod tests {
                     .iter()
                     .any(|w| w.address == HR_3PH_FORCE_DISCHARGE_ENABLE && w.value == 1),
                 "three-phase force discharge must set HR_3PH_FORCE_DISCHARGE_ENABLE=1"
+            );
+
+            // All-in-One uses the single-phase path (HR 59).
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            let _ = force_discharge(State(state.clone()), None).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert!(
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 1),
+                "AIO force discharge must set HR_ENABLE_DISCHARGE=1"
             );
         })
         .await;

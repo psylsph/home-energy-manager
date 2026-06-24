@@ -1284,6 +1284,14 @@ mod tests {
     }
 
     #[test]
+    fn aio_max_battery_power_w() {
+        assert_eq!(DeviceType::AllInOne6kW.max_battery_power_w(), 6000);
+        assert_eq!(DeviceType::AllInOne3_6kW.max_battery_power_w(), 3600);
+        assert_eq!(DeviceType::AllInOne5kW.max_battery_power_w(), 5000);
+        assert_eq!(DeviceType::AllInOneHybrid.max_battery_power_w(), 6000);
+    }
+
+    #[test]
     fn device_type_unknown_fallbacks() {
         let dt = DeviceType::Unknown(0x9999);
         assert_eq!(dt.display_name(), "Unknown");
@@ -1366,6 +1374,16 @@ mod tests {
             assert!(
                 !dt.needs_three_phase_input_blocks(),
                 "{dt:?} must not poll IR1000+"
+            );
+            assert_eq!(
+                dt.max_charge_slots(),
+                10,
+                "{dt:?} should have 10 charge slots"
+            );
+            assert_eq!(
+                dt.max_discharge_slots(),
+                10,
+                "{dt:?} should have 10 discharge slots"
             );
 
             let extras = dt.extra_poll_blocks();
