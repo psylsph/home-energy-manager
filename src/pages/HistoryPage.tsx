@@ -12,6 +12,7 @@ import { fetchHistory, apiGet, isTauri } from '../lib/api';
 import {
   HISTORY_CHART_GRID_PROPS,
   HISTORY_RANGES,
+  rangeToBucketSecs,
   HISTORY_RANGE_MS,
   getHistoryRangeDomain,
   getHistoryXAxisMinTickGap,
@@ -48,13 +49,19 @@ interface TimePoint {
 
 type MetricTab = 'battery' | 'solar' | 'grid' | 'home' | 'cost' | 'temperature';
 
+/** Context handed to a chart's `preprocess` fn. */
+interface PreprocessContext {
+  /** Backend aggregation bucket size (seconds) for the current range. */
+  bucketSecs: number;
+}
+
 interface ChartDef {
   key: string;
   title: string;
   fields: { field: string; color: string; label?: string; transform?: (v: number) => number }[];
   unit: string;
   yDomain?: [number, number];
-  preprocess?: (merged: Record<string, number>[]) => Record<string, number>[];
+  preprocess?: (merged: Record<string, number>[], ctx: PreprocessContext) => Record<string, number>[];
   /** Raw field names needed by `preprocess` that aren't in `fields`. */
   requires?: string[];
 }
@@ -193,8 +200,8 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
             { field: '_export_income', color: '#22C55E', label: 'Export Income' },
           ],
           requires: ['today_import_kwh', 'today_export_kwh'],
-          preprocess: (merged) =>
-            computeCombinedCost(merged, importTariffCfg, exportTariffCfg),
+          preprocess: (merged, ctx) =>
+            computeCombinedCost(merged, importTariffCfg, exportTariffCfg, ctx.bucketSecs),
         },
       ];
   }
@@ -282,7 +289,7 @@ function ChartCard({ chart, data, range, domain, ticks }: {
   });
 
   if (chart.preprocess) {
-    merged = chart.preprocess(merged);
+    merged = chart.preprocess(merged, { bucketSecs: rangeToBucketSecs(range) });
   }
 
   const seriesNames = chart.fields.map((f, i) => {
@@ -467,7 +474,7 @@ function exportCSV(charts: ChartDef[], data: Record<string, TimePoint[]>, range:
       return row;
     });
     for (const c of costCharts) {
-      if (c.preprocess) processed = c.preprocess(rawMerged);
+      if (c.preprocess) processed = c.preprocess(rawMerged, { bucketSecs: rangeToBucketSecs(range) });
     }
   }
 

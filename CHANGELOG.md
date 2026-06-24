@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.40.2] - 2026-06-24
+
+### Fixed
+
+- **History Cost totals no longer shrink as you widen the range.** On the History → Cost tab, the cumulative Import Cost and Export Income figures were being thrown away whenever a single time bucket held more than a fixed amount of energy — and that fixed amount got easier to exceed the wider the range, because a 12-hour bucket naturally holds far more energy than a 30-minute one. The threshold now scales with the bucket size, so the same data adds up to the same £ total whether you're looking at the last week, the last month, or the last six months. See #133.
+
 ## [0.40.1] - 2026-06-24
 
 ### Fixed
