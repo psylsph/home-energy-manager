@@ -144,8 +144,8 @@ test.describe('Status Page - Summary Tiles', () => {
     await page.goto('/');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    // Consumption tile
-    await expect(page.locator('span', { hasText: /^Consumption$/ })).toBeVisible({ timeout: 5_000 });
+    // Consumption tile (label was renamed to "Home Use")
+    await expect(page.locator('span', { hasText: /^Home Use$/ })).toBeVisible({ timeout: 5_000 });
   });
 
   test('should show Import and Export tiles', async ({ page }) => {

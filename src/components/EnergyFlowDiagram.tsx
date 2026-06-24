@@ -1,7 +1,8 @@
 import { memo } from 'react';
 import { useIsMobile } from '../hooks/useIsMobile';
+import { useInverterStore } from '../store/useInverterStore';
 import type { InverterSnapshot } from '../lib/types';
-import { formatPower, formatPercent, formatCurrent, formatTemp, formatVoltage } from '../lib/format';
+import { formatVisualPower, formatPercent, formatCurrent, formatTemp, formatVoltage } from '../lib/format';
 
 interface Props {
   snapshot: InverterSnapshot;
@@ -252,10 +253,13 @@ function FlowNode({ cx, cy, color, label, value, unit, hub, width, height, mobil
 
 function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false, evcConnected = false, showEvc = false }: Props) {
   const mobile = useIsMobile();
+  const noiseThreshold = useInverterStore((st) => st.visualNoiseThreshold);
   const isCharging = s.battery_state === 'charging';
   const isDischarging = s.battery_state === 'discharging';
-  const isExporting = s.grid_power > 0;
-  const isImporting = s.grid_power < 0;
+  const absGrid = Math.abs(s.grid_power);
+  const absBattery = Math.abs(s.battery_power);
+  const isExporting = s.grid_power > noiseThreshold;
+  const isImporting = s.grid_power < -noiseThreshold;
   const chargeSlotActive = (s.charge_slots ?? []).some(slot => {
     if (!slot.enabled) return false;
     const now = new Date();
@@ -277,7 +281,7 @@ function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false
       : curMin >= startMin || curMin < endMin;
   });
 
-  const evcActive = showEvc && evcPower > 0;
+  const evcActive = showEvc && evcPower > noiseThreshold;
 
   const modeLabel = modeDisplayLabel(
     s.battery_mode, s.cosy_active, s.cosy_enabled,
@@ -290,7 +294,7 @@ function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false
       id: 'solar',
       from: NODES.solar,
       to: NODES.inverter,
-      active: s.solar_power > 0,
+      active: s.solar_power > noiseThreshold,
       power: s.solar_power,
       labelSide: 'right',
     },
@@ -299,7 +303,7 @@ function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false
       id: 'home',
       from: NODES.inverter,
       to: NODES.home,
-      active: s.home_power > 0,
+      active: s.home_power > noiseThreshold,
       power: s.home_power,
       labelSide: 'below',
     },
@@ -326,7 +330,7 @@ function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false
       id: 'charge',
       from: NODES.inverter,
       to: NODES.battery,
-      active: isCharging,
+      active: isCharging && absBattery > noiseThreshold,
       power: Math.abs(s.battery_power),
       labelSide: 'right',
     },
@@ -335,7 +339,7 @@ function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false
       id: 'discharge',
       from: NODES.battery,
       to: NODES.inverter,
-      active: isDischarging,
+      active: isDischarging && absBattery > noiseThreshold,
       power: Math.abs(s.battery_power),
       labelSide: 'right',
     },
@@ -376,25 +380,25 @@ function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false
         <FlowNode
           {...NODES.solar}
           mobile={mobile}
-          value={formatPower(s.solar_power)}
+          value={formatVisualPower(s.solar_power, noiseThreshold)}
           unit={s.pv1_voltage > 0 ? `${formatVoltage(s.pv1_voltage)}/${formatCurrent(s.pv1_current + s.pv2_current)}` : formatCurrent(s.pv1_current + s.pv2_current)}
         />
         <FlowNode
           {...NODES.grid}
           mobile={mobile}
-          value={`${isExporting ? '-' : ''}${formatPower(Math.abs(s.grid_power))}`}
+          value={`${isExporting ? '-' : ''}${formatVisualPower(absGrid, noiseThreshold)}`}
           unit={isImporting ? 'Import' : isExporting ? 'Export' : 'Idle'}
         />
         <FlowNode
           {...NODES.home}
           mobile={mobile}
-          value={formatPower(s.home_power)}
+          value={formatVisualPower(s.home_power, noiseThreshold)}
           unit="Consumption"
         />
         <FlowNode
           {...NODES.battery}
           mobile={mobile}
-          value={`${isDischarging ? '-' : ''}${formatPower(Math.abs(s.battery_power))}`}
+          value={`${isDischarging && absBattery > noiseThreshold ? '-' : ''}${formatVisualPower(absBattery, noiseThreshold)}`}
           unit={`${formatPercent(s.soc)} · ${modeLabel}`}
           color={s.soc < 20 ? '#EF4444' : s.soc < 50 ? '#F59E0B' : '#22C55E'}
         />
@@ -424,7 +428,7 @@ function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false
             mobile={mobile}
             width={116}
             height={76}
-            value={formatPower(evcPower)}
+            value={formatVisualPower(evcPower, noiseThreshold)}
             unit={evcCharging ? 'Charging' : evcConnected ? 'Connected' : 'Disconnected'}
           />
         )}

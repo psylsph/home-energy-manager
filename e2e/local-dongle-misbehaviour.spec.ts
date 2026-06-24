@@ -237,7 +237,7 @@ test.describe('Dongle Misbehaviour: DropConnection', () => {
 
     // The backend should be in Reconnecting or Disconnected state
     // (it will keep retrying since the simulator keeps dropping)
-    expect(['reconnecting', 'disconnected']).toContain(data.connection_state);
+    expect(['reconnecting', 'disconnected']).toContain(data.connection);
   });
 });
 
@@ -300,7 +300,7 @@ test.describe('Dongle Misbehaviour: Intermittent', () => {
 
     // With per-block retry, the client should stay Connected even
     // when ~50% of reads return zeros (which cause CRC errors/timeouts).
-    expect(data.connection_state).toBe('connected');
+    expect(data.connection).toBe('connected');
   });
 });
 
@@ -344,7 +344,7 @@ test.describe('Dongle Misbehaviour: EmptyData', () => {
     const data = await resp.json();
     // Empty data is not a connection error — the dongle responds,
     // it just returns zeros. The client should stay connected.
-    expect(data.connection_state).toBe('connected');
+    expect(data.connection).toBe('connected');
   });
 });
 
@@ -397,6 +397,6 @@ test.describe('Dongle Misbehaviour: StaleData', () => {
     const data = await resp.json();
     // Stale data is not a connection error — the dongle responds,
     // it just returns the same values. The client should stay connected.
-    expect(data.connection_state).toBe('connected');
+    expect(data.connection).toBe('connected');
   });
 });

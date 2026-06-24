@@ -44,6 +44,12 @@ interface InverterState {
   connectedSince: number | null;
   /** Consecutive connection failures since last successful connect. */
   connectFailures: number;
+  /**
+   * Noise floor in watts for the energy flow diagram. Flows below this
+   * value are treated as zero — no animated line, no arrow, displayed
+   * value rounds to "0W". Default: 20W.
+   */
+  visualNoiseThreshold: number;
   setSnapshot: (snapshot: InverterSnapshot) => void;
   clearSnapshot: () => void;
   setConnection: (state: ConnectionState, host?: string, connectedSince?: number | null) => void;
@@ -61,6 +67,7 @@ interface InverterState {
   setHiddenPanels: (panels: string[]) => void;
   setEvcHost: (host: string) => void;
   setEvcData: (power: number, charging: boolean, connected?: boolean) => void;
+  setVisualNoiseThreshold: (threshold: number) => void;
 }
 
 function loadDeveloperMode(): boolean {
@@ -145,6 +152,17 @@ function loadPanelGraphsYLock(): boolean {
   }
 }
 
+function loadVisualNoiseThreshold(): number {
+  try {
+    const stored = localStorage.getItem('visualNoiseThreshold');
+    if (stored !== null) {
+      const n = Number(stored);
+      if (Number.isFinite(n) && n >= 0) return n;
+    }
+  } catch { /* ignore */ }
+  return 20;
+}
+
 function loadPendingDischargeSlots(): Record<number, ScheduleSlot> {
   try {
     const stored = localStorage.getItem('pendingDischargeSlots');
@@ -175,6 +193,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   panelGraphsScale: loadPanelGraphsScale(),
   panelGraphsYLock: loadPanelGraphsYLock(),
   panelGraphsYLockMax: 0,
+  visualNoiseThreshold: loadVisualNoiseThreshold(),
   pendingDischargeSlots: loadPendingDischargeSlots(),
   evcHost: '',
   evcPower: 0,
@@ -231,6 +250,12 @@ export const useInverterStore = create<InverterState>((set) => ({
     set({ panelGraphsYLock: enabled, panelGraphsYLockMax: 0 });
   },
   setPanelGraphsYLockMax: (max) => set({ panelGraphsYLockMax: max }),
+  setVisualNoiseThreshold: (threshold) => {
+    try {
+      localStorage.setItem('visualNoiseThreshold', String(threshold));
+    } catch { /* ignore */ }
+    set({ visualNoiseThreshold: threshold });
+  },
   setPendingDischargeSlots: (slots) => {
     savePendingDischargeSlots(slots);
     set({ pendingDischargeSlots: slots });

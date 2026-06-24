@@ -20,7 +20,9 @@ test.describe('History Page - Tab Navigation', () => {
   for (const tab of tabs) {
     test(`should show ${tab} tab`, async ({ page }) => {
       await page.goto('/#/history');
-      await expect(page.locator(`text=${tab}`).first()).toBeVisible({ timeout: 15_000 });
+      // Target the desktop tab button directly — `text=${tab}` also matches
+      // the hidden <option> inside the sm:hidden mobile <select>.
+      await expect(page.getByRole('button', { name: tab, exact: true })).toBeVisible({ timeout: 15_000 });
     });
   }
 

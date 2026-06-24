@@ -32,8 +32,9 @@ import { SeriesLegend } from '../components/SeriesLegend';
 import { useInverterStore } from '../store/useInverterStore';
 import type { SeriesLegendItem } from '../components/SeriesLegend';
 import type { HistoryRange, PollSettings, TariffConfig } from '../lib/types';
-import { rateForTimestamp, defaultTariffConfig, flatTariffConfig } from '../lib/tariff';
+import { defaultTariffConfig, flatTariffConfig } from '../lib/tariff';
 import { computeTempDifferential, computeBatteryExternalDifferential } from '../lib/temperatureChart';
+import { computeCombinedCost } from '../lib/costChart';
 import { openExternal } from '../lib/openExternal';
 
 // ---------------------------------------------------------------------------
@@ -155,22 +156,14 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
     case 'temperature':
       return [
         {
-          key: 'battery-temp',
-          title: 'Battery Temperature',
+          key: 'all-temps',
+          title: 'Temperatures',
           unit: '°C',
-          fields: [{ field: 'battery_temperature', color: '#22C55E' }],
-        },
-        {
-          key: 'inverter-temp',
-          title: 'Inverter Temperature',
-          unit: '°C',
-          fields: [{ field: 'inverter_temperature', color: '#F59E0B' }],
-        },
-        {
-          key: 'external-temp',
-          title: 'Ambient Temperature',
-          unit: '°C',
-          fields: [{ field: 'external_temperature', color: '#38BDF8' }],
+          fields: [
+            { field: 'battery_temperature', color: '#22C55E', label: 'Battery' },
+            { field: 'inverter_temperature', color: '#F59E0B', label: 'Inverter' },
+            { field: 'external_temperature', color: '#38BDF8', label: 'Ambient' },
+          ],
         },
         {
           key: 'temp-differential',
@@ -192,81 +185,16 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
     case 'cost':
       return [
         {
-          key: 'import-cost',
-          title: 'Import Cost (£)',
+          key: 'cost-combined',
+          title: 'Import Cost & Export Income',
           unit: '£',
-          fields: [{ field: '_import_cost', color: '#EF4444' }],
-          requires: ['today_import_kwh'],
-          preprocess: (merged) => {
-            let prev: number | null = null;
-            let acc = 0;
-            return merged.map((row) => {
-              const raw = row.today_import_kwh;
-              let delta = 0;
-              if (raw != null && prev != null) {
-                if (raw >= prev) {
-                  delta = raw - prev;
-                } else if (prev > 5 && raw < 5) {
-                  // Midnight rollover: counter reset to near-zero.
-                  // prev was yesterday's final value (any positive amount),
-                  // raw is today's running total since midnight.
-                  // The delta is just the new day's accumulated import.
-                  delta = raw;
-                }
-                // else: small data glitch (counter dipped slightly),
-                // skip this delta (delta stays 0)
-
-                // Clamp delta to physically plausible maximum.
-                // 2 kWh per bucket is generous: 10 kW sustained for 12 min.
-                // Even for 1-minute buckets this is generous.
-                // This is the last line of defense against corrupted counter
-                // values that slip through the backend sanitizer.
-                if (delta > 2) {
-                  // Spike detected: zero the delta AND don't update prev,
-                  // so the corrupted cumulative value doesn't permanently
-                  // inflate the baseline. The next real reading will produce
-                  // a catch-up delta (capped at 2), then prev re-syncs.
-                  delta = 0;
-                } else {
-                  // Normal delta — advance the baseline.
-                  prev = raw;
-                }
-              } else if (raw != null) {
-                prev = raw;
-              }
-              const rate = rateForTimestamp(importTariffCfg, row.t) ?? importTariffCfg.slots[0]?.rate ?? 0;
-              acc += delta * rate;
-              return { ...row, _import_cost: acc };
-            });
-          },
-        },
-        {
-          key: 'export-income',
-          title: 'Export Income (£)',
-          unit: '£',
-          fields: [{ field: '_export_income', color: '#22C55E' }],
-          requires: ['today_export_kwh'],
-          preprocess: (merged) => {
-            let prev: number | null = null;
-            let acc = 0;
-            return merged.map((row) => {
-              const raw = row.today_export_kwh;
-              let delta = 0;
-              if (raw != null && prev != null) {
-                if (raw >= prev) {
-                  delta = raw - prev;
-                } else if (prev > 5 && raw < 5) {
-                  delta = raw;
-                }
-                // Clamp delta to physically plausible maximum (same as import).
-                if (delta > 2) delta = 0;
-              }
-              if (raw != null) prev = raw;
-              const rate = rateForTimestamp(exportTariffCfg, row.t) ?? exportTariffCfg.slots[0]?.rate ?? 0;
-              acc += delta * rate;
-              return { ...row, _export_income: acc };
-            });
-          },
+          fields: [
+            { field: '_import_cost', color: '#EF4444', label: 'Import Cost' },
+            { field: '_export_income', color: '#22C55E', label: 'Export Income' },
+          ],
+          requires: ['today_import_kwh', 'today_export_kwh'],
+          preprocess: (merged) =>
+            computeCombinedCost(merged, importTariffCfg, exportTariffCfg),
         },
       ];
   }

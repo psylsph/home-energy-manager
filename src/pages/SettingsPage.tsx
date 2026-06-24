@@ -224,6 +224,8 @@ export default function SettingsPage() {
     setPanelGraphsScale,
     panelGraphsYLock,
     setPanelGraphsYLock,
+    visualNoiseThreshold,
+    setVisualNoiseThreshold,
     snapshot,
   } = useInverterStore();
 
@@ -1713,6 +1715,43 @@ export default function SettingsPage() {
               Charts Y-axis locks to a clean ceiling based on the data maximum instead of auto-fitting
             </p>
           )}
+        </div>
+
+        {/* ── Sub-section: Energy Flow Diagram ── */}
+        <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
+          <h3 className="text-text-primary text-sm font-sans font-medium">Energy Flow Diagram</h3>
+          <p className="text-text-secondary text-xs font-sans">
+            Flows below this wattage are treated as zero — no animated line, no arrow, displayed value rounds to 0W.
+            Prevents tiny readings from cluttering the diagram.
+          </p>
+          <div className="flex items-center gap-3">
+            <input
+              type="number"
+              min={0}
+              max={100}
+              step={5}
+              value={visualNoiseThreshold}
+              onChange={(e) => {
+                const v = parseInt(e.target.value, 10);
+                if (!Number.isFinite(v)) return;
+                setVisualNoiseThreshold(Math.max(0, Math.min(100, v)));
+              }}
+              className="w-20 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors text-center"
+            />
+            <span className="text-text-secondary text-sm font-sans">watts</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={5}
+              value={visualNoiseThreshold}
+              onChange={(e) => setVisualNoiseThreshold(Number(e.target.value))}
+              className="w-full"
+            />
+            <span className="text-text-secondary text-xs font-sans w-8 text-right tabular-nums">{visualNoiseThreshold}W</span>
+          </div>
         </div>
       </section>
 
