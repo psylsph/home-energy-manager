@@ -6,7 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
-- **Test suite no longer fails lint.** A leftover unused type import in the cost chart unit tests was tripping the CI lint check; removing it gets the v0.40.0 release green again. No user-facing change.
+- **Test suite no longer fails lint.** A leftover unused type import in the cost chart unit tests was tripping the CI lint check; removing it gets the v0.40.0 release green again.
+
+- **Release builds no longer fail on transient crates.io network blips.** The build workflow now caches Rust dependencies and build artifacts via `Swatinem/rust-cache`, so a single dropped TLS handshake (like the OpenSSL `unexpected eof` that killed the v0.40.0 `tauri-macros` download) won't bring down the whole release — subsequent runs hit the cache instead of re-downloading the registry, and partial builds are preserved on failure so a retry picks up where the last run left off.
 
 ## [0.40.0] - 2026-06-24
 
