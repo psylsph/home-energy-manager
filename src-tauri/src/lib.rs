@@ -7,6 +7,7 @@ pub mod server;
 pub mod settings;
 pub mod support;
 pub mod weather;
+pub mod windows_autostart;
 #[cfg(test)]
 mod test_util;
 
@@ -243,6 +244,7 @@ pub fn run() {
     use tauri::Manager;
 
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![autostart_fallback])
         .setup(|app| {
             // Set up tracing with log capture layer for developer console.
             // Shared with `run_headless()` via `init_tracing()` so the tracing
@@ -309,6 +311,10 @@ pub fn run() {
             // update — see tauri-apps/plugins-workspace#771), re-add it
             // now. Failures are non-fatal — the user can re-flip the
             // toggle in Settings. See issue #117.
+            //
+            // On Windows, if the primary registry-based autostart fails
+            // (e.g. restrictive ACLs on the Run key), we fall back to
+            // creating a shortcut in the per-user Startup folder.
             #[cfg(desktop)]
             if autostart_enabled {
                 use tauri_plugin_autostart::ManagerExt;
@@ -320,10 +326,24 @@ pub fn run() {
                             "Autostart preference is enabled but platform entry is missing; re-enabling"
                         );
                         if let Err(e) = manager.enable() {
-                            tracing::warn!("Autostart self-heal failed: {e}");
+                            tracing::warn!("Autostart self-heal via registry failed: {e}");
+                            // Fallback: try the Windows Startup folder.
+                            #[cfg(windows)]
+                            if let Err(fb_err) = crate::windows_autostart::enable() {
+                                tracing::warn!("Autostart self-heal via Startup folder also failed: {fb_err}");
+                            } else {
+                                tracing::info!("Autostart self-heal succeeded via Startup folder shortcut");
+                            }
                         }
                     }
-                    Err(e) => tracing::warn!("Autostart is_enabled() check failed: {e}"),
+                    Err(e) => {
+                        tracing::warn!("Autostart is_enabled() check failed: {e}");
+                        // Also check the Startup folder fallback.
+                        #[cfg(windows)]
+                        if let Ok(true) = crate::windows_autostart::is_enabled() {
+                            tracing::info!("Autostart entry present via Startup folder shortcut");
+                        }
+                    }
                 }
             }
 
@@ -674,6 +694,34 @@ pub fn run_headless(args: &[String]) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Tauri command: autostart fallback via Windows Startup folder
+// ---------------------------------------------------------------------------
+
+/// Tauri command that the frontend calls when the primary
+/// `@tauri-apps/plugin-autostart` `enable()`/`disable()` fails (e.g.
+/// registry ACL error on Windows). Falls back to creating/removing a
+/// shortcut in the per-user Windows Startup folder.
+///
+/// On non-Windows platforms this always returns an error (the primary
+/// plugin should be used instead).
+#[tauri::command]
+fn autostart_fallback(enable: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        if enable {
+            crate::windows_autostart::enable()
+        } else {
+            crate::windows_autostart::disable()
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = enable;
+        Err("Autostart fallback is only supported on Windows".to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1015,5 +1063,41 @@ mod tests {
             positions, sorted,
             "search-order docstring entries must be listed in ascending order"
         );
+    }
+
+    /// On non-Windows, `autostart_fallback` must return an error since the
+    /// Startup folder fallback is Windows-only. On Windows the function
+    /// delegates to `windows_autostart`, which is tested in that module.
+    #[test]
+    fn autostart_fallback_returns_error_on_non_windows() {
+        #[cfg(not(windows))]
+        {
+            let result = super::autostart_fallback(true);
+            assert!(
+                result.is_err(),
+                "autostart_fallback should error on non-Windows: {:?}",
+                result
+            );
+            let err = result.unwrap_err();
+            assert!(
+                err.contains("only supported on Windows"),
+                "error should mention Windows-only: {err}"
+            );
+
+            let result = super::autostart_fallback(false);
+            assert!(
+                result.is_err(),
+                "autostart_fallback(false) should also error on non-Windows: {:?}",
+                result
+            );
+        }
+        // On Windows, the test would create/remove an actual shortcut.
+        // That's covered by the windows_autostart module tests.
+        #[cfg(windows)]
+        {
+            // Just verify the function exists and can be called.
+            let _ = super::autostart_fallback(true);
+            let _ = super::autostart_fallback(false);
+        }
     }
 }
