@@ -683,8 +683,10 @@ export default function SettingsPage() {
   // Flip the platform autostart entry and persist the new preference.
   // We optimistically apply the new value locally so the toggle reflects
   // the user's click immediately, then save to disk; if the platform
-  // call fails we still keep the preference (the Rust self-heal in
-  // lib.rs will retry on the next launch). Issue #117.
+  // call fails we try the Windows Startup folder fallback (registry ACL
+  // workaround — issue #117). If that also fails, we revert the toggle
+  // and show the error; the Rust self-heal in lib.rs will retry on the
+  // next launch.
   const handleAutostartToggle = async (next: boolean) => {
     if (!autostartSupported) return;
     const previous = autostartEnabled;
@@ -704,12 +706,26 @@ export default function SettingsPage() {
         true,
       );
     } catch (e) {
-      // Revert the optimistic UI update so the toggle matches the real
-      // state. The persisted preference is whatever the server wrote
-      // last, which may be the opposite of what the user just clicked.
-      setAutostartEnabled(previous);
-      const msg = e instanceof Error ? e.message : String(e);
-      flash(`Failed to ${next ? 'enable' : 'disable'} auto-start: ${msg}`, false);
+      // Primary plugin call failed (e.g. registry ACL error on Windows).
+      // Try the fallback: create/remove a shortcut in the Startup folder.
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('autostart_fallback', { enable: next });
+        // Fallback succeeded — keep the optimistic update and persist.
+        await apiPost('/api/settings', { autostart_enabled: next });
+        flash(
+          next
+            ? 'Will start automatically when you log in (Startup folder)'
+            : 'Will no longer start automatically when you log in',
+          true,
+        );
+      } catch (e2) {
+        // Both primary and fallback failed — revert the toggle.
+        setAutostartEnabled(previous);
+        const msg = e instanceof Error ? e.message : String(e);
+        const msg2 = e2 instanceof Error ? e2.message : String(e2);
+        flash(`Failed to ${next ? 'enable' : 'disable'} auto-start: ${msg} / ${msg2}`, false);
+      }
     }
   };
 
