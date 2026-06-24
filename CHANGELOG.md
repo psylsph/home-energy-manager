@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.38.3] - 2026-06-24
+
+### Fixed
+
+- **All-in-One charge slot toggle no longer reverts to ON after navigating away.**
+  Turning a charge slot off and leaving the Settings page would show the toggle
+  back on when you returned, even though the inverter had correctly disabled it.
+  The slot time registers were not being cleared on disable, so the next poll
+  still saw the old times and reported the slot as configured. Closes
+  [#106](https://github.com/psylsph/home-energy-manager/issues/106).
+
+### Added
+
+- **Comprehensive All-in-One test coverage.** 30 new Rust tests covering AIO
+  register routing for charge/discharge limits, EPS, extended charge slots 2–10,
+  discharge slots, validation boundaries, and the slot-toggle round-trip fix.
+  Plus 6 new Playwright E2E tests that configure the mock server as an AIO and
+  verify the full API and UI path.
+
 ## [0.38.2] - 2026-06-23
 
 ### Fixed
