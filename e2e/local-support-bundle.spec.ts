@@ -23,8 +23,10 @@ test.describe('Settings Page - Support Bundle', () => {
     await page.goto('/#/settings');
     await expect(page.getByText("What's the issue?")).toBeVisible({ timeout: 10_000 });
     await expect(page.getByText('Describe the problem')).toBeVisible();
-    // Category dropdown with the expected options.
-    const categorySelect = page.locator('select').first();
+    // Category dropdown with the expected options. Scope to the
+    // Support Bundle section so we don't match tariff time <select>s.
+    const supportSection = page.locator('section').filter({ hasText: 'Submit a Support Bundle' });
+    const categorySelect = supportSection.locator('select').first();
     await expect(categorySelect).toBeVisible();
     for (const cat of ['Connection', 'Battery', 'Other']) {
       await expect(categorySelect.locator(`option`)).toContainText([cat]);

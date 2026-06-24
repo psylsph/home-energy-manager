@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.40.0] - 2026-06-24
+
+### Added
+
+- **Combined cost chart on the History page.** Import Cost and Export Income
+  now share a single chart with per-series toggle, so you can see both
+  cumulative £ figures on the same graph at a glance. The two separate
+  charts are replaced by one overlay.
+
+- **Combined temperature chart on the History page.** Battery, inverter,
+  and ambient temperatures now share a single chart with per-series toggle,
+  making it easy to compare all three on the same scale. The three separate
+  charts are replaced by one overlay; the two differential charts
+  (Battery − Inverter, Battery − Ambient) remain as separate charts.
+
+- **Unit tests for cost accumulation logic.** The cumulative import/export
+  cost computation was extracted from inline HistoryPage code into a
+  testable module with 26 tests covering monotonic accumulation, midnight
+  rollover, spike clamping, missing-data gaps, and combined cost with
+  different import/export tariff rates.
+
 ## [0.39.2] - 2026-06-24
 
 ### Fixed

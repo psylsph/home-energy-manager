@@ -2,7 +2,7 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: './e2e',
-  testMatch: ['**/control.spec.ts', '**/force-stop.spec.ts'],
+  testMatch: ['**/control.spec.ts', '**/force-stop.spec.ts', '**/aio.spec.ts', '**/charts.spec.ts'],
   fullyParallel: false,
   workers: 1,
   timeout: 30_000,

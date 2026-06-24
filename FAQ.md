@@ -80,6 +80,36 @@ that may be intercepting requests and serving cached old JS.
 
 ---
 
+### The app shows a blank/white window but the backend (port 7337) is fine
+
+If you can still load the dashboard from another device's browser at
+`http://<this-mac's-ip>:7337` but the Tauri window itself is blank, the
+embedded WebKit WebView is holding onto corrupt local state (a cached
+`index.html` pointing at asset filenames from a previous version, or a
+broken Service Worker / localStorage entry from an old install). The
+backend is unaffected because it runs in a separate process — only the
+renderer is wedged.
+
+**Fix** — quit the app fully (Cmd+Q, don't just close the window), then
+in Terminal:
+
+```bash
+rm -rf ~/Library/Caches/com.givenergy.local \
+       ~/Library/WebKit/com.givenergy.local \
+       ~/Library/Application\ Support/com.givenergy.local/EBWebView
+```
+
+Then reopen the app. That clears the WebView's HTTP cache, Service
+Worker registrations, and IndexedDB / localStorage without touching your
+settings or inverter history (those live under
+`~/.givenergy-local/`).
+
+If the white screen returns after another update, please open an issue —
+we'd like to know so we can fix it at the source rather than have users
+nuke their cache each time.
+
+---
+
 ### On macOS, the app says it "can't be opened because it is from an unidentified developer"
 
 1. Right-click (or Control-click) the app and select **Open**.
