@@ -778,15 +778,38 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 backoff = Duration::from_secs(5);
 
                 // Track consecutive poll failures within this connection.
-                // With per-block retry on timeout, individual timeouts are
-                // handled at the block level and don't count toward a
-                // disconnect threshold. Only hard TCP errors (connection
-                // lost, send/receive failure) trigger a reconnect.
-                // Track consecutive dongle memory-leak fingerprint hits.
-                // After MAX_SUSPICIOUS_CYCLES, break to reconnect - persistent
-                // corruption means the dongle has probably crashed.
+                //
+                // Two independent counters drive reconnect-after-storms here:
+                //
+                // * `consecutive_suspicious` (incremented in the
+                //   block-fingerprint check) — the dongle's TCP stack is fine
+                //   but its register values look like its own memory buffer.
+                //   After MAX_SUSPICIOUS_CYCLES we assume the dongle's app
+                //   processor is stuck in a bad state and a fresh TCP session
+                //   will reset it.
+                //
+                // * `consecutive_timeouts` (incremented on a transient
+                //   `ClientError::Timeout` from `read_all_with_extras`) — the
+                //   socket is open but the dongle never answers a single
+                //   register within the 3 s `IO_TIMEOUT`. Without this
+                //   counter the poll loop would hammer a wedged dongle for
+                //   minutes until the OS finally noticed and sent an RST
+                //   (see the 8m 21s log storm that motivated the change).
+                //   Per-block retry inside `read_blocks_resilient` already
+                //   handles *occasional* slow responses; this counter only
+                //   fires when *every* block read in a cycle fails.
+                //
+                // Both counters reset to 0 on any successful poll.
                 let mut consecutive_suspicious: u8 = 0;
+                let mut consecutive_timeouts: u8 = 0;
                 const MAX_SUSPICIOUS_CYCLES: u8 = 6;
+                // 3 cycles × ~12 s each (3 s × 3 attempts per block + inter-
+                // request delay + the post-poll 2 s sleep) ≈ 36 s of
+                // sustained silence before we give up and reconnect. Long
+                // enough to ride out a brief dongle hiccup, short enough
+                // to recover well before the TCP RST that would otherwise
+                // take 5–10 minutes.
+                const MAX_CONSECUTIVE_TIMEOUTS: u8 = 3;
 
                 // Grace period: for the first few reads after connect, skip
                 // delta sanitization. The dongle can return plausible-but-wrong
@@ -2733,6 +2756,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     match poll_ok {
                         true => {
                             consecutive_suspicious = 0;
+                            consecutive_timeouts = 0;
                             session_had_successful_read = true;
 
                             // Tick the meter retry cadence counter.
@@ -2765,8 +2789,21 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 break;
                             }
                             // Transient error — read_blocks_resilient already
-                            // retried the failed block. Sleep briefly then
-                            // continue to the next poll cycle.
+                            // retried the failed block. Increment the
+                            // sustained-timeout counter so a wedged dongle
+                            // triggers a fresh TCP session instead of being
+                            // hammered until the OS sends an RST.
+                            consecutive_timeouts += 1;
+                            if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS {
+                                tracing::warn!(
+                                    consecutive = consecutive_timeouts,
+                                    max = MAX_CONSECUTIVE_TIMEOUTS,
+                                    "Sustained Modbus timeouts - disconnecting to force reconnect"
+                                );
+                                break;
+                            }
+                            // Sleep briefly then continue to the next poll
+                            // cycle.
                             tracing::debug!(
                                 "Poll read failed (transient) — sleeping before next cycle"
                             );
@@ -3068,6 +3105,52 @@ mod tests {
         assert_eq!(dead_session_backoff(5), Duration::from_secs(600));
         assert_eq!(dead_session_backoff(10), Duration::from_secs(600));
         assert_eq!(dead_session_backoff(100), Duration::from_secs(600));
+    }
+
+    /// `run_poll_loop` reconnects after `MAX_CONSECUTIVE_TIMEOUTS` cycles of
+    /// `ClientError::Timeout` from `read_all_with_extras` — the dongle is
+    /// TCP-alive but not answering any Modbus request within the 3 s
+    /// `IO_TIMEOUT`. Without this, a wedged dongle would be hammered until
+    /// the OS noticed (typically 5–10 minutes for the TCP RST to arrive),
+    /// during which the UI sees stale snapshots and the log fills with
+    /// timeout warnings.
+    ///
+    /// The threshold is a local `const` inside `run_poll_loop`, so we can't
+    /// reach it from a unit test directly. Instead this test pins the
+    /// documented timing math: with the default 3 s per-read timeout,
+    /// 3 retries per block, and the post-poll 2 s sleep, each cycle burns
+    /// roughly 10–12 s. `MAX_CONSECUTIVE_TIMEOUTS = 3` therefore yields a
+    /// ~36 s ceiling before we give up — long enough to ride out a brief
+    /// dongle hiccup, short enough to recover well before the OS notices.
+    ///
+    /// If anyone bumps the threshold, the dead-session back-off above is
+    /// what caps the *next* reconnect attempt, so they don't need to worry
+    /// about the poll loop tight-looping on the failed dongle.
+    #[test]
+    fn sustained_timeout_budget_is_bounded() {
+        const IO_TIMEOUT_SECS: u64 = 3;
+        const MAX_RETRIES_PER_BLOCK: u64 = 2;
+        const MAX_ATTEMPTS_PER_BLOCK: u64 = MAX_RETRIES_PER_BLOCK + 1;
+        const POST_POLL_SLEEP_SECS: u64 = 2;
+        const MAX_CONSECUTIVE_TIMEOUTS: u64 = 3;
+        const MAX_CYCLE_SECS: u64 =
+            MAX_ATTEMPTS_PER_BLOCK * IO_TIMEOUT_SECS + POST_POLL_SLEEP_SECS;
+
+        // Sanity: the documented cycle budget (~36 s) should always be
+        // well under the ~5 min worst-case RST latency we observed before
+        // this fix landed.
+        let total = MAX_CONSECUTIVE_TIMEOUTS * MAX_CYCLE_SECS;
+        assert!(
+            total < 60,
+            "sustained-timeout reconnect budget {total}s exceeds 60s — \
+             consider raising MAX_CONSECUTIVE_TIMEOUTS or shrinking IO_TIMEOUT",
+        );
+        // And we want at least two cycles to ride out a single transient
+        // hiccup (don't reconnect after a *single* timeout).
+        assert!(
+            MAX_CONSECUTIVE_TIMEOUTS >= 2,
+            "MAX_CONSECUTIVE_TIMEOUTS too low — single timeout would force reconnect",
+        );
     }
 
     #[test]

@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.39.1] - 2026-06-24
+
+### Fixed
+
+- **Faster reconnect when the dongle's Modbus processor wedges.** If the
+  dongle stops answering any register read but its TCP socket stays open —
+  a state the OS takes 5–10 minutes to notice with an RST — the poll loop
+  now disconnects and reconnects after roughly 36 seconds of sustained
+  timeouts instead of hammering the same dead session until the kernel
+  gives up. Most users will see this as a brief "Reconnecting…" flash on
+  the dashboard instead of an extended period of stale readings. Follow-up
+  to the per-block retry change in 0.39.0, which correctly stopped tearing
+  down the socket on *occasional* timeouts but inadvertently stopped
+  reacting to *sustained* ones.
+
 ## [0.39.0] - 2026-06-24
 
 ### Added
