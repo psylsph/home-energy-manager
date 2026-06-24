@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.39.2] - 2026-06-24
+
+### Fixed
+
+- **Tariff rates now keep two decimal places.** The Rate field under Settings → Energy Tariffs was snapping to one decimal place (0.1 p/kWh), so real-world prices like 25.47 p/kWh got rounded to 25.5. You can now enter and save rates exactly as published, and the History page cost figures use that full precision rather than the rounded value. Closes #130.
+
 ## [0.39.1] - 2026-06-24
 
 ### Fixed

@@ -138,8 +138,8 @@ function TariffSlotEditor({
               <label className="flex flex-col gap-1">
                 <span className="text-text-secondary text-xs font-sans">Rate (p/kWh)</span>
                 <input
-                  type="number" step="0.1" min="0"
-                  value={Math.round(slot.rate * 1000) / 10}
+                  type="number" step="0.01" min="0"
+                  value={Math.round(slot.rate * 100000) / 1000}
                   onChange={(e) => onChange(updateTariffSlot(config, i, 'rate', Number(e.target.value) / 100))}
                   className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
                 />
