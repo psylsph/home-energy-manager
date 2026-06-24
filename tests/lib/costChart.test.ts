@@ -5,7 +5,6 @@ import {
   computeCombinedCost,
 } from '../../src/lib/costChart';
 import { flatTariffConfig } from '../../src/lib/tariff';
-import type { TariffConfig } from '../../src/lib/types';
 
 /**
  * Tests for `computeImportCost` — the pure-data helper that powers the
