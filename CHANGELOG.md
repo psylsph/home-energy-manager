@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.39.0] - 2026-06-24
+
+### Added
+
+- **Per-block retry on Modbus timeout.** Instead of counting timeouts toward a
+  3-strikes disconnect, the client now retries individual register blocks that
+  time out (up to 3 attempts with 500ms delay). Only hard TCP errors
+  (connection lost, send/receive failure) trigger a reconnect. This matches
+  the GivEnergy dongle's behaviour: it sometimes pauses between responses but
+  recovers if re-prompted, and tearing down the TCP connection on a timeout
+  was unnecessarily costly (warmup + model re-detection + grace period).
+
+- **Dongle misbehaviour E2E tests.** New Playwright tests exercise the
+  simulator's `--dongle-misbehaviour` modes (DropConnection, Intermittent,
+  EmptyData, StaleData) against the per-block retry and sanitization layers.
+  Each test manages its own simulator + backend instance.
+
+### Changed
+
+- **Warmup read after connect** now uses `read_blocks_resilient` so a single
+  slow block during warmup is retried before declaring the session unusable.
+- **Error handling in poll loop** no longer tracks `consecutive_failures` or
+  disconnects after 3 timeouts. Timeouts are logged as transient warnings and
+  the next poll cycle continues normally.
+
 ## [0.38.3] - 2026-06-24
 
 ### Fixed

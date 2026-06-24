@@ -736,10 +736,15 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // full refresh after connect then enters its watch loop.)
                 //
                 // Bail on the failing read: if the dongle can't serve one
-                // multi-block read it won't serve another, so reconnecting now
-                // saves the per-read timeout.
+                // multi-block read after retries it won't serve another, so
+                // reconnecting now saves the per-read timeout.
                 if !session_unusable {
-                    match client.read_all_standard().await {
+                    match client.read_blocks_resilient(
+                        crate::modbus::registers::STANDARD_POLL_BLOCKS,
+                        2,
+                    )
+                    .await
+                    {
                         Ok(blocks) => {
                             tracing::debug!(
                                 blocks = blocks.len(),
@@ -773,15 +778,10 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 backoff = Duration::from_secs(5);
 
                 // Track consecutive poll failures within this connection.
-                // Transient errors (dongle busy, stale frames) are retried
-                // without disconnecting; only after repeated failures do we
-                // tear down the connection.
-                let mut consecutive_failures: u8 = 0;
-                const MAX_CONSECUTIVE_FAILURES: u8 = 3;
-                // Track persistent failures ACROSS intervals. consecutive_failures
-                // resets within each interval, so a dead socket loops: 3 failures
-                // → sleep → 3 failures → sleep forever. Now we break out to
-                // reconnect immediately on the 3rd consecutive failure.
+                // With per-block retry on timeout, individual timeouts are
+                // handled at the block level and don't count toward a
+                // disconnect threshold. Only hard TCP errors (connection
+                // lost, send/receive failure) trigger a reconnect.
                 // Track consecutive dongle memory-leak fingerprint hits.
                 // After MAX_SUSPICIOUS_CYCLES, break to reconnect - persistent
                 // corruption means the dongle has probably crashed.
@@ -894,10 +894,6 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     // NOTE: this is the INSTANTANEOUS version, not a stored
                     // baseline. The baseline check happens after the sleep.
                     let current_version = state.settings.lock().await.version;
-                    // Current poll interval — used by the inactivity watchdog
-                    // to decide how long a silent dongle must be silent before
-                    // we treat it as a zombie and reconnect.
-                    let interval_secs_now = state.settings.lock().await.interval_secs;
 
                     // If version changed since we last connected, break immediately.
                     if current_version != settings_version_at_connect {
@@ -2710,39 +2706,32 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 (true, sanitized || block_suspicious, false)
                             }
                             Err(e) => {
-                                let mut connection_lost = e.is_connection_lost();
-                                // Inactivity watchdog: detect a "zombie" dongle
-                                // (TCP up, Modbus hung). If no frame has arrived
-                                // since before this cycle began, the dongle is
-                                // silent — reconnect now instead of burning
-                                // through the consecutive-failure retries.
-                                let silent_age = client.last_activity_age();
-                                let silent = silent_age.is_some_and(|age| {
-                                    age >= Duration::from_secs(interval_secs_now.max(5))
-                                });
-                                if silent || connection_lost {
-                                    connection_lost = true;
+                                if e.is_connection_lost() {
+                                    // Hard TCP error — the socket is dead,
+                                    // must reconnect.
                                     tracing::warn!(
                                         error = %e,
-                                        silent_for = ?silent_age,
-                                        "Poll read failed - dongle unresponsive, reconnecting"
+                                        "TCP connection lost — reconnecting"
                                     );
+                                    (false, false, true)
                                 } else {
+                                    // Timeout — the dongle is slow but the
+                                    // TCP socket is fine.
+                                    // read_blocks_resilient already retried
+                                    // the failed block. Log and continue to
+                                    // the next poll cycle.
                                     tracing::warn!(
                                         error = %e,
-                                        consecutive_failures = consecutive_failures + 1,
-                                        max = MAX_CONSECUTIVE_FAILURES,
-                                        "Poll read failed"
+                                        "Poll read failed (transient) — continuing"
                                     );
+                                    (false, false, false)
                                 }
-                                (false, false, connection_lost)
                             }
                         }
                     }.await;
 
                     match poll_ok {
                         true => {
-                            consecutive_failures = 0;
                             consecutive_suspicious = 0;
                             session_had_successful_read = true;
 
@@ -2775,26 +2764,14 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                             if connection_lost {
                                 break;
                             }
-                            consecutive_failures += 1;
-                            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                                tracing::warn!(
-                                    consecutive_failures,
-                                    max = MAX_CONSECUTIVE_FAILURES,
-                                    "Poll read failed 3× - reconnecting"
-                                );
-                                break;
-                                // of breaking out of the inner loop - staying connected
-                                // avoids the warmup + grace period on the next poll.
-                            } else {
-                                // Transient error - retry after a short pause
-                                tracing::debug!(
-                                    "Poll read failed ({}/{}) - retrying",
-                                    consecutive_failures,
-                                    MAX_CONSECUTIVE_FAILURES,
-                                );
-                                tokio::time::sleep(Duration::from_secs(2)).await;
-                                continue; // stay in the inner loop
-                            }
+                            // Transient error — read_blocks_resilient already
+                            // retried the failed block. Sleep briefly then
+                            // continue to the next poll cycle.
+                            tracing::debug!(
+                                "Poll read failed (transient) — sleeping before next cycle"
+                            );
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            continue;
                         }
                     }
 
@@ -2858,8 +2835,6 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // ---- Disconnected (fell out of inner loop) ----
                 tracing::warn!(
                     host = %settings.host,
-                    consecutive_failures,
-                    max_failures = MAX_CONSECUTIVE_FAILURES,
                     "Disconnecting from inverter - will reconnect"
                 );
                 client.disconnect().await;
