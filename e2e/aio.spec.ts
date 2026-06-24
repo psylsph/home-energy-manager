@@ -10,6 +10,10 @@
  *   - Charge/discharge limits write HR 111/112 (DC hybrid), not HR 313/314 (AC)
  *   - Charge slot disable writes the correct registers
  *   - 10 charge/discharge slots are shown (extended HR 240-299 block)
+ *
+ * EPS toggle (HR 317) is covered by the Rust unit test `aio_eps_toggle` in
+ * api.rs — it can't be tested here because the poll loop locks the device
+ * type after the first detection, preventing mid-test switching to AIO.
  */
 
 import { test, expect } from './fixture.js';

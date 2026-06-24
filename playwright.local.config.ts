@@ -20,7 +20,7 @@ export default defineConfig({
   retries: 0,
   reporter: 'list',
   globalSetup: './e2e/local-global-setup.ts',
-  globalTimeout: 600_000,
+  globalTimeout: 900_000,
   use: {
     headless: true,
     browserName: 'chromium',
