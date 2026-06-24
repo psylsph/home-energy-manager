@@ -36,6 +36,33 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 | `docker build .` | Docker container build |
 | `npm run test:e2e` | Playwright E2E (requires `npm run build` + `cargo build --release` first) |
 | `npm run test:local` | Local-only E2E using simulator at `~/repos/givenergy-simulator/target/release/sim-api` |
+| `npm run test:local:headed` | Same as above with visible browser |
+
+### Dongle misbehaviour tests
+
+The simulator supports `--dongle-misbehaviour` to simulate various dongle failure modes:
+
+| Mode | Behaviour | What it tests |
+|---|---|---|
+| `Off` | Normal operation | Baseline |
+| `DropConnection` | Drops TCP immediately on accept | Hard error → reconnect |
+| `Intermittent` | ~50% zeros, 50% real data | Per-block retry on timeout |
+| `EmptyData` | All registers return 0 | Sanitizer zero detection |
+| `StaleData` | Frozen register values (snapshot on first read) | Stale data detection |
+| `GarbageData` | Random u16 values for every register | Sanitizer garbage rejection |
+
+Tests in `e2e/local-dongle-misbehaviour.spec.ts` start their own simulator +
+backend per misbehaviour mode, so they don't interfere with the main local
+E2E suite. They run as part of `npm run test:local` (the `local-*.spec.ts`
+glob in `playwright.local.config.ts` catches them).
+
+Each test verifies that the backend's per-block retry and sanitization layers
+handle the failure mode correctly:
+
+- **DropConnection**: backend enters Reconnecting state, reconnects on retry
+- **Intermittent**: backend stays Connected, snapshot eventually returns valid data
+- **EmptyData**: backend stays Connected, snapshot shows zero power fields
+- **StaleData**: backend stays Connected, snapshot values are frozen across polls
 
 Full verification order: `cargo clippy` → `npm run lint` → `npm run lint:md` → `npm run build` → `cargo test` → `npm run test:e2e` → `docker build .`
 

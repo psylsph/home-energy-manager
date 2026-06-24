@@ -1218,6 +1218,91 @@ impl ModbusClient {
     ///
     /// Iterates over [`STANDARD_POLL_BLOCKS`] and issues a read request for
     /// each one. If any block fails the entire operation fails.
+    /// Read blocks with per-block retry on timeout.
+    ///
+    /// Unlike [`read_blocks`], which fails the entire read on the first block
+    /// error, this method retries individual blocks that time out. Only hard
+    /// TCP errors (connection lost, send/receive failure) propagate up
+    /// immediately — timeouts are retried up to `max_retries` times per block.
+    ///
+    /// This matches the GivEnergy dongle's behaviour: it sometimes pauses
+    /// between responses but recovers if re-prompted. Tearing down the TCP
+    /// connection on a timeout is unnecessary and costly (warmup + model
+    /// re-detection + grace period).
+    pub async fn read_blocks_resilient(
+        &mut self,
+        blocks: &'static [RegisterBlock],
+        max_retries: u8,
+    ) -> Result<Vec<BlockRead>, ClientError> {
+        let mut results = Vec::with_capacity(blocks.len());
+
+        for (i, block) in blocks.iter().enumerate() {
+            if i > 0 {
+                tokio::time::sleep(self.inter_request_delay).await;
+            }
+
+            let reg_type = match block.register_type {
+                super::registers::RegisterType::Input => RegisterType::Input,
+                super::registers::RegisterType::Holding => RegisterType::Holding,
+            };
+
+            let mut last_err: Option<ClientError> = None;
+            for attempt in 0..=max_retries {
+                if attempt > 0 {
+                    tracing::debug!(
+                        block = block.name,
+                        attempt = attempt + 1,
+                        max = max_retries + 1,
+                        "Retrying block read after timeout"
+                    );
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+
+                let t0 = std::time::Instant::now();
+                match self.read_registers(reg_type, block.start, block.count).await {
+                    Ok(data) => {
+                        tracing::debug!(
+                            block = block.name,
+                            start = block.start,
+                            count = block.count,
+                            received = data.len(),
+                            elapsed_ms = t0.elapsed().as_millis() as u64,
+                            "Block read OK"
+                        );
+                        results.push(BlockRead { block, data });
+                        last_err = None;
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            block = block.name,
+                            error = %e,
+                            attempt = attempt + 1,
+                            "Block read attempt failed"
+                        );
+                        // Hard TCP errors propagate immediately — no point
+                        // retrying a dead socket.
+                        if e.is_connection_lost() {
+                            return Err(e);
+                        }
+                        last_err = Some(e);
+                    }
+                }
+            }
+
+            // If all retries exhausted, propagate the last error.
+            if let Some(e) = last_err {
+                return Err(e);
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Read all standard poll blocks, returning raw data per block.
+    ///
+    /// Iterates over [`STANDARD_POLL_BLOCKS`] and issues a read request for
+    /// each one. If any block fails the entire operation fails.
     pub async fn read_all_standard(&mut self) -> Result<Vec<BlockRead>, ClientError> {
         self.read_blocks(STANDARD_POLL_BLOCKS).await
     }
@@ -1235,6 +1320,11 @@ impl ModbusClient {
     /// banks) are skipped entirely. This trades some UI detail (slots 3-10,
     /// AC limits) for reduced per-cycle timeout exposure on chronically
     /// unstable dongles. Standard blocks (always needed) are always read.
+    ///
+    /// Standard blocks are read with per-block retry on timeout
+    /// ([`read_blocks_resilient`]) so a single slow block doesn't fail the
+    /// entire poll cycle. Model-specific blocks are read with a single
+    /// attempt (non-fatal on error).
     pub async fn read_all_with_extras(
         &mut self,
         device_type: Option<&crate::inverter::model::DeviceType>,
@@ -1254,7 +1344,9 @@ impl ModbusClient {
         } else {
             STANDARD_POLL_BLOCKS
         };
-        let mut results = self.read_blocks(standard_blocks).await?;
+        // Use resilient read for standard blocks — a single slow block
+        // is retried rather than failing the entire poll cycle.
+        let mut results = self.read_blocks_resilient(standard_blocks, 2).await?;
 
         if let Some(dt) = device_type {
             if minimal_telemetry {
@@ -2361,6 +2453,228 @@ mod tests {
         );
 
         server.await.unwrap();
+    }
+
+    // =======================================================================
+    // read_blocks_resilient tests
+    // =======================================================================
+
+    #[tokio::test]
+    async fn read_blocks_resilient_succeeds_when_all_blocks_respond() {
+        // All standard blocks respond on first attempt.
+        let responses = vec![
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 0,
+                data: (0..60).collect(),
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x03,
+                base: 0,
+                data: (100..160).collect(),
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x03,
+                base: 60,
+                data: (200..260).collect(),
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 180,
+                data: (500..504).collect(),
+            },
+        ];
+
+        let (_port, server, mut client) = setup_client_with_server(responses).await;
+
+        let blocks = client
+            .read_blocks_resilient(STANDARD_POLL_BLOCKS, 2)
+            .await
+            .unwrap();
+        assert_eq!(blocks.len(), 4);
+        assert_eq!(blocks[0].data[0], 0);
+        assert_eq!(blocks[1].data[0], 100);
+        assert_eq!(blocks[3].data.len(), 4);
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_blocks_resilient_retries_on_timeout_then_succeeds() {
+        // First block times out once, then succeeds on retry.
+        // The mock server needs to handle the retry: it sees two requests
+        // for the same block and responds to the second.
+
+        // Use a custom server that delays the first response.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server_handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+
+            // Read first request, delay, then respond.
+            let mut header = [0u8; 6];
+            tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut header))
+                .await
+                .unwrap();
+            let length = u16::from_be_bytes([header[4], header[5]]) as usize;
+            let mut rest = vec![0u8; length];
+            let mut read = 0usize;
+            while read < length {
+                let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut rest[read..]))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                read += n;
+            }
+
+            // Delay long enough to trigger a timeout on the first attempt
+            // (client timeout is 500ms, so delay 600ms).
+            tokio::time::sleep(Duration::from_millis(600)).await;
+
+            // Now respond to the first block (input_0_59).
+            let resp = build_read_response(0x11, 0x04, 0, &(0..60).collect::<Vec<_>>());
+            stream.write_all(&resp).await.unwrap();
+
+            // Read second request (retry of input_0_59) and respond immediately.
+            tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut header))
+                .await
+                .unwrap();
+            let length = u16::from_be_bytes([header[4], header[5]]) as usize;
+            let mut rest = vec![0u8; length];
+            let mut read = 0usize;
+            while read < length {
+                let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut rest[read..]))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                read += n;
+            }
+
+            // Respond to the retry.
+            let resp = build_read_response(0x11, 0x04, 0, &(0..60).collect::<Vec<_>>());
+            stream.write_all(&resp).await.unwrap();
+
+            // Read and respond to remaining standard blocks.
+            for (func, base, count) in &[
+                (0x03u8, 0u16, 60u16),
+                (0x03, 60, 60),
+                (0x04, 180, 4),
+            ] {
+                tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut header))
+                    .await
+                    .unwrap();
+                let length = u16::from_be_bytes([header[4], header[5]]) as usize;
+                let mut rest = vec![0u8; length];
+                let mut read = 0usize;
+                while read < length {
+                    let n =
+                        tokio::time::timeout(Duration::from_secs(5), stream.read(&mut rest[read..]))
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    read += n;
+                }
+                let data: Vec<u16> = match *base {
+                    0 => (100..160).collect(),
+                    60 => (200..260).collect(),
+                    180 => (500..504).collect(),
+                    _ => vec![],
+                };
+                let resp = build_read_response(0x11, *func, *base, &data);
+                stream.write_all(&resp).await.unwrap();
+            }
+        });
+
+        let mut client = ModbusClient::new("127.0.0.1", port, "TEST123456");
+        client.set_timeout(Duration::from_millis(500));
+        client.connect().await.unwrap();
+
+        let blocks = client
+            .read_blocks_resilient(STANDARD_POLL_BLOCKS, 2)
+            .await
+            .unwrap();
+        assert_eq!(blocks.len(), 4);
+        assert_eq!(blocks[0].data[0], 0);
+
+        server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_blocks_resilient_propagates_hard_errors_immediately() {
+        // A hard TCP error (NotConnected) should propagate immediately
+        // without retrying.
+        let responses: Vec<MockResponse> = vec![];
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let _server_handle = tokio::spawn(async move {
+            // Accept but immediately drop — simulates connection refused
+            let _ = listener.accept().await;
+        });
+
+        let mut client = ModbusClient::new("127.0.0.1", port, "TEST123456");
+        client.set_timeout(Duration::from_millis(100));
+        // Don't connect — client is in NotConnected state
+
+        let result = client
+            .read_blocks_resilient(STANDARD_POLL_BLOCKS, 2)
+            .await;
+        assert!(
+            result.is_err(),
+            "read_blocks_resilient should fail with NotConnected when not connected"
+        );
+        match result {
+            Err(ClientError::NotConnected) => {} // expected
+            _ => panic!("Expected NotConnected error, got: {:?}", result),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_blocks_resilient_exhausts_retries_on_persistent_timeout() {
+        // A completely silent server — all retries should be exhausted
+        // and the method should return Timeout.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server_handle = tokio::spawn(async move {
+            let (mut _stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            loop {
+                match tokio::time::timeout(Duration::from_secs(3), _stream.read(&mut buf)).await {
+                    Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                    Ok(Ok(_)) => {}
+                }
+            }
+        });
+
+        let mut client = ModbusClient::new("127.0.0.1", port, "TEST123456");
+        client.set_timeout(Duration::from_millis(100));
+        client.connect().await.unwrap();
+
+        let start = std::time::Instant::now();
+        let result = client
+            .read_blocks_resilient(STANDARD_POLL_BLOCKS, 2)
+            .await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_err(),
+            "read_blocks_resilient should fail when server never responds"
+        );
+        // With max_retries=2, we should have 3 attempts × 100ms timeout +
+        // 2 × 500ms retry delay = ~1300ms. Allow some margin.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "read_blocks_resilient took too long ({elapsed:?}) — may have retried more than expected"
+        );
+
+        server_handle.await.unwrap();
     }
 
     #[tokio::test]
