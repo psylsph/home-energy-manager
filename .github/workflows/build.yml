@@ -40,6 +40,13 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Cache Rust dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: ${{ matrix.platform }}
+          cache-on-failure: true
+
       - name: Install frontend dependencies
         uses: ./.github/actions/setup-frontend
 
@@ -316,6 +323,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,x86_64-linux-android
+
+      - name: Cache Rust dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: android
+          cache-on-failure: true
 
       - name: Install frontend dependencies
         uses: ./.github/actions/setup-frontend
