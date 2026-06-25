@@ -330,6 +330,35 @@ Check it's running:
 sudo journalctl -u givenergy-local -f
 ```
 
+#### Blank window, flicker, or the app fails to open on Raspberry Pi
+
+On Raspberry Pi GPU stacks (notably the Pi 5's VideoCore VII, and Pi 4 with the default Raspberry Pi OS desktop) WebKitGTK's DMA-BUF GPU renderer can fail to produce a first paint, show banded / torn output, or stop the window from opening at all. This is the same family of bugs tracked upstream at [tauri-apps/tauri#13885](https://github.com/tauri-apps/tauri/issues/13885) and [launchpad.net/bugs/2037015](https://bugs.launchpad.net/bugs/2037015).
+
+The fix is to force WebKitGTK to its legacy software path by setting two environment variables **before** the `givenergy-local` process starts — Tauri's setup hook runs too late. A small wrapper script in `scripts/run-with-software-renderer.sh` does this and forwards any flags you give it (`--headless`, `--port 8080`, etc.) to the real binary.
+
+Fetch and install it once:
+
+```bash
+sudo install -m 0755 \
+  <(curl -fsSL https://raw.githubusercontent.com/psylsph/home-energy-manager/master/scripts/run-with-software-renderer.sh) \
+  /usr/local/bin/givenergy-local-safe
+```
+
+Then launch the GUI through it instead of the bare binary:
+
+```bash
+givenergy-local-safe                  # opens the app window
+givenergy-local-safe --headless       # runs as a headless server (drop into systemd)
+```
+
+Override either environment variable per-launch if you need to — anything you set in your shell is left alone:
+
+```bash
+WEBKIT_DISABLE_DMABUF_RENDERER=0 givenergy-local-safe
+```
+
+If the wrapper doesn't help, the underlying issue is the WebKitGTK GPU path on that specific Pi OS image and the workaround is to run headless: `givenergy-local --headless`, then open the dashboard from any other device on your network at `http://<pi-ip>:7337`. The systemd unit above works as-is if you point `ExecStart` at `givenergy-local-safe` instead of `givenergy-local`.
+
 ### Option 2: Docker
 
 The quickest way to get started with Docker:
