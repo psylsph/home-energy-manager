@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.40.10] - 2026-06-25
+
+### Added
+
+- **`givenergy-local-safe` wrapper for Raspberry Pi rendering issues.** A small wrapper at `scripts/run-with-software-renderer.sh` exports the two WebKitGTK env vars that force the legacy software renderer, then launches the app — fixes the blank window, banding, and "installs but doesn't open" symptoms reported on Raspberry Pi 4 and Pi 5. Install with `sudo install -m 0755 <(curl -fsSL https://raw.githubusercontent.com/psylsph/home-energy-manager/master/scripts/run-with-software-renderer.sh) /usr/local/bin/givenergy-local-safe` and launch through `givenergy-local-safe` instead of `givenergy-local`. See #150.
+
+- **Unconfigured-UTC container warning on headless startup.** The headless server now prints a prominent WARN at startup if it detects the resolved local offset is UTC+0 with no `TZ` set, so Docker/unRAID/NAS containers that forgot to mount `/etc/localtime` no longer silently produce wrong day boundaries for the daily report, cost time-of-use slotting, and the cumulative-counter midnight rollover. An explicit `TZ=UTC` is respected as intentional and does not warn. See #134.
+
+### Fixed
+
+- **History "Today" and "Month" now use your local midnight, not the server's.** The chart x-axis was already browser-local, but the data query was still bounded server-side, so a UK user on a UTC container saw the chart say "Today 00:00–23:59" while the data was actually 01:00–01:00 BST. The frontend now sends an explicit `start_ms`/`end_ms` window computed from your local midnight, and the server honours it. See #134.
+
 ## [0.40.9] - 2026-06-25
 
 ### Added
