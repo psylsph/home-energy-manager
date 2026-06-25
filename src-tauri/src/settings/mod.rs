@@ -96,7 +96,66 @@ pub(crate) fn parse_hhmm_to_minutes(s: &str) -> Option<u16> {
     Some(h * 60 + m)
 }
 
+/// Look up the rate for `minutes` in slots pre-parsed by
+/// [`TariffConfig::parsed_slots`]. Same rule as [`TariffConfig::rate_for_minutes`]:
+/// intermediate slots are half-open `[start, end)`, the final slot is closed
+/// `[start, end]` (so "23:59" covers minute 1439), and a tail gap falls back to
+/// the last slot's rate. Returns `None` only for empty input.
+pub fn rate_for_parsed_minutes(
+    parsed: &[(Option<u16>, Option<u16>, f64)],
+    minutes: u16,
+) -> Option<f64> {
+    if parsed.is_empty() {
+        return None;
+    }
+    let last_idx = parsed.len() - 1;
+    for (i, &(start, end, rate)) in parsed.iter().enumerate() {
+        let (Some(start), Some(end)) = (start, end) else {
+            continue;
+        };
+        if i == last_idx {
+            if end >= start && minutes >= start && minutes <= end {
+                return Some(rate);
+            }
+        } else if end > start && minutes >= start && minutes < end {
+            return Some(rate);
+        }
+    }
+    parsed.last().map(|&(_, _, rate)| rate)
+}
+
 impl TariffConfig {
+    /// A flat-rate config: a single slot covering the whole day at `rate`.
+    ///
+    /// Used as the fallback when only the legacy scalar tariff is set (no
+    /// structured `slots`), so cost calculation always has a usable config.
+    pub fn flat(rate: f64) -> Self {
+        TariffConfig {
+            slots: vec![TariffSlot {
+                start: "00:00".to_string(),
+                end: "23:59".to_string(),
+                rate,
+            }],
+        }
+    }
+
+    /// Pre-parse the slots into `(start_min, end_min, rate)` triples once
+    /// (minutes since midnight; `None` for an unparseable bound), so a hot
+    /// loop can price many timestamps without re-parsing the `HH:MM` strings
+    /// on every reading. Pair with [`rate_for_parsed_minutes`].
+    pub fn parsed_slots(&self) -> Vec<(Option<u16>, Option<u16>, f64)> {
+        self.slots
+            .iter()
+            .map(|s| {
+                (
+                    parse_hhmm_to_minutes(&s.start),
+                    parse_hhmm_to_minutes(&s.end),
+                    s.rate,
+                )
+            })
+            .collect()
+    }
+
     /// Look up the rate for a given minute of the day `[0, 1440)`.
     ///
     /// Lookup = first slot whose `[start, end)` contains the minute. The
@@ -106,29 +165,7 @@ impl TariffConfig {
     /// the **last slot's rate** to defend against gaps at the end of the
     /// day. Returns `None` only when there are zero slots.
     pub fn rate_for_minutes(&self, minutes: u16) -> Option<f64> {
-        if self.slots.is_empty() {
-            return None;
-        }
-        let last_idx = self.slots.len() - 1;
-        for (i, slot) in self.slots.iter().enumerate() {
-            let Some(start) = parse_hhmm_to_minutes(&slot.start) else {
-                continue;
-            };
-            let Some(end) = parse_hhmm_to_minutes(&slot.end) else {
-                continue;
-            };
-            if i == last_idx {
-                // Final slot: closed [start, end] so "23:59" (1439) is hit.
-                // We require end >= start to guard against malformed input.
-                if end >= start && minutes >= start && minutes <= end {
-                    return Some(slot.rate);
-                }
-            } else if end > start && minutes >= start && minutes < end {
-                return Some(slot.rate);
-            }
-        }
-        // Tail gap fallback: use the last slot's rate.
-        self.slots.last().map(|s| s.rate)
+        rate_for_parsed_minutes(&self.parsed_slots(), minutes)
     }
 
     /// Validate the config for well-formedness. Returns `Ok(())` if every

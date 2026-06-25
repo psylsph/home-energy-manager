@@ -7,7 +7,6 @@ import {
   getHistoryXAxisTicks,
   formatHistoryXAxisTick,
   trimDomainStartToFirstDataPoint,
-  rangeToBucketSecs,
   HISTORY_CHART_GRID_PRESETS,
   getHistoryChartGridProps,
   type GridLineWeight,
@@ -283,28 +282,6 @@ describe('HistoryPage timestamp pipeline (static guard)', () => {
     // re-applies of the diff before they get to a human reviewer.
     expect(source).not.toMatch(/tzOffsetMs/);
     expect(source).not.toMatch(/\.t\s*\+\s*tzOffsetMs/);
-  });
-});
-/**
- * `rangeToBucketSecs` mirrors the backend range→bucket mapping in
- * `src-tauri/src/server/api.rs` (`get_history`). The Cost-tab spike ceiling
- * scales by this value (issue #133), so a drift between the two mappings would
- * silently distort Cost totals. These tests pin the contract.
- */
-describe('rangeToBucketSecs', () => {
-  it.each([
-    ['1h', 30],
-    ['6h', 60],
-    ['12h', 120],
-    ['24h', 300],
-    ['today', 300],
-    ['7d', 1800],
-    ['30d', 7200],
-    ['month', 3600],
-    ['6m', 43200],
-    ['1y', 86400],
-  ] as const)('maps %s → %s s (matches backend get_history)', (range, expected) => {
-    expect(rangeToBucketSecs(range)).toBe(expected);
   });
 });
 

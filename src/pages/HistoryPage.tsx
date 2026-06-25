@@ -8,11 +8,10 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from 'recharts';
-import { fetchHistory, apiGet, isTauri } from '../lib/api';
+import { fetchHistory, isTauri } from '../lib/api';
 import {
   getHistoryChartGridProps,
   HISTORY_RANGES,
-  rangeToBucketSecs,
   HISTORY_RANGE_MS,
   getHistoryRangeDomain,
   getHistoryXAxisMinTickGap,
@@ -32,10 +31,8 @@ import { getSeriesOpacity, removeSpikes } from '../lib/chartSeries';
 import { SeriesLegend } from '../components/SeriesLegend';
 import { useInverterStore } from '../store/useInverterStore';
 import type { SeriesLegendItem } from '../components/SeriesLegend';
-import type { HistoryRange, PollSettings, TariffConfig } from '../lib/types';
-import { defaultTariffConfig, flatTariffConfig } from '../lib/tariff';
+import type { HistoryRange } from '../lib/types';
 import { computeTempDifferential, computeBatteryExternalDifferential } from '../lib/temperatureChart';
-import { computeCombinedCost } from '../lib/costChart';
 import { openExternal } from '../lib/openExternal';
 
 // ---------------------------------------------------------------------------
@@ -49,19 +46,18 @@ interface TimePoint {
 
 type MetricTab = 'battery' | 'solar' | 'grid' | 'home' | 'cost' | 'temperature';
 
-/** Context handed to a chart's `preprocess` fn. */
-interface PreprocessContext {
-  /** Backend aggregation bucket size (seconds) for the current range. */
-  bucketSecs: number;
-}
-
 interface ChartDef {
   key: string;
   title: string;
   fields: { field: string; color: string; label?: string; transform?: (v: number) => number }[];
   unit: string;
   yDomain?: [number, number];
-  preprocess?: (merged: Record<string, number>[], ctx: PreprocessContext) => Record<string, number>[];
+  /**
+   * Optional client-side derivation (e.g. the temperature differentials).
+   * Cost/income are NOT derived here - the server computes them at native
+   * reading resolution (see `_import_cost` / `_export_income`).
+   */
+  preprocess?: (merged: Record<string, number>[]) => Record<string, number>[];
   /** Raw field names needed by `preprocess` that aren't in `fields`. */
   requires?: string[];
 }
@@ -79,7 +75,7 @@ const TABS: { key: MetricTab; label: string }[] = [
   { key: 'cost', label: 'Cost' },
 ];
 
-function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCfg: TariffConfig): ChartDef[] {
+function getCharts(tab: MetricTab): ChartDef[] {
   switch (tab) {
     case 'battery':
       return [
@@ -196,6 +192,11 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
     case 'cost':
       return [
         {
+          // `_import_cost` / `_export_income` are server-derived cumulative
+          // series: the backend integrates the today_*_kwh counters against the
+          // configured tariff at native reading resolution, so the totals are
+          // correct for time-of-use rates and consistent across every range's
+          // bucket width. The frontend just plots them.
           key: 'cost-combined',
           title: 'Import Cost & Export Income',
           unit: '£',
@@ -203,9 +204,6 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
             { field: '_import_cost', color: '#EF4444', label: 'Import Cost' },
             { field: '_export_income', color: '#22C55E', label: 'Export Income' },
           ],
-          requires: ['today_import_kwh', 'today_export_kwh'],
-          preprocess: (merged, ctx) =>
-            computeCombinedCost(merged, importTariffCfg, exportTariffCfg, ctx.bucketSecs),
         },
       ];
   }
@@ -296,7 +294,7 @@ function ChartCard({ chart, data, range, domain, ticks, gridLineWeight }: {
   });
 
   if (chart.preprocess) {
-    merged = chart.preprocess(merged, { bucketSecs: rangeToBucketSecs(range) });
+    merged = chart.preprocess(merged);
   }
 
   const seriesNames = chart.fields.map((f, i) => {
@@ -478,10 +476,12 @@ function exportCSV(charts: ChartDef[], data: Record<string, TimePoint[]>, range:
   }
   const sortedTs = [...timestamps].sort((a, b) => a - b);
 
-  // Handle preprocess for cost tab
-  const costCharts = charts.filter((c) => c.preprocess);
+  // Apply any client-side derivations (e.g. temperature differentials) so
+  // their derived fields appear in the CSV. Cost/income are plain server
+  // fields and need no preprocess.
+  const derivedCharts = charts.filter((c) => c.preprocess);
   let processed: Record<string, number>[] = [];
-  if (costCharts.length > 0) {
+  if (derivedCharts.length > 0) {
     const rawMerged = sortedTs.map((t) => {
       const row: Record<string, number> = { t };
       for (const f of allFields) {
@@ -490,8 +490,8 @@ function exportCSV(charts: ChartDef[], data: Record<string, TimePoint[]>, range:
       }
       return row;
     });
-    for (const c of costCharts) {
-      if (c.preprocess) processed = c.preprocess(rawMerged, { bucketSecs: rangeToBucketSecs(range) });
+    for (const c of derivedCharts) {
+      if (c.preprocess) processed = c.preprocess(rawMerged);
     }
   }
 
@@ -565,34 +565,9 @@ export default function HistoryPage() {
     ? trimDomainStartToFirstDataPoint(xDomain, data)
     : xDomain;
 
-  const [importTariffCfg, setImportTariffCfg] = useState<TariffConfig>(() => defaultTariffConfig());
-  const [exportTariffCfg, setExportTariffCfg] = useState<TariffConfig>(() =>
-    flatTariffConfig(0.15),
-  );
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await apiGet<{ ok: boolean; data: PollSettings }>('/api/settings');
-        if (res.data.import_tariff_config) {
-          setImportTariffCfg(res.data.import_tariff_config);
-        } else if (res.data.import_tariff) {
-          setImportTariffCfg(flatTariffConfig(res.data.import_tariff));
-        }
-        if (res.data.export_tariff_config) {
-          setExportTariffCfg(res.data.export_tariff_config);
-        } else if (res.data.export_tariff) {
-          setExportTariffCfg(flatTariffConfig(res.data.export_tariff));
-        }
-      } catch { /* use defaults */ }
-    })();
-  }, []);
-
-  
-
   useEffect(() => {
     let cancelled = false;
-    const charts = getCharts(tab, importTariffCfg, exportTariffCfg);
+    const charts = getCharts(tab);
     const allFields = [
       ...new Set([
         ...charts.flatMap((c) => c.fields.map((f) => f.field)),
@@ -617,7 +592,7 @@ export default function HistoryPage() {
         }
       })
     return () => { cancelled = true; };
-  }, [tab, range, offset, importTariffCfg, exportTariffCfg, refreshKey, rolling]);
+  }, [tab, range, offset, refreshKey, rolling]);
 
   const handleTabChange = (t: MetricTab) => {
     setTab(t);
@@ -629,7 +604,7 @@ export default function HistoryPage() {
     setOffset(0);
   };
 
-  const charts = getCharts(tab, importTariffCfg, exportTariffCfg);
+  const charts = getCharts(tab);
   const hasData = Object.values(data).some((pts) => pts.length > 0);
   const [csvToast, setCsvToast] = useState<string | null>(null);
 
