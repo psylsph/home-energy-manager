@@ -3395,6 +3395,94 @@ mod tests {
         .await;
     }
 
+    /// The GivEnergy Gateway (DTC 0x7001) is a single-phase-class control
+    /// device for scheduling purposes — it forwards standard charge/discharge
+    /// slot and SOC writes to its child AIO(s). It must NOT route through the
+    /// three-phase control bank (HR 1080-1124), which a real Gateway dongle
+    /// has no registers for (issue #149: quick actions silently did nothing).
+    /// Mirrors dewet22/givenergy-modbus `slot_map` (Gateway →
+    /// SINGLE_PHASE_SLOTS) and GivTCP ("gateway" is not "3ph" for write
+    /// routing). Regression test: route force-charge to single-phase registers.
+    #[tokio::test]
+    async fn gateway_force_charge_routes_to_single_phase_registers() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC,
+                HR_ENABLE_CHARGE, HR_3PH_CHARGE_SLOT_1_START, HR_3PH_FORCE_CHARGE_ENABLE,
+            };
+            let state = make_state_with_device(DeviceType::Gateway).await;
+
+            let (status, body) =
+                force_charge(State(state.clone()), Some(Json(serde_json::json!({"minutes": 30})))).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body.0["ok"], serde_json::Value::Bool(true));
+
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            // Single-phase charge registers must be written.
+            let slot_start = writes.iter().find(|w| w.address == HR_CHARGE_SLOT_1_START);
+            assert!(slot_start.is_some(), "Gateway must write HR 94 (charge slot 1 start)");
+            let _ = writes.iter().find(|w| w.address == HR_CHARGE_SLOT_1_END)
+                .expect("Gateway must write HR 95 (charge slot 1 end)");
+            assert_eq!(
+                writes.iter().find(|w| w.address == HR_ENABLE_CHARGE).map(|w| w.value),
+                Some(1),
+                "Gateway must set HR 96 (enable_charge)",
+            );
+            assert_eq!(
+                writes.iter().find(|w| w.address == HR_CHARGE_TARGET_SOC).map(|w| w.value),
+                Some(100),
+                "Gateway must write HR 116 (charge target SOC)",
+            );
+            // The three-phase control bank must NOT be touched.
+            assert!(
+                writes.iter().all(|w| w.address != HR_3PH_CHARGE_SLOT_1_START),
+                "Gateway must NOT write HR 1113 (three-phase charge slot)",
+            );
+            assert!(
+                writes.iter().all(|w| w.address != HR_3PH_FORCE_CHARGE_ENABLE),
+                "Gateway must NOT write HR 1123 (three-phase force charge)",
+            );
+        })
+        .await;
+    }
+
+    /// Same routing invariant for Force Discharge: the Gateway must target
+    /// single-phase discharge registers (HR 56/57 slot, HR 59 enable) and not
+    /// the three-phase bank (HR 1118-1122). See issue #149.
+    #[tokio::test]
+    async fn gateway_force_discharge_routes_to_single_phase_registers() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_DISCHARGE_SLOT_1_START, HR_ENABLE_DISCHARGE, HR_3PH_FORCE_DISCHARGE_ENABLE,
+            };
+            let state = make_state_with_device(DeviceType::Gateway).await;
+
+            let (status, body) =
+                force_discharge(State(state.clone()), Some(Json(serde_json::json!({"minutes": 30}))))
+                    .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body.0["ok"], serde_json::Value::Bool(true));
+
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert!(
+                writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_1_START),
+                "Gateway must write HR 56 (discharge slot 1 start)",
+            );
+            assert_eq!(
+                writes.iter().find(|w| w.address == HR_ENABLE_DISCHARGE).map(|w| w.value),
+                Some(1),
+                "Gateway must set HR 59 (enable_discharge)",
+            );
+            assert!(
+                writes.iter().all(|w| w.address != HR_3PH_FORCE_DISCHARGE_ENABLE),
+                "Gateway must NOT write HR 1122 (three-phase force discharge)",
+            );
+        })
+        .await;
+    }
+
     /// The All-in-One honours the GLOBAL charge target SOC (HR 116) — confirmed
     /// by GivTCP's setChargeSlot → set_charge_target_only. Configuring a charge
     /// slot with an explicit target SOC < 100% must therefore write HR 116 (in
@@ -4115,7 +4203,9 @@ mod tests {
                 (DeviceType::AioCommercial, false, true),
                 (DeviceType::HybridHvGen3, false, true),
                 (DeviceType::AllInOneHybrid, false, true),
-                (DeviceType::Gateway, false, true),
+                // Gateway is single-phase-class for control (issue #149): not
+                // AC-coupled, and not three-phase for schedule-slot routing.
+                (DeviceType::Gateway, false, false),
             ];
             for (dt, want_ac, want_tp) in cases {
                 let state = make_state_with_device(dt).await;
