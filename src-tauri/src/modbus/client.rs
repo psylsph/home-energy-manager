@@ -304,14 +304,26 @@ impl ModbusClient {
     /// trigger sooner instead of dragging out 5 s at a time.
     pub const IO_TIMEOUT: Duration = Duration::from_secs(3);
 
-    /// Timeout for a single-register liveness probe — well inside any healthy
-    /// dongle's ~50 ms response time, so a silent ("zombie") dongle fails in
-    /// one round-trip instead of cascading through the full block-read retry
-    /// sequence (~minutes).
+    /// Timeout for the TCP `connect()` handshake.
+    ///
+    /// GivTCP uses `connect_timeout = 7.0` s (`GivLUT.get_connection`) because a
+    /// GivEnergy WiFi/Ethernet dongle under load can take several seconds to
+    /// complete the TCP handshake. The 3 s operational [`IO_TIMEOUT`] is too
+    /// tight for the connect phase and caused spurious "Connection failed" on
+    /// busy networks. Kept distinct from [`IO_TIMEOUT`] so raising the
+    /// per-request timeout does not also stretch the connect window.
+    pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(7);
+
+    /// Timeout for a single liveness-probe attempt — well inside any healthy
+    /// dongle's ~50 ms response time. The probe itself retries (see
+    /// [`liveness_probe`]), so a transiently slow dongle that needs a re-prompt
+    /// gets a few round-trips rather than being condemned on a single miss.
     ///
     /// Numerically equal to [`IO_TIMEOUT`]; kept as a distinct constant so the
-    /// probe's fast-fail-on-zombie property holds even if a caller raises the
-    /// operational timeout via [`ModbusClient::set_timeout`].
+    /// probe's own budget holds even if a caller raises the operational timeout
+    /// via [`ModbusClient::set_timeout`].
+    ///
+    /// [`liveness_probe`]: ModbusClient::liveness_probe
     pub const LIVENESS_TIMEOUT: Duration = Duration::from_secs(3);
 
     /// Cheap single-register read used to confirm the dongle is actually
@@ -320,28 +332,47 @@ impl ModbusClient {
     /// Holding register 0 is present on every GivEnergy model and is read in
     /// every standard poll, so *any* response — data or a Modbus exception —
     /// proves liveness. A "zombie" dongle (TCP connected, Modbus processor
-    /// hung) times out here in ~3 s. Uses exactly one attempt (no retry loop)
-    /// and treats a Modbus exception as success (the dongle decoded and
-    /// answered the request).
+    /// hung) times out here. Retries a few times (treating a Modbus exception
+    /// as success) because the dongle's Modbus processor is slow to wake right
+    /// after a TCP handshake — GivTCP gives its first poll up to 10 retries for
+    /// the same reason.
     pub async fn liveness_probe(&mut self) -> Result<(), ClientError> {
+        // GivTCP's first poll after connect is deliberately patient
+        // (detect_plant: retries=10, refresh_plant: retries=5) because the
+        // Modbus processor is sluggish right after a TCP handshake — a single
+        // one-shot probe condemns a healthy-but-slow socket. A small retry
+        // budget here mirrors that; the warmup read that follows adds more.
+        const PROBE_ATTEMPTS: u8 = 3;
+
         let saved_timeout = self.timeout;
         self.timeout = Self::LIVENESS_TIMEOUT;
-        let request =
-            framer::build_read_request(&self.serial, self.slave, RegisterType::Holding, 0, 1);
-        let key = ResponseKey::from_request(
-            self.slave,
-            RegisterType::Holding.function_code(),
-            0,
-            1,
-        );
-        let result = self.send_and_await_response(request, key).await;
-        self.timeout = saved_timeout;
-        match result {
-            // A decoded read response or even a Modbus exception means the
-            // dongle is alive and answering — the probe's only goal.
-            Ok(_) | Err(ClientError::InvalidResponse(_)) => Ok(()),
-            Err(e) => Err(e),
+
+        let mut last_err: Option<ClientError> = None;
+        for attempt in 0..PROBE_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            let request =
+                framer::build_read_request(&self.serial, self.slave, RegisterType::Holding, 0, 1);
+            let key = ResponseKey::from_request(
+                self.slave,
+                RegisterType::Holding.function_code(),
+                0,
+                1,
+            );
+            match self.send_and_await_response(request, key).await {
+                // A decoded read response or even a Modbus exception means the
+                // dongle is alive and answering — the probe's only goal.
+                Ok(_) | Err(ClientError::InvalidResponse(_)) => {
+                    self.timeout = saved_timeout;
+                    return Ok(());
+                }
+                Err(e) => last_err = Some(e),
+            }
         }
+
+        self.timeout = saved_timeout;
+        Err(last_err.unwrap_or(ClientError::Timeout))
     }
 
     /// Connect to the inverter. Returns `Err(ClientError::AlreadyConnected)` if
@@ -353,7 +384,12 @@ impl ModbusClient {
 
         let addr = format!("{}:{}", self.host, self.port);
         tracing::info!("Connecting to {addr} ...",);
-        let stream = tokio::time::timeout(self.timeout, TcpStream::connect(&addr))
+        // Use the dedicated connect timeout (7 s, matching GivTCP's
+        // connect_timeout) rather than the 3 s operational IO_TIMEOUT — a
+        // GivEnergy dongle under load can take several seconds to complete
+        // the TCP handshake, and borrowing IO_TIMEOUT here caused spurious
+        // connection failures on busy networks.
+        let stream = tokio::time::timeout(Self::CONNECT_TIMEOUT, TcpStream::connect(&addr))
             .await
             .map_err(|_| ClientError::Timeout)?
             .map_err(|e| ClientError::ConnectionFailed(e.to_string()))?;
@@ -1849,6 +1885,31 @@ mod tests {
         Some((slave, function, payload))
     }
 
+    /// Read and discard one complete GivEnergy request frame (6-byte MBAP
+    /// header + length-prefixed body) from the mock stream. Used by the
+    /// liveness-probe retry tests to simulate a dongle that receives but
+    /// ignores a request (so the client times out and retries).
+    async fn read_and_discard_one_request(stream: &mut tokio::net::TcpStream) {
+        let mut header = [0u8; 6];
+        if tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut header))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let length = u16::from_be_bytes([header[4], header[5]]) as usize;
+        let mut rest = vec![0u8; length];
+        let mut read = 0usize;
+        while read < length {
+            match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut rest[read..]))
+                .await
+            {
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                Ok(Ok(n)) => read += n,
+            }
+        }
+    }
+
     /// Run a mock server that replies to each request with the next response
     /// from `responses` (cycling if there are fewer responses than requests).
     async fn run_mock_server(listener: TcpListener, responses: Arc<Vec<MockResponse>>) {
@@ -3054,17 +3115,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn liveness_probe_timeout_on_silent_server() {
-        // A silent dongle (accepts TCP but never responds) should fail
-        // the probe in one round-trip (~LIVENESS_TIMEOUT), not retry.
+    async fn liveness_probe_retries_then_fails_on_silent_server() {
+        // A silent dongle (accepts TCP but never responds) should exhaust the
+        // probe's retry budget before failing — a single one-shot attempt
+        // previously condemned a healthy-but-slow socket.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
         let server_handle = tokio::spawn(async move {
-            let (mut _stream, _) = listener.accept().await.unwrap();
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // Read & discard every request the client sends, never respond.
             let mut buf = [0u8; 1024];
             loop {
-                match tokio::time::timeout(Duration::from_secs(2), _stream.read(&mut buf)).await {
+                match tokio::time::timeout(Duration::from_secs(15), stream.read(&mut buf)).await {
                     Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
                     Ok(Ok(_)) => {}
                 }
@@ -3072,24 +3135,74 @@ mod tests {
         });
 
         let mut client = ModbusClient::new("127.0.0.1", port, "TEST123456");
-        client.set_timeout(Duration::from_secs(15));
         client.connect().await.unwrap();
 
         let start = std::time::Instant::now();
         let result = client.liveness_probe().await;
         let elapsed = start.elapsed();
 
+        assert!(result.is_err(), "liveness probe should fail on silent dongle");
+        // The probe retries: one attempt is ~LIVENESS_TIMEOUT (3 s); with the
+        // retry budget it must take well over a single timeout but be bounded.
         assert!(
-            result.is_err(),
-            "liveness probe should fail on silent dongle"
+            elapsed > Duration::from_secs(4),
+            "liveness probe should retry — elapsed {elapsed:?} suggests a single attempt"
         );
-        // Should complete in ~LIVENESS_TIMEOUT (3 s), not 5× longer
         assert!(
-            elapsed < Duration::from_secs(6),
-            "liveness probe should not retry — elapsed {elapsed:?}"
+            elapsed < Duration::from_secs(13),
+            "liveness probe retry budget exceeded — elapsed {elapsed:?}"
         );
 
         server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn liveness_probe_succeeds_on_retry() {
+        // A "just woke up" dongle ignores the first probe (no response →
+        // timeout) but answers the second. The probe should retry and succeed
+        // rather than condemning the socket on the first miss.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server_handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // Request 1: read & discard, send NO response.
+            read_and_discard_one_request(&mut stream).await;
+            // Request 2: read & answer with a valid HR0 read response.
+            read_and_discard_one_request(&mut stream).await;
+            let resp = build_read_response(0x11, 0x03, 0, &[0x0001]);
+            let _ = stream.write_all(&resp).await;
+            // Hold the socket so the consumer task doesn't error out mid-test.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+
+        let mut client = ModbusClient::new("127.0.0.1", port, "TEST123456");
+        client.connect().await.unwrap();
+
+        let start = std::time::Instant::now();
+        let result = client.liveness_probe().await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok(), "probe should succeed on retry: {result:?}");
+        // It waited through at least one full LIVENESS_TIMEOUT before retrying.
+        assert!(
+            elapsed >= Duration::from_secs(3),
+            "probe should have waited through one timeout — elapsed {elapsed:?}"
+        );
+
+        // Give the server task time to finish its hold sleep.
+        let _ = tokio::time::timeout(Duration::from_secs(3), server_handle).await;
+    }
+
+    #[test]
+    fn connect_timeout_matches_givtcp() {
+        // GivTCP uses connect_timeout = 7.0 s (GivLUT.get_connection) because a
+        // dongle under load can take several seconds to complete the TCP
+        // handshake. Pin the value so an accidental change is caught here.
+        assert_eq!(ModbusClient::CONNECT_TIMEOUT, Duration::from_secs(7));
+        // It must be distinct from the operational IO_TIMEOUT so the connect
+        // window isn't coupled to the per-request timeout.
+        assert_ne!(ModbusClient::CONNECT_TIMEOUT, ModbusClient::IO_TIMEOUT);
     }
 
     // =======================================================================
