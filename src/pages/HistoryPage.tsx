@@ -321,6 +321,15 @@ function ChartCard({ chart, data, range, domain, ticks }: {
   // Solar power chart on the dashboard only (see SolarPowerChart.tsx).
   const yDomain: [number, number] | undefined = chart.yDomain;
 
+  // Currency tick labels (`£12.25`, and up to `£xxx.xx` on the year range)
+  // are much wider than `%` / `W` / `°C`. The chart's tight `left: -20`
+  // margin pulls the plot past the SVG's left edge and clips the leading `£`,
+  // so the £ axis gets a non-negative left margin plus an explicit wider
+  // gutter. Other units keep `left: -20` and the default width via a
+  // conditional spread, so their rendered output is byte-identical to before
+  // (adding a `width` prop globally once broke every chart's layout).
+  const isCurrency = chart.unit === '£';
+
   return (
     <div className="bg-bg-elevated rounded-xl p-4 relative">
       <div className="flex items-center justify-between mb-3 gap-2">
@@ -330,7 +339,7 @@ function ChartCard({ chart, data, range, domain, ticks }: {
         )}
       </div>
       <ResponsiveContainer width="100%" height={200}>
-        <AreaChart data={seriesData} margin={{ top: 5, right: 5, left: -20, bottom: 0 }}>
+        <AreaChart data={seriesData} margin={{ top: 5, right: 5, left: isCurrency ? 0 : -20, bottom: 0 }}>
           <defs>
             {chart.fields.map((f, i) => (
               <linearGradient key={i} id={`grad-${chart.key}-${i}`} x1="0" y1="0" x2="0" y2="1">
@@ -353,6 +362,7 @@ function ChartCard({ chart, data, range, domain, ticks }: {
             minTickGap={getHistoryXAxisMinTickGap(range)}
           />
           <YAxis
+            {...(isCurrency ? { width: 58 } : {})}
             stroke="#8B949E"
             tick={{ fontSize: 11, style: { fontWeight: 700 } }}
             tickLine={false}

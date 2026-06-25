@@ -353,16 +353,52 @@ describe('computeCombinedCost', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Test helpers for the daily-resetting-counter scenarios (issue #133).
+// ---------------------------------------------------------------------------
+
+/** Local-time epoch ms for `Y-M-D H:00` (matches how the inverter resets). */
+function localMs(y: number, m: number, d: number, h: number): number {
+  return new Date(y, m, d, h, 0, 0, 0).getTime();
+}
+
 /**
- * Regression tests for issue #133: the per-bucket spike ceiling must scale
- * with bucket width, otherwise legitimate per-bucket energy gets silently
- * discarded on wide ranges and the cumulative Cost totals shrink as the
- * range widens (e.g. Export Income £12 → £2.40 → £0.32 for the same data).
+ * Build a daily-resetting cumulative-counter series that models real
+ * `today_*_kwh` data: each day the counter ramps from ~0 to `peak` across
+ * `bucketsPerDay` evenly-spaced buckets (bucket MAX ≈ that ramp value),
+ * then resets at the next local midnight.
  *
- * The old code used a fixed 2 kWh ceiling regardless of bucket size. With a
- * 12-hour bucket (6m range) almost every real bucket exceeded 2 kWh and was
- * zeroed. The fix scales the ceiling by `MAX_PLAUSIBLE_POWER_KW × bucketHours`
- * (plus actual elapsed time, to tolerate data gaps).
+ * Widths used below all divide 24 h exactly (2 h × 12, 12 h × 2, 24 h × 1),
+ * so bucket boundaries land on the day boundary and the reset is clean.
+ */
+function dailyResetSeries(
+  days: number,
+  peak: number,
+  bucketsPerDay: number,
+  bucketSecs: number,
+): { t: number; today_export_kwh: number }[] {
+  const rows: { t: number; today_export_kwh: number }[] = [];
+  const day0 = localMs(2026, 0, 1, 0);
+  for (let day = 0; day < days; day++) {
+    for (let b = 0; b < bucketsPerDay; b++) {
+      const t = day0 + day * 86_400_000 + b * bucketSecs * 1000;
+      rows.push({ t, today_export_kwh: (peak * (b + 1)) / bucketsPerDay });
+    }
+  }
+  return rows;
+}
+
+/** Final cumulative export income (kWh, via a £1 rate so income ≡ energy). */
+function totalExportKwh(rows: ReturnType<typeof dailyResetSeries>, bucketSecs: number): number {
+  const rate1 = flatTariffConfig(1);
+  return computeExportIncome(rows, rate1, bucketSecs).at(-1)?._export_income ?? 0;
+}
+
+/**
+ * Regression tests for issue #133 (spike clamp): the per-bucket spike ceiling
+ * must scale with bucket width, otherwise legitimate per-bucket energy gets
+ * silently discarded on wide ranges and the cumulative Cost totals shrink as
+ * the range widens.
  */
 describe('issue #133 — bucket-width-aware spike ceiling', () => {
   it('counts legitimate per-bucket energy that the old 2 kWh flat cap would discard', () => {
@@ -377,8 +413,8 @@ describe('issue #133 — bucket-width-aware spike ceiling', () => {
     expect(result[1]._export_income).toBeCloseTo(3 * 0.15, 5); // £0.45, not £0
   });
 
-  it('gives the same total cost for the same energy regardless of bucket width', () => {
-    // 3 kWh of export expressed two ways:
+  it('gives the same total cost for the same single-day energy regardless of bucket width', () => {
+    // One day, 3 kWh of export expressed two ways:
     //   (a) three 30-min buckets of 1 kWh each  — 7d range (bucket_secs=1800)
     //   (b) one 1-hour bucket of 3 kWh          — month range (bucket_secs=3600)
     // Both must total the same income. Under the old fixed cap (b) was zeroed.
@@ -421,5 +457,91 @@ describe('issue #133 — bucket-width-aware spike ceiling', () => {
     ];
     const result = computeImportCost(rows, FLAT_15P, 1800);
     expect(result[1]._import_cost).toBeCloseTo(4 * 0.15, 5); // £0.60
+  });
+});
+
+/**
+ * Regression tests for the issue #133 follow-up: a daily-resetting counter
+ * (`today_*_kwh`) must total correctly at EVERY range, not just fine ones.
+ *
+ * The midnight reset is detected by the bucket timestamp's LOCAL calendar
+ * day. This is the case the original tests missed: they only used same-day
+ * synthetic data, so they exercised the value heuristic (`prev > 5 &&
+ * raw < 5`) and never caught that wide buckets' first-of-day MAX sits well
+ * above 5 kWh and was being misclassified as a "glitch" and zeroed. With
+ * 12 h buckets the total came out ~half; with 24 h buckets (1y) it was 0.
+ *
+ * The true total over `days` days at `peak` kWh/day is `days × peak`. The
+ * accumulator can't credit the very first bucket of the whole window (there
+ * is no prior reading to delta against), so each width loses at most one
+ * day's first-bucket energy — a bounded, range-independent discrepancy,
+ * not the catastrophic 4–∞× collapse the bug caused.
+ */
+describe('issue #133 follow-up — daily-resetting counter totals across ranges', () => {
+  it('fully counts each day after the first at 12 h buckets (6m range)', () => {
+    // 3 days, 10 kWh/day export. 12 h buckets: morning MAX 5, evening MAX 10.
+    //   d1 morning (init, not credited) → d1 evening +5
+    //   d2 morning: calendar day changed → credit 5 ; d2 evening +5
+    //   d3 morning: credit 5 ; d3 evening +5
+    // Counted = 5+5+5+5+5 = 25 kWh (only d1's morning 5 lost to init).
+    // Under the old value heuristic d2/d3 mornings (raw=5, not < 5) were
+    // zeroed as glitches → only 5 kWh counted.
+    const rows = [
+      { t: localMs(2026, 0, 1, 0), today_export_kwh: 5 },
+      { t: localMs(2026, 0, 1, 12), today_export_kwh: 10 },
+      { t: localMs(2026, 0, 2, 0), today_export_kwh: 5 },
+      { t: localMs(2026, 0, 2, 12), today_export_kwh: 10 },
+      { t: localMs(2026, 0, 3, 0), today_export_kwh: 5 },
+      { t: localMs(2026, 0, 3, 12), today_export_kwh: 10 },
+    ];
+    const result = computeExportIncome(rows, FLAT_15P, 43200);
+    expect(result.at(-1)?._export_income).toBeCloseTo(25 * 0.15, 5); // £3.75
+  });
+
+  it('fully counts each day at 24 h buckets (1y range) even when peaks are equal', () => {
+    // The nastiest case for a delta accumulator: 24 h buckets where every day
+    // peaks at the same value, so raw == prev and there is NO visible drop to
+    // signal a reset. Calendar-day detection credits each new day in full.
+    // Without it the total was 0 (every delta zeroed). True = 30 kWh; the
+    // first day is lost to init → 20 kWh counted.
+    const rows = Array.from({ length: 3 }, (_, day) => ({
+      t: localMs(2026, 0, 1 + day, 0),
+      today_export_kwh: 10,
+    }));
+    const result = computeExportIncome(rows, FLAT_15P, 86400);
+    expect(result.at(-1)?._export_income).toBeCloseTo(20 * 0.15, 5); // £3.00, not £0
+  });
+
+  it('gives consistent totals across 2 h / 12 h / 24 h buckets for the same data', () => {
+    // 10 days, 10 kWh/day → true total 100 kWh. Each width loses only its
+    // first bucket to init (2 h ≈ 99, 12 h ≈ 95, 24 h ≈ 90), so all three
+    // sit within ~one day of the truth and of each other — no 4× collapse.
+    const fine = dailyResetSeries(10, 10, 12, 7200); // 2 h (30d)
+    const half = dailyResetSeries(10, 10, 2, 43200); // 12 h (6m)
+    const daily = dailyResetSeries(10, 10, 1, 86400); // 24 h (1y)
+
+    const fineTotal = totalExportKwh(fine, 7200);
+    const halfTotal = totalExportKwh(half, 43200);
+    const dailyTotal = totalExportKwh(daily, 86400);
+
+    // All within ~one day of the true 100 kWh.
+    expect(fineTotal).toBeGreaterThan(95);
+    expect(halfTotal).toBeGreaterThan(85);
+    expect(dailyTotal).toBeGreaterThan(80);
+    // And within 20% of each other (the bug made half ≈ 0.5× and daily = 0).
+    expect(halfTotal).toBeGreaterThan(fineTotal * 0.8);
+    expect(dailyTotal).toBeGreaterThan(fineTotal * 0.8);
+  });
+
+  it('does not miscount a same-day dip as a rollover', () => {
+    // Two readings on the SAME calendar day where the counter dips slightly:
+    // must be treated as a glitch (delta 0), not a midnight rollover. This
+    // guards against the calendar-day check over-crediting intraday noise.
+    const rows = [
+      { t: localMs(2026, 0, 1, 6), today_export_kwh: 8 },
+      { t: localMs(2026, 0, 1, 18), today_export_kwh: 7.9 },
+    ];
+    const result = computeExportIncome(rows, FLAT_15P, 43200);
+    expect(result[1]._export_income).toBeCloseTo(0, 5);
   });
 });

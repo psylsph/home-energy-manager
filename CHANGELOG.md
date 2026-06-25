@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.40.3] - 2026-06-24
+
+### Fixed
+
+- **6-month and 1-year Cost totals no longer collapse.** On the History → Cost tab, the 6-month and 1-year Import Cost and Export Income figures were a fraction of the 30-day total even though they covered more time, because the midnight rollover of the daily counter was no longer recognised once the buckets got wider than a few hours. The cost accumulator now treats a bucket that crosses local midnight as the start of a new day, so every day's energy is counted in full regardless of the selected range. Follow-up to the 0.40.2 spike-clamp fix, which stopped discarding large legitimate per-bucket energy but did not address the rollover itself. See #133.
+
+- **The £ symbol on the Cost chart is no longer cut off.** The narrow left margin that other History charts use was pushing the leading `£` past the edge of the chart at narrow viewports; the £ axis now has its own room to render.
+
 ## [0.40.2] - 2026-06-24
 
 ### Fixed
