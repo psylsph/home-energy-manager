@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.40.7] - 2026-06-25
+
+### Added
+
+- **Subtle chart grid lines for less visual noise.** A new *Chart Grid Lines* setting in *Preferences → Panel Controls* lets you drop the Power, History, Battery, and Solar charts from the 2-px dashed grid to a hairline that sits behind the data series. The default weight is unchanged so most users see no difference; pick *Subtle* if the grid lines were competing with the series for your eye. See #111.
+
 ## [0.40.6] - 2026-06-25
 
 ### Added

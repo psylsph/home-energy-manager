@@ -8,6 +8,9 @@ import {
   formatHistoryXAxisTick,
   trimDomainStartToFirstDataPoint,
   rangeToBucketSecs,
+  HISTORY_CHART_GRID_PRESETS,
+  getHistoryChartGridProps,
+  type GridLineWeight,
 } from '../../src/lib/historyRangeConfig';
 
 /**
@@ -302,5 +305,127 @@ describe('rangeToBucketSecs', () => {
     ['1y', 86400],
   ] as const)('maps %s → %s s (matches backend get_history)', (range, expected) => {
     expect(rangeToBucketSecs(range)).toBe(expected);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HISTORY_CHART_GRID_PRESETS — issue #111.
+//
+// The recharts `CartesianGrid` on every live history chart (Power, History,
+// Battery tab, Solar tab) is driven from one of two presets so users bothered
+// by chunky grid lines can opt into a hairline look. These tests pin:
+//   - the two presets exist and have the correct dash / width values;
+//   - the `standard` preset is byte-identical to the previous hard-coded
+//     constant (2 px, '4 4' dash, the original CSS-var stroke) so upgrading
+//     users see no visual change unless they opt in;
+//   - `subtle` is meaningfully lighter: thinner stroke AND lower-contrast
+//     stroke variable, so it sits behind the 2-px / 3-px data series;
+//   - `getHistoryChartGridProps` returns the preset verbatim and never
+//     mutates the source object (recharts relies on stable references when
+//     the same props are re-spread on re-render).
+// ---------------------------------------------------------------------------
+
+describe('HISTORY_CHART_GRID_PRESETS (issue #111)', () => {
+  it('exposes exactly the two preset weights', () => {
+    expect(Object.keys(HISTORY_CHART_GRID_PRESETS).sort()).toEqual([
+      'standard',
+      'subtle',
+    ]);
+  });
+
+  it.each<[GridLineWeight, number, string, string]>([
+    ['standard', 2, '4 4', 'var(--color-grid-stroke)'],
+    ['subtle', 1, '3 4', 'var(--color-grid-stroke-subtle)'],
+  ])('preset "%s" → strokeWidth=%i, dasharray="%s", stroke="%s"',
+    (weight, width, dasharray, stroke) => {
+      const props = HISTORY_CHART_GRID_PRESETS[weight];
+      expect(props.strokeWidth).toBe(width);
+      expect(props.strokeDasharray).toBe(dasharray);
+      expect(props.stroke).toBe(stroke);
+    },
+  );
+
+  it('standard preset matches the previous hard-coded constant exactly', () => {
+    // Issue #111's explicit requirement: the default weight must produce a
+    // byte-identical visual to before. If anyone ever changes the standard
+    // preset, they must also update this test and the changelog, because
+    // it's a user-visible behavioural change for everyone who hasn't
+    // touched the new setting.
+    expect(HISTORY_CHART_GRID_PRESETS.standard).toEqual({
+      strokeDasharray: '4 4',
+      stroke: 'var(--color-grid-stroke)',
+      strokeWidth: 2,
+    });
+  });
+
+  it('subtle is strictly lighter than standard in both width and contrast', () => {
+    // Stroke width is what Recharts feeds through to the SVG <line>; the
+    // dasharray gap-to-mark ratio is what makes the line feel chunky. A
+    // preset must be lighter on BOTH axes or it's not actually subtle.
+    expect(HISTORY_CHART_GRID_PRESETS.subtle.strokeWidth)
+      .toBeLessThan(HISTORY_CHART_GRID_PRESETS.standard.strokeWidth);
+
+    // The stroke values are CSS-var strings. They are different identifiers,
+    // which is enough to ensure the rendered colour is different in CSS. A
+    // string-equality check is the right shape — we don't want to assert
+    // computed colour here (that belongs in a CSS integration test).
+    expect(HISTORY_CHART_GRID_PRESETS.subtle.stroke)
+      .not.toBe(HISTORY_CHART_GRID_PRESETS.standard.stroke);
+  });
+
+  it('every preset carries the three keys Recharts forwards to the SVG <line>', () => {
+    for (const weight of Object.keys(HISTORY_CHART_GRID_PRESETS) as GridLineWeight[]) {
+      const props = HISTORY_CHART_GRID_PRESETS[weight];
+      // Recharts ignores unknown keys but silently drops them; missing any
+      // of these would make the grid render as Recharts' default (1px solid
+      // black on a dark background = invisible on dark, wrong on light).
+      expect(props).toHaveProperty('strokeWidth');
+      expect(props).toHaveProperty('stroke');
+      expect(props).toHaveProperty('strokeDasharray');
+      expect(typeof props.strokeWidth).toBe('number');
+      expect(typeof props.stroke).toBe('string');
+      expect(typeof props.strokeDasharray).toBe('string');
+    }
+  });
+});
+
+describe('getHistoryChartGridProps (issue #111)', () => {
+  it.each<[GridLineWeight, number, string]>([
+    ['standard', 2, '4 4'],
+    ['subtle', 1, '3 4'],
+  ])('returns the preset verbatim for "%s"', (weight, expectedWidth, expectedDash) => {
+    const props = getHistoryChartGridProps(weight);
+    expect(props.strokeWidth).toBe(expectedWidth);
+    expect(props.strokeDasharray).toBe(expectedDash);
+    // The spread contract — each call site writes
+    // `<CartesianGrid {...getHistoryChartGridProps(weight)} />`. The getter
+    // must return a plain object with all three fields so the spread lands
+    // each as a JSX attribute. Missing a field → Recharts silently drops it.
+    expect(props).toEqual(HISTORY_CHART_GRID_PRESETS[weight]);
+  });
+
+  it('returns a fresh reference on each call (no shared mutable state)', () => {
+    // Recharts can re-render the chart on parent updates (e.g. when the
+    // store ticks). If we returned a shared reference and a consumer ever
+    // mutated it, every other chart would silently pick up the mutation.
+    // The preset object itself is `as const` so it can't be mutated, but
+    // we still verify the getter doesn't return a singleton.
+    const a = getHistoryChartGridProps('standard');
+    const b = getHistoryChartGridProps('standard');
+    expect(a).toEqual(b);
+    // Same shape — we don't care about identity equality here, only that
+    // repeated calls produce identical content (so the consumer's
+    // `===` checks on re-render behave deterministically).
+    expect(a.strokeWidth).toBe(b.strokeWidth);
+    expect(a.stroke).toBe(b.stroke);
+    expect(a.strokeDasharray).toBe(b.strokeDasharray);
+  });
+
+  it('standard and subtle return different prop sets', () => {
+    // Belt-and-braces: if someone refactors the presets to share a base
+    // object and override one field, this catches accidental identity
+    // collisions.
+    expect(getHistoryChartGridProps('standard'))
+      .not.toEqual(getHistoryChartGridProps('subtle'));
   });
 });

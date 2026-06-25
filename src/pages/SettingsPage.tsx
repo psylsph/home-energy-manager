@@ -227,6 +227,8 @@ export default function SettingsPage() {
     setPanelGraphsYLock,
     visualNoiseThreshold,
     setVisualNoiseThreshold,
+    gridLineWeight,
+    setGridLineWeight,
     snapshot,
   } = useInverterStore();
 
@@ -1748,6 +1750,71 @@ export default function SettingsPage() {
               Charts Y-axis locks to a clean ceiling based on the data maximum instead of auto-fitting
             </p>
           )}
+        </div>
+
+        {/* ── Sub-section: Chart Grid Lines ── */}
+        {/* Two-weight control for the recharts `CartesianGrid` on the Power,
+            History, Battery tab, and Solar tab charts. Issue #111: the
+            default 2-px dashed grid competes with the data series for
+            visual attention; users bothered by that can drop to a hairline.
+            Defaults to 'standard' so existing users see no change. */}
+        <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
+          <h3 className="text-text-primary text-sm font-sans font-medium">Chart Grid Lines</h3>
+          <p className="text-text-secondary text-xs font-sans">
+            Grid line weight on the Power, History, Battery, and Solar charts.
+            Standard matches the data series thickness; subtle is a hairline that sits behind it.
+          </p>
+          <div className="flex gap-2">
+            {([
+              ['standard', 'Standard'],
+              ['subtle', 'Subtle'],
+            ] as const).map(([key, label]) => {
+              const selected = gridLineWeight === key;
+              // Inline swatch mirrors the actual chart props for the preset
+              // so the user previews what each weight will look like before
+              // committing. The dash / width values match
+              // HISTORY_CHART_GRID_PRESETS in src/lib/historyRangeConfig.ts.
+              const dasharray = key === 'standard' ? '4 4' : '3 4';
+              const swatchColor = key === 'standard'
+                ? 'var(--color-grid-stroke)'
+                : 'var(--color-grid-stroke-subtle)';
+              const swatchWidth = key === 'standard' ? 2 : 1;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setGridLineWeight(key)}
+                  aria-pressed={selected}
+                  className={`flex-1 py-2 rounded-lg text-sm font-sans transition flex flex-col items-center gap-2 ${
+                    selected
+                      ? 'bg-flow-active text-white font-semibold'
+                      : 'bg-bg-elevated text-text-primary hover:bg-bg-elevated/80'
+                  }`}
+                >
+                  <span>{label}</span>
+                  {/* 24×8 px SVG swatch — wide enough to show the dash
+                      repeat, short enough not to dominate the button. */}
+                  <svg
+                    width="48"
+                    height="8"
+                    viewBox="0 0 48 8"
+                    aria-hidden="true"
+                    className="opacity-80"
+                  >
+                    <line
+                      x1="0"
+                      y1="4"
+                      x2="48"
+                      y2="4"
+                      stroke={swatchColor}
+                      strokeWidth={swatchWidth}
+                      strokeDasharray={dasharray}
+                    />
+                  </svg>
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         {/* ── Sub-section: Energy Flow Diagram ── */}

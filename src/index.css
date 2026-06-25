@@ -12,6 +12,7 @@
   --color-text-primary: var(--app-text-primary);
   --color-text-secondary: var(--app-text-secondary);
   --color-grid-stroke: var(--app-grid-stroke);
+  --color-grid-stroke-subtle: var(--app-grid-stroke-subtle);
   --font-mono: 'JetBrains Mono', ui-monospace, monospace;
   --font-sans: 'DM Sans', ui-sans-serif, system-ui, sans-serif;
 }
@@ -34,6 +35,7 @@
   --app-range-track: #30363D;
   --app-range-thumb-border: #0D1117;
   --app-grid-stroke: #6E7681;
+  --app-grid-stroke-subtle: rgba(110, 118, 129, 0.55);
 }
 
 [data-theme="light"] {
@@ -53,6 +55,7 @@
   --app-range-track: #D0D7DE;
   --app-range-thumb-border: #F6F8FA;
   --app-grid-stroke: #57606A;
+  --app-grid-stroke-subtle: rgba(87, 96, 106, 0.55);
 }
 
 body {
