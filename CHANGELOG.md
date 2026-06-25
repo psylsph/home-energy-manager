@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.40.9] - 2026-06-25
+
+### Added
+
+- **Minimal Telemetry Mode for chronically unstable dongles.** A new *Minimal Telemetry Mode* toggle in *Settings → Developer* lets the app skip the optional model-specific register blocks (extended schedule slots, AC charge/discharge limits, three-phase config, gateway aggregation) and read only the standard power/SOC/battery blocks each cycle. SOC, solar, grid, and home readings stay identical; the savings show up on a flaky dongle as fewer timeouts and shorter reconnect storms, since the poll loop now spends less time waiting on the optional pages. The change takes effect on the next poll cycle — no reconnect needed — and the toggle is off by default.
+
 ## [0.40.8] - 2026-06-25
 
 ### Fixed
