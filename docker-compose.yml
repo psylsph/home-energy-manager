@@ -6,11 +6,23 @@ services:
     network_mode: "host"
     volumes:
       - "${HOME}/.givenergy-local:/root/.givenergy-local"
-      # Inherit the host's timezone so server-side day boundaries (history
-      # "Today" windowing, energy reconstruction) match the host's wall clock
-      # WITHOUT needing to set TZ. /etc/localtime is a self-contained tzfile
-      # that glibc reads directly, so this works on any Linux host that has it
-      # configured (standard). Falls back to the image default (UTC) if absent.
+      # Inherit the host's timezone so server-side day boundaries match the
+      # host's wall clock WITHOUT needing to set TZ. /etc/localtime is a
+      # self-contained tzfile that glibc reads directly, so this works on any
+      # Linux host that has it configured (standard). Falls back to the image
+      # default (UTC) if absent.
+      #
+      # IMPORTANT — set this correctly! The History chart window itself is now
+      # computed in the browser (issue #134), so the chart is fine regardless.
+      # But these server-side features still run on the container's timezone:
+      #   - the daily consumption report (its "today" window)
+      #   - cost-series time-of-use tariff slot selection
+      #   - the cumulative-counter midnight rollover detection
+      # A container left on UTC (no /etc/localtime mounted) will compute those
+      # on UTC day boundaries, so e.g. a UK install reports 01:00→01:00 BST.
+      # On startup the headless server prints a prominent WARN if it detects
+      # this UTC-default signature — watch the container logs for it.
+      # If your host has no /etc/localtime, uncomment the TZ line below instead.
       - /etc/localtime:/etc/localtime:ro
     environment:
       - GIVENERGY_LOCAL_CONFIG_DIR=/root/.givenergy-local

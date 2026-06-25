@@ -1,3 +1,5 @@
+import { getTodayBoundaryMs, getMonthBoundaryMs } from './historyRangeConfig';
+
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
 function getServerPort(): string {
@@ -97,9 +99,19 @@ export async function fetchHistory(
   if (rolling) {
     params.set('rolling', 'true');
   }
-  if (range === 'today') {
-    // Delegate to the backend — it computes the window in local time to
-    // match the inverter's today_*_kwh reset at local midnight.
+  // Calendar-aligned ranges ("today", "month") are bounded by the browser's
+  // local midnight, not the server's wall clock. The server honours an
+  // explicit start_ms/end_ms window so a UTC server (NAS / Docker / unRAID)
+  // can't shift "Today" relative to the user's timezone or the inverter's
+  // local-midnight today_*_kwh counter reset. Completes PR #136, which only
+  // aligned the chart x-axis domain. See issue #134.
+  const window: [number, number] | undefined =
+    range === 'today' ? getTodayBoundaryMs(offset)
+      : range === 'month' ? getMonthBoundaryMs(offset)
+        : undefined;
+  if (window) {
+    params.set('start_ms', String(window[0]));
+    params.set('end_ms', String(window[1]));
   }
   const res = await apiGet<{ ok: boolean; data: Record<string, Array<{ t: number; v: number }>> }>(
     `/api/history?${params}`,
