@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.40.11] - 2026-06-25
+
+### Fixed
+
+- **The app recovers from a flaky inverter dongle in seconds instead of minutes.** When the dongle briefly stops answering after a network blip — still on the network, just not replying for a moment — the app now reconnects within a few seconds and gives a freshly-connected dongle more time to come good before giving up, mirroring how GivTCP handles the same situation. Previously a single missed check after a reconnect could condemn an otherwise healthy socket, and the reconnect delay then climbed in stages all the way to ten minutes, leaving the dashboard dark long after the dongle had recovered on its own.
+
 ## [0.40.10] - 2026-06-25
 
 ### Added

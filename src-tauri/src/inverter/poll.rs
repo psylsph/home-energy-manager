@@ -561,15 +561,22 @@ fn should_probe_hv_stacks(known_device_type: Option<DeviceType>, hv_probe_done: 
 /// zombie, so the normal connect-failure back-off never kicks in — this
 /// function provides the escalation that path is missing.
 ///
-/// Schedule: 0→5 s, 1→30 s, 2→60 s, 3→2 min, 4→5 min, 5+→10 min cap.
+/// Schedule: a small flat ramp capped low (0–1 → 5 s, 2+ → 10 s).
+///
+/// GivTCP reconnects on a dead/zombie session with a flat ~2 s pause
+/// (`read.py`: `close()` → `sleep(2)` → `connect()`) and only escalates to a
+/// full container restart after 10 *hard* connect failures (which HEM maps
+/// to auto-discovery instead). The previous schedule here (5 → 30 → 60 →
+/// 120 → 300 → 600 s) parked a self-healing dongle behind a 10-minute wall
+/// after a handful of zombie sessions — during which the dongle typically
+/// recovers on its own. A small ramp that caps low gives a genuinely-wedged
+/// dongle modest breathing room without stranding a recovering one for
+/// minutes. (The separate `backoff` exponential only bites on actual
+/// `connect()` failures, where it is appropriate to back off harder.)
 fn dead_session_backoff(consecutive_dead_sessions: u32) -> Duration {
     match consecutive_dead_sessions {
-        0 => Duration::from_secs(5),
-        1 => Duration::from_secs(30),
-        2 => Duration::from_secs(60),
-        3 => Duration::from_secs(120),
-        4 => Duration::from_secs(300),
-        _ => Duration::from_secs(600),
+        0 | 1 => Duration::from_secs(5),
+        _ => Duration::from_secs(10),
     }
 }
 
@@ -709,25 +716,31 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // session - without this, cached responses corrupt the
                 // request-response pairing for the first poll.
 
-                // Liveness probe + warmup.
+                // Liveness probe (advisory) + warmup.
                 //
                 // A "zombie" dongle keeps its TCP stack alive (so connect()
                 // succeeds and keepalives pass) while its Modbus application
-                // processor hangs. Without a cheap liveness check we'd only
-                // discover this by timing out the full multi-block warmup +
-                // poll sequence — minutes of pure timeouts per reconnect
-                // cycle. The probe is a single-register read: a healthy
-                // dongle answers in ~50 ms; a dead one fails in one
-                // round-trip (~3 s). When it fails we skip warmup entirely
-                // and reconnect.
+                // processor hangs. This probe is a cheap single-register read
+                // that confirms the dongle is answering Modbus before we commit
+                // to a full multi-block poll.
+                //
+                // It is **advisory only**: a failure is logged but does *not*
+                // tear down the session. GivTCP has no equivalent gate — its
+                // first poll (the warmup read below) is the real liveness
+                // check, and a transiently slow-but-healthy dongle recovers
+                // within a few seconds of TCP connect. Bailing on a single
+                // probe miss previously condemned good-but-slow sockets and
+                // parked them behind the escalating reconnect back-off. A
+                // genuinely wedged dongle is still caught — by the warmup read
+                // (which sets `session_unusable`) and, if it slips past that,
+                // by the inner loop's `consecutive_timeouts` counter.
                 let mut session_unusable = false;
                 match client.liveness_probe().await {
                     Ok(()) => tracing::debug!("Liveness probe OK"),
                     Err(e) => {
                         tracing::warn!(
-                            "Liveness probe FAILED after connect - dongle not answering Modbus: {e}"
+                            "Liveness probe not answering yet (advisory - will retry via warmup): {e}"
                         );
-                        session_unusable = true;
                     }
                 }
 
@@ -742,13 +755,18 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // it could delay the first UI update by 30 s+. GivTCP does one
                 // full refresh after connect then enters its watch loop.)
                 //
-                // Bail on the failing read: if the dongle can't serve one
-                // multi-block read after retries it won't serve another, so
-                // reconnecting now saves the per-read timeout.
+                // This read is the real post-connect liveness check: it gets a
+                // generous retry budget (matching GivTCP's patient first poll,
+                // `refresh_plant(retries=5)`) because the dongle's Modbus
+                // processor is slow to wake right after a TCP handshake. If it
+                // can't serve one multi-block read after all those retries it
+                // won't serve another, so reconnecting now saves the per-read
+                // timeout.
+                const WARMUP_MAX_RETRIES: u8 = 4;
                 if !session_unusable {
                     match client.read_blocks_resilient(
                         crate::modbus::registers::STANDARD_POLL_BLOCKS,
-                        2,
+                        WARMUP_MAX_RETRIES,
                     )
                     .await
                     {
@@ -3098,20 +3116,16 @@ mod tests {
 
     #[test]
     fn dead_session_backoff_schedule() {
-        // 0 dead sessions → 5 s (same as the base back-off)
+        // Flat, low cap — mirrors GivTCP's ~2 s reconnect on a zombie session
+        // (close → sleep(2) → connect). A self-healing dongle gets another
+        // shot within seconds instead of being parked behind a 10-minute wall.
         assert_eq!(dead_session_backoff(0), Duration::from_secs(5));
-        // 1 → 30 s
-        assert_eq!(dead_session_backoff(1), Duration::from_secs(30));
-        // 2 → 60 s
-        assert_eq!(dead_session_backoff(2), Duration::from_secs(60));
-        // 3 → 2 min
-        assert_eq!(dead_session_backoff(3), Duration::from_secs(120));
-        // 4 → 5 min
-        assert_eq!(dead_session_backoff(4), Duration::from_secs(300));
-        // 5+ → 10 min cap
-        assert_eq!(dead_session_backoff(5), Duration::from_secs(600));
-        assert_eq!(dead_session_backoff(10), Duration::from_secs(600));
-        assert_eq!(dead_session_backoff(100), Duration::from_secs(600));
+        assert_eq!(dead_session_backoff(1), Duration::from_secs(5));
+        // 2+ caps at 10 s.
+        assert_eq!(dead_session_backoff(2), Duration::from_secs(10));
+        assert_eq!(dead_session_backoff(3), Duration::from_secs(10));
+        assert_eq!(dead_session_backoff(5), Duration::from_secs(10));
+        assert_eq!(dead_session_backoff(100), Duration::from_secs(10));
     }
 
     /// `run_poll_loop` reconnects after `MAX_CONSECUTIVE_TIMEOUTS` cycles of
