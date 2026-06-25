@@ -1973,7 +1973,7 @@ export default function SettingsPage() {
               <div className="flex flex-col gap-0.5">
                 <span className="text-text-primary text-sm font-sans font-medium">Minimal Telemetry Mode</span>
                 <span className="text-text-secondary text-xs font-sans">
-                  Skip optional model-specific register blocks (AC HR300-359, extended slots, three-phase config). Reduces per-cycle timeouts on unstable dongles. Standard blocks and battery BMS / HV BCU reads still run, so SOC and power readings are unaffected. Takes effect on the next poll cycle.
+                  Skip optional model-specific register blocks (extended slots, three-phase telemetry, gateway IR1600+) to reduce per-cycle timeouts on unstable dongles. The AC config block (HR300-359) and three-phase config block (HR1080-1124) are still polled on AC-coupled and three-phase inverters so the battery charge/discharge limit sliders stay accurate. SOC and power readings are unaffected. Takes effect on the next poll cycle.
                 </span>
               </div>
               <Toggle
