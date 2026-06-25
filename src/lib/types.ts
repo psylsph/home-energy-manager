@@ -180,6 +180,15 @@ export interface PollSettings {
   evc_host: string;
   evc_port: number;
   disable_auto_discovery: boolean;
+  /**
+   * When true, the poll loop skips optional model-specific register blocks
+   * (extended slots, AC config, three-phase config, gateway input banks) to
+   * reduce per-cycle timeout exposure on chronically unstable dongles. The
+   * standard blocks (and per-battery BMS / HV BCU reads) always run. Surfaced
+   * in the Developer section of Settings because it's a tradeoff between UI
+   * detail and connection stability — most users should leave it off.
+   */
+  minimal_telemetry_mode: boolean;
   /** Whether the user has opted in to launching the app on system login.
    *  Wired through tauri-plugin-autostart (HKCU\…\Run on Windows,
    *  LaunchAgent on macOS, ~/.config/autostart/*.desktop on Linux).
