@@ -94,6 +94,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Discovery
         .route("/api/discover", get(api::discover))
         .route("/api/evc/discover", get(api::evc_discover))
+        // EVC reachability snapshot (issue #138) — lets the frontend
+        // seed `evcEverConnected` on page load without waiting for the
+        // next WS broadcast.
+        .route("/api/evc/status", get(api::evc_status))
         // Developer logs
         .route("/api/logs", get(logs::get_logs))
         .route(

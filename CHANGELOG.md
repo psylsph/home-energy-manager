@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.40.4] - 2026-06-25
+
+### Fixed
+
+- **EV Charger label now tells you whether it was ever reachable.** When the
+  EVC icon on the Status page shows "Disconnected", it's been telling you a
+  lie if the charger host has actually never answered. The label now reads
+  "Not Found" in that case, so a typo in the Charger Address field (the
+  classic being `10.1.71` instead of `10.1.1.71`) is obvious instead of
+  looking like a network outage. Once a charger has responded at least once,
+  it switches to the honest "Disconnected" / "Connected" / "Charging" labels
+  and stays there. The Settings page now also refuses to save a malformed
+  address and flags the field red as you type, so the typo never reaches
+  the backend in the first place. See #138.
+
 ## [0.40.3] - 2026-06-24
 
 ### Fixed

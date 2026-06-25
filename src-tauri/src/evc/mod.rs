@@ -333,7 +333,20 @@ pub async fn run_evc_poll_loop(state: Arc<AppState>) {
         let addr: std::net::SocketAddr = match socket_addr.parse() {
             Ok(a) => a,
             Err(e) => {
+                // Host string is unparseable (issue #138: typo like "10.1.71"
+                // instead of "10.1.1.71"). Without broadcasting, the frontend
+                // sits on the Zustand defaults forever and shows a misleading
+                // "Disconnected" label. Clear cached snapshot and emit
+                // EvcDisconnected so the UI can render an honest state, then
+                // back off. The frontend SettingsPage already blocks saving
+                // bad hosts, but this also covers hand-edited settings.json
+                // and old clients that pre-date the validator.
                 tracing::warn!("EVC: invalid address '{socket_addr}': {e}");
+                {
+                    let mut evc = state.latest_evc.lock().await;
+                    *evc = None;
+                }
+                let _ = state.tx.send(PollMessage::EvcDisconnected);
                 sleep(backoff).await;
                 continue;
             }
@@ -343,6 +356,14 @@ pub async fn run_evc_poll_loop(state: Arc<AppState>) {
             Ok(ctx) => {
                 tracing::info!(host = %evc_host, "EVC: connected");
                 backoff = Duration::from_secs(10);
+                // Broadcast a connect event immediately so the frontend can
+                // latch "we've reached the host" without waiting for the
+                // first successful register read (issue #138). If the
+                // first read fails and we drop back to EvcDisconnected, the
+                // latch will be cleared by resetEvc() on the next save —
+                // in the meantime the UI shows an honest "Connected"
+                // rather than the misleading "Not Found".
+                let _ = state.tx.send(PollMessage::EvcConnected);
                 ctx
             }
             Err(e) => {

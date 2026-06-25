@@ -3,6 +3,7 @@ import { useIsMobile } from '../hooks/useIsMobile';
 import { useInverterStore } from '../store/useInverterStore';
 import type { InverterSnapshot } from '../lib/types';
 import { formatVisualPower, formatPercent, formatCurrent, formatTemp, formatVoltage } from '../lib/format';
+import { evcNodeLabel } from '../lib/evcLabel';
 
 interface Props {
   snapshot: InverterSnapshot;
@@ -12,6 +13,13 @@ interface Props {
   evcCharging?: boolean;
   /** Whether the EV Charger is connected/responding. */
   evcConnected?: boolean;
+  /**
+   * True once at least one valid EVC snapshot has been received since the
+   * page loaded. Lets the diagram distinguish "was here, now offline"
+   * ("Disconnected") from "never reached the configured host" ("Not
+   * Found" — issue #138). Defaults to `evcConnected` when omitted.
+   */
+  evcEverConnected?: boolean;
   /** Whether EV Charger is configured (non-empty host). When falsy, EV node is hidden. */
   showEvc?: boolean;
 }
@@ -251,7 +259,7 @@ function FlowNode({ cx, cy, color, label, value, unit, hub, width, height, mobil
 // Component
 // ---------------------------------------------------------------------------
 
-function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false, evcConnected = false, showEvc = false }: Props) {
+function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false, evcConnected = false, evcEverConnected, showEvc = false }: Props) {
   const mobile = useIsMobile();
   const noiseThreshold = useInverterStore((st) => st.visualNoiseThreshold);
   const isCharging = s.battery_state === 'charging';
@@ -282,6 +290,7 @@ function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false
   });
 
   const evcActive = showEvc && evcPower > noiseThreshold;
+  const evcUnit = evcNodeLabel(evcCharging, evcConnected, !!evcEverConnected);
 
   const modeLabel = modeDisplayLabel(
     s.battery_mode, s.cosy_active, s.cosy_enabled,
@@ -429,7 +438,7 @@ function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false
             width={116}
             height={76}
             value={formatVisualPower(evcPower, noiseThreshold)}
-            unit={evcCharging ? 'Charging' : evcConnected ? 'Connected' : 'Disconnected'}
+            unit={evcUnit}
           />
         )}
       </svg>
