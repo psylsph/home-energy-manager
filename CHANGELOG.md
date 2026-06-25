@@ -12,7 +12,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **History Cost totals now agree across every date range, and price your energy at the right tariff.** The Import Cost and Export Income figures on the History → Cost tab were rebuilt in the browser from data the server had already averaged down, so the £ totals drifted depending on which range you'd picked, and on wider ranges a whole day's energy could end up priced at a single off-peak rate — quietly dropping the evening peak. The running total is now built on the back end from the full-resolution readings, charging each increment of energy at the peak or off-peak rate for the moment it actually happened, so every range — this week, this month, this year — comes out the same, and the figures are correct for time-of-use tariffs. This completes the fix started in 0.40.2 and 0.40.3. See #133.
+
 - **History "Today" and "Month" now use your local midnight, not the server's.** The chart x-axis was already browser-local, but the data query was still bounded server-side, so a UK user on a UTC container saw the chart say "Today 00:00–23:59" while the data was actually 01:00–01:00 BST. The frontend now sends an explicit `start_ms`/`end_ms` window computed from your local midnight, and the server honours it. See #134.
+
+Thanks to [@bendavies](https://github.com/bendavies) for the History Cost rework in this release (PR #148).
 
 ## [0.40.9] - 2026-06-25
 
