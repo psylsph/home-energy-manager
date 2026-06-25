@@ -579,6 +579,12 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     } else {
         0.0
     };
+    // Issue #108: surface the individual strings for per-card display and
+    // the History solar-energy chart. We assign *before* the IR(44) fallback
+    // so the per-string values reflect the actual panel-side measurement,
+    // even if the IR(44) aggregate is later used for today_solar_kwh.
+    snap.today_pv1_kwh = pv1_today * 0.1;
+    snap.today_pv2_kwh = pv2_today * 0.1;
     let per_string_today = pv1_today + pv2_today;
     if per_string_today > 0.0 {
         snap.today_solar_kwh = per_string_today * 0.1; // IR(17)+IR(19)
@@ -1306,12 +1312,37 @@ fn decode_input_1360_1413(data: &[u16], snap: &mut InverterSnapshot) {
     // 36+37 → IR(1396)+IR(1397): e_load_today              (uint32 /10 kWh)
     // 52+53 → IR(1412)+IR(1413): e_pv_today                (uint32 /10 kWh)
     let pv_today = uint32(get_reg(data, 52), get_reg(data, 53));
-    snap.today_solar_kwh = if pv_today > 0 {
+    // Issue #108: read each per-string register independently and sanitise
+    // against the same 200 kWh ceiling the single-phase decoder uses.
+    // Always populate today_pv1_kwh / today_pv2_kwh so the History chart
+    // shows per-string lines even when the aggregate register is preferred
+    // for today_solar_kwh. A corrupted single-string register is dropped
+    // to 0 here so it can't contaminate either field.
+    const MAX_DAILY_KWH_TENTHS_TP: u32 = 2_000; // 200 kWh × 10
+    let raw_pv1 = uint32(get_reg(data, 6), get_reg(data, 7));
+    let raw_pv2 = uint32(get_reg(data, 10), get_reg(data, 11));
+    let pv1_today_kwh = if raw_pv1 <= MAX_DAILY_KWH_TENTHS_TP {
+        raw_pv1 as f32 * 0.1
+    } else {
+        0.0
+    };
+    let pv2_today_kwh = if raw_pv2 <= MAX_DAILY_KWH_TENTHS_TP {
+        raw_pv2 as f32 * 0.1
+    } else {
+        0.0
+    };
+    snap.today_pv1_kwh = pv1_today_kwh;
+    snap.today_pv2_kwh = pv2_today_kwh;
+    snap.today_solar_kwh = if pv1_today_kwh + pv2_today_kwh > 0.0 {
+        // Prefer the per-string sum so Total == PV1 + PV2 on the UI
+        // (the property the History chart relies on). Both registers
+        // pass the ceiling above; otherwise we fall through to the
+        // aggregate below.
+        pv1_today_kwh + pv2_today_kwh
+    } else if pv_today > 0 {
         pv_today as f32 * 0.1
     } else {
-        (uint32(get_reg(data, 6), get_reg(data, 7)) + uint32(get_reg(data, 10), get_reg(data, 11)))
-            as f32
-            * 0.1
+        0.0
     };
     snap.today_import_kwh = uint32(get_reg(data, 20), get_reg(data, 21)) as f32 * 0.1;
     snap.today_export_kwh = uint32(get_reg(data, 24), get_reg(data, 25)) as f32 * 0.1;
@@ -3189,6 +3220,218 @@ mod tests {
         // formula generalises the GE one by adding battery throughput.)
         assert!((snap.today_consumption_kwh - 13.0).abs() < 0.01);
         assert!((snap.home_energy_today_kwh - 13.0).abs() < 0.01);
+    }
+
+    // ---- Issue #108: per-string PV1/PV2 today fields ----
+
+    // (helper removed; tests set IR(2) directly in the data buffer since
+    // decode_input_0_59 overwrites snap.pv2_voltage from IR(2) on entry.)
+
+    #[test]
+    fn single_phase_per_string_pv1_pv2_populated_from_ir17_ir19() {
+        // PV1 18.5 kWh (IR(17)=185), PV2 9.5 kWh (IR(19)=95). IR(2)
+        // pv2_voltage = 380 (38.0 V) so the IR(19) gate is open.
+        let mut snap = InverterSnapshot::default();
+        let mut data = vec![0u16; 60];
+        data[2] = 380; // IR(2): pv2_voltage = 38.0 V — PV2 present
+        data[17] = 185; // IR(17): PV1 today 18.5 kWh
+        data[19] = 95; // IR(19): PV2 today 9.5 kWh
+        data[44] = 250; // IR(44): aggregate (must be ignored when per-string sum works)
+        decode_input_0_59(&data, &mut snap);
+        assert!((snap.today_pv1_kwh - 18.5).abs() < 0.01, "PV1 today wrong");
+        assert!((snap.today_pv2_kwh - 9.5).abs() < 0.01, "PV2 today wrong");
+        // Total = sum, NOT aggregate: 18.5 + 9.5 = 28.0, not IR(44)=25.0.
+        assert!(
+            (snap.today_solar_kwh - 28.0).abs() < 0.01,
+            "total should be PV1+PV2=28.0, not IR(44)=25.0; got {}",
+            snap.today_solar_kwh
+        );
+    }
+
+    #[test]
+    fn single_phase_per_string_zero_when_pv2_voltage_zero() {
+        // No PV2 string (pv2_voltage == 0) → IR(19) must be ignored regardless
+        // of value; today_pv2_kwh stays at 0.0.
+        let mut snap = InverterSnapshot::default();
+        let mut data = vec![0u16; 60];
+        data[2] = 0; // pv2_voltage = 0 — no second string
+        data[17] = 120; // PV1 12.0 kWh
+        data[19] = 999; // IR(19) stale garbage — must be ignored
+        decode_input_0_59(&data, &mut snap);
+        assert!((snap.today_pv1_kwh - 12.0).abs() < 0.01);
+        assert_eq!(snap.today_pv2_kwh, 0.0, "PV2 must be 0 when no PV2 string");
+        assert!((snap.today_solar_kwh - 12.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn single_phase_per_string_individually_sanitised_against_corruption() {
+        // A single corrupted per-string register is dropped without
+        // contaminating the other string. Total uses the surviving string
+        // (or IR(44) if both are corrupted).
+        let mut snap = InverterSnapshot::default();
+        let mut data = vec![0u16; 60];
+        data[2] = 380; // PV2 present
+        data[17] = 5_000; // PV1: 500 kWh — corrupted
+        data[19] = 80; // PV2: 8.0 kWh — valid
+        decode_input_0_59(&data, &mut snap);
+        assert_eq!(snap.today_pv1_kwh, 0.0, "corrupted PV1 must be 0");
+        assert!((snap.today_pv2_kwh - 8.0).abs() < 0.01, "PV2 must survive");
+        // Total = PV1 (dropped) + PV2 (8.0)
+        assert!(
+            (snap.today_solar_kwh - 8.0).abs() < 0.01,
+            "total must use surviving string only; got {}",
+            snap.today_solar_kwh
+        );
+    }
+
+    #[test]
+    fn single_phase_per_string_zero_falls_back_to_ir44_but_fields_stay_zero() {
+        // Per-string corruption → IR(44) fallback for total, but
+        // today_pv1_kwh / today_pv2_kwh stay 0 (the per-string readings
+        // are corrupted, not just missing). Honest representation on UI:
+        // Total reads IR(44), but per-string rows show 0.
+        let mut snap = InverterSnapshot::default();
+        let mut data = vec![0u16; 60];
+        data[2] = 380; // PV2 present
+        data[17] = 5_000; // corrupted
+        data[19] = 5_000; // corrupted
+        data[44] = 100; // valid fallback 10.0 kWh
+        decode_input_0_59(&data, &mut snap);
+        assert_eq!(snap.today_pv1_kwh, 0.0);
+        assert_eq!(snap.today_pv2_kwh, 0.0);
+        assert!(
+            (snap.today_solar_kwh - 10.0).abs() < 0.01,
+            "total must use IR(44) fallback; got {}",
+            snap.today_solar_kwh
+        );
+    }
+
+    #[test]
+    fn three_phase_per_string_pv1_pv2_populated_from_ir1366_ir1370() {
+        // uint32(high, low) — IR(1366)=high, IR(1367)=low.
+        // PV1: high=0, low=1500 → 150.0 kWh.
+        // PV2: high=0, low=750  → 75.0 kWh.
+        // Aggregate IR(1412-13) is set but must NOT be used when per-string
+        // sum is non-zero (issue #108 decision).
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::ThreePhase,
+            ..Default::default()
+        };
+        let mut data = vec![0u16; 54];
+        data[6] = 0;       // IR(1366) high
+        data[7] = 1500;    // IR(1367) low  → PV1 = 150.0 kWh
+        data[10] = 0;      // IR(1370) high
+        data[11] = 750;    // IR(1371) low  → PV2 = 75.0 kWh
+        data[52] = 0xFFFF; // IR(1412) high
+        data[53] = 0x0000; // IR(1413) low — garbage aggregate, must be ignored
+        decode_input_1360_1413(&data, &mut snap);
+        assert!((snap.today_pv1_kwh - 150.0).abs() < 0.01, "got PV1 {}", snap.today_pv1_kwh);
+        assert!((snap.today_pv2_kwh - 75.0).abs() < 0.01, "got PV2 {}", snap.today_pv2_kwh);
+        // Total = PV1 + PV2 = 225.0, NOT the garbage aggregate.
+        assert!(
+            (snap.today_solar_kwh - 225.0).abs() < 0.01,
+            "total must equal PV1+PV2 when per-string is non-zero; got {}",
+            snap.today_solar_kwh
+        );
+    }
+
+    #[test]
+    fn three_phase_corrupted_per_string_drops_to_aggregate() {
+        // Both per-string registers above the 200 kWh ceiling → fall back
+        // to the aggregate IR(1412-13). today_pv1_kwh / today_pv2_kwh
+        // are still populated (each dropped to 0 individually).
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::ThreePhase,
+            ..Default::default()
+        };
+        let mut data = vec![0u16; 54];
+        data[6] = 0xFFFF;
+        data[7] = 0xFFFF; // corrupted PV1 (~4.3 billion)
+        data[10] = 0xFFFF;
+        data[11] = 0xFFFF; // corrupted PV2
+        data[52] = 0;
+        data[53] = 250; // uint32(high=0, low=250) = 250 → 25.0 kWh (valid aggregate)
+        decode_input_1360_1413(&data, &mut snap);
+        assert_eq!(snap.today_pv1_kwh, 0.0, "corrupted PV1 must drop to 0");
+        assert_eq!(snap.today_pv2_kwh, 0.0, "corrupted PV2 must drop to 0");
+        assert!(
+            (snap.today_solar_kwh - 25.0).abs() < 0.01,
+            "must fall back to aggregate 25.0 when both per-string corrupted; got {}",
+            snap.today_solar_kwh
+        );
+    }
+
+    #[test]
+    fn three_phase_only_one_string_corrupted_other_survives() {
+        // PV1 corrupted, PV2 valid → PV1=0, PV2 preserved, total = PV2.
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::ThreePhase,
+            ..Default::default()
+        };
+        let mut data = vec![0u16; 54];
+        data[6] = 0xFFFF;
+        data[7] = 0xFFFF; // corrupted PV1
+        data[10] = 0;
+        data[11] = 200; // PV2 = 20.0 kWh (valid)
+        data[52] = 0;
+        data[53] = 0;
+        decode_input_1360_1413(&data, &mut snap);
+        assert_eq!(snap.today_pv1_kwh, 0.0);
+        assert!((snap.today_pv2_kwh - 20.0).abs() < 0.01, "got PV2 {}", snap.today_pv2_kwh);
+        // Per-string sum (PV1=0, PV2=20.0) > 0 → total = 20.0, not aggregate (0).
+        assert!(
+            (snap.today_solar_kwh - 20.0).abs() < 0.01,
+            "total should be surviving per-string sum; got {}",
+            snap.today_solar_kwh
+        );
+    }
+
+    #[test]
+    fn three_phase_below_ceiling_but_total_matches_sum() {
+        // Both strings below ceiling, sum is non-zero: total = PV1+PV2.
+        // No aggregate fallback should occur. Verifies the priority logic.
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::ThreePhase,
+            ..Default::default()
+        };
+        let mut data = vec![0u16; 54];
+        data[6] = 0;
+        data[7] = 10; // PV1 = 1.0 kWh
+        data[10] = 0;
+        data[11] = 20; // PV2 = 2.0 kWh
+        data[52] = 100;
+        data[53] = 0; // aggregate = 1000 kWh — must be ignored
+        decode_input_1360_1413(&data, &mut snap);
+        assert!((snap.today_pv1_kwh - 1.0).abs() < 0.01);
+        assert!((snap.today_pv2_kwh - 2.0).abs() < 0.01);
+        assert!(
+            (snap.today_solar_kwh - 3.0).abs() < 0.01,
+            "total should be 1.0+2.0=3.0; got {}",
+            snap.today_solar_kwh
+        );
+    }
+
+    #[test]
+    fn gateway_decoder_does_not_set_per_string_fields() {
+        // Issue #108 design decision: gateway has no per-string registers,
+        // so today_pv1_kwh / today_pv2_kwh must remain at their default
+        // (0.0) after a gateway snapshot is decoded. The aggregate
+        // IR(1643) `e_pv_today` populates today_solar_kwh as before.
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::Gateway,
+            ..Default::default()
+        };
+        let mut data = vec![0u16; 60];
+        data[43] = 123; // IR(1643): e_pv_today = 12.3 kWh (only aggregate is set)
+        decode_gateway_1600_1659(&data, &mut snap);
+        // Aggregate is set; per-string fields untouched.
+        assert!(
+            (snap.today_solar_kwh - 12.3).abs() < 0.01,
+            "gateway aggregate should populate today_solar_kwh; got {}",
+            snap.today_solar_kwh
+        );
+        assert_eq!(snap.today_pv1_kwh, 0.0, "gateway must not populate PV1");
+        assert_eq!(snap.today_pv2_kwh, 0.0, "gateway must not populate PV2");
     }
 
     #[test]

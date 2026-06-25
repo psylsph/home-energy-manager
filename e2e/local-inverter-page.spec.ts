@@ -100,6 +100,22 @@ test.describe('Inverter Page - Solar Inputs', () => {
 
     await expect(page.locator('text=Solar Today')).toBeVisible({ timeout: 5_000 });
   });
+
+  // Issue #108: per-string PV1/PV2 Today rows in the Solar Inputs section.
+  test('should show PV1 Today row', async ({ page }) => {
+    await page.goto('/#/inverter');
+    await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
+
+    await expect(page.locator('text=PV1 Today')).toBeVisible({ timeout: 5_000 });
+  });
+
+  test('snapshot exposes per-string PV today fields (issue #108)', async ({ baseUrl }) => {
+    const resp = await fetch(`${baseUrl}/api/snapshot`);
+    const data = await resp.json();
+    expect(data.ok).toBe(true);
+    expect(data.data).toHaveProperty('today_pv1_kwh');
+    expect(data.data).toHaveProperty('today_pv2_kwh');
+  });
 });
 
 test.describe('Inverter Page - Grid Section', () => {

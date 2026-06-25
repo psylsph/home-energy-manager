@@ -124,7 +124,11 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
           key: 'pv-energy',
           title: 'PV Energy Today (kWh)',
           unit: 'kWh',
-          fields: [{ field: 'today_solar_kwh', color: '#F59E0B' }],
+          fields: [
+            { field: 'today_pv1_kwh', color: '#F59E0B', label: 'PV1' },
+            { field: 'today_pv2_kwh', color: '#3B82F6', label: 'PV2' },
+            { field: 'today_solar_kwh', color: '#22C55E', label: 'Total' },
+          ],
         },
       ];
     case 'grid':

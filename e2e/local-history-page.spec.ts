@@ -120,4 +120,29 @@ test.describe('History Page - API', () => {
     // Should return 400 or handle gracefully
     expect(resp.status).toBeLessThanOrEqual(400);
   });
+
+  // Issue #108: per-string PV1/PV2 today fields are valid history fields.
+  test('history endpoint accepts today_pv1_kwh and today_pv2_kwh fields', async ({ baseUrl }) => {
+    const resp = await fetch(
+      `${baseUrl}/api/history?range=24h&fields=today_pv1_kwh,today_pv2_kwh,today_solar_kwh`,
+    );
+    expect(resp.ok).toBe(true);
+    const data = await resp.json();
+    expect(data.ok).toBe(true);
+    expect(data.data).toHaveProperty('today_pv1_kwh');
+    expect(data.data).toHaveProperty('today_pv2_kwh');
+    expect(data.data).toHaveProperty('today_solar_kwh');
+  });
+
+  test('Solar tab on history page shows the per-string energy chart', async ({ page }) => {
+    await page.goto('/#/history');
+    await expect(page.locator('button:has-text("Solar")').first()).toBeVisible({ timeout: 15_000 });
+    await page.locator('button:has-text("Solar")').first().click();
+    await page.waitForTimeout(1500);
+
+    // The PV Energy Today chart should be present (or empty state).
+    const hasChart = await page.locator('text=/PV Energy Today/').count();
+    const hasEmpty = await page.locator('text=/No data available/').count();
+    expect(hasChart > 0 || hasEmpty > 0).toBe(true);
+  });
 });

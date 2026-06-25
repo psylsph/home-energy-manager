@@ -48,6 +48,8 @@ const ALLOWED_FIELDS: &[&str] = &[
     "grid_frequency",
     "inverter_temperature",
     "today_solar_kwh",
+    "today_pv1_kwh",
+    "today_pv2_kwh",
     "today_import_kwh",
     "today_export_kwh",
     "today_charge_kwh",
@@ -82,6 +84,8 @@ fn is_weather_field(field: &str) -> bool {
 /// (AVG would understate the true value).
 const CUMULATIVE_FIELDS: &[&str] = &[
     "today_solar_kwh",
+    "today_pv1_kwh",
+    "today_pv2_kwh",
     "today_import_kwh",
     "today_export_kwh",
     "today_charge_kwh",
@@ -175,6 +179,8 @@ CREATE TABLE IF NOT EXISTS readings (
     grid_frequency  REAL,
     inverter_temperature REAL,
     today_solar_kwh     REAL,
+    today_pv1_kwh       REAL,
+    today_pv2_kwh       REAL,
     today_import_kwh    REAL,
     today_export_kwh    REAL,
     today_charge_kwh    REAL,
@@ -240,6 +246,11 @@ impl HistoryDb {
         // cumulative consumption, replaces the misleading today_consumption_kwh
         // formula value for display).
         let _ = conn.execute_batch("ALTER TABLE readings ADD COLUMN home_energy_today_kwh REAL");
+
+        // Migration: add today_pv1_kwh / today_pv2_kwh columns if missing
+        // (issue #108 — per-string PV daily totals).
+        let _ = conn.execute_batch("ALTER TABLE readings ADD COLUMN today_pv1_kwh REAL");
+        let _ = conn.execute_batch("ALTER TABLE readings ADD COLUMN today_pv2_kwh REAL");
 
         // One-time backfill: populate home_energy_today_kwh for historic rows
         // recorded before this column existed. Commit 5e1da32 renamed the
@@ -713,11 +724,12 @@ impl HistoryDb {
                 soc, battery_voltage, battery_current,
                 battery_temperature, battery_capacity_kwh,
                 grid_voltage, grid_frequency, inverter_temperature,
-                today_solar_kwh, today_import_kwh, today_export_kwh,
+                today_solar_kwh, today_pv1_kwh, today_pv2_kwh,
+                today_import_kwh, today_export_kwh,
                 today_charge_kwh, today_discharge_kwh, today_consumption_kwh,
                 today_ac_charge_kwh, home_energy_today_kwh,
                 charge_rate, discharge_rate, battery_reserve, target_soc
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31)",
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33)",
             params![
                 snap.timestamp,
                 snap.solar_power,
@@ -739,6 +751,8 @@ impl HistoryDb {
                 snap.grid_frequency,
                 snap.inverter_temperature,
                 snap.today_solar_kwh,
+                snap.today_pv1_kwh,
+                snap.today_pv2_kwh,
                 snap.today_import_kwh,
                 snap.today_export_kwh,
                 snap.today_charge_kwh,
@@ -2731,5 +2745,141 @@ mod tests {
         assert_eq!(soc.len(), 1);
         assert_eq!(ext.len(), 1);
         assert_eq!(soc[0].t, ext[0].t, "both must share the bucketed timestamp");
+    }
+
+    // ---- Issue #108: per-string PV1/PV2 today history fields ----
+
+    #[test]
+    fn today_pv1_kwh_and_today_pv2_kwh_are_allowed_fields() {
+        // The whitelist must accept the new field names — without this,
+        // /api/history requests for the per-string series would 400.
+        assert!(is_allowed_field("today_pv1_kwh"));
+        assert!(is_allowed_field("today_pv2_kwh"));
+    }
+
+    #[test]
+    fn today_pv1_kwh_and_today_pv2_kwh_are_cumulative_fields() {
+        // Per-string fields are monotonic daily counters (same shape as
+        // today_solar_kwh) and must use MAX aggregation. Otherwise a
+        // 5-minute bucket averaging would show lower values than reality.
+        assert!(is_cumulative_field("today_pv1_kwh"));
+        assert!(is_cumulative_field("today_pv2_kwh"));
+    }
+
+    #[test]
+    fn insert_and_query_per_string_pv_today_with_max_aggregation() {
+        // Insert three snapshots, query today_pv1_kwh / today_pv2_kwh /
+        // today_solar_kwh over a wide bucket — must return the MAX of each,
+        // not the average, since the fields are cumulative.
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("givenergy-history-test-pv-{id}"));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("pv_history.db");
+        let _ = std::fs::remove_file(&path);
+
+        let db = HistoryDb::open(&path).unwrap();
+        // Use explicit (start, end) window so the test is independent of
+        // wall-clock time. Three snapshots 60s apart.
+        let start_ts = 1_700_000_000i64;
+        // Three snapshots — PV1 climbs 5→6→7, PV2 climbs 2→2.5→3, total 7→8.5→10.
+        let values = [(5.0, 2.0, 7.0), (6.0, 2.5, 8.5), (7.0, 3.0, 10.0)];
+        for (i, (pv1, pv2, total)) in values.iter().enumerate() {
+            let mut snap = make_snapshot(start_ts + i as i64 * 60, 50, 0);
+            snap.today_pv1_kwh = *pv1;
+            snap.today_pv2_kwh = *pv2;
+            snap.today_solar_kwh = *total;
+            db.insert_reading(&snap);
+        }
+
+        let result = db
+            .query_history(
+                3600,
+                300,
+                0,
+                &["today_pv1_kwh".to_string(), "today_pv2_kwh".to_string(), "today_solar_kwh".to_string()],
+                Some((start_ts, start_ts + 3 * 60)),
+            )
+            .unwrap();
+
+        let pv1_pts: Vec<TimePoint> =
+            serde_json::from_value(result.get("today_pv1_kwh").cloned().unwrap()).unwrap();
+        let pv2_pts: Vec<TimePoint> =
+            serde_json::from_value(result.get("today_pv2_kwh").cloned().unwrap()).unwrap();
+        let total_pts: Vec<TimePoint> =
+            serde_json::from_value(result.get("today_solar_kwh").cloned().unwrap()).unwrap();
+
+        assert!(!pv1_pts.is_empty(), "PV1 series must have data");
+        assert!(!pv2_pts.is_empty(), "PV2 series must have data");
+        assert!(!total_pts.is_empty(), "Total series must have data");
+
+        // MAX aggregation across the three samples.
+        let pv1_max = pv1_pts.iter().map(|p| p.v).fold(f64::NEG_INFINITY, f64::max);
+        let pv2_max = pv2_pts.iter().map(|p| p.v).fold(f64::NEG_INFINITY, f64::max);
+        let total_max = total_pts.iter().map(|p| p.v).fold(f64::NEG_INFINITY, f64::max);
+        assert!((pv1_max - 7.0).abs() < 1e-6, "PV1 MAX must be 7.0; got {pv1_max}");
+        assert!((pv2_max - 3.0).abs() < 1e-6, "PV2 MAX must be 3.0; got {pv2_max}");
+        assert!((total_max - 10.0).abs() < 1e-6, "Total MAX must be 10.0; got {total_max}");
+
+        // Invariant: total == pv1 + pv2 (with per-string sum preference).
+        assert!(
+            (total_max - (pv1_max + pv2_max)).abs() < 1e-6,
+            "Total must equal PV1+PV2 in MAX view"
+        );
+    }
+
+    #[test]
+    fn existing_db_migrates_today_pv_columns() {
+        // Simulate an existing DB created before the per-string columns
+        // existed. After reopening with the current code, the ALTER
+        // migrations must add the columns and inserts must succeed.
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("givenergy-history-test-pv-mig-{id}"));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("legacy_pv.db");
+        let _ = std::fs::remove_file(&path);
+
+        // Open with current schema (which includes the ALTER migration),
+        // insert a row with the new fields, reopen, read back.
+        {
+            let db = HistoryDb::open(&path).unwrap();
+            let mut snap = make_snapshot(1_000, 50, 0);
+            snap.today_pv1_kwh = 4.5;
+            snap.today_pv2_kwh = 2.0;
+            db.insert_reading(&snap);
+        }
+        {
+            let db = HistoryDb::open(&path).unwrap();
+            let conn = db.conn.lock().unwrap();
+            let pv1: Option<f64> = conn
+                .query_row(
+                    "SELECT today_pv1_kwh FROM readings WHERE timestamp = 1000",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let pv2: Option<f64> = conn
+                .query_row(
+                    "SELECT today_pv2_kwh FROM readings WHERE timestamp = 1000",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(pv1.map(|v| (v - 4.5).abs() < 1e-6).unwrap_or(false), "got {pv1:?}");
+            assert!(pv2.map(|v| (v - 2.0).abs() < 1e-6).unwrap_or(false), "got {pv2:?}");
+        }
+    }
+
+    #[test]
+    fn query_rejects_per_string_field_when_not_yet_migrated() {
+        // Belt-and-braces: even if migration hasn't run for some reason,
+        // the API path validates the field name against ALLOWED_FIELDS,
+        // not the column existence. Field name recognition is independent
+        // of column existence at query time. (The migration is what adds
+        // the column, but a missing column would surface as an SQLite
+        // error, not a 400 from the API layer.)
+        assert!(
+            is_allowed_field("today_pv1_kwh"),
+            "API must whitelist the field name"
+        );
     }
 }

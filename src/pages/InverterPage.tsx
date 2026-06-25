@@ -206,6 +206,14 @@ export default function InverterPage() {
               <span className="text-text-primary font-mono text-right">{formatCurrent(s.pv2_current)}</span>
             </>
           )}
+          <span className="text-text-secondary">PV1 Today</span>
+          <span className="text-text-primary font-mono text-right">{formatEnergy(s.today_pv1_kwh)}</span>
+          {(s.pv2_power > 0 || s.pv2_current > 0) && (
+            <>
+              <span className="text-text-secondary">PV2 Today</span>
+              <span className="text-text-primary font-mono text-right">{formatEnergy(s.today_pv2_kwh)}</span>
+            </>
+          )}
           <span className="text-text-secondary">Solar Today</span>
           <span className="text-text-primary font-mono text-right">{formatEnergy(s.today_solar_kwh)}</span>
           <span className="text-text-secondary">Lifetime Solar Generation</span>
