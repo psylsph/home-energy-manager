@@ -2061,25 +2061,31 @@ pub async fn get_history(
         Some(db) => {
             let result = tokio::task::spawn_blocking(
                 move || -> Result<serde_json::Map<String, Value>, String> {
+                    // Shared window spec so the aggregated and cost paths cover
+                    // the exact same span of readings.
+                    let window = crate::history::HistoryWindow {
+                        range_secs,
+                        offset,
+                        explicit_window,
+                    };
+
                     let mut data = if normal_fields.is_empty() {
                         serde_json::Map::new()
                     } else {
                         db.query_history(
-                            range_secs,
+                            window.range_secs,
                             bucket_secs,
-                            offset,
+                            window.offset,
                             &normal_fields,
-                            explicit_window,
+                            window.explicit_window,
                         )?
                     };
 
                     if let Some((import_cfg, export_cfg, flat_import, flat_export)) = &cost_cfgs {
                         if want_import_cost {
                             let series = db.query_cost_series(
-                                range_secs,
+                                &window,
                                 bucket_secs,
-                                offset,
-                                explicit_window,
                                 "today_import_kwh",
                                 import_cfg,
                                 *flat_import,
@@ -2091,10 +2097,8 @@ pub async fn get_history(
                         }
                         if want_export_income {
                             let series = db.query_cost_series(
-                                range_secs,
+                                &window,
                                 bucket_secs,
-                                offset,
-                                explicit_window,
                                 "today_export_kwh",
                                 export_cfg,
                                 *flat_export,

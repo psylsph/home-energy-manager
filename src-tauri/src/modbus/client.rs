@@ -2523,6 +2523,7 @@ mod tests {
             let mut header = [0u8; 6];
             tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut header))
                 .await
+                .unwrap()
                 .unwrap();
             let length = u16::from_be_bytes([header[4], header[5]]) as usize;
             let mut rest = vec![0u8; length];
@@ -2546,6 +2547,7 @@ mod tests {
             // Read second request (retry of input_0_59) and respond immediately.
             tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut header))
                 .await
+                .unwrap()
                 .unwrap();
             let length = u16::from_be_bytes([header[4], header[5]]) as usize;
             let mut rest = vec![0u8; length];
@@ -2563,13 +2565,14 @@ mod tests {
             stream.write_all(&resp).await.unwrap();
 
             // Read and respond to remaining standard blocks.
-            for (func, base, count) in &[
+            for (func, base, _count) in &[
                 (0x03u8, 0u16, 60u16),
                 (0x03, 60, 60),
                 (0x04, 180, 4),
             ] {
                 tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut header))
                     .await
+                    .unwrap()
                     .unwrap();
                 let length = u16::from_be_bytes([header[4], header[5]]) as usize;
                 let mut rest = vec![0u8; length];
@@ -2611,8 +2614,6 @@ mod tests {
     async fn read_blocks_resilient_propagates_hard_errors_immediately() {
         // A hard TCP error (NotConnected) should propagate immediately
         // without retrying.
-        let responses: Vec<MockResponse> = vec![];
-
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 

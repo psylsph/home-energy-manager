@@ -174,47 +174,62 @@ fn local_minutes_of_day(ts_secs: i64) -> u16 {
     }
 }
 
-/// Resolve the `(start_ts, end_ts)` UTC-second window for a history query.
+/// Time-window specification for a history query.
 ///
-/// Extracted so the aggregated-field path ([`HistoryDb::query_history`]) and
-/// the cost path ([`HistoryDb::query_cost_series`]) cover the exact same span.
+/// Both the aggregated-field path ([`HistoryDb::query_history`]) and the cost
+/// path ([`HistoryDb::query_cost_series`]) resolve a `HistoryWindow` to the
+/// same concrete UTC-second `(start, end)` bounds via [`HistoryWindow::resolve`],
+/// so they cover the exact same span of readings. `query_cost_series` takes one
+/// by reference instead of the three loose window arguments (clippy's
+/// `too_many_arguments`), keeping the call site self-documenting.
+///
 /// When `explicit_window` is supplied (the browser sent local-timezone
 /// boundaries) it wins; otherwise the window is `range_secs` long, ending at a
 /// boundary aligned the same way the aggregated path aligns it.
-fn resolve_history_window(
-    range_secs: i64,
-    offset: i64,
-    explicit_window: Option<(i64, i64)>,
-) -> (i64, i64) {
-    match explicit_window {
-        Some((s, e)) => (s, e),
-        None => {
-            let now = chrono::Utc::now().timestamp();
-            let raw_end = now - (offset * range_secs);
-            let aligned_end = match range_secs {
-                3600 => ((raw_end / 3600) * 3600) + 3600,
-                21600 => ((raw_end / 21600) * 21600) + 21600,
-                _ => {
-                    // Align to local midnight so day-based ranges start at
-                    // 00:00 local time instead of 00:00 UTC.
-                    let raw_local = chrono::DateTime::from_timestamp(raw_end, 0)
-                        .unwrap()
-                        .with_timezone(&chrono::Local);
-                    let secs_today = raw_local.time().num_seconds_from_midnight();
-                    if secs_today == 0 {
-                        raw_end
-                    } else {
-                        let tomorrow = raw_local.date_naive() + chrono::Duration::days(1);
-                        let next_midnight_naive = tomorrow.and_hms_opt(0, 0, 0).unwrap();
-                        let next_midnight_local = chrono::Local
-                            .from_local_datetime(&next_midnight_naive)
-                            .earliest()
-                            .unwrap();
-                        next_midnight_local.timestamp()
+pub struct HistoryWindow {
+    /// Window length in seconds (used only when `explicit_window` is `None`).
+    pub range_secs: i64,
+    /// How many whole windows back from "now" the window ends (`0` = most recent).
+    pub offset: i64,
+    /// Explicit UTC-second `(start, end)` bounds sent by the browser in its
+    /// local timezone. When `Some`, overrides `range_secs`/`offset`.
+    pub explicit_window: Option<(i64, i64)>,
+}
+
+impl HistoryWindow {
+    /// Resolve to concrete UTC-second `(start, end)` bounds, applying the
+    /// range/alignment rules shared by both history query paths.
+    pub(crate) fn resolve(&self) -> (i64, i64) {
+        match self.explicit_window {
+            Some((s, e)) => (s, e),
+            None => {
+                let now = chrono::Utc::now().timestamp();
+                let raw_end = now - (self.offset * self.range_secs);
+                let aligned_end = match self.range_secs {
+                    3600 => ((raw_end / 3600) * 3600) + 3600,
+                    21600 => ((raw_end / 21600) * 21600) + 21600,
+                    _ => {
+                        // Align to local midnight so day-based ranges start at
+                        // 00:00 local time instead of 00:00 UTC.
+                        let raw_local = chrono::DateTime::from_timestamp(raw_end, 0)
+                            .unwrap()
+                            .with_timezone(&chrono::Local);
+                        let secs_today = raw_local.time().num_seconds_from_midnight();
+                        if secs_today == 0 {
+                            raw_end
+                        } else {
+                            let tomorrow = raw_local.date_naive() + chrono::Duration::days(1);
+                            let next_midnight_naive = tomorrow.and_hms_opt(0, 0, 0).unwrap();
+                            let next_midnight_local = chrono::Local
+                                .from_local_datetime(&next_midnight_naive)
+                                .earliest()
+                                .unwrap();
+                            next_midnight_local.timestamp()
+                        }
                     }
-                }
-            };
-            (aligned_end - range_secs, aligned_end)
+                };
+                (aligned_end - self.range_secs, aligned_end)
+            }
         }
     }
 }
@@ -898,7 +913,8 @@ impl HistoryDb {
             .lock()
             .map_err(|e| format!("History DB lock poisoned: {e}"))?;
 
-        let (start_ts, end_ts) = resolve_history_window(range_secs, offset, explicit_window);
+        let (start_ts, end_ts) =
+            HistoryWindow { range_secs, offset, explicit_window }.resolve();
 
         let mut result = serde_json::Map::new();
 
@@ -992,10 +1008,8 @@ impl HistoryDb {
     /// nothing (degenerate config).
     pub fn query_cost_series(
         &self,
-        range_secs: i64,
+        window: &HistoryWindow,
         bucket_secs: i64,
-        offset: i64,
-        explicit_window: Option<(i64, i64)>,
         counter_field: &str,
         tariff: &crate::settings::TariffConfig,
         flat_fallback: f64,
@@ -1010,7 +1024,7 @@ impl HistoryDb {
             .lock()
             .map_err(|e| format!("History DB lock poisoned: {e}"))?;
 
-        let (start_ts, end_ts) = resolve_history_window(range_secs, offset, explicit_window);
+        let (start_ts, end_ts) = window.resolve();
 
         let sql = format!(
             "SELECT timestamp, \"{counter_field}\" \
@@ -3134,6 +3148,17 @@ mod tests {
         series.last().map(|p| p.v).unwrap_or(0.0)
     }
 
+    /// A `HistoryWindow` pinned to explicit `(start, end)` UTC-second bounds —
+    /// the form every cost-series test uses. `range_secs`/`offset` are unused
+    /// when `explicit_window` is `Some`.
+    fn window(start: i64, end: i64) -> HistoryWindow {
+        HistoryWindow {
+            range_secs: 0,
+            offset: 0,
+            explicit_window: Some((start, end)),
+        }
+    }
+
     fn tou_export_tariff() -> crate::settings::TariffConfig {
         // Off-peak 0.10 all day except a 16:00-19:00 peak at 0.30.
         crate::settings::TariffConfig {
@@ -3179,7 +3204,7 @@ mod tests {
             .iter()
             .map(|&b| {
                 let s = db
-                    .query_cost_series(0, b, 0, Some((start, end)), "today_export_kwh", &tou, 0.10)
+                    .query_cost_series(&window(start, end), b, "today_export_kwh", &tou, 0.10)
                     .unwrap();
                 series_total(&s)
             })
@@ -3212,7 +3237,7 @@ mod tests {
         insert_export_day(&db_peak, 0, 10.0, 16 * 60, 18 * 60 + 30);
         let peak = series_total(
             &db_peak
-                .query_cost_series(0, 1800, 0, Some((start, end)), "today_export_kwh", &tou, 0.10)
+                .query_cost_series(&window(start, end), 1800, "today_export_kwh", &tou, 0.10)
                 .unwrap(),
         );
 
@@ -3220,7 +3245,7 @@ mod tests {
         insert_export_day(&db_off, 0, 10.0, 6 * 60, 10 * 60);
         let off = series_total(
             &db_off
-                .query_cost_series(0, 1800, 0, Some((start, end)), "today_export_kwh", &tou, 0.10)
+                .query_cost_series(&window(start, end), 1800, "today_export_kwh", &tou, 0.10)
                 .unwrap(),
         );
 
@@ -3241,7 +3266,7 @@ mod tests {
         let end = local_midnight_secs(3) + 60;
         let flat = crate::settings::TariffConfig::flat(0.10);
         let total = series_total(
-            &db.query_cost_series(0, 86400, 0, Some((start, end)), "today_export_kwh", &flat, 0.10)
+            &db.query_cost_series(&window(start, end), 86400, "today_export_kwh", &flat, 0.10)
                 .unwrap(),
         );
         // 3 × 8 kWh × £0.10 = £2.40.
@@ -3268,7 +3293,7 @@ mod tests {
         let end = local_midnight_secs(1) + 60;
         let flat = crate::settings::TariffConfig::flat(1.0);
         let total = series_total(
-            &db.query_cost_series(0, 3600, 0, Some((start, end)), "today_export_kwh", &flat, 1.0)
+            &db.query_cost_series(&window(start, end), 3600, "today_export_kwh", &flat, 1.0)
                 .unwrap(),
         );
         // True energy is the monotone envelope 0 -> 8 = 8 kWh at £1.00 = £8.00.
@@ -3293,7 +3318,7 @@ mod tests {
         let end = m1 + 19 * 3600;
         let tou = tou_export_tariff();
         let total = series_total(
-            &db.query_cost_series(0, 1800, 0, Some((start, end)), "today_export_kwh", &tou, 0.10)
+            &db.query_cost_series(&window(start, end), 1800, "today_export_kwh", &tou, 0.10)
                 .unwrap(),
         );
         // Only the observed 9 -> 12 = 3 kWh (all peak) is credited: 3 x 0.30 = 0.90.
@@ -3319,7 +3344,7 @@ mod tests {
         let end = m + 13 * 3600;
         let flat = crate::settings::TariffConfig::flat(0.25);
         let total = series_total(
-            &db.query_cost_series(0, 1800, 0, Some((start, end)), "today_import_kwh", &flat, 0.25)
+            &db.query_cost_series(&window(start, end), 1800, "today_import_kwh", &flat, 0.25)
                 .unwrap(),
         );
         // ~3.33 kWh at 0.25 ~= £0.83. Must be far above zero (the bug gave ~0).
@@ -3340,7 +3365,7 @@ mod tests {
         let end = m + 13 * 3600;
         let flat = crate::settings::TariffConfig::flat(1.0);
         let total = series_total(
-            &db.query_cost_series(0, 1800, 0, Some((start, end)), "today_export_kwh", &flat, 1.0)
+            &db.query_cost_series(&window(start, end), 1800, "today_export_kwh", &flat, 1.0)
                 .unwrap(),
         );
         // The 5 -> 5000 spike is dropped (baseline held at 5); only 5 -> 5.2 -> 5.4
