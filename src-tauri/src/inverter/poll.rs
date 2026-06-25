@@ -3143,21 +3143,22 @@ mod tests {
         const MAX_CYCLE_SECS: u64 =
             MAX_ATTEMPTS_PER_BLOCK * IO_TIMEOUT_SECS + POST_POLL_SLEEP_SECS;
 
-        // Sanity: the documented cycle budget (~36 s) should always be
-        // well under the ~5 min worst-case RST latency we observed before
-        // this fix landed.
-        let total = MAX_CONSECUTIVE_TIMEOUTS * MAX_CYCLE_SECS;
-        assert!(
-            total < 60,
-            "sustained-timeout reconnect budget {total}s exceeds 60s — \
-             consider raising MAX_CONSECUTIVE_TIMEOUTS or shrinking IO_TIMEOUT",
-        );
-        // And we want at least two cycles to ride out a single transient
-        // hiccup (don't reconnect after a *single* timeout).
-        assert!(
-            MAX_CONSECUTIVE_TIMEOUTS >= 2,
-            "MAX_CONSECUTIVE_TIMEOUTS too low — single timeout would force reconnect",
-        );
+        // Sanity (enforced at compile time, so a bump trips the build
+        // immediately rather than only when tests run): the documented cycle
+        // budget (~36 s) should always be well under the ~5 min worst-case RST
+        // latency we observed before this fix landed, and the threshold needs
+        // at least two cycles so a single transient hiccup doesn't reconnect.
+        const _: () = {
+            const TOTAL_SECS: u64 = MAX_CONSECUTIVE_TIMEOUTS * MAX_CYCLE_SECS;
+            assert!(
+                TOTAL_SECS < 60,
+                "sustained-timeout reconnect budget exceeds 60s",
+            );
+            assert!(
+                MAX_CONSECUTIVE_TIMEOUTS >= 2,
+                "MAX_CONSECUTIVE_TIMEOUTS too low — single timeout would force reconnect",
+            );
+        };
     }
 
     #[test]
