@@ -66,39 +66,6 @@ export const HISTORY_RANGE_MS: Partial<Record<HistoryRange, number>> = {
   '1y': 31536000000,
 };
 
-/**
- * History aggregation bucket size (seconds) for a range.
- *
- * Mirrors the backend's range→bucket mapping in
- * `src-tauri/src/server/api.rs` (`get_history`). The Cost-tab spike ceiling
- * scales by this value so legitimate per-bucket energy is not discarded on
- * wider ranges (issue #133). If the backend mapping changes, update both.
- */
-export function rangeToBucketSecs(range: HistoryRange): number {
-  switch (range) {
-    case '1h':
-      return 30;
-    case '6h':
-      return 60;
-    case '12h':
-      return 120;
-    case '24h':
-      return 300;
-    case 'today':
-      return 300;
-    case '7d':
-      return 1800;
-    case '30d':
-      return 7200;
-    case 'month':
-      return 3600;
-    case '6m':
-      return 43200;
-    case '1y':
-      return 86400;
-  }
-}
-
 export function isRollingHistoryRange(range: HistoryRange): boolean {
   return range !== 'month' && range !== 'today';
 }
