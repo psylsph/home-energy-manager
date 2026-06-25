@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.40.8] - 2026-06-25
+
+### Fixed
+
+- **Inter-request delay matched to GivTCP's 500ms.** The Modbus client was spacing register-block reads 150ms (single-phase) / 250ms (three-phase) apart, but the GivEnergy dongle — especially after a firmware update — needs more breathing room than that or it drops frames. Both single-phase and three-phase now use the same 500ms inter-request delay that GivTCP ships with, which is the known-good value across the full device range.
+
 ## [0.40.7] - 2026-06-25
 
 ### Added
