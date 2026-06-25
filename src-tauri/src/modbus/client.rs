@@ -813,12 +813,15 @@ impl ModbusClient {
 
     /// Inter-request delay to avoid overwhelming the GivEnergy dongle.
     /// The dongle has a very slow processor and limited frame buffer.
-    /// The givenergy-modbus reference library uses 250ms; we default to
-    /// 150ms for single-phase models and increase to 250ms for three-phase
-    /// (which reads 15+ blocks per cycle).
-    pub const INTER_REQUEST_DELAY_DEFAULT: Duration = Duration::from_millis(150);
+    /// GivTCP uses DEFAULT_SLEEP = 0.5s between every register page read;
+    /// we match that 500ms to give the dongle breathing room, especially
+    /// after firmware updates that can slow Modbus response times.
+    pub const INTER_REQUEST_DELAY_DEFAULT: Duration = Duration::from_millis(500);
     /// Inter-request delay for three-phase models (more blocks per cycle).
-    pub const INTER_REQUEST_DELAY_3PH: Duration = Duration::from_millis(250);
+    /// Matches the single-phase delay — givTCP uses the same 500ms regardless
+    /// of model, and three-phase models read 15+ blocks so need the same
+    /// per-block spacing.
+    pub const INTER_REQUEST_DELAY_3PH: Duration = Duration::from_millis(500);
 
     /// Read a block of registers (input or holding).
     ///
