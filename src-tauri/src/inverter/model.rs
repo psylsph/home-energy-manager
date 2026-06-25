@@ -430,6 +430,58 @@ impl DeviceType {
         )
     }
 
+    /// Returns the single register block that holds this device's *active*
+    /// battery charge/discharge limit register, when that register sits in
+    /// an optional poll block rather than the standard `holding_60_119`
+    /// block.
+    ///
+    /// Why this exists: Minimal Telemetry Mode (`Settings → Minimal
+    /// Telemetry Mode`) skips every optional model-specific poll block to
+    /// cut per-cycle timeout exposure on chronically unstable dongles.
+    /// For most devices that's fine — the charge/discharge limit sits in
+    /// `holding_60_119` (HR 111/112) which is always polled. But for
+    /// AC-coupled and three-phase families, the limit register lives in
+    /// an optional block:
+    ///
+    /// - AC-coupled (ACCoupled / ACCoupledMk2): `AC_CONFIG_BLOCK` (HR 300-359)
+    ///   holds `battery_charge_limit_ac` (HR 313) and
+    ///   `battery_discharge_limit_ac` (HR 314). HR 111/112 read as 0 on
+    ///   these models — there is no DC battery path to limit.
+    /// - Three-phase families: `THREE_PHASE_CONFIG_BLOCK` (HR 1080-1124)
+    ///   holds `battery_charge_limit_ac` (HR 1110) and
+    ///   `battery_discharge_limit_ac` (HR 1108), which shadow the
+    ///   single-phase HR 313/314 — see givenergy-modbus
+    ///   `model/inverter_threephase.py:285-290`.
+    ///
+    /// Skipping those blocks silently makes the limit slider read 0% even
+    /// when the inverter is genuinely at the value the user just set.
+    /// `read_all_with_extras` uses this to keep polling the one block
+    /// that actually contains the live limit value, even when minimal
+    /// telemetry mode skips the rest of the optional blocks.
+    pub fn essential_limit_block(&self) -> Option<&'static crate::modbus::registers::RegisterBlock> {
+        use crate::modbus::registers::{AC_CONFIG_BLOCK, THREE_PHASE_CONFIG_BLOCK};
+        match self {
+            // AC-coupled: HR 313/314 are the only place the charge/discharge
+            // limit is read. Per givenergy-modbus these are the AC-coupled
+            // variants of the standard HR 111/112; the standard registers
+            // read as 0 on AC-coupled models (no DC battery path).
+            Self::ACCoupled | Self::ACCoupledMk2 => Some(&AC_CONFIG_BLOCK),
+            // Three-phase / HV / AIO commercial / AIO hybrid: HR 1108/1110
+            // are the only place the charge/discharge limit is read. These
+            // shadow the single-phase HR 313/314 — see givenergy-modbus
+            // `model/inverter_threephase.py:285-290`.
+            Self::ThreePhase
+            | Self::ACThreePhase
+            | Self::AioCommercial
+            | Self::HybridHvGen3
+            | Self::AllInOneHybrid => Some(&THREE_PHASE_CONFIG_BLOCK),
+            // All other device types have their charge/discharge limit in
+            // the standard `holding_60_119` block (HR 111/112), which is
+            // always polled. No essential carve-out needed.
+            _ => None,
+        }
+    }
+
     /// Whether this device's battery uses the HV BCU/BMU stack protocol
     /// (device addresses 0x70/0x50) rather than the LV pack protocol (0x32).
     ///
@@ -1762,6 +1814,75 @@ mod tests {
             assert!(
                 !dt.needs_gateway_input_blocks(),
                 "{dt:?} should NOT need gateway input blocks"
+            );
+        }
+    }
+
+    /// The `essential_limit_block()` helper tells `read_all_with_extras`
+    /// which single optional block must still be polled when minimal
+    /// telemetry mode skips everything else, because it's the only place
+    /// the device's active charge/discharge limit register can be read.
+    ///
+    /// - AC-coupled: AC_CONFIG_BLOCK (HR 313/314). HR 111/112 reads as 0
+    ///   on these models (no DC battery path).
+    /// - Three-phase families: THREE_PHASE_CONFIG_BLOCK (HR 1108/1110),
+    ///   which shadow the single-phase HR 313/314.
+    /// - DC-coupled hybrids / AIO / PvInverter: limit lives in standard
+    ///   `holding_60_119` (HR 111/112), which is always polled, so no
+    ///   carve-out is needed.
+    #[test]
+    fn essential_limit_block_routes_by_device_type() {
+        use crate::modbus::registers::{AC_CONFIG_BLOCK, THREE_PHASE_CONFIG_BLOCK};
+
+        // AC-coupled must return the AC config block.
+        for dt in [DeviceType::ACCoupled, DeviceType::ACCoupledMk2] {
+            let block = dt
+                .essential_limit_block()
+                .expect("{dt:?} must have an essential limit block");
+            assert_eq!(block.start, AC_CONFIG_BLOCK.start);
+            assert_eq!(block.count, AC_CONFIG_BLOCK.count);
+        }
+
+        // Three-phase / HV / AIO commercial / AIO hybrid must return the
+        // three-phase config block (HR 1080-1124).
+        for dt in [
+            DeviceType::ThreePhase,
+            DeviceType::ACThreePhase,
+            DeviceType::AioCommercial,
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOneHybrid,
+        ] {
+            let block = dt
+                .essential_limit_block()
+                .expect("{dt:?} must have an essential limit block");
+            assert_eq!(block.start, THREE_PHASE_CONFIG_BLOCK.start);
+            assert_eq!(block.count, THREE_PHASE_CONFIG_BLOCK.count);
+        }
+
+        // DC-coupled families don't need a carve-out: their charge/discharge
+        // limits come from HR 111/112 in the always-polled `holding_60_119`
+        // block. Anything that returns Some here is a bug — it would cause
+        // an extra read under minimal telemetry that buys us nothing.
+        for dt in [
+            DeviceType::Gen1Hybrid,
+            DeviceType::Gen2Hybrid,
+            DeviceType::Gen3Hybrid,
+            DeviceType::PolarHybrid,
+            DeviceType::Gen3PlusHybrid,
+            DeviceType::Gen4Hybrid,
+            DeviceType::AllInOne6kW,
+            DeviceType::AllInOne3_6kW,
+            DeviceType::AllInOne5kW,
+            DeviceType::PvInverter,
+            DeviceType::Gateway,
+            DeviceType::Ems,
+            DeviceType::EmsCommercial,
+            DeviceType::Unknown(0),
+        ] {
+            assert!(
+                dt.essential_limit_block().is_none(),
+                "{dt:?} should NOT have an essential limit block — its limits \
+                 come from HR 111/112 in the always-polled holding_60_119 block"
             );
         }
     }
