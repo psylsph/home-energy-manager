@@ -36,6 +36,14 @@ interface InverterState {
   evcHost: string;
   /** EV Charger active power (watts), updated by EVC poll loop. */
   evcPower: number;
+  /**
+   * Raw EV Charger charging-state string from HR 0 (`"Unknown"`, `"Idle"`,
+   * `"Connected"`, `"Starting"`, `"Charging"`, …). Used to render the
+   * "Idle" label on the Status page when the EVC reports state=1 but
+   * isn't actively delivering power (issue #139). Empty string when no
+   * snapshot has arrived yet.
+   */
+  evcChargingState: string;
   /** EV Charger charging state (true = actively delivering power). */
   evcCharging: boolean;
   /** EV Charger Modbus connection/data status. */
@@ -75,7 +83,12 @@ interface InverterState {
   clearPendingDischargeSlots: () => void;
   setHiddenPanels: (panels: string[]) => void;
   setEvcHost: (host: string) => void;
-  setEvcData: (power: number, charging: boolean, connected?: boolean) => void;
+  setEvcData: (
+    power: number,
+    charging: boolean,
+    connected?: boolean,
+    chargingState?: string,
+  ) => void;
   /**
    * Mark the EVC as "we just successfully reached the host" without
    * touching power / charging (we don't have register data yet — the
@@ -224,6 +237,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   pendingDischargeSlots: loadPendingDischargeSlots(),
   evcHost: '',
   evcPower: 0,
+  evcChargingState: '',
   evcCharging: false,
   evcConnected: false,
   evcEverConnected: false,
@@ -294,9 +308,10 @@ export const useInverterStore = create<InverterState>((set) => ({
   },
   setHiddenPanels: (panels) => set({ hiddenPanels: panels }),
   setEvcHost: (host) => set({ evcHost: host }),
-  setEvcData: (power, charging, connected = true) =>
+  setEvcData: (power, charging, connected = true, chargingState = '') =>
     set((prev) => ({
       evcPower: power,
+      evcChargingState: chargingState,
       evcCharging: charging,
       evcConnected: connected,
       // Latch: once we've ever seen a live EVC snapshot, stay latched.
@@ -312,6 +327,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   resetEvc: () =>
     set({
       evcPower: 0,
+      evcChargingState: '',
       evcCharging: false,
       evcConnected: false,
       evcEverConnected: false,

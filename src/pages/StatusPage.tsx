@@ -35,6 +35,7 @@ export default function StatusPage() {
     connectFailures,
     evcHost,
     evcPower,
+    evcChargingState,
     evcCharging,
     evcConnected,
     evcEverConnected,
@@ -202,6 +203,7 @@ export default function StatusPage() {
         <EnergyFlowDiagram
           snapshot={snapshot}
           evcPower={evcPower}
+          evcChargingState={evcChargingState}
           evcCharging={evcCharging}
           evcConnected={evcConnected}
           evcEverConnected={evcEverConnected}

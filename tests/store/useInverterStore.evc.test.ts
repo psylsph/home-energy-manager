@@ -19,6 +19,7 @@ describe('useInverterStore — EVC state machine (issue #138)', () => {
     useInverterStore.setState({
       evcHost: '',
       evcPower: 0,
+      evcChargingState: '',
       evcCharging: false,
       evcConnected: false,
       evcEverConnected: false,
@@ -146,5 +147,53 @@ describe('useInverterStore — EVC state machine (issue #138)', () => {
     // Charge starts.
     setEvcData(2200, true, true);
     expect(evcNodeLabel(true, true, useInverterStore.getState().evcEverConnected)).toBe('Charging');
+  });
+
+  // ---- issue #139: raw charging_state round-trip ---------------------
+
+  it('stores the raw charging_state passed to setEvcData', () => {
+    const { setEvcData } = useInverterStore.getState();
+    setEvcData(0, false, false, 'Idle');
+    expect(useInverterStore.getState().evcChargingState).toBe('Idle');
+  });
+
+  it('defaults evcChargingState to "" when setEvcData is called without it (legacy callers)', () => {
+    // The signature is optional on the 4th arg so existing call sites
+    // (and any third-party tests) keep working.
+    const { setEvcData } = useInverterStore.getState();
+    setEvcData(1200, true, true);
+    expect(useInverterStore.getState().evcChargingState).toBe('');
+  });
+
+  it('resetEvc() clears evcChargingState too', () => {
+    const { setEvcData, resetEvc } = useInverterStore.getState();
+    setEvcData(0, false, false, 'Idle');
+    expect(useInverterStore.getState().evcChargingState).toBe('Idle');
+    resetEvc();
+    expect(useInverterStore.getState().evcChargingState).toBe('');
+  });
+
+  it('label derivation honours evcChargingState="Idle" through the store (issue #139)', async () => {
+    // Wire the store + the label picker together: the diagram pulls
+    // evcCharging, evcConnected, evcEverConnected, AND evcChargingState
+    // out of the store and feeds them straight into evcNodeLabel.
+    const { evcNodeLabel } = await import('../../src/lib/evcLabel');
+    const { setEvcData, resetEvc } = useInverterStore.getState();
+
+    // User-reported scenario: state=4 (Charging) → state=1 (Idle),
+    // cable unplugged. The label should switch from "Charging" to
+    // "Idle" — not stay on "Charging", not collapse to "Disconnected".
+    resetEvc();
+    setEvcData(6893, true, true, 'Charging');
+    const s = useInverterStore.getState();
+    expect(
+      evcNodeLabel(s.evcCharging, s.evcConnected, s.evcEverConnected, s.evcChargingState),
+    ).toBe('Charging');
+
+    setEvcData(0, false, false, 'Idle');
+    const s2 = useInverterStore.getState();
+    expect(
+      evcNodeLabel(s2.evcCharging, s2.evcConnected, s2.evcEverConnected, s2.evcChargingState),
+    ).toBe('Idle');
   });
 });

@@ -374,6 +374,65 @@ describe('EnergyFlowDiagram — noise threshold', () => {
     expect(screen.getByText('7.4kW')).toBeDefined();
   });
 
+  it('shows "Idle" label when EVC reports state=1 with no power (issue #139)', () => {
+    // User-reported case: state=4 (Charging) → state=1 (Idle), cable
+    // unplugged, P=0W. The diagram label should switch to "Idle" rather
+    // than "Disconnected" so it matches the EVC's own display. We push
+    // the grid to an active import so its label reads "Import" instead
+    // of "Idle" — otherwise the grid node also renders the word "Idle"
+    // and the assertion below is ambiguous.
+    render(
+      <EnergyFlowDiagram
+        snapshot={makeSnapshot({
+          grid_power: -500,
+          solar_power: 100,
+          home_power: 100,
+          battery_power: 100,
+          battery_state: 'discharging',
+        })}
+        evcPower={0}
+        evcChargingState="Idle"
+        evcCharging={false}
+        evcConnected={false}
+        evcEverConnected={true}
+        showEvc={true}
+      />,
+    );
+    expect(screen.getByText('500W')).toBeDefined();
+    expect(screen.getByText('Import')).toBeDefined();
+    expect(screen.getByText('Idle')).toBeDefined();
+  });
+
+  it('still shows "Charging" when power is flowing even if chargingState lags as "Idle"', () => {
+    // Edge case: raw string and power disagree by one poll cycle. Power
+    // wins — we don't show "Idle" while current is flowing. We push
+    // the grid to an active import so its label reads "Import" (not
+    // "Idle") and the assertion below is unambiguous.
+    render(
+      <EnergyFlowDiagram
+        snapshot={makeSnapshot({
+          grid_power: -500,
+          solar_power: 100,
+          home_power: 100,
+          battery_power: 100,
+          battery_state: 'discharging',
+        })}
+        evcPower={6900}
+        evcChargingState="Idle"
+        evcCharging={true}
+        evcConnected={true}
+        evcEverConnected={true}
+        showEvc={true}
+      />,
+    );
+    expect(screen.getByText('6.9kW')).toBeDefined();
+    expect(screen.getByText('500W')).toBeDefined();
+    expect(screen.getByText('Charging')).toBeDefined();
+    // No "Idle" anywhere — the EV label is "Charging" (power wins), and
+    // the grid label is "Import" (we forced grid_power != 0).
+    expect(screen.queryByText('Idle')).toBeNull();
+  });
+
   // ---- Mixed scenario ---------------------------------------------------
 
   it('shows some flows as zero and others as real values', () => {

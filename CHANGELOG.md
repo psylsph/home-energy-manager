@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.40.5] - 2026-06-25
+
+### Fixed
+
+- **EV Charger now reads "Idle" when it reports state=1.** After a charging session ends and the cable is unplugged, the GivEnergy charger reports `state=1` (Idle) over Modbus but the Status page was still showing "Disconnected" — accurate for the cable, but not what the charger's own display says. The diagram node now reads "Idle" in that case, matching the EVC. Every other label (Charging / Connected / Disconnected / Not Found) is unchanged. See #139.
+
 ## [0.40.4] - 2026-06-25
 
 ### Fixed
