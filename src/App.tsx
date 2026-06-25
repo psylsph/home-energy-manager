@@ -54,7 +54,7 @@ function GridFaultBanner() {
   );
 }
 
-function ConnectionIndicator() {
+export function ConnectionIndicator() {
   const { connectionState, connectedHost, snapshot } = useInverterStore();
   const colors: Record<string, string> = {
     connected: 'bg-green-500',
@@ -77,9 +77,12 @@ function ConnectionIndicator() {
 
   return (
     <div className="flex items-center gap-2 text-text-secondary text-xs">
-      <div className={`w-2 h-2 rounded-full ${colors[connectionState] || 'bg-gray-500'}`} />
+      <div className={`w-2 h-2 rounded-full shrink-0 ${colors[connectionState] || 'bg-gray-500'}`} />
       {connectionState === 'connected' ? (
-        <>
+        // On narrow screens the last-updated time stacks *under* the
+        // inverter IP so the header row doesn't overflow; on sm+ they
+        // share a row separated by a middot (matches the old layout).
+        <div className="flex flex-col sm:flex-row sm:items-center sm:gap-2 leading-tight">
           {connectedHost && (
             <span className="font-mono">
               {connectedHost.replace(/:.*$/, '')}
@@ -94,10 +97,11 @@ function ConnectionIndicator() {
               }`}
               title={new Date(lastUpdatedMs).toLocaleString()}
             >
-              &middot; {formatTimestamp(lastUpdatedMs)}
+              <span className="hidden sm:inline">&middot; </span>
+              {formatTimestamp(lastUpdatedMs)}
             </span>
           )}
-        </>
+        </div>
       ) : (
         <span className="capitalize">{connectionState}</span>
       )}
