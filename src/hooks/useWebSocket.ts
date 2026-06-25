@@ -47,10 +47,58 @@ export function useWebSocket() {
     }
   }, [setConnection]);
 
-  // Export the fetch function so the StatusPage can trigger re-fetches.
+  // Fetch initial EVC reachability (issue #138). The broadcast channel
+  // doesn't replay past `EvcConnected` / `Evc` frames, so a WS client
+  // that subscribes after the EVC has already connected (e.g. user
+  // opens the page minutes after app launch) would otherwise never see
+  // the latch fire. We ask the backend directly for the cached snapshot
+  // and seed the store accordingly.
+  const fetchInitialEvcStatus = useCallback(async () => {
+    try {
+      const res = await apiGet<{
+        ok: boolean;
+        evc_host: string;
+        evc_port: number;
+        reachable: boolean;
+        snapshot: {
+          charging_state: string;
+          connection_status: string;
+          active_power: number;
+          current_l1: number;
+          current_l2: number;
+          current_l3: number;
+          voltage_l1: number;
+          voltage_l2: number;
+          voltage_l3: number;
+          meter_energy_kwh: number;
+          session_energy_kwh: number;
+          session_duration_secs: number;
+          charge_limit_a: number;
+          serial_number: string;
+        } | null;
+      }>('/api/evc/status');
+      if (!res.ok) return;
+      if (res.reachable && res.snapshot) {
+        const snap = res.snapshot;
+        const charging = snap.charging_state === 'Charging' || snap.active_power > 0;
+        const connected = snap.connection_status === 'Connected' || snap.active_power > 0;
+        setEvcData(snap.active_power, charging, connected);
+      } else if (res.evc_host) {
+        // EVC is configured but the backend has never seen a snapshot
+        // since startup. Latch `evcEverConnected` based on the live WS
+        // path going forward; for now, leave evcConnected=false so the
+        // diagram reads "Not Found" (issue #138).
+      }
+    } catch {
+      // Backend not reachable — leave defaults
+    }
+  }, [setEvcData]);
+
+  // Export the fetch functions so the StatusPage can trigger re-fetches.
   useEffect(() => {
     (window as unknown as Record<string, unknown>).__fetchInitialStatus = fetchInitialStatus;
-  }, [fetchInitialStatus]);
+    (window as unknown as Record<string, unknown>).__fetchInitialEvcStatus = fetchInitialEvcStatus;
+  }, [fetchInitialStatus, fetchInitialEvcStatus]);
 
   const connect = useCallback(() => {
     const url = getWsUrl();
@@ -92,6 +140,16 @@ export function useWebSocket() {
           const charging = evc.charging_state === 'Charging' || evc.active_power > 0;
           const connected = evc.connection_status === 'Connected' || evc.active_power > 0;
           setEvcData(evc.active_power, charging, connected);
+        } else if (data.type === 'evc_connected') {
+          // Backend just established the TCP/Modbus connection to the
+          // configured EVC host (issue #138). Latch `evcEverConnected`
+          // immediately so the UI drops out of the misleading "Not
+          // Found" state. Also flip `evcConnected=true` for the brief
+          // window between TCP success and the first register read so
+          // the label reads "Connected" rather than flickering through
+          // "Disconnected". A subsequent `EvcDisconnected` will correct
+          // the flag if the first read fails.
+          useInverterStore.getState().markEvcConnectedReached();
         } else if (data.type === 'evc_disconnected') {
           setEvcData(0, false, false);
         }
@@ -123,10 +181,11 @@ export function useWebSocket() {
 
   useEffect(() => {
     fetchInitialStatus();
+    fetchInitialEvcStatus();
     connect();
     return () => {
       clearTimeout(reconnectTimeout.current);
       wsRef.current?.close(1000, 'Unmount');
     };
-  }, [connect, fetchInitialStatus]);
+  }, [connect, fetchInitialStatus, fetchInitialEvcStatus]);
 }

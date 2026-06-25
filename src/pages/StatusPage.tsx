@@ -37,6 +37,7 @@ export default function StatusPage() {
     evcPower,
     evcCharging,
     evcConnected,
+    evcEverConnected,
   } = useInverterStore();
 
   // Re-compute uptime every second while connected.
@@ -203,6 +204,7 @@ export default function StatusPage() {
           evcPower={evcPower}
           evcCharging={evcCharging}
           evcConnected={evcConnected}
+          evcEverConnected={evcEverConnected}
           showEvc={!!evcHost}
         />
       </section>

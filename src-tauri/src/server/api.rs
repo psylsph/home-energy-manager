@@ -2598,6 +2598,52 @@ pub async fn discover(State(_state): State<Arc<AppState>>) -> (StatusCode, Json<
 // EVC discovery endpoint
 // ---------------------------------------------------------------------------
 
+/// GET /api/evc/status — current EV charger reachability snapshot.
+///
+/// The frontend calls this on page load (before WS frames start flowing)
+/// to seed `evcEverConnected`. The WS broadcast channel doesn't replay
+/// past messages, so a late subscriber would otherwise miss the initial
+/// `EvcConnected` / `Evc(snapshot)` event and the diagram would stay
+/// pinned on the misleading "Not Found" label forever (issue #138).
+///
+/// `reachable` is derived from the cached `latest_evc`: if a snapshot has
+/// been decoded since the process started, the configured host has been
+/// reached at least once. Once true, it stays true until process restart.
+pub async fn evc_status(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let evc_host = state.settings.lock().await.evc_host.clone();
+    let evc_port = state.settings.lock().await.evc_port;
+    let cached = state.latest_evc.lock().await.clone();
+    let reachable = cached.is_some();
+    let last_snapshot = cached.map(|s| {
+        serde_json::json!({
+            "charging_state": s.charging_state,
+            "connection_status": s.connection_status,
+            "active_power": s.active_power,
+            "current_l1": s.current_l1,
+            "current_l2": s.current_l2,
+            "current_l3": s.current_l3,
+            "voltage_l1": s.voltage_l1,
+            "voltage_l2": s.voltage_l2,
+            "voltage_l3": s.voltage_l3,
+            "meter_energy_kwh": s.meter_energy_kwh,
+            "session_energy_kwh": s.session_energy_kwh,
+            "session_duration_secs": s.session_duration_secs,
+            "charge_limit_a": s.charge_limit_a,
+            "serial_number": s.serial_number,
+        })
+    });
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "evc_host": evc_host,
+            "evc_port": evc_port,
+            "reachable": reachable,
+            "snapshot": last_snapshot,
+        })),
+    )
+}
+
 /// GET /api/evc/discover — scan the local network for EV chargers on port 502.
 pub async fn evc_discover(State(_state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     tracing::info!("EVC network discovery requested");
@@ -6749,5 +6795,96 @@ mod tests {
             );
         })
         .await;
+    }
+
+    /// GET /api/evc/status — issue #138. The frontend uses this to seed
+    /// `evcEverConnected` on page load when the WS broadcast channel has
+    /// already missed the initial `EvcConnected` / `Evc` frame.
+    mod evc_status_endpoint {
+        use super::*;
+
+        #[tokio::test]
+        async fn returns_reachable_false_when_no_snapshot_cached() {
+            let state = Arc::new(AppState::new());
+            // Fresh process — latest_evc is None, host is empty by default.
+            let (status, json) = evc_status(State(state.clone())).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["ok"], serde_json::Value::Bool(true));
+            assert_eq!(
+                json["reachable"],
+                serde_json::Value::Bool(false),
+                "no cached snapshot -> reachable=false"
+            );
+            assert!(
+                json["snapshot"].is_null(),
+                "no cached snapshot -> snapshot=null, got: {}",
+                json["snapshot"]
+            );
+            assert_eq!(json["evc_host"], serde_json::Value::String(String::new()));
+            assert_eq!(json["evc_port"], serde_json::json!(502));
+        }
+
+        #[tokio::test]
+        async fn returns_configured_host_even_when_unreachable() {
+            let state = Arc::new(AppState::new());
+            state.settings.lock().await.evc_host = "192.168.1.225".to_string();
+            state.settings.lock().await.evc_port = 502;
+            let (_status, json) = evc_status(State(state.clone())).await;
+            assert_eq!(
+                json["evc_host"],
+                serde_json::Value::String("192.168.1.225".into())
+            );
+            assert_eq!(json["evc_port"], serde_json::json!(502));
+            assert_eq!(
+                json["reachable"],
+                serde_json::Value::Bool(false),
+                "host is set but never reached -> reachable=false"
+            );
+            assert!(json["snapshot"].is_null());
+        }
+
+        #[tokio::test]
+        async fn returns_reachable_true_with_snapshot_when_latest_evc_is_some() {
+            // Simulate the EVC poll loop having decoded at least one
+            // snapshot since startup.
+            let state = Arc::new(AppState::new());
+            state.settings.lock().await.evc_host = "192.168.1.225".to_string();
+            {
+                let mut evc = state.latest_evc.lock().await;
+                *evc = Some(crate::evc::EvcSnapshot {
+                    charging_state: "Idle".into(),
+                    connection_status: "Connected".into(),
+                    active_power: 0,
+                    current_l1: 0.0,
+                    current_l2: 0.0,
+                    current_l3: 0.0,
+                    voltage_l1: 230.0,
+                    voltage_l2: 230.0,
+                    voltage_l3: 230.0,
+                    meter_energy_kwh: 1234.5,
+                    session_energy_kwh: 0.0,
+                    session_duration_secs: 0,
+                    charge_limit_a: 32.0,
+                    serial_number: "GE-EVC-0001".into(),
+                });
+            }
+            let (_status, json) = evc_status(State(state.clone())).await;
+            assert_eq!(
+                json["reachable"],
+                serde_json::Value::Bool(true),
+                "cached snapshot -> reachable=true"
+            );
+            let snap = &json["snapshot"];
+            assert!(snap.is_object(), "snapshot should be an object");
+            assert_eq!(
+                snap["connection_status"],
+                serde_json::Value::String("Connected".into())
+            );
+            assert_eq!(
+                snap["serial_number"],
+                serde_json::Value::String("GE-EVC-0001".into())
+            );
+            assert_eq!(snap["meter_energy_kwh"], serde_json::json!(1234.5));
+        }
     }
 }

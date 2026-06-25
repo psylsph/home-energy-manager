@@ -118,6 +118,13 @@ pub enum PollMessage {
     },
     /// EV charger data has been polled.
     Evc(Box<crate::evc::EvcSnapshot>),
+    /// EV charger TCP/Modbus connection was just established (before the
+    /// first register read). Lets the frontend latch "we've reached the
+    /// configured host" immediately instead of waiting for the first
+    /// successful register poll — covers the case where the user sees
+    /// "EVC: connected" in the logs but the read fails transiently or
+    /// the WS misses the first snapshot frame (issue #138).
+    EvcConnected,
     /// EV charger is disconnected.
     EvcDisconnected,
 }

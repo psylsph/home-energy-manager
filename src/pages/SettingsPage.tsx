@@ -16,6 +16,7 @@ import {
   parseHHMM,
 } from '../lib/tariff';
 import { useInverterStore } from '../store/useInverterStore';
+import { isValidIpv4Host } from '../lib/validators';
 
 function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -251,6 +252,9 @@ export default function SettingsPage() {
   const [evcDiscovering, setEvcDiscovering] = useState(false);
   const [evcDiscoverResults, setEvcDiscoverResults] = useState<DiscoveredEvc[]>([]);
   const [evcDiscoverError, setEvcDiscoverError] = useState('');
+  // Empty host = EVC disabled (intentional, see handleEvcSave). Anything
+  // non-empty must be a valid IPv4 dotted-quad (issue #138).
+  const evcHostInvalid = evcHost !== '' && !isValidIpv4Host(evcHost);
   const [disableAutoDiscovery, setDisableAutoDiscovery] = useState(false);
 
   // Start on login (issue #117). The actual platform autostart entry is
@@ -473,9 +477,22 @@ export default function SettingsPage() {
 
   // Save EV Charger settings
   const handleEvcSave = async () => {
+    // Re-check client-side as defence-in-depth (issue #138): the Save
+    // button is also disabled on invalid input, but programmatic callers
+    // (or an old tab racing a stale form state) must still be rejected.
+    if (evcHostInvalid) {
+      flash('EV Charger address must be a valid IPv4 address (e.g. 192.168.1.50)', false);
+      return;
+    }
     try {
       await apiPost('/api/settings', { evc_host: evcHost, evc_port: evcPort });
       useInverterStore.getState().setEvcHost(evcHost);
+      // Clear cached EVC state so the energy-flow node resets to its
+      // "Not Found" / "Charging" / "Connected" state for the new host,
+      // rather than carrying over power values from the previous host
+      // (issue #138). The next EVC poll frame (or EvcDisconnected if the
+      // new host is bad) will repopulate it.
+      useInverterStore.getState().resetEvc();
       flash(evcHost ? 'EV Charger settings saved' : 'EV Charger disabled', true);
     } catch (error) {
       flash(error instanceof Error ? error.message : 'Failed to save EV charger settings', false);
@@ -1785,8 +1802,13 @@ export default function SettingsPage() {
               type="text"
               value={evcHost}
               onChange={(e) => setEvcHost(e.target.value)}
-              placeholder="Leave blank to disable"
-              className="min-w-0 flex-1 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+              placeholder="e.g. 192.168.1.50 (leave blank to disable)"
+              aria-invalid={evcHostInvalid}
+              className={`min-w-0 flex-1 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border outline-none transition-colors ${
+                evcHostInvalid
+                  ? 'border-red-500 focus:border-red-400'
+                  : 'border-bg-elevated focus:border-flow-active'
+              }`}
             />
             {developerMode && (
               <input
@@ -1798,12 +1820,18 @@ export default function SettingsPage() {
               />
             )}
           </div>
+          {evcHostInvalid && (
+            <span className="text-red-400 text-xs font-sans">
+              Must be four numbers separated by dots, e.g. <span className="font-mono">192.168.1.50</span>.
+            </span>
+          )}
         </label>
 
         <div className="flex gap-3 pt-1">
           <button
             onClick={handleEvcSave}
-            className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
+            disabled={evcHostInvalid}
+            className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Save
           </button>
