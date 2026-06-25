@@ -11,7 +11,7 @@ import {
 import { fetchHistory } from '../lib/api';
 import { removeSpikes } from '../lib/chartSeries';
 import {
-  HISTORY_CHART_GRID_PROPS,
+  getHistoryChartGridProps,
   formatHistoryXAxisTick,
   getHistoryRangeDomain,
   getHistoryXAxisMinTickGap,
@@ -74,6 +74,7 @@ function computeYMax(rows: PvRow[], hasPv2: boolean): number {
 
 export default function SolarPowerChart() {
   const scale = useInverterStore((state) => state.panelGraphsScale);
+  const gridLineWeight = useInverterStore((state) => state.gridLineWeight);
   const yLock = useInverterStore((state) => state.panelGraphsYLock);
   const yLockMax = useInverterStore((state) => state.panelGraphsYLockMax);
   const setYLockMax = useInverterStore((state) => state.setPanelGraphsYLockMax);
@@ -169,7 +170,7 @@ export default function SolarPowerChart() {
                 <stop offset="95%" stopColor={PV2_COLOR} stopOpacity={0} />
               </linearGradient>
             </defs>
-            <CartesianGrid {...HISTORY_CHART_GRID_PROPS} />
+            <CartesianGrid {...getHistoryChartGridProps(gridLineWeight)} />
             <XAxis
               dataKey="t"
               type="number"

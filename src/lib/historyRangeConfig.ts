@@ -13,11 +13,47 @@ export const HISTORY_RANGES: { key: HistoryRange; label: string }[] = [
   { key: '1y', label: '1y' },
 ];
 
-export const HISTORY_CHART_GRID_PROPS = {
-  strokeDasharray: '4 4',
-  stroke: 'var(--color-grid-stroke)',
-  strokeWidth: 2,
-} as const;
+/**
+ * Recharts `CartesianGrid` props presets for the live history charts.
+ *
+ * Two weights are exposed so users bothered by chunky grid lines (issue #111)
+ * can opt into a hairline preset. The `standard` preset keeps the original
+ * look byte-for-byte (`strokeWidth: 2`, `'4 4'` dash, current colour) so
+ * existing users see no visual change unless they opt in.
+ */
+export type GridLineWeight = 'standard' | 'subtle';
+
+export const HISTORY_CHART_GRID_PRESETS: Record<GridLineWeight, {
+  strokeDasharray: string;
+  stroke: string;
+  strokeWidth: number;
+}> = {
+  standard: {
+    strokeDasharray: '4 4',
+    stroke: 'var(--color-grid-stroke)',
+    strokeWidth: 2,
+  },
+  subtle: {
+    strokeDasharray: '3 4',
+    stroke: 'var(--color-grid-stroke-subtle)',
+    strokeWidth: 1,
+  },
+};
+
+/**
+ * Return the active `CartesianGrid` props for the given weight preset.
+ *
+ * Spreads directly onto a `<CartesianGrid {...props} />` element. The stroke
+ * value is a CSS variable string resolved by the SVG at render time — Recharts
+ * forwards it unchanged through to the underlying `<line stroke="…">`.
+ */
+export function getHistoryChartGridProps(weight: GridLineWeight): {
+  strokeDasharray: string;
+  stroke: string;
+  strokeWidth: number;
+} {
+  return HISTORY_CHART_GRID_PRESETS[weight];
+}
 
 export const HISTORY_RANGE_MS: Partial<Record<HistoryRange, number>> = {
   '1h': 3600000,

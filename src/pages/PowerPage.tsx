@@ -12,7 +12,7 @@ import {
 } from 'recharts';
 import { fetchHistory, isTauri } from '../lib/api';
 import {
-  HISTORY_CHART_GRID_PROPS,
+  getHistoryChartGridProps,
   HISTORY_RANGE_MS,
   HISTORY_RANGES,
   getHistoryRangeDomain,
@@ -892,6 +892,7 @@ export default function PowerPage() {
   const snapshot = useInverterStore((state) => state.snapshot);
   const range = useInverterStore((state) => state.chartRange);
   const setRange = useInverterStore((state) => state.setChartRange);
+  const gridLineWeight = useInverterStore((state) => state.gridLineWeight);
   const now = useNow();
   const rolling = isRollingHistoryRange(range);
   const [offset, setOffset] = useState(0);
@@ -1163,7 +1164,7 @@ export default function PowerPage() {
                   </linearGradient>
                 ))}
               </defs>
-              <CartesianGrid {...HISTORY_CHART_GRID_PROPS} />
+              <CartesianGrid {...getHistoryChartGridProps(gridLineWeight)} />
               <ReferenceLine
                 yAxisId="power"
                 y={0}

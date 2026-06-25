@@ -11,7 +11,7 @@ import {
 import { fetchHistory } from '../lib/api';
 import { removeSpikes } from '../lib/chartSeries';
 import {
-  HISTORY_CHART_GRID_PROPS,
+  getHistoryChartGridProps,
   formatHistoryXAxisTick,
   getHistoryRangeDomain,
   getHistoryXAxisMinTickGap,
@@ -46,6 +46,7 @@ function useNow(): number {
 
 export default function BatterySocChart() {
   const scale = useInverterStore((state) => state.panelGraphsScale);
+  const gridLineWeight = useInverterStore((state) => state.gridLineWeight);
   const range = scale;
   const rolling = isRollingHistoryRange(range);
   const now = useNow();
@@ -105,7 +106,7 @@ export default function BatterySocChart() {
                 <stop offset="95%" stopColor={SOC_COLOR} stopOpacity={0} />
               </linearGradient>
             </defs>
-            <CartesianGrid {...HISTORY_CHART_GRID_PROPS} />
+            <CartesianGrid {...getHistoryChartGridProps(gridLineWeight)} />
             <XAxis
               dataKey="t"
               type="number"

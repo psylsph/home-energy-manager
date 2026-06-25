@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { InverterSnapshot, ConnectionState, HistoryRange, ScheduleSlot } from '../lib/types';
+import type { GridLineWeight } from '../lib/historyRangeConfig';
 
 type ThemeMode = 'dark' | 'light';
 
@@ -30,6 +31,14 @@ interface InverterState {
   panelGraphsYLock: boolean;
   /** Highest Y-axis ceiling seen this session when lock is enabled (0 = unset). */
   panelGraphsYLockMax: number;
+  /**
+   * Grid line weight for the recharts `CartesianGrid` on every live history
+   * chart (Power, History, Battery tab, Solar tab). `'standard'` matches the
+   * original 2-px dashed look; `'subtle'` drops to a hairline that sits
+   * behind the data series (issue #111). Persisted to localStorage so the
+   * user's choice survives reloads.
+   */
+  gridLineWeight: GridLineWeight;
   /** Discharge slots configured locally in Eco mode, not yet written to the inverter. */
   pendingDischargeSlots: Record<number, ScheduleSlot>;
   /** EV Charger host — non-empty when configured in Settings. */
@@ -79,6 +88,7 @@ interface InverterState {
   setPanelGraphsScale: (scale: 'today' | '24h') => void;
   setPanelGraphsYLock: (enabled: boolean) => void;
   setPanelGraphsYLockMax: (max: number) => void;
+  setGridLineWeight: (weight: GridLineWeight) => void;
   setPendingDischargeSlots: (slots: Record<number, ScheduleSlot>) => void;
   clearPendingDischargeSlots: () => void;
   setHiddenPanels: (panels: string[]) => void;
@@ -203,6 +213,24 @@ function loadVisualNoiseThreshold(): number {
   return 20;
 }
 
+function loadGridLineWeight(): GridLineWeight {
+  try {
+    const stored = localStorage.getItem('gridLineWeight');
+    // Reject anything that isn't one of the two known presets — defends
+    // against a typo or a future preset name being written by an older
+    // build (issue #111). Default to 'standard' so existing users see
+    // the original look after upgrade.
+    return stored === 'subtle' ? 'subtle' : 'standard';
+  } catch { /* ignore */ }
+  return 'standard';
+}
+
+function saveGridLineWeight(weight: GridLineWeight) {
+  try {
+    localStorage.setItem('gridLineWeight', weight);
+  } catch { /* ignore */ }
+}
+
 function loadPendingDischargeSlots(): Record<number, ScheduleSlot> {
   try {
     const stored = localStorage.getItem('pendingDischargeSlots');
@@ -234,6 +262,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   panelGraphsYLock: loadPanelGraphsYLock(),
   panelGraphsYLockMax: 0,
   visualNoiseThreshold: loadVisualNoiseThreshold(),
+  gridLineWeight: loadGridLineWeight(),
   pendingDischargeSlots: loadPendingDischargeSlots(),
   evcHost: '',
   evcPower: 0,
@@ -297,6 +326,14 @@ export const useInverterStore = create<InverterState>((set) => ({
       localStorage.setItem('visualNoiseThreshold', String(threshold));
     } catch { /* ignore */ }
     set({ visualNoiseThreshold: threshold });
+  },
+  setGridLineWeight: (weight) => {
+    // Defensive: the setter takes a `GridLineWeight`, so the type system
+    // already prevents unknown values. Belt-and-braces guard against a
+    // future caller passing a string through an untyped boundary.
+    if (weight !== 'standard' && weight !== 'subtle') return;
+    saveGridLineWeight(weight);
+    set({ gridLineWeight: weight });
   },
   setPendingDischargeSlots: (slots) => {
     savePendingDischargeSlots(slots);

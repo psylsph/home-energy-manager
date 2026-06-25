@@ -10,7 +10,7 @@ import {
 } from 'recharts';
 import { fetchHistory, apiGet, isTauri } from '../lib/api';
 import {
-  HISTORY_CHART_GRID_PROPS,
+  getHistoryChartGridProps,
   HISTORY_RANGES,
   rangeToBucketSecs,
   HISTORY_RANGE_MS,
@@ -260,12 +260,15 @@ function formatWindowLabel(range: HistoryRange, offset: number): string {
 // Single chart component
 // ---------------------------------------------------------------------------
 
-function ChartCard({ chart, data, range, domain, ticks }: {
+import type { GridLineWeight } from '../lib/historyRangeConfig';
+
+function ChartCard({ chart, data, range, domain, ticks, gridLineWeight }: {
   chart: ChartDef;
   data: Record<string, TimePoint[]>;
   range: HistoryRange;
   domain: [number, number];
   ticks?: number[];
+  gridLineWeight: GridLineWeight;
 }) {
   const [mutedSeries, setMutedSeries] = useState<Partial<Record<string, boolean>>>({});
   const allFields = [...chart.fields.map((f) => f.field), ...(chart.requires ?? [])];
@@ -352,7 +355,7 @@ function ChartCard({ chart, data, range, domain, ticks }: {
               </linearGradient>
             ))}
           </defs>
-          <CartesianGrid {...HISTORY_CHART_GRID_PROPS} />
+          <CartesianGrid {...getHistoryChartGridProps(gridLineWeight)} />
           <XAxis
             dataKey="t"
             type="number"
@@ -549,6 +552,7 @@ export default function HistoryPage() {
   const [tab, setTab] = useState<MetricTab>('battery');
   const range = useInverterStore((state) => state.chartRange);
   const setChartRange = useInverterStore((state) => state.setChartRange);
+  const gridLineWeight = useInverterStore((state) => state.gridLineWeight);
   const [offset, setOffset] = useState(0);
   const lastDateRef = useRef(getHistoryPickerValue(range, offset));
   const [data, setData] = useState<Record<string, TimePoint[]>>({});
@@ -782,6 +786,7 @@ export default function HistoryPage() {
               range={range}
               domain={displayDomain}
               ticks={getHistoryXAxisTicks(range, displayDomain)}
+              gridLineWeight={gridLineWeight}
             />
           ))}
           {tab === 'temperature' && (
