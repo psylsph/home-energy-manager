@@ -118,6 +118,107 @@ fn same_utc_day(a_ms: i64, b_ms: i64) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Cost / income series
+// ---------------------------------------------------------------------------
+
+/// Derived field names for the History "Cost" tab. These are NOT stored
+/// columns - the server computes them from the `today_*_kwh` counters and the
+/// configured tariff (see [`HistoryDb::query_cost_series`]). The frontend
+/// requests them like any other field; the history handler routes them here.
+pub const IMPORT_COST_FIELD: &str = "_import_cost";
+pub const EXPORT_INCOME_FIELD: &str = "_export_income";
+
+/// True for the server-derived cost/income fields.
+pub fn is_cost_field(field: &str) -> bool {
+    field == IMPORT_COST_FIELD || field == EXPORT_INCOME_FIELD
+}
+
+/// Coarse upper bound (kW) used only to reject a grossly corrupted counter
+/// value that slipped past ingestion. A per-reading delta is discarded only if
+/// it would require sustaining more than this over the actual elapsed time
+/// between readings.
+///
+/// Sized well above realistic residential grid import: unlike inverter or
+/// solar power, grid import can legitimately reach the low tens of kW (EV
+/// charging, electric showers, three-phase supplies), so the bound must clear
+/// those or genuine high-power readings get silently dropped. It only needs to
+/// be tight enough to catch obvious corruption (a counter glitching by orders
+/// of magnitude), not to bound real power precisely.
+const MAX_PLAUSIBLE_POWER_KW: f64 = 30.0;
+
+/// Whether two Unix-second timestamps fall on the same LOCAL calendar day.
+///
+/// The inverter's `today_*_kwh` counters reset at local midnight, so the
+/// cost walk detects a daily reset by a local-day change (not UTC - the
+/// reset happens at local midnight regardless of server timezone).
+fn same_local_day(a_secs: i64, b_secs: i64) -> bool {
+    let date = |s: i64| {
+        chrono::DateTime::from_timestamp(s, 0).map(|dt| dt.with_timezone(&chrono::Local).date_naive())
+    };
+    match (date(a_secs), date(b_secs)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Minutes-of-day `[0, 1440)` for a Unix-second timestamp in local time.
+/// Used to pick the tariff slot for the moment a reading occurred.
+fn local_minutes_of_day(ts_secs: i64) -> u16 {
+    match chrono::DateTime::from_timestamp(ts_secs, 0) {
+        Some(dt) => {
+            let l = dt.with_timezone(&chrono::Local);
+            (l.hour() * 60 + l.minute()) as u16
+        }
+        None => 0,
+    }
+}
+
+/// Resolve the `(start_ts, end_ts)` UTC-second window for a history query.
+///
+/// Extracted so the aggregated-field path ([`HistoryDb::query_history`]) and
+/// the cost path ([`HistoryDb::query_cost_series`]) cover the exact same span.
+/// When `explicit_window` is supplied (the browser sent local-timezone
+/// boundaries) it wins; otherwise the window is `range_secs` long, ending at a
+/// boundary aligned the same way the aggregated path aligns it.
+fn resolve_history_window(
+    range_secs: i64,
+    offset: i64,
+    explicit_window: Option<(i64, i64)>,
+) -> (i64, i64) {
+    match explicit_window {
+        Some((s, e)) => (s, e),
+        None => {
+            let now = chrono::Utc::now().timestamp();
+            let raw_end = now - (offset * range_secs);
+            let aligned_end = match range_secs {
+                3600 => ((raw_end / 3600) * 3600) + 3600,
+                21600 => ((raw_end / 21600) * 21600) + 21600,
+                _ => {
+                    // Align to local midnight so day-based ranges start at
+                    // 00:00 local time instead of 00:00 UTC.
+                    let raw_local = chrono::DateTime::from_timestamp(raw_end, 0)
+                        .unwrap()
+                        .with_timezone(&chrono::Local);
+                    let secs_today = raw_local.time().num_seconds_from_midnight();
+                    if secs_today == 0 {
+                        raw_end
+                    } else {
+                        let tomorrow = raw_local.date_naive() + chrono::Duration::days(1);
+                        let next_midnight_naive = tomorrow.and_hms_opt(0, 0, 0).unwrap();
+                        let next_midnight_local = chrono::Local
+                            .from_local_datetime(&next_midnight_naive)
+                            .earliest()
+                            .unwrap();
+                        next_midnight_local.timestamp()
+                    }
+                }
+            };
+            (aligned_end - range_secs, aligned_end)
+        }
+    }
+}
+
 /// Repair cumulative daily counters after aggregation.
 ///
 /// The inverter's `today_*_kwh` fields are cumulative counters: they should
@@ -797,40 +898,7 @@ impl HistoryDb {
             .lock()
             .map_err(|e| format!("History DB lock poisoned: {e}"))?;
 
-        let (start_ts, end_ts) = match explicit_window {
-            Some((s, e)) => (s, e),
-            None => {
-                let now = chrono::Utc::now().timestamp();
-                let raw_end = now - (offset * range_secs);
-                let aligned_end = match range_secs {
-                    3600 => ((raw_end / 3600) * 3600) + 3600,
-                    21600 => ((raw_end / 21600) * 21600) + 21600,
-                    _ => {
-                        // Align to local midnight so day-based ranges start at
-                        // 00:00 local time instead of 00:00 UTC. This prevents
-                        // 24h charts from appearing to start at 01:00 in
-                        // timezones east of UTC (e.g. BST/GMT+1).
-                        let raw_local = chrono::DateTime::from_timestamp(raw_end, 0)
-                            .unwrap()
-                            .with_timezone(&chrono::Local);
-                        let secs_today = raw_local.time().num_seconds_from_midnight();
-                        if secs_today == 0 {
-                            raw_end
-                        } else {
-                            // Next local midnight: go to midnight of the next day
-                            let tomorrow = raw_local.date_naive() + chrono::Duration::days(1);
-                            let next_midnight_naive = tomorrow.and_hms_opt(0, 0, 0).unwrap();
-                            let next_midnight_local = chrono::Local
-                                .from_local_datetime(&next_midnight_naive)
-                                .earliest()
-                                .unwrap();
-                            next_midnight_local.timestamp()
-                        }
-                    }
-                };
-                (aligned_end - range_secs, aligned_end)
-            }
-        };
+        let (start_ts, end_ts) = resolve_history_window(range_secs, offset, explicit_window);
 
         let mut result = serde_json::Map::new();
 
@@ -899,6 +967,145 @@ impl HistoryDb {
         }
 
         Ok(result)
+    }
+
+    /// Compute a cumulative cost/income series (£) for a daily energy counter
+    /// over the query window, priced with a time-of-use `tariff`.
+    ///
+    /// Why this can't reuse the aggregated (`MAX`-bucket) path: a time-of-use
+    /// rate must be applied to each energy increment at the moment it actually
+    /// occurred, and that resolution is destroyed by wide buckets. A 24h MAX
+    /// bucket only knows the day's *total* - pricing it at one rate prices the
+    /// whole day at the bucket's start-of-day rate and silently drops the
+    /// evening peak, so the running total shrinks as the range widens.
+    /// Likewise the local-midnight reset must be detected exactly, not
+    /// inferred from a coarse bucket.
+    ///
+    /// So we walk the raw readings at native resolution, accumulate
+    /// `energy_delta * rate(reading_time)`, and only then downsample the
+    /// cumulative result to `bucket_secs` display buckets (one point per
+    /// bucket, carrying the running total at the bucket's last reading). The
+    /// total is therefore independent of the selected range's bucket width.
+    ///
+    /// `counter_field` must be `"today_import_kwh"` or `"today_export_kwh"`.
+    /// `flat_fallback` is the £/kWh rate used only if the tariff lookup yields
+    /// nothing (degenerate config).
+    pub fn query_cost_series(
+        &self,
+        range_secs: i64,
+        bucket_secs: i64,
+        offset: i64,
+        explicit_window: Option<(i64, i64)>,
+        counter_field: &str,
+        tariff: &crate::settings::TariffConfig,
+        flat_fallback: f64,
+    ) -> Result<Vec<TimePoint>, String> {
+        // Guard the SQL identifier - only the two daily counters drive cost.
+        if counter_field != "today_import_kwh" && counter_field != "today_export_kwh" {
+            return Err(format!("Unsupported cost counter field: {counter_field}"));
+        }
+
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+
+        let (start_ts, end_ts) = resolve_history_window(range_secs, offset, explicit_window);
+
+        let sql = format!(
+            "SELECT timestamp, \"{counter_field}\" \
+             FROM readings \
+             WHERE timestamp >= ?1 AND timestamp < ?2 AND \"{counter_field}\" IS NOT NULL \
+             ORDER BY timestamp",
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("Failed to prepare cost query: {e}"))?;
+        let rows = stmt
+            .query_map(params![start_ts, end_ts], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
+            })
+            .map_err(|e| format!("Cost query failed: {e}"))?
+            .filter_map(SqlResult::ok);
+
+        // bucket_start_ms -> cumulative cost at that bucket's last reading.
+        // BTreeMap keeps display points sorted; the cumulative series is
+        // monotonic non-decreasing so the last write per bucket is its max.
+        let mut buckets: std::collections::BTreeMap<i64, f64> = std::collections::BTreeMap::new();
+        let mut acc = 0.0_f64;
+        // `baseline` is the counter value of the last *counted* reading on the
+        // current day; `last_ts` is the previous reading's time (for the
+        // local-day reset check and the plausibility window).
+        let mut baseline: Option<f64> = None;
+        let mut last_ts: Option<i64> = None;
+        // Parse the tariff's HH:MM bounds once, not per reading (the walk can
+        // cover hundreds of thousands of rows on a 1y range).
+        let parsed_slots = tariff.parsed_slots();
+
+        for (ts, raw) in rows {
+            match baseline {
+                None => {
+                    // First reading establishes the baseline; nothing to credit
+                    // (we only count energy accumulated *within* the window).
+                    baseline = Some(raw);
+                }
+                Some(base) => {
+                    let day_changed = last_ts.is_some_and(|lt| !same_local_day(lt, ts));
+                    let (delta, new_baseline) = if day_changed {
+                        // Counter reset at local midnight. Re-baseline only;
+                        // credit nothing for the first reading of the new day.
+                        // In continuous data that reading is ~0, so this is a
+                        // no-op. After a data gap (app or inverter offline) the
+                        // first reading can already hold a chunk of the day,
+                        // accumulated at unknown times; crediting it here would
+                        // price that whole chunk at this single reading's tariff
+                        // slot. We only count energy whose accumulation we
+                        // actually observe via within-day deltas.
+                        (0.0, raw)
+                    } else if raw >= base {
+                        (raw - base, raw) // normal same-day increase
+                    } else {
+                        // Same-day decrease: a sensor glitch, not real negative
+                        // energy. Skip it AND keep the baseline, so the later
+                        // recovery back up to `base` isn't re-counted.
+                        (0.0, base)
+                    };
+
+                    // Plausibility ceiling, scaled by the actual elapsed time so
+                    // a data gap (app offline) doesn't trip it. Rejects a delta
+                    // that would require > MAX_PLAUSIBLE_POWER_KW sustained. The
+                    // floor keeps a sane ceiling for sub-minute sample spacing.
+                    let elapsed_h = ((ts - last_ts.unwrap_or(ts)).max(0) as f64) / 3600.0;
+                    let ceiling = MAX_PLAUSIBLE_POWER_KW * elapsed_h.max(1.0 / 60.0);
+
+                    if delta > 0.0 && delta <= ceiling {
+                        let rate = crate::settings::rate_for_parsed_minutes(
+                            &parsed_slots,
+                            local_minutes_of_day(ts),
+                        )
+                        .unwrap_or(flat_fallback);
+                        acc += delta * rate;
+                        baseline = Some(new_baseline);
+                    } else if delta <= ceiling {
+                        // Zero (or reset-to-zero) delta: still advance the
+                        // baseline so the day re-syncs after a reset.
+                        baseline = Some(new_baseline);
+                    }
+                    // delta > ceiling: implausible spike. Drop it and keep the
+                    // baseline so a single corrupt reading doesn't inflate the
+                    // total; the next good reading produces a re-checked delta.
+                }
+            }
+
+            let bucket_ms = ((ts / bucket_secs) * bucket_secs) * 1000;
+            buckets.insert(bucket_ms, acc);
+            last_ts = Some(ts);
+        }
+
+        Ok(buckets
+            .into_iter()
+            .map(|(t, v)| TimePoint { t, v })
+            .collect())
     }
 
     /// Insert one weather observation.
@@ -2881,5 +3088,263 @@ mod tests {
             is_allowed_field("today_pv1_kwh"),
             "API must whitelist the field name"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Cost / income series
+    // -----------------------------------------------------------------------
+
+    fn local_midnight_secs(day_offset: i64) -> i64 {
+        let date = Local::now().date_naive() + chrono::Duration::days(day_offset);
+        Local
+            .from_local_datetime(&date.and_hms_opt(0, 0, 0).unwrap())
+            .earliest()
+            .unwrap()
+            .timestamp()
+    }
+
+    /// Insert one local day of a daily-resetting export counter at 30-min
+    /// resolution. The counter rises 0 → `daily_kwh` between `rise_start_min`
+    /// and `rise_end_min` (local minutes-of-day) and plateaus after, so the
+    /// day's last reading carries the full daily total. It is 0 at the day's
+    /// local midnight (step 0), modelling the inverter's midnight reset.
+    fn insert_export_day(
+        db: &HistoryDb,
+        day_offset: i64,
+        daily_kwh: f32,
+        rise_start_min: i64,
+        rise_end_min: i64,
+    ) {
+        let midnight = local_midnight_secs(day_offset);
+        for step in 0..48i64 {
+            let ts = midnight + step * 1800;
+            let min_of_day = step * 30;
+            let frac = if min_of_day <= rise_start_min {
+                0.0
+            } else if min_of_day >= rise_end_min {
+                1.0
+            } else {
+                (min_of_day - rise_start_min) as f64 / (rise_end_min - rise_start_min) as f64
+            };
+            db.insert_reading(&make_snapshot_with_kwh(ts, 0.0, (daily_kwh as f64 * frac) as f32));
+        }
+    }
+
+    fn series_total(series: &[TimePoint]) -> f64 {
+        series.last().map(|p| p.v).unwrap_or(0.0)
+    }
+
+    fn tou_export_tariff() -> crate::settings::TariffConfig {
+        // Off-peak 0.10 all day except a 16:00-19:00 peak at 0.30.
+        crate::settings::TariffConfig {
+            slots: vec![
+                crate::settings::TariffSlot {
+                    start: "00:00".into(),
+                    end: "16:00".into(),
+                    rate: 0.10,
+                },
+                crate::settings::TariffSlot {
+                    start: "16:00".into(),
+                    end: "19:00".into(),
+                    rate: 0.30,
+                },
+                crate::settings::TariffSlot {
+                    start: "19:00".into(),
+                    end: "23:59".into(),
+                    rate: 0.10,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn cost_series_total_is_bucket_size_independent() {
+        // The core regression: the cumulative total must not
+        // change with the selected range's bucket width. Three local days of
+        // export, ALL generated inside the 16:00-19:00 peak window, priced with
+        // a time-of-use tariff. Because the running total is integrated at
+        // native reading resolution, every bucket size yields the same final
+        // value - and that value reflects the peak rate even on the 24h bucket
+        // (the old MAX-bucket reconstruction collapsed wide ranges to the
+        // off-peak rate).
+        let db = test_db();
+        for d in 0..3 {
+            insert_export_day(&db, d, 10.0, 16 * 60, 18 * 60 + 30); // 16:00-18:30
+        }
+        let start = local_midnight_secs(0) - 60;
+        let end = local_midnight_secs(3) + 60;
+        let tou = tou_export_tariff();
+
+        let totals: Vec<f64> = [1800i64, 3600, 7200, 43200, 86400]
+            .iter()
+            .map(|&b| {
+                let s = db
+                    .query_cost_series(0, b, 0, Some((start, end)), "today_export_kwh", &tou, 0.10)
+                    .unwrap();
+                series_total(&s)
+            })
+            .collect();
+
+        for w in totals.windows(2) {
+            assert!(
+                (w[0] - w[1]).abs() < 1e-9,
+                "cost total drifted with bucket size: {totals:?}"
+            );
+        }
+        // 3 days × 10 kWh, all in the peak window → 30 kWh × £0.30 = £9.00.
+        assert!(
+            (totals[0] - 9.0).abs() < 1e-6,
+            "expected £9.00 at peak rate, got {}",
+            totals[0]
+        );
+    }
+
+    #[test]
+    fn cost_series_prices_each_increment_at_its_local_time() {
+        // Same energy (10 kWh in a day), once in the peak window and once in an
+        // off-peak window, must price at the respective rates - proving the
+        // rate is applied at the time the energy was produced.
+        let tou = tou_export_tariff();
+        let start = local_midnight_secs(0) - 60;
+        let end = local_midnight_secs(1) + 60;
+
+        let db_peak = test_db();
+        insert_export_day(&db_peak, 0, 10.0, 16 * 60, 18 * 60 + 30);
+        let peak = series_total(
+            &db_peak
+                .query_cost_series(0, 1800, 0, Some((start, end)), "today_export_kwh", &tou, 0.10)
+                .unwrap(),
+        );
+
+        let db_off = test_db();
+        insert_export_day(&db_off, 0, 10.0, 6 * 60, 10 * 60);
+        let off = series_total(
+            &db_off
+                .query_cost_series(0, 1800, 0, Some((start, end)), "today_export_kwh", &tou, 0.10)
+                .unwrap(),
+        );
+
+        assert!((peak - 3.0).abs() < 1e-6, "10 kWh @ peak 0.30 = £3.00, got {peak}");
+        assert!((off - 1.0).abs() < 1e-6, "10 kWh @ off-peak 0.10 = £1.00, got {off}");
+    }
+
+    #[test]
+    fn cost_series_credits_each_day_once_after_reset() {
+        // Three days at a flat rate must sum each day's energy exactly once.
+        // A double-count (the symptom that inflated narrow ranges) would
+        // roughly double this.
+        let db = test_db();
+        for d in 0..3 {
+            insert_export_day(&db, d, 8.0, 6 * 60, 10 * 60);
+        }
+        let start = local_midnight_secs(0) - 60;
+        let end = local_midnight_secs(3) + 60;
+        let flat = crate::settings::TariffConfig::flat(0.10);
+        let total = series_total(
+            &db.query_cost_series(0, 86400, 0, Some((start, end)), "today_export_kwh", &flat, 0.10)
+                .unwrap(),
+        );
+        // 3 × 8 kWh × £0.10 = £2.40.
+        assert!((total - 2.4).abs() < 1e-6, "expected £2.40, got {total}");
+    }
+
+    #[test]
+    fn cost_series_ignores_same_day_dip_without_recounting_recovery() {
+        // A transient sensor dip mid-day must not subtract energy, and the
+        // recovery back up to the prior peak must not be re-counted.
+        let db = test_db();
+        let m = local_midnight_secs(0);
+        let pts: [(i64, f32); 5] = [
+            (0, 0.0),         // 00:00 baseline
+            (8 * 60, 5.0),    // 08:00 → +5
+            (9 * 60, 1.0),    // 09:00 glitch dip (ignored, baseline held at 5)
+            (10 * 60, 5.0),   // 10:00 recovery (no new energy)
+            (12 * 60, 8.0),   // 12:00 → +3
+        ];
+        for (min, v) in pts {
+            db.insert_reading(&make_snapshot_with_kwh(m + min * 60, 0.0, v));
+        }
+        let start = m - 60;
+        let end = local_midnight_secs(1) + 60;
+        let flat = crate::settings::TariffConfig::flat(1.0);
+        let total = series_total(
+            &db.query_cost_series(0, 3600, 0, Some((start, end)), "today_export_kwh", &flat, 1.0)
+                .unwrap(),
+        );
+        // True energy is the monotone envelope 0 -> 8 = 8 kWh at £1.00 = £8.00.
+        assert!((total - 8.0).abs() < 1e-6, "dip recovery double-counted: got {total}");
+    }
+
+    #[test]
+    fn cost_series_does_not_misprice_energy_accrued_during_a_gap() {
+        // Recording resumes mid-afternoon (peak window) after a gap, with the
+        // counter already at 9 kWh produced at unknown (mostly off-peak) times.
+        // That 9 kWh must NOT be billed at the 17:00 peak rate; only energy
+        // observed via within-day deltas after resumption is counted.
+        let db = test_db();
+        let m0 = local_midnight_secs(0);
+        db.insert_reading(&make_snapshot_with_kwh(m0 + 6 * 3600, 0.0, 0.0)); // 06:00, then a gap
+        let m1 = local_midnight_secs(1);
+        db.insert_reading(&make_snapshot_with_kwh(m1 + 17 * 3600, 0.0, 9.0)); // resume 17:00, raw 9
+        db.insert_reading(&make_snapshot_with_kwh(m1 + 17 * 3600 + 1800, 0.0, 10.5)); // 17:30
+        db.insert_reading(&make_snapshot_with_kwh(m1 + 18 * 3600, 0.0, 11.0)); // 18:00
+        db.insert_reading(&make_snapshot_with_kwh(m1 + 18 * 3600 + 1800, 0.0, 12.0)); // 18:30
+        let start = m0 - 60;
+        let end = m1 + 19 * 3600;
+        let tou = tou_export_tariff();
+        let total = series_total(
+            &db.query_cost_series(0, 1800, 0, Some((start, end)), "today_export_kwh", &tou, 0.10)
+                .unwrap(),
+        );
+        // Only the observed 9 -> 12 = 3 kWh (all peak) is credited: 3 x 0.30 = 0.90.
+        // The pre-resumption 9 kWh is not retroactively priced at the peak rate
+        // (which would have given 12 x 0.30 = 3.60).
+        assert!((total - 0.90).abs() < 1e-6, "gap energy mis-priced: got {total}");
+    }
+
+    #[test]
+    fn cost_series_credits_sustained_high_power_under_ceiling() {
+        // ~20 kW import sustained for 10 minutes (0.333 kWh/min) must be credited
+        // in full. The old 15 kW ceiling (0.25 kWh per 60s poll) wrongly dropped
+        // every step and stranded the whole session at ~0.
+        let db = test_db();
+        let m = local_midnight_secs(0);
+        db.insert_reading(&make_snapshot_with_kwh(m + 12 * 3600, 0.0, 0.0)); // noon, import 0
+        let mut kwh = 0.0f32;
+        for i in 1..=10i64 {
+            kwh += 20.0 / 60.0; // 20 kW for one minute
+            db.insert_reading(&make_snapshot_with_kwh(m + 12 * 3600 + i * 60, kwh, 0.0));
+        }
+        let start = m - 60;
+        let end = m + 13 * 3600;
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let total = series_total(
+            &db.query_cost_series(0, 1800, 0, Some((start, end)), "today_import_kwh", &flat, 0.25)
+                .unwrap(),
+        );
+        // ~3.33 kWh at 0.25 ~= £0.83. Must be far above zero (the bug gave ~0).
+        assert!((total - 0.833).abs() < 0.02, "sustained high power dropped: got {total}");
+    }
+
+    #[test]
+    fn cost_series_still_clamps_a_gross_transient_spike() {
+        // A single corrupt reading that jumps the counter by orders of magnitude
+        // and then returns must not inflate the total.
+        let db = test_db();
+        let m = local_midnight_secs(0);
+        db.insert_reading(&make_snapshot_with_kwh(m + 12 * 3600, 0.0, 5.0)); // 12:00 export 5
+        db.insert_reading(&make_snapshot_with_kwh(m + 12 * 3600 + 60, 0.0, 5000.0)); // spike
+        db.insert_reading(&make_snapshot_with_kwh(m + 12 * 3600 + 120, 0.0, 5.2)); // back to normal
+        db.insert_reading(&make_snapshot_with_kwh(m + 12 * 3600 + 180, 0.0, 5.4));
+        let start = m - 60;
+        let end = m + 13 * 3600;
+        let flat = crate::settings::TariffConfig::flat(1.0);
+        let total = series_total(
+            &db.query_cost_series(0, 1800, 0, Some((start, end)), "today_export_kwh", &flat, 1.0)
+                .unwrap(),
+        );
+        // The 5 -> 5000 spike is dropped (baseline held at 5); only 5 -> 5.2 -> 5.4
+        // = 0.4 kWh of real growth is credited: 0.4 x 1.0 = £0.40.
+        assert!((total - 0.4).abs() < 1e-6, "gross spike not clamped: got {total}");
     }
 }

@@ -1,25 +1,25 @@
 /**
- * E2E tests for the History page Cost tab (issue #133) and Y-axis rendering.
+ * E2E tests for the History page Cost tab and Y-axis rendering.
  *
- * Covers three concerns that the pure-data unit tests can't:
+ * Cost/income are now computed on the server (`_import_cost` / `_export_income`,
+ * integrated from the today_*_kwh counters against the tariff at native reading
+ * resolution - see `HistoryDb::query_cost_series`). The cross-range-consistency
+ * maths is covered by Rust unit tests; these E2E tests cover what those can't:
  *
- *  1. Issue #133 follow-up — the Cost-tab cost computation must NOT collapse as
- *     the range widens. The bug lived in the frontend preprocess (midnight
- *     rollover detection) interacting with backend bucketing, so we feed a
- *     daily-resetting counter series via route interception at the 6m range
- *     (12 h buckets) and assert the rendered £ total is substantial, not ~£0.
+ *  1. The Cost tab requests the server-derived `_import_cost` / `_export_income`
+ *     fields and renders them - i.e. the fetch + chart wiring is intact and a
+ *     substantial £ total scales the Y axis (not a collapsed ~£0).
  *
  *  2. £ Y-axis labels must not be clipped off the left edge of the chart card
  *     (the £ glyph is wider than % / W / °C labels).
  *
- *  3. Regression — non-currency charts (Solar etc.) still render a chart with
+ *  3. Regression - non-currency charts (Solar etc.) still render a chart with
  *     a visible Y axis after the £-axis fix, so the fix didn't perturb their
  *     layout. This guards the exact mistake an earlier attempt made (adding a
- *     YAxis `width` prop broke every chart's layout).
+ *     YAxis `width` prop globally broke every chart's layout).
  *
  * History data is injected via `page.route` so these tests don't depend on
- * real recorded history or the simulator — they exercise the frontend
- * preprocess + chart rendering in isolation.
+ * real recorded history or the simulator.
  */
 
 import { test, expect } from './fixture.js';
@@ -37,23 +37,21 @@ function startOfLocalDay(ms: number): number {
 type Point = { t: number; v: number };
 
 /**
- * Build a daily-resetting cumulative-counter series (the `today_*_kwh`
- * shape): each local day the counter ramps morning→evening then resets at
- * the next local midnight. Two 12 h buckets per day, matching the 6m range's
- * backend bucket size (43200 s).
- *
- * This is the data shape that exposed issue #133 at wide ranges: the morning
- * MAX sits above 5 kWh, so the old value-heuristic rollover detector
- * (`prev > 5 && raw < 5`) failed to recognise the midnight reset and zeroed
- * every following day's energy.
+ * Build a cumulative cost/income series in the shape the server returns for
+ * the Cost tab: one monotonically non-decreasing £ value per bucket. Two
+ * 12 h buckets per day match the 6m range's bucket size (43200 s). The total
+ * accrues ~`perDay` each day, so over `days` days it reaches ~`days*perDay`.
  */
-function dailyResetSeries(days: number, morning: number, evening: number): Point[] {
+function cumulativeCostSeries(days: number, perDay: number): Point[] {
   const pts: Point[] = [];
   const todayMidnight = startOfLocalDay(Date.now());
+  let acc = 0;
   for (let d = days - 1; d >= 0; d--) {
     const midnight = todayMidnight - d * 86_400_000;
-    pts.push({ t: midnight, v: morning }); // 00:00 bucket
-    pts.push({ t: midnight + 12 * 3_600_000, v: evening }); // 12:00 bucket
+    acc += perDay * 0.4;
+    pts.push({ t: midnight, v: Math.round(acc * 100) / 100 }); // 00:00 bucket
+    acc += perDay * 0.6;
+    pts.push({ t: midnight + 12 * 3_600_000, v: Math.round(acc * 100) / 100 }); // 12:00 bucket
   }
   return pts;
 }
@@ -123,35 +121,31 @@ async function expectYAxisTicksInsideChart(
 // Tests
 // ---------------------------------------------------------------------------
 
-test.describe('History Cost tab — issue #133 (totals collapse at wide ranges)', () => {
-  test('export income and import cost stay substantial at the 6m range', async ({ page }) => {
-    // 10 days of daily-resetting counters, 12 h buckets (6m range bucket size).
-    // Export ramps 6→12 kWh/day; import 1→2 kWh/day. With the fix, export
-    // income ≈ £15 and import cost ≈ £5.4. Under the old rollover bug both
-    // collapsed to roughly a single day (~£0.9 / £0.28).
+test.describe('History Cost tab - server-computed totals', () => {
+  test('renders the server-derived £ totals at the 6m range', async ({ page }) => {
+    // 10 days of cumulative income/cost as the server would return it: export
+    // income reaching ~£15, import cost ~£5.4. The Y-axis max tick should be
+    // well above £3 (the collapsed bug produced < £1 at this range).
     await mockHistory(page, {
-      today_export_kwh: dailyResetSeries(10, 6, 12),
-      today_import_kwh: dailyResetSeries(10, 1, 2),
+      _export_income: cumulativeCostSeries(10, 1.5),
+      _import_cost: cumulativeCostSeries(10, 0.54),
     });
 
     await page.goto('/#/history');
     await page.getByRole('button', { name: 'Cost', exact: true }).click();
-    // 6m uses 12 h buckets — the width that exposed the bug.
+    // 6m uses 12 h buckets - the width that exposed the original bug.
     await page.getByRole('button', { name: '6m', exact: true }).click();
     await expect(page.getByText('Import Cost & Export Income')).toBeVisible({ timeout: 10_000 });
-    // Give the route-mocked fetch + preprocess + render a beat to settle.
     await expect(page.locator('.recharts-wrapper').first()).toBeVisible({ timeout: 10_000 });
 
     const maxTick = await yAxisMaxValue(page);
-    // Substantial: the two series peak near £15 (export) / £5.4 (import); the
-    // Y-axis max tick should be well above £3. The collapsed bug produced < £1.
     expect(maxTick).toBeGreaterThan(3);
   });
 
-  test('cost chart renders data points (preprocess wiring intact)', async ({ page }) => {
+  test('cost chart renders data points (fetch wiring intact)', async ({ page }) => {
     await mockHistory(page, {
-      today_export_kwh: dailyResetSeries(5, 6, 12),
-      today_import_kwh: dailyResetSeries(5, 1, 2),
+      _export_income: cumulativeCostSeries(5, 1.5),
+      _import_cost: cumulativeCostSeries(5, 0.54),
     });
     await page.goto('/#/history');
     await page.getByRole('button', { name: 'Cost', exact: true }).click();
@@ -165,8 +159,8 @@ test.describe('History Cost tab — issue #133 (totals collapse at wide ranges)'
 test.describe('History Y-axis label rendering', () => {
   test('£ labels are not clipped off the left of the Cost chart', async ({ page }) => {
     await mockHistory(page, {
-      today_export_kwh: dailyResetSeries(10, 6, 12),
-      today_import_kwh: dailyResetSeries(10, 1, 2),
+      _export_income: cumulativeCostSeries(10, 1.5),
+      _import_cost: cumulativeCostSeries(10, 0.54),
     });
     await page.goto('/#/history');
     await page.getByRole('button', { name: 'Cost', exact: true }).click();

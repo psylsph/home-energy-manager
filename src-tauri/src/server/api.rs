@@ -2022,6 +2022,36 @@ pub async fn get_history(
         return error_response("No fields specified");
     }
 
+    // The Cost tab requests the derived `_import_cost` / `_export_income`
+    // fields, which aren't stored columns - the server integrates them from
+    // the `today_*_kwh` counters and the configured tariff at native reading
+    // resolution. Split them out from the directly-aggregated
+    // fields so each goes down its own path.
+    let want_import_cost = fields.iter().any(|f| f == crate::history::IMPORT_COST_FIELD);
+    let want_export_income = fields.iter().any(|f| f == crate::history::EXPORT_INCOME_FIELD);
+    let normal_fields: Vec<String> = fields
+        .iter()
+        .filter(|f| !crate::history::is_cost_field(f))
+        .cloned()
+        .collect();
+
+    // Resolve tariff configs only when a cost field is requested, falling back
+    // to a flat single-slot config built from the legacy scalar rate.
+    let cost_cfgs = if want_import_cost || want_export_income {
+        let s = crate::settings::Settings::load();
+        let import_cfg = s
+            .import_tariff_config
+            .clone()
+            .unwrap_or_else(|| crate::settings::TariffConfig::flat(s.import_tariff));
+        let export_cfg = s
+            .export_tariff_config
+            .clone()
+            .unwrap_or_else(|| crate::settings::TariffConfig::flat(s.export_tariff));
+        Some((import_cfg, export_cfg, s.import_tariff, s.export_tariff))
+    } else {
+        None
+    };
+
     // Clone the HistoryDb handle and drop the async lock so the synchronous
     // SQLite query runs on a blocking thread instead of pinning the Tokio
     // worker while holding the async mutex.
@@ -2029,16 +2059,56 @@ pub async fn get_history(
 
     match history_db {
         Some(db) => {
-            let fields_clone = fields.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                db.query_history(
-                    range_secs,
-                    bucket_secs,
-                    offset,
-                    &fields_clone,
-                    explicit_window,
-                )
-            })
+            let result = tokio::task::spawn_blocking(
+                move || -> Result<serde_json::Map<String, Value>, String> {
+                    let mut data = if normal_fields.is_empty() {
+                        serde_json::Map::new()
+                    } else {
+                        db.query_history(
+                            range_secs,
+                            bucket_secs,
+                            offset,
+                            &normal_fields,
+                            explicit_window,
+                        )?
+                    };
+
+                    if let Some((import_cfg, export_cfg, flat_import, flat_export)) = &cost_cfgs {
+                        if want_import_cost {
+                            let series = db.query_cost_series(
+                                range_secs,
+                                bucket_secs,
+                                offset,
+                                explicit_window,
+                                "today_import_kwh",
+                                import_cfg,
+                                *flat_import,
+                            )?;
+                            data.insert(
+                                crate::history::IMPORT_COST_FIELD.to_string(),
+                                serde_json::to_value(&series).unwrap_or(Value::Null),
+                            );
+                        }
+                        if want_export_income {
+                            let series = db.query_cost_series(
+                                range_secs,
+                                bucket_secs,
+                                offset,
+                                explicit_window,
+                                "today_export_kwh",
+                                export_cfg,
+                                *flat_export,
+                            )?;
+                            data.insert(
+                                crate::history::EXPORT_INCOME_FIELD.to_string(),
+                                serde_json::to_value(&series).unwrap_or(Value::Null),
+                            );
+                        }
+                    }
+
+                    Ok(data)
+                },
+            )
             .await;
 
             match result {
