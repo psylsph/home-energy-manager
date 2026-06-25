@@ -606,6 +606,54 @@ fn resolve_dist_dir(args: &[String]) -> Option<String> {
     None
 }
 
+/// Whether the headless process looks like it fell back to UTC with no
+/// timezone configured — the classic "Docker/unRAID container inherited UTC"
+/// pitfall.
+///
+/// True only when the resolved local offset is UTC+0 *and* the user did not
+/// explicitly set `TZ`. An explicit `TZ=UTC` is respected as intentional and
+/// does not warn. Extracted as a pure predicate so the decision is unit-
+/// testable without spawning the runtime or depending on the host zone.
+///
+/// Note: a correctly-configured `Europe/London` host during winter (GMT) also
+/// resolves to UTC+0 with `TZ` unset — the warning is therefore phrased as
+/// "verify / ignore if correct", never as a hard error.
+fn looks_like_unconfigured_utc(local_offset_secs: i32, tz_env_set: bool) -> bool {
+    local_offset_secs == 0 && !tz_env_set
+}
+
+/// Report the resolved timezone on stdout, escalating to a prominent WARN
+/// when the headless process appears to be on an unconfigured UTC zone.
+/// See [`looks_like_unconfigured_utc`].
+fn log_timezone_check() {
+    let offset_secs = chrono::Local::now().offset().local_minus_utc();
+    let tz_env_set = std::env::var_os("TZ").is_some();
+
+    if looks_like_unconfigured_utc(offset_secs, tz_env_set) {
+        tracing::warn!(
+            "Server timezone resolves to UTC (+00:00). In headless/Docker mode \
+             this usually means the container did not inherit a timezone. \
+             Server-side features that depend on the local day boundary — the \
+             daily consumption report ('today' window), cost time-of-use tariff \
+             slotting, and the cumulative-counter midnight rollover — will \
+             assume UTC. To fix, mount the host's /etc/localtime into the \
+             container, or set the TZ environment variable (e.g. \
+             TZ=Europe/London). The History chart window itself is computed in \
+             your browser and is unaffected. If UTC is correct for your \
+             location (e.g. winter GMT, or an explicit TZ=UTC), ignore this."
+        );
+    } else {
+        let sign = if offset_secs >= 0 { '+' } else { '-' };
+        let abs = offset_secs.unsigned_abs();
+        tracing::info!(
+            "Server timezone offset: UTC{}{:02}:{:02}",
+            sign,
+            abs / 3600,
+            (abs / 60) % 60,
+        );
+    }
+}
+
 /// Run the server in headless mode — no Tauri window, just the
 /// Axum HTTP/WS server and the Modbus polling loop.
 ///
@@ -614,6 +662,17 @@ pub fn run_headless(args: &[String]) {
     // Set up tracing with log capture. Shared with `run()` via `init_tracing()`.
     let log_ring = Arc::new(LogRing::new(2000));
     init_tracing(&log_ring);
+
+    // Surface the resolved timezone prominently on stdout. The history chart
+    // window is computed browser-side (issue #134), so the chart is unaffected
+    // by the server zone, but several server-side features still run on
+    // `chrono::Local`: the daily consumption report's "today" boundaries,
+    // cost-series time-of-use tariff slotting, and the cumulative-counter
+    // midnight rollover. A Docker/unRAID container that fell back to UTC with
+    // no timezone mounted produces wrong day boundaries for those features,
+    // so when that signature is detected we emit a prominent, actionable WARN
+    // (the default stdout level is WARN, so this is visible without RUST_LOG).
+    log_timezone_check();
 
     let cli_port = parse_port(args);
     // Load settings
@@ -727,6 +786,28 @@ mod tests {
     use super::*;
     use crate::inverter::poll::LoadLimiterState;
     use crate::test_util::with_isolated_config_dir_async;
+
+    /// `looks_like_unconfigured_utc` is the decision behind the headless
+    /// timezone warning (issue #134). It must fire for the unconfigured-UTC
+    /// pitfall but not for an explicit `TZ=UTC` or for any real non-UTC zone
+    /// (BST, CET, US zones). A correctly-configured winter-GMT host also
+    /// resolves to UTC+0 with `TZ` unset — that case *does* return true, which
+    /// is why the runtime message is phrased as "verify / ignore if correct"
+    /// rather than a hard error.
+    #[test]
+    fn looks_like_unconfigured_utc_decides_the_headless_warning() {
+        // The pitfall: container fell back to UTC, nothing explicitly set.
+        assert!(looks_like_unconfigured_utc(0, false));
+
+        // Explicit `TZ=UTC` is intentional — never warn.
+        assert!(!looks_like_unconfigured_utc(0, true));
+
+        // Any real non-UTC offset never warns regardless of TZ.
+        assert!(!looks_like_unconfigured_utc(3600, false)); // BST
+        assert!(!looks_like_unconfigured_utc(7200, false)); // CET summer
+        assert!(!looks_like_unconfigured_utc(-18_000, false)); // US Eastern
+        assert!(!looks_like_unconfigured_utc(3600, true));
+    }
 
     /// `initialize_app_state` must apply every persisted field to the live
     /// `AppState`: poll settings, auto-winter config, load-limiter config, the
