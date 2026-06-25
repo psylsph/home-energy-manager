@@ -1738,10 +1738,21 @@ mod tests {
             "input_1780_1830",
             "input_1831_1859",
         ]));
-        // Should also poll three-phase config (HR 1080-1124) for write registers
-        // and extended slots (HR 240-299) for slots 3-10.
-        assert!(names.contains(&"holding_240_299"));
-        assert!(names.contains(&"holding_1080_1124"));
+        // The Gateway is a single-phase-class control device (issue #149): it
+        // forwards standard HR 94/95/56/57/96/116 slot + SOC writes to its
+        // child AIO(s) and has no registers in the three-phase control bank
+        // (HR 1080-1124) or the Gen3 extended-slot block (HR 240-299). Those
+        // live in the always-polled standard HR 0-119 block, so must NOT be
+        // requested as extra blocks — polling them would only raise Modbus
+        // exceptions on real hardware.
+        assert!(
+            !names.contains(&"holding_240_299"),
+            "Gateway must NOT poll the Gen3 extended-slot block (HR 240-299)"
+        );
+        assert!(
+            !names.contains(&"holding_1080_1124"),
+            "Gateway must NOT poll the three-phase config block (HR 1080-1124)"
+        );
         // And the EMS / Gateway plant-level holding block (HR 2040-2075) so
         // the round-trip on the export limit (HR 2071) actually populates
         // the snapshot. Without this, writes to HR 2071 succeed but the

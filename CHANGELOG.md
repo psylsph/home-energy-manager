@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.40.12] - 2026-06-25
+
+### Fixed
+
+- **Quick actions now actually work on the GivEnergy Gateway.** Force Charge, Force Discharge, and the charge/discharge schedule were being written to the three-phase control registers (HR 1080–1124), which a Gateway has no registers for, so the command returned success but the inverter never did anything. The Gateway is a single-phase-class controller for scheduling — it forwards the standard charge/discharge slot and SOC writes to its child AIO(s) — so the app now routes those commands to the registers a real Gateway honours (HR 94/95, 56/57, 96, 116), matching what GivTCP and the givenergy-modbus reference library do. See #149.
+
 ## [0.40.11] - 2026-06-25
 
 ### Fixed

@@ -327,6 +327,16 @@ impl DeviceType {
     /// Slots 1-2 live in HR1113-1121; slots 3-10 reuse the extended
     /// HR240-299 schedule block.
     pub fn uses_three_phase_schedule_slots(&self) -> bool {
+        // NOTE: Gateway is deliberately excluded. Although it shares the
+        // Gateway/EMS *telemetry* bank (IR 1600-1859) with three-phase models,
+        // for control purposes it is a single-phase-class device: it forwards
+        // standard charge/discharge slot + SOC writes (HR 94/95, 56/57, 96,
+        // 116) to its child AIO(s) and has no registers in the three-phase
+        // control bank (HR 1080-1124). Routing it through the three-phase
+        // path caused quick actions to silently do nothing (issue #149).
+        // Mirrors dewet22/givenergy-modbus `slot_map` (Gateway →
+        // SINGLE_PHASE_SLOTS) and GivTCP ("gateway" is not "3ph" for write
+        // routing).
         matches!(
             self,
             Self::ThreePhase
@@ -334,7 +344,6 @@ impl DeviceType {
                 | Self::AioCommercial
                 | Self::HybridHvGen3
                 | Self::AllInOneHybrid
-                | Self::Gateway
         )
     }
 
@@ -397,8 +406,7 @@ impl DeviceType {
             Self::HybridHvGen3
             | Self::AllInOneHybrid
             | Self::ThreePhase
-            | Self::AioCommercial
-            | Self::Gateway => EXTENDED_AND_THREE_PHASE_BLOCKS,
+            | Self::AioCommercial => EXTENDED_AND_THREE_PHASE_BLOCKS,
             Self::AllInOne6kW | Self::AllInOne3_6kW | Self::AllInOne5kW => {
                 EXTENDED_AND_AC_CONFIG_BLOCKS
             }
@@ -1335,7 +1343,6 @@ mod tests {
             DeviceType::ACThreePhase,
             DeviceType::HybridHvGen3,
             DeviceType::AllInOneHybrid,
-            DeviceType::Gateway,
         ] {
             assert!(
                 dt.supports_schedule_slots(),
@@ -1639,7 +1646,6 @@ mod tests {
             DeviceType::AioCommercial,
             DeviceType::HybridHvGen3,
             DeviceType::AllInOneHybrid,
-            DeviceType::Gateway,
         ];
         for dt in three_phase {
             assert!(
@@ -1663,6 +1669,10 @@ mod tests {
             DeviceType::Gen4Hybrid,
             DeviceType::Ems,
             DeviceType::EmsCommercial,
+            // Gateway is single-phase-class for control (issue #149): it
+            // forwards standard HR 94/95/56/57/96/116 writes to its child
+            // AIO(s) and has no three-phase control bank.
+            DeviceType::Gateway,
         ];
         for dt in single_phase {
             assert!(
