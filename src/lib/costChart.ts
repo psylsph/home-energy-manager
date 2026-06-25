@@ -43,12 +43,78 @@ function maxDeltaKwh(bucketSecs: number, elapsedMs: number): number {
 }
 
 /**
+ * Whether two epoch-ms timestamps fall on the same LOCAL calendar day.
+ *
+ * The inverter's `today_*_kwh` counters reset at LOCAL midnight, so day
+ * boundaries must be compared in the user's wall clock (`new Date(ms)`
+ * already localizes). This is the robust signal for a midnight reset when
+ * working with backend bucketed data.
+ */
+function sameLocalDay(t1: number, t2: number): boolean {
+  const a = new Date(t1);
+  const b = new Date(t2);
+  return (
+    a.getFullYear() === b.getFullYear()
+    && a.getMonth() === b.getMonth()
+    && a.getDate() === b.getDate()
+  );
+}
+
+/**
+ * Decide the energy delta to credit for `raw` given the previous counted
+ * reading.
+ *
+ * Three cases:
+ *
+ * 1. **Midnight rollover (calendar day changed since `prevT`)** — the daily
+ *    counter reset to ~0 at local midnight, so `raw` is *today's* running
+ *    total. Credit it in full (`delta = raw`). This is the case that makes
+ *    wide-range totals correct (issue #133 follow-up): at 12 h / 24 h buckets
+ *    the first-of-day MAX is far above zero, so the old `prev > 5 && raw < 5`
+ *    value heuristic failed to see the reset and zeroed every following day.
+ *    Detecting the reset by the timestamp's calendar day is bucket-width
+ *    independent.
+ *
+ * 2. **Normal increase (`raw >= prev`, same day)** — credit the difference.
+ *
+ * 3. **Same-day dip (`raw < prev`, same day)** — a small data glitch; skip
+ *    (delta 0) and keep the baseline.
+ *
+ * The `prev > 5 && raw < 5` branch is kept only as a fallback for inputs with
+ * degenerate/missing timestamps (e.g. synthetic same-day test data where a
+ * day boundary can't be inferred).
+ *
+ * The returned delta is NOT yet clamped — the caller applies `maxDeltaKwh`
+ * as the corruption ceiling.
+ */
+function counterDelta(
+  prev: number,
+  raw: number,
+  prevT: number | null,
+  t: number,
+): number {
+  const dayChanged = prevT != null && t > 0 && !sameLocalDay(prevT, t);
+  if (dayChanged) {
+    return raw; // midnight rollover — credit today's accumulated total
+  }
+  if (raw >= prev) {
+    return raw - prev; // normal same-day increase
+  }
+  if (prev > 5 && raw < 5) {
+    return raw; // rollover fallback when timestamps can't resolve the day
+  }
+  return 0; // same-day dip (glitch) — skip
+}
+
+/**
  * Compute the cumulative import cost (£) from `today_import_kwh` deltas
  * and the import tariff config.
  *
  * `bucketSecs` is the backend aggregation bucket size for the current range
  * (see `rangeToBucketSecs`); it sets the per-bucket spike ceiling so wider
- * ranges do not silently discard legitimate energy (issue #133).
+ * ranges do not silently discard legitimate energy (issue #133), and the
+ * midnight rollover is detected by calendar day so totals stay consistent
+ * across bucket widths.
  *
  * Adds a `_import_cost` field to each row. Missing data is represented as
  * `NaN` so the chart leaves a gap rather than drawing a misleading zero.
@@ -72,18 +138,7 @@ export function computeImportCost(
     }
     let delta = 0;
     if (prev != null) {
-      if (raw >= prev) {
-        delta = raw - prev;
-      } else if (prev > 5 && raw < 5) {
-        // Midnight rollover: counter reset to near-zero.
-        // prev was yesterday's final value (any positive amount),
-        // raw is today's running total since midnight.
-        // The delta is just the new day's accumulated import.
-        delta = raw;
-      }
-      // else: small data glitch (counter dipped slightly),
-      // skip this delta (delta stays 0)
-
+      delta = counterDelta(prev, raw, prevT, t);
       const elapsedMs = prevT != null ? Math.max(0, t - prevT) : 0;
       if (delta > maxDeltaKwh(bucketSecs, elapsedMs)) {
         // Spike detected: zero the delta AND don't advance prev,
@@ -113,7 +168,9 @@ export function computeImportCost(
  *
  * `bucketSecs` is the backend aggregation bucket size for the current range
  * (see `rangeToBucketSecs`); it sets the per-bucket spike ceiling so wider
- * ranges do not silently discard legitimate energy (issue #133).
+ * ranges do not silently discard legitimate energy (issue #133), and the
+ * midnight rollover is detected by calendar day so totals stay consistent
+ * across bucket widths.
  *
  * Adds a `_export_income` field to each row. Missing data is represented as
  * `NaN` so the chart leaves a gap rather than drawing a misleading zero.
@@ -136,13 +193,7 @@ export function computeExportIncome(
     }
     let delta = 0;
     if (prev != null) {
-      if (raw >= prev) {
-        delta = raw - prev;
-      } else if (prev > 5 && raw < 5) {
-        // Midnight rollover
-        delta = raw;
-      }
-
+      delta = counterDelta(prev, raw, prevT, t);
       const elapsedMs = prevT != null ? Math.max(0, t - prevT) : 0;
       if (delta > maxDeltaKwh(bucketSecs, elapsedMs)) {
         delta = 0;
