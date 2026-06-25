@@ -9,6 +9,13 @@ interface Props {
   snapshot: InverterSnapshot;
   /** EV Charger active power in watts. 0 = not charging or no data. */
   evcPower?: number;
+  /**
+   * Raw EV Charger charging-state string from HR 0 (`"Unknown"`, `"Idle"`,
+   * `"Charging"`, …). When `"Idle"` and power is zero, the diagram node
+   * reads "Idle" instead of "Connected" / "Disconnected" so the app
+   * matches the charger's own display (issue #139).
+   */
+  evcChargingState?: string;
   /** Whether the EV Charger is actively charging. */
   evcCharging?: boolean;
   /** Whether the EV Charger is connected/responding. */
@@ -259,7 +266,7 @@ function FlowNode({ cx, cy, color, label, value, unit, hub, width, height, mobil
 // Component
 // ---------------------------------------------------------------------------
 
-function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false, evcConnected = false, evcEverConnected, showEvc = false }: Props) {
+function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcChargingState = '', evcCharging = false, evcConnected = false, evcEverConnected, showEvc = false }: Props) {
   const mobile = useIsMobile();
   const noiseThreshold = useInverterStore((st) => st.visualNoiseThreshold);
   const isCharging = s.battery_state === 'charging';
@@ -290,7 +297,7 @@ function EnergyFlowDiagramInner({ snapshot: s, evcPower = 0, evcCharging = false
   });
 
   const evcActive = showEvc && evcPower > noiseThreshold;
-  const evcUnit = evcNodeLabel(evcCharging, evcConnected, !!evcEverConnected);
+  const evcUnit = evcNodeLabel(evcCharging, evcConnected, !!evcEverConnected, evcChargingState);
 
   const modeLabel = modeDisplayLabel(
     s.battery_mode, s.cosy_active, s.cosy_enabled,
