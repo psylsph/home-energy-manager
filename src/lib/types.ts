@@ -34,6 +34,8 @@ export interface InverterSnapshot {
   inverter_temperature: number;
   inverter_time: string;
   today_solar_kwh: number;
+  today_pv1_kwh: number;
+  today_pv2_kwh: number;
   today_import_kwh: number;
   today_export_kwh: number;
   today_charge_kwh: number;

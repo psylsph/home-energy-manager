@@ -760,6 +760,17 @@ pub struct InverterSnapshot {
 
     // -- Energy totals (kWh) --
     pub today_solar_kwh: f32,
+    /// PV1 today (issue #108). Sourced from IR(17) on single-phase /
+    /// IR(1366-1367) on three-phase. 0 on gateway models (no per-string
+    /// register). `#[serde(default)]` so old persisted snapshots and
+    /// fixtures decode without panicking.
+    #[serde(default)]
+    pub today_pv1_kwh: f32,
+    /// PV2 today (issue #108). Sourced from IR(19) on single-phase /
+    /// IR(1370-1371) on three-phase. 0 on gateway models (no per-string
+    /// register) and on single-phase units without a PV2 string.
+    #[serde(default)]
+    pub today_pv2_kwh: f32,
     pub today_import_kwh: f32,
     pub today_export_kwh: f32,
     pub today_charge_kwh: f32,

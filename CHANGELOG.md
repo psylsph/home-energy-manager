@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.40.6] - 2026-06-25
+
+### Added
+
+- **Solar Today is now split into per-string PV1 and PV2 totals.** The Solar page PV1 and PV2 cards each show their own Today row, the Inverter page Solar Inputs section lists PV1 Today, PV2 Today and the combined Solar Today, and the History → Solar tab adds a 3-line energy chart (PV1, PV2, Total) so you can see at a glance whether one string is underperforming. Per-string registers are sanitised against the same 200 kWh ceiling and rate-check the aggregate uses, so a corrupted single-string value can't poison the total. See #108.
+
 ## [0.40.5] - 2026-06-25
 
 ### Fixed

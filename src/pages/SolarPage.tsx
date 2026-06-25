@@ -38,6 +38,14 @@ export default function SolarPage() {
         <h2 className="text-text-primary font-semibold text-lg mb-1">Solar Overview</h2>
         <p className="text-4xl font-bold text-amber-400 mb-1">{formatPower(snapshot.solar_power)}</p>
         <p className="text-text-secondary text-xs">Total Solar Power</p>
+        <p className="text-text-primary font-mono text-sm mt-2">
+          Today: {formatEnergy(snapshot.today_solar_kwh ?? 0)}
+          {snapshot.today_pv1_kwh != null && snapshot.today_pv2_kwh != null && (
+            <span className="text-text-secondary text-xs ml-2">
+              (PV1 {formatEnergy(snapshot.today_pv1_kwh)} · PV2 {formatEnergy(snapshot.today_pv2_kwh)})
+            </span>
+          )}
+        </p>
       </section>
 
 
@@ -57,7 +65,7 @@ export default function SolarPage() {
             <span className="text-text-secondary">Current</span>
             <span className="text-text-primary font-mono text-right">{formatCurrent(snapshot.pv1_current)}</span>
             <span className="text-text-secondary">Today</span>
-            <span className="text-text-primary font-mono text-right">{formatEnergy(snapshot.today_solar_kwh ?? 0)}</span>
+            <span className="text-text-primary font-mono text-right">{formatEnergy(snapshot.today_pv1_kwh ?? 0)}</span>
           </div>
         </section>
 
@@ -75,6 +83,8 @@ export default function SolarPage() {
               <span className="text-text-primary font-mono text-right">{formatVoltage(snapshot.pv2_voltage)}</span>
               <span className="text-text-secondary">Current</span>
               <span className="text-text-primary font-mono text-right">{formatCurrent(snapshot.pv2_current)}</span>
+              <span className="text-text-secondary">Today</span>
+              <span className="text-text-primary font-mono text-right">{formatEnergy(snapshot.today_pv2_kwh ?? 0)}</span>
             </div>
           </section>
         )}
