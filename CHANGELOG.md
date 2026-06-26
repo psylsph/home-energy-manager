@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.40.14] - 2026-06-26
+
+### Fixed
+
+- **The Charge Schedule no longer shows a leftover slot as if it were armed.** Some inverters keep a factory or previously-set time window in the charge slot registers (e.g. 02:00–05:00) even after you turn scheduled charging off, and because those registers are non-zero the app used to paint the slot as an active charge — toggle on, times filled in, a Target SOC — even though the battery never charged and the GivEnergy cloud showed nothing there. A scheduled charge needs both the slot times *and* the master charge-enable flag to actually fire, and the app was only looking at the times. Charge slots that are configured but not enabled now appear dimmed with a clear "Not active — enable charging to arm this slot" notice, so the schedule reflects what the inverter will actually do. The slot configuration itself stays visible (it never gets hidden just because charging is off, which was a past bug of its own), only its armed state changes. See #135.
+
 ## [0.40.13] - 2026-06-26
 
 ### Fixed
