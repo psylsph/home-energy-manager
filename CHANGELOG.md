@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.40.15] - 2026-06-26
+
+### Added
+
+- **The Status dashboard now has a cleaner radial energy view.** The live flow diagram is closer to the reference-style home energy dashboard, with orbiting solar, grid, battery and EV nodes, faster movement for larger flows, clearer mobile layout, lighter symbol backgrounds in light mode, and optional overview/status wording in Panel Controls.
+
+### Fixed
+
+- **Battery mode labels now keep the real inverter mode visible during timed windows.** A running charge or discharge window now shows labels such as `Eco (Charging)` or `Timed Export (Discharging)` instead of the vague `Override`, so Eco mode is no longer made to look like a different underlying mode. See #151.
+
 ## [0.40.14] - 2026-06-26
 
 ### Fixed

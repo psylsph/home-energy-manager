@@ -313,15 +313,33 @@ describe('batteryModeDisplayLabel', () => {
     expect(batteryModeDisplayLabel('timed_demand', false, true, false, false, [], [])).toBe('Timed Demand');
   });
 
-  it('returns "Override" when inside an enabled charge window', () => {
+  it('returns an Eco charging label when inside an enabled charge window', () => {
     // Window 00:00–23:59 always active.
     const slots = [slot(0, 0, 23, 59)];
-    expect(batteryModeDisplayLabel('eco', false, false, true, false, slots, [])).toBe('Override');
+    expect(batteryModeDisplayLabel('eco', false, false, true, false, slots, [])).toBe('Eco (Charging)');
+    expect(batteryModeDisplayLabel('eco_paused', false, false, true, false, slots, [])).toBe('Eco (Charging)');
   });
 
-  it('returns "Override" when inside an enabled discharge window', () => {
+  it('returns an Eco discharging label when inside an enabled discharge window', () => {
     const slots = [slot(0, 0, 23, 59)];
-    expect(batteryModeDisplayLabel('eco', false, false, false, true, [], slots)).toBe('Override');
+    expect(batteryModeDisplayLabel('eco', false, false, false, true, [], slots)).toBe('Eco (Discharging)');
+    expect(batteryModeDisplayLabel('eco_paused', false, false, false, true, [], slots)).toBe('Eco (Discharging)');
+  });
+
+  it('prefixes active-window labels with the actual timed/export mode', () => {
+    const slots = [slot(0, 0, 23, 59)];
+    expect(batteryModeDisplayLabel('timed_demand', false, false, true, false, slots, []))
+      .toBe('Timed Demand (Charging)');
+    expect(batteryModeDisplayLabel('timed_export', false, false, false, true, [], slots))
+      .toBe('Timed Export (Discharging)');
+    expect(batteryModeDisplayLabel('export_paused', false, false, true, false, slots, []))
+      .toBe('Export Paused (Charging)');
+  });
+
+  it('combines the suffix when both charge and discharge windows are active', () => {
+    const slots = [slot(0, 0, 23, 59)];
+    expect(batteryModeDisplayLabel('eco', false, false, true, true, slots, slots))
+      .toBe('Eco (Charging & Discharging)');
   });
 
   it('does not override when enable flag is set but no slot is active', () => {
@@ -335,7 +353,8 @@ describe('batteryModeDisplayLabel', () => {
     // 23:00–01:00 active at midnight.
     const slots = [slot(23, 0, 1, 0)];
     const midnight = new Date(2025, 0, 1, 0, 30);
-    expect(batteryModeDisplayLabel('eco', false, false, true, false, slots, [], midnight)).toBe('Override');
+    expect(batteryModeDisplayLabel('eco', false, false, true, false, slots, [], midnight))
+      .toBe('Eco (Charging)');
   });
 });
 
