@@ -110,16 +110,36 @@ function ScheduleSlotEditor({
   onSave,
   showTargetSoc,
   apiPath = '/api/control/discharge-slot',
+  masterArmed = true,
+  notArmedMessage,
 }: {
   slotIndex: number;
   slot: ScheduleSlot;
   onSave: (index: number, slot: ScheduleSlot, path: string) => void;
   showTargetSoc: boolean;
   apiPath?: string;
+  /** Whether the schedule's master enable flag (e.g. enable_charge / HR 96)
+   *  is ON. A slot can hold configured times in its registers while the
+   *  master flag is OFF — the inverter ignores the window, but the slot is
+   *  still "configured". Defaults to `true` so callsites that don't pass it
+   *  (currently the discharge schedule, whose Eco/Timed arming model is
+   *  different) keep the original always-armed rendering. */
+  masterArmed?: boolean;
+  /** Message shown when the slot is configured but the master flag is off
+   *  (issue #135). Omit / leave empty to suppress the "not active" notice. */
+  notArmedMessage?: string;
 }) {
   const [local, setLocal] = useState<ScheduleSlot>({ ...slot });
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<'saved' | 'error' | null>(null);
+
+  // A slot is "configured but not armed" when it holds times (enabled) but
+  // the schedule's master enable flag is off. The slot times live in their
+  // own registers (e.g. HR 94/95) independent of the master flag (HR 96),
+  // so this state is real and common — leftover/factory windows show up
+  // here. We keep the slot visible (issue #41: never hide a configured slot
+  // just because the master flag is off) but signal that it won't fire.
+  const notArmed = local.enabled && !masterArmed && Boolean(notArmedMessage);
 
   const handleSave = async () => {
     setSaving(true);
@@ -135,11 +155,16 @@ function ScheduleSlotEditor({
   };
 
   return (
-    <div className="bg-bg-surface rounded-xl p-3 space-y-2">
+    <div
+      className={`bg-bg-surface rounded-xl p-3 space-y-2 transition ${notArmed ? 'opacity-60' : ''
+        }`}
+    >
       <div className="flex items-center justify-between">
         <span className="text-text-primary text-sm font-medium">Slot {slotIndex + 1}</span>
         <button
           onClick={() => setLocal((l) => ({ ...l, enabled: !l.enabled }))}
+          aria-pressed={local.enabled}
+          aria-label={`Slot ${slotIndex + 1} ${local.enabled ? 'enabled' : 'disabled'}`}
           className={`relative w-9 h-4 rounded-full transition ${local.enabled ? 'bg-battery' : 'bg-bg-elevated'
             }`}
         >
@@ -149,6 +174,12 @@ function ScheduleSlotEditor({
           />
         </button>
       </div>
+
+      {notArmed && (
+        <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-2 py-1.5 text-xs text-text-primary">
+          {notArmedMessage}
+        </div>
+      )}
 
       {local.enabled && (
         <>
@@ -2109,6 +2140,8 @@ export default function ControlPage() {
                 onSave={handleSlotSave}
                 showTargetSoc
                 apiPath="/api/control/charge-slot"
+                masterArmed={snapshot?.enable_charge === true}
+                notArmedMessage="Not active — enable charging to arm this slot"
               />
             </>
           ))}

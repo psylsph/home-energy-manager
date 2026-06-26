@@ -4395,6 +4395,114 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Charge slot / enable_charge independence — issue #135 regression surface
+    //
+    // The headline #41 test above builds an `InverterSnapshot` literal and
+    // asserts back on it, so it never actually exercises the decode pipeline.
+    // The tests below drive `decode_snapshot` with the exact register state a
+    // real Gen3 Hybrid sits in when issue #135 is reported:
+    //   HR 94/95 = 02:00/05:00 (leftover factory off-peak window)
+    //   HR 96    = 0           (enable_charge OFF — slot is inert)
+    //   HR 116   = 4           (global target SOC)
+    //   HR 242   = 100         (per-slot target SOC, extended block)
+    //
+    // They pin the decoder contract that the issue #135 frontend fix relies
+    // on: `slot.enabled` reflects *configured times* and is deliberately NOT
+    // gated on `enable_charge`, so the UI can distinguish "configured but not
+    // armed" from "armed". If any of these flip, the fix would re-open #41.
+    // -----------------------------------------------------------------------
+
+    /// A configured charge slot (HR 94/95 non-zero) must stay `enabled=true`
+    /// through the real decode pipeline even when the master `enable_charge`
+    /// flag (HR 96) is OFF. This is the exact register state the issue #135
+    /// reporter is on (02:00–05:00 leftover window, HR 96 = 0). The frontend
+    /// shows the slot as "not active" rather than hiding it — the decoder must
+    /// keep both pieces of state independent so that's possible.
+    #[test]
+    fn charge_slot1_from_hr94_95_is_enabled_when_hr96_is_off() {
+        // Gen3 Hybrid: DTC family 0x20 + ARM FW century 3 (>=300).
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x2001;
+        holding_data[21] = 318; // ARM FW 318 (century 3) → Gen3Hybrid, matches reporter
+
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[94 - 60] = 200; // slot 1 start 02:00
+        holding_60_data[95 - 60] = 500; // slot 1 end   05:00
+        holding_60_data[96 - 60] = 0; //  enable_charge OFF (the phantom-slot root cause)
+        holding_60_data[116 - 60] = 4; // global target SOC 4%
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_60_data),
+        ];
+        let snap = decode_snapshot(&blocks);
+
+        assert_eq!(snap.device_type, DeviceType::Gen3Hybrid);
+        // Master flag reads correctly as OFF.
+        assert!(!snap.enable_charge, "enable_charge must be false from HR 96 = 0");
+        // Global target SOC reads as 4% (HR 116).
+        assert_eq!(snap.target_soc, 4);
+        // The configured slot MUST stay enabled — this is the independence
+        // the frontend "not active" treatment depends on. Gating it back on
+        // enable_charge would re-open #41.
+        assert!(
+            snap.charge_slots[0].enabled,
+            "charge slot 0 must stay enabled when enable_charge is off (issue #41 contract)"
+        );
+        assert_eq!(snap.charge_slots[0].start_hour, 2);
+        assert_eq!(snap.charge_slots[0].start_minute, 0);
+        assert_eq!(snap.charge_slots[0].end_hour, 5);
+        assert_eq!(snap.charge_slots[0].end_minute, 0);
+        // With no per-slot HR 242, the slot inherits the global HR 116 = 4.
+        assert_eq!(snap.charge_slots[0].target_soc, 4);
+    }
+
+    /// The per-slot target SOC (HR 242) overrides the global HR 116 independently
+    /// of whether the slot is armed. This documents why a "100%" target can show
+    /// on a slot that will never fire (the issue #135 reporter sees exactly this):
+    /// the displayed target is *stored* register state, decoupled from the master
+    /// enable flag. The frontend must not treat a non-zero target as proof the
+    /// slot is armed.
+    #[test]
+    fn charge_slot1_target_soc_overrides_global_when_extended_block_present() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x2001;
+        holding_data[21] = 318; // Gen3Hybrid
+
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[94 - 60] = 200; // slot 1 start 02:00
+        holding_60_data[95 - 60] = 500; // slot 1 end   05:00
+        holding_60_data[96 - 60] = 0; //  enable_charge OFF
+        holding_60_data[116 - 60] = 4; // global target SOC 4%
+
+        let mut extended = vec![0u16; 60];
+        extended[242 - 240] = 100; // per-slot target SOC 100% (the reporter's symptom)
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_60_data),
+            make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
+        ];
+        let snap = decode_snapshot(&blocks);
+
+        assert!(!snap.enable_charge, "slot is not armed (HR 96 = 0)");
+        assert!(snap.charge_slots[0].enabled, "slot stays configured (issue #41 contract)");
+        // The per-slot register wins, decoupled from the armed state.
+        assert_eq!(
+            snap.charge_slots[0].target_soc, 100,
+            "per-slot HR 242 (100%) must override global HR 116 (4%) even when not armed"
+        );
+        assert_eq!(snap.target_soc, 4, "global HR 116 still reads 4% on its own field");
+    }
+
+    // NOTE: the per-slot target SOC zero→global fallback is already pinned by
+    // `per_slot_target_soc_zero_falls_back_to_global` above (AIO device type,
+    // same `decode_holding_240_299` branch that Gen3Hybrid also takes), so we
+    // don't duplicate it here.
+
+    // -----------------------------------------------------------------------
     // Meter validation tests
     // -----------------------------------------------------------------------
 
