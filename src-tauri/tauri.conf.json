@@ -14,8 +14,8 @@
     "windows": [
       {
         "title": "Home Energy Manager",
-        "width": 850,
-        "height": 1000,
+        "width": 950,
+        "height": 1030,
         "x": 0,
         "y": 0,
         "resizable": true,

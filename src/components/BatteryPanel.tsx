@@ -34,8 +34,13 @@ function BatteryPanelInner({ snapshot: s }: Props) {
 
   return (
     <section className="bg-bg-surface rounded-2xl p-6 h-full flex flex-col sm:flex-row items-center gap-6">
-      <div className="relative w-32 h-32 shrink-0 flex items-center justify-center">
-        <BatteryGauge soc={s.soc} width={88} />
+      <div className="relative w-40 h-16 sm:w-32 sm:h-32 shrink-0 flex items-center justify-center">
+        <div className="sm:hidden">
+          <BatteryGauge soc={s.soc} width={128} orientation="horizontal" />
+        </div>
+        <div className="hidden sm:block">
+          <BatteryGauge soc={s.soc} width={88} />
+        </div>
       </div>
       <div className="flex flex-col gap-2 flex-1">
         <div className="flex items-center gap-3">

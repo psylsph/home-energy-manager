@@ -56,7 +56,11 @@ function makeSnapshot(overrides: Partial<InverterSnapshot> = {}): InverterSnapsh
 }
 
 function resetStore(threshold = 20) {
-  useInverterStore.setState({ visualNoiseThreshold: threshold });
+  useInverterStore.setState({
+    showFlowSummary: false,
+    showFlowStatusWords: false,
+    visualNoiseThreshold: threshold,
+  });
 }
 
 beforeEach(() => {
@@ -66,34 +70,65 @@ beforeEach(() => {
 });
 
 describe('EnergyOrbitDiagram', () => {
-  it('renders the plain-English summary sentence', () => {
+  it('hides the plain-English overview sentence by default', () => {
     const { container } = render(
       <EnergyOrbitDiagram snapshot={makeSnapshot({ solar_power: 3000, home_power: 500 })} />,
     );
-    // The summary paragraph is the <p> with the max-w-md class.
+    expect(container.querySelector('p.max-w-md')).toBeNull();
+    // The accessible image label still describes the flow for screen readers.
+    expect(container.querySelector('svg')?.getAttribute('aria-label')).toContain(
+      'Solar is powering the home',
+    );
+  });
+
+  it('renders the plain-English overview sentence when the preference is on', () => {
+    useInverterStore.setState({ showFlowSummary: true });
+    const { container } = render(
+      <EnergyOrbitDiagram snapshot={makeSnapshot({ solar_power: 3000, home_power: 500 })} />,
+    );
     const summary = container.querySelector('p.max-w-md');
     expect(summary?.textContent).toContain('Solar is powering the home');
   });
 
-  it('renders the inverter as a supporting mini-card, not a hub node', () => {
-    const { container } = render(<EnergyOrbitDiagram snapshot={makeSnapshot()} />);
-    const inverterLine = container.querySelector('p.text-xs.text-center');
-    expect(inverterLine?.textContent).toContain('Inverter');
-    expect(inverterLine?.textContent).toContain('Gen 3 Hybrid');
+  it('hides the plain-English overview sentence when the preference is off', () => {
+    const { container } = render(
+      <EnergyOrbitDiagram snapshot={makeSnapshot({ solar_power: 3000, home_power: 500 })} />,
+    );
+    expect(container.querySelector('p.max-w-md')).toBeNull();
+    // The accessible image label still describes the flow for screen readers.
+    expect(container.querySelector('svg')?.getAttribute('aria-label')).toContain(
+      'Solar is powering the home',
+    );
   });
 
-  it('draws no flow spokes when everything is below the noise threshold', () => {
+  it('renders inverter model, temperature, and battery mode as a supporting mini-card', () => {
     const { container } = render(<EnergyOrbitDiagram snapshot={makeSnapshot()} />);
-    // Each active spoke renders one direction arrow (polygon).
-    expect(container.querySelectorAll('polygon').length).toBe(0);
+    const inverterLine = container.querySelector('p.text-sm.text-center');
+    expect(inverterLine?.className).toContain('-mt-1');
+    expect(inverterLine?.textContent).toBe('Gen 3 Hybrid · 30.0°C · Eco');
+    expect(inverterLine?.textContent).not.toContain('Inverter');
   });
 
-  it('draws a spoke per active flow (solar→home)', () => {
+  it('uses a shorter SVG viewBox when node status words are hidden so the inverter line sits higher', () => {
+    const compact = render(<EnergyOrbitDiagram snapshot={makeSnapshot()} />);
+    expect(compact.container.querySelector('svg')?.getAttribute('viewBox')).toBe('0 0 520 480');
+
+    cleanup();
+    useInverterStore.setState({ showFlowStatusWords: true });
+    const expanded = render(<EnergyOrbitDiagram snapshot={makeSnapshot()} />);
+    expect(expanded.container.querySelector('svg')?.getAttribute('viewBox')).toBe('0 0 520 520');
+  });
+
+  it('draws no moving flow dots when everything is below the noise threshold', () => {
+    const { container } = render(<EnergyOrbitDiagram snapshot={makeSnapshot()} />);
+    expect(container.querySelectorAll('[data-flow-id]').length).toBe(0);
+  });
+
+  it('draws a moving flow dot per active flow (solar→home)', () => {
     const { container } = render(
       <EnergyOrbitDiagram snapshot={makeSnapshot({ solar_power: 5000, home_power: 500 })} />,
     );
-    // solar→home is the only active flow → exactly one arrow.
-    expect(container.querySelectorAll('polygon').length).toBe(1);
+    expect(container.querySelectorAll('[data-flow-id]').length).toBe(1);
   });
 
   it('gates flows by the store noise threshold', () => {
@@ -101,23 +136,105 @@ describe('EnergyOrbitDiagram', () => {
     const { container } = render(
       <EnergyOrbitDiagram snapshot={makeSnapshot({ solar_power: 100, home_power: 100 })} />,
     );
-    // 100W is below the 150W threshold → no spokes.
-    expect(container.querySelectorAll('polygon').length).toBe(0);
+    // 100W is below the 150W threshold → no active dots.
+    expect(container.querySelectorAll('[data-flow-id]').length).toBe(0);
   });
 
-  it('shows export as a negative grid value and import as the "Import" label', () => {
+  it('shows import/export sign direction and friendly status text when status words are on', () => {
+    useInverterStore.setState({ showFlowStatusWords: true });
     const exporting = render(<EnergyOrbitDiagram snapshot={makeSnapshot({ grid_power: 4300 })} />);
-    const gridValue = Array.from(exporting.container.querySelectorAll('text')).map(
+    const exportValues = Array.from(exporting.container.querySelectorAll('text')).map(
       (t) => t.textContent ?? '',
     );
-    expect(gridValue.some((v) => v.startsWith('-'))).toBe(true);
+    expect(exportValues).toContain('-4.3kW');
+    expect(exportValues).toContain('Exporting');
 
     cleanup();
     const importing = render(<EnergyOrbitDiagram snapshot={makeSnapshot({ grid_power: -2000 })} />);
     const impValues = Array.from(importing.container.querySelectorAll('text')).map(
       (t) => t.textContent ?? '',
     );
-    expect(impValues).toContain('Import');
+    expect(impValues).toContain('+2.0kW');
+    expect(impValues).toContain('Importing');
+  });
+
+  it('hides node status words by default and shows them when enabled', () => {
+    const hidden = render(
+      <EnergyOrbitDiagram snapshot={makeSnapshot({ grid_power: 4300 })} />,
+    );
+    let labels = Array.from(hidden.container.querySelectorAll('text')).map((t) => t.textContent ?? '');
+    expect(labels).not.toContain('Exporting');
+
+    cleanup();
+    useInverterStore.setState({ showFlowStatusWords: true });
+    const shown = render(
+      <EnergyOrbitDiagram snapshot={makeSnapshot({ grid_power: 4300 })} />,
+    );
+    labels = Array.from(shown.container.querySelectorAll('text')).map((t) => t.textContent ?? '');
+    expect(labels).toContain('Exporting');
+  });
+
+  it('renders the reference-style outer orbit ring and battery SOC ring/glyph', () => {
+    useInverterStore.setState({ showFlowStatusWords: true });
+    const { container } = render(
+      <EnergyOrbitDiagram snapshot={makeSnapshot({ soc: 31, battery_power: 1400, battery_state: 'discharging' })} />,
+    );
+    const orbitRing = container.querySelector('[data-testid="energy-orbit-ring"]');
+    expect(orbitRing).not.toBeNull();
+    expect(orbitRing?.getAttribute('mask')).toContain('url(#');
+    expect(container.querySelector('[data-testid="battery-soc-ring"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="battery-glyph"]')).not.toBeNull();
+    const labels = Array.from(container.querySelectorAll('text')).map((t) => t.textContent ?? '');
+    expect(labels).toContain('31%');
+    expect(labels).toContain('-1.4kW');
+    expect(labels).toContain('Discharging');
+  });
+
+  it('routes excess solar to battery and grid around the outer orbit', () => {
+    const { container } = render(
+      <EnergyOrbitDiagram
+        snapshot={makeSnapshot({
+          solar_power: 5000,
+          home_power: 500,
+          battery_power: -241,
+          battery_state: 'charging',
+          grid_power: 4300,
+        })}
+      />,
+    );
+    expect(container.querySelector('[data-flow-id="charge"]')?.getAttribute('data-route')).toBe('outer');
+    expect(container.querySelector('[data-flow-id="export"]')?.getAttribute('data-route')).toBe('outer');
+    expect(container.querySelector('[data-flow-id="solar"]')?.getAttribute('data-route')).toBe('direct');
+  });
+
+  it('routes battery export to grid around the outer orbit', () => {
+    const { container } = render(
+      <EnergyOrbitDiagram
+        snapshot={makeSnapshot({
+          home_power: 300,
+          battery_power: 1200,
+          battery_state: 'discharging',
+          grid_power: 900,
+        })}
+      />,
+    );
+    expect(container.querySelector('[data-flow-id="export"]')?.getAttribute('data-route')).toBe('outer');
+    expect(container.querySelector('[data-flow-id="discharge"]')?.getAttribute('data-route')).toBe('direct');
+  });
+
+  it('moves higher-energy balls faster than lower-energy balls', () => {
+    const slow = render(<EnergyOrbitDiagram snapshot={makeSnapshot({ solar_power: 500, home_power: 500 })} />);
+    const slowDuration = parseFloat(
+      slow.container.querySelector('[data-flow-id="solar"]')?.getAttribute('data-duration') ?? '0',
+    );
+
+    cleanup();
+    const fast = render(<EnergyOrbitDiagram snapshot={makeSnapshot({ solar_power: 5000, home_power: 500 })} />);
+    const fastDuration = parseFloat(
+      fast.container.querySelector('[data-flow-id="solar"]')?.getAttribute('data-duration') ?? '0',
+    );
+
+    expect(fastDuration).toBeLessThan(slowDuration);
   });
 
   describe('EV charger node', () => {
@@ -130,6 +247,7 @@ describe('EnergyOrbitDiagram', () => {
     });
 
     it('appears and draws a home→ev spoke when charging', () => {
+      useInverterStore.setState({ showFlowStatusWords: true });
       const { container } = render(
         <EnergyOrbitDiagram
           snapshot={makeSnapshot({ home_power: 7500 })}
@@ -140,12 +258,16 @@ describe('EnergyOrbitDiagram', () => {
         />,
       );
       const labels = Array.from(container.querySelectorAll('text')).map((t) => t.textContent ?? '');
-      expect(labels).toContain('EV');
+      expect(labels).not.toContain('EV');
+      const evIcon = container.querySelector('[data-testid="ev-car-icon"]');
+      expect(evIcon).not.toBeNull();
+      expect(evIcon?.getAttribute('transform')).toContain('scale(2.55)');
       expect(labels).toContain('Charging');
-      expect(container.querySelectorAll('polygon').length).toBeGreaterThanOrEqual(1);
+      expect(container.querySelectorAll('[data-flow-id]').length).toBeGreaterThanOrEqual(1);
     });
 
     it('shows "Not Found" for a configured-but-unreachable charger (issue #138)', () => {
+      useInverterStore.setState({ showFlowStatusWords: true });
       const { container } = render(
         <EnergyOrbitDiagram snapshot={makeSnapshot()} showEvc evcPower={0} />,
       );
@@ -159,7 +281,7 @@ describe('EnergyOrbitDiagram', () => {
     const { container } = render(
       <EnergyOrbitDiagram snapshot={makeSnapshot({ solar_power: 5000, home_power: 500 })} />,
     );
-    // The animate element is conditionally omitted for reduced-motion users.
-    expect(container.querySelectorAll('animate').length).toBe(0);
+    // The animateMotion element is conditionally omitted for reduced-motion users.
+    expect(container.querySelectorAll('animateMotion').length).toBe(0);
   });
 });

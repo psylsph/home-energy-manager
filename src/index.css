@@ -36,6 +36,12 @@
   --app-range-thumb-border: #0D1117;
   --app-grid-stroke: #6E7681;
   --app-grid-stroke-subtle: rgba(110, 118, 129, 0.55);
+  --app-flow-node-solar-bg: #302C15;
+  --app-flow-node-grid-bg: #2F1F20;
+  --app-flow-node-home-bg: #1D2D55;
+  --app-flow-node-battery-bg: #332A16;
+  --app-flow-node-ev-bg: #2B1E3A;
+  --app-flow-node-inverter-bg: #132C34;
 }
 
 [data-theme="light"] {
@@ -56,6 +62,12 @@
   --app-range-thumb-border: #F6F8FA;
   --app-grid-stroke: #57606A;
   --app-grid-stroke-subtle: rgba(87, 96, 106, 0.55);
+  --app-flow-node-solar-bg: #FEF3C7;
+  --app-flow-node-grid-bg: #FEE2E2;
+  --app-flow-node-home-bg: #DBEAFE;
+  --app-flow-node-battery-bg: #FEF3C7;
+  --app-flow-node-ev-bg: #F3E8FF;
+  --app-flow-node-inverter-bg: #CFFAFE;
 }
 
 body {

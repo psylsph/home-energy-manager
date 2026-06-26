@@ -71,6 +71,16 @@ interface InverterState {
   /** Consecutive connection failures since last successful connect. */
   connectFailures: number;
   /**
+   * Whether to show the plain-English sentence under the energy flow
+   * diagram. Default: off.
+   */
+  showFlowSummary: boolean;
+  /**
+   * Whether to show short status words under orbit nodes (Generating,
+   * Importing, Charging, etc.). Default: off.
+   */
+  showFlowStatusWords: boolean;
+  /**
    * Noise floor in watts for the energy flow diagram. Flows below this
    * value are treated as zero — no animated line, no arrow, displayed
    * value rounds to "0W". Default: 20W.
@@ -117,6 +127,8 @@ interface InverterState {
    * host actually responds.
    */
   resetEvc: () => void;
+  setShowFlowSummary: (enabled: boolean) => void;
+  setShowFlowStatusWords: (enabled: boolean) => void;
   setVisualNoiseThreshold: (threshold: number) => void;
 }
 
@@ -202,6 +214,22 @@ function loadPanelGraphsYLock(): boolean {
   }
 }
 
+function loadShowFlowSummary(): boolean {
+  try {
+    return localStorage.getItem('showFlowSummary') === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function loadShowFlowStatusWords(): boolean {
+  try {
+    return localStorage.getItem('showFlowStatusWords') === 'true';
+  } catch {
+    return false;
+  }
+}
+
 function loadVisualNoiseThreshold(): number {
   try {
     const stored = localStorage.getItem('visualNoiseThreshold');
@@ -261,6 +289,8 @@ export const useInverterStore = create<InverterState>((set) => ({
   panelGraphsScale: loadPanelGraphsScale(),
   panelGraphsYLock: loadPanelGraphsYLock(),
   panelGraphsYLockMax: 0,
+  showFlowSummary: loadShowFlowSummary(),
+  showFlowStatusWords: loadShowFlowStatusWords(),
   visualNoiseThreshold: loadVisualNoiseThreshold(),
   gridLineWeight: loadGridLineWeight(),
   pendingDischargeSlots: loadPendingDischargeSlots(),
@@ -321,6 +351,18 @@ export const useInverterStore = create<InverterState>((set) => ({
     set({ panelGraphsYLock: enabled, panelGraphsYLockMax: 0 });
   },
   setPanelGraphsYLockMax: (max) => set({ panelGraphsYLockMax: max }),
+  setShowFlowSummary: (enabled) => {
+    try {
+      localStorage.setItem('showFlowSummary', String(enabled));
+    } catch { /* ignore */ }
+    set({ showFlowSummary: enabled });
+  },
+  setShowFlowStatusWords: (enabled) => {
+    try {
+      localStorage.setItem('showFlowStatusWords', String(enabled));
+    } catch { /* ignore */ }
+    set({ showFlowStatusWords: enabled });
+  },
   setVisualNoiseThreshold: (threshold) => {
     try {
       localStorage.setItem('visualNoiseThreshold', String(threshold));

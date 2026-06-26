@@ -48,12 +48,12 @@ export const DEFAULT_NOISE_THRESHOLD_W = 20;
 // ---------------------------------------------------------------------------
 
 export const FLOW_COLORS = {
-  solar: '#F59E0B',
-  grid: '#EF4444',
-  home: '#14B8A6',
-  battery: '#6366F1',
+  solar: '#F5E04A',
+  grid: '#EF5A4F',
+  home: '#4F7DFF',
+  battery: '#FBBF24',
   inverter: '#22D3EE',
-  ev: '#10B981',
+  ev: '#A855F7',
 } as const satisfies Record<FlowNodeId, string>;
 
 /** Battery SOC tier colour, shared by the panel gauge and the diagram node. */
@@ -257,7 +257,7 @@ export function buildEnergyFlows(
     {
       id: 'grid',
       label: 'Grid',
-      value: `${isExporting ? '-' : ''}${formatVisualPower(absGrid, noise)}`,
+      value: `${isExporting ? '-' : isImporting ? '+' : ''}${formatVisualPower(absGrid, noise)}`,
       unit: isImporting ? 'Import' : isExporting ? 'Export' : 'Idle',
       color: FLOW_COLORS.grid,
       active: isImporting || isExporting,
@@ -273,9 +273,10 @@ export function buildEnergyFlows(
     {
       id: 'battery',
       label: 'Battery',
-      value: `${isDischarging ? '-' : ''}${formatVisualPower(absBattery, noise)}`,
+      value: `${isDischarging ? '-' : isCharging ? '+' : ''}${formatVisualPower(absBattery, noise)}`,
       unit: `${formatPercent(s.soc)} · ${modeLabel}`,
       color: socColor(s.soc),
+      ringPercent: s.soc,
       active: isCharging || isDischarging,
     },
     {
