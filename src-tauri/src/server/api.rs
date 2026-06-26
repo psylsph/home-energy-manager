@@ -27,6 +27,22 @@ fn ok_response(message: &str) -> (StatusCode, Json<Value>) {
     )
 }
 
+/// Like [`ok_response`] but includes `discharge_slots_backup` so the
+/// frontend can stage the just-captured schedule as pending edits and
+/// show the saved slots in the Eco-mode UI after an Eco→Timed→Eco
+/// round-trip. The field is omitted when `backup` is `None` (nothing
+/// was captured — see `capture_discharge_schedule_backup`). See #137.
+fn ok_response_with_backup(
+    message: &str,
+    backup: Option<&[crate::settings::DischargeSlotBackup]>,
+) -> (StatusCode, Json<Value>) {
+    let mut body = json!({ "ok": true, "message": message });
+    if let Some(b) = backup {
+        body["discharge_slots_backup"] = json!(b);
+    }
+    (StatusCode::OK, Json(body))
+}
+
 fn error_response(error: &str) -> (StatusCode, Json<Value>) {
     (
         StatusCode::BAD_REQUEST,
@@ -164,6 +180,164 @@ fn clear_discharge_slot_writes(device_type: DeviceType) -> Vec<RegisterWrite> {
         }
     }
     out
+}
+
+/// Build the writes needed to restore a backed-up discharge schedule to the
+/// inverter. Mirrors the body-path logic in `set_mode` (`is_timed` branch):
+/// slot writes go FIRST so the inverter never sees `enable_discharge=1`
+/// without slot constraints. Returns `None` if the backup is empty / absent
+/// so callers can skip the restore step cleanly.
+///
+/// Each slot's `start_hour:start_minute` and `end_hour:end_minute` are
+/// packed to the `HHMM` wire format expected by the encoder. Per-slot
+/// discharge target SOCs are written for extended-slot models (Gen3, AIO,
+/// HV Gen3) so the restore round-trips everything the snapshot had, not
+/// just the slot times.
+///
+/// Performance: with a 10-element backup array, an early version emitted
+/// 2 slot-register writes per element (20 writes) plus per-slot target-SOC
+/// writes for extended-slot models. With the backend's 1.5-second-per-write
+/// inter-write delay, a full restore of an unmodified backup took ~36
+/// seconds — long enough to time out downstream tests. The current
+/// implementation SKIPS slots that are not actually configured (i.e.
+/// `enabled: false` AND all times zero): the inverter already holds zero
+/// in those registers, so writing zero again is wasted Modbus traffic.
+/// The user's only "configured" slots are restored, which is what the
+/// user actually lost when Eco cleared them.
+///
+/// See issue #137.
+fn restore_discharge_slot_writes(
+    device_type: DeviceType,
+    backup: &[crate::settings::DischargeSlotBackup],
+) -> Option<Vec<RegisterWrite>> {
+    if backup.is_empty() {
+        return None;
+    }
+    let mut slot_writes: Vec<RegisterWrite> = Vec::new();
+    for (idx, slot) in backup.iter().enumerate() {
+        // Skip unconfigured slots — they're already zero in the
+        // inverter's registers (Eco's slot-clear left them that way),
+        // and writing zero again costs 1.5s of Modbus time per slot for
+        // no observable change. Only configured slots (enabled, OR
+        // non-zero times) need restoring.
+        let is_configured = slot.enabled
+            || slot.start_hour != 0
+            || slot.start_minute != 0
+            || slot.end_hour != 0
+            || slot.end_minute != 0;
+        if !is_configured {
+            continue;
+        }
+
+        let slot_num = (idx + 1) as u8;
+        let start = encode_hhmm(slot.start_hour, slot.start_minute);
+        let end = encode_hhmm(slot.end_hour, slot.end_minute);
+
+        let cmd = match discharge_slot_command_for_device(
+            device_type,
+            slot_num,
+            slot.enabled,
+            start,
+            end,
+        ) {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                tracing::warn!(
+                    "Skipping backed-up discharge slot {}: {}",
+                    slot_num,
+                    e
+                );
+                continue;
+            }
+        };
+
+        match cmd.encode() {
+            Ok(mut w) => {
+                // Per-slot discharge target SOC for extended-slot models.
+                // Non-extended models key off the global target, which the
+                // Timed mode encoder doesn't touch, so this stays a no-op
+                // there — same pattern the existing `is_timed` body path
+                // uses (api.rs:1083-1100).
+                if slot.enabled && slot.target_soc > 0 && device_type.uses_extended_schedule_slots() {
+                    if let Ok(target_writes) =
+                        (ControlCommand::SetDischargeTargetSocSlot {
+                            slot: slot_num,
+                            soc: slot.target_soc as u16,
+                        }
+                        .encode())
+                    {
+                        w.extend(target_writes);
+                    }
+                }
+                slot_writes.extend(w);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to encode backed-up discharge slot {}: {}",
+                    slot_num,
+                    e
+                );
+            }
+        }
+    }
+    if slot_writes.is_empty() {
+        return None;
+    }
+    Some(slot_writes)
+}
+
+/// Capture the current discharge schedule (from `latest_snapshot`) into
+/// `Settings.discharge_slots_backup` so a subsequent Eco→Timed round-trip
+/// can restore the user's configured slots. Persists to disk via
+/// `Settings::save()` — a backup is only useful if it survives a crash,
+/// and the file write is the same atomic-rename path every other settings
+/// mutation uses.
+///
+/// Returns the captured backup (so the API can echo it back to the
+/// frontend, which surfaces the slots as pending edits in the Eco-mode
+/// UI) or `None` if no slot is actually configured (no enabled slot with
+/// non-zero start or end). When `None`, the existing backup field is
+/// left untouched so a stale snapshot from earlier in the day doesn't get
+/// restored by accident on the next Timed toggle.
+///
+/// See issue #137.
+async fn capture_discharge_schedule_backup(
+    state: &AppState,
+) -> Option<Vec<crate::settings::DischargeSlotBackup>> {
+    // Snapshot read: take the entire `discharge_slots` array so the backup
+    // covers all 10 slots (Gen3 extended), not just the 1–2 that the
+    // clear-path zeroes. Slots 3–10 survive on the inverter today, but a
+    // restore from a partial backup would silently drop them.
+    let slots = {
+        let snap = state.latest_snapshot.lock().await;
+        let snap = snap.as_ref()?;
+        snap.discharge_slots.to_vec()
+    };
+
+    let has_any_configured_slot = slots
+        .iter()
+        .any(|s| s.enabled && (s.start_hour != 0 || s.start_minute != 0 || s.end_hour != 0 || s.end_minute != 0));
+    if !has_any_configured_slot {
+        // Nothing worth backing up — leave the existing backup field alone
+        // so a stale snapshot from earlier in the day doesn't get restored
+        // by accident on the next Timed toggle.
+        return None;
+    }
+
+    let backup: Vec<crate::settings::DischargeSlotBackup> = slots
+        .iter()
+        .map(crate::settings::DischargeSlotBackup::from)
+        .collect();
+
+    let mut settings = crate::settings::Settings::load();
+    settings.discharge_slots_backup = Some(backup.clone());
+    if let Err(e) = settings.save() {
+        tracing::warn!(
+            "Failed to persist discharge-slot backup, schedule may not round-trip on next Timed toggle: {e}"
+        );
+        return None;
+    }
+    Some(backup)
 }
 
 fn reserve_writes_for_device(
@@ -624,6 +798,11 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "autostart_enabled": settings.autostart_enabled,
             "api_key": settings.api_key,
             "api_port": settings.api_port,
+            // Issue #137: surface the discharge-slot backup so the frontend
+            // can stage it as pending edits after a Timed→Eco round-trip.
+            // `None` on first install / before any capture; otherwise the
+            // 10-element Vec captured on the most recent Eco/Pause entry.
+            "discharge_slots_backup": settings.discharge_slots_backup,
         }
         })),
     )
@@ -1020,13 +1199,28 @@ pub async fn set_mode(
         Ok(mut writes) => {
             tracing::info!("Mode command encoded: {:?}", writes);
 
-            // When switching to Eco mode, clear ALL discharge slot registers
-            // to prevent Gen3 inverter firmware from auto-re-enabling
-            // enable_discharge. The Gen3 keeps HR59=1 when discharge slot
-            // registers are non-zero, making it impossible to stay in Eco.
-            // Three-phase models and Gateway use different slot addresses
-            // (HR 1118-1121) than single-phase (HR 44-45/56-57).
+            // Captured backup (if any) for the response payload. Captured
+            // only when entering Eco/Pause/Export Paused with a configured
+            // schedule (see issue #137); the frontend uses it to surface
+            // the slots as pending edits so the Eco-mode UI shows the
+            // user's saved schedule after an Eco→Timed→Eco round-trip.
+            let mut captured_backup: Option<Vec<crate::settings::DischargeSlotBackup>> = None;
+
+            // When switching to Eco / Pause / Export Paused, the Gen3
+            // inverter firmware re-asserts `enable_discharge` whenever any
+            // discharge slot register is non-zero, so the slot registers
+            // must be zeroed to make Eco "stick". Doing so erases the
+            // user's configured schedule — issue #137 — so snapshot the
+            // current schedule into `Settings` *before* clearing it, and
+            // restore it on the way back to Timed (see the `is_timed`
+            // branch below).
             if mode_str == "eco" || mode_str == "eco_paused" || mode_str == "export_paused" {
+                // Back up the user's existing schedule (issue #137). No-op
+                // when nothing is configured, so a phantom backup can't
+                // later "restore" an empty schedule and unlock the Timed
+                // button spuriously.
+                captured_backup = capture_discharge_schedule_backup(&state).await;
+
                 // Clear ALL discharge slot registers to prevent Gen3 inverter
                 // firmware from auto-re-enabling enable_discharge. The Gen3
                 // keeps HR59=1 when discharge slot registers are non-zero,
@@ -1043,10 +1237,14 @@ pub async fn set_mode(
             // discharge_slots that were configured locally in Eco mode.
             // Write them atomically BEFORE the enable_discharge flag so the
             // inverter never sees HR59=1 without slot constraints.
+            //
+            // If the body doesn't carry discharge_slots but a backup exists
+            // from a prior Eco entry (issue #137), restore from the backup
+            // instead. The body always wins: an explicit fresh schedule
+            // overrides any stale snapshot from earlier in the day.
             if is_timed {
+                let device_type = latest_device_type(&state).await;
                 if let Some(slots) = body["discharge_slots"].as_array() {
-                    let device_type = latest_device_type(&state).await;
-
                     // Prepend slot writes before the mode writes.
                     let mut slot_writes = Vec::new();
                     for slot_obj in slots {
@@ -1113,11 +1311,37 @@ pub async fn set_mode(
                     let mut combined = slot_writes;
                     combined.append(&mut writes);
                     writes = combined;
+                } else {
+                    // No explicit body slots: try the backup (issue #137).
+                    let mut settings = crate::settings::Settings::load();
+                    if let Some(backup) = settings.discharge_slots_backup.take() {
+                        if let Some(slot_writes) =
+                            restore_discharge_slot_writes(device_type, &backup)
+                        {
+                            // Slot writes go FIRST so they're on the inverter
+                            // before HR59=1 is set — same invariant as the
+                            // body path above.
+                            let mut combined = slot_writes;
+                            combined.append(&mut writes);
+                            writes = combined;
+                        }
+                        // Persist the cleared backup so a subsequent Eco entry
+                        // captures fresh state instead of restoring a stale
+                        // snapshot from earlier in the day.
+                        if let Err(e) = settings.save() {
+                            tracing::warn!(
+                                "Failed to persist discharge-slot backup clear after restore: {e}"
+                            );
+                        }
+                    }
                 }
             }
 
             queue_writes(&state, writes).await;
-            ok_response(&format!("Mode set to {}", mode_str))
+            ok_response_with_backup(
+                &format!("Mode set to {}", mode_str),
+                captured_backup.as_deref(),
+            )
         }
         Err(e) => error_response(&format!("Validation error: {}", e)),
     }
@@ -1605,6 +1829,14 @@ pub async fn pause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, J
         Err(e) => return error_response(&format!("Validation error: {}", e)),
     };
 
+    // Back up the user's discharge schedule (issue #137) before the slot
+    // registers are zeroed. Mirrors the `set_mode("eco_paused")` branch —
+    // pause is just a softer "Eco but stop charging" mode, and the Gen3
+    // re-assertion quirk applies the same way. The captured backup is
+    // echoed back to the frontend so it can surface the slots as pending
+    // edits in the Eco-mode UI after a Timed→Pause round-trip.
+    let captured_backup = capture_discharge_schedule_backup(&state).await;
+
     // Clear stale discharge slot registers to prevent Gen3 inverter
     // firmware from auto-re-enabling enable_discharge (the Gen3 keeps
     // HR59=1 when non-zero slot registers are present, which would
@@ -1639,7 +1871,7 @@ pub async fn pause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, J
     }
     tracing::info!("PauseBattery encoded: {:?}", writes);
     queue_writes(&state, writes).await;
-    ok_response("Battery paused")
+    ok_response_with_backup("Battery paused", captured_backup.as_deref())
 }
 
 /// POST /api/control/force-charge — enable charging with target SOC.
@@ -4157,6 +4389,564 @@ mod tests {
                     .iter()
                     .any(|w| w.address == HR_3PH_AC_CHARGE_ENABLE && w.value == 0),
                 "three-phase pause must clear AC charge flag"
+            );
+        })
+        .await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #137: switching to Eco (or Pause / Export Paused) currently
+    // clears the discharge slot registers via the encoder, leaving the
+    // user's previously-configured schedule irretrievable on the inverter
+    // AND locking the Timed toggle out because `discharge_slots` is now
+    // empty on the wire. The fix is to capture the discharge schedule
+    // from `latest_snapshot` *before* clearing it, persist it on
+    // `Settings`, and restore it atomically (before HR_ENABLE_DISCHARGE=1)
+    // when the user switches back to Timed without an explicit body of
+    // discharge_slots. These tests lock in the contract for that fix.
+    //
+    // They reference `crate::settings::Settings::discharge_slots_backup`,
+    // which the fix is expected to add to `Settings` (mirroring the
+    // existing `cosy_active_persisted` / `auto_winter_saved_target_soc`
+    // pattern). The field must survive across restarts — read/write via
+    // `Settings::load()` / `Settings::save()` — so a crash-recovery path
+    // can re-read from the backup.
+    // -----------------------------------------------------------------------
+
+    /// Seed `latest_snapshot` with a Gen3 inverter carrying two enabled
+    /// discharge slots and `enable_discharge=true` (i.e. the user was
+    /// happily running Timed Demand with a real schedule). Helper used by
+    /// the backup-and-restore tests below.
+    async fn seed_gen3_timed_pre_state(state: &Arc<AppState>) {
+        use crate::inverter::model::ScheduleSlot;
+        let mut snap = crate::inverter::model::InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            enable_discharge: true,
+            battery_power_mode: 1, // eco / self-consumption (Timed Demand)
+            max_discharge_slots: 10,
+            charge_slots: Default::default(),
+            discharge_slots: Default::default(),
+            ..Default::default()
+        };
+        snap.discharge_slots[0] = ScheduleSlot {
+            enabled: true,
+            start_hour: 16,
+            start_minute: 0,
+            end_hour: 19,
+            end_minute: 30,
+            target_soc: 4,
+        };
+        snap.discharge_slots[1] = ScheduleSlot {
+            enabled: true,
+            start_hour: 21,
+            start_minute: 0,
+            end_hour: 23,
+            end_minute: 0,
+            target_soc: 4,
+        };
+        *state.latest_snapshot.lock().await = Some(snap);
+    }
+
+    /// Switching to `eco` must snapshot the user's existing discharge
+    /// schedule into `Settings` *before* `clear_discharge_slot_writes`
+    /// zeroes the slot registers on the inverter. This is the fix for
+    /// the data-loss half of issue #137: without the backup, the schedule
+    /// is unrecoverable and the Timed toggle becomes un-selectable.
+    ///
+    /// Mirrors how `cosy_active_persisted`, `auto_winter_saved_target_soc`,
+    /// `load_limiter_saved_reserve`, etc. round-trip through
+    /// `crate::settings::Settings::load()` / `Settings::save()`.
+    #[tokio::test]
+    async fn set_eco_backs_up_discharge_slots_before_clearing() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END,
+                HR_DISCHARGE_SLOT_2_START,
+            };
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            seed_gen3_timed_pre_state(&state).await;
+
+            let body = serde_json::json!({ "mode": "eco", "soc_reserve": 10 });
+            let (status, response) = set_mode(State(state.clone()), Json(body)).await;
+
+            // Response contract: 200 OK with the captured backup echoed so
+            // the frontend can stage it as pending edits in the Eco UI.
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(response.0["ok"], serde_json::Value::Bool(true));
+            let resp_backup = response.0["discharge_slots_backup"]
+                .as_array()
+                .expect("eco response must include discharge_slots_backup when a schedule was captured");
+            assert_eq!(resp_backup.len(), 10, "response backup covers all 10 slots");
+            assert_eq!(resp_backup[0]["start_hour"], 16);
+            assert_eq!(resp_backup[0]["end_hour"], 19);
+            assert_eq!(resp_backup[0]["end_minute"], 30);
+            assert_eq!(resp_backup[1]["start_hour"], 21);
+
+            // Existing contract: the four classic slot registers are zeroed.
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            for reg in [
+                HR_DISCHARGE_SLOT_1_START,
+                HR_DISCHARGE_SLOT_1_END,
+                HR_DISCHARGE_SLOT_2_START,
+                HR_DISCHARGE_SLOT_2_END,
+            ] {
+                let w = writes.iter().find(|w| w.address == reg);
+                assert!(w.is_some(), "eco must still clear slot {}", reg);
+                assert_eq!(w.unwrap().value, 0);
+            }
+
+            // New contract: the schedule has been captured into Settings.
+            // The Settings struct lives on disk (not on AppState), so read
+            // it back the same way the implementation will write it.
+            let disk = crate::settings::Settings::load();
+            let backup = disk
+                .discharge_slots_backup
+                .clone()
+                .expect("eco must back up the previous discharge schedule");
+            assert_eq!(backup.len(), 10, "backup must cover all 10 slots");
+            assert_eq!(backup[0].start_hour, 16);
+            assert_eq!(backup[0].start_minute, 0);
+            assert_eq!(backup[0].end_hour, 19);
+            assert_eq!(backup[0].end_minute, 30);
+            assert!(backup[0].enabled);
+            assert_eq!(backup[1].start_hour, 21);
+            assert_eq!(backup[1].end_hour, 23);
+            assert!(backup[1].enabled);
+            // Unused slots must round-trip as disabled + 00:00–00:00 so a
+            // restore path doesn't accidentally enable phantom slots.
+            assert!(!backup[2].enabled);
+            assert_eq!(backup[2].start_hour, 0);
+            assert_eq!(backup[2].end_hour, 0);
+        })
+        .await;
+    }
+
+    /// After a backup, switching back to Timed (with no `discharge_slots`
+    /// in the body) must atomically re-write the backed-up slots to the
+    /// inverter BEFORE `HR_ENABLE_DISCHARGE=1`. This is the fix for the
+    /// lock-out half of issue #137: with this, the user's schedule comes
+    /// back and the next snapshot reports it as configured.
+    #[tokio::test]
+    async fn set_timed_restores_backed_up_slots_atomically() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END,
+                HR_DISCHARGE_SLOT_2_START, HR_ENABLE_DISCHARGE,
+            };
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            seed_gen3_timed_pre_state(&state).await;
+
+            // Step 1: Eco captures the schedule and clears the inverter.
+            let _ = set_mode(
+                State(state.clone()),
+                Json(serde_json::json!({ "mode": "eco", "soc_reserve": 10 })),
+            )
+            .await;
+            drain_pending_writes(&state).await; // drop the eco batch
+
+            // Step 2: Timed Demand with NO body slots must restore from backup.
+            let _ = set_mode(
+                State(state.clone()),
+                Json(serde_json::json!({ "mode": "timed_demand", "soc_reserve": 4 })),
+            )
+            .await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+
+            // The slot registers must carry the backed-up values back.
+            let s1 = writes
+                .iter()
+                .find(|w| w.address == HR_DISCHARGE_SLOT_1_START)
+                .expect("restore must rewrite HR 56");
+            assert_eq!(s1.value, 1600);
+            let e1 = writes
+                .iter()
+                .find(|w| w.address == HR_DISCHARGE_SLOT_1_END)
+                .expect("restore must rewrite HR 57");
+            assert_eq!(e1.value, 1930);
+            let s2 = writes
+                .iter()
+                .find(|w| w.address == HR_DISCHARGE_SLOT_2_START)
+                .expect("restore must rewrite HR 44");
+            assert_eq!(s2.value, 2100);
+            let e2 = writes
+                .iter()
+                .find(|w| w.address == HR_DISCHARGE_SLOT_2_END)
+                .expect("restore must rewrite HR 45");
+            assert_eq!(e2.value, 2300);
+
+            // Order matters: slots MUST appear before HR_ENABLE_DISCHARGE=1
+            // so the inverter never asserts the master flag without slot
+            // constraints (the same invariant `is_timed` already enforces
+            // for the explicit `discharge_slots` body path).
+            let pos_slot = writes
+                .iter()
+                .position(|w| w.address == HR_DISCHARGE_SLOT_1_START)
+                .expect("slot 1 start must be in the batch");
+            let pos_enable = writes
+                .iter()
+                .position(|w| w.address == HR_ENABLE_DISCHARGE)
+                .expect("timed must set HR_ENABLE_DISCHARGE");
+            assert!(
+                pos_slot < pos_enable,
+                "slot writes (pos {}) must precede HR_ENABLE_DISCHARGE=1 (pos {})",
+                pos_slot,
+                pos_enable
+            );
+            let enable = writes.iter().find(|w| w.address == HR_ENABLE_DISCHARGE).unwrap();
+            assert_eq!(enable.value, 1);
+        })
+        .await;
+    }
+
+    /// Restore must skip unconfigured slots — slots with `enabled: false`
+    /// and all-zero times. Writing zero to a register that's already
+    /// zero is wasted Modbus traffic (~1.5s per write at the dongle's
+    /// rate limit) and would balloon an Eco→Timed restore of a
+    /// 10-slot Gen3 to ~30s when only slot 1 was actually configured
+    /// by the user. Issue #137 fix for the downstream E2E
+    /// timeout (`Eco → Timed Demand transition`).
+    #[tokio::test]
+    async fn restore_skips_unconfigured_slots() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END,
+                HR_DISCHARGE_SLOT_2_START,
+            };
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            seed_gen3_timed_pre_state(&state).await;
+
+            // Eco captures. The 10-element backup now contains 2 enabled
+            // slots (indices 0-1) and 8 all-zero, disabled slots (2-9).
+            let _ = set_mode(
+                State(state.clone()),
+                Json(serde_json::json!({ "mode": "eco", "soc_reserve": 10 })),
+            )
+            .await;
+            drain_pending_writes(&state).await;
+
+            // Sanity: disk has the full 10-element backup (the capture
+            // step doesn't filter, only the restore step does — mirroring
+            // how the snapshot is reported to the UI verbatim).
+            let backup = crate::settings::Settings::load()
+                .discharge_slots_backup
+                .expect("eco must capture backup");
+            assert_eq!(backup.len(), 10);
+            assert!(!backup[2].enabled && backup[2].start_hour == 0);
+
+            // Timed Demand restores only the configured slots.
+            let _ = set_mode(
+                State(state.clone()),
+                Json(serde_json::json!({ "mode": "timed_demand", "soc_reserve": 4 })),
+            )
+            .await;
+            let writes = drain_pending_writes(&state).await;
+
+            // Configured slots 1-2 must be written.
+            assert!(writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_1_START));
+            assert!(writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_1_END));
+            assert!(writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_2_START));
+            assert!(writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_2_END));
+
+            // Unconfigured slots must NOT be written — they would
+            // re-zero already-zero registers, costing 1.5s per slot ×
+            // 8 slots = 12s of wasted Modbus time.
+            for addr in 60..=70u16 {
+                // HR 60-70 are mid-poll-block; slot writes go to
+                // HR 56/57/44/45 (slots 1-2) and HR 276+ (slots 3-10).
+                // We check slot 3+ via the slot_num lookup. Quickest
+                // way is to confirm there are no extended-slot writes
+                // (HR 276+) since they're for slots 3-10.
+                let _ = addr; // placeholder; real assertion below
+            }
+            let extended_slot_writes: Vec<u16> = writes
+                .iter()
+                .map(|w| w.address)
+                .filter(|a| *a >= 276 && *a <= 298)
+                .collect();
+            assert!(
+                extended_slot_writes.is_empty(),
+                "restore must skip slots 3-10 when they're all-zero; got writes to {:?}",
+                extended_slot_writes
+            );
+        })
+        .await;
+    }
+
+    /// The backup must be cleared once it has been consumed by a restore,
+    /// so the next Eco entry captures the *new* (post-Timed) state rather
+    /// than silently restoring a stale snapshot from earlier in the day.
+    #[tokio::test]
+    async fn backup_cleared_after_restore() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            seed_gen3_timed_pre_state(&state).await;
+
+            // Eco captures.
+            let _ = set_mode(
+                State(state.clone()),
+                Json(serde_json::json!({ "mode": "eco", "soc_reserve": 10 })),
+            )
+            .await;
+            assert!(
+                crate::settings::Settings::load().discharge_slots_backup.is_some(),
+                "precondition: backup is populated after Eco"
+            );
+            drain_pending_writes(&state).await;
+
+            // Timed restores and consumes the backup.
+            let _ = set_mode(
+                State(state.clone()),
+                Json(serde_json::json!({ "mode": "timed_demand", "soc_reserve": 4 })),
+            )
+            .await;
+            assert!(
+                crate::settings::Settings::load().discharge_slots_backup.is_none(),
+                "backup must be cleared after a successful restore"
+            );
+        })
+        .await;
+    }
+
+    /// When the user explicitly posts a `discharge_slots` array alongside
+    /// the mode (the existing frontend round-trip via `pendingDischargeSlots`),
+    /// the explicit payload must win over the backup. The backup must NOT
+    /// be used AND must NOT be cleared (a subsequent explicit save or a
+    /// crash-recovery path that re-reads from backup must still work).
+    #[tokio::test]
+    async fn set_timed_with_body_slots_does_not_use_backup() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START};
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            seed_gen3_timed_pre_state(&state).await;
+
+            // Eco populates the backup with 16:00–19:30.
+            let _ = set_mode(
+                State(state.clone()),
+                Json(serde_json::json!({ "mode": "eco", "soc_reserve": 10 })),
+            )
+            .await;
+            drain_pending_writes(&state).await;
+
+            // User edits a different schedule in the UI and posts it
+            // explicitly. Backend must use 09:00–11:00, not the backup.
+            let _ = set_mode(
+                State(state.clone()),
+                Json(serde_json::json!({
+                    "mode": "timed_demand",
+                    "soc_reserve": 4,
+                    "discharge_slots": [{
+                        "slot": 1, "enabled": true,
+                        "start_hour": 9, "start_minute": 0,
+                        "end_hour": 11, "end_minute": 0,
+                        "target_soc": 100,
+                    }],
+                })),
+            )
+            .await;
+            let writes = drain_pending_writes(&state).await;
+            let s1 = writes
+                .iter()
+                .find(|w| w.address == HR_DISCHARGE_SLOT_1_START)
+                .expect("slot 1 start must be in the batch");
+            let e1 = writes
+                .iter()
+                .find(|w| w.address == HR_DISCHARGE_SLOT_1_END)
+                .expect("slot 1 end must be in the batch");
+            assert_eq!(
+                s1.value, 900,
+                "explicit body must win over backup (got backup's 16:00)"
+            );
+            assert_eq!(
+                e1.value, 1100,
+                "explicit body must win over backup (got backup's 19:30)"
+            );
+        })
+        .await;
+    }
+
+    /// The same backup-and-restore must hold for `eco_paused` and
+    /// `export_paused` — all three go through `clear_discharge_slot_writes`
+    /// (`api.rs:1029-1040`) and share the same lose-the-schedule bug.
+    /// Regression test pinned to the existing pause battery handler.
+    #[tokio::test]
+    async fn pause_battery_also_backs_up_discharge_slots() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            seed_gen3_timed_pre_state(&state).await;
+
+            let _ = pause_battery(State(state.clone())).await;
+
+            let backup = crate::settings::Settings::load()
+                .discharge_slots_backup
+                .clone()
+                .expect("pause must back up the previous discharge schedule");
+            assert_eq!(backup[0].start_hour, 16);
+            assert_eq!(backup[0].end_hour, 19);
+            assert!(backup[0].enabled);
+        })
+        .await;
+    }
+
+    /// Gen3 inverters support 10 discharge slots (HR 56–57, 44–45, and
+    /// HR 276–298 for slots 3–10). `clear_discharge_slot_writes` only
+    /// iterates slots 1–2 today — slots 3–10 already survive an Eco
+    /// toggle on the inverter. The backup MUST mirror that: it must
+    /// cover all 10 slots, not just the two the clear path writes to,
+    /// otherwise the restore round-trip silently drops slots 3–10.
+    #[tokio::test]
+    async fn backup_covers_extended_slots_on_gen3() {
+        with_isolated_config_dir_async(|| async {
+            use crate::inverter::model::ScheduleSlot;
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+
+            // Seed a schedule that uses slots 1, 2, AND 5.
+            let mut snap = crate::inverter::model::InverterSnapshot {
+                device_type: DeviceType::Gen3Hybrid,
+                enable_discharge: true,
+                max_discharge_slots: 10,
+                charge_slots: Default::default(),
+                discharge_slots: Default::default(),
+                ..Default::default()
+            };
+            snap.discharge_slots[0] = ScheduleSlot {
+                enabled: true,
+                start_hour: 5,
+                start_minute: 0,
+                end_hour: 7,
+                end_minute: 0,
+                target_soc: 4,
+            };
+            snap.discharge_slots[1] = ScheduleSlot {
+                enabled: true,
+                start_hour: 11,
+                start_minute: 0,
+                end_hour: 13,
+                end_minute: 0,
+                target_soc: 4,
+            };
+            snap.discharge_slots[4] = ScheduleSlot {
+                enabled: true,
+                start_hour: 17,
+                start_minute: 0,
+                end_hour: 20,
+                end_minute: 0,
+                target_soc: 4,
+            };
+            *state.latest_snapshot.lock().await = Some(snap);
+
+            let _ = set_mode(
+                State(state.clone()),
+                Json(serde_json::json!({ "mode": "eco", "soc_reserve": 10 })),
+            )
+            .await;
+
+            let backup = crate::settings::Settings::load()
+                .discharge_slots_backup
+                .clone()
+                .expect("eco must back up slots even on Gen3 10-slot models");
+            assert_eq!(backup.len(), 10);
+            assert_eq!(backup[0].start_hour, 5);
+            assert_eq!(backup[1].start_hour, 11);
+            assert_eq!(
+                backup[4].start_hour, 17,
+                "slot 5 lives in HR 276 and must round-trip through the backup"
+            );
+            assert_eq!(backup[4].end_hour, 20);
+            assert!(backup[4].enabled);
+        })
+        .await;
+    }
+
+    /// When the user starts with NO discharge schedule configured and
+    /// switches to Eco, the backup must end up as `None` (or empty) so
+    /// that a subsequent Timed toggle doesn't restore a phantom schedule.
+    /// Without this guard, a no-op Eco would still unlock the Timed
+    /// button via a stale `None→Some` transition.
+    #[tokio::test]
+    async fn eco_with_no_existing_schedule_does_not_create_backup() {
+        with_isolated_config_dir_async(|| async {
+            // Default snapshot: discharge_slots all disabled, start==end==0.
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+
+            let (status, response) = set_mode(
+                State(state.clone()),
+                Json(serde_json::json!({ "mode": "eco", "soc_reserve": 4 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(response.0["ok"], serde_json::Value::Bool(true));
+            // No schedule was captured → response must NOT carry a
+            // discharge_slots_backup key (or it must be null). The frontend
+            // uses presence-of-field as the signal to surface slots as
+            // pending edits; a stale/empty field would re-create the bug.
+            assert!(
+                response.0.get("discharge_slots_backup").is_none()
+                    || response.0["discharge_slots_backup"].is_null(),
+                "eco with empty schedule must not echo discharge_slots_backup in response"
+            );
+
+            let backup = crate::settings::Settings::load().discharge_slots_backup.clone();
+            // Either None, or Some(vec with no enabled slot) — both are
+            // acceptable representations of "nothing to back up". A future
+            // Timed toggle must not see this as a reason to enable slots.
+            match backup {
+                None => { /* fine — no backup created */ }
+                Some(v) => assert!(
+                    v.iter().all(|s| !s.enabled),
+                    "backup from an empty schedule must contain only disabled slots"
+                ),
+            }
+        })
+        .await;
+    }
+
+    /// Pause Battery shares the same backup-and-restore contract as
+    /// `set_mode("eco_paused")` — the response must echo the captured
+    /// backup so the Eco-mode UI can surface it as pending edits after a
+    /// Timed→Pause round-trip.
+    #[tokio::test]
+    async fn pause_battery_response_echoes_captured_backup() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            seed_gen3_timed_pre_state(&state).await;
+
+            let (status, response) = pause_battery(State(state.clone())).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(response.0["ok"], serde_json::Value::Bool(true));
+            let resp_backup = response.0["discharge_slots_backup"]
+                .as_array()
+                .expect("pause response must include discharge_slots_backup when a schedule was captured");
+            assert_eq!(resp_backup.len(), 10);
+            assert_eq!(resp_backup[0]["start_hour"], 16);
+            assert_eq!(resp_backup[0]["end_hour"], 19);
+            assert_eq!(resp_backup[1]["start_hour"], 21);
+            assert_eq!(resp_backup[1]["end_hour"], 23);
+        })
+        .await;
+    }
+
+    /// Timed mode responses must NOT include `discharge_slots_backup` —
+    /// it's only meaningful on the Eco/Pause transitions where the
+    /// schedule is being captured (not on Timed, where it's either
+    /// restored from a backup or written fresh from the body).
+    #[tokio::test]
+    async fn set_timed_response_does_not_echo_backup() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            seed_gen3_timed_pre_state(&state).await;
+
+            let (status, response) = set_mode(
+                State(state.clone()),
+                Json(serde_json::json!({ "mode": "timed_demand", "soc_reserve": 4 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(response.0["ok"], serde_json::Value::Bool(true));
+            assert!(
+                response.0.get("discharge_slots_backup").is_none(),
+                "timed response must not include discharge_slots_backup (it would be stale data)"
             );
         })
         .await;

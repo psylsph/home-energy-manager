@@ -233,4 +233,76 @@ describe('useAction', () => {
     expect(result.current.loading).toBe(false);
     expect(result.current.success).toBe(true);
   });
+
+  // -----------------------------------------------------------------
+  // markSuccess / markError — used by callers that handle the API
+  // call themselves (e.g. handleModeChange inspects the response
+  // body to read `discharge_slots_backup` for the issue #137 round
+  // trip) and need to drive the same loading/success/error UI
+  // feedback as `execute`. See src/hooks/useAction.ts.
+  // -----------------------------------------------------------------
+
+  it('markSuccess shows the success badge and clears it after 2s', async () => {
+    const { result } = renderHook(() => useAction());
+    expect(result.current.loading).toBe(false);
+    expect(result.current.success).toBe(false);
+
+    act(() => {
+      result.current.markSuccess();
+    });
+    expect(result.current.loading).toBe(false);
+    expect(result.current.success).toBe(true);
+    expect(result.current.error).toBeNull();
+
+    act(() => {
+      vi.advanceTimersByTime(2100);
+    });
+    expect(result.current.success).toBe(false);
+  });
+
+  it('markError shows the error badge and clears it after 3s', async () => {
+    const { result } = renderHook(() => useAction());
+
+    act(() => {
+      result.current.markError('network down');
+    });
+    expect(result.current.loading).toBe(false);
+    expect(result.current.success).toBe(false);
+    expect(result.current.error).toBe('network down');
+
+    act(() => {
+      vi.advanceTimersByTime(3100);
+    });
+    expect(result.current.error).toBeNull();
+  });
+
+  it('markSuccess replaces an in-flight loading state from execute', async () => {
+    // The exact pattern `handleModeChange` uses: kick off the API call
+    // with `execute`, then `markSuccess()` once the caller has inspected
+    // the response body. Issue #137's frontend reads
+    // `discharge_slots_backup` from the body — `execute` discards the
+    // response, so the caller calls markSuccess after their own await.
+    mockApiPost.mockResolvedValue({ ok: true });
+    const { result } = renderHook(() => useAction());
+
+    let pending!: Promise<void>;
+    act(() => {
+      pending = result.current.execute('/api/control/mode', { mode: 'eco' });
+    });
+    expect(result.current.loading).toBe(true);
+
+    // Caller awaits the response itself (so they can read discharge_slots_backup).
+    await act(async () => {
+      await pending;
+    });
+    // After the call resolves, the execute path also marks success. In the
+    // real handleModeChange the caller skips that by not calling execute at
+    // all. The interaction between markSuccess and execute is: whichever
+    // runs last wins, and the loading flag is always cleared.
+    act(() => {
+      result.current.markSuccess();
+    });
+    expect(result.current.loading).toBe(false);
+    expect(result.current.success).toBe(true);
+  });
 });
