@@ -10,26 +10,51 @@
   <meta property="og:image" content="screenshots/status.png">
   <meta name="twitter:card" content="summary_large_image">
   <style>
+    /* ── Reset & Base ── */
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
       background: #0d1117;
       color: #e6edf3;
       line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
     }
     a { color: #58a6ff; text-decoration: none; }
     a:hover { text-decoration: underline; }
 
-    /* Hero */
+    /* ── Section divider accent ── */
+    section { position: relative; }
+    section + section::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 50%;
+      transform: translateX(-50%);
+      width: 64px; height: 1px;
+      background: linear-gradient(90deg, transparent, #30363d, transparent);
+    }
+
+    /* ── Hero ── */
     .hero {
       max-width: 800px;
       margin: 0 auto;
-      padding: 80px 24px 40px;
+      padding: 64px 24px 32px;
       text-align: center;
     }
+    .hero::after {
+      content: '';
+      position: absolute;
+      top: -40%; left: 50%;
+      transform: translateX(-50%);
+      width: 480px; height: 480px;
+      background: radial-gradient(circle, rgba(88,166,255,0.06) 0%, transparent 70%);
+      pointer-events: none;
+      z-index: -1;
+    }
     .hero h1 {
-      font-size: 2.8rem;
-      font-weight: 700;
+      font-size: clamp(1.8rem, 5vw, 2.8rem);
+      font-weight: 800;
+      line-height: 1.2;
       margin-bottom: 16px;
       background: linear-gradient(135deg, #58a6ff, #3fb950);
       -webkit-background-clip: text;
@@ -37,58 +62,65 @@
       background-clip: text;
     }
     .hero p {
-      font-size: 1.25rem;
+      font-size: clamp(1rem, 2.5vw, 1.25rem);
       color: #8b949e;
-      margin-bottom: 32px;
+      margin-bottom: 28px;
     }
     .hero .badges {
       display: flex;
-      gap: 12px;
+      gap: 10px;
       justify-content: center;
       flex-wrap: wrap;
-      margin-bottom: 32px;
+      margin-bottom: 28px;
     }
     .hero .badge {
       display: inline-flex;
       align-items: center;
-      height: 24px;
-      padding: 0 9px;
-      border-radius: 4px;
+      height: 26px;
+      padding: 0 10px;
+      border-radius: 6px;
       background: #21262d;
       border: 1px solid #30363d;
       color: #e6edf3;
       font-size: 0.78rem;
+      font-weight: 500;
       line-height: 1;
     }
     .hero .badge-blue { background: #1f6feb; border-color: #1f6feb; }
     .hero .badge-green { background: #238636; border-color: #238636; }
     .hero .badge-purple { background: #8957e5; border-color: #8957e5; }
     .cta {
-      display: inline-block;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
       padding: 14px 32px;
       background: linear-gradient(135deg, #238636, #2ea043);
       color: #fff;
-      font-size: 1.1rem;
+      font-size: 1.05rem;
       font-weight: 600;
-      border-radius: 8px;
-      transition: transform 0.15s, box-shadow 0.15s;
+      border-radius: 10px;
+      transition: transform 0.2s, box-shadow 0.2s;
+      min-height: 48px;
     }
     .cta:hover {
       transform: translateY(-2px);
-      box-shadow: 0 8px 24px rgba(35, 134, 54, 0.4);
+      box-shadow: 0 8px 28px rgba(35, 134, 54, 0.45);
       text-decoration: none;
     }
+    .cta:active { transform: translateY(0); }
     .cta-secondary {
-      display: inline-block;
+      display: inline-flex;
+      align-items: center;
       padding: 12px 24px;
       background: #21262d;
       border: 1px solid #30363d;
       color: #e6edf3;
       font-size: 1rem;
       font-weight: 500;
-      border-radius: 8px;
+      border-radius: 10px;
       margin-left: 12px;
-      transition: transform 0.15s, border-color 0.15s;
+      min-height: 48px;
+      transition: transform 0.2s, border-color 0.2s;
     }
     .cta-secondary:hover {
       transform: translateY(-2px);
@@ -97,231 +129,336 @@
     }
     .hero-buttons { margin-bottom: 12px; }
 
-    /* Quick start */
+    /* Windows warning — collapsible on mobile via <details> */
+    .windows-warning {
+      max-width: 760px;
+      margin: 20px auto 0;
+      padding: 14px 16px;
+      background: rgba(187, 128, 9, 0.1);
+      border: 1px solid rgba(187, 128, 9, 0.35);
+      border-radius: 10px;
+      color: #d0d7de;
+      font-size: 0.9rem;
+      text-align: left;
+    }
+    .windows-warning strong { color: #f2cc60; }
+    .windows-warning summary {
+      cursor: pointer;
+      color: #f2cc60;
+      font-weight: 600;
+      font-size: 0.9rem;
+      padding: 2px 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .windows-warning .warning-body {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid rgba(187, 128, 9, 0.2);
+    }
+
+    /* ── Support (coffee button) ── */
+    .support {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 16px 24px 32px;
+      text-align: center;
+    }
+    .support h2 {
+      font-size: 1.1rem;
+      color: #8b949e;
+      margin-bottom: 12px;
+      font-weight: 500;
+    }
+
+    /* ── Quick start ── */
     .quickstart {
       max-width: 700px;
       margin: 0 auto;
-      padding: 20px 24px 40px;
+      padding: 24px 24px 32px;
       text-align: center;
     }
     .quickstart h2 {
-      font-size: 1.6rem;
-      margin-bottom: 24px;
+      font-size: clamp(1.3rem, 3.5vw, 1.6rem);
+      margin-bottom: 20px;
+      color: #e6edf3;
     }
     .quickstart ol {
       text-align: left;
-      max-width: 500px;
+      max-width: 480px;
       margin: 0 auto;
-      padding-left: 20px;
+      padding: 0;
+      list-style: none;
     }
     .quickstart li {
+      position: relative;
+      padding: 16px 16px 16px 48px;
       margin-bottom: 12px;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 10px;
       color: #b1bac4;
-      font-size: 1.05rem;
+      font-size: 1rem;
+      line-height: 1.5;
+      counter-increment: step;
+    }
+    .quickstart li::before {
+      content: counter(step);
+      position: absolute;
+      left: 14px;
+      top: 16px;
+      width: 24px;
+      height: 24px;
+      background: #1f6feb;
+      color: #fff;
+      font-size: 0.8rem;
+      font-weight: 700;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
     .quickstart li strong { color: #e6edf3; }
+    .quickstart ol { counter-reset: step; }
 
-    /* Features */
+    /* ── Features ── */
     .features {
       max-width: 1000px;
       margin: 0 auto;
-      padding: 30px 24px 40px;
+      padding: 32px 24px 40px;
     }
     .features h2 {
       text-align: center;
-      font-size: 2rem;
+      font-size: clamp(1.4rem, 3.5vw, 2rem);
       margin-bottom: 24px;
     }
     .features-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      gap: 20px;
+      gap: 16px;
     }
     .feature {
       background: #161b22;
       border: 1px solid #30363d;
       border-radius: 12px;
-      padding: 24px;
+      padding: 20px;
+      transition: border-color 0.25s, box-shadow 0.25s;
     }
-    .feature .icon { font-size: 1.6rem; margin-bottom: 8px; }
-    .feature h3 { color: #58a6ff; margin-bottom: 8px; font-size: 1.1rem; }
-    .feature p { color: #8b949e; font-size: 0.95rem; }
+    .feature:hover {
+      border-color: #58a6ff;
+      box-shadow: 0 0 0 1px rgba(88,166,255,0.15);
+    }
+    .feature .icon { font-size: 1.5rem; margin-bottom: 8px; }
+    .feature h3 { color: #58a6ff; margin-bottom: 6px; font-size: 1.05rem; }
+    .feature p { color: #8b949e; font-size: 0.9rem; line-height: 1.55; }
 
-    /* Screenshots */
+    /* ── Screenshots ── */
     .screenshots {
       max-width: 1100px;
       margin: 0 auto;
-      padding: 30px 24px 40px;
+      padding: 32px 24px 40px;
     }
     .screenshots h2 {
       text-align: center;
-      font-size: 2rem;
+      font-size: clamp(1.4rem, 3.5vw, 2rem);
       margin-bottom: 24px;
     }
     .gallery {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-      gap: 24px;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 20px;
     }
     .gallery .shot {
       background: #161b22;
       border: 1px solid #30363d;
       border-radius: 12px;
       overflow: hidden;
-      transition: transform 0.2s, box-shadow 0.2s;
+      transition: transform 0.25s, box-shadow 0.25s;
     }
-    .gallery .shot:hover {
-      transform: translateY(-4px);
-      box-shadow: 0 12px 32px rgba(0,0,0,0.4);
+    .gallery .shot:hover,
+    .gallery .shot:active {
+      transform: translateY(-3px);
+      box-shadow: 0 12px 32px rgba(0,0,0,0.5);
     }
     .gallery .shot img {
       width: 100%;
       display: block;
     }
     .gallery .shot .caption {
-      padding: 12px 16px;
-      font-size: 0.9rem;
+      padding: 10px 14px;
+      font-size: 0.85rem;
       color: #8b949e;
       text-align: center;
     }
 
-    /* Compatibility */
+    /* ── Compatibility ── */
     .compat {
       max-width: 800px;
       margin: 0 auto;
-      padding: 20px 24px 40px;
+      padding: 24px 24px 32px;
       text-align: center;
     }
-    .compat h2 { font-size: 1.6rem; margin-bottom: 16px; }
-    .compat p { color: #8b949e; font-size: 1.05rem; margin-bottom: 12px; }
+    .compat h2 { font-size: clamp(1.3rem, 3.5vw, 1.6rem); margin-bottom: 12px; }
+    .compat p { color: #8b949e; font-size: 1rem; margin-bottom: 16px; }
     .compat .model-list {
       display: flex;
       flex-wrap: wrap;
-      gap: 10px;
+      gap: 8px;
       justify-content: center;
     }
     .compat .model-list span {
       background: #161b22;
       border: 1px solid #30363d;
-      padding: 6px 14px;
+      padding: 5px 14px;
       border-radius: 20px;
-      font-size: 0.9rem;
+      font-size: 0.85rem;
       color: #b1bac4;
     }
 
-    /* Platforms */
+    /* ── Platforms ── */
     .platforms {
       max-width: 800px;
       margin: 0 auto;
-      padding: 20px 24px 40px;
+      padding: 24px 24px 32px;
       text-align: center;
     }
-    .platforms h2 { font-size: 1.6rem; margin-bottom: 16px; }
+    .platforms h2 { font-size: clamp(1.3rem, 3.5vw, 1.6rem); margin-bottom: 12px; }
     .platform-grid {
       display: flex;
       flex-wrap: wrap;
-      gap: 16px;
+      gap: 12px;
       justify-content: center;
-      margin-top: 20px;
+      margin-top: 16px;
     }
     .platform-card {
       background: #161b22;
       border: 1px solid #30363d;
       border-radius: 12px;
-      padding: 20px 28px;
+      padding: 16px 24px;
       text-align: center;
+      transition: border-color 0.25s;
+      flex: 0 1 auto;
+      min-width: 110px;
     }
-    .platform-card .icon { font-size: 2rem; }
-    .platform-card .name { font-weight: 600; margin-top: 8px; }
-    .platform-card .detail { font-size: 0.85rem; color: #8b949e; margin-top: 4px; }
-    .signing-note {
-      max-width: 640px;
-      margin: 20px auto 0;
-      color: #8b949e;
-      font-size: 0.95rem;
-    }
-    .signing-note strong { color: #e6edf3; }
-    .windows-warning {
-      max-width: 760px;
-      margin: 20px auto 0;
-      padding: 16px 18px;
-      background: rgba(187, 128, 9, 0.14);
-      border: 1px solid rgba(187, 128, 9, 0.45);
-      border-radius: 12px;
-      color: #d0d7de;
-      font-size: 0.95rem;
-      text-align: left;
-    }
-    .windows-warning strong { color: #f2cc60; }
+    .platform-card:hover { border-color: #58a6ff; }
+    .platform-card .icon { font-size: 1.6rem; }
+    .platform-card .name { font-weight: 600; margin-top: 6px; font-size: 0.9rem; }
+    .platform-card .detail { font-size: 0.8rem; color: #8b949e; margin-top: 3px; }
 
-    /* Support */
-    .support {
-      max-width: 800px;
-      margin: 0 auto;
-      padding: 16px 24px 24px;
-      text-align: center;
-    }
-    .support-content {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 24px;
-    }
-    .support-links-section {
+    /* ── Need Help section ── */
+    .help-section {
       max-width: 800px;
       margin: 0 auto;
       padding: 24px 24px 40px;
       text-align: center;
     }
-    .support-links {
+    .help-card {
       background: #161b22;
       border: 1px solid #30363d;
       border-radius: 12px;
-      padding: 24px;
+      padding: 20px;
       text-align: left;
       max-width: 520px;
       width: 100%;
+      margin: 0 auto;
     }
-    .support-links h3 {
+    .help-card h3 {
       color: #e6edf3;
       margin-bottom: 12px;
-      font-size: 1.05rem;
+      font-size: 1rem;
     }
-    .support-links ul {
+    .help-card ul {
       list-style: none;
       padding: 0;
     }
-    .support-links li {
+    .help-card li {
       color: #b1bac4;
-      font-size: 0.95rem;
+      font-size: 0.9rem;
       margin-bottom: 8px;
+      padding: 6px 0;
     }
-    .support-links li strong {
-      color: #e6edf3;
-    }
-    .support-note {
+    .help-card li strong { color: #e6edf3; }
+    .help-card .help-note {
       color: #484f58;
-      font-size: 0.85rem;
+      font-size: 0.8rem;
       margin-top: 12px;
       margin-bottom: 0;
+      text-align: center;
     }
 
-    /* Footer */
+    /* ── Footer ── */
     .footer {
       text-align: center;
-      padding: 40px 24px;
+      padding: 32px 24px;
       border-top: 1px solid #21262d;
       color: #484f58;
-      font-size: 0.85rem;
+      font-size: 0.8rem;
     }
     .footer a { color: #58a6ff; }
+    .footer p { margin: 4px 0; }
 
+    /* ── Responsive ── */
     @media (max-width: 640px) {
-      .hero h1 { font-size: 2rem; }
-      .hero p { font-size: 1rem; }
-      .gallery { grid-template-columns: 1fr; }
-      .cta-secondary { margin-left: 0; margin-top: 12px; }
-      .hero-buttons { display: flex; flex-direction: column; align-items: center; }
+      .hero { padding: 40px 20px 24px; }
+      .hero h1 { font-size: 1.6rem; }
+      .hero p { font-size: 0.95rem; }
+      .hero::after { width: 300px; height: 300px; top: -20%; }
+      .hero .badges { gap: 8px; margin-bottom: 20px; }
+      .hero .badge { font-size: 0.72rem; height: 24px; }
+
+      .cta { width: 100%; justify-content: center; padding: 14px 20px; }
+      .cta-secondary { margin-left: 0; margin-top: 10px; width: 100%; justify-content: center; }
+      .hero-buttons { display: flex; flex-direction: column; align-items: stretch; }
+
+      .features-grid { grid-template-columns: 1fr; }
+      .feature { padding: 16px; }
+      .feature .icon { font-size: 1.3rem; }
+
+      .gallery { gap: 16px; }
+
+      section + section::before { width: 40px; }
+
+      .platform-card { min-width: 0; flex: 1 1 calc(50% - 8px); padding: 12px 16px; }
+
+      .support { padding: 12px 20px 24px; }
+      .quickstart { padding: 20px 20px 24px; }
+      .features { padding: 24px 20px 32px; }
+      .screenshots { padding: 24px 20px 32px; }
+      .compat { padding: 20px 20px 24px; }
+      .platforms { padding: 20px 20px 24px; }
+      .help-section { padding: 20px 20px 32px; }
+      .footer { padding: 24px 20px; }
+
+      .quickstart li { padding: 14px 14px 14px 44px; font-size: 0.9rem; }
+      .quickstart li::before { left: 12px; top: 14px; width: 22px; height: 22px; font-size: 0.75rem; }
+
+      .compat .model-list span { font-size: 0.8rem; padding: 4px 12px; }
+
+      .windows-warning { font-size: 0.85rem; padding: 12px 14px; }
+    }
+
+    @media (max-width: 400px) {
+      .hero h1 { font-size: 1.4rem; }
+      .hero p { font-size: 0.9rem; }
+      .features h2 { font-size: 1.2rem; }
+      .screenshots h2 { font-size: 1.2rem; }
+
+      .platform-card { flex: 1 1 100%; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      .cta, .cta-secondary, .gallery .shot, .feature, .platform-card { transition: none; }
+    }
+
+    @media (min-width: 1024px) {
+      .features-grid { grid-template-columns: repeat(3, 1fr); }
+      .hero { padding: 80px 24px 40px; }
+    }
+
+    /* ── Print ── */
+    @media print {
+      .windows-warning { display: none; }
+      .support { display: none; }
     }
   </style>
 </head>
@@ -338,10 +475,18 @@
     <div class="hero-buttons">
       <a class="cta" href="https://github.com/psylsph/home-energy-manager/releases/latest">Download Free</a>
     </div>
-    <p class="windows-warning"><strong>Windows security notice:</strong> SmartScreen may warn that the MSI is from an unknown publisher, and Microsoft Defender has recently false-flagged the unsigned Windows installer as <code>Trojan:Script/Wacatac.C!ml</code> on some systems. The installer has been submitted to Microsoft as a false positive, and VirusTotal reports it as clean.</p>
+    <p class="windows-warning">
+      <details>
+        <summary>⚠️ Windows security notice (click to expand)</summary>
+        <div class="warning-body">
+          SmartScreen may warn that the MSI is from an unknown publisher, and Microsoft Defender has recently false-flagged the unsigned Windows installer as <code>Trojan:Script/Wacatac.C!ml</code> on some systems. The installer has been submitted to Microsoft as a false positive, and VirusTotal reports it as clean.
+        </div>
+      </details>
+    </p>
   </section>
 
   <section class="support">
+    <h2>Support this project</h2>
     <a href="https://www.buymeacoffee.com/psylsph" target="_blank" rel="noopener noreferrer">
       <img src="https://cdn.buymeacoffee.com/buttons/v2/default-blue.png" alt="Buy Me a Coffee" style="height: 48px; width: 173px;">
     </a>
@@ -436,55 +581,55 @@
     <h2>Screenshots</h2>
     <div class="gallery">
       <div class="shot">
-        <img src="screenshots/status.png" alt="Status Dashboard — real-time power monitoring with energy flow diagram">
+        <img loading="lazy" src="screenshots/status.png" alt="Status Dashboard — real-time power monitoring with energy flow diagram">
         <div class="caption">Status Dashboard</div>
       </div>
       <div class="shot">
-        <img src="screenshots/power.png" alt="Power Chart — live time-series power chart">
+        <img loading="lazy" src="screenshots/power.png" alt="Power Chart — live time-series power chart">
         <div class="caption">Power Chart</div>
       </div>
       <div class="shot">
-        <img src="screenshots/battery.png" alt="Battery Detail — cell voltages and temperatures">
+        <img loading="lazy" src="screenshots/battery.png" alt="Battery Detail — cell voltages and temperatures">
         <div class="caption">Battery Detail</div>
       </div>
       <div class="shot">
-        <img src="screenshots/inverter.png" alt="Inverter Info — model, firmware, and electrical readings">
+        <img loading="lazy" src="screenshots/inverter.png" alt="Inverter Info — model, firmware, and electrical readings">
         <div class="caption">Inverter Info</div>
       </div>
       <div class="shot">
-        <img src="screenshots/meters.png" alt="Meters — external meter and CT clamp data">
+        <img loading="lazy" src="screenshots/meters.png" alt="Meters — external meter and CT clamp data">
         <div class="caption">Meters</div>
       </div>
       <div class="shot">
-        <img src="screenshots/history.png" alt="Energy History — daily generation and consumption charts">
+        <img loading="lazy" src="screenshots/history.png" alt="Energy History — daily generation and consumption charts">
         <div class="caption">Energy History</div>
       </div>
       <div class="shot">
-        <img src="screenshots/history-solar.png" alt="Solar History — solar generation breakdown">
+        <img loading="lazy" src="screenshots/history-solar.png" alt="Solar History — solar generation breakdown">
         <div class="caption">History — Solar</div>
       </div>
       <div class="shot">
-        <img src="screenshots/history-home.png" alt="Home Energy — home consumption breakdown">
+        <img loading="lazy" src="screenshots/history-home.png" alt="Home Energy — home consumption breakdown">
         <div class="caption">History — Home</div>
       </div>
       <div class="shot">
-        <img src="screenshots/control-1.png" alt="Control Panel — schedules, modes, and SOC limits">
+        <img loading="lazy" src="screenshots/control-1.png" alt="Control Panel — schedules, modes, and SOC limits">
         <div class="caption">Control Panel</div>
       </div>
       <div class="shot">
-        <img src="screenshots/control-2.png" alt="Control Panel — schedules, modes, and SOC limits">
+        <img loading="lazy" src="screenshots/control-2.png" alt="Control Panel — schedules, modes, and SOC limits">
         <div class="caption">Control Panel</div>
       </div>
       <div class="shot">
-        <img src="screenshots/settings.png" alt="Settings — connection configuration">
+        <img loading="lazy" src="screenshots/settings.png" alt="Settings — connection configuration">
         <div class="caption">Settings</div>
       </div>
       <div class="shot">
-        <img src="screenshots/developer-mode.png" alt="Developer Console — advanced configuration options">
+        <img loading="lazy" src="screenshots/developer-mode.png" alt="Developer Console — advanced configuration options">
         <div class="caption">Developer Console</div>
       </div>
       <div class="shot">
-        <img src="screenshots/status-mobile.png" alt="Mobile view — responsive layout on phone">
+        <img loading="lazy" src="screenshots/status-mobile.png" alt="Mobile view — responsive layout on phone">
         <div class="caption">Mobile View</div>
       </div>
     </div>
@@ -494,11 +639,11 @@
     <h2>Consumption Reports</h2>
     <div class="gallery">
       <div class="shot">
-        <img src="screenshots/power-reports-1.png" alt="Status Dashboard — real-time power monitoring with energy flow diagram">
+        <img loading="lazy" src="screenshots/power-reports-1.png" alt="Status Dashboard — real-time power monitoring with energy flow diagram">
         <div class="caption">Consumption Reports</div>
       </div>
       <div class="shot">
-        <img src="screenshots/power-reports-2.png" alt="Power Chart — live time-series power chart">
+        <img loading="lazy" src="screenshots/power-reports-2.png" alt="Power Chart — live time-series power chart">
         <div class="caption">Consumption Reports</div>
       </div>
     </div>
@@ -554,8 +699,8 @@
     </div>
   </section>
 
-  <section class="support-links-section">
-    <div class="support-links">
+  <section class="help-section">
+    <div class="help-card">
       <h3>Need Help or Have Ideas?</h3>
       <ul>
         <li>❓ <strong>Questions</strong> — Open a <a href="https://github.com/psylsph/home-energy-manager/discussions">Discussion</a> on GitHub</li>
@@ -563,7 +708,7 @@
         <li>🐛 <strong>Bug Reports</strong> — File a <a href="https://github.com/psylsph/home-energy-manager/issues/new?labels=bug">Bug Report</a></li>
         <li>💬 <strong>Chat</strong> — Join the conversation in <a href="https://github.com/psylsph/home-energy-manager/discussions">GitHub Discussions</a></li>
       </ul>
-      <p class="support-note">If you find this project useful, consider buying me a coffee to support ongoing development. ☕</p>
+      <p class="help-note">If you find this project useful, consider buying me a coffee to support ongoing development. ☕</p>
     </div>
   </section>
 
