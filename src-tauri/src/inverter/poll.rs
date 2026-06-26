@@ -580,6 +580,49 @@ fn dead_session_backoff(consecutive_dead_sessions: u32) -> Duration {
     }
 }
 
+/// Flap back-off: a third reconnect-delay gate, calibrated for a *flapping*
+/// dongle rather than a chronically-dead one.
+///
+/// Both [`dead_session_backoff`] (reset on a single successful poll) and the
+/// `backoff` exponential (reset on a successful TCP `connect()`) are easy to
+/// reset during a flap — a dongle that answers a read or two every minute or
+/// two, keeping the UI pinned to "Reconnecting" for a quarter hour while HEM
+/// storms it with reconnects every few seconds. Neither timer measures the
+/// thing that actually matters during a flap: *has the frontend received
+/// fresh data recently?*
+///
+/// This gate does. The poll loop tracks `last_good_data_at` (updated only on a
+/// fully-delivered, sanitized snapshot) and engages an elevated reconnect
+/// delay once the gap exceeds [`FLAP_THRESHOLD_SECS`]. The engaged state is
+/// **sticky**: it stands down only after [`FLAP_STANDDOWN_POLLS`] consecutive
+/// good polls, so a single isolated success mid-flap can't yo-yo the cadence
+/// back to fast. Entry is fast (one data-starved interval); exit deliberately
+/// requires proof of sustained recovery.
+///
+/// The elevated delay is deliberately above the `dead_session_backoff` cap
+/// (10 s) and the `backoff` floor (5 s) so that once engaged it actually wins
+/// the `Duration::max` selection — the other gates stay in place for the
+/// genuinely-chronic cases they handle.
+const FLAP_THRESHOLD_SECS: u64 = 120;
+const FLAP_ELEVATED_DELAY: Duration = Duration::from_secs(30);
+const FLAP_STANDDOWN_POLLS: u8 = 3;
+
+/// Whether the flap gate should engage given the time (in seconds) since the
+/// last fully-delivered good snapshot.
+fn flap_should_engage(secs_since_good_data: u64) -> bool {
+    secs_since_good_data >= FLAP_THRESHOLD_SECS
+}
+
+/// Reconnect delay contributed by the flap gate. Zero when disengaged so the
+/// other back-off gates decide the delay; [`FLAP_ELEVATED_DELAY`] when engaged.
+fn flap_backoff(engaged: bool) -> Duration {
+    if engaged {
+        FLAP_ELEVATED_DELAY
+    } else {
+        Duration::ZERO
+    }
+}
+
 /// Runs the polling loop indefinitely (spawn as a Tokio task).
 ///
 /// ## Behaviour
@@ -609,6 +652,13 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
     // chronically hung dongle isn't hammered every few seconds. Reset to 0
     // the moment a session yields at least one good poll.
     let mut consecutive_dead_sessions: u32 = 0;
+    // Flap-gate state — see `flap_backoff` / `flap_should_engage`. Declared
+    // in the outer (reconnect) scope so it spans sessions: a flap is a
+    // multi-session phenomenon, and these must not reset on a fresh TCP
+    // connect or a single good poll.
+    let mut last_good_data_at: Instant = Instant::now();
+    let mut flap_engaged: bool = false;
+    let mut consecutive_good_polls: u8 = 0;
     // Snapshot of `state.reconnect_request` at the start of the current
     // outer-loop iteration. Compared at the top of every iteration so a
     // manual `POST /api/reconnect` (which increments the counter) resets
@@ -642,6 +692,12 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
             );
             backoff = Duration::from_secs(5);
             consecutive_dead_sessions = 0;
+            // A manual "retry now" should actually retry fast — clear the
+            // flap gate too, and restart the data-starvation clock so we
+            // don't immediately re-engage on the next failed session.
+            flap_engaged = false;
+            consecutive_good_polls = 0;
+            last_good_data_at = Instant::now();
             last_seen_reconnect_request = current_reconnect_request;
         }
 
@@ -2783,6 +2839,24 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                             consecutive_suspicious = 0;
                             consecutive_timeouts = 0;
                             session_had_successful_read = true;
+                            // Fresh, sanitized data reached the UI/history —
+                            // restart the flap gate's data-starvation clock.
+                            // The stand-down count only advances while a flap
+                            // is engaged, and demands a sustained run of good
+                            // polls: a single isolated success mid-flap must
+                            // not yo-yo the reconnect cadence back to fast.
+                            last_good_data_at = Instant::now();
+                            if flap_engaged {
+                                consecutive_good_polls += 1;
+                                if consecutive_good_polls >= FLAP_STANDDOWN_POLLS {
+                                    flap_engaged = false;
+                                    consecutive_good_polls = 0;
+                                    tracing::info!(
+                                        polls = FLAP_STANDDOWN_POLLS,
+                                        "Dongle recovered — standing down flap back-off, resuming normal reconnect cadence"
+                                    );
+                                }
+                            }
 
                             // Tick the meter retry cadence counter.
                             if meter_probe_done
@@ -2810,6 +2884,9 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                             }
                         }
                         false => {
+                            // A failed poll breaks the sustained-recovery
+                            // streak the flap stand-down counts.
+                            consecutive_good_polls = 0;
                             if connection_lost {
                                 break;
                             }
@@ -3055,11 +3132,30 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
         // zombie-dongle back-off and see no effect for up to 10 minutes
         // (the increment is still detected at the top of the next outer
         // iteration, but only after the sleep completes).
-        let delay = backoff.max(dead_session_backoff(consecutive_dead_sessions));
+        // ---- Flap gate ----
+        // Engage when the frontend has been data-starved past the threshold —
+        // the signature of a flapping dongle. Only engages here (never
+        // disengages; stand-down happens in the poll loop on a sustained run
+        // of good polls). Sticky so an isolated success mid-flap doesn't
+        // reset it.
+        let secs_since_good_data = last_good_data_at.elapsed().as_secs();
+        if !flap_engaged && flap_should_engage(secs_since_good_data) {
+            flap_engaged = true;
+            consecutive_good_polls = 0;
+            tracing::warn!(
+                secs_since_good_data,
+                threshold = FLAP_THRESHOLD_SECS,
+                "Dongle flap detected — no good data for {secs_since_good_data}s, slowing reconnect cadence"
+            );
+        }
+        let delay = backoff
+            .max(dead_session_backoff(consecutive_dead_sessions))
+            .max(flap_backoff(flap_engaged));
         tracing::debug!(
-            "Retrying connection in {:?} (dead_sessions={})",
+            "Retrying connection in {:?} (dead_sessions={}, flap_engaged={})",
             delay,
-            consecutive_dead_sessions
+            consecutive_dead_sessions,
+            flap_engaged
         );
         let sleep_start = tokio::time::Instant::now();
         let sleep_deadline = sleep_start + delay;
@@ -3126,6 +3222,62 @@ mod tests {
         assert_eq!(dead_session_backoff(3), Duration::from_secs(10));
         assert_eq!(dead_session_backoff(5), Duration::from_secs(10));
         assert_eq!(dead_session_backoff(100), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn flap_should_engage_at_threshold() {
+        // Below the threshold the gate stays disengaged — normal operation,
+        // the existing back-off gates decide the delay.
+        assert!(!flap_should_engage(0));
+        assert!(!flap_should_engage(FLAP_THRESHOLD_SECS - 1));
+        // At and above the threshold it engages.
+        assert!(flap_should_engage(FLAP_THRESHOLD_SECS));
+        assert!(flap_should_engage(FLAP_THRESHOLD_SECS + 1));
+        assert!(flap_should_engage(u64::MAX));
+    }
+
+    #[test]
+    fn flap_backoff_delay_schedule() {
+        // Disengaged contributes nothing — the other gates win the `max`.
+        assert_eq!(flap_backoff(false), Duration::ZERO);
+        // Engaged contributes a delay above the dead-session cap (10 s) and
+        // the connect-failure floor (5 s) so it actually wins the `max`
+        // selection rather than being shadowed by the other gates.
+        let engaged = flap_backoff(true);
+        assert_eq!(engaged, FLAP_ELEVATED_DELAY);
+        assert!(engaged > Duration::from_secs(10));
+        assert!(engaged > Duration::from_secs(5));
+    }
+
+    /// The flap gate's design contract. The integer-constant checks run at
+    /// compile time (mirrors `sustained_timeout_budget_is_bounded`) so a tweak
+    /// to any constant trips the build immediately; the `Duration` checks run
+    /// at runtime since `Duration` comparisons aren't const-stable across all
+    /// the operations used here. The stand-down must demand a genuine run of
+    /// success (not a single poll) to avoid yo-yoing, and the threshold must
+    /// be long enough that a healthy (if slow) poll interval never trips it.
+    #[test]
+    fn flap_gate_contract_holds() {
+        const _: () = {
+            assert!(
+                FLAP_STANDDOWN_POLLS >= 2,
+                "stand-down must require a sustained run, not a single poll",
+            );
+            assert!(
+                FLAP_THRESHOLD_SECS > 60,
+                "threshold must exceed a slow poll interval so the gate never engages on healthy operation",
+            );
+        };
+        // The elevated delay must dominate the other two gates' maximums to
+        // have any effect under `Duration::max`.
+        assert!(
+            FLAP_ELEVATED_DELAY > Duration::from_secs(10),
+            "flap delay must exceed dead-session cap"
+        );
+        assert!(
+            FLAP_ELEVATED_DELAY > Duration::from_secs(5),
+            "flap delay must exceed connect back-off floor"
+        );
     }
 
     /// `run_poll_loop` reconnects after `MAX_CONSECUTIVE_TIMEOUTS` cycles of
