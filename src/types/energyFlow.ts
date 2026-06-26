@@ -51,6 +51,8 @@ export interface FlowNode {
   value: string;
   unit: string;
   color: string;
+  /** Optional 0–100 ring fill (currently battery state-of-charge). */
+  ringPercent?: number;
   /** Whether this node is currently moving meaningful power. */
   active: boolean;
 }

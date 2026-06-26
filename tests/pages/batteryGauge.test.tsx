@@ -40,6 +40,16 @@ describe('BatteryGauge', () => {
     expect(highH).toBeGreaterThan(lowH);
   });
 
+  it('supports a horizontal mobile orientation with left-to-right fill', () => {
+    const { container: low } = render(<BatteryGauge soc={25} orientation="horizontal" width={128} />);
+    const { container: high } = render(<BatteryGauge soc={90} orientation="horizontal" width={128} />);
+    expect(low.querySelector('svg')?.getAttribute('data-orientation')).toBe('horizontal');
+    expect(low.querySelector('svg')?.getAttribute('viewBox')).toBe('0 0 80 40');
+    const lowFill = low.querySelector('rect[style]') as SVGSVGElement;
+    const highFill = high.querySelector('rect[style]') as SVGSVGElement;
+    expect(Number(highFill.getAttribute('width'))).toBeGreaterThan(Number(lowFill.getAttribute('width')));
+  });
+
   it('hides the numeric label below the label-width threshold', () => {
     const { container } = render(<BatteryGauge soc={50} width={60} />);
     // showLabel defaults true but gates on width >= 72.

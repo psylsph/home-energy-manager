@@ -119,22 +119,24 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
   });
 
   it('treats +grid_power as export (home→grid) and −grid_power as import (grid→home)', () => {
-    // Export: +4.3kW
+    // Export: +4.3kW internally, displayed as -4.3kW because power leaves the home.
     const exp = buildEnergyFlows(snap({ grid_power: 4300 }));
     const ef = flowById(exp, 'export');
     expect(ef).toBeDefined();
     expect(ef!.from).toBe('home');
     expect(ef!.to).toBe('grid');
     expect(ef!.direction).toBe('export');
+    expect(exp.nodes.find((n) => n.id === 'grid')!.value).toBe('-4.3kW');
     expect(flowById(exp, 'import')).toBeUndefined();
 
-    // Import: −2kW
+    // Import: −2kW internally, displayed as +2.0kW because power enters the home.
     const imp = buildEnergyFlows(snap({ grid_power: -2000 }));
     const imf = flowById(imp, 'import');
     expect(imf).toBeDefined();
     expect(imf!.from).toBe('grid');
     expect(imf!.to).toBe('home');
     expect(imf!.direction).toBe('import');
+    expect(imp.nodes.find((n) => n.id === 'grid')!.value).toBe('+2.0kW');
     expect(flowById(imp, 'export')).toBeUndefined();
   });
 
@@ -148,15 +150,17 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
     expect(cf!.to).toBe('battery');
     expect(cf!.watts).toBe(241);
     expect(cf!.direction).toBe('charge');
+    expect(chg.nodes.find((n) => n.id === 'battery')!.value).toBe('+241W');
     expect(flowById(chg, 'discharge')).toBeUndefined();
 
-    // discharge → battery→home.
+    // discharge → battery→home, displayed as negative because power leaves the battery node.
     const dis = buildEnergyFlows(snap({ battery_state: 'discharging', battery_power: 1400 }));
     const df = flowById(dis, 'discharge');
     expect(df).toBeDefined();
     expect(df!.from).toBe('battery');
     expect(df!.to).toBe('home');
     expect(df!.direction).toBe('discharge');
+    expect(dis.nodes.find((n) => n.id === 'battery')!.value).toBe('-1.4kW');
   });
 
   it('never emits a self-flow for home (it is the hub, not a spoke)', () => {
@@ -201,6 +205,11 @@ describe('buildEnergyFlows — noise threshold', () => {
   it('clamps sub-threshold node values to "0W"', () => {
     const vm = buildEnergyFlows(snap({ solar_power: 5 }));
     expect(vm.nodes.find((n) => n.id === 'solar')!.value).toBe('0W');
+  });
+
+  it('exposes battery SOC as a node ring percentage for the radial diagram', () => {
+    const vm = buildEnergyFlows(snap({ soc: 31 }));
+    expect(vm.nodes.find((n) => n.id === 'battery')!.ringPercent).toBe(31);
   });
 
   it('maxFlowWatts is ≥1 even when no flows are active', () => {

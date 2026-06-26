@@ -90,25 +90,33 @@ function SummaryTilesInner({ snapshot: s }: Props) {
 
   return (
     <div className="bg-bg-surface rounded-2xl p-6 h-full flex flex-col gap-4">
-      <h2 className="text-text-primary text-base font-semibold tracking-wide">Today</h2>
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+      <h2 className="hidden md:block text-text-primary text-base font-semibold tracking-wide">Today</h2>
+      <div
+        data-testid="summary-tiles-grid"
+        className="gap-2 md:gap-3"
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+          gridAutoFlow: 'row',
+        }}
+      >
         {tiles.map((t) => (
           <div
             key={t.label}
             title={t.tooltip}
-            className="bg-bg-elevated rounded-xl p-4 flex flex-col gap-2 border border-transparent hover:border-white/5 transition-colors cursor-help"
+            className="min-w-0 bg-bg-elevated rounded-xl p-1.5 md:p-4 flex flex-col gap-1 md:gap-2 border border-transparent hover:border-white/5 transition-colors cursor-help"
           >
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1 md:gap-2">
               <span
-                className="w-8 h-8 rounded-lg flex items-center justify-center text-sm"
+                className="w-5 h-5 md:w-8 md:h-8 rounded-md md:rounded-lg flex items-center justify-center text-[10px] md:text-sm"
                 style={{ backgroundColor: t.accent + '20' }}
               >
                 {t.icon}
               </span>
-              <span className="text-text-secondary text-xs font-medium">{t.label}</span>
+              <span className="min-w-0 text-text-secondary text-[10px] md:text-xs font-medium leading-tight">{t.label}</span>
             </div>
             <span
-              className="text-xl font-mono font-bold tracking-tight"
+              className="text-base md:text-xl font-mono font-bold tracking-tight"
               style={{ color: t.accent }}
             >
               {t.value}

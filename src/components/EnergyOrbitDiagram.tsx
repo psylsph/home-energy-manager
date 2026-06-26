@@ -7,23 +7,12 @@
  * now. The inverter is demoted from "hub" to a small info line beneath the
  * diagram — it's plumbing, not the thing a homeowner cares about.
  *
- * Renders purely from the [`buildEnergyFlows`] view-model: no sign logic, no
- * noise-threshold branching, no string-building here. See
- * `src/lib/energyFlow.ts` for the conventions (battery +ve = discharge,
- * grid +ve = export, home-centred topology).
- *
- * ## Layout balance with/without EV
- *
- * Node positions are computed from the *visible* node set, not a fixed map,
- * so removing the optional EV node doesn't leave a hole on the left:
- *  - **With EV** (4 satellites): Solar top, Grid right, Battery bottom, EV
- *    left — a symmetric cross.
- *  - **Without EV** (3 satellites): Solar top, Grid lower-right, Battery
- *    lower-left — a balanced triangle with its base spread across the
- *    bottom, so no single quadrant reads as empty.
+ * Renders from the [`buildEnergyFlows`] view-model: sign logic, thresholding,
+ * and string-building live in `src/lib/energyFlow.ts`. This component is only
+ * responsible for the radial visual language.
  */
 
-import { memo } from 'react';
+import { memo, useId } from 'react';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { useInverterStore } from '../store/useInverterStore';
 import type { InverterSnapshot } from '../lib/types';
@@ -48,107 +37,331 @@ interface Props {
 }
 
 // ---------------------------------------------------------------------------
-// Geometry — a 460×460 viewBox, Home hub at centre, satellites on an orbit.
+// Geometry — tuned to match the reference image: a large outer orbit, a
+// smaller central Home node, large circular satellites, grey spokes, and
+// moving coloured dots rather than arrow-heads.
 // ---------------------------------------------------------------------------
 
-const VB = 460;
+const VB = 520;
 const CX = VB / 2;
-const CY = VB / 2;
-const ORBIT_R = 158; // satellite centre distance from Home centre
-const HUB_R = 74;    // Home node radius
-const SAT_R = 58;    // satellite node radius
+const CY = 260;
+const ORBIT_CY = 260;
+const OUTER_ORBIT_R = 202;
+const HUB_R = 48;
+const SAT_R = 47;
+const BATTERY_R = 50;
 
-/** Pixel position for a satellite at a given clock angle (deg, 0=right, 90=top). */
-function satPos(angleDeg: number): { x: number; y: number } {
-  const r = (angleDeg * Math.PI) / 180;
-  return { x: CX + ORBIT_R * Math.cos(r), y: CY - ORBIT_R * Math.sin(r) };
-}
-
-/**
- * Satellite positions keyed by node id, chosen for visual balance whether or
- * not the optional EV node is shown. See file header.
- */
 function satellitePositions(showEv: boolean): Partial<Record<FlowNodeId, { x: number; y: number }>> {
   if (showEv) {
-    // Symmetric cross: Solar 12, Grid 3, Battery 6, EV 9.
     return {
-      solar: satPos(90),
-      grid: satPos(0),
-      battery: satPos(270),
-      ev: satPos(180),
+      solar: { x: CX, y: 78 },
+      ev: { x: 145, y: 208 },
+      battery: { x: 92, y: 370 },
+      grid: { x: 428, y: 370 },
     };
   }
-  // Balanced triangle: Solar 12, Grid ~5 (lower-right), Battery ~7 (lower-left).
+
   return {
-    solar: satPos(90),
-    grid: satPos(-40),
-    battery: satPos(220),
+    solar: { x: CX, y: 78 },
+    battery: { x: 118, y: 370 },
+    grid: { x: 402, y: 370 },
   };
 }
 
+function radiusFor(id: FlowNodeId): number {
+  if (id === 'home') return HUB_R;
+  if (id === 'battery') return BATTERY_R;
+  return SAT_R;
+}
+
+function trimLine(
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  fromR: number,
+  toR: number,
+): { x1: number; y1: number; x2: number; y2: number; mx: number; my: number } {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len;
+  const uy = dy / len;
+  const x1 = from.x + ux * fromR;
+  const y1 = from.y + uy * fromR;
+  const x2 = to.x - ux * toR;
+  const y2 = to.y - uy * toR;
+  return { x1, y1, x2, y2, mx: (x1 + x2) / 2, my: (y1 + y2) / 2 };
+}
+
+function nodeFill(id: FlowNodeId): string {
+  switch (id) {
+    case 'solar': return 'var(--app-flow-node-solar-bg, #302C15)';
+    case 'grid': return 'var(--app-flow-node-grid-bg, #2F1F20)';
+    case 'home': return 'var(--app-flow-node-home-bg, #1D2D55)';
+    case 'battery': return 'var(--app-flow-node-battery-bg, #332A16)';
+    case 'ev': return 'var(--app-flow-node-ev-bg, #2B1E3A)';
+    case 'inverter': return 'var(--app-flow-node-inverter-bg, #132C34)';
+  }
+}
+
+function displayValue(node: FlowNode): string {
+  return node.value;
+}
+
+function statusFor(node: FlowNode, flows: EnergyFlow[]): string {
+  if (node.id === 'solar') return node.active ? 'Generating' : 'Idle';
+  if (node.id === 'grid') {
+    if (flows.some((f) => f.direction === 'import')) return 'Importing';
+    if (flows.some((f) => f.direction === 'export')) return 'Exporting';
+    return 'Idle';
+  }
+  if (node.id === 'battery') {
+    if (flows.some((f) => f.direction === 'charge')) return 'Charging';
+    if (flows.some((f) => f.direction === 'discharge')) return 'Discharging';
+    return 'Idle';
+  }
+  if (node.id === 'ev') return node.unit;
+  return node.unit;
+}
+
+function batterySocText(node: FlowNode): string {
+  return node.unit.split(' · ')[0] ?? node.unit;
+}
+
 // ---------------------------------------------------------------------------
-// Flow spoke (animated, directional)
+// Icons — compact inline SVG glyphs, avoiding emoji rendering differences.
 // ---------------------------------------------------------------------------
 
-interface SpokeProps {
+function NodeIcon({ id, x, y, color, size = 30 }: { id: FlowNodeId; x: number; y: number; color: string; size?: number }) {
+  const s = size;
+  if (id === 'solar') {
+    return (
+      <g stroke={color} strokeWidth={3} strokeLinecap="round" fill="none">
+        <circle cx={x} cy={y} r={s * 0.22} fill={color} stroke="none" />
+        {Array.from({ length: 8 }).map((_, i) => {
+          const a = (i * Math.PI) / 4;
+          const x1 = x + Math.cos(a) * s * 0.36;
+          const y1 = y + Math.sin(a) * s * 0.36;
+          const x2 = x + Math.cos(a) * s * 0.50;
+          const y2 = y + Math.sin(a) * s * 0.50;
+          return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} />;
+        })}
+      </g>
+    );
+  }
+
+  if (id === 'home') {
+    return (
+      <g fill={color}>
+        <path d={`M ${x - 18} ${y - 2} L ${x} ${y - 19} L ${x + 18} ${y - 2} L ${x + 13} ${y - 2} L ${x + 13} ${y + 16} L ${x + 4} ${y + 16} L ${x + 4} ${y + 5} L ${x - 4} ${y + 5} L ${x - 4} ${y + 16} L ${x - 13} ${y + 16} L ${x - 13} ${y - 2} Z`} />
+      </g>
+    );
+  }
+
+  if (id === 'grid') {
+    return (
+      <g stroke={color} strokeWidth={2.8} strokeLinecap="round" strokeLinejoin="round" fill="none">
+        <path d={`M ${x} ${y - 27} L ${x - 23} ${y + 24} H ${x + 23} Z`} />
+        <path d={`M ${x} ${y - 27} V ${y + 24}`} />
+        <path d={`M ${x - 18} ${y - 11} H ${x + 18}`} />
+        <path d={`M ${x - 23} ${y + 3} H ${x + 23}`} />
+        <path d={`M ${x - 17} ${y + 15} H ${x + 17}`} />
+        <path d={`M ${x - 18} ${y - 11} L ${x + 23} ${y + 3} L ${x - 17} ${y + 15} L ${x + 23} ${y + 24}`} opacity={0.75} />
+        <path d={`M ${x + 18} ${y - 11} L ${x - 23} ${y + 3} L ${x + 17} ${y + 15} L ${x - 23} ${y + 24}`} opacity={0.75} />
+      </g>
+    );
+  }
+
+  if (id === 'ev') {
+    // Filled side-profile EV, adapted from common CC0 / Material-style
+    // electric-car SVG silhouettes so it stays readable at small node size.
+    return (
+      <g data-testid="ev-car-icon" transform={`translate(${x-30} ${y - 23}) scale(2.55)`}>
+        <path
+          d="M4.2 13.2h1.1a2.4 2.4 0 0 1 4.8 0h3.8a2.4 2.4 0 0 1 4.8 0h1.1c.7 0 1.2-.5 1.2-1.2V9.5c0-.7-.4-1.3-1-1.6l-2.7-1.2-2.1-2.8c-.4-.6-1.1-.9-1.8-.9H8.7c-.8 0-1.5.4-1.9 1.1L5.1 7.2 3.5 8c-.3.2-.5.5-.5.9V12c0 .7.5 1.2 1.2 1.2Z"
+          fill={color}
+          opacity={0.95}
+        />
+        <path d="M8.8 4.8h4.3l1.7 2.2H7.6l1.2-2.2Z" fill="var(--app-bg-elevated, #21262D)" opacity={0.95} />
+        <path d="M15.1 4.8 16.8 7h-2.6V4.8h.9Z" fill="var(--app-bg-elevated, #21262D)" opacity={0.95} />
+        <circle cx="7.7" cy="13.2" r="1.35" fill="var(--app-bg-elevated, #21262D)" />
+        <circle cx="16.3" cy="13.2" r="1.35" fill="var(--app-bg-elevated, #21262D)" />
+        <path
+          d="M11.8 9.1h2.1l-1.2 2.1h1.5l-2.9 3.2.8-2.4h-1.4l1.1-2.9Z"
+          fill="var(--app-bg-elevated, #21262D)"
+          opacity={0.95}
+        />
+        <path
+          d="M19.5 3.5v2.4h1.4v3.2"
+          fill="none"
+          stroke={color}
+          strokeWidth="1.2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </g>
+    );
+  }
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Tracks + moving flow dots
+// ---------------------------------------------------------------------------
+
+interface TrackProps {
+  id: FlowNodeId;
+  posOf: (id: FlowNodeId) => { x: number; y: number };
+}
+
+function StaticTrack({ id, posOf }: TrackProps) {
+  const home = posOf('home');
+  const sat = posOf(id);
+  const { x1, y1, x2, y2 } = trimLine(home, sat, HUB_R, radiusFor(id));
+  return (
+    <line
+      x1={x1}
+      y1={y1}
+      x2={x2}
+      y2={y2}
+      stroke="rgba(79, 84, 94, 0.55)"
+      strokeWidth={5}
+      strokeLinecap="round"
+    />
+  );
+}
+
+interface FlowPath {
+  path: string;
+  mx: number;
+  my: number;
+  route: 'direct' | 'outer';
+  color: string;
+}
+
+function hasFlow(flows: EnergyFlow[], id: string): boolean {
+  return flows.some((f) => f.id === id);
+}
+
+function visualEndpoints(flow: EnergyFlow, flows: EnergyFlow[]): { from: FlowNodeId; to: FlowNodeId } {
+  const solarActive = hasFlow(flows, 'solar');
+  const batteryExporting = !solarActive && hasFlow(flows, 'discharge') && flow.id === 'export';
+
+  if (flow.id === 'charge' && solarActive) return { from: 'solar', to: 'battery' };
+  if (flow.id === 'export' && solarActive) return { from: 'solar', to: 'grid' };
+  if (batteryExporting) return { from: 'battery', to: 'grid' };
+  return { from: flow.from, to: flow.to };
+}
+
+function isOuterRoute(from: FlowNodeId, to: FlowNodeId): boolean {
+  return from !== 'home' && to !== 'home' && from !== 'ev' && to !== 'ev';
+}
+
+function orbitAngle(pos: { x: number; y: number }): number {
+  return Math.atan2(pos.y - ORBIT_CY, pos.x - CX);
+}
+
+function orbitPoint(angle: number): { x: number; y: number } {
+  return {
+    x: CX + OUTER_ORBIT_R * Math.cos(angle),
+    y: ORBIT_CY + OUTER_ORBIT_R * Math.sin(angle),
+  };
+}
+
+function clockwiseDelta(from: number, to: number): number {
+  return (to - from + Math.PI * 2) % (Math.PI * 2);
+}
+
+function orbitGap(id: FlowNodeId): number {
+  return Math.asin(Math.min(0.45, (radiusFor(id) + 12) / OUTER_ORBIT_R));
+}
+
+function outerArcPath(from: FlowNodeId, to: FlowNodeId, posOf: (id: FlowNodeId) => { x: number; y: number }): FlowPath {
+  const fromAngle = orbitAngle(posOf(from));
+  const toAngle = orbitAngle(posOf(to));
+  const cw = clockwiseDelta(fromAngle, toAngle);
+  const ccw = clockwiseDelta(toAngle, fromAngle);
+  const sweep = cw <= ccw ? 1 : 0;
+  const startAngle = sweep === 1 ? fromAngle + orbitGap(from) : fromAngle - orbitGap(from);
+  const endAngle = sweep === 1 ? toAngle - orbitGap(to) : toAngle + orbitGap(to);
+  const delta = sweep === 1 ? clockwiseDelta(startAngle, endAngle) : clockwiseDelta(endAngle, startAngle);
+  const largeArc = delta > Math.PI ? 1 : 0;
+  const start = orbitPoint(startAngle);
+  const end = orbitPoint(endAngle);
+  const mid = orbitPoint(sweep === 1 ? startAngle + delta / 2 : startAngle - delta / 2);
+  return {
+    path: `M ${start.x} ${start.y} A ${OUTER_ORBIT_R} ${OUTER_ORBIT_R} 0 ${largeArc} ${sweep} ${end.x} ${end.y}`,
+    mx: mid.x,
+    my: mid.y,
+    route: 'outer',
+    color: FLOW_COLORS[from],
+  };
+}
+
+function directPath(from: FlowNodeId, to: FlowNodeId, posOf: (id: FlowNodeId) => { x: number; y: number }): FlowPath {
+  const a = posOf(from);
+  const b = posOf(to);
+  const { x1, y1, x2, y2, mx, my } = trimLine(a, b, radiusFor(from), radiusFor(to));
+  return {
+    path: `M ${x1} ${y1} L ${x2} ${y2}`,
+    mx,
+    my,
+    route: 'direct',
+    color: FLOW_COLORS[from],
+  };
+}
+
+function flowPath(flow: EnergyFlow, flows: EnergyFlow[], posOf: (id: FlowNodeId) => { x: number; y: number }): FlowPath {
+  const { from, to } = visualEndpoints(flow, flows);
+  return isOuterRoute(from, to)
+    ? outerArcPath(from, to, posOf)
+    : directPath(from, to, posOf);
+}
+
+interface DotProps {
   flow: EnergyFlow;
+  flows: EnergyFlow[];
   posOf: (id: FlowNodeId) => { x: number; y: number };
   maxW: number;
   reduced: boolean;
 }
 
-function FlowSpoke({ flow, posOf, maxW, reduced }: SpokeProps) {
-  const a = posOf(flow.from);
-  const b = posOf(flow.to);
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  const len = Math.hypot(dx, dy) || 1;
-  const ux = dx / len;
-  const uy = dy / len;
-  // Trim each end by its node radius so the spoke starts/ends at the edges.
-  const r1 = flow.from === 'home' ? HUB_R : SAT_R;
-  const r2 = flow.to === 'home' ? HUB_R : SAT_R;
-  const x1 = a.x + ux * r1;
-  const y1 = a.y + uy * r1;
-  const x2 = b.x - ux * r2;
-  const y2 = b.y - uy * r2;
-  // Stroke width scales with this flow's share of the largest active flow.
-  const sw = 2 + 4 * Math.min(1, flow.watts / maxW);
-  const mx = (x1 + x2) / 2;
-  const my = (y1 + y2) / 2;
-  const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
-  // Colour by the source node so the spoke reads as "from X".
-  const color = FLOW_COLORS[flow.from];
+function FlowDot({ flow, flows, posOf, maxW, reduced }: DotProps) {
+  const routed = flowPath(flow, flows, posOf);
+  const strength = Math.min(1, flow.watts / maxW);
+  const r = 6 + 3 * strength;
+  const durSeconds = Math.max(0.55, 2.4 - Math.min(flow.watts, 8000) / 8000 * 1.75);
+  const dur = `${durSeconds.toFixed(2)}s`;
+
+  if (reduced) {
+    return (
+      <circle
+        data-flow-id={flow.id}
+        data-route={routed.route}
+        data-duration={dur}
+        cx={routed.mx}
+        cy={routed.my}
+        r={r}
+        fill={routed.color}
+        opacity={0.95}
+      />
+    );
+  }
 
   return (
-    <g>
-      {/* Faint track behind the animated line */}
-      <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="#21262D" strokeWidth={2} strokeLinecap="round" />
-      {/* Animated flow — dashes move in the from→to direction */}
-      <line
-        x1={x1} y1={y1} x2={x2} y2={y2}
-        stroke={color}
-        strokeWidth={sw}
-        strokeLinecap="round"
-        strokeDasharray="9 7"
-        opacity={0.9}
-      >
-        {!reduced && (
-          <animate attributeName="stroke-dashoffset" from="0" to="-32" dur="0.8s" repeatCount="indefinite" />
-        )}
-      </line>
-      {/* Direction arrow at the midpoint */}
-      <polygon
-        points="0,-7 14,0 0,7"
-        fill={color}
-        transform={`translate(${mx},${my}) rotate(${angle})`}
-      />
+    <g data-flow-id={flow.id} data-route={routed.route} data-duration={dur}>
+      <circle r={r} fill={routed.color} opacity={0.95}>
+        <animateMotion path={routed.path} dur={dur} repeatCount="indefinite" />
+      </circle>
+      <circle r={r + 6} fill={routed.color} opacity={0.12}>
+        <animateMotion path={routed.path} dur={dur} repeatCount="indefinite" />
+      </circle>
     </g>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Node
+// Nodes
 // ---------------------------------------------------------------------------
 
 interface NodeProps {
@@ -156,58 +369,151 @@ interface NodeProps {
   x: number;
   y: number;
   r: number;
+  flows: EnergyFlow[];
   hub?: boolean;
   mobile?: boolean;
+  showStatusWords?: boolean;
 }
 
-function NodeCircle({ node, x, y, r, hub, mobile }: NodeProps) {
+function BatterySocRing({ node, x, y, r }: { node: FlowNode; x: number; y: number; r: number }) {
+  const pct = Math.max(0, Math.min(100, node.ringPercent ?? 0));
+  const ringR = r + 2;
+  const circumference = 2 * Math.PI * ringR;
+  const filled = circumference * (pct / 100);
   return (
-    <g>
-      {/* Active glow */}
-      {node.active && (
-        <circle cx={x} cy={y} r={r + 5} fill="none" stroke={node.color} strokeWidth={1} opacity={0.18} />
-      )}
-      {/* Body */}
+    <g data-testid="battery-soc-ring">
+      <circle cx={x} cy={y} r={ringR} fill="none" stroke="rgba(251, 191, 36, 0.20)" strokeWidth={6} />
       <circle
-        cx={x} cy={y} r={r}
-        fill="var(--app-bg-elevated, #21262D)"
+        cx={x}
+        cy={y}
+        r={ringR}
+        fill="none"
         stroke={node.color}
-        strokeWidth={hub ? 2.5 : 2}
+        strokeWidth={6}
+        strokeLinecap="round"
+        strokeDasharray={`${filled} ${circumference - filled}`}
+        transform={`rotate(-90 ${x} ${y})`}
       />
-      {/* Label */}
-      <text
-        x={x} y={y - r + (hub ? 20 : 17)}
-        textAnchor="middle"
+    </g>
+  );
+}
+
+function BatteryGlyph({ node, x, y }: { node: FlowNode; x: number; y: number }) {
+  const pct = Math.max(0, Math.min(100, node.ringPercent ?? 0));
+  const bodyX = x - 28;
+  const bodyY = y - 18;
+  const bodyW = 50;
+  const bodyH = 34;
+  const fillW = Math.max(3, (bodyW - 8) * (pct / 100));
+  return (
+    <g data-testid="battery-glyph">
+      <rect
+        x={bodyX}
+        y={bodyY}
+        width={bodyW}
+        height={bodyH}
+        rx={7}
+        fill="rgba(13, 17, 23, 0.42)"
+        stroke={node.color}
+        strokeWidth={2.5}
+      />
+      <rect
+        x={bodyX + bodyW}
+        y={bodyY + 10}
+        width={7}
+        height={14}
+        rx={3}
         fill={node.color}
-        fontSize={mobile ? 11 : 10.5}
-        fontWeight={700}
-        fontFamily="var(--font-sans, sans-serif)"
-        letterSpacing="0.6"
-      >
-        {node.label.toUpperCase()}
-      </text>
-      {/* Value */}
+        opacity={0.85}
+      />
+      <rect
+        x={bodyX + 4}
+        y={bodyY + 4}
+        width={fillW}
+        height={bodyH - 8}
+        rx={4}
+        fill={node.color}
+        opacity={0.35}
+      />
+    </g>
+  );
+}
+
+function HubNode({ node, x, y, r, mobile }: NodeProps) {
+  return (
+    <g aria-label={`${node.label}: ${node.value} ${node.unit}`}>
+      {node.active && <circle cx={x} cy={y} r={r + 9} fill={node.color} opacity={0.10} />}
+      <circle data-node-body={node.id} cx={x} cy={y} r={r} fill={nodeFill(node.id)} stroke={node.color} strokeWidth={2.5} />
+      <NodeIcon id="home" x={x} y={y} color={node.color} size={32} />
       <text
-        x={x} y={y + 3}
+        x={x}
+        y={y + r + 37}
         textAnchor="middle"
         fill="var(--app-text-primary, #F0F6FC)"
-        fontSize={hub ? (mobile ? 18 : 17) : (mobile ? 17 : 16)}
+        fontSize={mobile ? 20 : 19}
         fontWeight={700}
         fontFamily="var(--font-mono, monospace)"
       >
-        {node.value}
+        {displayValue(node)}
       </text>
-      {/* Unit / secondary */}
+    </g>
+  );
+}
+
+function SatelliteNode({ node, x, y, r, flows, mobile, showStatusWords }: NodeProps) {
+  const status = statusFor(node, flows);
+  const value = displayValue(node);
+  const isBattery = node.id === 'battery';
+  const isEv = node.id === 'ev';
+
+  return (
+    <g aria-label={`${node.label}: ${value} ${status}`}>
+      {node.active && <circle cx={x} cy={y} r={r + 10} fill={node.color} opacity={0.10} />}
+      {isBattery && <BatterySocRing node={node} x={x} y={y} r={r} />}
+      <circle data-node-body={node.id} cx={x} cy={y} r={r} fill={nodeFill(node.id)} stroke={node.color} strokeWidth={2.5} />
+
+      {isBattery ? (
+        <>
+          <BatteryGlyph node={node} x={x} y={y} />
+          <text
+            x={x - 2}
+            y={y + 7}
+            textAnchor="middle"
+            fill={node.color}
+            fontSize={mobile ? 18 : 17}
+            fontWeight={800}
+            fontFamily="var(--font-mono, monospace)"
+          >
+            {batterySocText(node)}
+          </text>
+        </>
+      ) : (
+        <NodeIcon id={node.id} x={x} y={y} color={node.color} size={isEv ? 34 : 32} />
+      )}
+
       <text
-        x={x} y={y + (hub ? 23 : 20)}
+        x={x}
+        y={y + r + 32}
         textAnchor="middle"
-        fill={hub ? 'var(--app-text-secondary, #8B949E)' : node.color}
-        fontSize={mobile ? 11 : 10}
+        fill="var(--app-text-primary, #F0F6FC)"
+        fontSize={mobile ? 20 : 19}
         fontWeight={700}
         fontFamily="var(--font-mono, monospace)"
       >
-        {node.unit}
+        {value}
       </text>
+      {showStatusWords && (
+        <text
+          x={x}
+          y={y + r + 57}
+          textAnchor="middle"
+          fill="var(--app-text-secondary, #8B949E)"
+          fontSize={mobile ? 15 : 14}
+          fontFamily="var(--font-sans, sans-serif)"
+        >
+          {status}
+        </text>
+      )}
     </g>
   );
 }
@@ -226,8 +532,11 @@ function EnergyOrbitDiagramInner({
   showEvc = false,
 }: Props) {
   const mobile = useIsMobile();
+  const orbitMaskId = useId().replace(/:/g, '');
+  const showFlowSummary = useInverterStore((st) => st.showFlowSummary);
+  const showFlowStatusWords = useInverterStore((st) => st.showFlowStatusWords);
   const noise = useInverterStore((st) => st.visualNoiseThreshold);
-  // Reduced-motion users get static spokes (no SMIL animation).
+  // Reduced-motion users get static flow dots (no SMIL animation).
   const reduced =
     typeof window !== 'undefined' &&
     typeof window.matchMedia === 'function' &&
@@ -251,54 +560,102 @@ function EnergyOrbitDiagramInner({
   const nodeById = (id: FlowNodeId): FlowNode | undefined =>
     vm.nodes.find((n) => n.id === id);
   const home = nodeById('home')!;
+  const battery = nodeById('battery');
   const inverter = nodeById('inverter');
+  const batteryMode = battery?.unit.split(' · ')[1] ?? '—';
 
-  // Satellite nodes to render, in draw order.
   const satelliteIds: FlowNodeId[] = showEvc
-    ? ['solar', 'grid', 'battery', 'ev']
-    : ['solar', 'grid', 'battery'];
+    ? ['solar', 'ev', 'battery', 'grid']
+    : ['solar', 'battery', 'grid'];
+  const viewBoxHeight = showFlowStatusWords ? VB : 480;
 
   return (
     <div className="flex flex-col items-center gap-3">
       <div className="flex justify-center w-full">
         <svg
-          viewBox={`0 0 ${VB} ${VB}`}
+          viewBox={`0 0 ${VB} ${viewBoxHeight}`}
           className="w-full"
-          style={{ maxWidth: '460px', fontFamily: 'var(--font-sans, sans-serif)' }}
+          style={{ maxWidth: '520px', fontFamily: 'var(--font-sans, sans-serif)' }}
           role="img"
           aria-label={`Energy flow. ${vm.summaryText}`}
         >
-          {/* Layer 1: flow spokes (behind nodes) */}
-          {vm.flows.map((f) => (
-            <FlowSpoke key={f.id} flow={f} posOf={posOf} maxW={vm.maxFlowWatts} reduced={reduced} />
+          <defs>
+            <mask id={orbitMaskId}>
+              <rect x="0" y="0" width={VB} height={VB} fill="white" />
+              {satelliteIds.map((id) => {
+                const p = posOf(id);
+                return <circle key={id} cx={p.x} cy={p.y} r={radiusFor(id) + 13} fill="black" />;
+              })}
+            </mask>
+          </defs>
+
+          {/* Large outer orbit ring from the reference image, with gaps where
+              the node symbols sit so it never visibly runs through them. */}
+          <circle
+            data-testid="energy-orbit-ring"
+            cx={CX}
+            cy={ORBIT_CY}
+            r={OUTER_ORBIT_R}
+            fill="none"
+            stroke="rgba(79, 84, 94, 0.28)"
+            strokeWidth={6}
+            mask={`url(#${orbitMaskId})`}
+          />
+
+          {/* Fixed grey tracks from Home to each visible satellite. */}
+          {satelliteIds.map((id) => (
+            <StaticTrack key={id} id={id} posOf={posOf} />
           ))}
 
-          {/* Layer 2: Home hub (centre) */}
-          <NodeCircle node={home} x={CX} y={CY} r={HUB_R} hub mobile={mobile} />
+          {/* Moving dots show active flow direction and strength. */}
+          {vm.flows.map((f) => (
+            <FlowDot
+              key={f.id}
+              flow={f}
+              flows={vm.flows}
+              posOf={posOf}
+              maxW={vm.maxFlowWatts}
+              reduced={reduced}
+            />
+          ))}
 
-          {/* Layer 3: satellites */}
+          <HubNode node={home} x={CX} y={CY} r={HUB_R} flows={vm.flows} hub mobile={mobile} />
+
           {satelliteIds.map((id) => {
             const node = nodeById(id);
             if (!node) return null;
             const p = posOf(id);
-            return <NodeCircle key={id} node={node} x={p.x} y={p.y} r={SAT_R} mobile={mobile} />;
+            return (
+              <SatelliteNode
+                key={id}
+                node={node}
+                x={p.x}
+                y={p.y}
+                r={radiusFor(id)}
+                flows={vm.flows}
+                mobile={mobile}
+                showStatusWords={showFlowStatusWords}
+              />
+            );
           })}
         </svg>
       </div>
 
       {/* Plain-English summary */}
-      <p className="text-text-secondary text-sm font-sans text-center max-w-md px-4">
-        {vm.summaryText}
-      </p>
+      {showFlowSummary && (
+        <p className="text-text-secondary text-sm font-sans text-center max-w-md px-4">
+          {vm.summaryText}
+        </p>
+      )}
 
       {/* Inverter mini-card (demoted from hub to a supporting line) */}
       {inverter && (
-        <p className="text-text-secondary text-xs font-sans text-center">
-          <span className="text-text-primary font-medium">Inverter</span>
-          {' · '}
-          {inverter.value}
+        <p className="text-text-secondary text-sm font-sans text-center -mt-1">
+          <span className="text-text-primary font-medium">{inverter.value}</span>
           {' · '}
           {inverter.unit}
+          {' · '}
+          {batteryMode}
         </p>
       )}
     </div>

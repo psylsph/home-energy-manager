@@ -225,6 +225,10 @@ export default function SettingsPage() {
     setPanelGraphsScale,
     panelGraphsYLock,
     setPanelGraphsYLock,
+    showFlowSummary,
+    setShowFlowSummary,
+    showFlowStatusWords,
+    setShowFlowStatusWords,
     visualNoiseThreshold,
     setVisualNoiseThreshold,
     gridLineWeight,
@@ -1828,6 +1832,33 @@ export default function SettingsPage() {
         {/* ── Sub-section: Energy Flow Diagram ── */}
         <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
           <h3 className="text-text-primary text-sm font-sans font-medium">Energy Flow Diagram</h3>
+
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-col gap-0.5">
+              <span className="text-text-primary text-sm font-sans">Show Overview Sentence</span>
+              <span className="text-text-secondary text-xs font-sans">
+                Show the plain-English explanation underneath the radial flow diagram.
+              </span>
+            </div>
+            <Toggle
+              checked={showFlowSummary}
+              onChange={setShowFlowSummary}
+            />
+          </div>
+
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-col gap-0.5">
+              <span className="text-text-primary text-sm font-sans">Show Node Status Words</span>
+              <span className="text-text-secondary text-xs font-sans">
+                Show short words like Generating, Importing, and Charging under the orbit nodes.
+              </span>
+            </div>
+            <Toggle
+              checked={showFlowStatusWords}
+              onChange={setShowFlowStatusWords}
+            />
+          </div>
+
           <p className="text-text-secondary text-xs font-sans">
             Flows below this wattage are treated as zero — no animated line, no arrow, displayed value rounds to 0W.
             Prevents tiny readings from cluttering the diagram.

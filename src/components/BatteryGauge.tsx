@@ -19,10 +19,12 @@ import { socColor, batteryFillFraction } from '../lib/energyFlow';
 interface Props {
   /** State of charge, 0–100. */
   soc: number;
-  /** Rendered pixel width. Height is ~2× width (AA aspect). Default 96. */
+  /** Rendered pixel width. Height follows the chosen orientation. Default 96. */
   width?: number;
   /** Show the numeric `%` label inside the body. Default true. */
   showLabel?: boolean;
+  /** Battery orientation. Mobile panels use the horizontal variant. */
+  orientation?: 'vertical' | 'horizontal';
 }
 
 // ViewBox geometry — a 40×80 cell with a 16×6 terminal nub on top. The fill
@@ -41,11 +43,11 @@ const NUB_W = 16;
 const NUB_H = 6;
 const NUB_X = (VB_W - NUB_W) / 2;
 
-function BatteryGaugeInner({ soc, width = 96, showLabel = true }: Props) {
+function BatteryGaugeInner({ soc, width = 96, showLabel = true, orientation = 'vertical' }: Props) {
   const color = socColor(soc);
   const frac = batteryFillFraction(soc);
-  // Fill grows from the bottom up. Height proportional to SOC; the top edge
-  // sits at BODY_BOTTOM - (frac * BODY_H).
+  const horizontal = orientation === 'horizontal';
+  // Vertical fill grows from bottom up. Horizontal fill grows left to right.
   const fillH = frac * BODY_H;
   const fillY = BODY_BOTTOM - fillH;
   const labelVisible = showLabel && width >= 72;
@@ -61,8 +63,73 @@ function BatteryGaugeInner({ soc, width = 96, showLabel = true }: Props) {
   const labelText = formatPercent(soc);
   const labelFontSize = labelText.length >= 4 ? 10 : 12;
 
+  if (horizontal) {
+    const hBodyX = 4;
+    const hBodyY = 6;
+    const hBodyW = 68;
+    const hBodyH = 28;
+    const hFillW = Math.max(0, frac * (hBodyW - 4));
+    return (
+      <svg
+        data-orientation="horizontal"
+        viewBox="0 0 80 40"
+        width={width}
+        height={width * 0.5}
+        role="img"
+        aria-label={`Battery ${formatPercent(soc)} charged`}
+        style={{ display: 'block' }}
+      >
+        <rect
+          x={hBodyX}
+          y={hBodyY}
+          width={hBodyW}
+          height={hBodyH}
+          rx={5}
+          fill="var(--app-bg-elevated, #161B22)"
+          stroke={color}
+          strokeWidth={2}
+        />
+        <rect
+          x={73}
+          y={15}
+          width={5}
+          height={10}
+          rx={2}
+          fill="var(--app-bg-elevated, #161B22)"
+          stroke={color}
+          strokeWidth={1.5}
+        />
+        {frac > 0 && (
+          <rect
+            x={hBodyX + 2}
+            y={hBodyY + 2}
+            width={hFillW}
+            height={hBodyH - 4}
+            rx={3}
+            fill={color}
+            style={{ transition: 'width 0.6s ease' }}
+          />
+        )}
+        {labelVisible && (
+          <text
+            x={hBodyX + hBodyW / 2}
+            y={hBodyY + hBodyH / 2 + 4}
+            textAnchor="middle"
+            fontSize={labelFontSize}
+            fontWeight={700}
+            fontFamily="var(--font-mono, monospace)"
+            fill="var(--app-text-primary, #E6EDF3)"
+          >
+            {labelText}
+          </text>
+        )}
+      </svg>
+    );
+  }
+
   return (
     <svg
+      data-orientation="vertical"
       viewBox={`0 0 ${VB_W} ${VB_H}`}
       width={width}
       height={width * (VB_H / VB_W)}
