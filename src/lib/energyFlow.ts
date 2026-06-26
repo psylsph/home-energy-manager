@@ -74,9 +74,10 @@ export function batteryFillFraction(soc: number): number {
 }
 
 // ---------------------------------------------------------------------------
-// Battery mode label — extracted here to de-dupe the copy that previously
-// lived in both EnergyFlowDiagram.tsx and BatteryPanel.tsx. Cosy / Override
-// overrides mirror the existing inline logic exactly.
+// Battery mode label — extracted here to de-dupe display logic across the
+// status diagram and BatteryPanel. Cosy remains the highest-priority display
+// override; active force windows are rendered as mode-aware annotations so
+// the underlying HR(27) mode stays visible.
 // ---------------------------------------------------------------------------
 
 const BATTERY_MODE_LABELS: Record<string, string> = {
@@ -102,12 +103,16 @@ function isAnySlotActive(slots: ScheduleSlot[] | undefined, now: Date): boolean 
 }
 
 /**
- * Display label for the battery mode, applying the Cosy / Override overrides.
+ * Display label for the battery mode, applying the Cosy / active-window display overrides.
  *
  * - "Cosy" when cosy mode is active or enabled-and-in-an-eco-mode.
- * - "Override" when a force charge or force discharge window is currently
- *   active (enable flag set AND inside a slot window — the enable register
- *   is a sticky schedule-enable, not an instantaneous "now" signal).
+ * - `"<mode> (Charging)"` / `"<mode> (Discharging)"` when a force charge or
+ *   force discharge window is currently active (enable flag set AND inside a
+ *   slot window — the enable register is a sticky schedule-enable, not an
+ *   instantaneous "now" signal). If both windows are active, the suffix is
+ *   combined as `"Charging & Discharging"` so the rare overlap is explicit.
+ *   Eco Paused is intentionally grouped under "Eco" here: the active slot is
+ *   the important transient state, while the underlying eco-family mode remains visible.
  * - Otherwise the raw mode label (Eco / Timed Demand / …).
  *
  * `now` is a parameter (default `new Date()`) so tests are deterministic.
@@ -126,8 +131,16 @@ export function batteryModeDisplayLabel(
   if (cosyEnabled && (mode === 'eco' || mode === 'eco_paused')) return 'Cosy';
   const forceChargeActive = enableCharge && isAnySlotActive(chargeSlots, now);
   const forceDischargeActive = enableDischarge && isAnySlotActive(dischargeSlots, now);
-  if (forceChargeActive || forceDischargeActive) return 'Override';
-  return BATTERY_MODE_LABELS[mode] ?? mode;
+  const rawModeLabel = BATTERY_MODE_LABELS[mode] ?? mode;
+  const modeLabel = mode === 'eco' || mode === 'eco_paused' ? 'Eco' : rawModeLabel;
+  if (forceChargeActive || forceDischargeActive) {
+    const activeStates = [
+      forceChargeActive ? 'Charging' : null,
+      forceDischargeActive ? 'Discharging' : null,
+    ].filter((state): state is string => state !== null);
+    return `${modeLabel} (${activeStates.join(' & ')})`;
+  }
+  return rawModeLabel;
 }
 
 // ---------------------------------------------------------------------------
