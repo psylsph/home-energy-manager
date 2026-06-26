@@ -3,7 +3,8 @@ import { useInverterStore } from '../store/useInverterStore';
 import { useAction } from '../hooks/useAction';
 import { apiPost, apiGet } from '../lib/api';
 import { deviceSupportsEps } from '../lib/deviceCapabilities';
-import type { ScheduleSlot } from '../lib/types';
+import { stageBackupAsPending } from '../lib/dischargeSlotBackup';
+import type { ScheduleSlot, SetModeResponse } from '../lib/types';
 
 type BatteryMode = 'unknown' | 'eco' | 'eco_paused' | 'timed_demand' | 'timed_export' | 'export_paused';
 
@@ -1750,9 +1751,12 @@ export default function ControlPage() {
   const handleModeChange = async (mode: BatteryMode) => {
     setRequestedMode(mode);
     try {
-      // When switching to Timed mode with pending local discharge slots,
-      // send everything atomically so HR59=1 is never set without slot constraints.
-      if (modeToCategory(mode) === 'timed' && Object.keys(pendingDischargeSlots).length > 0) {
+      // Build the request body. When switching to Timed mode with pending
+      // local discharge slots, send everything atomically so HR59=1 is
+      // never set without slot constraints.
+      let body: Record<string, unknown> = { mode };
+      const hasPending = Object.keys(pendingDischargeSlots).length > 0;
+      if (modeToCategory(mode) === 'timed' && hasPending) {
         const slots: { slot: number; enabled: boolean; start_hour: number; start_minute: number; end_hour: number; end_minute: number; target_soc: number }[] = [];
         Object.entries(pendingDischargeSlots).forEach(([i, s]) => {
           const idx = Number(i);
@@ -1766,12 +1770,37 @@ export default function ControlPage() {
             target_soc: s.target_soc,
           });
         });
-        await modeAction.execute('/api/control/mode', { mode, discharge_slots: slots });
-        clearPendingDischargeSlots();
-      } else {
-        await modeAction.execute('/api/control/mode', { mode });
+        body = { ...body, discharge_slots: slots };
       }
-    } catch {
+
+      // Call the backend directly so we can inspect the response. The
+      // Eco/Pause transitions may echo back a captured discharge schedule
+      // (see issue #137), and we want to surface that to the UI as
+      // pending edits so the Eco-mode slot editor shows the user's saved
+      // schedule after an Eco→Timed→Eco round-trip.
+      const response = await apiPost<SetModeResponse>('/api/control/mode', body);
+      modeAction.markSuccess();
+
+      // Successful Timed switch: clear pending (they're now on the inverter).
+      if (modeToCategory(mode) === 'timed' && hasPending) {
+        clearPendingDischargeSlots();
+      }
+
+      // Successful Eco/Pause/Export Paused switch with a captured backup:
+      // stage the captured slots as pending edits so the Eco-mode UI shows
+      // them. Only overwrites pending if pending is empty (the user is not
+      // mid-edit) — pending wins over a stale backup.
+      const wentEcoLike =
+        mode === 'eco' || mode === 'eco_paused' || mode === 'export_paused';
+      const staged = stageBackupAsPending(
+        wentEcoLike ? response.discharge_slots_backup : undefined,
+        hasPending ? pendingDischargeSlots : {},
+      );
+      if (staged) {
+        setPendingDischargeSlots(staged);
+      }
+    } catch (e) {
+      modeAction.markError((e as Error).message);
       setRequestedMode(null);
     }
   };

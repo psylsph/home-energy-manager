@@ -156,6 +156,20 @@ export interface ScheduleSlot {
   target_soc: number;
 }
 
+/**
+ * Response shape for POST /api/control/mode. The backend echoes a captured
+ * discharge schedule in `discharge_slots_backup` when entering Eco / Pause /
+ * Export Paused with a configured schedule, so the frontend can stage the
+ * saved slots as pending edits and surface them in the Eco-mode UI after
+ * an Eco→Timed→Eco round-trip. See issue #137.
+ */
+export interface SetModeResponse {
+  ok: boolean;
+  message?: string;
+  error?: string;
+  discharge_slots_backup?: ScheduleSlot[];
+}
+
 export interface TariffSlot {
   start: string;   // "HH:MM"
   end: string;     // "HH:MM" — "23:59" for final slot (inclusive, covers minute 1439)

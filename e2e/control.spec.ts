@@ -748,10 +748,37 @@ test.describe('API Mode Transitions', () => {
     });
     expect((await resp.json()).ok).toBe(true);
 
-    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 3, 15_000);
-    expect(findWrite(writes, 27)!.value).toBe(1);  // self-consumption
-    expect(findWrite(writes, 59)!.value).toBe(1);  // enable discharge
-    expect(findWrite(writes, 110)!.value).toBe(4);  // SOC reserve
+    // Wait for AT LEAST 3 writes — the mode-flag writes (HR 27/59/110).
+    // Issue #137 may add up to 4 slot restore writes when a backup
+    // exists from a prior test; wait for the whole batch.
+    //
+    // Slot restore writes (HR 56/57/44/45, if any) are queued FIRST in
+    // the writes batch, so the very first `waitForWrites(3)` typically
+    // drains the slot writes and the test moves on without seeing the
+    // mode-flag writes. We loop until all three mode-flag writes
+    // (HR 27/59/110) are present in the drained set, with a hard cap
+    // so a stuck queue can't hang the test forever.
+    let allWrites: RegisterWrite[] = [];
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      const writes = await waitForWrites(
+        peekModbusWrites,
+        drainModbusWrites,
+        1,
+        5_000,
+      );
+      allWrites = [...allWrites, ...writes];
+      if (
+        findWrite(allWrites, 27) &&
+        findWrite(allWrites, 59) &&
+        findWrite(allWrites, 110)
+      ) {
+        break;
+      }
+    }
+    expect(findWrite(allWrites, 27)!.value).toBe(1);  // self-consumption
+    expect(findWrite(allWrites, 59)!.value).toBe(1);  // enable discharge
+    expect(findWrite(allWrites, 110)!.value).toBe(4);  // SOC reserve
   });
 
   test('Eco → Timed Export transition', async ({
@@ -776,10 +803,30 @@ test.describe('API Mode Transitions', () => {
     });
     expect((await resp.json()).ok).toBe(true);
 
-    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 3, 15_000);
-    expect(findWrite(writes, 27)!.value).toBe(0);  // export mode
-    expect(findWrite(writes, 59)!.value).toBe(1);  // enable discharge
-    expect(findWrite(writes, 110)!.value).toBe(4);  // SOC reserve
+    // Wait until all three mode-flag writes are captured. See comment
+    // on the previous test for why a single `waitForWrites(3)` is not
+    // sufficient under issue #137's slot-restore path.
+    let allWrites: RegisterWrite[] = [];
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      const writes = await waitForWrites(
+        peekModbusWrites,
+        drainModbusWrites,
+        1,
+        5_000,
+      );
+      allWrites = [...allWrites, ...writes];
+      if (
+        findWrite(allWrites, 27) &&
+        findWrite(allWrites, 59) &&
+        findWrite(allWrites, 110)
+      ) {
+        break;
+      }
+    }
+    expect(findWrite(allWrites, 27)!.value).toBe(0);  // export mode
+    expect(findWrite(allWrites, 59)!.value).toBe(1);  // enable discharge
+    expect(findWrite(allWrites, 110)!.value).toBe(4);  // SOC reserve
   });
 
   test('Timed Demand → Eco transition', async ({

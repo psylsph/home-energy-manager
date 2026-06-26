@@ -79,5 +79,25 @@ export function useAction() {
     [clearResetTimer, scheduleReset],
   );
 
-  return { ...state, execute };
+  // Manually advance the action state when the caller handled the API call
+  // themselves (e.g. to inspect the response body). Used by `handleModeChange`
+  // so the Eco/Timed buttons still surface the same loading spinner and
+  // "Settings are being applied…" hint as the other actions, while still
+  // letting the caller read `discharge_slots_backup` from the response.
+  const markSuccess = useCallback(() => {
+    clearResetTimer();
+    setState({ loading: false, success: true, error: null });
+    scheduleReset(2000);
+  }, [clearResetTimer, scheduleReset]);
+
+  const markError = useCallback(
+    (message: string) => {
+      clearResetTimer();
+      setState({ loading: false, success: false, error: message });
+      scheduleReset(3000);
+    },
+    [clearResetTimer, scheduleReset],
+  );
+
+  return { ...state, execute, markSuccess, markError };
 }

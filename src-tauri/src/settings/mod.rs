@@ -598,6 +598,44 @@ pub(crate) fn default_open_meteo_base_url() -> String {
     "https://api.open-meteo.com".to_string()
 }
 
+/// A snapshot of a single discharge schedule slot, persisted to settings
+/// so the user's pre-Eco schedule can be restored when they switch back
+/// to Timed mode.
+///
+/// Mirrors [`crate::inverter::model::ScheduleSlot`] field-for-field but
+/// lives in `settings/` to avoid a circular dependency (the settings
+/// module is loaded by the inverter module, not the other way around).
+/// Keep the two structs in sync — adding a field to `ScheduleSlot` should
+/// be reflected here. See issue #137.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DischargeSlotBackup {
+    /// Whether the slot is active.
+    pub enabled: bool,
+    /// Start hour (0-23).
+    pub start_hour: u8,
+    /// Start minute (0-59).
+    pub start_minute: u8,
+    /// End hour (0-23).
+    pub end_hour: u8,
+    /// End minute (0-59).
+    pub end_minute: u8,
+    /// Target SOC (from separate register, min 4 to protect battery).
+    pub target_soc: u8,
+}
+
+impl From<&crate::inverter::model::ScheduleSlot> for DischargeSlotBackup {
+    fn from(slot: &crate::inverter::model::ScheduleSlot) -> Self {
+        Self {
+            enabled: slot.enabled,
+            start_hour: slot.start_hour,
+            start_minute: slot.start_minute,
+            end_hour: slot.end_hour,
+            end_minute: slot.end_minute,
+            target_soc: slot.target_soc,
+        }
+    }
+}
+
 /// Application settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -776,6 +814,18 @@ pub struct Settings {
     /// Only started when `api_key` is also non-empty. Set to 0 to disable.
     #[serde(default = "default_api_port")]
     pub api_port: u16,
+
+    /// Persisted copy of the user's discharge schedule captured on the way
+    /// into Eco / Pause / Export Paused. The backend needs to zero the
+    /// slot registers on those mode switches (the Gen3 firmware re-asserts
+    /// `enable_discharge` whenever any slot register is non-zero, which
+    /// would otherwise prevent Eco from "sticking"), but doing so loses
+    /// the user's configured schedule. We snapshot it here first and
+    /// restore it atomically (before `HR_ENABLE_DISCHARGE=1`) when the
+    /// user switches back to Timed Demand / Timed Export without
+    /// explicitly posting a new schedule. See issue #137.
+    #[serde(default)]
+    pub discharge_slots_backup: Option<Vec<DischargeSlotBackup>>,
 }
 
 fn default_http_port() -> u16 {
@@ -980,6 +1030,7 @@ impl Default for Settings {
             autostart_enabled: false,
             api_key: String::new(),
             api_port: 7338,
+            discharge_slots_backup: None,
         }
     }
 }
@@ -1127,6 +1178,10 @@ mod tests {
         // Read-only API key must be empty by default; port must default to 7338.
         assert_eq!(s.api_key, "");
         assert_eq!(s.api_port, 7338);
+        // Discharge-slot backup (issue #137) defaults to None — no schedule
+        // to restore until the user enters Eco / Pause / Export Paused at
+        // least once with a configured discharge schedule.
+        assert_eq!(s.discharge_slots_backup, None);
     }
 
     #[test]
@@ -1183,6 +1238,24 @@ mod tests {
             autostart_enabled: true,
             api_key: String::new(),
             api_port: 0,
+            discharge_slots_backup: Some(vec![
+                DischargeSlotBackup {
+                    enabled: true,
+                    start_hour: 16,
+                    start_minute: 0,
+                    end_hour: 19,
+                    end_minute: 30,
+                    target_soc: 4,
+                },
+                DischargeSlotBackup {
+                    enabled: true,
+                    start_hour: 21,
+                    start_minute: 0,
+                    end_hour: 23,
+                    end_minute: 0,
+                    target_soc: 4,
+                },
+            ]),
         };
         let json = serde_json::to_string(&s).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
@@ -1219,6 +1292,20 @@ mod tests {
             decoded.weather_config.open_meteo_base_url,
             "https://api.open-meteo.com"
         );
+        // Discharge-slot backup roundtrips with all fields populated (issue #137).
+        let backup = decoded
+            .discharge_slots_backup
+            .as_ref()
+            .expect("backup must round-trip through JSON");
+        assert_eq!(backup.len(), 2);
+        assert!(backup[0].enabled);
+        assert_eq!(backup[0].start_hour, 16);
+        assert_eq!(backup[0].start_minute, 0);
+        assert_eq!(backup[0].end_hour, 19);
+        assert_eq!(backup[0].end_minute, 30);
+        assert_eq!(backup[0].target_soc, 4);
+        assert_eq!(backup[1].start_hour, 21);
+        assert_eq!(backup[1].end_hour, 23);
     }
 
     /// AlertsConfig pushover fields must survive a full JSON round-trip and
@@ -1305,6 +1392,56 @@ mod tests {
             decoded.weather_config.open_meteo_base_url,
             "https://api.open-meteo.com"
         );
+        // Legacy files (pre-#137) carry no `discharge_slots_backup` key.
+        // The `#[serde(default)]` on the new field produces `None` so the
+        // upgrade path is silent — see the dedicated
+        // `legacy_settings_without_discharge_slots_backup_loads` test.
+        assert_eq!(decoded.discharge_slots_backup, None);
+    }
+
+    /// `settings.json` written before the discharge-slot backup feature
+    /// shipped (no `discharge_slots_backup` key at all) must still load.
+    /// The `#[serde(default)]` on the new field produces `None` so an
+    /// upgrade user gets the "no schedule to restore" state, not a panic.
+    /// See issue #137.
+    #[test]
+    fn legacy_settings_without_discharge_slots_backup_loads() {
+        let legacy = r#"{
+            "host": "192.168.1.50",
+            "port": 8899,
+            "serial": "",
+            "poll_interval": 60,
+            "auto_connect": true,
+            "import_tariff": 0.285,
+            "export_tariff": 0.15,
+            "hidden_panels": [],
+            "evc_host": "",
+            "disable_auto_discovery": true,
+            "minimal_telemetry_mode": false
+        }"#;
+        let decoded: Settings = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            decoded.discharge_slots_backup, None,
+            "missing field must default to None, not fail to parse"
+        );
+    }
+
+    /// `DischargeSlotBackup` survives a full JSON round-trip independently
+    /// of the surrounding `Settings` struct. Pins the on-disk shape so a
+    /// later rename or field reorder can't break a stored backup file.
+    #[test]
+    fn discharge_slot_backup_roundtrip() {
+        let original = DischargeSlotBackup {
+            enabled: true,
+            start_hour: 16,
+            start_minute: 30,
+            end_hour: 19,
+            end_minute: 45,
+            target_soc: 80,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: DischargeSlotBackup = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, original);
     }
 
     /// WeatherConfig JSON missing the optional `open_meteo_base_url` field
@@ -1406,6 +1543,7 @@ mod tests {
             autostart_enabled: false,
             api_key: String::new(),
             api_port: 0,
+            discharge_slots_backup: None,
         };
 
         // We can't easily override the settings path for testing,
