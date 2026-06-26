@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useInverterStore } from '../store/useInverterStore';
 import { apiPost } from '../lib/api';
-import EnergyFlowDiagram from '../components/EnergyFlowDiagram';
+import EnergyOrbitDiagram from '../components/EnergyOrbitDiagram';
 import BatteryPanel from '../components/BatteryPanel';
 import SummaryTiles from '../components/SummaryTiles';
 import ColdBatteryWarning from '../components/ColdBatteryWarning';
@@ -200,7 +200,7 @@ export default function StatusPage() {
 
       {/* Energy flow diagram — full width card */}
       <section className="bg-bg-surface rounded-2xl p-2">
-        <EnergyFlowDiagram
+        <EnergyOrbitDiagram
           snapshot={snapshot}
           evcPower={evcPower}
           evcChargingState={evcChargingState}
