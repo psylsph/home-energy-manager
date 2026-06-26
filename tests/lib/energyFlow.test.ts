@@ -3,6 +3,7 @@ import {
   buildEnergyFlows,
   buildSummaryText,
   batteryModeDisplayLabel,
+  batteryFillFraction,
   DEFAULT_NOISE_THRESHOLD_W,
 } from '../../src/lib/energyFlow';
 import type { InverterSnapshot, ScheduleSlot } from '../../src/lib/types';
@@ -238,6 +239,33 @@ describe('buildEnergyFlows — EV charger', () => {
     expect(ev!.active).toBe(false);
     expect(ev!.unit).toBe('Idle');
     expect(flowById(vm, 'ev')).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Battery fill fraction (AA-cell gauge)
+// ---------------------------------------------------------------------------
+
+describe('batteryFillFraction', () => {
+  it('maps 0% to 0 and 100% to 1', () => {
+    expect(batteryFillFraction(0)).toBe(0);
+    expect(batteryFillFraction(100)).toBe(1);
+  });
+
+  it('is linear in SOC', () => {
+    expect(batteryFillFraction(50)).toBe(0.5);
+    expect(batteryFillFraction(25)).toBe(0.25);
+    expect(batteryFillFraction(97)).toBe(0.97);
+  });
+
+  it('clamps out-of-range values', () => {
+    expect(batteryFillFraction(150)).toBe(1);
+    expect(batteryFillFraction(-20)).toBe(0);
+  });
+
+  it('treats NaN / non-finite as 0', () => {
+    expect(batteryFillFraction(Number.NaN)).toBe(0);
+    expect(batteryFillFraction(Number.POSITIVE_INFINITY)).toBe(0);
   });
 });
 

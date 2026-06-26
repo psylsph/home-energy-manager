@@ -63,6 +63,16 @@ export function socColor(soc: number): string {
   return '#22C55E';
 }
 
+/**
+ * Fraction (0–1) of the battery body to fill for a given SOC. Clamped and
+ * NaN-safe. Used by the AA-cell [`BatteryGauge`] so the fill-height math
+ * lives here (unit-tested) rather than in the component.
+ */
+export function batteryFillFraction(soc: number): number {
+  if (!Number.isFinite(soc)) return 0;
+  return Math.max(0, Math.min(1, soc / 100));
+}
+
 // ---------------------------------------------------------------------------
 // Battery mode label — extracted here to de-dupe the copy that previously
 // lived in both EnergyFlowDiagram.tsx and BatteryPanel.tsx. Cosy / Override
