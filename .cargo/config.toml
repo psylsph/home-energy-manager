@@ -1,0 +1,7 @@
+# Resilience against transient crates.io / CDN failures such as
+# "Connection reset by peer" mid-download. Cargo gives up on the first failed
+# fetch by default; bumping net.retry makes it retry flaky registry downloads.
+# CI also sets CARGO_NET_RETRY as an env var for belt-and-braces coverage.
+# https://doc.rust-lang.org/cargo/reference/config.html#net
+[net]
+retry = 10
