@@ -23,23 +23,66 @@ import type { RegisterWrite } from './mock-modbus.js';
 // Helpers
 // ---------------------------------------------------------------------------
 
+// Minimum quiet window used to decide the write stream has settled. This MUST
+// exceed the backend poll loop's cycle interval (poll_interval = 5s in the
+// global-setup settings) plus a safety margin. Why: a register write can sit
+// QUEUED in the backend's pending_writes for up to one full poll cycle before
+// the poll loop drains and sends it over the wire. A quiet window shorter than
+// the cycle can therefore read "no writes arriving" while writes are merely
+// queued and unsent — a false negative that lets a previous test's deferred
+// write leak into this test's captured set (the force-stop write-capture race
+// documented in AGENTS.md). 7s comfortably spans the 5s cycle plus jitter.
+//
+// During active sending writes arrive ~1.5s apart (the inter-request delay),
+// so a 7s window never falsely reports "quiet" mid-batch — it only goes quiet
+// once the queue is genuinely empty.
+const WRITE_QUIESCENCE_MS = 7_000;
+
 /**
- * Drain pending writes. Mirrors the `clearWrites` helper in
- * control.spec.ts: repeatedly drain and wait until no new writes
- * appear for 3 seconds (covering ~2 writes × 1.5s retry delay
- * each). This prevents cross-contamination where a previous test's
- * deferred writes arrive in the middle of the next test.
+ * Drain pending writes until the write stream is genuinely idle.
+ *
+ * Repeatedly drain and wait out a full WRITE_QUIESCENCE_MS window: if any new
+ * writes arrive within that window, the backend still had writes queued (or in
+ * flight), so loop again. Only return once a whole window passes with nothing
+ * new. This prevents cross-contamination where a previous test's deferred
+ * writes — still queued in pending_writes when this test starts — arrive in the
+ * middle of this test's captured set and corrupt the per-register assertions.
  */
 async function clearWrites(drainModbusWrites: () => Promise<RegisterWrite[]>) {
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     await drainModbusWrites();
-    await new Promise((r) => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, WRITE_QUIESCENCE_MS));
     const remaining = await drainModbusWrites();
     if (remaining.length === 0) return;
   }
 }
 
+/**
+ * Wait for this test's register writes to finish landing, then return the
+ * FINAL value written to each register (one entry per address).
+ *
+ * Replaces the old "peek until the raw write count hits minCount, then drain"
+ * approach, which raced in two ways (AGENTS.md, force-stop write-capture race):
+ *
+ *   1. Gating on a raw write count is fragile: if a register is written more
+ *      than once (a transient/intermediate value before its final value), the
+ *      count is inflated and can satisfy `minCount` before the batch is
+ *      complete — so the drain captured a prefix, not the settled set.
+ *   2. Draining the instant the count was met could catch the write stream
+ *      mid-batch, and `findWrite` (first match) then surfaced the transient
+ *      value (e.g. a slot register momentarily holding a live-time value like
+ *      1600) instead of the intended final value.
+ *
+ * The fix mirrors what the auto-revert tests already do: capture every write,
+ * then keep the LAST one per register. We first wait for `minCount` writes so
+ * we don't drain a still-empty buffer (the action hasn't started emitting yet),
+ * then keep draining until a WRITE_QUIESCENCE_MS window produces no new writes
+ * — proof the poll loop has finished emitting the whole batch — and finally
+ * collapse to the final value per address. `findWrite` then trivially returns
+ * that final value, and the `toBeUndefined` assertions still hold (an absent
+ * register has no entry).
+ */
 async function waitForWrites(
   peekModbusWrites: () => Promise<RegisterWrite[]>,
   drainModbusWrites: () => Promise<RegisterWrite[]>,
@@ -47,12 +90,30 @@ async function waitForWrites(
   timeoutMs = 30_000,
 ): Promise<RegisterWrite[]> {
   const start = Date.now();
+
+  // Phase 1: wait for the action's writes to begin landing. Peek (don't drain)
+  // so nothing is lost before the quiescence window.
   while (Date.now() - start < timeoutMs) {
-    const writes = await peekModbusWrites();
-    if (writes.length >= minCount) return drainModbusWrites();
+    if ((await peekModbusWrites()).length >= minCount) break;
     await new Promise((r) => setTimeout(r, 200));
   }
-  return drainModbusWrites();
+
+  // Phase 2: drain everything captured so far, then keep draining until a full
+  // WRITE_QUIESCENCE_MS window produces no new writes — the batch has settled.
+  // Use a fresh deadline so a slow Phase 1 can't starve the quiescence window.
+  let captured: RegisterWrite[] = await drainModbusWrites();
+  const settleDeadline = Date.now() + timeoutMs;
+  while (Date.now() < settleDeadline) {
+    await new Promise((r) => setTimeout(r, WRITE_QUIESCENCE_MS));
+    const more = await drainModbusWrites();
+    if (more.length === 0) break;
+    captured = captured.concat(more);
+  }
+
+  // Collapse to the last (final) write per register address.
+  const byAddr = new Map<number, RegisterWrite>();
+  for (const w of captured) byAddr.set(w.address, w);
+  return [...byAddr.values()];
 }
 
 function findWrite(writes: RegisterWrite[], address: number): RegisterWrite | undefined {
