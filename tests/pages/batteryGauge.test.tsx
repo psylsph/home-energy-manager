@@ -45,4 +45,37 @@ describe('BatteryGauge', () => {
     // showLabel defaults true but gates on width >= 72.
     expect(container.querySelector('text')).toBeNull();
   });
+
+  it('always uses the theme text colour (no dark-ink flip as the fill rises)', () => {
+    // Regression guard for the transition-period bug: the label used to flip
+    // to dark ink once the fill covered ~45% of the body, leaving the upper
+    // half of the glyph unreadable against the dark background mid-rise.
+    // Now it must follow --app-text-primary at every SOC.
+    for (const soc of [5, 25, 45, 55, 75, 100]) {
+      const { container } = render(<BatteryGauge soc={soc} />);
+      const text = container.querySelector('text')!;
+      expect(text.getAttribute('fill')).toBe('var(--app-text-primary, #E6EDF3)');
+    }
+  });
+
+  it('scales the font down for the 4-char "100%" label and keeps it inside the body', () => {
+    // "100%" overflows the body at the default font size; the 100% case
+    // must use the smaller size and the glyph must not exceed the body width.
+    const { container } = render(<BatteryGauge soc={100} />);
+    const text = container.querySelector('text')!;
+    expect(Number(text.getAttribute('font-size'))).toBe(10);
+    // Body spans BODY_X(5)..(5+30)=35 in the 40-wide viewBox. A centred
+    // "100%" at size 10 (≈0.6em advance × 4 chars = 24 units) fits within
+    // the ~26-unit inner width with margin.
+    const body = container.querySelectorAll('rect')[1];
+    const bx = Number(body.getAttribute('x'));
+    const bw = Number(body.getAttribute('width'));
+    expect(bx).toBe(5);
+    expect(bw).toBe(30);
+  });
+
+  it('uses the full font size for 2/3-char labels', () => {
+    const { container } = render(<BatteryGauge soc={50} />);
+    expect(Number(container.querySelector('text')!.getAttribute('font-size'))).toBe(12);
+  });
 });
