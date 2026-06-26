@@ -144,6 +144,12 @@ export interface BuildEnergyFlowsOptions {
   evcPowerW?: number;
   /** When false, the EV node is omitted entirely (charger not configured). */
   showEvc?: boolean;
+  /**
+   * Resolved EV node label (e.g. "Charging" / "Idle" / "Connected" /
+   * "Disconnected" / "Not Found") from [`evcNodeLabel`]. When omitted the
+   * node falls back to "Charging" / "Idle" based on power alone.
+   */
+  evcLabel?: string;
   /** Injected clock for deterministic summary / slot-window tests. */
   now?: Date;
 }
@@ -188,6 +194,15 @@ export function buildEnergyFlows(
   );
 
   // --- Flows (watts always non-negative; direction via from/to) ---
+  //
+  // Home-centred topology: the inverter is treated as passive plumbing,
+  // so every flow is spoken of relative to the *home* (the radial hub)
+  // rather than the physical inverter. Solar generates INTO home, grid
+  // imports INTO home / exports OUT of home, battery charges FROM home /
+  // discharges INTO home. This matches how a homeowner thinks about
+  // "what's powering my house" (the whole point of the radial diagram)
+  // and is how consumer energy apps (Tesla, etc.) present it. The
+  // inverter still appears as a passive info node below the diagram.
   const flows: EnergyFlow[] = [];
   const push = (
     id: string,
@@ -201,29 +216,27 @@ export function buildEnergyFlows(
   };
 
   if (solarActive) {
-    push('solar', 'solar', 'inverter', s.solar_power, 'generate',
+    push('solar', 'solar', 'home', s.solar_power, 'generate',
       `${formatPower(s.solar_power)} from solar`);
   }
   if (isImporting) {
-    push('import', 'grid', 'inverter', absGrid, 'import',
+    push('import', 'grid', 'home', absGrid, 'import',
       `${formatPower(absGrid)} importing`);
   }
   if (isExporting) {
-    push('export', 'inverter', 'grid', absGrid, 'export',
+    push('export', 'home', 'grid', absGrid, 'export',
       `${formatPower(absGrid)} exporting`);
   }
   if (isCharging) {
-    push('charge', 'inverter', 'battery', absBattery, 'charge',
+    push('charge', 'home', 'battery', absBattery, 'charge',
       `${formatPower(absBattery)} charging battery`);
   }
   if (isDischarging) {
-    push('discharge', 'battery', 'inverter', absBattery, 'discharge',
+    push('discharge', 'battery', 'home', absBattery, 'discharge',
       `${formatPower(absBattery)} from battery`);
   }
-  if (homeActive) {
-    push('home', 'inverter', 'home', s.home_power, 'consume',
-      `${formatPower(s.home_power)} to home`);
-  }
+  // No self-flow for home: it is the hub, not a spoke. Its consumption is
+  // shown as the hub node's value, not as a directed flow.
   if (evcActive) {
     push('ev', 'home', 'ev', evcPower, 'consume',
       `${formatPower(evcPower)} to EV`);
@@ -279,7 +292,7 @@ export function buildEnergyFlows(
       id: 'ev',
       label: 'EV',
       value: formatVisualPower(evcPower, noise),
-      unit: evcActive ? 'Charging' : 'Idle',
+      unit: opts.evcLabel ?? (evcActive ? 'Charging' : 'Idle'),
       color: FLOW_COLORS.ev,
       active: evcActive,
     });

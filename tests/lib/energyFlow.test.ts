@@ -107,23 +107,23 @@ function flowById(vm: ReturnType<typeof buildEnergyFlows>, id: string) {
 // Sign conventions (AGENTS.md "Battery power sign convention")
 // ---------------------------------------------------------------------------
 
-describe('buildEnergyFlows — sign conventions', () => {
-  it('emits solar→inverter for positive solar_power above threshold', () => {
+describe('buildEnergyFlows — sign conventions (home-centred)', () => {
+  it('emits solar→home for positive solar_power above threshold', () => {
     const vm = buildEnergyFlows(snap({ solar_power: 5000 }));
     const f = flowById(vm, 'solar');
     expect(f).toBeDefined();
     expect(f!.from).toBe('solar');
-    expect(f!.to).toBe('inverter');
+    expect(f!.to).toBe('home');
     expect(f!.watts).toBe(5000);
     expect(f!.direction).toBe('generate');
   });
 
-  it('treats +grid_power as export (inverter→grid) and −grid_power as import (grid→inverter)', () => {
+  it('treats +grid_power as export (home→grid) and −grid_power as import (grid→home)', () => {
     // Export: +4.3kW
     const exp = buildEnergyFlows(snap({ grid_power: 4300 }));
     const ef = flowById(exp, 'export');
     expect(ef).toBeDefined();
-    expect(ef!.from).toBe('inverter');
+    expect(ef!.from).toBe('home');
     expect(ef!.to).toBe('grid');
     expect(ef!.direction).toBe('export');
     expect(flowById(exp, 'import')).toBeUndefined();
@@ -133,39 +133,40 @@ describe('buildEnergyFlows — sign conventions', () => {
     const imf = flowById(imp, 'import');
     expect(imf).toBeDefined();
     expect(imf!.from).toBe('grid');
-    expect(imf!.to).toBe('inverter');
+    expect(imf!.to).toBe('home');
     expect(imf!.direction).toBe('import');
     expect(flowById(imp, 'export')).toBeUndefined();
   });
 
   it('uses battery_state (not sign alone) to pick charge vs discharge direction', () => {
     // battery_state drives direction; battery_power magnitude is the watts.
-    // +ve power + charging state → inverter→battery (charge).
+    // charging → home→battery (charge).
     const chg = buildEnergyFlows(snap({ battery_state: 'charging', battery_power: -241 }));
     const cf = flowById(chg, 'charge');
     expect(cf).toBeDefined();
-    expect(cf!.from).toBe('inverter');
+    expect(cf!.from).toBe('home');
     expect(cf!.to).toBe('battery');
     expect(cf!.watts).toBe(241);
     expect(cf!.direction).toBe('charge');
     expect(flowById(chg, 'discharge')).toBeUndefined();
 
-    // discharge → battery→inverter.
+    // discharge → battery→home.
     const dis = buildEnergyFlows(snap({ battery_state: 'discharging', battery_power: 1400 }));
     const df = flowById(dis, 'discharge');
     expect(df).toBeDefined();
     expect(df!.from).toBe('battery');
-    expect(df!.to).toBe('inverter');
+    expect(df!.to).toBe('home');
     expect(df!.direction).toBe('discharge');
   });
 
-  it('emits home flow as inverter→home (home_power is always +ve)', () => {
+  it('never emits a self-flow for home (it is the hub, not a spoke)', () => {
+    // Home's consumption shows as the hub node value, not a directed flow.
     const vm = buildEnergyFlows(snap({ home_power: 501 }));
-    const f = flowById(vm, 'home');
-    expect(f).toBeDefined();
-    expect(f!.from).toBe('inverter');
-    expect(f!.to).toBe('home');
-    expect(f!.direction).toBe('consume');
+    expect(flowById(vm, 'home')).toBeUndefined();
+    // But the home node itself is active and carries the consumption value.
+    const home = vm.nodes.find((n) => n.id === 'home');
+    expect(home).toBeDefined();
+    expect(home!.active).toBe(true);
   });
 });
 
@@ -239,6 +240,15 @@ describe('buildEnergyFlows — EV charger', () => {
     expect(ev!.active).toBe(false);
     expect(ev!.unit).toBe('Idle');
     expect(flowById(vm, 'ev')).toBeUndefined();
+  });
+
+  it('uses the resolved evcLabel for the node unit when provided', () => {
+    // Charger configured + reachable but not delivering → "Connected".
+    const vm = buildEnergyFlows(snap(), { evcPowerW: 0, showEvc: true, evcLabel: 'Connected' });
+    expect(vm.nodes.find((n) => n.id === 'ev')!.unit).toBe('Connected');
+    // A never-reached host → "Not Found" (issue #138).
+    const vm2 = buildEnergyFlows(snap(), { evcPowerW: 0, showEvc: true, evcLabel: 'Not Found' });
+    expect(vm2.nodes.find((n) => n.id === 'ev')!.unit).toBe('Not Found');
   });
 });
 
