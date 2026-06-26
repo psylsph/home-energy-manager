@@ -29,8 +29,10 @@ interface Props {
 // lives inside an inset body so the outline stroke never overlaps it.
 const VB_W = 40;
 const VB_H = 80;
-const BODY_X = 6;
-const BODY_W = VB_W - BODY_X * 2; // 28
+// Body inset — left wide enough that a 4-char label ("100%") fits inside
+// the outline at the scaled-down font size used for that case.
+const BODY_X = 5;
+const BODY_W = VB_W - BODY_X * 2; // 30
 const BODY_TOP = 10; // below the terminal nub
 const BODY_BOTTOM = VB_H - 4;
 const BODY_H = BODY_BOTTOM - BODY_TOP;
@@ -47,10 +49,17 @@ function BatteryGaugeInner({ soc, width = 96, showLabel = true }: Props) {
   const fillH = frac * BODY_H;
   const fillY = BODY_BOTTOM - fillH;
   const labelVisible = showLabel && width >= 72;
-  // Label colour flips to dark ink when the fill reaches the label band so
-  // the percentage stays readable against a bright fill; otherwise use the
-  // elevated-surface text colour (set via CSS var on the parent).
-  const labelOnFill = frac > 0.45;
+  // Label colour always follows the app theme (light text in dark mode,
+  // dark in light mode). We deliberately do NOT flip to a dark ink when the
+  // fill covers the text band: during the SOC transition the fill only
+  // partially covers the glyph, so a hard flip leaves half the text
+  // unreadable against whichever half it isn't on. A single theme-bound
+  // colour stays legible across the whole range and at both extremes.
+  //
+  // Font size scales down for the 4-char "100%" case so it never overflows
+  // the body outline (2/3-char labels use the full size).
+  const labelText = formatPercent(soc);
+  const labelFontSize = labelText.length >= 4 ? 10 : 12;
 
   return (
     <svg
@@ -102,12 +111,12 @@ function BatteryGaugeInner({ soc, width = 96, showLabel = true }: Props) {
           x={VB_W / 2}
           y={VB_H / 2 + 4}
           textAnchor="middle"
-          fontSize={12}
+          fontSize={labelFontSize}
           fontWeight={700}
           fontFamily="var(--font-mono, monospace)"
-          fill={labelOnFill ? 'var(--app-bg-base, #0D1117)' : 'var(--app-text-primary, #E6EDF3)'}
+          fill="var(--app-text-primary, #E6EDF3)"
         >
-          {formatPercent(soc)}
+          {labelText}
         </text>
       )}
     </svg>
