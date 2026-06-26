@@ -33,6 +33,7 @@ import { useInverterStore } from '../store/useInverterStore';
 import type { SeriesLegendItem } from '../components/SeriesLegend';
 import type { HistoryRange } from '../lib/types';
 import { computeTempDifferential, computeBatteryExternalDifferential } from '../lib/temperatureChart';
+import { computeTightDomain } from '../lib/chartDomain';
 import { openExternal } from '../lib/openExternal';
 
 // ---------------------------------------------------------------------------
@@ -52,6 +53,13 @@ interface ChartDef {
   fields: { field: string; color: string; label?: string; transform?: (v: number) => number }[];
   unit: string;
   yDomain?: [number, number];
+  /**
+   * When set, the y-axis snaps to the recorded data range ± this padding
+   * instead of Recharts' 0-based auto-scale, so narrow-band series like
+   * Grid Voltage stay readable (issue #152). Ignored when the range has
+   * no finite data points (falls back to auto-scaling).
+   */
+  tightDomainPadding?: number;
   /**
    * Optional client-side derivation (e.g. the temperature differentials).
    * Cost/income are NOT derived here - the server computes them at native
@@ -142,6 +150,7 @@ function getCharts(tab: MetricTab): ChartDef[] {
           key: 'grid-voltage',
           title: 'Grid Voltage (V)',
           unit: 'V',
+          tightDomainPadding: 10,
           fields: [{ field: 'grid_voltage', color: '#3B82F6' }],
         },
       ];
@@ -322,9 +331,20 @@ function ChartCard({ chart, data, range, domain, ticks, gridLineWeight }: {
   });
 
   // Charts use their declared yDomain (e.g. SOC fixed at 0-100) or Recharts
-  // auto-scaling otherwise. The shared Y-axis lock feature is scoped to the
-  // Solar power chart on the dashboard only (see SolarPowerChart.tsx).
-  const yDomain: [number, number] | undefined = chart.yDomain;
+  // auto-scaling otherwise. Charts that declare `tightDomainPadding` instead
+  // snap the y-axis to the recorded range ± padding (e.g. Grid Voltage ±10 V
+  // so narrow fluctuations stay readable, issue #152). The shared Y-axis
+  // lock feature is scoped to the Solar power chart on the dashboard only
+  // (see SolarPowerChart.tsx).
+  const yDomain: [number, number] | undefined =
+    chart.tightDomainPadding !== undefined
+      ? computeTightDomain(
+          seriesData.flatMap((row) =>
+            seriesNames.map((name) => row[name] as number | null | undefined),
+          ),
+          chart.tightDomainPadding,
+        )
+      : chart.yDomain;
 
   // Currency tick labels (`£12.25`, and up to `£xxx.xx` on the year range)
   // are much wider than `%` / `W` / `°C`. The chart's tight `left: -20`
@@ -372,7 +392,7 @@ function ChartCard({ chart, data, range, domain, ticks, gridLineWeight }: {
             tick={{ fontSize: 11, style: { fontWeight: 700 } }}
             tickLine={false}
             axisLine={false}
-            domain={yDomain ?? chart.yDomain}
+            domain={yDomain}
             tickFormatter={(v: number) =>
               chart.unit === '£' ? `£${v.toFixed(2)}`
                 : chart.unit === 'kWh' ? `${v.toFixed(1)}`

@@ -240,6 +240,11 @@ export default function SettingsPage() {
   const [host, setHost] = useState('');
   const [port, setPort] = useState(8899);
   const [serial, setSerial] = useState('');
+  // Inverter address must be a valid IPv4 dotted-quad — same rule as the
+  // EV Charger field (issue #153). Empty is allowed only so the field can
+  // be cleared; the Connect button stays disabled until a valid address
+  // is present.
+  const hostInvalid = host !== '' && !isValidIpv4Host(host);
 
   // Discover
   const [discovering, setDiscovering] = useState(false);
@@ -450,6 +455,13 @@ export default function SettingsPage() {
 
   // Save connection
   const handleConnect = async () => {
+    // Defence-in-depth (issue #153): the Connect button is disabled on
+    // invalid input, but a stale tab or programmatic caller must still be
+    // rejected before we persist a bad host.
+    if (!isValidIpv4Host(host)) {
+      flash('Inverter address must be a valid IPv4 address (e.g. 192.168.1.50)', false);
+      return;
+    }
     const savedHost = localStorage.getItem('saved_host');
     const hostChanged = savedHost && savedHost !== host;
     setSaving(true);
@@ -884,8 +896,13 @@ export default function SettingsPage() {
               type="text"
               value={host}
               onChange={(e) => setHost(e.target.value)}
-              placeholder="192.168.x.x"
-              className="min-w-0 flex-1 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+              placeholder="e.g. 192.168.1.50"
+              aria-invalid={hostInvalid}
+              className={`min-w-0 flex-1 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border outline-none transition-colors ${
+                hostInvalid
+                  ? 'border-red-500 focus:border-red-400'
+                  : 'border-bg-elevated focus:border-flow-active'
+              }`}
             />
             {developerMode && (
               <input
@@ -897,6 +914,11 @@ export default function SettingsPage() {
               />
             )}
           </div>
+          {hostInvalid && (
+            <span className="text-red-400 text-xs font-sans">
+              Must be four numbers separated by dots, e.g. <span className="font-mono">192.168.1.50</span>.
+            </span>
+          )}
         </label>
 
         <label className="flex flex-col gap-1">
@@ -913,8 +935,8 @@ export default function SettingsPage() {
         <div className="flex gap-3 pt-1">
           <button
             onClick={handleConnect}
-            disabled={saving || !host}
-            className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 transition-opacity"
+            disabled={saving || !host || hostInvalid}
+            className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
           >
             {saving ? 'Saving…' : 'Connect'}
           </button>
