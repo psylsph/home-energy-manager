@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-06-26
+
 ### Fixed
 
 - **The manual Inverter Address field now validates like the EV Charger field.** Typing a malformed address (a missing octet, out-of-range numbers, letters) now turns the field red, shows a hint, and disables Connect instead of letting a bad host be saved and retried forever — the same IPv4 check the EV Charger field already had. See #153.

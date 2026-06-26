@@ -40,6 +40,9 @@ jobs:
     name: Rust tests
     needs: lint-frontend
     runs-on: ubuntu-22.04
+    env:
+      CARGO_NET_RETRY: "10"
+      RUSTUP_MAX_RETRIES: "10"
     steps:
       - uses: actions/checkout@v6
 
