@@ -284,10 +284,6 @@ Users on unsupported Macs can try [OpenCore Legacy Patcher](https://github.com/d
 
 macOS 26.5 blocks ad-hoc signed binaries inside `/Applications`. Three issues: (1) `/Applications` block — mitigated via one-time "Open Anyway" approval; (2) Gatekeeper on `open` — mitigated via `xattr -d com.apple.quarantine`; (3) x86_64 crashes under Rosetta — use aarch64 builds. The DMG workflow is standard; a `launch.command` script in the project root bypasses `/Applications` by searching Desktop first.
 
-### Flaky E2E: `force-stop.spec.ts` write-capture race (fix next release)
-
-The "Start without minutes" tests in `e2e/force-stop.spec.ts` intermittently fail under the full E2E suite but pass when re-run in isolation. They collect the backend's emitted register writes via `waitForWrites(peekModbusWrites, drainModbusWrites, 8, …)`, which peeks until it sees ≥8 writes then drains. Under load the drained set can include a transient/intermediate value (e.g. a slot register briefly holding the live clock value such as `56 = 1600` before the intended `0` / `2359`, or an extra write from the concurrent poll cycle), so the per-register assertion mismatches. It is a test-harness race, not a backend regression — none of the write-encoding paths are implicated. Stabilise next release (e.g. drain-and-stabilise with a quiescence window, or assert against the final settled write set rather than the raw drained list).
-
 ## Release process
 
 1. Bump version in `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`
