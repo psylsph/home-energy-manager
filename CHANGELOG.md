@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The manual Inverter Address field now validates like the EV Charger field.** Typing a malformed address (a missing octet, out-of-range numbers, letters) now turns the field red, shows a hint, and disables Connect instead of letting a bad host be saved and retried forever — the same IPv4 check the EV Charger field already had. See #153.
+
+- **The Grid Voltage chart uses a tighter y-axis so fluctuations are readable.** Grid voltage sits in a narrow band (~230–240 V), so the old 0-based axis squashed the line flat against the top and hid the day-to-day variation. The axis now snaps to the recorded range ±10 V, giving the line room to breathe while keeping the absolute scale honest. See #152.
+
 ## [0.40.15] - 2026-06-26
 
 ### Added
