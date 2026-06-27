@@ -8,7 +8,7 @@ import type { PollSettings } from './lib/types';
 import { apiGet } from './lib/api';
 import { formatPercent, formatTimestamp } from './lib/format';
 import { gridFaultReason, gridFaultTitle, hasGridFault } from './lib/gridFault';
-import { FLOW_COLORS } from './lib/energyFlow';
+import { FLOW_COLORS, socColor } from './lib/energyFlow';
 import { useInverterStore } from './store/useInverterStore';
 import StatusPage from './pages/StatusPage';
 import BatteryPage from './pages/BatteryPage';
@@ -235,7 +235,7 @@ function Layout() {
   useWebSocket();
   useGridOutageNotifications();
   const [searchParams] = useSearchParams();
-  const { developerMode, themeMode, hiddenPanels, readOnly, setHiddenPanels, setEvcHost, setReadOnly } = useInverterStore();
+  const { snapshot, developerMode, themeMode, hiddenPanels, readOnly, setHiddenPanels, setEvcHost, setReadOnly } = useInverterStore();
 
   // Load hidden panels from settings on mount
   useEffect(() => {
@@ -351,30 +351,33 @@ function Layout() {
           never get cut off. A title/aria-label keeps icon-only modes
           discoverable. */}
       <nav className="sticky bottom-0 bg-bg-surface/90 backdrop-blur-md border-t border-white/5 px-0 pt-1 pb-safe flex items-stretch z-30 overflow-x-auto">
-        {visibleItems.map(({ to, label, icon: Icon, accent }) => (
-          <NavLink
-            key={to}
-            to={to}
-            end={to === '/'}
-            title={label}
-            aria-label={label}
-            style={navAccentStyle(accent)}
-            className={({ isActive }) =>
-              `min-w-0 flex-1 flex flex-col items-center justify-center
-               gap-0 py-1.5 sm:py-2
-               rounded-none
-               text-[10px] sm:text-xs font-medium transition-colors
-               ${
-                 isActive
-                  ? accent ? 'text-[var(--nav-accent)]' : 'text-flow-active'
-                  : 'text-text-secondary hover:text-text-primary'
-              }`
-            }
-          >
-            <Icon />
-            <span className="hidden md:inline">{label}</span>
-          </NavLink>
-        ))}
+        {visibleItems.map(({ to, label, icon: Icon, accent }) => {
+          const navAccent = to === '/battery' && snapshot ? socColor(snapshot.soc) : accent;
+          return (
+            <NavLink
+              key={to}
+              to={to}
+              end={to === '/'}
+              title={label}
+              aria-label={label}
+              style={navAccentStyle(navAccent)}
+              className={({ isActive }) =>
+                `min-w-0 flex-1 flex flex-col items-center justify-center
+                 gap-0 py-1.5 sm:py-2
+                 rounded-none
+                 text-[10px] sm:text-xs font-medium transition-colors
+                 ${
+                   isActive
+                    ? navAccent ? 'text-[var(--nav-accent)]' : 'text-flow-active'
+                    : 'text-text-secondary hover:text-text-primary'
+                }`
+              }
+            >
+              <Icon />
+              <span className="hidden md:inline">{label}</span>
+            </NavLink>
+          );
+        })}
         {developerMode && (
           <NavLink
             to="/logs"

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, cleanup } from '@testing-library/react';
 import EnergyOrbitDiagram from '../../src/components/EnergyOrbitDiagram';
-import { FLOW_COLORS } from '../../src/lib/energyFlow';
+import { FLOW_COLORS, socColor } from '../../src/lib/energyFlow';
 import { useInverterStore } from '../../src/store/useInverterStore';
 import type { InverterSnapshot } from '../../src/lib/types';
 
@@ -207,7 +207,14 @@ describe('EnergyOrbitDiagram', () => {
     expect(orbitRing).not.toBeNull();
     expect(orbitRing?.getAttribute('mask')).toContain('url(#');
     expect(container.querySelector('[data-testid="battery-soc-ring"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="battery-soc-ring-track"]')?.getAttribute('stroke')).toBe(socColor(31));
+    expect(container.querySelector('[data-testid="battery-soc-ring-track"]')?.getAttribute('stroke-opacity')).toBe('0.2');
     expect(container.querySelector('[data-testid="battery-glyph"]')).not.toBeNull();
+    expect(container.querySelector('[data-node-body="battery"]')?.getAttribute('fill')).toBe(socColor(31));
+    expect(container.querySelector('[data-node-body="battery"]')?.getAttribute('fill-opacity')).toBe('0.16');
+    expect(container.querySelector('[data-testid="battery-glyph-body"]')?.getAttribute('fill')).toBe(socColor(31));
+    expect(container.querySelector('[data-testid="battery-glyph-body"]')?.getAttribute('fill-opacity')).toBe('0.16');
+    expect(container.querySelector('[data-testid="battery-glyph-fill"]')?.getAttribute('fill')).toBe(socColor(31));
     const labels = Array.from(container.querySelectorAll('text')).map((t) => t.textContent ?? '');
     expect(labels).toContain('31%');
     expect(labels).toContain('-1.4kW');
@@ -309,6 +316,22 @@ describe('EnergyOrbitDiagram', () => {
     expect(discharge?.getAttribute('data-route')).toBe('direct');
     expect(toGrid).not.toBeNull();
     expect(toGrid?.getAttribute('data-route')).toBe('outer');
+    expect(container.querySelector('[data-flow-track-id="discharge"]')?.getAttribute('stroke')).toBe(socColor(50));
+  });
+
+  it('uses the current SOC colour for battery-origin moving balls under reduced motion', () => {
+    mockMatchMedia({ '(prefers-reduced-motion: reduce)': true });
+    const { container } = render(
+      <EnergyOrbitDiagram
+        snapshot={makeSnapshot({
+          soc: 10,
+          home_power: 500,
+          battery_power: 2000,
+          battery_state: 'discharging',
+        })}
+      />,
+    );
+    expect(container.querySelector('[data-flow-id="discharge"]')?.getAttribute('fill')).toBe(socColor(10));
   });
 
   it('does not draw a battery→grid dot when discharge is fully consumed by the house (issue #155)', () => {

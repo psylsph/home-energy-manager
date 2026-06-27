@@ -72,6 +72,8 @@ export interface EnergyFlow {
   direction: FlowDirection;
   /** Human-readable label, e.g. "4.3kW exporting". */
   label: string;
+  /** Optional rendered colour override for stateful sources such as battery SOC. */
+  color?: string;
 }
 
 /**
