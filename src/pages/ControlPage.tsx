@@ -15,6 +15,7 @@ const ECO_MODES: { key: BatteryMode; label: string; tooltip: string }[] = [
 
 const TIMED_MODES: { key: BatteryMode; label: string; tooltip: string }[] = [
   { key: 'timed_demand', label: 'Timed Discharge', tooltip: 'Battery covers home demand automatically, plus follows your export schedule during slot times' },
+  { key: 'timed_export', label: 'Timed Export', tooltip: 'Discharges the battery at full power, exporting surplus to the grid during slot times' },
   { key: 'export_paused', label: 'Paused', tooltip: 'Pauses scheduled discharge. Schedule is kept for next time.' },
 ];
 
@@ -2071,9 +2072,11 @@ export default function ControlPage() {
         {/* Sub-mode buttons */}
         <div className="grid grid-cols-2 gap-2">
           {(modeToCategory(effectiveMode) === 'eco' ? ECO_MODES : TIMED_MODES).map(({ key, label, tooltip }) => {
-            // timed_export from inverter maps to timed_demand button
-            const displayMode = effectiveMode === 'timed_export' ? 'timed_demand' : effectiveMode;
-            const isActive = displayMode === key;
+            // issue #156: timed_export is its own mode, not an alias for
+            // timed_demand. HR(27) is the sole register separating them
+            // (1 = match demand / discharge to home, 0 = max power / export
+            // surplus), so they must render and post as distinct modes.
+            const isActive = effectiveMode === key;
             return (
               <button
                 key={key}
