@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, cleanup } from '@testing-library/react';
 import EnergyOrbitDiagram from '../../src/components/EnergyOrbitDiagram';
+import { FLOW_COLORS } from '../../src/lib/energyFlow';
 import { useInverterStore } from '../../src/store/useInverterStore';
 import type { InverterSnapshot } from '../../src/lib/types';
 
@@ -263,6 +264,30 @@ describe('EnergyOrbitDiagram', () => {
     expect(container.querySelector('[data-flow-id="charge"]')?.getAttribute('data-route')).toBe('outer');
     expect(container.querySelector('[data-flow-id="export"]')?.getAttribute('data-route')).toBe('outer');
     expect(container.querySelector('[data-flow-id="solar"]')?.getAttribute('data-route')).toBe('direct');
+  });
+
+  it('draws source-coloured active tracks for direct spokes and outer routes', () => {
+    const { container } = render(
+      <EnergyOrbitDiagram
+        snapshot={makeSnapshot({
+          solar_power: 5000,
+          home_power: 500,
+          battery_power: -241,
+          battery_state: 'charging',
+          grid_power: 4300,
+        })}
+      />,
+    );
+
+    const solarTrack = container.querySelector('[data-flow-track-id="solar"]');
+    expect(solarTrack).not.toBeNull();
+    expect(solarTrack?.getAttribute('data-route')).toBe('direct');
+    expect(solarTrack?.getAttribute('stroke')).toBe(FLOW_COLORS.solar);
+
+    const chargeTrack = container.querySelector('[data-flow-track-id="charge"]');
+    expect(chargeTrack).not.toBeNull();
+    expect(chargeTrack?.getAttribute('data-route')).toBe('outer');
+    expect(chargeTrack?.getAttribute('stroke')).toBe(FLOW_COLORS.solar);
   });
 
   it('draws a battery→grid dot when discharge exceeds the house load (issue #155)', () => {
