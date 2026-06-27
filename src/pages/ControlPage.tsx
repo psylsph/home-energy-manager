@@ -111,7 +111,6 @@ function ScheduleSlotEditor({
   showTargetSoc,
   apiPath = '/api/control/discharge-slot',
   masterArmed = true,
-  notArmedMessage,
 }: {
   slotIndex: number;
   slot: ScheduleSlot;
@@ -125,27 +124,51 @@ function ScheduleSlotEditor({
    *  (currently the discharge schedule, whose Eco/Timed arming model is
    *  different) keep the original always-armed rendering. */
   masterArmed?: boolean;
-  /** Message shown when the slot is configured but the master flag is off
-   *  (issue #135). Omit / leave empty to suppress the "not active" notice. */
-  notArmedMessage?: string;
 }) {
   const [local, setLocal] = useState<ScheduleSlot>({ ...slot });
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<'saved' | 'error' | null>(null);
+  // `dirty` is true when `local` differs from the last-saved (or just-loaded)
+  // slot. We deep-compare the six scalar fields the user can change.
+  // `baseline` lives in state (not a ref) so it's safe to consume in the
+  // same render that derives `dirty` from it.
+  const [baseline, setBaseline] = useState<ScheduleSlot>(slot);
+  const isDirty = (s: ScheduleSlot) =>
+    s.start_hour !== baseline.start_hour ||
+    s.start_minute !== baseline.start_minute ||
+    s.end_hour !== baseline.end_hour ||
+    s.end_minute !== baseline.end_minute ||
+    s.enabled !== baseline.enabled ||
+    s.target_soc !== baseline.target_soc;
+  // Track the slot prop reference so we can re-baseline when the parent
+  // hands us a fresh slot (e.g. after a re-fetch of the snapshot, or after
+  // a sibling save) — but only if the user isn't in the middle of an
+  // edit, otherwise their typing would be wiped out. This is React's
+  // documented "derive state from props" pattern: setState during render
+  // schedules a re-render, never an infinite loop, because the next render
+  // sees the same `slot` and skips the update.
+  const [prevSlot, setPrevSlot] = useState(slot);
+  if (slot !== prevSlot) {
+    setPrevSlot(slot);
+    if (!isDirty(local)) {
+      setBaseline(slot);
+    }
+  }
 
   // A slot is "configured but not armed" when it holds times (enabled) but
   // the schedule's master enable flag is off. The slot times live in their
   // own registers (e.g. HR 94/95) independent of the master flag (HR 96),
   // so this state is real and common — leftover/factory windows show up
   // here. We keep the slot visible (issue #41: never hide a configured slot
-  // just because the master flag is off) but signal that it won't fire.
-  const notArmed = local.enabled && !masterArmed && Boolean(notArmedMessage);
+  // just because the master flag is off) and dim it.
+  const notArmed = local.enabled && !masterArmed;
 
   const handleSave = async () => {
     setSaving(true);
     setFeedback(null);
     try {
       await onSave(slotIndex, local, apiPath);
+      setBaseline({ ...local });
       setFeedback('saved');
     } catch {
       setFeedback('error');
@@ -174,12 +197,6 @@ function ScheduleSlotEditor({
           />
         </button>
       </div>
-
-      {notArmed && (
-        <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-2 py-1.5 text-xs text-text-primary">
-          {notArmedMessage}
-        </div>
-      )}
 
       {local.enabled && (
         <>
@@ -2141,7 +2158,6 @@ export default function ControlPage() {
                 showTargetSoc
                 apiPath="/api/control/charge-slot"
                 masterArmed={snapshot?.enable_charge === true}
-                notArmedMessage="Not active — enable charging to arm this slot"
               />
             </>
           ))}

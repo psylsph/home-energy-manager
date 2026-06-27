@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-06-27
+
+### Added
+
+- **Bottom nav now uses the same colour language as the energy flow diagram.** Status, Power, Battery, Solar, Inverter and Meters each take on their matching diagram accent when active, so the bottom bar and the radial diagram read as one visual system instead of two. The Battery tab follows the live battery colour — green when it's healthy, amber mid-range, red when low — so the tab itself tells you at a glance whether to worry about state of charge. History, Control and Settings stay on the original cyan because they don't map to a node.
+
+- **Active energy flow lines are colour-coded by source.** The spokes and outer-orbit arcs now light up in the colour of whatever is flowing through them — solar yellow for generation, red for grid import, amber/green/red for battery depending on state of charge, purple for the EV charger — with the moving dot riding on top in the same colour, so direction and strength are readable at a glance. The grey idle rails underneath are unchanged.
+
+### Fixed
+
+- **The Status dashboard handles Gateway devices without crashing.** Gateways don't expose per-pack battery current / voltage / temperature, inverter temperature or PV voltage, and the backend reports those fields as null. The radial diagram, the Inverter page battery row and the cold-battery warning now all render an em-dash instead of `0.0A` / `0°C`, and the diagram no longer chokes on the missing telemetry at launch.
+
+- **The battery symbol and battery-origin flows follow the live battery colour.** The battery node background, glyph body, state-of-charge ring and the moving ball / track that represents battery charge or discharge all share the current state-of-charge tier colour (green / amber / red) instead of a fixed yellow, matching the colour the battery tab already shows at the bottom of the screen.
+
+- **Discharging past the house load draws a battery → grid dot.** When the battery is discharging more than the house can absorb (timed export, forced discharge), the excess now shows up as a separate dot running from the battery straight to the grid on the outer orbit, matching how the GivEnergy app draws the same situation. The discharge dot into the home is still drawn first; the battery → grid one only appears when there's actually excess to export.
+
+- **PV strings show a V/A sub-label under the solar power value.** When the inverter reports a real PV voltage, the radial diagram shows `350.4V/6.5A` as a small grey line under the kW value, the same way the old inverter-centred diagram used to. Strings without voltage telemetry (Gateways) fall back to current-only.
+
+- **The Inverter page shows the real Target SOC on three-phase and HV inverters instead of always reading 4%.** On those devices the firmware writes the "Target SOC" to the per-slot register (HR 242 for charge slot 1) rather than the global HR 1111, and the app was clamping the uninitialised HR 1111 to its 4% floor — so the Inverter page always showed `4%` no matter what you'd set on the inverter. The decoder now reads HR 242 back as the authoritative value for three-phase-class devices when HR 1111 is uninitialised, and the per-slot target survives the round-trip through the slot-time decode. Single-phase and AIO behaviour is unchanged.
+
 ## [0.41.0] - 2026-06-26
 
 ### Fixed
