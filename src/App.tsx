@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import type { CSSProperties } from 'react';
 import MetersPage from './pages/MetersPage';
 import { HashRouter, Routes, Route, NavLink, Navigate, useSearchParams } from 'react-router-dom';
 import { useWebSocket } from './hooks/useWebSocket';
@@ -7,6 +8,7 @@ import type { PollSettings } from './lib/types';
 import { apiGet } from './lib/api';
 import { formatPercent, formatTimestamp } from './lib/format';
 import { gridFaultReason, gridFaultTitle, hasGridFault } from './lib/gridFault';
+import { FLOW_COLORS } from './lib/energyFlow';
 import { useInverterStore } from './store/useInverterStore';
 import StatusPage from './pages/StatusPage';
 import BatteryPage from './pages/BatteryPage';
@@ -110,16 +112,20 @@ export function ConnectionIndicator() {
 }
 
 const NAV_ITEMS = [
-  { to: '/', label: 'Status', icon: StatusIcon },
-  { to: '/power', label: 'Power', icon: PowerIcon },
-  { to: '/battery', label: 'Battery', icon: BatteryIcon },
-  { to: '/solar', label: 'Solar', icon: SolarIcon },
-  { to: '/inverter', label: 'Inverter', icon: InverterIcon },
-  { to: '/meters', label: 'Meters', icon: MeterIcon },
+  { to: '/', label: 'Status', icon: StatusIcon, accent: FLOW_COLORS.home },
+  { to: '/power', label: 'Power', icon: PowerIcon, accent: FLOW_COLORS.home },
+  { to: '/battery', label: 'Battery', icon: BatteryIcon, accent: FLOW_COLORS.battery },
+  { to: '/solar', label: 'Solar', icon: SolarIcon, accent: FLOW_COLORS.solar },
+  { to: '/inverter', label: 'Inverter', icon: InverterIcon, accent: FLOW_COLORS.inverter },
+  { to: '/meters', label: 'Meters', icon: MeterIcon, accent: FLOW_COLORS.grid },
   { to: '/history', label: 'History', icon: HistoryIcon },
   { to: '/control', label: 'Control', icon: ControlIcon },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
 ] as const;
+
+function navAccentStyle(accent?: string): CSSProperties | undefined {
+  return accent ? ({ '--nav-accent': accent } as CSSProperties) : undefined;
+}
 
 function StatusIcon() {
   return (
@@ -345,13 +351,14 @@ function Layout() {
           never get cut off. A title/aria-label keeps icon-only modes
           discoverable. */}
       <nav className="sticky bottom-0 bg-bg-surface/90 backdrop-blur-md border-t border-white/5 px-0 pt-1 pb-safe flex items-stretch z-30 overflow-x-auto">
-        {visibleItems.map(({ to, label, icon: Icon }) => (
+        {visibleItems.map(({ to, label, icon: Icon, accent }) => (
           <NavLink
             key={to}
             to={to}
             end={to === '/'}
             title={label}
             aria-label={label}
+            style={navAccentStyle(accent)}
             className={({ isActive }) =>
               `min-w-0 flex-1 flex flex-col items-center justify-center
                gap-0 py-1.5 sm:py-2
@@ -359,7 +366,7 @@ function Layout() {
                text-[10px] sm:text-xs font-medium transition-colors
                ${
                  isActive
-                  ? 'text-flow-active'
+                  ? accent ? 'text-[var(--nav-accent)]' : 'text-flow-active'
                   : 'text-text-secondary hover:text-text-primary'
               }`
             }

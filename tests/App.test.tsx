@@ -55,6 +55,7 @@ vi.mock('../src/lib/api', () => ({
 
 // Imported after the vi.mock() calls above (factories are hoisted regardless).
 import App from '../src/App';
+import { FLOW_COLORS } from '../src/lib/energyFlow';
 import { useInverterStore } from '../src/store/useInverterStore';
 
 // ---------------------------------------------------------------------------
@@ -185,6 +186,14 @@ describe('<App/> read-only mode (issue #114)', () => {
     render(<App />);
     expect(screen.getByRole('link', { name: 'Control' })).toBeDefined();
     expect(screen.getByRole('link', { name: 'Settings' })).toBeDefined();
+  });
+
+  it('uses energy-flow colours for matching active nav icons', async () => {
+    await navigate('/battery');
+    render(<App />);
+    const batteryLink = screen.getByRole('link', { name: 'Battery' });
+    expect(batteryLink.className).toContain('text-[var(--nav-accent)]');
+    expect(batteryLink.getAttribute('style')).toContain(`--nav-accent: ${FLOW_COLORS.battery}`);
   });
 
   it('persists the read-only flag to localStorage when ?RO is visited', async () => {
