@@ -360,7 +360,10 @@ pub fn build_connection_restored_message(host: &str) -> String {
 /// Send a connection-lost notification to all configured channels. Called
 /// from the poll loop's disconnect path. Honours the `connection_lost_enabled`
 /// toggle and the standard channel-config gates.
-pub async fn send_connection_lost_notification(state: &std::sync::Arc<crate::inverter::poll::AppState>, host: &str) {
+pub async fn send_connection_lost_notification(
+    state: &std::sync::Arc<crate::inverter::poll::AppState>,
+    host: &str,
+) {
     let config = state.alert_config.lock().await.clone();
     if !config.enabled || !config.connection_lost_enabled {
         return;
@@ -389,11 +392,15 @@ pub async fn send_connection_lost_notification(state: &std::sync::Arc<crate::inv
                 tracing::warn!("Pushover connection-lost notification failed: {e}");
             }
         }
-    }).await;
+    })
+    .await;
 }
 
 /// Send a connection-restored notification to all configured channels.
-pub async fn send_connection_restored_notification(state: &std::sync::Arc<crate::inverter::poll::AppState>, host: &str) {
+pub async fn send_connection_restored_notification(
+    state: &std::sync::Arc<crate::inverter::poll::AppState>,
+    host: &str,
+) {
     let config = state.alert_config.lock().await.clone();
     if !config.enabled || !config.connection_lost_enabled {
         return;
@@ -422,7 +429,8 @@ pub async fn send_connection_restored_notification(state: &std::sync::Arc<crate:
                 tracing::warn!("Pushover connection-restored notification failed: {e}");
             }
         }
-    }).await;
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -552,10 +560,8 @@ pub fn send_telegram_document(
     // document file
     body.extend(format!("--{boundary}{crlf}").as_bytes());
     body.extend(
-        format!(
-            "Content-Disposition: form-data; name=\"document\"; filename=\"{filename}\"{crlf}"
-        )
-        .as_bytes(),
+        format!("Content-Disposition: form-data; name=\"document\"; filename=\"{filename}\"{crlf}")
+            .as_bytes(),
     );
     body.extend(format!("Content-Type: text/html{crlf}").as_bytes());
     body.extend(crlf.as_bytes());
@@ -571,9 +577,7 @@ pub fn send_telegram_document(
 
     // parse_mode
     body.extend(format!("--{boundary}{crlf}").as_bytes());
-    body.extend(
-        format!("Content-Disposition: form-data; name=\"parse_mode\"{crlf}").as_bytes(),
-    );
+    body.extend(format!("Content-Disposition: form-data; name=\"parse_mode\"{crlf}").as_bytes());
     body.extend(crlf.as_bytes());
     body.extend(b"HTML");
     body.extend(crlf.as_bytes());
@@ -733,7 +737,10 @@ pub fn send_ntfy_attachment(
     let resp = match req.send(body.to_vec()) {
         Ok(r) => r,
         Err(ureq::Error::StatusCode(code)) => {
-            return Err(format!("ntfy attachment API {} at {}", code, server_display));
+            return Err(format!(
+                "ntfy attachment API {} at {}",
+                code, server_display
+            ));
         }
         Err(e) => return Err(format!("HTTP transport error to {}: {e}", server_display)),
     };
@@ -746,7 +753,10 @@ pub fn send_ntfy_attachment(
             .into_body()
             .read_to_string()
             .unwrap_or_else(|_| "<read error>".to_string());
-        Err(format!("ntfy attachment API {} at {}: {}", status, server_display, text))
+        Err(format!(
+            "ntfy attachment API {} at {}: {}",
+            status, server_display, text
+        ))
     }
 }
 
@@ -778,10 +788,7 @@ pub fn send_pushover_message(app_token: &str, user_key: &str, text: &str) -> Res
 
     let body = serde_json::to_string(&payload).map_err(|e| format!("Failed to serialize: {e}"))?;
 
-    let resp = match ureq::post(url)
-        .content_type("application/json")
-        .send(&body)
-    {
+    let resp = match ureq::post(url).content_type("application/json").send(&body) {
         Ok(r) => r,
         Err(ureq::Error::StatusCode(code)) => {
             return Err(format!(
@@ -1276,17 +1283,13 @@ pub fn spawn_telegram_poller(state: std::sync::Arc<crate::inverter::poll::AppSta
                     match telegram_agent().get(&url).call() {
                         Ok(r) => {
                             let body = r.into_body().read_to_string().unwrap_or_default();
-                            if let Ok(data) =
-                                serde_json::from_str::<serde_json::Value>(&body)
-                            {
+                            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&body) {
                                 let mut msgs = Vec::new();
                                 if let Some(results) = data["result"].as_array() {
                                     for update in results {
-                                        let update_id =
-                                            update["update_id"].as_i64().unwrap_or(0);
+                                        let update_id = update["update_id"].as_i64().unwrap_or(0);
                                         if let Some(msg) = update.get("message") {
-                                            let chat_id =
-                                                msg["chat"]["id"].as_i64().unwrap_or(0);
+                                            let chat_id = msg["chat"]["id"].as_i64().unwrap_or(0);
                                             let text =
                                                 msg["text"].as_str().unwrap_or("").to_string();
                                             msgs.push((update_id, chat_id, text));
@@ -1415,8 +1418,7 @@ pub fn spawn_telegram_poller(state: std::sync::Arc<crate::inverter::poll::AppSta
                                 });
                                 continue; // already sent via document, skip text reply
                             }
-                            None => "⚠️ Not enough data for yesterday's report yet."
-                                .to_string(),
+                            None => "⚠️ Not enough data for yesterday's report yet.".to_string(),
                         }
                     }
                     // Unrecognized command from the allowed chat → help.
@@ -1874,10 +1876,14 @@ mod tests {
             let got = b.record_failure();
             assert_eq!(
                 got, want,
-            "delay after {failures} consecutive failures should be {want:?}, got {got:?}"
+                "delay after {failures} consecutive failures should be {want:?}, got {got:?}"
             );
             assert_eq!(b.consecutive_failures(), failures);
-            assert_eq!(b.current_delay(), want, "current_delay must match record_failure");
+            assert_eq!(
+                b.current_delay(),
+                want,
+                "current_delay must match record_failure"
+            );
         }
     }
 
@@ -1893,7 +1899,11 @@ mod tests {
         assert_eq!(first, Duration::from_secs(12));
         assert_eq!(first, second);
         assert_eq!(second, third);
-        assert_eq!(b.consecutive_failures(), 2, "current_delay must not bump the counter");
+        assert_eq!(
+            b.consecutive_failures(),
+            2,
+            "current_delay must not bump the counter"
+        );
     }
 
     #[test]
@@ -1902,7 +1912,10 @@ mod tests {
         let mut b = PollBackoff::new_for_telegram();
         for _ in 0..50 {
             let d = b.record_failure();
-            assert!(d <= Duration::from_secs(60), "delay {d:?} exceeded the 60s cap");
+            assert!(
+                d <= Duration::from_secs(60),
+                "delay {d:?} exceeded the 60s cap"
+            );
         }
         assert_eq!(b.current_delay(), Duration::from_secs(60));
     }
@@ -2056,7 +2069,11 @@ mod tests {
         // Root-cause fix for `timeout: global`: pooled (possibly reaped)
         // sockets must never be reused, so both pool limits are pinned to 0.
         let cfg = telegram_agent().config();
-        assert_eq!(cfg.max_idle_connections(), 0, "global pool must be disabled");
+        assert_eq!(
+            cfg.max_idle_connections(),
+            0,
+            "global pool must be disabled"
+        );
         assert_eq!(
             cfg.max_idle_connections_per_host(),
             0,
@@ -2115,6 +2132,9 @@ mod tests {
 
     #[test]
     fn sanitize_passes_plain_text_through() {
-        assert_eq!(super::sanitize_header_value("bundle hem-X-1"), "bundle hem-X-1");
+        assert_eq!(
+            super::sanitize_header_value("bundle hem-X-1"),
+            "bundle hem-X-1"
+        );
     }
 }

@@ -354,12 +354,8 @@ impl ModbusClient {
             }
             let request =
                 framer::build_read_request(&self.serial, self.slave, RegisterType::Holding, 0, 1);
-            let key = ResponseKey::from_request(
-                self.slave,
-                RegisterType::Holding.function_code(),
-                0,
-                1,
-            );
+            let key =
+                ResponseKey::from_request(self.slave, RegisterType::Holding.function_code(), 0, 1);
             match self.send_and_await_response(request, key).await {
                 // A decoded read response or even a Modbus exception means the
                 // dongle is alive and answering — the probe's only goal.
@@ -1298,7 +1294,10 @@ impl ModbusClient {
                 }
 
                 let t0 = std::time::Instant::now();
-                match self.read_registers(reg_type, block.start, block.count).await {
+                match self
+                    .read_registers(reg_type, block.start, block.count)
+                    .await
+                {
                     Ok(data) => {
                         tracing::debug!(
                             block = block.name,
@@ -1371,7 +1370,10 @@ impl ModbusClient {
             }
 
             let t0 = std::time::Instant::now();
-            match self.read_registers(reg_type, block.start, block.count).await {
+            match self
+                .read_registers(reg_type, block.start, block.count)
+                .await
+            {
                 Ok(data) => {
                     tracing::debug!(
                         block = block.name,
@@ -1458,9 +1460,7 @@ impl ModbusClient {
 
         if let Some(dt) = device_type {
             if minimal_telemetry {
-                tracing::debug!(
-                    "Minimal telemetry mode - skipping optional model-specific blocks"
-                );
+                tracing::debug!("Minimal telemetry mode - skipping optional model-specific blocks");
                 // AC-coupled and three-phase families store their
                 // *active* charge/discharge limit register in an optional
                 // block (AC_CONFIG_BLOCK / THREE_PHASE_CONFIG_BLOCK). If
@@ -1993,8 +1993,7 @@ mod tests {
         let mut rest = vec![0u8; length];
         let mut read = 0usize;
         while read < length {
-            match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut rest[read..]))
-                .await
+            match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut rest[read..])).await
             {
                 Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
                 Ok(Ok(n)) => read += n,
@@ -2682,10 +2681,11 @@ mod tests {
             let mut rest = vec![0u8; length];
             let mut read = 0usize;
             while read < length {
-                let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut rest[read..]))
-                    .await
-                    .unwrap()
-                    .unwrap();
+                let n =
+                    tokio::time::timeout(Duration::from_secs(5), stream.read(&mut rest[read..]))
+                        .await
+                        .unwrap()
+                        .unwrap();
                 read += n;
             }
 
@@ -2706,10 +2706,11 @@ mod tests {
             let mut rest = vec![0u8; length];
             let mut read = 0usize;
             while read < length {
-                let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut rest[read..]))
-                    .await
-                    .unwrap()
-                    .unwrap();
+                let n =
+                    tokio::time::timeout(Duration::from_secs(5), stream.read(&mut rest[read..]))
+                        .await
+                        .unwrap()
+                        .unwrap();
                 read += n;
             }
 
@@ -2718,11 +2719,7 @@ mod tests {
             stream.write_all(&resp).await.unwrap();
 
             // Read and respond to remaining standard blocks.
-            for (func, base, _count) in &[
-                (0x03u8, 0u16, 60u16),
-                (0x03, 60, 60),
-                (0x04, 180, 4),
-            ] {
+            for (func, base, _count) in &[(0x03u8, 0u16, 60u16), (0x03, 60, 60), (0x04, 180, 4)] {
                 tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut header))
                     .await
                     .unwrap()
@@ -2731,11 +2728,13 @@ mod tests {
                 let mut rest = vec![0u8; length];
                 let mut read = 0usize;
                 while read < length {
-                    let n =
-                        tokio::time::timeout(Duration::from_secs(5), stream.read(&mut rest[read..]))
-                            .await
-                            .unwrap()
-                            .unwrap();
+                    let n = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        stream.read(&mut rest[read..]),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
                     read += n;
                 }
                 let data: Vec<u16> = match *base {
@@ -2779,9 +2778,7 @@ mod tests {
         client.set_timeout(Duration::from_millis(100));
         // Don't connect — client is in NotConnected state
 
-        let result = client
-            .read_blocks_resilient(STANDARD_POLL_BLOCKS, 2)
-            .await;
+        let result = client.read_blocks_resilient(STANDARD_POLL_BLOCKS, 2).await;
         assert!(
             result.is_err(),
             "read_blocks_resilient should fail with NotConnected when not connected"
@@ -2815,9 +2812,7 @@ mod tests {
         client.connect().await.unwrap();
 
         let start = std::time::Instant::now();
-        let result = client
-            .read_blocks_resilient(STANDARD_POLL_BLOCKS, 2)
-            .await;
+        let result = client.read_blocks_resilient(STANDARD_POLL_BLOCKS, 2).await;
         let elapsed = start.elapsed();
 
         assert!(
@@ -3233,7 +3228,10 @@ mod tests {
         let result = client.liveness_probe().await;
         let elapsed = start.elapsed();
 
-        assert!(result.is_err(), "liveness probe should fail on silent dongle");
+        assert!(
+            result.is_err(),
+            "liveness probe should fail on silent dongle"
+        );
         // The probe retries: one attempt is ~LIVENESS_TIMEOUT (3 s); with the
         // retry budget it must take well over a single timeout but be bounded.
         assert!(
@@ -3317,7 +3315,10 @@ mod tests {
         assert!(client.last_activity_age().is_none());
 
         // Perform a successful read — the consumer receives a frame
-        let _ = client.read_registers(RegisterType::Input, 0, 20).await.unwrap();
+        let _ = client
+            .read_registers(RegisterType::Input, 0, 20)
+            .await
+            .unwrap();
 
         // After a successful read, age should be Some and very small
         let age = client.last_activity_age();
@@ -3639,15 +3640,10 @@ mod tests {
         client.connect().await.unwrap();
 
         let start = std::time::Instant::now();
-        let result = client
-            .read_registers(RegisterType::Input, 0, 20)
-            .await;
+        let result = client.read_registers(RegisterType::Input, 0, 20).await;
         let elapsed = start.elapsed();
 
-        assert!(
-            result.is_err(),
-            "should fail on silent server"
-        );
+        assert!(result.is_err(), "should fail on silent server");
         // With fail-fast: ~500ms. With old 5× retry: ~2.5s + 4×500ms = ~4.5s.
         // Allow some margin for TCP setup.
         assert!(
@@ -3689,9 +3685,7 @@ mod tests {
         // because the correct response hasn't arrived yet. With the
         // activity-based retry, the client retries and gets the correct
         // response on the second attempt.
-        let result = client
-            .read_registers(RegisterType::Input, 0, 20)
-            .await;
+        let result = client.read_registers(RegisterType::Input, 0, 20).await;
 
         assert!(
             result.is_ok(),

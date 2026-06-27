@@ -216,10 +216,7 @@ fn timestamp_to_local_minutes(ts: i64) -> u16 {
 /// Find the `[start, end)` boundaries (in minutes) of the tariff slot that
 /// covers the given minute. Returns `(0, 1439)` as a safe fallback if no slot
 /// matches (the caller already has a rate from `rate_for_minutes`).
-fn find_window_bounds(
-    cfg: &crate::settings::TariffConfig,
-    minutes: u16,
-) -> (u16, u16) {
+fn find_window_bounds(cfg: &crate::settings::TariffConfig, minutes: u16) -> (u16, u16) {
     for slot in &cfg.slots {
         let Some(start) = parse_hhmm(&slot.start) else {
             continue;
@@ -260,10 +257,7 @@ pub fn generate_daily_summary_text(
 
     // Resolve the import tariff config, falling back to the legacy flat
     // scalar when the structured config is absent.
-    let imp_cfg = settings
-        .import_tariff_config
-        .clone()
-        .unwrap_or_default();
+    let imp_cfg = settings.import_tariff_config.clone().unwrap_or_default();
     let flat_import = settings.import_tariff;
     // Use the flat rate when the config has a single slot covering the whole
     // day at the same rate (or when no structured config exists).
@@ -1043,7 +1037,6 @@ fn render_donut(title: &str, items: &[(&str, f64, &str)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     fn dummy_reading(
         ts: i64,
@@ -1162,8 +1155,10 @@ mod tests {
         let cfg = crate::settings::TariffConfig::default();
         let midday_mins = 12 * 60; // 720
         let night_mins = 3 * 60; // 180
-        // Peak at midday, off-peak at night.
-        assert!(cfg.rate_for_minutes(midday_mins).unwrap() > cfg.rate_for_minutes(night_mins).unwrap());
+                                 // Peak at midday, off-peak at night.
+        assert!(
+            cfg.rate_for_minutes(midday_mins).unwrap() > cfg.rate_for_minutes(night_mins).unwrap()
+        );
     }
 
     #[test]

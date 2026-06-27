@@ -21,8 +21,8 @@ use std::process::Command;
 
 /// Returns the path to the current user's Windows Startup folder.
 fn startup_folder() -> PathBuf {
-    let appdata = std::env::var("APPDATA")
-        .expect("APPDATA environment variable must be set on Windows");
+    let appdata =
+        std::env::var("APPDATA").expect("APPDATA environment variable must be set on Windows");
     PathBuf::from(appdata).join("Microsoft\\Windows\\Start Menu\\Programs\\Startup")
 }
 
@@ -38,14 +38,17 @@ pub fn enable() -> Result<(), String> {
     let shortcut_path = startup.join(SHORTCUT_NAME);
 
     // Get the current executable path.
-    let exe_path = std::env::current_exe()
-        .map_err(|e| format!("Failed to get executable path: {e}"))?;
+    let exe_path =
+        std::env::current_exe().map_err(|e| format!("Failed to get executable path: {e}"))?;
     let exe_str = exe_path.to_string_lossy().to_string();
 
     // PowerShell one-liner to create a shortcut via COM.
     let ps_script = format!(
         r#"$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut('{}'); $s.TargetPath = '{}'; $s.Save()"#,
-        shortcut_path.to_string_lossy().to_string().replace('\'', "''"),
+        shortcut_path
+            .to_string_lossy()
+            .to_string()
+            .replace('\'', "''"),
         exe_str.replace('\'', "''"),
     );
 
@@ -190,10 +193,7 @@ mod tests {
 
         let startup = startup_folder();
         let shortcut_path = startup.join(SHORTCUT_NAME);
-        assert!(
-            shortcut_path.exists(),
-            "shortcut file should exist"
-        );
+        assert!(shortcut_path.exists(), "shortcut file should exist");
         assert!(
             shortcut_path.is_file(),
             "shortcut should be a file, not a directory"

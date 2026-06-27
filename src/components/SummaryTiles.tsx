@@ -89,7 +89,7 @@ function SummaryTilesInner({ snapshot: s }: Props) {
   ];
 
   return (
-    <div className="bg-bg-surface rounded-2xl p-6 h-full flex flex-col gap-4">
+    <div className="bg-bg-surface rounded-lg p-3 sm:p-4 md:p-5 h-full flex flex-col gap-2 sm:gap-3 md:gap-4">
       <h2 className="hidden md:block text-text-primary text-base font-semibold tracking-wide">Today</h2>
       <div
         data-testid="summary-tiles-grid"
@@ -104,7 +104,7 @@ function SummaryTilesInner({ snapshot: s }: Props) {
           <div
             key={t.label}
             title={t.tooltip}
-            className="min-w-0 bg-bg-elevated rounded-xl p-1.5 md:p-4 flex flex-col gap-1 md:gap-2 border border-transparent hover:border-white/5 transition-colors cursor-help"
+            className="min-w-0 bg-bg-elevated rounded-md p-1 md:p-2 lg:p-3 flex flex-col gap-0.5 md:gap-1.5 border border-transparent hover:border-white/5 transition-colors cursor-help"
           >
             <div className="flex items-center gap-1 md:gap-2">
               <span

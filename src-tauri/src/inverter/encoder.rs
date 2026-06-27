@@ -34,7 +34,6 @@ use crate::modbus::registers::{
     HR_BATTERY_PAUSE_SLOT_1_START,
     HR_BATTERY_POWER_MODE,
     HR_BATTERY_SOC_RESERVE,
-    HR_EMS_EXPORT_POWER_LIMIT,
     HR_CHARGE_SLOT_10_END,
     HR_CHARGE_SLOT_10_START,
     HR_CHARGE_SLOT_1_END,
@@ -100,6 +99,7 @@ use crate::modbus::registers::{
     HR_DISCHARGE_TARGET_SOC_7,
     HR_DISCHARGE_TARGET_SOC_8,
     HR_DISCHARGE_TARGET_SOC_9,
+    HR_EMS_EXPORT_POWER_LIMIT,
     HR_ENABLE_CHARGE,
     HR_ENABLE_CHARGE_TARGET,
     HR_ENABLE_DISCHARGE,
@@ -778,6 +778,183 @@ mod tests {
         assert_eq!(writes[1].value, 1); // enable discharge
     }
 
+    // -- Battery mode register contract (issue #156) -----------------------
+    //
+    // GivEnergy exposes two distinct discharge-type functions — Timed
+    // Discharge (battery covers home demand) and Timed Export (battery
+    // force-exports to grid). At the register level the ONLY thing that
+    // distinguishes them is HR(27) `battery_power_mode`:
+    //   - HR(27) = 1  → match-demand (discharge to home, never export)
+    //   - HR(27) = 0  → max-power   (discharge at full rate, export surplus)
+    //
+    // Both set HR(59) enable_discharge = 1. This mirrors GivTCP's
+    // `set_mode_storage(discharge_for_export=…)`, which calls
+    // `set_discharge_mode_to_match_demand` (HR27=1) vs
+    // `set_discharge_mode_max_power` (HR27=0). See read.py:685-697 for the
+    // inverse decode and commands.py `set_mode_storage` / `set_eco_mode`.
+    //
+    // These tests are the permanent guard rail for the frontend work in
+    // issue #156 (surfacing Timed Export as its own mode). Any change that
+    // collapses Timed Demand and Timed Export onto the same HR(27) value
+    // would silently flip users between discharging-to-home and
+    // exporting-to-grid — the exact regression the issue is about.
+
+    #[test]
+    fn set_timed_demand_mode() {
+        // Counterpart to `set_timed_export_mode` above. Timed Demand keeps
+        // the battery in self-consumption (HR27=1) while arming the
+        // discharge schedule (HR59=1).
+        let cmd = ControlCommand::SetTimedDemandMode { soc_reserve: 10 };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 3);
+        assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
+        assert_eq!(writes[0].value, 1, "Timed Demand must keep match-demand (HR27=1)");
+        assert_eq!(writes[1].address, HR_ENABLE_DISCHARGE);
+        assert_eq!(writes[1].value, 1, "Timed Demand must arm the schedule (HR59=1)");
+        assert_eq!(writes[2].address, HR_BATTERY_SOC_RESERVE);
+        assert_eq!(writes[2].value, 10);
+        for w in &writes {
+            assert!(SAFE_WRITE_REGS.contains(&w.address), "HR{} not whitelisted", w.address);
+        }
+    }
+
+    #[test]
+    fn set_timed_export_mode_registers() {
+        // Expanded sibling to `set_timed_export_mode` above: pin the
+        // addresses (not just the values) so the demand/export distinction
+        // is explicit. Timed Export switches to max-power (HR27=0) while
+        // arming the schedule (HR59=1).
+        let cmd = ControlCommand::SetTimedExportMode { soc_reserve: 20 };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 3);
+        assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
+        assert_eq!(writes[0].value, 0, "Timed Export must use max-power (HR27=0)");
+        assert_eq!(writes[1].address, HR_ENABLE_DISCHARGE);
+        assert_eq!(writes[1].value, 1, "Timed Export must arm the schedule (HR59=1)");
+        assert_eq!(writes[2].address, HR_BATTERY_SOC_RESERVE);
+        assert_eq!(writes[2].value, 20);
+        for w in &writes {
+            assert!(SAFE_WRITE_REGS.contains(&w.address), "HR{} not whitelisted", w.address);
+        }
+    }
+
+    #[test]
+    fn set_export_paused() {
+        // Export Paused: HR27=0 (export family), HR59=0 (schedule disarmed).
+        // Distinct from Eco (HR27=1, HR59=0) and from both Timed modes (HR59=1).
+        let cmd = ControlCommand::SetExportPaused { soc_reserve: 4 };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 3);
+        assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
+        assert_eq!(writes[0].value, 0, "Export Paused stays in the export family (HR27=0)");
+        assert_eq!(writes[1].address, HR_ENABLE_DISCHARGE);
+        assert_eq!(writes[1].value, 0, "Export Paused disarms the schedule (HR59=0)");
+        assert_eq!(writes[2].address, HR_BATTERY_SOC_RESERVE);
+        assert_eq!(writes[2].value, 4);
+        for w in &writes {
+            assert!(SAFE_WRITE_REGS.contains(&w.address), "HR{} not whitelisted", w.address);
+        }
+    }
+
+    #[test]
+    fn timed_demand_and_timed_export_differ_only_in_battery_power_mode() {
+        // THE issue #156 invariant: HR(27) is the sole register that tells
+        // demand from export. Both modes arm the schedule identically
+        // (HR59=1, HR110=reserve); only HR27 differs (1 vs 0). If a
+        // refactor ever makes them equal, users in Timed Export would be
+        // silently switched to discharging only to home demand.
+        let demand = ControlCommand::SetTimedDemandMode { soc_reserve: 4 }
+            .encode()
+            .unwrap();
+        let export = ControlCommand::SetTimedExportMode { soc_reserve: 4 }
+            .encode()
+            .unwrap();
+
+        let power_mode_demand = demand
+            .iter()
+            .find(|w| w.address == HR_BATTERY_POWER_MODE)
+            .expect("Timed Demand writes HR27");
+        let power_mode_export = export
+            .iter()
+            .find(|w| w.address == HR_BATTERY_POWER_MODE)
+            .expect("Timed Export writes HR27");
+        assert_eq!(power_mode_demand.value, 1);
+        assert_eq!(power_mode_export.value, 0);
+        assert_ne!(
+            power_mode_demand.value, power_mode_export.value,
+            "Timed Demand and Timed Export MUST differ in HR27 — this is the register that \
+             separates discharging-to-home from exporting-to-grid (issue #156)"
+        );
+
+        // Everything else (enable_discharge, soc_reserve) is identical, so
+        // the only behavioural difference is whether surplus battery power
+        // exports to grid.
+        let enable_demand = demand.iter().find(|w| w.address == HR_ENABLE_DISCHARGE);
+        let enable_export = export.iter().find(|w| w.address == HR_ENABLE_DISCHARGE);
+        assert_eq!(enable_demand.unwrap().value, 1);
+        assert_eq!(enable_export.unwrap().value, 1);
+        let reserve_demand = demand.iter().find(|w| w.address == HR_BATTERY_SOC_RESERVE);
+        let reserve_export = export.iter().find(|w| w.address == HR_BATTERY_SOC_RESERVE);
+        assert_eq!(reserve_demand.unwrap().value, reserve_export.unwrap().value);
+    }
+
+    #[test]
+    fn mode_encode_decode_round_trips_per_givtcp() {
+        // Encode/decode symmetry for the five battery modes. This locks the
+        // issue #156 model together in both directions: whatever each
+        // Set*Mode command writes must decode back to the same BatteryMode
+        // via `from_registers`, exactly as GivTCP read.py:685-697 derives
+        // `Mode` from the same registers. If the encode and decode ever
+        // drift apart, the UI would report a mode that disagrees with the
+        // registers it just wrote — precisely the class of bug #156 is
+        // about.
+        use crate::inverter::model::BatteryMode;
+
+        /// Read back the three mode registers from an encoded command batch
+        /// and derive the BatteryMode the way the decoder/poll loop would.
+        fn decode(cmd: ControlCommand) -> BatteryMode {
+            let writes = cmd.encode().expect("encode must succeed");
+            let power_mode = writes
+                .iter()
+                .find(|w| w.address == HR_BATTERY_POWER_MODE)
+                .expect("mode command writes HR27")
+                .value;
+            let enable_discharge = writes
+                .iter()
+                .find(|w| w.address == HR_ENABLE_DISCHARGE)
+                .expect("mode command writes HR59")
+                .value
+                == 1;
+            let reserve = writes
+                .iter()
+                .find(|w| w.address == HR_BATTERY_SOC_RESERVE)
+                .expect("mode command writes HR110")
+                .value;
+            BatteryMode::from_registers(power_mode, enable_discharge, reserve)
+        }
+
+        assert_eq!(
+            decode(ControlCommand::SetEcoMode { soc_reserve: 4 }),
+            BatteryMode::Eco
+        );
+        assert_eq!(
+            decode(ControlCommand::SetEcoMode { soc_reserve: 100 }),
+            BatteryMode::EcoPaused
+        );
+        assert_eq!(
+            decode(ControlCommand::SetTimedDemandMode { soc_reserve: 4 }),
+            BatteryMode::TimedDemand
+        );
+        assert_eq!(
+            decode(ControlCommand::SetTimedExportMode { soc_reserve: 4 }),
+            BatteryMode::TimedExport
+        );
+        assert_eq!(
+            decode(ControlCommand::SetExportPaused { soc_reserve: 4 }),
+            BatteryMode::ExportPaused
+        );
+    }
+
     #[test]
     fn clear_charge_target_flag_encodes() {
         let writes = ControlCommand::ClearChargeTargetFlag.encode().unwrap();
@@ -1251,9 +1428,15 @@ mod tests {
     #[test]
     fn set_ems_export_limit_validates_range() {
         // 0 disables the limit; max is 22 kW per GivTCP entity_lut.py:89.
-        assert!(ControlCommand::SetEmsExportLimit { watts: 0 }.encode().is_ok());
-        assert!(ControlCommand::SetEmsExportLimit { watts: 22_000 }.encode().is_ok());
-        assert!(ControlCommand::SetEmsExportLimit { watts: 22_001 }.encode().is_err());
+        assert!(ControlCommand::SetEmsExportLimit { watts: 0 }
+            .encode()
+            .is_ok());
+        assert!(ControlCommand::SetEmsExportLimit { watts: 22_000 }
+            .encode()
+            .is_ok());
+        assert!(ControlCommand::SetEmsExportLimit { watts: 22_001 }
+            .encode()
+            .is_err());
     }
 
     #[test]
@@ -1269,9 +1452,15 @@ mod tests {
     #[test]
     fn set_three_phase_export_limit_validates_range() {
         // 0 disables the limit; max is 22 kW per GivTCP entity_lut.py:89.
-        assert!(ControlCommand::SetThreePhaseExportLimit { watts: 0 }.encode().is_ok());
-        assert!(ControlCommand::SetThreePhaseExportLimit { watts: 22_000 }.encode().is_ok());
-        assert!(ControlCommand::SetThreePhaseExportLimit { watts: 22_001 }.encode().is_err());
+        assert!(ControlCommand::SetThreePhaseExportLimit { watts: 0 }
+            .encode()
+            .is_ok());
+        assert!(ControlCommand::SetThreePhaseExportLimit { watts: 22_000 }
+            .encode()
+            .is_ok());
+        assert!(ControlCommand::SetThreePhaseExportLimit { watts: 22_001 }
+            .encode()
+            .is_err());
     }
 
     #[test]
@@ -1300,9 +1489,15 @@ mod tests {
 
     #[test]
     fn set_charge_target_soc_only_validates_range() {
-        assert!(ControlCommand::SetChargeTargetSocOnly { soc: 3 }.encode().is_err());
-        assert!(ControlCommand::SetChargeTargetSocOnly { soc: 101 }.encode().is_err());
-        assert!(ControlCommand::SetChargeTargetSocOnly { soc: 100 }.encode().is_ok());
+        assert!(ControlCommand::SetChargeTargetSocOnly { soc: 3 }
+            .encode()
+            .is_err());
+        assert!(ControlCommand::SetChargeTargetSocOnly { soc: 101 }
+            .encode()
+            .is_err());
+        assert!(ControlCommand::SetChargeTargetSocOnly { soc: 100 }
+            .encode()
+            .is_ok());
     }
 
     #[test]

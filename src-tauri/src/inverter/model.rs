@@ -403,10 +403,9 @@ impl DeviceType {
         };
         match self {
             Self::ACThreePhase => AC_EXTENDED_AND_THREE_PHASE_BLOCKS,
-            Self::HybridHvGen3
-            | Self::AllInOneHybrid
-            | Self::ThreePhase
-            | Self::AioCommercial => EXTENDED_AND_THREE_PHASE_BLOCKS,
+            Self::HybridHvGen3 | Self::AllInOneHybrid | Self::ThreePhase | Self::AioCommercial => {
+                EXTENDED_AND_THREE_PHASE_BLOCKS
+            }
             Self::AllInOne6kW | Self::AllInOne3_6kW | Self::AllInOne5kW => {
                 EXTENDED_AND_AC_CONFIG_BLOCKS
             }
@@ -458,7 +457,9 @@ impl DeviceType {
     /// `read_all_with_extras` uses this to keep polling the one block
     /// that actually contains the live limit value, even when minimal
     /// telemetry mode skips the rest of the optional blocks.
-    pub fn essential_limit_block(&self) -> Option<&'static crate::modbus::registers::RegisterBlock> {
+    pub fn essential_limit_block(
+        &self,
+    ) -> Option<&'static crate::modbus::registers::RegisterBlock> {
         use crate::modbus::registers::{AC_CONFIG_BLOCK, THREE_PHASE_CONFIG_BLOCK};
         match self {
             // AC-coupled: HR 313/314 are the only place the charge/discharge
@@ -1628,10 +1629,7 @@ mod tests {
             DeviceType::Gateway,
         ];
         for dt in ac_block_models {
-            let has_ac_config = dt
-                .extra_poll_blocks()
-                .iter()
-                .any(|b| b.start == 300);
+            let has_ac_config = dt.extra_poll_blocks().iter().any(|b| b.start == 300);
             assert_eq!(
                 dt.supports_eps(),
                 has_ac_config,

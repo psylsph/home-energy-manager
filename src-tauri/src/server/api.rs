@@ -13,8 +13,8 @@ use serde_json::{json, Value};
 use crate::inverter::encoder::{ControlCommand, RegisterWrite};
 use crate::inverter::model::DeviceType;
 use crate::inverter::poll::{AppState, ForceChargeRevert, ForceDischargeRevert, PollSettings};
-use crate::settings::TariffConfig;
 use crate::modbus::registers::encode_hhmm;
+use crate::settings::TariffConfig;
 
 // ---------------------------------------------------------------------------
 // Helper: standard JSON response
@@ -242,11 +242,7 @@ fn restore_discharge_slot_writes(
         ) {
             Ok(cmd) => cmd,
             Err(e) => {
-                tracing::warn!(
-                    "Skipping backed-up discharge slot {}: {}",
-                    slot_num,
-                    e
-                );
+                tracing::warn!("Skipping backed-up discharge slot {}: {}", slot_num, e);
                 continue;
             }
         };
@@ -258,13 +254,13 @@ fn restore_discharge_slot_writes(
                 // Timed mode encoder doesn't touch, so this stays a no-op
                 // there — same pattern the existing `is_timed` body path
                 // uses (api.rs:1083-1100).
-                if slot.enabled && slot.target_soc > 0 && device_type.uses_extended_schedule_slots() {
-                    if let Ok(target_writes) =
-                        (ControlCommand::SetDischargeTargetSocSlot {
-                            slot: slot_num,
-                            soc: slot.target_soc as u16,
-                        }
-                        .encode())
+                if slot.enabled && slot.target_soc > 0 && device_type.uses_extended_schedule_slots()
+                {
+                    if let Ok(target_writes) = (ControlCommand::SetDischargeTargetSocSlot {
+                        slot: slot_num,
+                        soc: slot.target_soc as u16,
+                    }
+                    .encode())
                     {
                         w.extend(target_writes);
                     }
@@ -314,9 +310,10 @@ async fn capture_discharge_schedule_backup(
         snap.discharge_slots.to_vec()
     };
 
-    let has_any_configured_slot = slots
-        .iter()
-        .any(|s| s.enabled && (s.start_hour != 0 || s.start_minute != 0 || s.end_hour != 0 || s.end_minute != 0));
+    let has_any_configured_slot = slots.iter().any(|s| {
+        s.enabled
+            && (s.start_hour != 0 || s.start_minute != 0 || s.end_hour != 0 || s.end_minute != 0)
+    });
     if !has_any_configured_slot {
         // Nothing worth backing up — leave the existing backup field alone
         // so a stale snapshot from earlier in the day doesn't get restored
@@ -494,8 +491,8 @@ fn build_force_charge_stop_writes(
 ) -> Vec<RegisterWrite> {
     use crate::modbus::registers::{
         HR_3PH_AC_CHARGE_ENABLE, HR_3PH_FORCE_CHARGE_ENABLE, HR_BATTERY_POWER_MODE,
-        HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC,
-        HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
+        HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE,
+        HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
     };
     let mut writes = Vec::new();
 
@@ -507,11 +504,19 @@ fn build_force_charge_stop_writes(
         // via the normal controls.
         writes.push(RegisterWrite {
             address: HR_3PH_FORCE_CHARGE_ENABLE,
-            value: if revert.three_phase_force_charge_enable.unwrap_or(false) { 1 } else { 0 },
+            value: if revert.three_phase_force_charge_enable.unwrap_or(false) {
+                1
+            } else {
+                0
+            },
         });
         writes.push(RegisterWrite {
             address: HR_3PH_AC_CHARGE_ENABLE,
-            value: if revert.three_phase_ac_charge_enable.unwrap_or(false) { 1 } else { 0 },
+            value: if revert.three_phase_ac_charge_enable.unwrap_or(false) {
+                1
+            } else {
+                0
+            },
         });
         // Restore the pre-force-charge power mode (0 = export, 1 = eco).
         // ThreePhaseForceCharge start writes 1; a user in Max-Power /
@@ -594,7 +599,10 @@ async fn capture_force_discharge_revert(
     type SlotTimes = (Option<(u8, u8)>, Option<(u8, u8)>);
     let capture_slot = |slot: &crate::inverter::model::ScheduleSlot| -> SlotTimes {
         if slot.enabled {
-            (Some((slot.start_hour, slot.start_minute)), Some((slot.end_hour, slot.end_minute)))
+            (
+                Some((slot.start_hour, slot.start_minute)),
+                Some((slot.end_hour, slot.end_minute)),
+            )
         } else {
             (None, None)
         }
@@ -643,8 +651,7 @@ fn build_force_discharge_stop_writes(
     use crate::modbus::registers::{
         HR_3PH_FORCE_CHARGE_ENABLE, HR_3PH_FORCE_DISCHARGE_ENABLE, HR_BATTERY_POWER_MODE,
         HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END,
-        HR_DISCHARGE_SLOT_2_START, HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET,
-        HR_ENABLE_DISCHARGE,
+        HR_DISCHARGE_SLOT_2_START, HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
     };
     let mut writes = Vec::new();
 
@@ -654,11 +661,19 @@ fn build_force_discharge_stop_writes(
         // the slot registers from the HR 1080-1124 block.
         writes.push(RegisterWrite {
             address: HR_3PH_FORCE_DISCHARGE_ENABLE,
-            value: if revert.three_phase_force_discharge_enable.unwrap_or(false) { 1 } else { 0 },
+            value: if revert.three_phase_force_discharge_enable.unwrap_or(false) {
+                1
+            } else {
+                0
+            },
         });
         writes.push(RegisterWrite {
             address: HR_3PH_FORCE_CHARGE_ENABLE,
-            value: if revert.three_phase_force_charge_enable.unwrap_or(false) { 1 } else { 0 },
+            value: if revert.three_phase_force_charge_enable.unwrap_or(false) {
+                1
+            } else {
+                0
+            },
         });
         writes.push(RegisterWrite {
             address: HR_BATTERY_POWER_MODE,
@@ -746,11 +761,7 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> (StatusCode, Json
     drop(clients);
 
     // Connection timestamp (epoch millis) and consecutive failure count.
-    let cs_val = state
-        .connected_since
-        .lock()
-        .ok()
-        .and_then(|guard| *guard);
+    let cs_val = state.connected_since.lock().ok().and_then(|guard| *guard);
     let connected_since_epoch_ms = cs_val
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as u64);
@@ -1055,7 +1066,10 @@ fn settings_log_fields(
         out.push(format!("http_port={}", persist.http_port));
     }
     if is_present("hidden_panels") {
-        out.push(format!("hidden_panels={} entries", persist.hidden_panels.len()));
+        out.push(format!(
+            "hidden_panels={} entries",
+            persist.hidden_panels.len()
+        ));
     }
     if is_present("evc_host") {
         out.push(format!("evc_host={}", persist.evc_host));
@@ -1124,9 +1138,9 @@ fn parse_settings(body: &serde_json::Value) -> Result<PollSettings, String> {
         host,
         port,
         serial,
-        interval_secs,          // caller will merge: 0 means "keep existing"
-        version: 0,             // not set by the API; caller bumps it
-        evc_host: String::new(),// merged from disk settings separately
+        interval_secs,           // caller will merge: 0 means "keep existing"
+        version: 0,              // not set by the API; caller bumps it
+        evc_host: String::new(), // merged from disk settings separately
         evc_port: 502,
         disable_auto_discovery,
         minimal_telemetry_mode: body
@@ -1782,10 +1796,7 @@ pub async fn set_export_limit(
 
     let device_type = latest_device_type(&state).await;
     let cmd = if device_type.needs_gateway_input_blocks()
-        || matches!(
-            device_type,
-            DeviceType::Ems | DeviceType::EmsCommercial
-        )
+        || matches!(device_type, DeviceType::Ems | DeviceType::EmsCommercial)
     {
         // EMS / Gateway plant-level (HR 2071).
         ControlCommand::SetEmsExportLimit { watts }
@@ -1938,9 +1949,7 @@ pub async fn force_charge(
 /// Returns an error if no Force Charge is in progress (i.e. the revert
 /// is `None`) — this prevents the user from accidentally clearing a
 /// working charge schedule they didn't intend to.
-pub async fn force_charge_stop(
-    State(state): State<Arc<AppState>>,
-) -> (StatusCode, Json<Value>) {
+pub async fn force_charge_stop(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     // Take the revert so a concurrent force-charge re-arm can't race with
     // us: the second start will overwrite the field, but the writes we
     // queue now restore the FIRST start's captured state, which is what
@@ -2011,8 +2020,7 @@ pub async fn force_discharge(
         let clamped_minutes = minutes.clamp(1, 1439) as i64;
         let expiry = Local::now() + ChronoDuration::minutes(clamped_minutes);
         if let Some(r) = revert.as_mut() {
-            r.force_discharge_slot_end_ms =
-                Some(expiry.timestamp_millis());
+            r.force_discharge_slot_end_ms = Some(expiry.timestamp_millis());
         }
         match force_discharge_slot_writes(device_type, minutes) {
             Ok(mut slot_writes) => writes.append(&mut slot_writes),
@@ -2041,8 +2049,8 @@ pub async fn force_discharge(
                 use crate::modbus::registers::{
                     HR_3PH_DISCHARGE_SLOT_1_END, HR_3PH_DISCHARGE_SLOT_1_START,
                     HR_3PH_DISCHARGE_SLOT_2_END, HR_3PH_DISCHARGE_SLOT_2_START,
-                    HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START,
-                    HR_DISCHARGE_SLOT_2_END, HR_DISCHARGE_SLOT_2_START,
+                    HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END,
+                    HR_DISCHARGE_SLOT_2_START,
                 };
                 let slot_addrs: &[u16] = if is_three_phase {
                     &[
@@ -2086,9 +2094,7 @@ pub async fn force_discharge(
 /// Returns an error if no Force Discharge is in progress — this prevents
 /// the user from accidentally clearing a working discharge schedule they
 /// didn't intend to.
-pub async fn force_discharge_stop(
-    State(state): State<Arc<AppState>>,
-) -> (StatusCode, Json<Value>) {
+pub async fn force_discharge_stop(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let revert = state.force_discharge_revert.lock().await.take();
     let revert = match revert {
         Some(r) => r,
@@ -2259,8 +2265,12 @@ pub async fn get_history(
     // the `today_*_kwh` counters and the configured tariff at native reading
     // resolution. Split them out from the directly-aggregated
     // fields so each goes down its own path.
-    let want_import_cost = fields.iter().any(|f| f == crate::history::IMPORT_COST_FIELD);
-    let want_export_income = fields.iter().any(|f| f == crate::history::EXPORT_INCOME_FIELD);
+    let want_import_cost = fields
+        .iter()
+        .any(|f| f == crate::history::IMPORT_COST_FIELD);
+    let want_export_income = fields
+        .iter()
+        .any(|f| f == crate::history::EXPORT_INCOME_FIELD);
     let normal_fields: Vec<String> = fields
         .iter()
         .filter(|f| !crate::history::is_cost_field(f))
@@ -2480,7 +2490,10 @@ pub async fn set_alerts(
     if let Some(v) = body.get("grid_offline_enabled").and_then(|v| v.as_bool()) {
         config.grid_offline_enabled = v;
     }
-    if let Some(v) = body.get("connection_lost_enabled").and_then(|v| v.as_bool()) {
+    if let Some(v) = body
+        .get("connection_lost_enabled")
+        .and_then(|v| v.as_bool())
+    {
         config.connection_lost_enabled = v;
     }
     if let Some(v) = body
@@ -2815,7 +2828,10 @@ pub async fn submit_support_bundle(
 
     let any_ok = sent_to
         .as_array()
-        .map(|a| a.iter().any(|r| r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)))
+        .map(|a| {
+            a.iter()
+                .any(|r| r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false))
+        })
         .unwrap_or(false);
 
     let message = if any_ok {
@@ -2855,9 +2871,7 @@ pub async fn submit_support_bundle(
 /// dongle would only fire one extra attempt before the loop fell back
 /// into a 10-minute zombie-dongle back-off sleep, which is not what the
 /// user expects when they click "Retry now".
-pub async fn post_reconnect(
-    State(state): State<Arc<AppState>>,
-) -> (StatusCode, Json<Value>) {
+pub async fn post_reconnect(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     // Bump settings version so the poll loop detects the change
     // and breaks out of the inner loop → disconnect → reconnect.
     let mut settings = state.settings.lock().await;
@@ -3185,10 +3199,7 @@ fn lookup_postcode(postcode: &str) -> Option<(String, f64, f64)> {
     }
     let url = format!(
         "https://api.postcodes.io/postcodes/{}",
-        percent_encoding::utf8_percent_encode(
-            trimmed,
-            percent_encoding::NON_ALPHANUMERIC,
-        )
+        percent_encoding::utf8_percent_encode(trimmed, percent_encoding::NON_ALPHANUMERIC,)
     );
     // postcodes.io is a low-volume, trusted UK government-backed API. We
     // reuse the shared weather agent (10 s timeout, no idle pooling) —
@@ -3263,7 +3274,9 @@ pub async fn set_weather(
     // If we have a postcode but no coordinates, try to resolve now so the
     // user gets immediate feedback (rather than waiting for the next poll
     // tick). Failure is non-fatal — the user can enter coords manually.
-    if !ws.config.postcode.is_empty() && (ws.config.latitude.is_none() || ws.config.longitude.is_none()) {
+    if !ws.config.postcode.is_empty()
+        && (ws.config.latitude.is_none() || ws.config.longitude.is_none())
+    {
         match lookup_postcode(&ws.config.postcode) {
             Some((canonical, lat, lon)) => {
                 ws.config.postcode = canonical;
@@ -3639,13 +3652,16 @@ mod tests {
     async fn gateway_force_charge_routes_to_single_phase_registers() {
         with_isolated_config_dir_async(|| async {
             use crate::modbus::registers::{
-                HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC,
-                HR_ENABLE_CHARGE, HR_3PH_CHARGE_SLOT_1_START, HR_3PH_FORCE_CHARGE_ENABLE,
+                HR_3PH_CHARGE_SLOT_1_START, HR_3PH_FORCE_CHARGE_ENABLE, HR_CHARGE_SLOT_1_END,
+                HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE,
             };
             let state = make_state_with_device(DeviceType::Gateway).await;
 
-            let (status, body) =
-                force_charge(State(state.clone()), Some(Json(serde_json::json!({"minutes": 30})))).await;
+            let (status, body) = force_charge(
+                State(state.clone()),
+                Some(Json(serde_json::json!({"minutes": 30}))),
+            )
+            .await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(body.0["ok"], serde_json::Value::Bool(true));
 
@@ -3653,26 +3669,41 @@ mod tests {
             assert_all_whitelisted(&writes);
             // Single-phase charge registers must be written.
             let slot_start = writes.iter().find(|w| w.address == HR_CHARGE_SLOT_1_START);
-            assert!(slot_start.is_some(), "Gateway must write HR 94 (charge slot 1 start)");
-            let _ = writes.iter().find(|w| w.address == HR_CHARGE_SLOT_1_END)
+            assert!(
+                slot_start.is_some(),
+                "Gateway must write HR 94 (charge slot 1 start)"
+            );
+            let _ = writes
+                .iter()
+                .find(|w| w.address == HR_CHARGE_SLOT_1_END)
                 .expect("Gateway must write HR 95 (charge slot 1 end)");
             assert_eq!(
-                writes.iter().find(|w| w.address == HR_ENABLE_CHARGE).map(|w| w.value),
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_ENABLE_CHARGE)
+                    .map(|w| w.value),
                 Some(1),
                 "Gateway must set HR 96 (enable_charge)",
             );
             assert_eq!(
-                writes.iter().find(|w| w.address == HR_CHARGE_TARGET_SOC).map(|w| w.value),
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_CHARGE_TARGET_SOC)
+                    .map(|w| w.value),
                 Some(100),
                 "Gateway must write HR 116 (charge target SOC)",
             );
             // The three-phase control bank must NOT be touched.
             assert!(
-                writes.iter().all(|w| w.address != HR_3PH_CHARGE_SLOT_1_START),
+                writes
+                    .iter()
+                    .all(|w| w.address != HR_3PH_CHARGE_SLOT_1_START),
                 "Gateway must NOT write HR 1113 (three-phase charge slot)",
             );
             assert!(
-                writes.iter().all(|w| w.address != HR_3PH_FORCE_CHARGE_ENABLE),
+                writes
+                    .iter()
+                    .all(|w| w.address != HR_3PH_FORCE_CHARGE_ENABLE),
                 "Gateway must NOT write HR 1123 (three-phase force charge)",
             );
         })
@@ -3686,29 +3717,38 @@ mod tests {
     async fn gateway_force_discharge_routes_to_single_phase_registers() {
         with_isolated_config_dir_async(|| async {
             use crate::modbus::registers::{
-                HR_DISCHARGE_SLOT_1_START, HR_ENABLE_DISCHARGE, HR_3PH_FORCE_DISCHARGE_ENABLE,
+                HR_3PH_FORCE_DISCHARGE_ENABLE, HR_DISCHARGE_SLOT_1_START, HR_ENABLE_DISCHARGE,
             };
             let state = make_state_with_device(DeviceType::Gateway).await;
 
-            let (status, body) =
-                force_discharge(State(state.clone()), Some(Json(serde_json::json!({"minutes": 30}))))
-                    .await;
+            let (status, body) = force_discharge(
+                State(state.clone()),
+                Some(Json(serde_json::json!({"minutes": 30}))),
+            )
+            .await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(body.0["ok"], serde_json::Value::Bool(true));
 
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
             assert!(
-                writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_1_START),
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_DISCHARGE_SLOT_1_START),
                 "Gateway must write HR 56 (discharge slot 1 start)",
             );
             assert_eq!(
-                writes.iter().find(|w| w.address == HR_ENABLE_DISCHARGE).map(|w| w.value),
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_ENABLE_DISCHARGE)
+                    .map(|w| w.value),
                 Some(1),
                 "Gateway must set HR 59 (enable_discharge)",
             );
             assert!(
-                writes.iter().all(|w| w.address != HR_3PH_FORCE_DISCHARGE_ENABLE),
+                writes
+                    .iter()
+                    .all(|w| w.address != HR_3PH_FORCE_DISCHARGE_ENABLE),
                 "Gateway must NOT write HR 1122 (three-phase force discharge)",
             );
         })
@@ -3747,7 +3787,10 @@ mod tests {
             assert_eq!(global.unwrap().value, 80);
             // Per-slot target SOC (HR 242) is also written for extended-slot models.
             let per_slot = writes.iter().find(|w| w.address == HR_CHARGE_TARGET_SOC_1);
-            assert!(per_slot.is_some(), "extended-slot model must write per-slot HR 242");
+            assert!(
+                per_slot.is_some(),
+                "extended-slot model must write per-slot HR 242"
+            );
             assert_eq!(per_slot.unwrap().value, 80);
             // enable_charge armed, force-charge flag cleared.
             assert_eq!(
@@ -3960,7 +4003,10 @@ mod tests {
                 .expect("AIO charge slot must clear HR 20");
             assert_eq!(flag.value, 0);
             let global = writes.iter().find(|w| w.address == HR_CHARGE_TARGET_SOC);
-            assert!(global.is_none(), "HR 116 must NOT be written when target_soc=100");
+            assert!(
+                global.is_none(),
+                "HR 116 must NOT be written when target_soc=100"
+            );
         })
         .await;
     }
@@ -4042,9 +4088,7 @@ mod tests {
     #[tokio::test]
     async fn aio_discharge_slot1_enable() {
         with_isolated_config_dir_async(|| async {
-            use crate::modbus::registers::{
-                HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START,
-            };
+            use crate::modbus::registers::{HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START};
             let state = make_state_with_device(DeviceType::AllInOne6kW).await;
             let body = serde_json::json!({
                 "slot": 1,
@@ -4073,9 +4117,7 @@ mod tests {
     #[tokio::test]
     async fn aio_discharge_slot1_disable() {
         with_isolated_config_dir_async(|| async {
-            use crate::modbus::registers::{
-                HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START,
-            };
+            use crate::modbus::registers::{HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START};
             let state = make_state_with_device(DeviceType::AllInOne6kW).await;
             let body = serde_json::json!({
                 "slot": 1,
@@ -4203,8 +4245,8 @@ mod tests {
     async fn aio_charge_slot_target_soc_4() {
         with_isolated_config_dir_async(|| async {
             use crate::modbus::registers::{
-                HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC,
-                HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET,
+                HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE,
+                HR_ENABLE_CHARGE_TARGET,
             };
             let state = make_state_with_device(DeviceType::AllInOne6kW).await;
             let body = serde_json::json!({
@@ -4247,8 +4289,8 @@ mod tests {
     async fn aio_charge_slot_target_soc_100_with_previous_hr116() {
         with_isolated_config_dir_async(|| async {
             use crate::modbus::registers::{
-                HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC,
-                HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET,
+                HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE,
+                HR_ENABLE_CHARGE_TARGET,
             };
             let state = make_state_with_device(DeviceType::AllInOne6kW).await;
             let body = serde_json::json!({
@@ -4267,7 +4309,10 @@ mod tests {
                 .expect("AIO charge slot must write HR 94");
             assert_eq!(start.value, 600);
             let global = writes.iter().find(|w| w.address == HR_CHARGE_TARGET_SOC);
-            assert!(global.is_none(), "HR 116 must NOT be written when target_soc=100");
+            assert!(
+                global.is_none(),
+                "HR 116 must NOT be written when target_soc=100"
+            );
             let flag = writes
                 .iter()
                 .find(|w| w.address == HR_ENABLE_CHARGE_TARGET)
@@ -4309,6 +4354,141 @@ mod tests {
                 );
                 assert_eq!(w.unwrap().value, 0);
             }
+        })
+        .await;
+    }
+
+    // -- set_mode register contract (issue #156) --------------------------
+    //
+    // The frontend fix for issue #156 will surface Timed Export as its own
+    // selectable mode. The backend already routes `set_mode("timed_export")`
+    // → `SetTimedExportMode`, but no test asserts the resulting register
+    // writes — so a regression in the API routing or the encoder would slip
+    // through silently. These tests pin the three-register contract for each
+    // mode exactly as GivTCP's `set_mode_storage` / `set_mode_dynamic`
+    // define it (see commands.py), with HR(27) as the sole demand/export
+    // distinguisher.
+    #[tokio::test]
+    async fn set_mode_timed_demand_writes_match_demand_registers() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_BATTERY_POWER_MODE, HR_BATTERY_SOC_RESERVE, HR_ENABLE_DISCHARGE,
+            };
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let body = serde_json::json!({ "mode": "timed_demand", "soc_reserve": 12 });
+            let _ = set_mode(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_BATTERY_POWER_MODE)
+                    .expect("timed_demand must write HR27")
+                    .value,
+                1,
+                "Timed Demand keeps match-demand (HR27=1) — battery covers home only"
+            );
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_ENABLE_DISCHARGE)
+                    .expect("timed_demand must write HR59")
+                    .value,
+                1,
+                "Timed Demand arms the schedule (HR59=1)"
+            );
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_BATTERY_SOC_RESERVE)
+                    .expect("timed_demand must write HR110")
+                    .value,
+                12
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_mode_timed_export_writes_max_power_registers() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_BATTERY_POWER_MODE, HR_BATTERY_SOC_RESERVE, HR_ENABLE_DISCHARGE,
+            };
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let body = serde_json::json!({ "mode": "timed_export", "soc_reserve": 20 });
+            let _ = set_mode(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            // HR27=0 is the entire point of Timed Export: surplus battery
+            // power exports to grid instead of only topping up home demand.
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_BATTERY_POWER_MODE)
+                    .expect("timed_export must write HR27")
+                    .value,
+                0,
+                "Timed Export uses max-power (HR27=0) — battery exports surplus to grid"
+            );
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_ENABLE_DISCHARGE)
+                    .expect("timed_export must write HR59")
+                    .value,
+                1,
+                "Timed Export arms the schedule (HR59=1)"
+            );
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_BATTERY_SOC_RESERVE)
+                    .expect("timed_export must write HR110")
+                    .value,
+                20
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_mode_export_paused_writes_paused_registers() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_BATTERY_POWER_MODE, HR_BATTERY_SOC_RESERVE, HR_ENABLE_DISCHARGE,
+            };
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let body = serde_json::json!({ "mode": "export_paused", "soc_reserve": 4 });
+            let _ = set_mode(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_BATTERY_POWER_MODE)
+                    .expect("export_paused must write HR27")
+                    .value,
+                0,
+                "Export Paused stays in the export family (HR27=0)"
+            );
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_ENABLE_DISCHARGE)
+                    .expect("export_paused must write HR59")
+                    .value,
+                0,
+                "Export Paused disarms the schedule (HR59=0)"
+            );
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_BATTERY_SOC_RESERVE)
+                    .expect("export_paused must write HR110")
+                    .value,
+                4
+            );
         })
         .await;
     }
@@ -4473,9 +4653,9 @@ mod tests {
             // the frontend can stage it as pending edits in the Eco UI.
             assert_eq!(status, StatusCode::OK);
             assert_eq!(response.0["ok"], serde_json::Value::Bool(true));
-            let resp_backup = response.0["discharge_slots_backup"]
-                .as_array()
-                .expect("eco response must include discharge_slots_backup when a schedule was captured");
+            let resp_backup = response.0["discharge_slots_backup"].as_array().expect(
+                "eco response must include discharge_slots_backup when a schedule was captured",
+            );
             assert_eq!(resp_backup.len(), 10, "response backup covers all 10 slots");
             assert_eq!(resp_backup[0]["start_hour"], 16);
             assert_eq!(resp_backup[0]["end_hour"], 19);
@@ -4594,7 +4774,10 @@ mod tests {
                 pos_slot,
                 pos_enable
             );
-            let enable = writes.iter().find(|w| w.address == HR_ENABLE_DISCHARGE).unwrap();
+            let enable = writes
+                .iter()
+                .find(|w| w.address == HR_ENABLE_DISCHARGE)
+                .unwrap();
             assert_eq!(enable.value, 1);
         })
         .await;
@@ -4644,9 +4827,13 @@ mod tests {
             let writes = drain_pending_writes(&state).await;
 
             // Configured slots 1-2 must be written.
-            assert!(writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_1_START));
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_DISCHARGE_SLOT_1_START));
             assert!(writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_1_END));
-            assert!(writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_2_START));
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_DISCHARGE_SLOT_2_START));
             assert!(writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_2_END));
 
             // Unconfigured slots must NOT be written — they would
@@ -4690,7 +4877,9 @@ mod tests {
             )
             .await;
             assert!(
-                crate::settings::Settings::load().discharge_slots_backup.is_some(),
+                crate::settings::Settings::load()
+                    .discharge_slots_backup
+                    .is_some(),
                 "precondition: backup is populated after Eco"
             );
             drain_pending_writes(&state).await;
@@ -4702,7 +4891,9 @@ mod tests {
             )
             .await;
             assert!(
-                crate::settings::Settings::load().discharge_slots_backup.is_none(),
+                crate::settings::Settings::load()
+                    .discharge_slots_backup
+                    .is_none(),
                 "backup must be cleared after a successful restore"
             );
         })
@@ -4887,7 +5078,9 @@ mod tests {
                 "eco with empty schedule must not echo discharge_slots_backup in response"
             );
 
-            let backup = crate::settings::Settings::load().discharge_slots_backup.clone();
+            let backup = crate::settings::Settings::load()
+                .discharge_slots_backup
+                .clone();
             // Either None, or Some(vec with no enabled slot) — both are
             // acceptable representations of "nothing to back up". A future
             // Timed toggle must not see this as a reason to enable slots.
@@ -4915,9 +5108,9 @@ mod tests {
             let (status, response) = pause_battery(State(state.clone())).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(response.0["ok"], serde_json::Value::Bool(true));
-            let resp_backup = response.0["discharge_slots_backup"]
-                .as_array()
-                .expect("pause response must include discharge_slots_backup when a schedule was captured");
+            let resp_backup = response.0["discharge_slots_backup"].as_array().expect(
+                "pause response must include discharge_slots_backup when a schedule was captured",
+            );
             assert_eq!(resp_backup.len(), 10);
             assert_eq!(resp_backup[0]["start_hour"], 16);
             assert_eq!(resp_backup[0]["end_hour"], 19);
@@ -5648,8 +5841,7 @@ mod tests {
             for dt in cases {
                 let state = make_state_with_device(dt).await;
                 let body = serde_json::json!({ "enabled": true });
-                let (status, payload) =
-                    set_eps(State(state.clone()), Json(body)).await;
+                let (status, payload) = set_eps(State(state.clone()), Json(body)).await;
                 assert_eq!(
                     status,
                     StatusCode::BAD_REQUEST,
@@ -5660,8 +5852,7 @@ mod tests {
                 assert_eq!(
                     payload["ok"], false,
                     "expected ok=false for {:?}, got {:?}",
-                    dt,
-                    payload
+                    dt, payload
                 );
                 assert!(
                     payload["error"]
@@ -5699,8 +5890,7 @@ mod tests {
             for dt in cases {
                 let state = make_state_with_device(dt).await;
                 let body = serde_json::json!({ "enabled": true });
-                let (status, payload) =
-                    set_eps(State(state.clone()), Json(body)).await;
+                let (status, payload) = set_eps(State(state.clone()), Json(body)).await;
                 assert_eq!(
                     status,
                     StatusCode::OK,
@@ -5748,10 +5938,7 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST);
             assert_eq!(payload["ok"], false);
             assert!(
-                payload["error"]
-                    .as_str()
-                    .unwrap_or("")
-                    .contains("Missing"),
+                payload["error"].as_str().unwrap_or("").contains("Missing"),
                 "expected 'Missing' error, got {:?}",
                 payload
             );
@@ -5888,21 +6075,29 @@ mod tests {
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
             assert!(
-                writes.iter().any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 1),
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 1),
                 "stop should restore enable_discharge to its pre-force value (1) — \
                  ForceCharge start clears it, and not restoring it leaves the \
                  user's discharge schedule silently disabled"
             );
             assert!(
-                writes.iter().any(|w| w.address == HR_ENABLE_CHARGE && w.value == 1),
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_ENABLE_CHARGE && w.value == 1),
                 "stop should restore enable_charge to its pre-force value (1)"
             );
             assert!(
-                writes.iter().any(|w| w.address == HR_ENABLE_CHARGE_TARGET && w.value == 1),
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_ENABLE_CHARGE_TARGET && w.value == 1),
                 "stop should restore enable_charge_target to match enable_charge"
             );
             assert!(
-                writes.iter().any(|w| w.address == HR_CHARGE_TARGET_SOC && w.value == 60),
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_CHARGE_TARGET_SOC && w.value == 60),
                 "stop should restore target_soc to 60"
             );
             assert!(
@@ -6198,7 +6393,10 @@ mod tests {
                 .await
                 .clone()
                 .expect("force_discharge should have populated the revert");
-            assert!(revert.enable_discharge, "pre-state had enable_discharge=true");
+            assert!(
+                revert.enable_discharge,
+                "pre-state had enable_discharge=true"
+            );
             assert!(revert.enable_charge, "pre-state had enable_charge=true");
             assert_eq!(revert.discharge_rate, Some(40));
             assert_eq!(revert.discharge_slot_1_start, Some((17, 0)));
@@ -6237,15 +6435,21 @@ mod tests {
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
             assert!(
-                writes.iter().any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 1),
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 1),
                 "stop should restore enable_discharge to its pre-force value (1)"
             );
             assert!(
-                writes.iter().any(|w| w.address == HR_ENABLE_CHARGE && w.value == 1),
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_ENABLE_CHARGE && w.value == 1),
                 "stop should restore enable_charge to its pre-force value (1)"
             );
             assert!(
-                writes.iter().any(|w| w.address == HR_ENABLE_CHARGE_TARGET && w.value == 1),
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_ENABLE_CHARGE_TARGET && w.value == 1),
                 "stop should restore enable_charge_target to match enable_charge"
             );
             // 17:00 = 1700 HHMM encoded.
@@ -6297,7 +6501,9 @@ mod tests {
     #[tokio::test]
     async fn force_discharge_stop_three_phase_restores_force_flags() {
         with_isolated_config_dir_async(|| async {
-            use crate::modbus::registers::{HR_3PH_FORCE_CHARGE_ENABLE, HR_3PH_FORCE_DISCHARGE_ENABLE};
+            use crate::modbus::registers::{
+                HR_3PH_FORCE_CHARGE_ENABLE, HR_3PH_FORCE_DISCHARGE_ENABLE,
+            };
 
             let state = make_state_with_device(DeviceType::ThreePhase).await;
             // Pre-state had three-phase force discharge enabled, force charge
@@ -6384,11 +6590,8 @@ mod tests {
             };
 
             let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
-            let _ = force_discharge(
-                State(state.clone()),
-                Some(Json(json!({ "minutes": 60 }))),
-            )
-            .await;
+            let _ =
+                force_discharge(State(state.clone()), Some(Json(json!({ "minutes": 60 })))).await;
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
 
@@ -6396,7 +6599,9 @@ mod tests {
             // without freezing Local::now, so just assert the writes are
             // present and not the encoder's default of 0/2359).
             assert!(
-                writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_1_START),
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_DISCHARGE_SLOT_1_START),
                 "force discharge with minutes must write discharge slot 1 start"
             );
             assert!(
@@ -6464,11 +6669,8 @@ mod tests {
             };
 
             let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
-            let _ = force_discharge(
-                State(state.clone()),
-                Some(Json(json!({ "minutes": 30 }))),
-            )
-            .await;
+            let _ =
+                force_discharge(State(state.clone()), Some(Json(json!({ "minutes": 30 })))).await;
             let writes = drain_pending_writes(&state).await;
 
             let start_idx = writes
@@ -6536,11 +6738,8 @@ mod tests {
             let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
             let before = chrono::Local::now().timestamp_millis();
 
-            let _ = force_discharge(
-                State(state.clone()),
-                Some(Json(json!({ "minutes": 30 }))),
-            )
-            .await;
+            let _ =
+                force_discharge(State(state.clone()), Some(Json(json!({ "minutes": 30 })))).await;
             let _ = drain_pending_writes(&state).await;
 
             let revert = state
@@ -6601,11 +6800,8 @@ mod tests {
             };
 
             let state = make_state_with_device(DeviceType::ThreePhase).await;
-            let _ = force_discharge(
-                State(state.clone()),
-                Some(Json(json!({ "minutes": 60 }))),
-            )
-            .await;
+            let _ =
+                force_discharge(State(state.clone()), Some(Json(json!({ "minutes": 60 })))).await;
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
 
@@ -6643,7 +6839,9 @@ mod tests {
                 HR_DISCHARGE_SLOT_2_START,
             };
             assert!(
-                !writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_1_START),
+                !writes
+                    .iter()
+                    .any(|w| w.address == HR_DISCHARGE_SLOT_1_START),
                 "3PH force discharge must not write classic HR 56"
             );
             assert!(
@@ -6651,7 +6849,9 @@ mod tests {
                 "3PH force discharge must not write classic HR 57"
             );
             assert!(
-                !writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_2_START),
+                !writes
+                    .iter()
+                    .any(|w| w.address == HR_DISCHARGE_SLOT_2_START),
                 "3PH force discharge must not write classic HR 44"
             );
             assert!(
@@ -7237,20 +7437,41 @@ mod tests {
         let fields = settings_log_fields(&body, &persist);
         let joined = fields.join(", ");
 
-        assert_eq!(fields.len(), 2, "only the two fields in the body should appear, got: {joined}");
-        assert!(joined.contains("api_key="), "expected api_key entry, got: {joined}");
-        assert!(joined.contains("api_port=7338"), "expected api_port entry, got: {joined}");
+        assert_eq!(
+            fields.len(),
+            2,
+            "only the two fields in the body should appear, got: {joined}"
+        );
+        assert!(
+            joined.contains("api_key="),
+            "expected api_key entry, got: {joined}"
+        );
+        assert!(
+            joined.contains("api_port=7338"),
+            "expected api_port entry, got: {joined}"
+        );
         // The bug was: these connection fields appeared as empty/0 in the
         // log even when the body didn't carry them. They must NOT appear.
         // Use precise matches to avoid false positives from `api_port=`
         // (which contains the substring `port=`).
-        assert!(!joined.contains("host="), "host must not appear when absent from body, got: {joined}");
         assert!(
-            !joined.split(',').any(|s| s.trim_start().starts_with("port=")),
+            !joined.contains("host="),
+            "host must not appear when absent from body, got: {joined}"
+        );
+        assert!(
+            !joined
+                .split(',')
+                .any(|s| s.trim_start().starts_with("port=")),
             "port must not appear when absent from body, got: {joined}"
         );
-        assert!(!joined.contains("serial="), "serial must not appear when absent from body, got: {joined}");
-        assert!(!joined.contains("interval="), "interval must not appear when absent from body, got: {joined}");
+        assert!(
+            !joined.contains("serial="),
+            "serial must not appear when absent from body, got: {joined}"
+        );
+        assert!(
+            !joined.contains("interval="),
+            "interval must not appear when absent from body, got: {joined}"
+        );
     }
 
     #[test]
@@ -7270,8 +7491,14 @@ mod tests {
             !joined.contains("supersecretvalue"),
             "api_key plaintext must NEVER appear in the log (security: log files can be exfiltrated via the support bundle), got: {joined}"
         );
-        assert!(joined.contains("api_key=set"), "expected redacted set marker, got: {joined}");
-        assert!(joined.contains("16 chars"), "expected length hint so the user can verify the key, got: {joined}");
+        assert!(
+            joined.contains("api_key=set"),
+            "expected redacted set marker, got: {joined}"
+        );
+        assert!(
+            joined.contains("16 chars"),
+            "expected length hint so the user can verify the key, got: {joined}"
+        );
     }
 
     #[test]
@@ -7287,7 +7514,10 @@ mod tests {
         let fields = settings_log_fields(&body, &persist);
         let joined = fields.join(", ");
 
-        assert!(joined.contains("api_key=cleared"), "empty api_key should be reported as cleared, got: {joined}");
+        assert!(
+            joined.contains("api_key=cleared"),
+            "empty api_key should be reported as cleared, got: {joined}"
+        );
     }
 
     #[test]
@@ -7333,16 +7563,26 @@ mod tests {
         let persist = Settings {
             import_tariff_config: Some(TariffConfig {
                 slots: vec![
-                    TariffSlot { start: "00:00".into(), end: "07:00".into(), rate: 0.10 },
-                    TariffSlot { start: "07:00".into(), end: "23:59".into(), rate: 0.30 },
+                    TariffSlot {
+                        start: "00:00".into(),
+                        end: "07:00".into(),
+                        rate: 0.10,
+                    },
+                    TariffSlot {
+                        start: "07:00".into(),
+                        end: "23:59".into(),
+                        rate: 0.30,
+                    },
                 ],
             }),
             export_tariff_config: Some(TariffConfig {
-                slots: (0..24).map(|i| TariffSlot {
-                    start: format!("{i:02}:00"),
-                    end: format!("{:02}:00", (i + 1) % 24),
-                    rate: 0.20,
-                }).collect(),
+                slots: (0..24)
+                    .map(|i| TariffSlot {
+                        start: format!("{i:02}:00"),
+                        end: format!("{:02}:00", (i + 1) % 24),
+                        rate: 0.20,
+                    })
+                    .collect(),
             }),
             hidden_panels: vec!["x".into(), "y".into(), "z".into()],
             ..Default::default()
@@ -7351,11 +7591,20 @@ mod tests {
         let fields = settings_log_fields(&body, &persist);
         let joined = fields.join(", ");
 
-        assert!(joined.contains("import_tariff_config=2 slots"), "got: {joined}");
-        assert!(joined.contains("export_tariff_config=24 slots"), "got: {joined}");
+        assert!(
+            joined.contains("import_tariff_config=2 slots"),
+            "got: {joined}"
+        );
+        assert!(
+            joined.contains("export_tariff_config=24 slots"),
+            "got: {joined}"
+        );
         assert!(joined.contains("hidden_panels=3 entries"), "got: {joined}");
         // Don't dump the full JSON.
-        assert!(!joined.contains("rate"), "tariff slot details must not be logged, got: {joined}");
+        assert!(
+            !joined.contains("rate"),
+            "tariff slot details must not be logged, got: {joined}"
+        );
     }
 
     #[test]
@@ -7386,8 +7635,7 @@ mod tests {
                 "api_port": 8443,
             });
 
-            let (status, json) =
-                update_settings(State(state.clone()), Json(body)).await;
+            let (status, json) = update_settings(State(state.clone()), Json(body)).await;
             assert_eq!(status, StatusCode::OK);
             let msg = response_message(&json);
 
@@ -7422,17 +7670,22 @@ mod tests {
                 "port must not appear when absent, got: {msg}"
             );
             assert!(
-                !msg.split(',').any(|s| s.trim_start().starts_with("serial=")),
+                !msg.split(',')
+                    .any(|s| s.trim_start().starts_with("serial=")),
                 "serial must not appear when absent, got: {msg}"
             );
             assert!(
-                !msg.split(',').any(|s| s.trim_start().starts_with("interval=")),
+                !msg.split(',')
+                    .any(|s| s.trim_start().starts_with("interval=")),
                 "interval must not appear when absent, got: {msg}"
             );
 
             // (c) The values must be on disk for the next launch.
             let saved = crate::settings::Settings::load();
-            assert_eq!(saved.api_key, "my-secret-token-12345", "api_key must be persisted");
+            assert_eq!(
+                saved.api_key, "my-secret-token-12345",
+                "api_key must be persisted"
+            );
             assert_eq!(saved.api_port, 8443, "api_port must be persisted");
         })
         .await;
@@ -7453,8 +7706,7 @@ mod tests {
             let state = Arc::new(AppState::new());
             let body = serde_json::json!({ "api_key": "" });
 
-            let (status, json) =
-                update_settings(State(state.clone()), Json(body)).await;
+            let (status, json) = update_settings(State(state.clone()), Json(body)).await;
             assert_eq!(status, StatusCode::OK);
             let msg = response_message(&json);
 
@@ -7465,7 +7717,10 @@ mod tests {
             // Persisted state is empty, port preserved.
             let saved = crate::settings::Settings::load();
             assert_eq!(saved.api_key, "", "api_key must be cleared on disk");
-            assert_eq!(saved.api_port, 7338, "api_port must be preserved when only key was sent");
+            assert_eq!(
+                saved.api_port, 7338,
+                "api_port must be preserved when only key was sent"
+            );
         })
         .await;
     }
@@ -7485,8 +7740,7 @@ mod tests {
                 },
             });
 
-            let (status, json) =
-                update_settings(State(state.clone()), Json(body)).await;
+            let (status, json) = update_settings(State(state.clone()), Json(body)).await;
             assert_eq!(status, StatusCode::OK);
             let msg = response_message(&json);
 
@@ -7504,7 +7758,8 @@ mod tests {
                 "got: {msg}"
             );
             assert!(
-                !msg.split(',').any(|s| s.trim_start().starts_with("interval=")),
+                !msg.split(',')
+                    .any(|s| s.trim_start().starts_with("interval=")),
                 "got: {msg}"
             );
 
@@ -7545,8 +7800,7 @@ mod tests {
                 "serial": "SN-NEW",
             });
 
-            let (status, json) =
-                update_settings(State(state.clone()), Json(body)).await;
+            let (status, json) = update_settings(State(state.clone()), Json(body)).await;
             assert_eq!(status, StatusCode::OK);
             let msg = response_message(&json);
 
@@ -7558,11 +7812,17 @@ mod tests {
             // (b) The interval was NOT in the body, so it must not appear.
             // Previously the log would have said "interval=0s" here,
             // which was the misleading behaviour.
-            assert!(!msg.contains("interval="), "interval must not appear when absent from body, got: {msg}");
+            assert!(
+                !msg.contains("interval="),
+                "interval must not appear when absent from body, got: {msg}"
+            );
             // (c) And the disk value must still be 30s — the connection
             // save did not clobber it.
             let saved = crate::settings::Settings::load();
-            assert_eq!(saved.poll_interval, 30, "interval on disk must be unchanged");
+            assert_eq!(
+                saved.poll_interval, 30,
+                "interval on disk must be unchanged"
+            );
             assert_eq!(saved.host, "10.0.0.99", "new host must be persisted");
             assert_eq!(saved.port, 8899, "new port must be persisted");
             assert_eq!(saved.serial, "SN-NEW", "new serial must be persisted");
@@ -7584,12 +7844,14 @@ mod tests {
             let state = Arc::new(AppState::new());
             let body = serde_json::json!({ "interval_secs": 30 });
 
-            let (status, json) =
-                update_settings(State(state.clone()), Json(body)).await;
+            let (status, json) = update_settings(State(state.clone()), Json(body)).await;
             assert_eq!(status, StatusCode::OK);
             let msg = response_message(&json);
 
-            assert!(msg.contains("interval=30s"), "new interval must appear, got: {msg}");
+            assert!(
+                msg.contains("interval=30s"),
+                "new interval must appear, got: {msg}"
+            );
             // The four connection fields are not in the body, so none
             // should appear — previously all four would show as empty/0.
             assert!(!msg.contains("host="), "got: {msg}");
@@ -7597,7 +7859,10 @@ mod tests {
             assert!(!msg.contains("serial="), "got: {msg}");
 
             let saved = crate::settings::Settings::load();
-            assert_eq!(saved.poll_interval, 30, "interval must be persisted to disk");
+            assert_eq!(
+                saved.poll_interval, 30,
+                "interval must be persisted to disk"
+            );
         })
         .await;
     }
@@ -7613,8 +7878,7 @@ mod tests {
                 "evc_port": 5020,
             });
 
-            let (status, json) =
-                update_settings(State(state.clone()), Json(body)).await;
+            let (status, json) = update_settings(State(state.clone()), Json(body)).await;
             assert_eq!(status, StatusCode::OK);
             let msg = response_message(&json);
 
@@ -7648,14 +7912,16 @@ mod tests {
                 "hidden_panels": ["battery", "history", "inverter"],
             });
 
-            let (status, json) =
-                update_settings(State(state.clone()), Json(body)).await;
+            let (status, json) = update_settings(State(state.clone()), Json(body)).await;
             assert_eq!(status, StatusCode::OK);
             let msg = response_message(&json);
 
             assert!(msg.contains("hidden_panels=3 entries"), "got: {msg}");
             // Don't dump the full list into the log.
-            assert!(!msg.contains("battery"), "panel names must not be logged, got: {msg}");
+            assert!(
+                !msg.contains("battery"),
+                "panel names must not be logged, got: {msg}"
+            );
 
             let saved = crate::settings::Settings::load();
             assert_eq!(saved.hidden_panels, vec!["battery", "history", "inverter"]);
@@ -7672,11 +7938,36 @@ mod tests {
         with_isolated_config_dir_async(|| async {
             let state = Arc::new(AppState::new());
             for (field, value, expected_log, expected_disk) in [
-                ("autostart_enabled", json!(true), "autostart_enabled=true", true),
-                ("autostart_enabled", json!(false), "autostart_enabled=false", false),
-                ("disable_auto_discovery", json!(true), "disable_auto_discovery=true", true),
-                ("disable_auto_discovery", json!(false), "disable_auto_discovery=false", false),
-                ("minimal_telemetry_mode", json!(true), "minimal_telemetry_mode=true", true),
+                (
+                    "autostart_enabled",
+                    json!(true),
+                    "autostart_enabled=true",
+                    true,
+                ),
+                (
+                    "autostart_enabled",
+                    json!(false),
+                    "autostart_enabled=false",
+                    false,
+                ),
+                (
+                    "disable_auto_discovery",
+                    json!(true),
+                    "disable_auto_discovery=true",
+                    true,
+                ),
+                (
+                    "disable_auto_discovery",
+                    json!(false),
+                    "disable_auto_discovery=false",
+                    false,
+                ),
+                (
+                    "minimal_telemetry_mode",
+                    json!(true),
+                    "minimal_telemetry_mode=true",
+                    true,
+                ),
             ] {
                 let body = serde_json::json!({ field: value });
                 let (status, json) = update_settings(State(state.clone()), Json(body)).await;

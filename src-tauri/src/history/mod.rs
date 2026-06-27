@@ -154,7 +154,8 @@ const MAX_PLAUSIBLE_POWER_KW: f64 = 30.0;
 /// reset happens at local midnight regardless of server timezone).
 fn same_local_day(a_secs: i64, b_secs: i64) -> bool {
     let date = |s: i64| {
-        chrono::DateTime::from_timestamp(s, 0).map(|dt| dt.with_timezone(&chrono::Local).date_naive())
+        chrono::DateTime::from_timestamp(s, 0)
+            .map(|dt| dt.with_timezone(&chrono::Local).date_naive())
     };
     match (date(a_secs), date(b_secs)) {
         (Some(a), Some(b)) => a == b,
@@ -437,38 +438,35 @@ impl HistoryDb {
                         backup_path.display()
                     );
                 } else {
-                    tracing::info!(
-                        "History DB backed up to {}",
-                        backup_path.display()
-                    );
+                    tracing::info!("History DB backed up to {}", backup_path.display());
                 }
             }
 
             let energy_cols = [
-            "today_solar_kwh",
-            "today_import_kwh",
-            "today_export_kwh",
-            "today_charge_kwh",
-            "today_discharge_kwh",
-            "today_consumption_kwh",
-            "today_ac_charge_kwh",
-        ];
-        for col in &energy_cols {
-            // Build a repaired set using a window: for each row, fix
-            // corrupted values including:
-            //   - Small spurious DECREASES (counter dips without midnight reset)
-            //   - Values clamped to 0 by old sanitizer versions (previous bug)
-            //     followed by a large jump back to the real value
-            //
-            // Midnight rollover: prev > 50 and current < 10 is a genuine
-            // counter reset — keep the new value.
-            //
-            // We do NOT suppress increases on cumulative counters because:
-            //   - MAX aggregation in the query already handles spikes
-            //   - The poll.rs sanitizer prevents register corruption
-            //   - Legitimate increases can be arbitrarily large (e.g. after
-            //     a long gap in data the counter could jump by > 2 kWh)
-            let repair_sql = format!(
+                "today_solar_kwh",
+                "today_import_kwh",
+                "today_export_kwh",
+                "today_charge_kwh",
+                "today_discharge_kwh",
+                "today_consumption_kwh",
+                "today_ac_charge_kwh",
+            ];
+            for col in &energy_cols {
+                // Build a repaired set using a window: for each row, fix
+                // corrupted values including:
+                //   - Small spurious DECREASES (counter dips without midnight reset)
+                //   - Values clamped to 0 by old sanitizer versions (previous bug)
+                //     followed by a large jump back to the real value
+                //
+                // Midnight rollover: prev > 50 and current < 10 is a genuine
+                // counter reset — keep the new value.
+                //
+                // We do NOT suppress increases on cumulative counters because:
+                //   - MAX aggregation in the query already handles spikes
+                //   - The poll.rs sanitizer prevents register corruption
+                //   - Legitimate increases can be arbitrarily large (e.g. after
+                //     a long gap in data the counter could jump by > 2 kWh)
+                let repair_sql = format!(
                 "CREATE TABLE IF NOT EXISTS _repair_{col} AS \
                  SELECT timestamp, {col} AS orig, \
                         CASE \
@@ -498,51 +496,51 @@ impl HistoryDb {
                  WHERE {col} IS NOT NULL \
                  ORDER BY timestamp"
             );
-            let _ = conn.execute_batch(&repair_sql);
+                let _ = conn.execute_batch(&repair_sql);
 
-            // Count how many rows were changed
-            let count: i64 = conn
-                .query_row(
-                    &format!("SELECT COUNT(*) FROM _repair_{col} WHERE orig != repaired"),
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0);
+                // Count how many rows were changed
+                let count: i64 = conn
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM _repair_{col} WHERE orig != repaired"),
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(0);
 
-            if count > 0 {
-                tracing::info!("Repairing {count} corrupted {col} values in history DB");
-                // Apply repairs back to the readings table
-                let apply_sql = format!(
-                    "UPDATE readings SET {col} = (\
+                if count > 0 {
+                    tracing::info!("Repairing {count} corrupted {col} values in history DB");
+                    // Apply repairs back to the readings table
+                    let apply_sql = format!(
+                        "UPDATE readings SET {col} = (\
                       SELECT repaired FROM _repair_{col} \
                       WHERE _repair_{col}.timestamp = readings.timestamp\
                     ) WHERE timestamp IN (\
                       SELECT timestamp FROM _repair_{col} WHERE orig != repaired\
                     )"
-                );
-                if let Err(e) = conn.execute_batch(&apply_sql) {
-                    tracing::warn!("Failed to repair {col}: {e}");
+                    );
+                    if let Err(e) = conn.execute_batch(&apply_sql) {
+                        tracing::warn!("Failed to repair {col}: {e}");
+                    }
                 }
+
+                // Clean up temp table
+                let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS _repair_{col}"));
             }
 
-            // Clean up temp table
-            let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS _repair_{col}"));
-        }
-
-        // ---- Reconstruct today_solar_kwh ----
-        // Use the inverter's values directly, only recalculating when stuck.
-        let solar_repaired = Self::reconstruct_solar_kwh(&conn);
-        match &solar_repaired {
-            Ok(count) if *count > 0 => {
-                tracing::info!(
-                    "Reconstructed {count} today_solar_kwh values from solar_power integration"
-                );
+            // ---- Reconstruct today_solar_kwh ----
+            // Use the inverter's values directly, only recalculating when stuck.
+            let solar_repaired = Self::reconstruct_solar_kwh(&conn);
+            match &solar_repaired {
+                Ok(count) if *count > 0 => {
+                    tracing::info!(
+                        "Reconstructed {count} today_solar_kwh values from solar_power integration"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Solar reconstruction failed: {e}");
+                }
+                _ => {}
             }
-            Err(e) => {
-                tracing::warn!("Solar reconstruction failed: {e}");
-            }
-            _ => {}
-        }
 
             // Mark the repair as complete so it doesn't run on every launch.
             let _ = conn.execute_batch(
@@ -578,14 +576,11 @@ impl HistoryDb {
             if v2_ran {
                 let backup_path = path.with_extension("db.bak");
                 if backup_path.exists() {
-                    tracing::info!(
-                        "repair_v3: restoring original data from backup"
-                    );
+                    tracing::info!("repair_v3: restoring original data from backup");
                     let bak_str = backup_path.to_string_lossy().replace('\'', "''");
-                    if let Err(e) = conn.execute(
-                        &format!("ATTACH DATABASE '{}' AS bak", bak_str),
-                        [],
-                    ) {
+                    if let Err(e) =
+                        conn.execute(&format!("ATTACH DATABASE '{}' AS bak", bak_str), [])
+                    {
                         tracing::warn!("repair_v3: failed to attach backup: {e}");
                     } else {
                         let energy_cols = [
@@ -611,9 +606,7 @@ impl HistoryDb {
                                 )"
                             );
                             if let Err(e) = conn.execute(&sql, []) {
-                                tracing::debug!(
-                                    "repair_v3: could not restore {col}: {e}"
-                                );
+                                tracing::debug!("repair_v3: could not restore {col}: {e}");
                             }
                         }
                         if let Err(e) = conn.execute_batch("DETACH bak") {
@@ -676,18 +669,14 @@ impl HistoryDb {
 
                 let count: i64 = conn
                     .query_row(
-                        &format!(
-                            "SELECT COUNT(*) FROM _repair_v3_{col} WHERE orig != repaired"
-                        ),
+                        &format!("SELECT COUNT(*) FROM _repair_v3_{col} WHERE orig != repaired"),
                         [],
                         |row| row.get(0),
                     )
                     .unwrap_or(0);
 
                 if count > 0 {
-                    tracing::info!(
-                        "repair_v3: repairing {count} {col} values"
-                    );
+                    tracing::info!("repair_v3: repairing {count} {col} values");
                     let apply_sql = format!(
                         "UPDATE readings SET {col} = (\
                           SELECT repaired FROM _repair_v3_{col} \
@@ -701,9 +690,7 @@ impl HistoryDb {
                     }
                 }
 
-                let _ = conn.execute_batch(&format!(
-                    "DROP TABLE IF EXISTS _repair_v3_{col}"
-                ));
+                let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS _repair_v3_{col}"));
             }
 
             let _ = conn.execute_batch(
@@ -913,8 +900,12 @@ impl HistoryDb {
             .lock()
             .map_err(|e| format!("History DB lock poisoned: {e}"))?;
 
-        let (start_ts, end_ts) =
-            HistoryWindow { range_secs, offset, explicit_window }.resolve();
+        let (start_ts, end_ts) = HistoryWindow {
+            range_secs,
+            offset,
+            explicit_window,
+        }
+        .resolve();
 
         let mut result = serde_json::Map::new();
 
@@ -1150,7 +1141,14 @@ impl HistoryDb {
             "INSERT OR REPLACE INTO weather_observations \
                 (timestamp, temperature_c, source, latitude, longitude, fetched_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![timestamp, temperature_c, source, latitude, longitude, fetched_at],
+            params![
+                timestamp,
+                temperature_c,
+                source,
+                latitude,
+                longitude,
+                fetched_at
+            ],
         ) {
             tracing::warn!("Failed to insert weather observation: {e}");
         }
@@ -1416,8 +1414,14 @@ mod tests {
         let after_reset: i64 = before_reset + 60 * 60 * 1000; // +1h
         let mut points = vec![
             TimePoint { t: base, v: 12.5 },
-            TimePoint { t: before_reset, v: 12.5 },
-            TimePoint { t: after_reset, v: 0.3 },
+            TimePoint {
+                t: before_reset,
+                v: 12.5,
+            },
+            TimePoint {
+                t: after_reset,
+                v: 0.3,
+            },
         ];
 
         repair_cumulative_points(&mut points);
@@ -1902,9 +1906,7 @@ mod tests {
                 correct_kwh += (solar_w as f64) / 1000.0 * delta_hours;
 
                 // Register is stuck after 11:00
-                let stored_kwh = if ts >= midnight + 11 * 3600
-                    && ts < midnight + 14 * 3600
-                {
+                let stored_kwh = if ts >= midnight + 11 * 3600 && ts < midnight + 14 * 3600 {
                     1.5
                 } else if ts >= midnight + 14 * 3600 {
                     2.0
@@ -1929,7 +1931,10 @@ mod tests {
         // Note: rows with solar_power=0 (06:00 when hour<8, solar_w=0) are
         // excluded by the WHERE clause, so we expect 144 total rows
         // inserted minus the zero-power ones.
-        assert!(count > 0, "Should have processed at least some rows, got {count}");
+        assert!(
+            count > 0,
+            "Should have processed at least some rows, got {count}"
+        );
 
         // Verify: at noon, stored value should be near PV-integrated total, not 1.5
         let noon_ts = midnight + 12 * 3600;
@@ -2009,7 +2014,7 @@ mod tests {
 
         // Insert two readings 2 hours apart with 800W solar
         let ts1 = midnight + 8 * 3600; // 08:00
-        let ts2 = ts1 + 2 * 3600;        // 10:00 (2h gap > 30min threshold)
+        let ts2 = ts1 + 2 * 3600; // 10:00 (2h gap > 30min threshold)
 
         let mut snap = make_snapshot(ts1, 50, 800);
         snap.today_solar_kwh = 0.0;
@@ -2044,11 +2049,7 @@ mod tests {
         drop(conn);
 
         // First row: uses stored value (0)
-        assert!(
-            val1.abs() < 0.01,
-            "first row should be 0, got {}",
-            val1
-        );
+        assert!(val1.abs() < 0.01, "first row should be 0, got {}", val1);
         // Second row: gap > 30min and stored value (0) didn't increase,
         // so recalculated: prev_value (0) + 0.8kW × 2h = 1.6 kWh
         assert!(
@@ -2074,7 +2075,7 @@ mod tests {
         // Insert rows matching user's data
         let rows_data: Vec<(i64, i32, f64)> = vec![
             (base, 4026, 5.2268622569437),
-            (base + 5100, 4403, 5.23257441972147),   // 11:15 (1h25m gap)
+            (base + 5100, 4403, 5.23257441972147), // 11:15 (1h25m gap)
             (base + 5100 + 300, 4400, 5.23293874805481), // 11:20
             (base + 5100 + 600, 4395, 5.23330745416592), // 11:25
         ];
@@ -2170,8 +2171,8 @@ mod tests {
             let base = 1710323400i64;
             let rows_data: Vec<(i64, i32, f64)> = vec![
                 (base, 4026, 5.2268622569437),
-                (base + 300, 4403, 5.23257441972147),  // 5min gap
-                (base + 600, 4400, 5.23293874805481),  // 5min gap
+                (base + 300, 4403, 5.23257441972147), // 5min gap
+                (base + 600, 4400, 5.23293874805481), // 5min gap
             ];
             for (ts, pv, kwh) in &rows_data {
                 let mut snap = make_snapshot(*ts, 50, *pv);
@@ -2408,8 +2409,14 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert!((v1 - 16.2).abs() < 1e-6, "legacy row 1 backfilled, got {v1}");
-            assert!((v2 - 23.7).abs() < 1e-6, "legacy row 2 backfilled, got {v2}");
+            assert!(
+                (v1 - 16.2).abs() < 1e-6,
+                "legacy row 1 backfilled, got {v1}"
+            );
+            assert!(
+                (v2 - 23.7).abs() < 1e-6,
+                "legacy row 2 backfilled, got {v2}"
+            );
 
             // The backfill must be gated: reopening must not re-run it (and
             // must not clobber values written by new inserts). The meta flag
@@ -2444,7 +2451,10 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert!((v1 - 16.2).abs() < 1e-6, "backfill did not re-run, got {v1}");
+            assert!(
+                (v1 - 16.2).abs() < 1e-6,
+                "backfill did not re-run, got {v1}"
+            );
         }
     }
 
@@ -2521,11 +2531,31 @@ mod tests {
             )
             .unwrap()
         };
-        assert!((read(1_000) - 16.2).abs() < 1e-6, "zero row backfilled from consumption, got {}", read(1_000));
-        assert!((read(2_000) - 23.7).abs() < 1e-6, "zero row backfilled from consumption, got {}", read(2_000));
-        assert!(read(3_000).abs() < 1e-6, "midnight-reset row left at 0, got {}", read(3_000));
-        assert!((read(4_000) - 9.1).abs() < 1e-6, "already-populated row untouched, got {}", read(4_000));
-        assert!(read(5_000).abs() < 1e-6, "no-consumption-data row left at 0, got {}", read(5_000));
+        assert!(
+            (read(1_000) - 16.2).abs() < 1e-6,
+            "zero row backfilled from consumption, got {}",
+            read(1_000)
+        );
+        assert!(
+            (read(2_000) - 23.7).abs() < 1e-6,
+            "zero row backfilled from consumption, got {}",
+            read(2_000)
+        );
+        assert!(
+            read(3_000).abs() < 1e-6,
+            "midnight-reset row left at 0, got {}",
+            read(3_000)
+        );
+        assert!(
+            (read(4_000) - 9.1).abs() < 1e-6,
+            "already-populated row untouched, got {}",
+            read(4_000)
+        );
+        assert!(
+            read(5_000).abs() < 1e-6,
+            "no-consumption-data row left at 0, got {}",
+            read(5_000)
+        );
     }
     #[test]
     fn repair_v3_restores_from_backup_and_fixes_midnight_rollover() {
@@ -2548,22 +2578,24 @@ mod tests {
         // ---- Step 1: create original (uncorrupted) data ----
         // Day 1: today_charge_kwh climbs 0 -> 8.5
         // Day 2: today_charge_kwh climbs 0 -> 7.2 (midnight reset)
-        let day1_noon = 1705320000i64;      // 2024-01-15 12:00 UTC
-        let day2_midnight = 1705363200i64;  // 2024-01-16 00:00 UTC
-        let day2_noon = 1705406400i64;      // 2024-01-16 12:00 UTC
+        let day1_noon = 1705320000i64; // 2024-01-15 12:00 UTC
+        let day2_midnight = 1705363200i64; // 2024-01-16 00:00 UTC
+        let day2_noon = 1705406400i64; // 2024-01-16 12:00 UTC
 
         // Write original data to the backup file first (pre-v2 state)
         // Remove any stale backup from a previous run.
         let _ = std::fs::remove_file(&backup_path);
         {
             let bak_conn = Connection::open(&backup_path).unwrap();
-            bak_conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS readings (
+            bak_conn
+                .execute_batch(
+                    "CREATE TABLE IF NOT EXISTS readings (
                     timestamp INTEGER PRIMARY KEY,
                     today_charge_kwh REAL,
                     today_discharge_kwh REAL
-                )"
-            ).unwrap();
+                )",
+                )
+                .unwrap();
             // Day 1: 0 -> 8.5
             bak_conn.execute(
                 "INSERT INTO readings (timestamp, today_charge_kwh, today_discharge_kwh) VALUES (?1, ?2, ?3)",
@@ -2606,17 +2638,23 @@ mod tests {
         {
             let main_conn = Connection::open(&path).unwrap();
             // Corrupt day 2: set all day 2 values to 8.5 (v2 bug: carried forward)
-            main_conn.execute(
-                "UPDATE readings SET today_charge_kwh = 8.5 WHERE timestamp >= ?1",
-                rusqlite::params![day2_midnight],
-            ).unwrap();
+            main_conn
+                .execute(
+                    "UPDATE readings SET today_charge_kwh = 8.5 WHERE timestamp >= ?1",
+                    rusqlite::params![day2_midnight],
+                )
+                .unwrap();
             // Set repair_v2_done meta flag so v3 knows v2 previously ran
-            main_conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-            ).unwrap();
-            main_conn.execute_batch(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES ('repair_v2_done', '1')"
-            ).unwrap();
+            main_conn
+                .execute_batch(
+                    "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+                )
+                .unwrap();
+            main_conn
+                .execute_batch(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('repair_v2_done', '1')",
+                )
+                .unwrap();
         }
 
         // ---- Step 3: open the database (triggers v3 migration) ----
@@ -2625,67 +2663,87 @@ mod tests {
 
         // ---- Step 4: verify data is corrected ----
         // Day 1 should be unchanged (wasn't corrupted)
-        let d1_r1: f64 = conn.query_row(
-            "SELECT today_charge_kwh FROM readings WHERE timestamp = ?",
-            rusqlite::params![day1_noon],
-            |row| row.get(0),
-        ).unwrap();
-        assert!((d1_r1 - 0.0).abs() < 0.01, "day1 start should be 0.0, got {d1_r1}");
+        let d1_r1: f64 = conn
+            .query_row(
+                "SELECT today_charge_kwh FROM readings WHERE timestamp = ?",
+                rusqlite::params![day1_noon],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            (d1_r1 - 0.0).abs() < 0.01,
+            "day1 start should be 0.0, got {d1_r1}"
+        );
 
-        let d1_r4: f64 = conn.query_row(
-            "SELECT today_charge_kwh FROM readings WHERE timestamp = ?",
-            rusqlite::params![day1_noon + 900],
-            |row| row.get(0),
-        ).unwrap();
-        assert!((d1_r4 - 8.5).abs() < 0.01, "day1 end should be 8.5, got {d1_r4}");
+        let d1_r4: f64 = conn
+            .query_row(
+                "SELECT today_charge_kwh FROM readings WHERE timestamp = ?",
+                rusqlite::params![day1_noon + 900],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            (d1_r4 - 8.5).abs() < 0.01,
+            "day1 end should be 8.5, got {d1_r4}"
+        );
 
         // Day 2 should be restored from backup (not carrying forward 8.5)
-        let d2_r1: f64 = conn.query_row(
-            "SELECT today_charge_kwh FROM readings WHERE timestamp = ?",
-            rusqlite::params![day2_midnight + 60],
-            |row| row.get(0),
-        ).unwrap();
+        let d2_r1: f64 = conn
+            .query_row(
+                "SELECT today_charge_kwh FROM readings WHERE timestamp = ?",
+                rusqlite::params![day2_midnight + 60],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(
             (d2_r1 - 0.3).abs() < 0.01,
             "day2 first row should be 0.3 (midnight reset), got {d2_r1}"
         );
 
-        let d2_r2: f64 = conn.query_row(
-            "SELECT today_charge_kwh FROM readings WHERE timestamp = ?",
-            rusqlite::params![day2_midnight + 300],
-            |row| row.get(0),
-        ).unwrap();
+        let d2_r2: f64 = conn
+            .query_row(
+                "SELECT today_charge_kwh FROM readings WHERE timestamp = ?",
+                rusqlite::params![day2_midnight + 300],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(
             (d2_r2 - 1.8).abs() < 0.01,
             "day2 second row should be 1.8, got {d2_r2}"
         );
 
-        let d2_r3: f64 = conn.query_row(
-            "SELECT today_charge_kwh FROM readings WHERE timestamp = ?",
-            rusqlite::params![day2_noon],
-            |row| row.get(0),
-        ).unwrap();
+        let d2_r3: f64 = conn
+            .query_row(
+                "SELECT today_charge_kwh FROM readings WHERE timestamp = ?",
+                rusqlite::params![day2_noon],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(
             (d2_r3 - 4.5).abs() < 0.01,
             "day2 noon should be 4.5, got {d2_r3}"
         );
 
-        let d2_r4: f64 = conn.query_row(
-            "SELECT today_charge_kwh FROM readings WHERE timestamp = ?",
-            rusqlite::params![day2_noon + 600],
-            |row| row.get(0),
-        ).unwrap();
+        let d2_r4: f64 = conn
+            .query_row(
+                "SELECT today_charge_kwh FROM readings WHERE timestamp = ?",
+                rusqlite::params![day2_noon + 600],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(
             (d2_r4 - 7.2).abs() < 0.01,
             "day2 end should be 7.2, got {d2_r4}"
         );
 
         // Verify v3 meta flag was set
-        let v3_flag: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'repair_v3_done' AND value = '1')",
-            [],
-            |row| row.get(0),
-        ).unwrap_or(false);
+        let v3_flag: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'repair_v3_done' AND value = '1')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
         assert!(v3_flag, "repair_v3_done meta flag should be set");
 
         // Clean up
@@ -2710,18 +2768,22 @@ mod tests {
                 "CREATE TABLE IF NOT EXISTS readings (
                     timestamp INTEGER PRIMARY KEY,
                     today_charge_kwh REAL
-                )"
-            ).unwrap();
+                )",
+            )
+            .unwrap();
             conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-            ).unwrap();
+                "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            )
+            .unwrap();
             conn.execute_batch(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES ('repair_v3_done', '1')"
-            ).unwrap();
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('repair_v3_done', '1')",
+            )
+            .unwrap();
             conn.execute(
                 "INSERT INTO readings (timestamp, today_charge_kwh) VALUES (100, 5.0)",
                 [],
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         // Open -- v3 should skip because flag is set
@@ -2729,12 +2791,17 @@ mod tests {
         let conn = db.conn.lock().unwrap();
 
         // Data should be untouched
-        let val: f64 = conn.query_row(
-            "SELECT today_charge_kwh FROM readings WHERE timestamp = 100",
-            [],
-            |row| row.get(0),
-        ).unwrap();
-        assert!((val - 5.0).abs() < 0.01, "data should be unchanged, got {val}");
+        let val: f64 = conn
+            .query_row(
+                "SELECT today_charge_kwh FROM readings WHERE timestamp = 100",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            (val - 5.0).abs() < 0.01,
+            "data should be unchanged, got {val}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2879,7 +2946,11 @@ mod tests {
 
         let points: Vec<TimePoint> =
             serde_json::from_value(result.get("external_temperature").cloned().unwrap()).unwrap();
-        assert_eq!(points.len(), 6, "only the in-window buckets should be returned");
+        assert_eq!(
+            points.len(),
+            6,
+            "only the in-window buckets should be returned"
+        );
     }
 
     #[test]
@@ -2896,7 +2967,10 @@ mod tests {
             .unwrap();
         let points: Vec<TimePoint> =
             serde_json::from_value(result.get("external_temperature").cloned().unwrap()).unwrap();
-        assert!(points.is_empty(), "empty table must yield an empty response");
+        assert!(
+            points.is_empty(),
+            "empty table must yield an empty response"
+        );
     }
 
     #[test]
@@ -2910,7 +2984,10 @@ mod tests {
                 100_000_000,
                 3600,
                 0,
-                &["external_temperature".to_string(), "DROP TABLE readings".to_string()],
+                &[
+                    "external_temperature".to_string(),
+                    "DROP TABLE readings".to_string(),
+                ],
                 None,
             )
             .unwrap();
@@ -2952,15 +3029,13 @@ mod tests {
                 100_000_000,
                 3600,
                 0,
-                &[
-                    "soc".to_string(),
-                    "external_temperature".to_string(),
-                ],
+                &["soc".to_string(), "external_temperature".to_string()],
                 None,
             )
             .unwrap();
 
-        let soc: Vec<TimePoint> = serde_json::from_value(result.get("soc").cloned().unwrap()).unwrap();
+        let soc: Vec<TimePoint> =
+            serde_json::from_value(result.get("soc").cloned().unwrap()).unwrap();
         let ext: Vec<TimePoint> =
             serde_json::from_value(result.get("external_temperature").cloned().unwrap()).unwrap();
         assert_eq!(soc.len(), 1);
@@ -3017,7 +3092,11 @@ mod tests {
                 3600,
                 300,
                 0,
-                &["today_pv1_kwh".to_string(), "today_pv2_kwh".to_string(), "today_solar_kwh".to_string()],
+                &[
+                    "today_pv1_kwh".to_string(),
+                    "today_pv2_kwh".to_string(),
+                    "today_solar_kwh".to_string(),
+                ],
                 Some((start_ts, start_ts + 3 * 60)),
             )
             .unwrap();
@@ -3034,12 +3113,30 @@ mod tests {
         assert!(!total_pts.is_empty(), "Total series must have data");
 
         // MAX aggregation across the three samples.
-        let pv1_max = pv1_pts.iter().map(|p| p.v).fold(f64::NEG_INFINITY, f64::max);
-        let pv2_max = pv2_pts.iter().map(|p| p.v).fold(f64::NEG_INFINITY, f64::max);
-        let total_max = total_pts.iter().map(|p| p.v).fold(f64::NEG_INFINITY, f64::max);
-        assert!((pv1_max - 7.0).abs() < 1e-6, "PV1 MAX must be 7.0; got {pv1_max}");
-        assert!((pv2_max - 3.0).abs() < 1e-6, "PV2 MAX must be 3.0; got {pv2_max}");
-        assert!((total_max - 10.0).abs() < 1e-6, "Total MAX must be 10.0; got {total_max}");
+        let pv1_max = pv1_pts
+            .iter()
+            .map(|p| p.v)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let pv2_max = pv2_pts
+            .iter()
+            .map(|p| p.v)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let total_max = total_pts
+            .iter()
+            .map(|p| p.v)
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            (pv1_max - 7.0).abs() < 1e-6,
+            "PV1 MAX must be 7.0; got {pv1_max}"
+        );
+        assert!(
+            (pv2_max - 3.0).abs() < 1e-6,
+            "PV2 MAX must be 3.0; got {pv2_max}"
+        );
+        assert!(
+            (total_max - 10.0).abs() < 1e-6,
+            "Total MAX must be 10.0; got {total_max}"
+        );
 
         // Invariant: total == pv1 + pv2 (with per-string sum preference).
         assert!(
@@ -3085,8 +3182,14 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert!(pv1.map(|v| (v - 4.5).abs() < 1e-6).unwrap_or(false), "got {pv1:?}");
-            assert!(pv2.map(|v| (v - 2.0).abs() < 1e-6).unwrap_or(false), "got {pv2:?}");
+            assert!(
+                pv1.map(|v| (v - 4.5).abs() < 1e-6).unwrap_or(false),
+                "got {pv1:?}"
+            );
+            assert!(
+                pv2.map(|v| (v - 2.0).abs() < 1e-6).unwrap_or(false),
+                "got {pv2:?}"
+            );
         }
     }
 
@@ -3140,7 +3243,11 @@ mod tests {
             } else {
                 (min_of_day - rise_start_min) as f64 / (rise_end_min - rise_start_min) as f64
             };
-            db.insert_reading(&make_snapshot_with_kwh(ts, 0.0, (daily_kwh as f64 * frac) as f32));
+            db.insert_reading(&make_snapshot_with_kwh(
+                ts,
+                0.0,
+                (daily_kwh as f64 * frac) as f32,
+            ));
         }
     }
 
@@ -3249,8 +3356,14 @@ mod tests {
                 .unwrap(),
         );
 
-        assert!((peak - 3.0).abs() < 1e-6, "10 kWh @ peak 0.30 = £3.00, got {peak}");
-        assert!((off - 1.0).abs() < 1e-6, "10 kWh @ off-peak 0.10 = £1.00, got {off}");
+        assert!(
+            (peak - 3.0).abs() < 1e-6,
+            "10 kWh @ peak 0.30 = £3.00, got {peak}"
+        );
+        assert!(
+            (off - 1.0).abs() < 1e-6,
+            "10 kWh @ off-peak 0.10 = £1.00, got {off}"
+        );
     }
 
     #[test]
@@ -3280,11 +3393,11 @@ mod tests {
         let db = test_db();
         let m = local_midnight_secs(0);
         let pts: [(i64, f32); 5] = [
-            (0, 0.0),         // 00:00 baseline
-            (8 * 60, 5.0),    // 08:00 → +5
-            (9 * 60, 1.0),    // 09:00 glitch dip (ignored, baseline held at 5)
-            (10 * 60, 5.0),   // 10:00 recovery (no new energy)
-            (12 * 60, 8.0),   // 12:00 → +3
+            (0, 0.0),       // 00:00 baseline
+            (8 * 60, 5.0),  // 08:00 → +5
+            (9 * 60, 1.0),  // 09:00 glitch dip (ignored, baseline held at 5)
+            (10 * 60, 5.0), // 10:00 recovery (no new energy)
+            (12 * 60, 8.0), // 12:00 → +3
         ];
         for (min, v) in pts {
             db.insert_reading(&make_snapshot_with_kwh(m + min * 60, 0.0, v));
@@ -3297,7 +3410,10 @@ mod tests {
                 .unwrap(),
         );
         // True energy is the monotone envelope 0 -> 8 = 8 kWh at £1.00 = £8.00.
-        assert!((total - 8.0).abs() < 1e-6, "dip recovery double-counted: got {total}");
+        assert!(
+            (total - 8.0).abs() < 1e-6,
+            "dip recovery double-counted: got {total}"
+        );
     }
 
     #[test]
@@ -3324,7 +3440,10 @@ mod tests {
         // Only the observed 9 -> 12 = 3 kWh (all peak) is credited: 3 x 0.30 = 0.90.
         // The pre-resumption 9 kWh is not retroactively priced at the peak rate
         // (which would have given 12 x 0.30 = 3.60).
-        assert!((total - 0.90).abs() < 1e-6, "gap energy mis-priced: got {total}");
+        assert!(
+            (total - 0.90).abs() < 1e-6,
+            "gap energy mis-priced: got {total}"
+        );
     }
 
     #[test]
@@ -3348,7 +3467,10 @@ mod tests {
                 .unwrap(),
         );
         // ~3.33 kWh at 0.25 ~= £0.83. Must be far above zero (the bug gave ~0).
-        assert!((total - 0.833).abs() < 0.02, "sustained high power dropped: got {total}");
+        assert!(
+            (total - 0.833).abs() < 0.02,
+            "sustained high power dropped: got {total}"
+        );
     }
 
     #[test]
@@ -3370,6 +3492,9 @@ mod tests {
         );
         // The 5 -> 5000 spike is dropped (baseline held at 5); only 5 -> 5.2 -> 5.4
         // = 0.4 kWh of real growth is credited: 0.4 x 1.0 = £0.40.
-        assert!((total - 0.4).abs() < 1e-6, "gross spike not clamped: got {total}");
+        assert!(
+            (total - 0.4).abs() < 1e-6,
+            "gross spike not clamped: got {total}"
+        );
     }
 }

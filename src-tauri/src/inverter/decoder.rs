@@ -363,12 +363,11 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
         && snap.today_consumption_kwh > 0.0
         && snap.today_ac_charge_kwh != snap.today_consumption_kwh;
     if !has_direct_consumption {
-        let consumption_kwh = (snap.today_solar_kwh
-            + snap.today_import_kwh
-            + snap.today_discharge_kwh
-            - snap.today_export_kwh
-            - snap.today_charge_kwh)
-            .max(0.0);
+        let consumption_kwh =
+            (snap.today_solar_kwh + snap.today_import_kwh + snap.today_discharge_kwh
+                - snap.today_export_kwh
+                - snap.today_charge_kwh)
+                .max(0.0);
         snap.today_consumption_kwh = consumption_kwh;
         snap.home_energy_today_kwh = consumption_kwh;
     }
@@ -451,8 +450,8 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.pv2_voltage = get_reg(data, 2) as f32 * 0.1; // IR(2):  v_pv2 (/10 V)
     snap.pv1_current = get_reg(data, 8) as f32 * 0.1; // IR(8):  i_pv1 (/10 A)
     snap.pv2_current = get_reg(data, 9) as f32 * 0.1; // IR(9):  i_pv2 (/10 A)
-    // If PV2 has no voltage or current, there is no second string — zero
-    // out the power field so garbage register values don't pollute history.
+                                                      // If PV2 has no voltage or current, there is no second string — zero
+                                                      // out the power field so garbage register values don't pollute history.
     if snap.pv2_voltage == 0.0 && snap.pv2_current == 0.0 {
         snap.pv2_power = 0;
     }
@@ -622,9 +621,7 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
                                                                // in the evening). For systems without a battery, charge_today and
                                                                // discharge_today are zero and the formula collapses to the GE one.
                                                                // Clamped at 0 to avoid negative from meter rounding noise.
-    let consumption_kwh = (snap.today_solar_kwh
-        + snap.today_import_kwh
-        + snap.today_discharge_kwh
+    let consumption_kwh = (snap.today_solar_kwh + snap.today_import_kwh + snap.today_discharge_kwh
         - snap.today_export_kwh
         - snap.today_charge_kwh)
         .max(0.0);
@@ -1429,7 +1426,7 @@ fn decode_input_1360_1413(data: &[u16], snap: &mut InverterSnapshot) {
     snap.total_discharge_kwh = decode_lifetime_total_kwh(get_reg(data, 30), get_reg(data, 31));
     // IR(1390-1391): e_battery_discharge_total
     snap.total_solar_kwh = decode_lifetime_total_kwh(get_reg(data, 14), get_reg(data, 15)); // IR(1374-1375): e_pv_total (uint32 /10 kWh)
-    // Three-phase has no direct e_battery_throughput register; use sum of charge + discharge.
+                                                                                            // Three-phase has no direct e_battery_throughput register; use sum of charge + discharge.
     snap.total_throughput_kwh = snap.total_charge_kwh + snap.total_discharge_kwh;
 }
 
@@ -1922,9 +1919,9 @@ fn decode_gateway_1600_1659(data: &[u16], snap: &mut InverterSnapshot) {
     snap.today_charge_kwh = get_reg(data, 49) as f32 * 0.1; // e_aio_charge_today
     snap.today_discharge_kwh = get_reg(data, 52) as f32 * 0.1; // e_aio_discharge_today
     snap.today_consumption_kwh = get_reg(data, 55) as f32 * 0.1; // e_load_today
-    // Gateway has a native e_load_today register; mirror it so the
-    // SummaryTiles / HistoryPage consumption display reads the same value
-    // regardless of inverter type.
+                                                                 // Gateway has a native e_load_today register; mirror it so the
+                                                                 // SummaryTiles / HistoryPage consumption display reads the same value
+                                                                 // regardless of inverter type.
     snap.home_energy_today_kwh = snap.today_consumption_kwh;
 
     // --- Lifetime energy totals (uint32 ÷10 kWh, V1/V2 byte order) ---
@@ -3009,8 +3006,20 @@ mod tests {
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
             make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
-            make_block(RegisterType::Holding, 1000, 80, "holding_1000_1079", high_config),
-            make_block(RegisterType::Holding, 2040, 36, "holding_2040_2075", plant_holding),
+            make_block(
+                RegisterType::Holding,
+                1000,
+                80,
+                "holding_1000_1079",
+                high_config,
+            ),
+            make_block(
+                RegisterType::Holding,
+                2040,
+                36,
+                "holding_2040_2075",
+                plant_holding,
+            ),
         ];
 
         let snap = decode_snapshot(&blocks);
@@ -3460,7 +3469,10 @@ mod tests {
         ];
 
         let snap = decode_snapshot(&blocks);
-        assert!(snap.charge_slots[1].enabled, "slot 2 must be enabled from HR 1115-1116");
+        assert!(
+            snap.charge_slots[1].enabled,
+            "slot 2 must be enabled from HR 1115-1116"
+        );
         assert_eq!(
             snap.charge_slots[1].target_soc, 90,
             "slot 2 per-slot target from HR 245 must survive the decode_timeslot clobber"
@@ -3505,7 +3517,10 @@ mod tests {
         ];
 
         let snap = decode_snapshot(&blocks);
-        assert!(!snap.charge_slots[0].enabled, "slot 1 must be disabled (HR 1113 == HR 1114)");
+        assert!(
+            !snap.charge_slots[0].enabled,
+            "slot 1 must be disabled (HR 1113 == HR 1114)"
+        );
         assert_eq!(
             snap.charge_slots[0].target_soc, 4,
             "disabled slot must keep the 4% default, not a stale HR 242 value"
@@ -3810,15 +3825,23 @@ mod tests {
             ..Default::default()
         };
         let mut data = vec![0u16; 54];
-        data[6] = 0;       // IR(1366) high
-        data[7] = 1500;    // IR(1367) low  → PV1 = 150.0 kWh
-        data[10] = 0;      // IR(1370) high
-        data[11] = 750;    // IR(1371) low  → PV2 = 75.0 kWh
+        data[6] = 0; // IR(1366) high
+        data[7] = 1500; // IR(1367) low  → PV1 = 150.0 kWh
+        data[10] = 0; // IR(1370) high
+        data[11] = 750; // IR(1371) low  → PV2 = 75.0 kWh
         data[52] = 0xFFFF; // IR(1412) high
         data[53] = 0x0000; // IR(1413) low — garbage aggregate, must be ignored
         decode_input_1360_1413(&data, &mut snap);
-        assert!((snap.today_pv1_kwh - 150.0).abs() < 0.01, "got PV1 {}", snap.today_pv1_kwh);
-        assert!((snap.today_pv2_kwh - 75.0).abs() < 0.01, "got PV2 {}", snap.today_pv2_kwh);
+        assert!(
+            (snap.today_pv1_kwh - 150.0).abs() < 0.01,
+            "got PV1 {}",
+            snap.today_pv1_kwh
+        );
+        assert!(
+            (snap.today_pv2_kwh - 75.0).abs() < 0.01,
+            "got PV2 {}",
+            snap.today_pv2_kwh
+        );
         // Total = PV1 + PV2 = 225.0, NOT the garbage aggregate.
         assert!(
             (snap.today_solar_kwh - 225.0).abs() < 0.01,
@@ -3869,7 +3892,11 @@ mod tests {
         data[53] = 0;
         decode_input_1360_1413(&data, &mut snap);
         assert_eq!(snap.today_pv1_kwh, 0.0);
-        assert!((snap.today_pv2_kwh - 20.0).abs() < 0.01, "got PV2 {}", snap.today_pv2_kwh);
+        assert!(
+            (snap.today_pv2_kwh - 20.0).abs() < 0.01,
+            "got PV2 {}",
+            snap.today_pv2_kwh
+        );
         // Per-string sum (PV1=0, PV2=20.0) > 0 → total = 20.0, not aggregate (0).
         assert!(
             (snap.today_solar_kwh - 20.0).abs() < 0.01,
@@ -4016,7 +4043,13 @@ mod tests {
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
             make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
-            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_60_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
             make_block(RegisterType::Holding, 300, 60, "holding_300_359", ac_config),
         ];
         let snap = decode_snapshot(&blocks);
@@ -4036,21 +4069,30 @@ mod tests {
         holding_data[0] = 0x8001;
 
         let mut holding_60_data = vec![0u16; 60];
-        holding_60_data[94 - 60] = 600;  // slot 1 start 06:00
+        holding_60_data[94 - 60] = 600; // slot 1 start 06:00
         holding_60_data[95 - 60] = 1000; // slot 1 end 10:00
 
         let mut extended = vec![0u16; 60];
-        extended[243 - 240] = 315;  // slot 2 start 03:15 (extended)
+        extended[243 - 240] = 315; // slot 2 start 03:15 (extended)
         extended[244 - 240] = 415; // slot 2 end 04:15 (extended)
 
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
             make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
-            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_60_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
             make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
         ];
         let snap = decode_snapshot(&blocks);
-        assert!(snap.charge_slots[1].enabled, "AIO charge slot 2 must be enabled");
+        assert!(
+            snap.charge_slots[1].enabled,
+            "AIO charge slot 2 must be enabled"
+        );
         assert_eq!(snap.charge_slots[1].start_hour, 3);
         assert_eq!(snap.charge_slots[1].start_minute, 15);
         assert_eq!(snap.charge_slots[1].end_hour, 4);
@@ -4075,7 +4117,10 @@ mod tests {
             make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
         ];
         let snap = decode_snapshot(&blocks);
-        assert!(snap.charge_slots[2].enabled, "AIO charge slot 3 must be enabled");
+        assert!(
+            snap.charge_slots[2].enabled,
+            "AIO charge slot 3 must be enabled"
+        );
         assert_eq!(snap.charge_slots[2].start_hour, 12);
         assert_eq!(snap.charge_slots[2].end_hour, 14);
     }
@@ -4086,12 +4131,12 @@ mod tests {
     fn aio_charge_slot2_extended_overrides_classic() {
         let mut holding_data = vec![0u16; 60];
         holding_data[0] = 0x8001;
-        holding_data[31] = 100;  // classic slot 2 start 01:00 (should be overridden)
-        holding_data[32] = 200;  // classic slot 2 end 02:00 (should be overridden)
+        holding_data[31] = 100; // classic slot 2 start 01:00 (should be overridden)
+        holding_data[32] = 200; // classic slot 2 end 02:00 (should be overridden)
 
         let mut extended = vec![0u16; 60];
-        extended[243 - 240] = 315;  // extended slot 2 start 03:15 (authoritative)
-        extended[244 - 240] = 415;  // extended slot 2 end 04:15 (authoritative)
+        extended[243 - 240] = 315; // extended slot 2 start 03:15 (authoritative)
+        extended[244 - 240] = 415; // extended slot 2 end 04:15 (authoritative)
 
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
@@ -4114,7 +4159,7 @@ mod tests {
     fn aio_charge_slot2_extended_zero_disables() {
         let mut holding_data = vec![0u16; 60];
         holding_data[0] = 0x8001;
-        holding_data[31] = 100;  // classic has non-zero times
+        holding_data[31] = 100; // classic has non-zero times
         holding_data[32] = 200;
 
         let extended = vec![0u16; 60]; // HR 243/244 = 0,0
@@ -4139,13 +4184,19 @@ mod tests {
         holding_data[0] = 0x8001;
 
         let mut holding_60_data = vec![0u16; 60];
-        holding_60_data[94 - 60] = 600;  // slot 1 start 06:00
+        holding_60_data[94 - 60] = 600; // slot 1 start 06:00
         holding_60_data[95 - 60] = 1000; // slot 1 end 10:00
 
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
             make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
-            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_60_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
         ];
         let snap = decode_snapshot(&blocks);
         assert!(snap.charge_slots[0].enabled);
@@ -4164,21 +4215,45 @@ mod tests {
         holding_60_data_on[96 - 60] = 1;
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
-            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data.clone()),
-            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_60_data_on),
+            make_block(
+                RegisterType::Holding,
+                0,
+                60,
+                "holding_0_59",
+                holding_data.clone(),
+            ),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data_on,
+            ),
         ];
         let snap = decode_snapshot(&blocks);
-        assert!(snap.enable_charge, "AIO enable_charge must be true from HR 96");
+        assert!(
+            snap.enable_charge,
+            "AIO enable_charge must be true from HR 96"
+        );
 
         // Test with HR 96 = 0
         let holding_60_data_off = vec![0u16; 60];
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
             make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
-            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_60_data_off),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data_off,
+            ),
         ];
         let snap = decode_snapshot(&blocks);
-        assert!(!snap.enable_charge, "AIO enable_charge must be false from HR 96");
+        assert!(
+            !snap.enable_charge,
+            "AIO enable_charge must be false from HR 96"
+        );
     }
 
     /// The All-in-One charge_rate must come from HR 111.
@@ -4193,10 +4268,19 @@ mod tests {
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
             make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
-            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_60_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
         ];
         let snap = decode_snapshot(&blocks);
-        assert_eq!(snap.charge_rate, 25, "AIO charge_rate must come from HR 111");
+        assert_eq!(
+            snap.charge_rate, 25,
+            "AIO charge_rate must come from HR 111"
+        );
     }
 
     /// The All-in-One discharge_rate must come from HR 112.
@@ -4211,10 +4295,19 @@ mod tests {
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
             make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
-            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_60_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
         ];
         let snap = decode_snapshot(&blocks);
-        assert_eq!(snap.discharge_rate, 30, "AIO discharge_rate must come from HR 112");
+        assert_eq!(
+            snap.discharge_rate, 30,
+            "AIO discharge_rate must come from HR 112"
+        );
     }
 
     /// The All-in-One global target SOC must come from HR 116.
@@ -4229,7 +4322,13 @@ mod tests {
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
             make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
-            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_60_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
         ];
         let snap = decode_snapshot(&blocks);
         assert_eq!(snap.target_soc, 80, "AIO target_soc must come from HR 116");
@@ -4242,9 +4341,9 @@ mod tests {
         holding_data[0] = 0x8001;
 
         let mut holding_60_data = vec![0u16; 60];
-        holding_60_data[94 - 60] = 600;  // slot 1 enabled
+        holding_60_data[94 - 60] = 600; // slot 1 enabled
         holding_60_data[95 - 60] = 1000;
-        holding_60_data[116 - 60] = 80;  // global target
+        holding_60_data[116 - 60] = 80; // global target
 
         let mut extended = vec![0u16; 60];
         extended[242 - 240] = 60; // per-slot target overrides global
@@ -4252,7 +4351,13 @@ mod tests {
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
             make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
-            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_60_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
             make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
         ];
         let snap = decode_snapshot(&blocks);
@@ -4278,7 +4383,10 @@ mod tests {
             make_block(RegisterType::Holding, 300, 60, "holding_300_359", ac_config),
         ];
         let snap = decode_snapshot(&blocks);
-        assert_eq!(snap.ac_export_priority, 1, "AIO export priority must come from HR 311");
+        assert_eq!(
+            snap.ac_export_priority, 1,
+            "AIO export priority must come from HR 311"
+        );
     }
 
     /// The All-in-One EPS enabled must come from HR 317.
@@ -4316,7 +4424,10 @@ mod tests {
             make_block(RegisterType::Holding, 300, 60, "holding_300_359", ac_config),
         ];
         let snap = decode_snapshot(&blocks);
-        assert_eq!(snap.battery_pause_mode, 2, "AIO pause mode must come from HR 318");
+        assert_eq!(
+            snap.battery_pause_mode, 2,
+            "AIO pause mode must come from HR 318"
+        );
     }
 
     /// The All-in-One battery pause slot must come from HR 319/320.
@@ -4327,7 +4438,7 @@ mod tests {
 
         let mut ac_config = vec![0u16; 60];
         ac_config[319 - 300] = 2200; // pause slot start 22:00
-        ac_config[320 - 300] = 600;  // pause slot end 06:00
+        ac_config[320 - 300] = 600; // pause slot end 06:00
 
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
@@ -4336,7 +4447,10 @@ mod tests {
             make_block(RegisterType::Holding, 300, 60, "holding_300_359", ac_config),
         ];
         let snap = decode_snapshot(&blocks);
-        assert!(snap.battery_pause_slot.enabled, "AIO pause slot must be enabled");
+        assert!(
+            snap.battery_pause_slot.enabled,
+            "AIO pause slot must be enabled"
+        );
         assert_eq!(snap.battery_pause_slot.start_hour, 22);
         assert_eq!(snap.battery_pause_slot.end_hour, 6);
     }
@@ -4926,13 +5040,22 @@ mod tests {
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
             make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
-            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_60_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
         ];
         let snap = decode_snapshot(&blocks);
 
         assert_eq!(snap.device_type, DeviceType::Gen3Hybrid);
         // Master flag reads correctly as OFF.
-        assert!(!snap.enable_charge, "enable_charge must be false from HR 96 = 0");
+        assert!(
+            !snap.enable_charge,
+            "enable_charge must be false from HR 96 = 0"
+        );
         // Global target SOC reads as 4% (HR 116).
         assert_eq!(snap.target_soc, 4);
         // The configured slot MUST stay enabled — this is the independence
@@ -4974,19 +5097,31 @@ mod tests {
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
             make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
-            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_60_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
             make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
         ];
         let snap = decode_snapshot(&blocks);
 
         assert!(!snap.enable_charge, "slot is not armed (HR 96 = 0)");
-        assert!(snap.charge_slots[0].enabled, "slot stays configured (issue #41 contract)");
+        assert!(
+            snap.charge_slots[0].enabled,
+            "slot stays configured (issue #41 contract)"
+        );
         // The per-slot register wins, decoupled from the armed state.
         assert_eq!(
             snap.charge_slots[0].target_soc, 100,
             "per-slot HR 242 (100%) must override global HR 116 (4%) even when not armed"
         );
-        assert_eq!(snap.target_soc, 4, "global HR 116 still reads 4% on its own field");
+        assert_eq!(
+            snap.target_soc, 4,
+            "global HR 116 still reads 4% on its own field"
+        );
     }
 
     // NOTE: the per-slot target SOC zero→global fallback is already pinned by
@@ -5449,9 +5584,7 @@ mod tests {
         // solar=3000, battery discharging (raw +1000 → +1000),
         // grid import (raw -500 → grid_power -500).
         // home = solar + battery_power - grid_power = 3000 + 1000 - (-500) = 4500
-        let snap = decode_snapshot(&single_phase_blocks_for_home_derivation(
-            3000, 1000, -500,
-        ));
+        let snap = decode_snapshot(&single_phase_blocks_for_home_derivation(3000, 1000, -500));
         assert_eq!(snap.battery_power, 1000);
         assert_eq!(snap.battery_state, BatteryState::Discharging);
         assert_eq!(snap.grid_power, -500);
@@ -5463,9 +5596,7 @@ mod tests {
         // solar=3500, battery charging (raw -800 → -800),
         // grid export (raw +1500 → grid_power +1500).
         // home = solar + battery_power - grid_power = 3500 + (-800) - 1500 = 1200
-        let snap = decode_snapshot(&single_phase_blocks_for_home_derivation(
-            3500, -800, 1500,
-        ));
+        let snap = decode_snapshot(&single_phase_blocks_for_home_derivation(3500, -800, 1500));
         assert_eq!(snap.battery_power, -800);
         assert_eq!(snap.battery_state, BatteryState::Charging);
         assert_eq!(snap.grid_power, 1500);
@@ -5561,11 +5692,7 @@ mod tests {
     /// Helper: gateway fixture with configurable p_aio_total at IR(1702),
     /// plus explicit p_pv (IR 1617) and p_load (IR 1618) so the derived
     /// grid_power formula is exercised. One AIO online.
-    fn gateway_blocks_for_power_flow(
-        p_pv: u16,
-        p_load: u16,
-        p_aio_total: i16,
-    ) -> Vec<BlockRead> {
+    fn gateway_blocks_for_power_flow(p_pv: u16, p_load: u16, p_aio_total: i16) -> Vec<BlockRead> {
         let mut b1 = [0u16; 60];
         // Identity "GA000009" → V1 (IR(1603) = 9 < 10).
         b1[0] = 0x4741; // 'G','A'
@@ -5705,7 +5832,7 @@ mod tests {
         input_data[35] = 0; // IR(35): e_ac_charge_today (unused in new formula)
         input_data[36] = charge; // IR(36): e_battery_charge_today
         input_data[37] = discharge; // IR(37): e_battery_discharge_today
-        // IR(17): e_pv1_generation_today — primary per-string source for solar_today.
+                                    // IR(17): e_pv1_generation_today — primary per-string source for solar_today.
         input_data[17] = solar;
         let mut holding_data = vec![0u16; 60];
         holding_data[0] = 0x2101; // PolarHybrid (no ARM refinement)
