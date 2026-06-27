@@ -926,11 +926,28 @@ fn decode_holding_240_299(data: &[u16], snap: &mut InverterSnapshot) {
     // clamping.
     let t1 = get_reg(data, 242 - 240) as u8;
     let t2 = get_reg(data, 245 - 240) as u8;
-    if snap.charge_slots[0].enabled && t1 > 0 {
-        snap.charge_slots[0].target_soc = t1.clamp(4, 100);
-    }
-    if snap.charge_slots[1].enabled && t2 > 0 {
-        snap.charge_slots[1].target_soc = t2.clamp(4, 100);
+    if snap.device_type.uses_three_phase_schedule_slots() {
+        // HV/three-phase firmware writes the global "Target SOC" to HR 242
+        // (per-slot for slot 1) rather than HR 1111, and the three-phase
+        // slot 1 `enabled` flag is decoded later from HR 1113-1114 in
+        // `decode_holding_1080_1124`. Populate the per-slot target here
+        // regardless of the (still-false) enabled flag so that the
+        // three-phase decoder can fall back to it when HR 1111 reads 0.
+        if t1 > 0 {
+            snap.charge_slots[0].target_soc = t1.clamp(4, 100);
+        }
+        if t2 > 0 {
+            snap.charge_slots[1].target_soc = t2.clamp(4, 100);
+        }
+    } else {
+        // AIO / single-phase: keep the enabled-guard so a per-slot 0
+        // doesn't clobber the global HR 116/1111 value.
+        if snap.charge_slots[0].enabled && t1 > 0 {
+            snap.charge_slots[0].target_soc = t1.clamp(4, 100);
+        }
+        if snap.charge_slots[1].enabled && t2 > 0 {
+            snap.charge_slots[1].target_soc = t2.clamp(4, 100);
+        }
     }
 
     // Extended discharge slots 3-10 at HR 276-298, same pattern
@@ -1075,7 +1092,44 @@ fn decode_holding_1080_1124(data: &[u16], snap: &mut InverterSnapshot, raw: &mut
     snap.battery_reserve = (get_reg(data, 1109 - 1080) as u8).clamp(4, 100);
     raw.battery_soc_reserve = snap.battery_reserve as u16;
     snap.charge_rate = get_reg(data, 1110 - 1080) as u8;
-    snap.target_soc = (get_reg(data, 1111 - 1080) as u8).clamp(4, 100);
+
+    // HR 1111: three-phase global charge target SOC. On HV / three-phase
+    // firmware this register stays at 0 because the firmware writes the
+    // "Target SOC" to HR 242 (per-slot for slot 1) instead — so a raw 0
+    // here is "uninitialised", not "0%". Don't clamp it to 4 (that masks
+    // the uninitialised state as a bogus 4% on the UI). Instead, fall back
+    // to the per-slot target SOC populated by `decode_holding_240_299`
+    // from HR 242.
+    //
+    // This block is only polled for three-phase-class devices (see
+    // `EXTENDED_AND_THREE_PHASE_BLOCKS`), so the fallback path is the
+    // one that actually fires in practice on HV Gen3 hardware.
+    let raw_hr1111 = get_reg(data, 1111 - 1080) as u8;
+    if raw_hr1111 > 0 {
+        snap.target_soc = raw_hr1111.clamp(4, 100);
+    } else if snap.device_type.uses_three_phase_schedule_slots() {
+        // HV / three-phase firmware authoritative target lives in HR 242.
+        // `decode_holding_240_299` populates `charge_slots[0].target_soc`
+        // from HR 242 for three-phase devices; when HR 242 is 0 the
+        // default 4 from `InverterSnapshot::default()` is preserved,
+        // which correctly displays as "unknown" (the sanitiser
+        // carry-forward in the next cycle restores any previous good
+        // value when the decode produces 4).
+        snap.target_soc = snap.charge_slots[0].target_soc;
+    }
+    // else: non-three-phase devices shouldn't poll this block, but if
+    // they do, leave `snap.target_soc` untouched — it was set from
+    // HR 116 by `decode_holding_60_119`.
+
+    // `decode_holding_240_299` may have populated the per-slot `target_soc`
+    // for charge slots 0/1 from HR 242/245 (for three-phase devices — see
+    // that function for the full rationale). `decode_timeslot` below resets
+    // `target_soc` to its 4% default, so save the per-slot values and
+    // restore them after the slot decode. This only matters for
+    // three-phase devices; on single-phase the per-slot target is
+    // re-derived from HR 242 inside `decode_holding_240_299` itself.
+    let saved_charge_t1 = snap.charge_slots[0].target_soc;
+    let saved_charge_t2 = snap.charge_slots[1].target_soc;
 
     // Three-phase schedule slots 1-2 live in this block rather than the
     // single-phase HR31/32, HR44/45, HR56/57 and HR94/95 locations.
@@ -1083,6 +1137,21 @@ fn decode_holding_1080_1124(data: &[u16], snap: &mut InverterSnapshot, raw: &mut
     snap.charge_slots[1] = decode_timeslot(data, 1115 - 1080, 1116 - 1080);
     snap.discharge_slots[0] = decode_timeslot(data, 1118 - 1080, 1119 - 1080);
     snap.discharge_slots[1] = decode_timeslot(data, 1120 - 1080, 1121 - 1080);
+
+    // Restore the per-slot target SOC for three-phase devices only when
+    // the slot is enabled and the saved value is a real per-slot value
+    // (> 4), not the 4% `decode_timeslot` placeholder. A disabled slot
+    // (start == end in HR 1113/1115) keeps the default 4 so the UI
+    // doesn't show a stale per-slot target for a slot the user has
+    // cleared.
+    if snap.device_type.uses_three_phase_schedule_slots() {
+        if snap.charge_slots[0].enabled && saved_charge_t1 > 4 {
+            snap.charge_slots[0].target_soc = saved_charge_t1;
+        }
+        if snap.charge_slots[1].enabled && saved_charge_t2 > 4 {
+            snap.charge_slots[1].target_soc = saved_charge_t2;
+        }
+    }
 
     // These are distinct from the single-phase HR96/59 flags but represent
     // the equivalent three-phase force/AC-charge state.
@@ -3070,6 +3139,429 @@ mod tests {
         assert_eq!(snap.discharge_slots[2].start_hour, 10);
         assert_eq!(snap.discharge_slots[2].end_hour, 12);
         assert_eq!(snap.discharge_slots[2].target_soc, 40);
+    }
+
+    /// Regression: on HV/three-phase firmware the global `charge_target_soc`
+    /// register (HR 1111) stays at 0 because the firmware writes the
+    /// "Target SOC" to HR 242 (per-slot for slot 1) instead. Previously
+    /// the decoder clamped the raw 0 to 4 and displayed "always 4%"
+    /// regardless of what the user set on the inverter. Now we fall back
+    /// to the per-slot value at HR 242.
+    #[test]
+    fn three_phase_target_soc_falls_back_to_hr242_when_hr1111_zero() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x4001; // Three Phase
+
+        let holding_60_data = vec![0u16; 60]; // HR 94-95 uninitialised → slot 0 not enabled
+
+        let mut three_phase = vec![0u16; 45];
+        // HR 1111 deliberately left at 0 — the bug scenario.
+        // HR 1113-1114 enable slot 1 so the per-slot target has somewhere
+        // to land.
+        three_phase[1113 - 1080] = 100; // 01:00
+        three_phase[1114 - 1080] = 500; // 05:00
+
+        let mut extended = vec![0u16; 60];
+        // HR 242 holds the real per-slot target the firmware wrote when the
+        // user set Target SOC = 80 on the inverter.
+        extended[242 - 240] = 80;
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+            // NB: in production, `holding_240_299` is polled and decoded
+            // BEFORE `holding_1080_1124` (see
+            // `EXTENDED_AND_THREE_PHASE_BLOCKS`). The three-phase
+            // target_soc fallback relies on that order: the per-slot
+            // target from HR 242 must already be in
+            // `snap.charge_slots[0].target_soc` by the time the
+            // three-phase decoder runs and falls back to it.
+            make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
+            make_block(
+                RegisterType::Holding,
+                1080,
+                45,
+                "holding_1080_1124",
+                three_phase,
+            ),
+        ];
+
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.device_type, DeviceType::ThreePhase);
+        assert!(
+            snap.charge_slots[0].enabled,
+            "charge slot 1 must be enabled from HR 1113-1114"
+        );
+        assert_eq!(
+            snap.target_soc, 80,
+            "target_soc must fall back to HR 242 when HR 1111 reads 0 on three-phase (was clamped to 4 before the fix)"
+        );
+        assert_eq!(
+            snap.charge_slots[0].target_soc, 80,
+            "per-slot target_soc must survive the decode_timeslot clobber"
+        );
+    }
+
+    /// Regression: when HR 1111 IS populated (firmware that honours the
+    /// global register), it takes precedence over HR 242 — the per-slot
+    /// fallback only fires when HR 1111 reads 0.
+    #[test]
+    fn three_phase_hr1111_takes_precedence_over_hr242_when_populated() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x4001; // Three Phase
+
+        let holding_60_data = vec![0u16; 60];
+
+        let mut three_phase = vec![0u16; 45];
+        three_phase[1111 - 1080] = 95; // global target wins
+        three_phase[1113 - 1080] = 100;
+        three_phase[1114 - 1080] = 500;
+
+        let mut extended = vec![0u16; 60];
+        extended[242 - 240] = 80; // per-slot would otherwise win
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+            make_block(
+                RegisterType::Holding,
+                1080,
+                45,
+                "holding_1080_1124",
+                three_phase,
+            ),
+            make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
+        ];
+
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.target_soc, 95, "HR 1111 must win when populated");
+    }
+
+    /// Regression: HR 242 = 0 must NOT clobber a populated HR 1111.
+    /// (Same guard the AIO path uses: `raw > 0` before applying the
+    /// per-slot override.)
+    #[test]
+    fn three_phase_hr242_zero_does_not_clobber_hr1111() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x4001; // Three Phase
+
+        let holding_60_data = vec![0u16; 60];
+
+        let mut three_phase = vec![0u16; 45];
+        three_phase[1111 - 1080] = 70;
+        three_phase[1113 - 1080] = 100;
+        three_phase[1114 - 1080] = 500;
+
+        let extended = vec![0u16; 60]; // HR 242 = 0
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+            make_block(
+                RegisterType::Holding,
+                1080,
+                45,
+                "holding_1080_1124",
+                three_phase,
+            ),
+            make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
+        ];
+
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(
+            snap.target_soc, 70,
+            "HR 242 = 0 must not clobber a real HR 1111"
+        );
+    }
+
+    /// Regression: when BOTH HR 1111 and HR 242 are 0 (genuinely unknown),
+    /// `target_soc` must NOT be reported as the bogus 4% that the old
+    /// `clamp(4, 100)` produced. The sanitiser carry-forward restores any
+    /// previous good value on the next cycle; here we just assert the
+    /// decode produces 4 (the `InverterSnapshot` default preserved by
+    /// both branches), not some intermediate clamped value.
+    #[test]
+    fn three_phase_both_zero_keeps_default_target_soc() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x4001; // Three Phase
+
+        let holding_60_data = vec![0u16; 60];
+
+        let three_phase = vec![0u16; 45]; // HR 1111 = 0
+        let extended = vec![0u16; 60]; // HR 242 = 0
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+            make_block(
+                RegisterType::Holding,
+                1080,
+                45,
+                "holding_1080_1124",
+                three_phase,
+            ),
+            make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
+        ];
+
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(
+            snap.target_soc, 4,
+            "unknown target_soc stays at the 4% InverterSnapshot default (was previously a fake 4% from clamp(0,4,100))"
+        );
+    }
+
+    /// Regression: the per-slot target_soc at HR 242 must be populated for
+    /// three-phase devices even when `charge_slots[0].enabled` is false
+    /// at the time `decode_holding_240_299` runs (because three-phase
+    /// `enabled` is decoded later from HR 1113-1114). Previously the
+    /// `&& snap.charge_slots[0].enabled` guard caused the value to be
+    /// discarded on three-phase.
+    #[test]
+    fn three_phase_per_slot_target_soc_populated_even_when_slot_not_yet_enabled() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x4001; // Three Phase
+
+        let holding_60_data = vec![0u16; 60]; // HR 94-95 uninitialised → slot 0 disabled here
+
+        let three_phase = vec![0u16; 45]; // HR 1113-1114 also uninitialised
+
+        let mut extended = vec![0u16; 60];
+        extended[242 - 240] = 60; // per-slot target written by firmware
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+            make_block(
+                RegisterType::Holding,
+                1080,
+                45,
+                "holding_1080_1124",
+                three_phase,
+            ),
+            make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
+        ];
+
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(
+            snap.charge_slots[0].target_soc, 60,
+            "three-phase per-slot target from HR 242 must be stored even when the slot is not yet enabled"
+        );
+    }
+
+    /// Regression: the AIO/single-phase behaviour must NOT change. HR 242
+    /// = 0 must NOT clobber the global HR 116 value when slot 1 is
+    /// enabled, and HR 242 > 0 must still override the global when set
+    /// (existing AIO tests cover the override; this guards the
+    /// non-three-phase branch specifically).
+    #[test]
+    fn single_phase_target_soc_still_comes_from_hr116() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x8001; // AIO
+
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[94 - 60] = 100; // slot 1 enabled (01:00)
+        holding_60_data[95 - 60] = 500; // ... to 05:00
+        holding_60_data[116 - 60] = 50; // global target
+
+        let mut extended = vec![0u16; 60];
+        extended[242 - 240] = 0; // no per-slot override
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+            make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
+        ];
+
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(
+            snap.target_soc, 50,
+            "AIO target_soc must still come from HR 116 (no three-phase fallback fires)"
+        );
+    }
+
+    /// Regression: charge slot 2's per-slot target must also fall back from
+    /// HR 245 on three-phase (mirrors the slot 1 / HR 242 case).
+    #[test]
+    fn three_phase_slot2_target_soc_falls_back_to_hr245_when_hr1111_zero() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x4001; // Three Phase
+
+        let holding_60_data = vec![0u16; 60];
+
+        let mut three_phase = vec![0u16; 45];
+        // HR 1111 deliberately 0.
+        // Enable slot 2 (HR 1115-1116) so the per-slot target has a home.
+        three_phase[1115 - 1080] = 1300; // 13:00
+        three_phase[1116 - 1080] = 1500; // 15:00
+
+        let mut extended = vec![0u16; 60];
+        extended[245 - 240] = 90; // per-slot target for slot 2
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+            make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
+            make_block(
+                RegisterType::Holding,
+                1080,
+                45,
+                "holding_1080_1124",
+                three_phase,
+            ),
+        ];
+
+        let snap = decode_snapshot(&blocks);
+        assert!(snap.charge_slots[1].enabled, "slot 2 must be enabled from HR 1115-1116");
+        assert_eq!(
+            snap.charge_slots[1].target_soc, 90,
+            "slot 2 per-slot target from HR 245 must survive the decode_timeslot clobber"
+        );
+    }
+
+    /// Regression: a disabled three-phase slot (HR 1113 == HR 1114) must
+    /// NOT have a stale per-slot target restored. The restore guard in
+    /// `decode_holding_1080_1124` only fires when the slot is enabled, so
+    /// a slot the user has cleared (by writing equal start/end) keeps the
+    /// default 4 rather than displaying a stale HR 242 value.
+    #[test]
+    fn three_phase_disabled_slot_does_not_inherit_stale_per_slot_target() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x4001; // Three Phase
+
+        let holding_60_data = vec![0u16; 60];
+
+        let three_phase = vec![0u16; 45]; // HR 1113 == HR 1114 == 0 → disabled
+
+        let mut extended = vec![0u16; 60];
+        extended[242 - 240] = 80; // stale per-slot value from before slot was disabled
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+            make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
+            make_block(
+                RegisterType::Holding,
+                1080,
+                45,
+                "holding_1080_1124",
+                three_phase,
+            ),
+        ];
+
+        let snap = decode_snapshot(&blocks);
+        assert!(!snap.charge_slots[0].enabled, "slot 1 must be disabled (HR 1113 == HR 1114)");
+        assert_eq!(
+            snap.charge_slots[0].target_soc, 4,
+            "disabled slot must keep the 4% default, not a stale HR 242 value"
+        );
+    }
+
+    /// Regression: on three-phase when BOTH the per-slot target is set
+    /// (HR 242) AND the slot is enabled, the per-slot target_soc must
+    /// round-trip end-to-end through the decode pipeline: read in
+    /// `decode_holding_240_299`, preserved by the save/restore in
+    /// `decode_holding_1080_1124`, and visible in the final snapshot.
+    /// This guards the whole flow as a single integration test.
+    #[test]
+    fn three_phase_per_slot_target_soc_round_trips_through_decode_pipeline() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x4001; // Three Phase
+
+        let holding_60_data = vec![0u16; 60];
+
+        let mut three_phase = vec![0u16; 45];
+        // HR 1111 = 0 (the bug scenario), HR 1113-1114 enable slot 1.
+        three_phase[1113 - 1080] = 100;
+        three_phase[1114 - 1080] = 500;
+
+        let mut extended = vec![0u16; 60];
+        extended[242 - 240] = 75;
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+            make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
+            make_block(
+                RegisterType::Holding,
+                1080,
+                45,
+                "holding_1080_1124",
+                three_phase,
+            ),
+        ];
+
+        let snap = decode_snapshot(&blocks);
+        // The whole point: target_soc on the snapshot reflects HR 242,
+        // not the bogus 4 from the old clamp.
+        assert_eq!(snap.target_soc, 75);
+        // And the per-slot target is intact too (not clobbered by decode_timeslot).
+        assert_eq!(snap.charge_slots[0].target_soc, 75);
+        // Slot times came from HR 1113-1114.
+        assert_eq!(snap.charge_slots[0].start_hour, 1);
+        assert_eq!(snap.charge_slots[0].end_hour, 5);
     }
 
     #[test]

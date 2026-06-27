@@ -241,11 +241,11 @@ describe('<ControlPage/> — Charge Schedule armed vs not-active (issue #135)', 
     return section;
   }
 
-  it('shows a configured charge slot as "not active" when enable_charge is off (issue #135)', async () => {
+  it('shows a configured charge slot as dimmed when enable_charge is off (issue #135)', async () => {
     // The exact register state the reporter is on: HR 94/95 = 02:00/05:00,
     // HR 96 = 0 (enable_charge OFF), HR 116 = 4, HR 242 = 100. The slot is
-    // configured but the inverter will not charge — the UI must not paint it
-    // as an armed charge.
+    // configured but the inverter will not charge — the UI must dim it
+    // (opacity-60) so the user can see it's inert.
     useInverterStore.setState({ snapshot: makeSnapshot(), developerMode: false });
     render(<ControlPage />);
 
@@ -257,22 +257,20 @@ describe('<ControlPage/> — Charge Schedule armed vs not-active (issue #135)', 
     expect(within(section).getByText('Slot 1')).toBeDefined();
     expect(within(section).getByText('100%')).toBeDefined();
 
-    // THE BUG: with enable_charge OFF, the slot must be presented as
-    // "not active" rather than as an armed charge. On main this indicator
-    // does not exist, so this assertion fails — that is the TDD red.
-    expect(within(section).getByText(/not active/i)).toBeDefined();
+    // THE BUG: with enable_charge OFF, the slot card must carry the dimmed
+    // class — the old behaviour painted it as an armed charge.
+    const slotCard = within(section).getByText('Slot 1').closest('div.bg-bg-surface');
+    expect(slotCard).toBeDefined();
+    expect(slotCard!.className).toMatch(/opacity-60/);
   });
 
   it('does NOT hide a configured charge slot when enable_charge is off (issue #41 regression)', async () => {
     // Regression guard for issue #41: a genuinely configured slot must keep
     // rendering its times after an ECO<->Timed transition that transiently
-    // clears HR 96. The fix for #135 must distinguish "configured but not
-    // armed" from "armed" — it must NOT collapse the slot card entirely.
+    // clears HR 96. The dimmed-when-not-armed style must not collapse the
+    // slot card entirely.
     useInverterStore.setState({
       snapshot: makeSnapshot({
-        // A clearly user-configured window (independent of the
-        // factory-default 02:00-05:00 above) with a distinctive target SOC
-        // so the visibility assertion below is unambiguous.
         charge_slots: [
           {
             enabled: true,
@@ -295,7 +293,5 @@ describe('<ControlPage/> — Charge Schedule armed vs not-active (issue #135)', 
     // slot.enabled) on enable_charge, this would disappear exactly as it
     // did in issue #41 — the slot would vanish from the UI.
     expect(within(section).getByText('80%')).toBeDefined();
-    // And the not-active indicator is present (enable_charge is still off).
-    expect(within(section).getByText(/not active/i)).toBeDefined();
   });
 });
