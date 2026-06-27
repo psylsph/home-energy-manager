@@ -38,6 +38,7 @@ import {
   formatPower,
   formatVisualPower,
   formatVoltage,
+  formatFrequency,
   formatCurrent,
   formatTemp,
 } from './format';
@@ -290,7 +291,7 @@ export function buildEnergyFlows(
       id: 'grid',
       label: 'Grid',
       value: `${isExporting ? '-' : isImporting ? '+' : ''}${formatVisualPower(absGrid, noise)}`,
-      unit: isImporting ? 'Import' : isExporting ? 'Export' : 'Idle',
+      unit: `${formatVoltage(s.grid_voltage)}/${formatFrequency(s.grid_frequency)}`,
       color: FLOW_COLORS.grid,
       active: isImporting || isExporting,
     },
