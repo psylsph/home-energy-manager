@@ -29,12 +29,17 @@ test.describe('Battery Page - SOC Overview', () => {
     await expect(page.locator('text=/Charging|Discharging|Idle/').first()).toBeVisible({ timeout: 5_000 });
   });
 
-  test('should show SOC percentage in the ring', async ({ page }) => {
+  test('should show SOC percentage in the gauge', async ({ page }) => {
     await page.goto('/#/battery');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    // The SOC should be visible as a number with %
-    await expect(page.locator('text=/\\d{1,3}%/').first()).toBeVisible({ timeout: 5_000 });
+    // The AA-cell gauge (commit 8bdcd73) renders SOC as an SVG <text> with
+    // an accessible aria-label of "Battery N% charged". Target the visible
+    // desktop gauge via its orientation marker so the hidden mobile variant
+    // (sm:hidden horizontal gauge) can't shadow the match.
+    const visibleGauge = page.locator('svg[data-orientation="vertical"]');
+    await expect(visibleGauge).toBeVisible({ timeout: 5_000 });
+    await expect(visibleGauge).toHaveAttribute('aria-label', /^Battery \d{1,3}% charged$/);
   });
 
   test('should show Power row with value', async ({ page }) => {
@@ -104,13 +109,17 @@ test.describe('Battery Page - Stored Energy', () => {
     await expect(page.getByText('Charged Today', { exact: true })).toBeVisible({ timeout: 5_000 });
   });
 
-  test('should show a SOC ring', async ({ page }) => {
+  test('should show a SOC gauge with the expected percentage', async ({ page }) => {
     await page.goto('/#/battery');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    // SOC ring shows battery charge level — use the bold 2xl ring label,
-    // not any of the per-module SOC labels that share the same text.
-    await expect(page.locator('span.text-2xl', { hasText: '75%' })).toBeVisible({ timeout: 5_000 });
+    // After commit 8bdcd73 the ring was replaced by an AA-cell battery
+    // glyph. Its accessible name is "Battery N% charged" (aria-label),
+    // which avoids the visibility quirks of SVG <text> and the ambiguity
+    // of per-module SOC labels that share the same "75%" text.
+    const visibleGauge = page.locator('svg[data-orientation="vertical"]');
+    await expect(visibleGauge).toBeVisible({ timeout: 5_000 });
+    await expect(visibleGauge).toHaveAttribute('aria-label', 'Battery 75% charged');
   });
 });
 

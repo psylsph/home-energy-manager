@@ -95,12 +95,22 @@ test.describe('Settings Page - Energy Tariffs', () => {
 
   test('should show Import tariff section', async ({ page }) => {
     await page.goto('/#/settings');
-    await expect(page.locator('text=Import')).toBeVisible({ timeout: 10_000 });
+    // The word "Import" also appears in the developer-mode description
+    // "Show short words like Generating, Importing, and Charging…", so a
+    // bare `text=Import` matches two elements in strict mode. Target the
+    // heading specifically.
+    await expect(
+      page.getByRole('heading', { name: 'Import', exact: true }),
+    ).toBeVisible({ timeout: 10_000 });
   });
 
   test('should show Export tariff section', async ({ page }) => {
     await page.goto('/#/settings');
-    await expect(page.locator('text=Export')).toBeVisible({ timeout: 10_000 });
+    // Same disambiguation as the Import test: "Export" appears both in
+    // the heading and in surrounding prose.
+    await expect(
+      page.getByRole('heading', { name: 'Export', exact: true }),
+    ).toBeVisible({ timeout: 10_000 });
   });
 
   test('should show Save Tariffs button', async ({ page }) => {
