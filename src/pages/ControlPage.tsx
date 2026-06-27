@@ -1371,26 +1371,40 @@ function LoadLimiterSection() {
     setTimeout(() => setSaveFeedback(null), 2000);
   };
 
-  const isEco = snapshot?.battery_mode === 'eco';
+  // The limiter operates in Eco and EcoPaused. EcoPaused is the mode the
+  // limiter itself sets (HR 110 = 100%) when it pauses discharge, so the
+  // GUI must keep showing the live state once the mode has flipped —
+  // issue #158: previously gated on `mode === 'eco'`, the moment the
+  // limiter did its job the GUI flipped back to "Idle" even though
+  // `load_limiter_active` was still true.
+  const mode = snapshot?.battery_mode;
+  const isLimiterOperating = mode === 'eco' || mode === 'eco_paused';
   const homePower = snapshot?.home_power ?? 0;
   const loadLimiterActive = snapshot?.load_limiter_active ?? false;
 
-  // Derive human-readable state
+  // Derive human-readable state. The primary signal is `load_limiter_active`:
+  // while the limiter is in its Paused/PausedFromRestart state, the GUI
+  // reflects that. The `enabled && isLimiterOperating` gate is only
+  // consulted for the "Monitoring…" state, which means the limiter is
+  // armed and watching for the next threshold crossing.
   let stateLabel = 'Idle';
-  if (enabled && isEco) {
-    if (loadLimiterActive) {
-      const belowThreshold = homePower <= thresholdW;
-      stateLabel = belowThreshold ? 'Recovering…' : 'Paused';
-    } else if (homePower > thresholdW && homePower !== 0) {
-      stateLabel = 'Monitoring…';
-    }
+  if (loadLimiterActive) {
+    const belowThreshold = homePower <= thresholdW;
+    stateLabel = belowThreshold ? 'Recovering…' : 'Paused';
+  } else if (enabled && isLimiterOperating && homePower > thresholdW && homePower !== 0) {
+    stateLabel = 'Monitoring…';
   }
 
   return (
     <div className="space-y-3">
       <h2 className="text-text-primary font-semibold text-lg">Load Discharge Limiter</h2>
 
-      {snapshot != null && !isEco && (
+      {/* Only warn when the mode is something the limiter can't run in
+          (Timed, Export). When the limiter is the reason we're in EcoPaused,
+          hide the banner — "load limiter only operates in Eco (current:
+          eco paused)" is misleading while the limiter is actively holding
+          the battery in pause. */}
+      {snapshot != null && mode !== 'eco' && mode !== 'eco_paused' && (
         <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-2.5 text-xs text-text-primary">
           Load limiter only operates in <strong>Eco</strong> mode (current:{' '}
           {snapshot.battery_mode.replace('_', ' ')})
