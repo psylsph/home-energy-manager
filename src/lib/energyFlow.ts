@@ -273,8 +273,12 @@ export function buildEnergyFlows(
       id: 'solar',
       label: 'Solar',
       value: formatVisualPower(s.solar_power, noise),
+      // PV1 voltage drives the volts label; when the dongle reports a real
+      // voltage we show "V/A" (matches the legacy inverter-centred diagram).
+      // PV strings without voltage telemetry (some gateways) fall back to
+      // current only.
       unit: s.pv1_voltage > 0
-        ? formatVoltage(s.pv1_voltage)
+        ? `${formatVoltage(s.pv1_voltage)}/${formatCurrent(s.pv1_current + s.pv2_current)}`
         : formatCurrent(s.pv1_current + s.pv2_current),
       color: FLOW_COLORS.solar,
       active: solarActive,

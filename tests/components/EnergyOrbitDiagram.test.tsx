@@ -213,6 +213,41 @@ describe('EnergyOrbitDiagram', () => {
     expect(labels).toContain('Discharging');
   });
 
+  it('renders the solar V/A sub-label under the kW value (legacy behaviour)', () => {
+    // Live PV voltage + current → "350.4V/6.5A" rendered as a small grey
+    // sub-label between the kW value and the optional status word.
+    const { container } = render(
+      <EnergyOrbitDiagram
+        snapshot={makeSnapshot({
+          solar_power: 5000,
+          home_power: 500,
+          pv1_voltage: 350.4,
+          pv1_current: 5.2,
+          pv2_current: 1.3,
+        })}
+      />,
+    );
+    const sub = container.querySelector('[data-testid="solar-sublabel"]');
+    expect(sub).not.toBeNull();
+    expect(sub?.textContent).toBe('350.4V/6.5A');
+  });
+
+  it('falls back to a current-only sub-label when PV voltage is zero (gateway-style)', () => {
+    const { container } = render(
+      <EnergyOrbitDiagram
+        snapshot={makeSnapshot({
+          solar_power: 5000,
+          home_power: 500,
+          pv1_voltage: 0,
+          pv1_current: 5.2,
+          pv2_current: 1.3,
+        })}
+      />,
+    );
+    const sub = container.querySelector('[data-testid="solar-sublabel"]');
+    expect(sub?.textContent).toBe('6.5A');
+  });
+
   it('routes excess solar to battery and grid around the outer orbit', () => {
     const { container } = render(
       <EnergyOrbitDiagram

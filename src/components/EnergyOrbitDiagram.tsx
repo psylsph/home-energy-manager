@@ -233,6 +233,11 @@ function StaticTrack({ id, posOf }: TrackProps) {
 
 interface FlowPath {
   path: string;
+  /** Visual path length in viewBox units. Used to normalise animation
+   *  duration so short spokes and long outer arcs move at a comparable pace
+   *  (issue: discharge-to-grid arc was racing at the same speed as a short
+   *  battery→home spoke). */
+  length: number;
   mx: number;
   my: number;
   route: 'direct' | 'outer';
@@ -245,11 +250,9 @@ function hasFlow(flows: EnergyFlow[], id: string): boolean {
 
 function visualEndpoints(flow: EnergyFlow, flows: EnergyFlow[]): { from: FlowNodeId; to: FlowNodeId } {
   const solarActive = hasFlow(flows, 'solar');
-  const batteryExporting = !solarActive && hasFlow(flows, 'discharge') && flow.id === 'export';
 
   if (flow.id === 'charge' && solarActive) return { from: 'solar', to: 'battery' };
   if (flow.id === 'export' && solarActive) return { from: 'solar', to: 'grid' };
-  if (batteryExporting) return { from: 'battery', to: 'grid' };
   return { from: flow.from, to: flow.to };
 }
 
@@ -291,6 +294,7 @@ function outerArcPath(from: FlowNodeId, to: FlowNodeId, posOf: (id: FlowNodeId) 
   const mid = orbitPoint(sweep === 1 ? startAngle + delta / 2 : startAngle - delta / 2);
   return {
     path: `M ${start.x} ${start.y} A ${OUTER_ORBIT_R} ${OUTER_ORBIT_R} 0 ${largeArc} ${sweep} ${end.x} ${end.y}`,
+    length: OUTER_ORBIT_R * delta,
     mx: mid.x,
     my: mid.y,
     route: 'outer',
@@ -304,6 +308,7 @@ function directPath(from: FlowNodeId, to: FlowNodeId, posOf: (id: FlowNodeId) =>
   const { x1, y1, x2, y2, mx, my } = trimLine(a, b, radiusFor(from), radiusFor(to));
   return {
     path: `M ${x1} ${y1} L ${x2} ${y2}`,
+    length: Math.hypot(x2 - x1, y2 - y1),
     mx,
     my,
     route: 'direct',
@@ -330,7 +335,14 @@ function FlowDot({ flow, flows, posOf, maxW, reduced }: DotProps) {
   const routed = flowPath(flow, flows, posOf);
   const strength = Math.min(1, flow.watts / maxW);
   const r = 6 + 3 * strength;
-  const durSeconds = Math.max(0.55, 2.4 - Math.min(flow.watts, 8000) / 8000 * 1.75);
+  // Duration is path-length-driven so a short battery→home spoke and a long
+  // battery→grid outer arc traverse at a comparable visual pace. Higher-
+  // energy flows get a modest speed boost (≈2× at full strength vs idle)
+  // so a 5 kW export still feels more energetic than a 200 W trickle, but
+  // neither flies across the screen.
+  const BASE_SPEED_PX_PER_S = 90;
+  const speed = BASE_SPEED_PX_PER_S * (0.55 + strength * 0.9);
+  const durSeconds = Math.min(8, Math.max(1.0, routed.length / speed));
   const dur = `${durSeconds.toFixed(2)}s`;
 
   if (reduced) {
@@ -465,6 +477,12 @@ function SatelliteNode({ node, x, y, r, flows, mobile, showStatusWords }: NodePr
   const value = displayValue(node);
   const isBattery = node.id === 'battery';
   const isEv = node.id === 'ev';
+  // Solar shows its PV voltage/current under the kW value (legacy
+  // inverter-centred diagram behaviour). Other nodes' `unit` strings are
+  // already rendered elsewhere (grid → status word, battery SOC inside
+  // the glyph, inverter → mini-card below the diagram), so we render
+  // the sub-label only for solar to avoid duplicating information.
+  const showSubLabel = node.id === 'solar' && node.unit.length > 0;
 
   return (
     <g aria-label={`${node.label}: ${value} ${status}`}>
@@ -502,10 +520,23 @@ function SatelliteNode({ node, x, y, r, flows, mobile, showStatusWords }: NodePr
       >
         {value}
       </text>
+      {showSubLabel && (
+        <text
+          data-testid={`${node.id}-sublabel`}
+          x={x}
+          y={y + r + 50}
+          textAnchor="middle"
+          fill="var(--app-text-primary, #F0F6FC)"
+          fontSize={mobile ? 14 : 13}
+          fontFamily="var(--font-mono, monospace)"
+        >
+          {node.unit}
+        </text>
+      )}
       {showStatusWords && (
         <text
           x={x}
-          y={y + r + 57}
+          y={y + r + 72}
           textAnchor="middle"
           fill="var(--app-text-secondary, #8B949E)"
           fontSize={mobile ? 15 : 14}
