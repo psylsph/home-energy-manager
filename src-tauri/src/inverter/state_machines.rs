@@ -565,10 +565,7 @@ pub(crate) fn check_load_limiter(
         if matches!(*state, LoadLimiterState::Paused)
             || matches!(*state, LoadLimiterState::PausedFromRestart)
         {
-            let restore_reserve = saved
-                .take()
-                .map(|s| s.reserve)
-                .unwrap_or(4);
+            let restore_reserve = saved.take().map(|s| s.reserve).unwrap_or(4);
             tracing::info!(
                 restore_reserve,
                 "Load limiter: outside activation window, restoring Eco"
@@ -686,10 +683,7 @@ pub(crate) fn check_load_limiter(
             }
 
             if home_power <= threshold {
-                let restore_reserve = saved
-                    .as_ref()
-                    .map(|s| s.reserve)
-                    .unwrap_or(4);
+                let restore_reserve = saved.as_ref().map(|s| s.reserve).unwrap_or(4);
                 tracing::info!(
                     restore_reserve,
                     "Load limiter: post-crash - load below threshold, restoring Eco"
@@ -725,10 +719,7 @@ pub(crate) fn check_load_limiter(
             if home_power <= threshold {
                 *consecutive += 1;
                 if *consecutive >= debounce_count {
-                    let restore_reserve = saved
-                        .take()
-                        .map(|s| s.reserve)
-                        .unwrap_or(4);
+                    let restore_reserve = saved.take().map(|s| s.reserve).unwrap_or(4);
                     tracing::info!(
                         consecutive = *consecutive,
                         restore_reserve,
@@ -1183,7 +1174,8 @@ mod tests {
             assert!(matches!(state, LoadLimiterState::HighLoadPending { .. }));
         }
         // 5th: transition to Paused with restore-100 writes.
-        let writes = check_load_limiter(&high, &config, &mut state, 60, &mut saved).expect("pauses");
+        let writes =
+            check_load_limiter(&high, &config, &mut state, 60, &mut saved).expect("pauses");
         assert_eq!(state, LoadLimiterState::Paused);
         // Should have saved the original reserve (20) before pausing.
         assert_eq!(saved, Some(LoadLimiterSaved { reserve: 20 }));
@@ -1214,7 +1206,8 @@ mod tests {
             assert!(matches!(state, LoadLimiterState::LowLoadPending { .. }));
         }
         // 3rd: restore Eco with the saved reserve (20), not hardcoded 4.
-        let writes = check_load_limiter(&low, &config, &mut state, 60, &mut saved).expect("restores");
+        let writes =
+            check_load_limiter(&low, &config, &mut state, 60, &mut saved).expect("restores");
         assert_eq!(state, LoadLimiterState::Idle);
         // Saved should be consumed (taken) on restore.
         assert!(saved.is_none(), "saved must be consumed on restore");
@@ -1343,7 +1336,10 @@ mod tests {
 
         // One poll with load below threshold: LowLoadPending.
         assert!(check_load_limiter(&low, &config, &mut state, 60, &mut saved).is_none());
-        assert!(matches!(state, LoadLimiterState::LowLoadPending { consecutive: 1 }));
+        assert!(matches!(
+            state,
+            LoadLimiterState::LowLoadPending { consecutive: 1 }
+        ));
 
         // Second poll: restore with fallback reserve 4.
         let writes = check_load_limiter(&low, &config, &mut state, 60, &mut saved)
@@ -1673,13 +1669,7 @@ mod tests {
             ..Default::default()
         };
 
-        let writes = check_load_limiter(
-            &already_restored,
-            &config,
-            &mut state,
-            60,
-            &mut saved,
-        );
+        let writes = check_load_limiter(&already_restored, &config, &mut state, 60, &mut saved);
         assert!(
             writes.is_none(),
             "no writes — battery is already in Eco, restore is confirmed"
@@ -1713,9 +1703,8 @@ mod tests {
         };
 
         for _ in 0..3 {
-            let writes =
-                check_load_limiter(&retry_snap, &config, &mut state, 60, &mut saved)
-                    .expect("retry must always return writes when battery is EcoPaused");
+            let writes = check_load_limiter(&retry_snap, &config, &mut state, 60, &mut saved)
+                .expect("retry must always return writes when battery is EcoPaused");
             assert_eq!(state, LoadLimiterState::PausedFromRestart);
             assert!(
                 writes

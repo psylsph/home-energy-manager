@@ -69,8 +69,8 @@ use crate::inverter::sanitizer::{
 };
 use crate::inverter::state_machines::{
     build_force_discharge_auto_revert_writes, check_auto_winter, check_load_limiter,
-    clear_cosy_slot_registers, cosy_slot_register_writes, persist_agile_state,
-    persist_cosy_active, write_registers_to_inverter,
+    clear_cosy_slot_registers, cosy_slot_register_writes, persist_agile_state, persist_cosy_active,
+    write_registers_to_inverter,
 };
 pub use crate::inverter::state_machines::{
     AgileState, AutoWinterConfig, AutoWinterSaved, AutoWinterState, LoadLimiterConfig,
@@ -665,8 +665,9 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
     // the back-off state below. Without this, a user click during a long
     // zombie-dongle back-off sleep would only trigger one extra attempt
     // before the loop fell asleep again for another 10 minutes.
-    let mut last_seen_reconnect_request: u32 =
-        state.reconnect_request.load(std::sync::atomic::Ordering::Relaxed);
+    let mut last_seen_reconnect_request: u32 = state
+        .reconnect_request
+        .load(std::sync::atomic::Ordering::Relaxed);
     // When we last ran LAN discovery (to avoid scanning too often).
     let mut last_discovery_time: Option<Instant> = None;
     // After this many consecutive failures, trigger auto-discovery.
@@ -820,17 +821,15 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // timeout.
                 const WARMUP_MAX_RETRIES: u8 = 4;
                 if !session_unusable {
-                    match client.read_blocks_resilient(
-                        crate::modbus::registers::STANDARD_POLL_BLOCKS,
-                        WARMUP_MAX_RETRIES,
-                    )
-                    .await
+                    match client
+                        .read_blocks_resilient(
+                            crate::modbus::registers::STANDARD_POLL_BLOCKS,
+                            WARMUP_MAX_RETRIES,
+                        )
+                        .await
                     {
                         Ok(blocks) => {
-                            tracing::debug!(
-                                blocks = blocks.len(),
-                                "Warmup read OK"
-                            );
+                            tracing::debug!(blocks = blocks.len(), "Warmup read OK");
                         }
                         Err(e) => {
                             tracing::warn!("Warmup read FAILED: {e} - ending session");
@@ -3053,8 +3052,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 consecutive_connect_failures = consecutive_connect_failures.wrapping_add(1);
                 let should_discover = !settings.disable_auto_discovery
                     && consecutive_connect_failures >= DISCOVERY_AFTER_FAILURES
-                    && last_discovery_time
-                        .is_none_or(|t| t.elapsed() >= DISCOVERY_COOLDOWN);
+                    && last_discovery_time.is_none_or(|t| t.elapsed() >= DISCOVERY_COOLDOWN);
 
                 if should_discover {
                     last_discovery_time = Some(Instant::now());
@@ -3066,7 +3064,8 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     );
 
                     let subnets = crate::inverter::discovery::detect_lan_subnets();
-                    let inverters = crate::inverter::discovery::scan_multiple_subnets(&subnets).await;
+                    let inverters =
+                        crate::inverter::discovery::scan_multiple_subnets(&subnets).await;
 
                     // Filter out the configured host (it's clearly not responding).
                     let candidates: Vec<_> = inverters
@@ -3181,9 +3180,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 .reconnect_request
                 .load(std::sync::atomic::Ordering::Relaxed);
             if cur_req != last_seen_reconnect_request {
-                tracing::info!(
-                    "Manual reconnect requested during back-off — waking early"
-                );
+                tracing::info!("Manual reconnect requested during back-off — waking early");
                 break;
             }
         }
@@ -3306,8 +3303,7 @@ mod tests {
         const MAX_ATTEMPTS_PER_BLOCK: u64 = MAX_RETRIES_PER_BLOCK + 1;
         const POST_POLL_SLEEP_SECS: u64 = 2;
         const MAX_CONSECUTIVE_TIMEOUTS: u64 = 3;
-        const MAX_CYCLE_SECS: u64 =
-            MAX_ATTEMPTS_PER_BLOCK * IO_TIMEOUT_SECS + POST_POLL_SLEEP_SECS;
+        const MAX_CYCLE_SECS: u64 = MAX_ATTEMPTS_PER_BLOCK * IO_TIMEOUT_SECS + POST_POLL_SLEEP_SECS;
 
         // Sanity (enforced at compile time, so a bump trips the build
         // immediately rather than only when tests run): the documented cycle
@@ -3346,7 +3342,9 @@ mod tests {
         crate::test_util::with_isolated_config_dir(|| {
             let state = AppState::new();
             assert_eq!(
-                state.reconnect_request.load(std::sync::atomic::Ordering::Relaxed),
+                state
+                    .reconnect_request
+                    .load(std::sync::atomic::Ordering::Relaxed),
                 0
             );
         });
@@ -3366,7 +3364,9 @@ mod tests {
                 .reconnect_request
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             assert_eq!(
-                state.reconnect_request.load(std::sync::atomic::Ordering::Relaxed),
+                state
+                    .reconnect_request
+                    .load(std::sync::atomic::Ordering::Relaxed),
                 2
             );
         });
@@ -3665,7 +3665,9 @@ mod tests {
         crate::test_util::with_isolated_config_dir(|| {
             let state = Arc::new(AppState::new());
             assert_eq!(
-                state.connect_failures.load(std::sync::atomic::Ordering::Relaxed),
+                state
+                    .connect_failures
+                    .load(std::sync::atomic::Ordering::Relaxed),
                 0
             );
         });
@@ -3689,28 +3691,36 @@ mod tests {
         crate::test_util::with_isolated_config_dir(|| {
             let state = Arc::new(AppState::new());
             assert_eq!(
-                state.connect_failures.load(std::sync::atomic::Ordering::Relaxed),
+                state
+                    .connect_failures
+                    .load(std::sync::atomic::Ordering::Relaxed),
                 0
             );
             state
                 .connect_failures
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             assert_eq!(
-                state.connect_failures.load(std::sync::atomic::Ordering::Relaxed),
+                state
+                    .connect_failures
+                    .load(std::sync::atomic::Ordering::Relaxed),
                 1
             );
             state
                 .connect_failures
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             assert_eq!(
-                state.connect_failures.load(std::sync::atomic::Ordering::Relaxed),
+                state
+                    .connect_failures
+                    .load(std::sync::atomic::Ordering::Relaxed),
                 2
             );
             state
                 .connect_failures
                 .store(0, std::sync::atomic::Ordering::Relaxed);
             assert_eq!(
-                state.connect_failures.load(std::sync::atomic::Ordering::Relaxed),
+                state
+                    .connect_failures
+                    .load(std::sync::atomic::Ordering::Relaxed),
                 0
             );
         });

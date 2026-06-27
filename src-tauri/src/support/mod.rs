@@ -110,7 +110,14 @@ fn default_false() -> bool {
 /// source of truth is in one place; the frontend derives its dropdown from the
 /// same list.
 pub fn valid_categories() -> &'static [&'static str] {
-    &["connection", "schedule", "battery", "control", "alerts", "other"]
+    &[
+        "connection",
+        "schedule",
+        "battery",
+        "control",
+        "alerts",
+        "other",
+    ]
 }
 
 /// Validate a [`SupportRequest`] after parsing. Returns `Ok(())` or a
@@ -431,8 +438,9 @@ pub fn build_bundle(inputs: BundleInputs) -> Result<BuiltBundle, String> {
     // honest than a defaulted snapshot full of zeros that would mislead the
     // maintainer.
     let mut snapshot_value = match &inputs.snapshot {
-        Some(s) => serde_json::to_value(s)
-            .map_err(|e| format!("Failed to serialise snapshot: {e}"))?,
+        Some(s) => {
+            serde_json::to_value(s).map_err(|e| format!("Failed to serialise snapshot: {e}"))?
+        }
         None => Value::Null,
     };
     redact_snapshot_serials(&mut snapshot_value);
@@ -590,7 +598,10 @@ mod tests {
         // But model + telemetry survive.
         assert_eq!(parsed["snapshot"]["device_type_display"], "Gen3 Hybrid");
         assert_eq!(parsed["logs"]["line_count"], 2);
-        assert_eq!(parsed["logs"]["lines"][0], "12:00:00.000 INFO [inverter] connected");
+        assert_eq!(
+            parsed["logs"]["lines"][0],
+            "12:00:00.000 INFO [inverter] connected"
+        );
         assert_eq!(parsed["snapshot"]["soc"], 80);
         assert!(parsed["history_tail"]["rows"].is_array());
     }
@@ -603,9 +614,15 @@ mod tests {
         let bundle = build_bundle(inputs).unwrap();
 
         let raw = String::from_utf8(bundle.json.clone()).unwrap();
-        assert!(!raw.contains("SA1234567"), "raw inverter serial leaked into bundle");
+        assert!(
+            !raw.contains("SA1234567"),
+            "raw inverter serial leaked into bundle"
+        );
         assert!(!raw.contains("192.168.1.50"), "LAN host leaked into bundle");
-        assert!(!raw.contains("DT123456"), "dongle serial leaked into bundle");
+        assert!(
+            !raw.contains("DT123456"),
+            "dongle serial leaked into bundle"
+        );
         // The summary must not carry the serial either.
         assert!(!bundle.manifest_summary.contains("SA1234567"));
         let parsed: Value = serde_json::from_slice(&bundle.json).unwrap();
@@ -672,7 +689,11 @@ mod tests {
         assert!(id.starts_with("hem-"), "got {id}");
         // User segment is the 16-hex fingerprint.
         let user_seg = id.trim_start_matches("hem-").split('-').next().unwrap();
-        assert_eq!(user_seg.len(), 16, "expected 16-hex fingerprint, got {user_seg}");
+        assert_eq!(
+            user_seg.len(),
+            16,
+            "expected 16-hex fingerprint, got {user_seg}"
+        );
         assert!(user_seg.chars().all(|c| c.is_ascii_hexdigit()));
         // Trailing stamp is YYYYmmddTHHMMSSZ.
         let stamp = id.rsplit_once('-').unwrap().1;
@@ -742,7 +763,10 @@ mod tests {
 
         let parsed: Value = serde_json::from_slice(&bundle.json).unwrap();
         assert!(parsed["snapshot"].is_null());
-        assert_eq!(parsed["service_info"]["note"], "No snapshot available — inverter may be disconnected.");
+        assert_eq!(
+            parsed["service_info"]["note"],
+            "No snapshot available — inverter may be disconnected."
+        );
     }
 
     // --- issue-number handling ---
@@ -754,7 +778,8 @@ mod tests {
         assert_eq!(normalize_issue_number("125").unwrap(), Some(125));
         assert_eq!(normalize_issue_number("#125").unwrap(), Some(125));
         assert_eq!(
-            normalize_issue_number("https://github.com/psylsph/home-energy-manager/issues/125").unwrap(),
+            normalize_issue_number("https://github.com/psylsph/home-energy-manager/issues/125")
+                .unwrap(),
             Some(125)
         );
     }

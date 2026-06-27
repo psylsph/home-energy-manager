@@ -389,7 +389,7 @@ mod tests {
             ring.push(&format!("line {i}")); // fills 0..4, cursor=0
         }
         ring.push("line 5"); // wraps: 5 at index 0, cursor=1
-                                          // after=1 should skip line 0 (which was overwritten) and return lines 1-5
+                             // after=1 should skip line 0 (which was overwritten) and return lines 1-5
         let (lines, _) = ring.read_from(1);
         assert_eq!(lines.len(), 5);
         assert_eq!(lines[0], "line 1");

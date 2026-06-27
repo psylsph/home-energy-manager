@@ -326,7 +326,7 @@ function Layout() {
       <GridFaultBanner />
 
       {/* Content */}
-      <main className="flex-1 overflow-auto px-4 py-6 md:px-6 md:py-8 pb-safe">
+      <main className="flex-1 overflow-auto px-4 py-3 md:px-6 md:py-4 pb-safe">
         <Routes>
           {page('/', <StatusPage />)}
           {page('/power', <PowerPage />, true)}

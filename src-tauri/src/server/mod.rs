@@ -61,9 +61,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/control/export-limit", post(api::set_export_limit))
         .route("/api/control/pause", post(api::pause_battery))
         .route("/api/control/force-charge", post(api::force_charge))
-        .route("/api/control/force-charge/stop", post(api::force_charge_stop))
+        .route(
+            "/api/control/force-charge/stop",
+            post(api::force_charge_stop),
+        )
         .route("/api/control/force-discharge", post(api::force_discharge))
-        .route("/api/control/force-discharge/stop", post(api::force_discharge_stop))
+        .route(
+            "/api/control/force-discharge/stop",
+            post(api::force_discharge_stop),
+        )
         .route("/api/control/sync-clock", post(api::sync_clock))
         .route("/api/control/calibration", post(api::set_calibration))
         .route("/api/control/reboot", post(api::reboot_inverter))
@@ -275,10 +281,7 @@ pub async fn start_server_with_frontend_on_available_port(
 ///
 /// Checks for a `Bearer <key>` token in the `Authorization` header.
 /// Returns 401 Unauthorized if the key is missing or doesn't match.
-async fn api_key_auth(
-    req: Request,
-    next: Next,
-) -> Response {
+async fn api_key_auth(req: Request, next: Next) -> Response {
     let expected_key = crate::settings::Settings::load().api_key;
 
     if expected_key.is_empty() {
@@ -332,10 +335,7 @@ pub fn create_readonly_router(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/api/snapshot", get(api::get_snapshot))
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            api_key_auth,
-        ))
+        .route_layer(middleware::from_fn_with_state(state.clone(), api_key_auth))
         .layer(cors)
         .with_state(state)
         .route("/api/{*rest}", get(not_found_404))
@@ -474,8 +474,12 @@ mod tests {
                 .unwrap();
             let response = app.oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-            let body: serde_json::Value =
-                serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+            let body: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
             assert_eq!(body["error"], "Unauthorized: invalid or missing API key");
         })
         .await;
@@ -511,8 +515,12 @@ mod tests {
                 .unwrap();
             let response = app.oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
-            let body: serde_json::Value =
-                serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+            let body: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
             // No snapshot available yet, but the response is {ok: false, error: "..."}
             // rather than 401.
             assert_eq!(body["ok"], false);

@@ -6,10 +6,10 @@ pub mod modbus;
 pub mod server;
 pub mod settings;
 pub mod support;
-pub mod weather;
-pub mod windows_autostart;
 #[cfg(test)]
 mod test_util;
+pub mod weather;
+pub mod windows_autostart;
 
 use history::HistoryDb;
 use inverter::poll::{run_poll_loop, AppState};
@@ -189,10 +189,7 @@ async fn initialize_app_state(
     if let Some(reserve) = app_settings.load_limiter_saved_reserve {
         let mut ll_saved = state.load_limiter_saved.lock().await;
         *ll_saved = Some(crate::inverter::poll::LoadLimiterSaved { reserve });
-        tracing::info!(
-            "Restored load limiter saved reserve: {}%",
-            reserve,
-        );
+        tracing::info!("Restored load limiter saved reserve: {}%", reserve,);
     }
 
     // Load persisted auto-winter saved values (original register values
@@ -586,9 +583,7 @@ fn resolve_dist_dir(args: &[String]) -> Option<String> {
     // it. `start_server()` (API-only mode) is still called below, so the
     // server keeps running for users who genuinely want the JSON/WS API
     // without a web UI.
-    let mut msg = String::from(
-        "No frontend dist directory found. Searched the following paths:",
-    );
+    let mut msg = String::from("No frontend dist directory found. Searched the following paths:");
     for candidate in &candidates {
         msg.push_str(&format!("\n  - {}", candidate.display()));
     }

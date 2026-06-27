@@ -225,8 +225,6 @@ export default function SettingsPage() {
     setPanelGraphsScale,
     panelGraphsYLock,
     setPanelGraphsYLock,
-    showFlowSummary,
-    setShowFlowSummary,
     showFlowStatusWords,
     setShowFlowStatusWords,
     visualNoiseThreshold,
@@ -266,6 +264,7 @@ export default function SettingsPage() {
   // Empty host = EVC disabled (intentional, see handleEvcSave). Anything
   // non-empty must be a valid IPv4 dotted-quad (issue #138).
   const evcHostInvalid = evcHost !== '' && !isValidIpv4Host(evcHost);
+
   const [disableAutoDiscovery, setDisableAutoDiscovery] = useState(false);
   // Developer-only: skip optional model-specific register blocks (extended
   // slots, AC config, three-phase config, gateway input banks) to reduce
@@ -503,6 +502,9 @@ export default function SettingsPage() {
 
   // Save EV Charger settings
   const handleEvcSave = async () => {
+    // Re-check client-side as defence-in-depth (issue #138): the Save
+    // button is also disabled on invalid input, but programmatic callers
+    // (or an old tab racing a stale form state) must still be rejected.
     // Re-check client-side as defence-in-depth (issue #138): the Save
     // button is also disabled on invalid input, but programmatic callers
     // (or an old tab racing a stale form state) must still be rejected.
@@ -1854,20 +1856,6 @@ export default function SettingsPage() {
         {/* ── Sub-section: Energy Flow Diagram ── */}
         <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
           <h3 className="text-text-primary text-sm font-sans font-medium">Energy Flow Diagram</h3>
-
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex flex-col gap-0.5">
-              <span className="text-text-primary text-sm font-sans">Show Overview Sentence</span>
-              <span className="text-text-secondary text-xs font-sans">
-                Show the plain-English explanation underneath the radial flow diagram.
-              </span>
-            </div>
-            <Toggle
-              checked={showFlowSummary}
-              onChange={setShowFlowSummary}
-            />
-          </div>
-
           <div className="flex items-center justify-between gap-3">
             <div className="flex flex-col gap-0.5">
               <span className="text-text-primary text-sm font-sans">Show Node Status Words</span>

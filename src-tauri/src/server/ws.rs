@@ -106,11 +106,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, peer: std::net::
     // Send the current connection state immediately on connect.
     {
         let cs = state.connection_state.lock().await.clone();
-        let cs_val = state
-            .connected_since
-            .lock()
-            .ok()
-            .and_then(|guard| *guard);
+        let cs_val = state.connected_since.lock().ok().and_then(|guard| *guard);
         let connected_since_epoch_ms = cs_val
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as u64);

@@ -143,7 +143,7 @@ export default function StatusPage() {
   }
 
   return (
-    <div className="flex flex-col gap-4 max-w-4xl mx-auto">
+    <div className="flex flex-col gap-3 max-w-4xl mx-auto">
       {/* Connection status bar — only show when disconnected */}
       {connectionState !== 'connected' && (
         <section className="flex items-center justify-between gap-2 px-4 py-2 bg-bg-surface/50 rounded-2xl text-xs text-text-secondary/70">
@@ -199,7 +199,7 @@ export default function StatusPage() {
       <ColdBatteryWarning />
 
       {/* Energy flow diagram — full width card */}
-      <section className="bg-bg-surface rounded-2xl p-2">
+      <section className="bg-bg-surface rounded-lg p-1">
         <EnergyOrbitDiagram
           snapshot={snapshot}
           evcPower={evcPower}
@@ -212,7 +212,7 @@ export default function StatusPage() {
       </section>
 
       {/* Battery + Summary side by side on md+ */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-stretch">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 md:gap-3 items-stretch">
         <SummaryTiles snapshot={snapshot} />
         <BatteryPanel snapshot={snapshot} />
       </div>

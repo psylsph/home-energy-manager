@@ -519,8 +519,7 @@ pub const SAFE_WRITE_REGS: &[u16] = &[
     199, // ENABLE_INVERTER_PARALLEL_MODE
     331, // FORCE_OFF_GRID — non-damaging, but sustained islanding state
     // Export limit — three-phase plant-level (1063, deci-W) and EMS/Gateway plant (2071, W)
-    1063, 2071,
-    // Smart Load slots 1-10 (app-confirmed, bounded HHMM values)
+    1063, 2071, // Smart Load slots 1-10 (app-confirmed, bounded HHMM values)
     554, 555, 556, 557, 558, 559, 560, 561, 562, 563, 564, 565, 566, 567, 568, 569, 570, 571, 572,
     573,
     // Other app-confirmed registers

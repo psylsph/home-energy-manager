@@ -29,7 +29,7 @@ use std::time::Duration;
 use chrono::{Datelike, NaiveDate};
 
 use crate::inverter::poll::AppState;
-use crate::settings::{WeatherConfig, default_open_meteo_base_url};
+use crate::settings::{default_open_meteo_base_url, WeatherConfig};
 
 /// HTTP timeout for both live and backfill fetches. 10 s is generous for
 /// Open-Meteo's normal p99 — anything longer is treated as a failure and
@@ -143,7 +143,11 @@ struct WeatherObservation {
 }
 
 /// Fetch the current ambient temperature from Open-Meteo's forecast endpoint.
-async fn fetch_current(base_url: &str, latitude: f64, longitude: f64) -> Result<WeatherObservation, String> {
+async fn fetch_current(
+    base_url: &str,
+    latitude: f64,
+    longitude: f64,
+) -> Result<WeatherObservation, String> {
     let url = format!(
         "{base}/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m&timezone=UTC",
         base = base_url.trim_end_matches('/'),
@@ -166,7 +170,9 @@ async fn fetch_current(base_url: &str, latitude: f64, longitude: f64) -> Result<
     .map_err(|e| format!("spawn_blocking failed: {e}"))?;
 
     let json = result?;
-    let current = json.get("current").ok_or_else(|| "missing 'current'".to_string())?;
+    let current = json
+        .get("current")
+        .ok_or_else(|| "missing 'current'".to_string())?;
     let time = current
         .get("time")
         .and_then(|v| v.as_str())
@@ -183,8 +189,14 @@ async fn fetch_current(base_url: &str, latitude: f64, longitude: f64) -> Result<
 
     // Open-Meteo also echoes the resolved coords at the top level — we
     // persist them so the Settings UI can show what grid cell was used.
-    let grid_lat = json.get("latitude").and_then(|v| v.as_f64()).map(|v| v as f32);
-    let grid_lon = json.get("longitude").and_then(|v| v.as_f64()).map(|v| v as f32);
+    let grid_lat = json
+        .get("latitude")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
+    let grid_lon = json
+        .get("longitude")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
 
     Ok(WeatherObservation {
         timestamp: ts,
@@ -257,8 +269,14 @@ async fn fetch_archive_month(
         ));
     }
 
-    let grid_lat = json.get("latitude").and_then(|v| v.as_f64()).map(|v| v as f32);
-    let grid_lon = json.get("longitude").and_then(|v| v.as_f64()).map(|v| v as f32);
+    let grid_lat = json
+        .get("latitude")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
+    let grid_lon = json
+        .get("longitude")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
 
     let mut out = Vec::with_capacity(times.len());
     for (t, temp) in times.iter().zip(temps.iter()) {
@@ -291,7 +309,10 @@ async fn fetch_archive_month(
 /// there's nothing left to do. The returned `end` is *inclusive* — it's
 /// passed straight to Open-Meteo's `end_date` query parameter, which
 /// must be `<= today` (the archive only contains data up to today).
-fn next_backfill_window(last_completed: Option<NaiveDate>, today: NaiveDate) -> Option<(NaiveDate, NaiveDate)> {
+fn next_backfill_window(
+    last_completed: Option<NaiveDate>,
+    today: NaiveDate,
+) -> Option<(NaiveDate, NaiveDate)> {
     let start = match last_completed {
         // First ever run: backfill from the 30-day-ago lower bound so
         // a stale or empty history DB doesn't trigger years of API
@@ -367,11 +388,7 @@ async fn run_backfill_tick(state: Arc<AppState>) {
                 // fetched. The window's `end` is inclusive, so on success
                 // that's just `window.1`. On an empty range we skip the
                 // window start and try again next tick.
-                let advance_to = if obs.is_empty() {
-                    window.0
-                } else {
-                    window.1
-                };
+                let advance_to = if obs.is_empty() { window.0 } else { window.1 };
                 last_completed = Some(advance_to);
 
                 {
@@ -485,8 +502,10 @@ async fn run_live_fetch(state: Arc<AppState>) {
                 fetched_at,
             );
             let mut ws = state.weather.lock().await;
-            ws.last_fetch_at = Some(chrono::DateTime::<chrono::Utc>::from_timestamp(obs.timestamp, 0)
-                .unwrap_or_else(chrono::Utc::now));
+            ws.last_fetch_at = Some(
+                chrono::DateTime::<chrono::Utc>::from_timestamp(obs.timestamp, 0)
+                    .unwrap_or_else(chrono::Utc::now),
+            );
             ws.last_fetched_temperature_c = Some(obs.temperature_c);
             ws.grid_cell_latitude = obs.grid_lat;
             ws.grid_cell_longitude = obs.grid_lon;

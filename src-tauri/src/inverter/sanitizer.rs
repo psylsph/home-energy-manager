@@ -1000,10 +1000,22 @@ pub(crate) fn cross_validate_power_balance(
                 prev.solar_power
             };
             let new_residual = balance_with(
-                if rate_rejected_battery { raw_battery_power } else { snap.battery_power },
-                if rate_rejected_grid { raw_grid_power } else { snap.grid_power },
+                if rate_rejected_battery {
+                    raw_battery_power
+                } else {
+                    snap.battery_power
+                },
+                if rate_rejected_grid {
+                    raw_grid_power
+                } else {
+                    snap.grid_power
+                },
                 candidate_solar,
-                if rate_rejected_home { raw_home_power } else { snap.home_power },
+                if rate_rejected_home {
+                    raw_home_power
+                } else {
+                    snap.home_power
+                },
             )
             .unsigned_abs();
             if new_residual < POWER_BALANCE_RESIDUAL_W as u32 {
@@ -1023,9 +1035,21 @@ pub(crate) fn cross_validate_power_balance(
             };
             let new_residual = balance_with(
                 candidate_battery,
-                if rate_rejected_grid { raw_grid_power } else { snap.grid_power },
-                if rate_rejected_solar { raw_solar_power } else { snap.solar_power },
-                if rate_rejected_home { raw_home_power } else { snap.home_power },
+                if rate_rejected_grid {
+                    raw_grid_power
+                } else {
+                    snap.grid_power
+                },
+                if rate_rejected_solar {
+                    raw_solar_power
+                } else {
+                    snap.solar_power
+                },
+                if rate_rejected_home {
+                    raw_home_power
+                } else {
+                    snap.home_power
+                },
             )
             .unsigned_abs();
             if new_residual < POWER_BALANCE_RESIDUAL_W as u32 {
@@ -1044,10 +1068,22 @@ pub(crate) fn cross_validate_power_balance(
                 prev.grid_power
             };
             let new_residual = balance_with(
-                if rate_rejected_battery { raw_battery_power } else { snap.battery_power },
+                if rate_rejected_battery {
+                    raw_battery_power
+                } else {
+                    snap.battery_power
+                },
                 candidate_grid,
-                if rate_rejected_solar { raw_solar_power } else { snap.solar_power },
-                if rate_rejected_home { raw_home_power } else { snap.home_power },
+                if rate_rejected_solar {
+                    raw_solar_power
+                } else {
+                    snap.solar_power
+                },
+                if rate_rejected_home {
+                    raw_home_power
+                } else {
+                    snap.home_power
+                },
             )
             .unsigned_abs();
             if new_residual < POWER_BALANCE_RESIDUAL_W as u32 {
@@ -1076,9 +1112,21 @@ pub(crate) fn cross_validate_power_balance(
     {
         if rate_rejected_home {
             let new_residual = balance_with(
-                if rate_rejected_battery { raw_battery_power } else { snap.battery_power },
-                if rate_rejected_grid { raw_grid_power } else { snap.grid_power },
-                if rate_rejected_solar { raw_solar_power } else { snap.solar_power },
+                if rate_rejected_battery {
+                    raw_battery_power
+                } else {
+                    snap.battery_power
+                },
+                if rate_rejected_grid {
+                    raw_grid_power
+                } else {
+                    snap.grid_power
+                },
+                if rate_rejected_solar {
+                    raw_solar_power
+                } else {
+                    snap.solar_power
+                },
                 raw_home_power,
             )
             .unsigned_abs();
@@ -1480,9 +1528,7 @@ pub(crate) fn sanitize_snapshot(
     // Skipped during the connect grace period (skip_delta=true) because the
     // prev readings aren't yet a reliable baseline, and on gateway / EMS
     // because one of the four terms is itself derived from this identity.
-    if !skip_delta
-        && !snap.device_type.needs_gateway_input_blocks()
-    {
+    if !skip_delta && !snap.device_type.needs_gateway_input_blocks() {
         if let Some(p) = prev {
             let restored = cross_validate_power_balance(
                 snap,
@@ -2079,7 +2125,12 @@ pub(crate) fn sanitize_snapshot(
             };
         }
 
-            check_energy_delta!("today_solar_kwh", snap.today_solar_kwh, p.today_solar_kwh, 0.25_f32);
+            check_energy_delta!(
+                "today_solar_kwh",
+                snap.today_solar_kwh,
+                p.today_solar_kwh,
+                0.25_f32
+            );
             check_energy_delta!(
                 "today_pv1_kwh",
                 snap.today_pv1_kwh,
@@ -2703,7 +2754,7 @@ mod tests {
         // Must clear the garbage IR(56) value and fall back to hardware max.
         let mut snap = InverterSnapshot {
             device_type: DeviceType::ThreePhase,
-            battery_temperature: 999.0, // garbage from IR(56)
+            battery_temperature: 999.0,  // garbage from IR(56)
             battery_capacity_kwh: 999.0, // garbage from HR(55)
             max_battery_power_w: 0,
             battery_modules: vec![],
@@ -3128,7 +3179,14 @@ mod tests {
             rate_fraction: 0.5,
             abs_delta_w: 2_000,
         };
-        let (val, sanitized) = check_power_rate(7_000, Some(2_000), 3.0, &rules, "solar_power", &mut RateReleaseCounts::default());
+        let (val, sanitized) = check_power_rate(
+            7_000,
+            Some(2_000),
+            3.0,
+            &rules,
+            "solar_power",
+            &mut RateReleaseCounts::default(),
+        );
         assert_eq!(val, 2_000, "rate spike must fall back to previous");
         assert!(sanitized);
     }
@@ -3140,8 +3198,18 @@ mod tests {
             rate_fraction: 0.5,
             abs_delta_w: 2_000,
         };
-        let (val, sanitized) = check_power_rate(8_000, Some(3_000), 3.0, &rules, "battery_power", &mut RateReleaseCounts::default());
-        assert_eq!(val, 3_000, "large rate spike from high base must be rejected");
+        let (val, sanitized) = check_power_rate(
+            8_000,
+            Some(3_000),
+            3.0,
+            &rules,
+            "battery_power",
+            &mut RateReleaseCounts::default(),
+        );
+        assert_eq!(
+            val, 3_000,
+            "large rate spike from high base must be rejected"
+        );
         assert!(sanitized);
     }
 
@@ -3154,7 +3222,14 @@ mod tests {
             rate_fraction: 0.5,
             abs_delta_w: 2_000,
         };
-        let (val, sanitized) = check_power_rate(500, Some(200), 3.0, &rules, "solar_power", &mut RateReleaseCounts::default());
+        let (val, sanitized) = check_power_rate(
+            500,
+            Some(200),
+            3.0,
+            &rules,
+            "solar_power",
+            &mut RateReleaseCounts::default(),
+        );
         assert_eq!(val, 500, "small absolute delta must be accepted");
         assert!(!sanitized);
     }
@@ -3168,8 +3243,18 @@ mod tests {
             rate_fraction: 0.5,
             abs_delta_w: 2_000,
         };
-        let (val, sanitized) = check_power_rate(10_000, Some(8_000), 3.0, &rules, "home_power", &mut RateReleaseCounts::default());
-        assert_eq!(val, 10_000, "small fractional change from high base must be accepted");
+        let (val, sanitized) = check_power_rate(
+            10_000,
+            Some(8_000),
+            3.0,
+            &rules,
+            "home_power",
+            &mut RateReleaseCounts::default(),
+        );
+        assert_eq!(
+            val, 10_000,
+            "small fractional change from high base must be accepted"
+        );
         assert!(!sanitized);
     }
 
@@ -3181,7 +3266,14 @@ mod tests {
             rate_fraction: 0.5,
             abs_delta_w: 2_000,
         };
-        let (val, sanitized) = check_power_rate(8_000, Some(2_000), 120.0, &rules, "solar_power", &mut RateReleaseCounts::default());
+        let (val, sanitized) = check_power_rate(
+            8_000,
+            Some(2_000),
+            120.0,
+            &rules,
+            "solar_power",
+            &mut RateReleaseCounts::default(),
+        );
         assert_eq!(val, 8_000, "long gap must skip rate check");
         assert!(!sanitized);
     }
@@ -3193,7 +3285,14 @@ mod tests {
             rate_fraction: 0.5,
             abs_delta_w: 2_000,
         };
-        let (val, sanitized) = check_power_rate(5_000, None, 3.0, &rules, "battery_power", &mut RateReleaseCounts::default());
+        let (val, sanitized) = check_power_rate(
+            5_000,
+            None,
+            3.0,
+            &rules,
+            "battery_power",
+            &mut RateReleaseCounts::default(),
+        );
         assert_eq!(val, 5_000, "first reading has no prev, must accept raw");
         assert!(!sanitized);
     }
@@ -3207,7 +3306,14 @@ mod tests {
             rate_fraction: 0.5,
             abs_delta_w: 2_000,
         };
-        let (val, sanitized) = check_power_rate(4_000, Some(-2_000), 3.0, &rules, "battery_power", &mut RateReleaseCounts::default());
+        let (val, sanitized) = check_power_rate(
+            4_000,
+            Some(-2_000),
+            3.0,
+            &rules,
+            "battery_power",
+            &mut RateReleaseCounts::default(),
+        );
         assert_eq!(val, -2_000, "sign-flip spike must fall back to previous");
         assert!(sanitized);
     }
@@ -3220,8 +3326,18 @@ mod tests {
             rate_fraction: 0.5,
             abs_delta_w: 2_000,
         };
-        let (val, sanitized) = check_power_rate(6_000, Some(4_000), 3.0, &rules, "grid_power", &mut RateReleaseCounts::default());
-        assert_eq!(val, 6_000, "exactly at threshold must be accepted (strict >)");
+        let (val, sanitized) = check_power_rate(
+            6_000,
+            Some(4_000),
+            3.0,
+            &rules,
+            "grid_power",
+            &mut RateReleaseCounts::default(),
+        );
+        assert_eq!(
+            val, 6_000,
+            "exactly at threshold must be accepted (strict >)"
+        );
         assert!(!sanitized);
     }
 
@@ -3233,8 +3349,18 @@ mod tests {
             rate_fraction: 0.5,
             abs_delta_w: 2_000,
         };
-        let (val, sanitized) = check_power_rate(-7_000, Some(-4_000), 3.0, &rules, "battery_power", &mut RateReleaseCounts::default());
-        assert_eq!(val, -4_000, "rate spike on negative values must be rejected");
+        let (val, sanitized) = check_power_rate(
+            -7_000,
+            Some(-4_000),
+            3.0,
+            &rules,
+            "battery_power",
+            &mut RateReleaseCounts::default(),
+        );
+        assert_eq!(
+            val, -4_000,
+            "rate spike on negative values must be rejected"
+        );
         assert!(sanitized);
     }
 
@@ -3254,7 +3380,14 @@ mod tests {
             abs_delta_w: 2_000,
         };
         // Battery wakeup from idle.
-        let (val, sanitized) = check_power_rate(3_089, Some(0), 23.0, &rules, "battery_power", &mut RateReleaseCounts::default());
+        let (val, sanitized) = check_power_rate(
+            3_089,
+            Some(0),
+            23.0,
+            &rules,
+            "battery_power",
+            &mut RateReleaseCounts::default(),
+        );
         assert_eq!(
             val, 3_089,
             "battery wakeup from 0 W must be accepted (low base skips fraction)"
@@ -3262,12 +3395,28 @@ mod tests {
         assert!(!sanitized);
         // Grid kicking in to cover a load surge (negative to slightly less
         // negative). |prev| below the gate, so the same rule applies.
-        let (val, sanitized) =
-            check_power_rate(-3_000, Some(-200), 23.0, &rules, "grid_power", &mut RateReleaseCounts::default());
-        assert_eq!(val, -3_000, "low-magnitude grid transitions must be accepted");
+        let (val, sanitized) = check_power_rate(
+            -3_000,
+            Some(-200),
+            23.0,
+            &rules,
+            "grid_power",
+            &mut RateReleaseCounts::default(),
+        );
+        assert_eq!(
+            val, -3_000,
+            "low-magnitude grid transitions must be accepted"
+        );
         assert!(!sanitized);
         // Solar pre-dawn → first rays of sunrise.
-        let (val, sanitized) = check_power_rate(2_500, Some(0), 23.0, &rules, "solar_power", &mut RateReleaseCounts::default());
+        let (val, sanitized) = check_power_rate(
+            2_500,
+            Some(0),
+            23.0,
+            &rules,
+            "solar_power",
+            &mut RateReleaseCounts::default(),
+        );
         assert_eq!(val, 2_500, "sunrise onset from 0 W must be accepted");
         assert!(!sanitized);
     }
@@ -3288,7 +3437,14 @@ mod tests {
         // |raw|=5000 against prev=0: above 2 kW gate, but fraction check is
         // skipped because prev < 2 kW. Accept — caller is responsible for
         // checking against `max_battery_power` etc. beforehand.
-        let (val, sanitized) = check_power_rate(5_000, Some(0), 23.0, &rules, "battery_power", &mut RateReleaseCounts::default());
+        let (val, sanitized) = check_power_rate(
+            5_000,
+            Some(0),
+            23.0,
+            &rules,
+            "battery_power",
+            &mut RateReleaseCounts::default(),
+        );
         assert_eq!(val, 5_000, "check_power_rate accepts up to abs_delta_w");
         assert!(!sanitized);
     }
@@ -3633,7 +3789,7 @@ mod tests {
                 &mut pending_mode,
                 &mut delta_corrections,
                 &mut suspect_counts,
-            &mut rate_release_counts,
+                &mut rate_release_counts,
             );
 
             if i < DELTA_CORRECTION_RELEASE_THRESHOLD - 1 {
@@ -3694,7 +3850,7 @@ mod tests {
                 &mut pending_mode,
                 &mut delta_corrections,
                 &mut suspect_counts,
-            &mut rate_release_counts,
+                &mut rate_release_counts,
             );
         }
         assert_eq!(
@@ -3780,7 +3936,7 @@ mod tests {
                 &mut pending_mode,
                 &mut delta_corrections,
                 &mut suspect_counts,
-            &mut rate_release_counts,
+                &mut rate_release_counts,
             );
 
             if i < DELTA_CORRECTION_RELEASE_THRESHOLD - 1 {
@@ -3844,7 +4000,7 @@ mod tests {
                 &mut pending_mode,
                 &mut delta_corrections,
                 &mut suspect_counts,
-            &mut rate_release_counts,
+                &mut rate_release_counts,
             );
         }
         assert_eq!(*delta_corrections.0.get("today_import_kwh").unwrap(), 2);
@@ -3964,7 +4120,7 @@ mod tests {
                 &mut pending_mode,
                 &mut delta_corrections,
                 &mut suspect_counts,
-            &mut rate_release_counts,
+                &mut rate_release_counts,
             );
 
             if i < DELTA_CORRECTION_RELEASE_THRESHOLD - 1 {
@@ -4131,7 +4287,8 @@ mod tests {
             ..Default::default()
         };
 
-        let changed = carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, true, true);
+        let changed =
+            carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, true, true);
         assert!(!changed);
         assert_eq!(snap.charge_rate, 20);
         assert_eq!(snap.discharge_rate, 30);
@@ -4184,7 +4341,8 @@ mod tests {
             ..Default::default()
         };
 
-        let changed = carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, true, true);
+        let changed =
+            carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, true, true);
         assert!(!changed);
         assert!(!snap.charge_slots[2].enabled);
     }
@@ -5102,7 +5260,10 @@ mod tests {
 
         let sanitized = sanitize_for_test(&mut snap, Some(&prev));
         assert!(sanitized);
-        assert_eq!(snap.battery_power, -2_000, "sign-flip spike must hold at previous");
+        assert_eq!(
+            snap.battery_power, -2_000,
+            "sign-flip spike must hold at previous"
+        );
     }
 
     #[test]
@@ -5153,7 +5314,10 @@ mod tests {
 
         let sanitized = sanitize_for_test(&mut snap, Some(&prev));
         assert!(sanitized);
-        assert_eq!(snap.soc, 50, "jump from 50% to 100% must carry forward prev");
+        assert_eq!(
+            snap.soc, 50,
+            "jump from 50% to 100% must carry forward prev"
+        );
     }
 
     #[test]
@@ -5228,7 +5392,10 @@ mod tests {
         let mut snap = base_grid_connected_snap();
         snap.solar_power = 8_000;
         let sanitized = sanitize_for_test(&mut snap, None);
-        assert_eq!(snap.solar_power, 8_000, "first reading must not be rate-rejected");
+        assert_eq!(
+            snap.solar_power, 8_000,
+            "first reading must not be rate-rejected"
+        );
         let _ = sanitized;
     }
 
@@ -5305,9 +5472,12 @@ mod tests {
         let home_on_1 = run_one_poll(
             &mut rate_release_counts,
             timestamp,
-            80, 8_000,
-            0, 2_500,
-            0, -5_500,
+            80,
+            8_000,
+            0,
+            2_500,
+            0,
+            -5_500,
         );
         assert_eq!(
             home_on_1, 8_000,
@@ -5318,11 +5488,17 @@ mod tests {
         let home_on_2 = run_one_poll(
             &mut rate_release_counts,
             timestamp,
-            8_000, 8_000, // steady state at the new reading
-            2_500, 2_500,
-            -5_500, -5_500,
+            8_000,
+            8_000, // steady state at the new reading
+            2_500,
+            2_500,
+            -5_500,
+            -5_500,
         );
-        assert_eq!(home_on_2, 8_000, "EV ON steady state passes through unchanged");
+        assert_eq!(
+            home_on_2, 8_000,
+            "EV ON steady state passes through unchanged"
+        );
         timestamp += 3;
 
         // -- EV charger switches OFF --
@@ -5334,9 +5510,12 @@ mod tests {
         let home_off_1 = run_one_poll(
             &mut rate_release_counts,
             timestamp,
-            8_000, 80,
-            2_500, 0,
-            -5_500, -80,
+            8_000,
+            80,
+            2_500,
+            0,
+            -5_500,
+            -80,
         );
         assert_eq!(
             home_off_1, 8_000,
@@ -5347,9 +5526,12 @@ mod tests {
         let home_off_2 = run_one_poll(
             &mut rate_release_counts,
             timestamp,
-            8_000, 80,
-            2_500, 0,
-            -5_500, -80,
+            8_000,
+            80,
+            2_500,
+            0,
+            -5_500,
+            -80,
         );
         assert_eq!(
             home_off_2, 8_000,
@@ -5360,9 +5542,12 @@ mod tests {
         let home_off_3 = run_one_poll(
             &mut rate_release_counts,
             timestamp,
-            8_000, 80,
-            2_500, 0,
-            -5_500, -80,
+            8_000,
+            80,
+            2_500,
+            0,
+            -5_500,
+            -80,
         );
         assert_eq!(
             home_off_3, 80,
@@ -5372,13 +5557,8 @@ mod tests {
 
         // Steady state at the new reading: rate counter is reset, delta
         // check passes (no movement), raw passes through.
-        let home_off_steady = run_one_poll(
-            &mut rate_release_counts,
-            timestamp,
-            80, 80,
-            0, 0,
-            -80, -80,
-        );
+        let home_off_steady =
+            run_one_poll(&mut rate_release_counts, timestamp, 80, 80, 0, 0, -80, -80);
         assert_eq!(
             home_off_steady, 80,
             "EV OFF steady state: no further rate-reject, no release"
@@ -5424,17 +5604,34 @@ mod tests {
         prev_grid: i32,
         prev_solar: i32,
         prev_home: i32,
-    ) -> (PowerFieldState, PowerFieldState, PowerFieldState, PowerFieldState) {
+    ) -> (
+        PowerFieldState,
+        PowerFieldState,
+        PowerFieldState,
+        PowerFieldState,
+    ) {
         // In each PowerFieldState, rate_rejected is set to `true` when the
         // raw value differs from prev by enough to have tripped the rate
         // smoother (we model that here as "raw != prev" — the precise
         // threshold doesn't matter because the cross-check tests below
         // exercise the cross-check itself, not the rate-check trigger).
         (
-            PowerFieldState { raw: raw_battery, rate_rejected: raw_battery != prev_battery },
-            PowerFieldState { raw: raw_grid, rate_rejected: raw_grid != prev_grid },
-            PowerFieldState { raw: raw_solar, rate_rejected: raw_solar != prev_solar },
-            PowerFieldState { raw: raw_home, rate_rejected: raw_home != prev_home },
+            PowerFieldState {
+                raw: raw_battery,
+                rate_rejected: raw_battery != prev_battery,
+            },
+            PowerFieldState {
+                raw: raw_grid,
+                rate_rejected: raw_grid != prev_grid,
+            },
+            PowerFieldState {
+                raw: raw_solar,
+                rate_rejected: raw_solar != prev_solar,
+            },
+            PowerFieldState {
+                raw: raw_home,
+                rate_rejected: raw_home != prev_home,
+            },
         )
     }
 
@@ -5455,7 +5652,10 @@ mod tests {
 
         let restored = cross_validate_power_balance(&mut snap, &prev, battery, grid, solar, home);
 
-        assert!(restored, "cross-check must restore rate-rejected home_power when balance agrees");
+        assert!(
+            restored,
+            "cross-check must restore rate-rejected home_power when balance agrees"
+        );
         assert_eq!(snap.home_power, 8_649, "raw home value must be restored");
     }
 
@@ -5476,7 +5676,10 @@ mod tests {
 
         let restored = cross_validate_power_balance(&mut snap, &prev, battery, grid, solar, home);
 
-        assert!(restored, "cross-check must restore rate-rejected solar when balance agrees");
+        assert!(
+            restored,
+            "cross-check must restore rate-rejected solar when balance agrees"
+        );
         assert_eq!(snap.solar_power, 5_000, "raw solar value must be restored");
     }
 
@@ -5497,8 +5700,14 @@ mod tests {
 
         let restored = cross_validate_power_balance(&mut snap, &prev, battery, grid, solar, home);
 
-        assert!(restored, "cross-check must restore rate-rejected battery when balance agrees");
-        assert_eq!(snap.battery_power, 3_000, "raw battery value must be restored");
+        assert!(
+            restored,
+            "cross-check must restore rate-rejected battery when balance agrees"
+        );
+        assert_eq!(
+            snap.battery_power, 3_000,
+            "raw battery value must be restored"
+        );
     }
 
     #[test]
@@ -5519,7 +5728,10 @@ mod tests {
 
         let restored = cross_validate_power_balance(&mut snap, &prev, battery, grid, solar, home);
 
-        assert!(restored, "cross-check must restore rate-rejected grid when balance agrees");
+        assert!(
+            restored,
+            "cross-check must restore rate-rejected grid when balance agrees"
+        );
         assert_eq!(snap.grid_power, -5_000, "raw grid value must be restored");
     }
 
@@ -5533,10 +5745,8 @@ mod tests {
         // it balances: home = 2000 + 1000 - (-500) = 3500. Recompute.
         snap.home_power = 3_500;
         prev.home_power = 3_500;
-        let (battery, grid, solar, home) = rate_rejected_state(
-            1_000, -500, 2_000, 3_500,
-            1_000, -500, 2_000, 3_500,
-        );
+        let (battery, grid, solar, home) =
+            rate_rejected_state(1_000, -500, 2_000, 3_500, 1_000, -500, 2_000, 3_500);
 
         let restored = cross_validate_power_balance(&mut snap, &prev, battery, grid, solar, home);
         assert!(!restored, "balanced fields must not be touched");
@@ -5561,7 +5771,10 @@ mod tests {
         );
 
         let restored = cross_validate_power_balance(&mut snap, &prev, b, g, s, h);
-        assert!(!restored, "sub-threshold residual must not trigger restoration");
+        assert!(
+            !restored,
+            "sub-threshold residual must not trigger restoration"
+        );
         assert_eq!(snap.home_power, 1_000, "rate-rejected value must remain");
     }
 
@@ -5589,7 +5802,10 @@ mod tests {
         );
 
         let restored = cross_validate_power_balance(&mut snap, &prev, b, g, s, h);
-        assert!(!restored, "no single field resolves — cross-check must not guess");
+        assert!(
+            !restored,
+            "no single field resolves — cross-check must not guess"
+        );
         assert_eq!(snap.battery_power, 0, "rate-rejected value must remain");
         assert_eq!(snap.grid_power, 0, "rate-rejected value must remain");
     }
@@ -5608,7 +5824,10 @@ mod tests {
         );
 
         let restored = cross_validate_power_balance(&mut snap, &prev, b, g, s, h);
-        assert!(!restored, "no movement means no candidate — must leave alone");
+        assert!(
+            !restored,
+            "no movement means no candidate — must leave alone"
+        );
     }
 
     #[test]
@@ -5865,7 +6084,10 @@ mod tests {
             ..Default::default()
         };
         median.apply_to(&mut snap);
-        assert_eq!(snap.today_pv1_kwh, 5.5, "median must overwrite corrupted PV1");
+        assert_eq!(
+            snap.today_pv1_kwh, 5.5,
+            "median must overwrite corrupted PV1"
+        );
         assert_eq!(snap.today_pv2_kwh, 3.0);
     }
 }

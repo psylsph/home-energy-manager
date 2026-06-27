@@ -304,12 +304,8 @@ impl<'de> serde::Deserialize<'de> for TariffConfig {
                 off_peak_end,
             } => {
                 // Synthesize slots that reproduce the exact legacy behaviour.
-                let slots = legacy_to_slots(
-                    peak_rate,
-                    off_peak_rate,
-                    &off_peak_start,
-                    &off_peak_end,
-                );
+                let slots =
+                    legacy_to_slots(peak_rate, off_peak_rate, &off_peak_start, &off_peak_end);
                 tracing::info!(
                     peak_rate,
                     off_peak_rate,
@@ -347,7 +343,8 @@ fn legacy_to_slots(
         // Malformed times → can't determine the window, emit a flat day at peak.
         _ => {
             tracing::warn!(
-                off_peak_start, off_peak_end,
+                off_peak_start,
+                off_peak_end,
                 "Legacy tariff has unparseable off-peak times, using flat peak rate"
             );
             return vec![TariffSlot {
@@ -1230,7 +1227,9 @@ mod tests {
                 postcode: "SW1A 1AA".to_string(),
                 latitude: Some(51.501009),
                 longitude: Some(-0.141588),
-                last_backfill_completed: Some(chrono::NaiveDate::from_ymd_opt(2025, 1, 15).unwrap()),
+                last_backfill_completed: Some(
+                    chrono::NaiveDate::from_ymd_opt(2025, 1, 15).unwrap(),
+                ),
                 open_meteo_base_url: "https://api.open-meteo.com".to_string(),
             },
             disable_auto_discovery: true,
@@ -1485,7 +1484,10 @@ mod tests {
             "minimal_telemetry_mode": false
         }"#;
         let decoded: Settings = serde_json::from_str(legacy).unwrap();
-        assert_eq!(decoded.api_key, "", "api_key should default to empty string");
+        assert_eq!(
+            decoded.api_key, "",
+            "api_key should default to empty string"
+        );
         assert_eq!(
             decoded.api_port, 7338,
             "api_port should default to 7338 (not 0) for legacy settings files"
@@ -1946,8 +1948,8 @@ mod tests {
         assert_eq!(cfg.slots.len(), 3);
         assert_eq!(cfg.slots[0].start, "00:00");
         assert_eq!(cfg.slots[1].rate, 0.09); // off-peak
-        // Final slot ends at "23:59" (the latest representable clock time);
-        // its end is inclusive so it covers minute 1439.
+                                             // Final slot ends at "23:59" (the latest representable clock time);
+                                             // its end is inclusive so it covers minute 1439.
         assert_eq!(cfg.slots.last().unwrap().end, "23:59");
     }
 
@@ -2148,7 +2150,10 @@ mod tests {
     fn tariff_empty_slots_uses_default() {
         let json = r#"{ "slots": [] }"#;
         let cfg: TariffConfig = serde_json::from_str(json).unwrap();
-        assert!(!cfg.slots.is_empty(), "empty slots must fall back to default");
+        assert!(
+            !cfg.slots.is_empty(),
+            "empty slots must fall back to default"
+        );
         assert_eq!(cfg.slots[0].start, "00:00");
     }
 

@@ -601,7 +601,6 @@ function EnergyOrbitDiagramInner({
 }: Props) {
   const mobile = useIsMobile();
   const orbitMaskId = useId().replace(/:/g, '');
-  const showFlowSummary = useInverterStore((st) => st.showFlowSummary);
   const showFlowStatusWords = useInverterStore((st) => st.showFlowStatusWords);
   const noise = useInverterStore((st) => st.visualNoiseThreshold);
   // Reduced-motion users get static flow dots (no SMIL animation).
@@ -638,7 +637,7 @@ function EnergyOrbitDiagramInner({
   const viewBoxHeight = showFlowStatusWords ? VB : 480;
 
   return (
-    <div className="flex flex-col items-center gap-3">
+    <div className="flex flex-col items-center">
       <div className="flex justify-center w-full">
         <svg
           viewBox={`0 0 ${VB} ${viewBoxHeight}`}
@@ -716,26 +715,66 @@ function EnergyOrbitDiagramInner({
               />
             );
           })}
+
+          {/* Inverter mini-card — rendered inside the SVG, below the home
+              hub's kW value and below the battery/grid satellites along the
+              orbit ring, so the diagram card collapses to just the SVG
+              height. Each item (model · temperature · battery mode) sits
+              on its own line. */}
+          {inverter && (
+            <g
+              data-testid="inverter-mini-card"
+              aria-label={`Inverter: ${inverter.value}, ${inverter.unit}, ${batteryMode}`}
+            >
+              {/* Translucent pill background so the chip stays readable over
+                  spokes and flow dots. Sits inside the outer orbit ring,
+                  at the bottom of the SVG below the battery/grid satellites. */}
+              <rect
+                x={CX - 72}
+                y={390}
+                width={144}
+                height={48}
+                rx={10}
+                fill="var(--app-bg-surface, #161B22)"
+                fillOpacity={0.82}
+                stroke="rgba(255,255,255,0.08)"
+                strokeWidth={1}
+              />
+              <text
+                x={CX}
+                y={404}
+                textAnchor="middle"
+                fill="var(--app-text-primary, #F0F6FC)"
+                fontSize={13}
+                fontWeight={600}
+                fontFamily="var(--font-sans, sans-serif)"
+              >
+                {inverter.value}
+              </text>
+              <text
+                x={CX}
+                y={420}
+                textAnchor="middle"
+                fill="var(--app-text-secondary, #8B949E)"
+                fontSize={11}
+                fontFamily="var(--font-sans, sans-serif)"
+              >
+                {inverter.unit}
+              </text>
+              <text
+                x={CX}
+                y={434}
+                textAnchor="middle"
+                fill="var(--app-text-secondary, #8B949E)"
+                fontSize={11}
+                fontFamily="var(--font-sans, sans-serif)"
+              >
+                {batteryMode}
+              </text>
+            </g>
+          )}
         </svg>
       </div>
-
-      {/* Plain-English summary */}
-      {showFlowSummary && (
-        <p className="text-text-secondary text-sm font-sans text-center max-w-md px-4">
-          {vm.summaryText}
-        </p>
-      )}
-
-      {/* Inverter mini-card (demoted from hub to a supporting line) */}
-      {inverter && (
-        <p className="text-text-secondary text-sm font-sans text-center -mt-1">
-          <span className="text-text-primary font-medium">{inverter.value}</span>
-          {' · '}
-          {inverter.unit}
-          {' · '}
-          {batteryMode}
-        </p>
-      )}
     </div>
   );
 }
