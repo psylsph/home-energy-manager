@@ -355,13 +355,17 @@ describe('buildEnergyFlows — Gateway null telemetry fields', () => {
     expect(() => buildEnergyFlows(allNull)).not.toThrow();
   });
 
-  it('renders the solar node voltage when pv1_voltage is a real number', () => {
-    // A live PV voltage takes priority over current (matches the legacy diagram).
-    const vm = buildEnergyFlows(snap({ pv1_voltage: 350.4, pv2_current: 0 }));
-    expect(vm.nodes.find((n) => n.id === 'solar')!.unit).toBe('350.4V');
+  it('renders the solar node voltage and current when pv1_voltage is live (legacy V/A format)', () => {
+    // A live PV voltage takes priority and is shown alongside the PV current
+    // (matches the legacy inverter-centred diagram: "350.4V/6.5A").
+    const vm = buildEnergyFlows(
+      snap({ pv1_voltage: 350.4, pv1_current: 5.2, pv2_current: 1.3 }),
+    );
+    expect(vm.nodes.find((n) => n.id === 'solar')!.unit).toBe('350.4V/6.5A');
   });
 
-  it('renders the solar node current when pv1_voltage is 0 but current is live', () => {
+  it('renders the solar node current only when pv1_voltage is 0', () => {
+    // No voltage telemetry (gateway-style) — fall back to current alone.
     const vm = buildEnergyFlows(snap({ pv1_voltage: 0, pv1_current: 5.2, pv2_current: 1.3 }));
     expect(vm.nodes.find((n) => n.id === 'solar')!.unit).toBe('6.5A');
   });
