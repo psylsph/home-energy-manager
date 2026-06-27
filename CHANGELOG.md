@@ -4,7 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Added
+## [0.43.0] - 2026-06-27
+
+### Fixed
+
+- **History charts and daily-total tiles now self-heal corrupted counter values.** The dongle occasionally dips or zeroes the "today" solar / battery / grid energy counters when it isn't a genuine midnight reset, which left visible notches and gaps in the history charts. Those spurious dips are now detected and repaired on the fly, and a stuck solar total is rebuilt from the live power readings, so the charts and the day-total tiles read smoothly again.
+
+- **PV2 no longer shows phantom power when only one string is wired.** On single-string installs the second MPPT register can return stray non-zero values, which showed up as spurious PV2 wattage on the Solar tab and in history. The decoder now zeroes PV2 power when there's no real voltage or current on that string.
+
+### Changed
+
+- **The plain-English overview sentence under the energy flow diagram has been removed**, along with its Settings toggle. The radial diagram and the tiles already convey the same information, so the extra caption was redundant.
 
 ## [0.42.0] - 2026-06-27
 
