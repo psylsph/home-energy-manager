@@ -507,11 +507,10 @@ function SatelliteNode({ node, x, y, r, flows, mobile, showStatusWords }: NodePr
   const isBattery = node.id === 'battery';
   const isEv = node.id === 'ev';
   // Solar shows its PV voltage/current under the kW value (legacy
-  // inverter-centred diagram behaviour). Other nodes' `unit` strings are
-  // already rendered elsewhere (grid → status word, battery SOC inside
-  // the glyph, inverter → mini-card below the diagram), so we render
-  // the sub-label only for solar to avoid duplicating information.
-  const showSubLabel = node.id === 'solar' && node.unit.length > 0;
+  // inverter-centred diagram behaviour). Grid now mirrors that pattern with
+  // voltage/frequency under the kW value; the status word still comes from
+  // the flow direction below it.
+  const showSubLabel = (node.id === 'solar' || node.id === 'grid') && node.unit.length > 0;
 
   return (
     <g aria-label={`${node.label}: ${value} ${status}`}>

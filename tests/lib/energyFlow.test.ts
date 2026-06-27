@@ -375,6 +375,45 @@ describe('buildEnergyFlows — Gateway null telemetry fields', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Grid voltage / frequency sub-label
+// ---------------------------------------------------------------------------
+
+describe('buildEnergyFlows — grid voltage/frequency label', () => {
+  it('renders grid volts and hertz for single-phase snapshots', () => {
+    const vm = buildEnergyFlows(snap({
+      device_type_display: 'Gen 3 Hybrid',
+      device_type_code: '2201',
+      grid_voltage: 239.6,
+      grid_frequency: 49.98,
+    }));
+
+    expect(vm.nodes.find((n) => n.id === 'grid')!.unit).toBe('239.6V/49.98Hz');
+  });
+
+  it('renders em-dashes for Gateway grid volts/hertz when telemetry is unavailable', () => {
+    const vm = buildEnergyFlows(snap({
+      device_type_display: 'Gateway',
+      device_type_code: '7001',
+      grid_voltage: null as unknown as number,
+      grid_frequency: Number.NaN,
+    }));
+
+    expect(vm.nodes.find((n) => n.id === 'grid')!.unit).toBe('—/—');
+  });
+
+  it('renders grid volts and hertz for three-phase snapshots', () => {
+    const vm = buildEnergyFlows(snap({
+      device_type_display: 'Three Phase Hybrid',
+      device_type_code: '3001',
+      grid_voltage: 231.2,
+      grid_frequency: 50.01,
+    }));
+
+    expect(vm.nodes.find((n) => n.id === 'grid')!.unit).toBe('231.2V/50.01Hz');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Battery fill fraction (AA-cell gauge)
 // ---------------------------------------------------------------------------
 
