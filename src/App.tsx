@@ -118,9 +118,9 @@ const NAV_ITEMS = [
   { to: '/solar', label: 'Solar', icon: SolarIcon, accent: FLOW_COLORS.solar },
   { to: '/inverter', label: 'Inverter', icon: InverterIcon, accent: FLOW_COLORS.inverter },
   { to: '/meters', label: 'Meters', icon: MeterIcon, accent: FLOW_COLORS.grid },
-  { to: '/history', label: 'History', icon: HistoryIcon },
-  { to: '/control', label: 'Control', icon: ControlIcon },
-  { to: '/settings', label: 'Settings', icon: SettingsIcon },
+  { to: '/history', label: 'History', icon: HistoryIcon, accent: undefined },
+  { to: '/control', label: 'Control', icon: ControlIcon, accent: undefined },
+  { to: '/settings', label: 'Settings', icon: SettingsIcon, accent: undefined },
 ] as const;
 
 function navAccentStyle(accent?: string): CSSProperties | undefined {
