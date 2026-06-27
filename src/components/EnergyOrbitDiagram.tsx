@@ -318,9 +318,10 @@ function directPath(from: FlowNodeId, to: FlowNodeId, posOf: (id: FlowNodeId) =>
 
 function flowPath(flow: EnergyFlow, flows: EnergyFlow[], posOf: (id: FlowNodeId) => { x: number; y: number }): FlowPath {
   const { from, to } = visualEndpoints(flow, flows);
-  return isOuterRoute(from, to)
+  const routed = isOuterRoute(from, to)
     ? outerArcPath(from, to, posOf)
     : directPath(from, to, posOf);
+  return { ...routed, color: flow.color ?? routed.color };
 }
 
 interface DotProps {
@@ -410,7 +411,16 @@ function BatterySocRing({ node, x, y, r }: { node: FlowNode; x: number; y: numbe
   const filled = circumference * (pct / 100);
   return (
     <g data-testid="battery-soc-ring">
-      <circle cx={x} cy={y} r={ringR} fill="none" stroke="rgba(251, 191, 36, 0.20)" strokeWidth={6} />
+      <circle
+        data-testid="battery-soc-ring-track"
+        cx={x}
+        cy={y}
+        r={ringR}
+        fill="none"
+        stroke={node.color}
+        strokeOpacity={0.20}
+        strokeWidth={6}
+      />
       <circle
         cx={x}
         cy={y}
@@ -436,12 +446,14 @@ function BatteryGlyph({ node, x, y }: { node: FlowNode; x: number; y: number }) 
   return (
     <g data-testid="battery-glyph">
       <rect
+        data-testid="battery-glyph-body"
         x={bodyX}
         y={bodyY}
         width={bodyW}
         height={bodyH}
         rx={7}
-        fill="rgba(13, 17, 23, 0.42)"
+        fill={node.color}
+        fillOpacity={0.16}
         stroke={node.color}
         strokeWidth={2.5}
       />
@@ -455,13 +467,14 @@ function BatteryGlyph({ node, x, y }: { node: FlowNode; x: number; y: number }) 
         opacity={0.85}
       />
       <rect
+        data-testid="battery-glyph-fill"
         x={bodyX + 4}
         y={bodyY + 4}
         width={fillW}
         height={bodyH - 8}
         rx={4}
         fill={node.color}
-        opacity={0.35}
+        opacity={0.55}
       />
     </g>
   );
@@ -504,7 +517,16 @@ function SatelliteNode({ node, x, y, r, flows, mobile, showStatusWords }: NodePr
     <g aria-label={`${node.label}: ${value} ${status}`}>
       {node.active && <circle cx={x} cy={y} r={r + 10} fill={node.color} opacity={0.10} />}
       {isBattery && <BatterySocRing node={node} x={x} y={y} r={r} />}
-      <circle data-node-body={node.id} cx={x} cy={y} r={r} fill={nodeFill(node.id)} stroke={node.color} strokeWidth={2.5} />
+      <circle
+        data-node-body={node.id}
+        cx={x}
+        cy={y}
+        r={r}
+        fill={isBattery ? node.color : nodeFill(node.id)}
+        fillOpacity={isBattery ? 0.16 : undefined}
+        stroke={node.color}
+        strokeWidth={2.5}
+      />
 
       {isBattery ? (
         <>

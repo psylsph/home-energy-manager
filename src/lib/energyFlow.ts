@@ -208,6 +208,7 @@ export function buildEnergyFlows(
     s.discharge_slots,
     now,
   );
+  const batteryColor = socColor(s.soc);
 
   // --- Flows (watts always non-negative; direction via from/to) ---
   //
@@ -251,6 +252,7 @@ export function buildEnergyFlows(
     // Battery → home: feed the house first (issue #155).
     push('discharge', 'battery', 'home', absBattery, 'discharge',
       `${formatPower(absBattery)} from battery`);
+    flows[flows.length - 1].color = batteryColor;
     // Battery → grid: any excess (battery outflow exceeds the house load)
     // is the timed / forced discharge export. Drawn directly battery→grid
     // (yellow, outer orbit) so the dot ends at the grid instead of the house.
@@ -258,6 +260,7 @@ export function buildEnergyFlows(
       push('discharge_to_grid', 'battery', 'grid',
         absBattery - s.home_power, 'export',
         `${formatPower(absBattery - s.home_power)} exporting`);
+      flows[flows.length - 1].color = batteryColor;
     }
   }
   // No self-flow for home: it is the hub, not a spoke. Its consumption is
@@ -304,7 +307,7 @@ export function buildEnergyFlows(
       label: 'Battery',
       value: `${isDischarging ? '-' : isCharging ? '+' : ''}${formatVisualPower(absBattery, noise)}`,
       unit: `${formatPercent(s.soc)} · ${modeLabel}`,
-      color: socColor(s.soc),
+      color: batteryColor,
       ringPercent: s.soc,
       active: isCharging || isDischarging,
     },

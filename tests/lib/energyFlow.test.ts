@@ -5,6 +5,7 @@ import {
   batteryModeDisplayLabel,
   batteryFillFraction,
   DEFAULT_NOISE_THRESHOLD_W,
+  socColor,
 } from '../../src/lib/energyFlow';
 import type { InverterSnapshot, ScheduleSlot } from '../../src/lib/types';
 
@@ -163,6 +164,7 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
     expect(df!.to).toBe('home');
     expect(df!.watts).toBe(1400);
     expect(df!.direction).toBe('discharge');
+    expect(df!.color).toBe(socColor(dis.nodes.find((n) => n.id === 'battery')!.ringPercent!));
     expect(dis.nodes.find((n) => n.id === 'battery')!.value).toBe('-1.4kW');
   });
 
@@ -178,6 +180,7 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
     expect(excess!.to).toBe('grid');
     expect(excess!.watts).toBe(1500);
     expect(excess!.direction).toBe('export');
+    expect(excess!.color).toBe(socColor(50));
   });
 
   it('does not emit a battery→grid flow when the house absorbs all of the discharge (issue #155)', () => {
