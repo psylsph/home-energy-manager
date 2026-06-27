@@ -1,4 +1,7 @@
 export function formatPower(watts: number): string {
+  if (!Number.isFinite(watts)) {
+    return '—';
+  }
   const abs = Math.abs(watts);
   if (abs >= 1000) {
     return `${(watts / 1000).toFixed(1)}kW`;
@@ -7,7 +10,35 @@ export function formatPower(watts: number): string {
 }
 
 export function formatEnergy(kwh: number): string {
+  if (!Number.isFinite(kwh)) {
+    return '—';
+  }
   return `${kwh.toFixed(1)}kWh`;
+}
+
+/**
+ * Absolute value that preserves non-finite / null values as NaN.
+ *
+ * Use this instead of `Math.abs(v)` when the result is fed into a format
+ * function (formatPower, formatCurrent, …). The format helpers guard with
+ * `Number.isFinite` to render '—' for NaN, but `Math.abs(null)` coerces
+ * `null` to `0` *before* that guard runs — so a null field (the Gateway
+ * sets battery_current / battery_voltage to f32::NAN, which serde_json
+ * serialises as null) ends up rendered as '0.0A' instead of '—'.
+ *
+ * `finiteAbs` converts null / NaN / Infinity to NaN so the format guard
+ * still fires and renders the em-dash. Real numbers get the plain absolute
+ * value, matching the old `Math.abs` behaviour.
+ *
+ * @example
+ *   finiteAbs(7.8)   // 7.8
+ *   finiteAbs(-7.8)  // 7.8
+ *   finiteAbs(null)  // NaN  → formatCurrent renders '—'
+ *   finiteAbs(NaN)   // NaN
+ */
+export function finiteAbs(v: number | null | undefined): number {
+  if (v == null || !Number.isFinite(v)) return NaN;
+  return Math.abs(v);
 }
 
 export function formatPercent(pct: number): string {

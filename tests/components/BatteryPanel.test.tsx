@@ -37,3 +37,36 @@ describe('<BatteryPanel/> responsive gauge orientation', () => {
     expect(verticalGauge?.parentElement?.className).toContain('hidden sm:block');
   });
 });
+
+describe('<BatteryPanel/> Gateway null telemetry fields', () => {
+  // The Gateway (DTC 0x70xx) sets battery_voltage / battery_current to
+  // f32::NAN; serde_json serialises NaN as null. Both must render '—',
+  // but battery_current used to show '0.0A' because BatteryPanel wrapped
+  // it in Math.abs() (which coerces null → 0) before formatCurrent's
+  // finite-guard could fire.
+  it('renders the battery current as an em-dash when it is null (Gateway)', () => {
+    const gatewaySnapshot = {
+      ...snapshot(),
+      battery_voltage: null as unknown as number,
+      battery_current: null as unknown as number,
+    } as InverterSnapshot;
+    const { container } = render(<BatteryPanel snapshot={gatewaySnapshot} />);
+
+    // The Voltage and Current rows sit side-by-side in the grid. Find them
+    // by their preceding label text and confirm both show '—'.
+    const rows = Array.from(container.querySelectorAll('span.text-text-secondary'));
+    const voltageRow = rows.find((r) => r.textContent === 'Voltage');
+    const currentRow = rows.find((r) => r.textContent === 'Current');
+    expect(voltageRow?.nextElementSibling?.textContent).toBe('—');
+    expect(currentRow?.nextElementSibling?.textContent).toBe('—');
+  });
+
+  it('renders the absolute battery current for a normal snapshot', () => {
+    // Sanity check: the finiteAbs change must not break the regular path.
+    // battery_current: -7.8 (charging) → displayed as 7.8A (absolute).
+    const { container } = render(<BatteryPanel snapshot={snapshot()} />);
+    const rows = Array.from(container.querySelectorAll('span.text-text-secondary'));
+    const currentRow = rows.find((r) => r.textContent === 'Current');
+    expect(currentRow?.nextElementSibling?.textContent).toBe('7.8A');
+  });
+});

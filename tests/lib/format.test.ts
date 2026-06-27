@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { formatOperatingHours, formatBatteryMode, formatVisualPower, formatTimestamp } from '../../src/lib/format';
+import { formatOperatingHours, formatBatteryMode, formatVisualPower, formatTimestamp, finiteAbs, formatCurrent, formatPower } from '../../src/lib/format';
 
 /**
  * Tests for `formatOperatingHours` — the helper that turns a raw
@@ -299,5 +299,65 @@ describe('formatTimestamp', () => {
     // 1970-01-01T00:00:00Z — still a valid time
     const result = formatTimestamp(0);
     expect(result).toMatch(/\d{1,2}:\d{2}:\d{2}/);
+  });
+});
+
+/**
+ * Tests for `finiteAbs` — the absolute-value helper that preserves NaN
+ * (instead of coercing null → 0 like `Math.abs`).
+ *
+ * This exists because the Gateway (DTC 0x70xx) doesn't expose battery
+ * current / voltage; the backend sets f32::NAN, serde_json serialises NaN as
+ * null, and `Math.abs(null)` returns 0 *before* the format helpers' finite
+ * guard can fire — so the field rendered as '0.0A' instead of '—'. `finiteAbs`
+ * keeps the null/NaN signal intact so formatCurrent/formatPower render '—'.
+ */
+describe('finiteAbs', () => {
+  describe('real numbers', () => {
+    it('returns the absolute value of a positive number', () => {
+      expect(finiteAbs(7.8)).toBe(7.8);
+    });
+
+    it('returns the absolute value of a negative number', () => {
+      expect(finiteAbs(-7.8)).toBe(7.8);
+    });
+
+    it('returns 0 for 0', () => {
+      expect(finiteAbs(0)).toBe(0);
+    });
+  });
+
+  describe('non-finite / nullish (the Gateway case)', () => {
+    it('returns NaN for null (instead of 0 like Math.abs)', () => {
+      // This is the whole point of the helper. Math.abs(null) === 0 would
+      // make formatCurrent render '0.0A'; finiteAbs preserves the signal.
+      expect(Number.isNaN(finiteAbs(null))).toBe(true);
+      expect(Math.abs(null)).toBe(0); // sanity-check the trap we're avoiding
+    });
+
+    it('returns NaN for undefined', () => {
+      expect(Number.isNaN(finiteAbs(undefined))).toBe(true);
+    });
+
+    it('returns NaN for NaN', () => {
+      expect(Number.isNaN(finiteAbs(NaN))).toBe(true);
+    });
+
+    it('returns NaN for Infinity', () => {
+      expect(Number.isNaN(finiteAbs(Infinity))).toBe(true);
+      expect(Number.isNaN(finiteAbs(-Infinity))).toBe(true);
+    });
+  });
+
+  describe('integration with format helpers', () => {
+    it('formatCurrent(finiteAbs(null)) renders em-dash, not 0.0A', () => {
+      // The exact regression: a Gateway battery_current that arrives as null.
+      expect(formatCurrent(finiteAbs(null))).toBe('—');
+    });
+
+    it('formatPower(finiteAbs(null)) renders em-dash, not 0W', () => {
+      // Same trap for battery_power if it ever arrives null.
+      expect(formatPower(finiteAbs(null))).toBe('—');
+    });
   });
 });

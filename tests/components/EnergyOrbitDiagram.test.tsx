@@ -109,6 +109,29 @@ describe('EnergyOrbitDiagram', () => {
     expect(inverterLine?.textContent).not.toContain('Inverter');
   });
 
+  it('does not crash on a Gateway snapshot with null telemetry fields', () => {
+    // The Gateway (DTC 0x70xx) doesn't expose inverter/battery temperature or
+    // PV voltage; the backend sends f32::NAN which serde_json serialises as
+    // null. The old diagram used formatTemp (finite-guarded); the radial
+    // rewrite called .toFixed directly and crashed on launch for Gateway
+    // users ("Cannot read properties of null (reading 'toFixed')").
+    const gatewaySnapshot = makeSnapshot({
+      inverter_temperature: null as unknown as number,
+      battery_temperature: null as unknown as number,
+      battery_voltage: null as unknown as number,
+      battery_current: null as unknown as number,
+      pv1_voltage: null as unknown as number,
+      pv2_voltage: null as unknown as number,
+      device_type_display: 'Gateway',
+    });
+    const { container } = render(<EnergyOrbitDiagram snapshot={gatewaySnapshot} />);
+    // The inverter mini-card shows an em-dash instead of the temperature, and
+    // the SVG renders without throwing.
+    const inverterLine = container.querySelector('p.text-sm.text-center');
+    expect(inverterLine?.textContent).toContain('—');
+    expect(container.querySelector('svg')).not.toBeNull();
+  });
+
   it('uses a shorter SVG viewBox when node status words are hidden so the inverter line sits higher', () => {
     const compact = render(<EnergyOrbitDiagram snapshot={makeSnapshot()} />);
     expect(compact.container.querySelector('svg')?.getAttribute('viewBox')).toBe('0 0 520 480');
@@ -177,7 +200,7 @@ describe('EnergyOrbitDiagram', () => {
   it('renders the reference-style outer orbit ring and battery SOC ring/glyph', () => {
     useInverterStore.setState({ showFlowStatusWords: true });
     const { container } = render(
-      <EnergyOrbitDiagram snapshot={makeSnapshot({ soc: 31, battery_power: 1400, battery_state: 'discharging' })} />,
+      <EnergyOrbitDiagram snapshot={makeSnapshot({ soc: 31, battery_power: 1400, battery_state: 'discharging', home_power: 800 })} />,
     );
     const orbitRing = container.querySelector('[data-testid="energy-orbit-ring"]');
     expect(orbitRing).not.toBeNull();
@@ -207,34 +230,92 @@ describe('EnergyOrbitDiagram', () => {
     expect(container.querySelector('[data-flow-id="solar"]')?.getAttribute('data-route')).toBe('direct');
   });
 
-  it('routes battery export to grid around the outer orbit', () => {
+  it('draws a battery→grid dot when discharge exceeds the house load (issue #155)', () => {
+    // Battery 2 kW discharging, house 500 W. The battery outflow exceeds the
+    // house load, so a battery→grid dot is drawn for the excess (1.5 kW),
+    // matching the GivEnergy app.
     const { container } = render(
       <EnergyOrbitDiagram
         snapshot={makeSnapshot({
-          home_power: 300,
-          battery_power: 1200,
+          home_power: 500,
+          battery_power: 2000,
           battery_state: 'discharging',
-          grid_power: 900,
         })}
       />,
     );
-    expect(container.querySelector('[data-flow-id="export"]')?.getAttribute('data-route')).toBe('outer');
-    expect(container.querySelector('[data-flow-id="discharge"]')?.getAttribute('data-route')).toBe('direct');
+    const discharge = container.querySelector('[data-flow-id="discharge"]');
+    const toGrid = container.querySelector('[data-flow-id="discharge_to_grid"]');
+    expect(discharge).not.toBeNull();
+    expect(discharge?.getAttribute('data-route')).toBe('direct');
+    expect(toGrid).not.toBeNull();
+    expect(toGrid?.getAttribute('data-route')).toBe('outer');
   });
 
-  it('moves higher-energy balls faster than lower-energy balls', () => {
-    const slow = render(<EnergyOrbitDiagram snapshot={makeSnapshot({ solar_power: 500, home_power: 500 })} />);
-    const slowDuration = parseFloat(
-      slow.container.querySelector('[data-flow-id="solar"]')?.getAttribute('data-duration') ?? '0',
+  it('does not draw a battery→grid dot when discharge is fully consumed by the house (issue #155)', () => {
+    // Battery 500 W discharging, house 800 W. Battery outflow is smaller than
+    // the house load — no export, no battery→grid dot.
+    const { container } = render(
+      <EnergyOrbitDiagram
+        snapshot={makeSnapshot({
+          home_power: 800,
+          battery_power: 500,
+          battery_state: 'discharging',
+        })}
+      />,
     );
+    expect(container.querySelector('[data-flow-id="discharge"]')).not.toBeNull();
+    expect(container.querySelector('[data-flow-id="discharge_to_grid"]')).toBeNull();
+  });
 
-    cleanup();
-    const fast = render(<EnergyOrbitDiagram snapshot={makeSnapshot({ solar_power: 5000, home_power: 500 })} />);
-    const fastDuration = parseFloat(
-      fast.container.querySelector('[data-flow-id="solar"]')?.getAttribute('data-duration') ?? '0',
+  it('keys dot speed on path length so long arcs do not race', () => {
+    // Battery 2 kW, house 200 W: a short battery→home spoke AND a long
+    // battery→grid outer arc are both drawn. The arc length (~¼ orbit,
+    // ~317 px) is ~2.3× the spoke length (~140 px), so the arc must take
+    // a proportionally longer duration — not the same speed as the spoke.
+    const { container } = render(
+      <EnergyOrbitDiagram
+        snapshot={makeSnapshot({
+          home_power: 200,
+          battery_power: 2000,
+          battery_state: 'discharging',
+        })}
+      />,
     );
+    const spokeDur = parseFloat(
+      container.querySelector('[data-flow-id="discharge"]')?.getAttribute('data-duration') ?? '0',
+    );
+    const arcDur = parseFloat(
+      container.querySelector('[data-flow-id="discharge_to_grid"]')?.getAttribute('data-duration') ?? '0',
+    );
+    expect(arcDur).toBeGreaterThan(spokeDur);
+    expect(spokeDur).toBeGreaterThanOrEqual(1.0);
+    expect(spokeDur).toBeLessThanOrEqual(8.0);
+    expect(arcDur).toBeGreaterThanOrEqual(1.0);
+    expect(arcDur).toBeLessThanOrEqual(8.0);
+  });
 
-    expect(fastDuration).toBeLessThan(slowDuration);
+  it('moves higher-energy balls faster than lower-energy balls in the same render', () => {
+    // Solar 5 kW + battery charging at 1 kW. The solar flow is the biggest
+    // (strength=1) so it should traverse faster than the 1 kW charge flow
+    // (strength=0.2) — same intent as the original test, but comparing
+    // flows in a single render so the result reflects relative strength.
+    const { container } = render(
+      <EnergyOrbitDiagram
+        snapshot={makeSnapshot({
+          solar_power: 5000,
+          home_power: 4000,
+          battery_power: -1000,
+          battery_state: 'charging',
+        })}
+      />,
+    );
+    const solarDur = parseFloat(
+      container.querySelector('[data-flow-id="solar"]')?.getAttribute('data-duration') ?? '0',
+    );
+    const chargeDur = parseFloat(
+      container.querySelector('[data-flow-id="charge"]')?.getAttribute('data-duration') ?? '0',
+    );
+    expect(solarDur).toBeLessThan(chargeDur);
   });
 
   describe('EV charger node', () => {

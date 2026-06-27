@@ -1,5 +1,5 @@
 import { useInverterStore } from '../store/useInverterStore';
-import { formatPower, formatVoltage, formatCurrent, formatTemp, formatEnergy, formatPercent, formatFrequency, formatOperatingHours, formatBatteryMode } from '../lib/format';
+import { formatPower, formatVoltage, formatCurrent, formatTemp, formatEnergy, formatPercent, formatFrequency, formatOperatingHours, formatBatteryMode, finiteAbs } from '../lib/format';
 import ColdBatteryWarning from '../components/ColdBatteryWarning';
 import { deviceSupportsExportLimit } from '../lib/deviceCapabilities';
 
@@ -253,7 +253,7 @@ export default function InverterPage() {
           <span className="text-text-secondary">Voltage</span>
           <span className="text-text-primary font-mono text-right">{formatVoltage(s.battery_voltage)}</span>
           <span className="text-text-secondary">Current</span>
-          <span className="text-text-primary font-mono text-right">{formatCurrent(Math.abs(s.battery_current))}</span>
+          <span className="text-text-primary font-mono text-right">{formatCurrent(finiteAbs(s.battery_current))}</span>
           <span className="text-text-secondary">Power</span>
           <span className="text-text-primary font-mono text-right">{formatPower(s.battery_power)}</span>
           <span className="text-text-secondary">Temperature</span>
