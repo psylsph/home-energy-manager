@@ -88,63 +88,30 @@ function toggleFor(label: string): HTMLElement {
   return toggle as HTMLElement;
 }
 
-describe('<SettingsPage/> — Energy Flow diagram word preferences', () => {
+describe('<SettingsPage/> — Energy Flow diagram node status words', () => {
   beforeEach(() => {
     silenceConsoleError();
-    localStorage.removeItem('showFlowSummary');
     localStorage.removeItem('showFlowStatusWords');
-    useInverterStore.setState({ showFlowSummary: false, showFlowStatusWords: false });
+    useInverterStore.setState({ showFlowStatusWords: false });
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
     cleanup();
-    localStorage.removeItem('showFlowSummary');
     localStorage.removeItem('showFlowStatusWords');
-    useInverterStore.setState({ showFlowSummary: false, showFlowStatusWords: false });
+    useInverterStore.setState({ showFlowStatusWords: false });
   });
 
-  it('renders the overview toggle inside the Energy Flow Diagram sub-section', async () => {
+  it('defaults node status words to off', async () => {
+    // The "Show Overview Sentence" toggle was removed (commit 22fe1b8) along
+    // with its store flag's consumers; only the node-status-words toggle
+    // remains in this sub-section, so that's all we default-check here.
     render(<SettingsPage />);
 
-    const label = await screen.findByText('Show Overview Sentence');
-    const section = screen
-      .getByRole('heading', { name: 'Energy Flow Diagram', level: 3 })
-      .closest('div');
-
-    expect(section).not.toBeNull();
-    expect(section!.contains(label)).toBe(true);
-  });
-
-  it('defaults the overview sentence and node status words to off', async () => {
-    render(<SettingsPage />);
-
-    await screen.findByText('Show Overview Sentence');
     await screen.findByText('Show Node Status Words');
 
-    expect(useInverterStore.getState().showFlowSummary).toBe(false);
     expect(useInverterStore.getState().showFlowStatusWords).toBe(false);
-    expect(localStorage.getItem('showFlowSummary')).toBeNull();
     expect(localStorage.getItem('showFlowStatusWords')).toBeNull();
-  });
-
-  it('clicking the overview toggle shows/hides the overview, persisting each choice', async () => {
-    render(<SettingsPage />);
-    await screen.findByText('Show Overview Sentence');
-
-    fireEvent.click(toggleFor('Show Overview Sentence'));
-
-    await waitFor(() => {
-      expect(useInverterStore.getState().showFlowSummary).toBe(true);
-      expect(localStorage.getItem('showFlowSummary')).toBe('true');
-    });
-
-    fireEvent.click(toggleFor('Show Overview Sentence'));
-
-    await waitFor(() => {
-      expect(useInverterStore.getState().showFlowSummary).toBe(false);
-      expect(localStorage.getItem('showFlowSummary')).toBe('false');
-    });
   });
 
   it('clicking the node-status toggle shows/hides node words, persisting each choice', async () => {

@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.43.1] - 2026-06-27
+
+### Fixed
+
+- **Timed Export is now its own battery mode instead of being folded into "Timed Discharge".** The app used to show a single "Discharge" schedule and labelled an inverter that was actually exporting to the grid as "Timed Discharge", disagreeing with GivEnergy Cloud. "Timed Discharge" (battery covers the home) and "Timed Export" (battery sends surplus to the grid) are now separate, selectable modes. (#156)
+
 ## [0.43.0] - 2026-06-27
 
 ### Fixed

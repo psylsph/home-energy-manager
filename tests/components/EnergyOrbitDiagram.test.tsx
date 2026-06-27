@@ -57,8 +57,9 @@ function makeSnapshot(overrides: Partial<InverterSnapshot> = {}): InverterSnapsh
 }
 
 function resetStore(threshold = 20) {
+  // `showFlowSummary` (the plain-English overview sentence) was removed in
+  // commit 22fe1b8 — the diagram no longer reads it — so it's not reset here.
   useInverterStore.setState({
-    showFlowSummary: false,
     showFlowStatusWords: false,
     visualNoiseThreshold: threshold,
   });
@@ -71,32 +72,14 @@ beforeEach(() => {
 });
 
 describe('EnergyOrbitDiagram', () => {
-  it('hides the plain-English overview sentence by default', () => {
+  it('exposes a plain-English flow description via the SVG accessible label', () => {
+    // The visible overview sentence was removed (commit 22fe1b8), but the
+    // diagram still describes the live flow for screen readers through the
+    // SVG's role="img" aria-label — now the only place the human-readable
+    // summary lives, so pin it.
     const { container } = render(
       <EnergyOrbitDiagram snapshot={makeSnapshot({ solar_power: 3000, home_power: 500 })} />,
     );
-    expect(container.querySelector('p.max-w-md')).toBeNull();
-    // The accessible image label still describes the flow for screen readers.
-    expect(container.querySelector('svg')?.getAttribute('aria-label')).toContain(
-      'Solar is powering the home',
-    );
-  });
-
-  it('renders the plain-English overview sentence when the preference is on', () => {
-    useInverterStore.setState({ showFlowSummary: true });
-    const { container } = render(
-      <EnergyOrbitDiagram snapshot={makeSnapshot({ solar_power: 3000, home_power: 500 })} />,
-    );
-    const summary = container.querySelector('p.max-w-md');
-    expect(summary?.textContent).toContain('Solar is powering the home');
-  });
-
-  it('hides the plain-English overview sentence when the preference is off', () => {
-    const { container } = render(
-      <EnergyOrbitDiagram snapshot={makeSnapshot({ solar_power: 3000, home_power: 500 })} />,
-    );
-    expect(container.querySelector('p.max-w-md')).toBeNull();
-    // The accessible image label still describes the flow for screen readers.
     expect(container.querySelector('svg')?.getAttribute('aria-label')).toContain(
       'Solar is powering the home',
     );
@@ -104,10 +87,13 @@ describe('EnergyOrbitDiagram', () => {
 
   it('renders inverter model, temperature, and battery mode as a supporting mini-card', () => {
     const { container } = render(<EnergyOrbitDiagram snapshot={makeSnapshot()} />);
-    const inverterLine = container.querySelector('p.text-sm.text-center');
-    expect(inverterLine?.className).toContain('-mt-1');
-    expect(inverterLine?.textContent).toBe('Gen 3 Hybrid · 30.0°C · Eco');
-    expect(inverterLine?.textContent).not.toContain('Inverter');
+    // The mini-card moved inside the SVG (commit 22fe1b8) as a translucent
+    // pill with three text rows: model, inverter temperature, battery mode.
+    const card = container.querySelector('[data-testid="inverter-mini-card"]');
+    expect(card).not.toBeNull();
+    expect(card?.getAttribute('aria-label')).toBe('Inverter: Gen 3 Hybrid, 30.0°C, Eco');
+    const rows = Array.from(card!.querySelectorAll('text')).map((t) => t.textContent ?? '');
+    expect(rows).toEqual(['Gen 3 Hybrid', '30.0°C', 'Eco']);
   });
 
   it('does not crash on a Gateway snapshot with null telemetry fields', () => {
@@ -126,10 +112,12 @@ describe('EnergyOrbitDiagram', () => {
       device_type_display: 'Gateway',
     });
     const { container } = render(<EnergyOrbitDiagram snapshot={gatewaySnapshot} />);
-    // The inverter mini-card shows an em-dash instead of the temperature, and
-    // the SVG renders without throwing.
-    const inverterLine = container.querySelector('p.text-sm.text-center');
-    expect(inverterLine?.textContent).toContain('—');
+    // The mini-card shows an em-dash instead of the temperature (formatTemp is
+    // NaN/null-safe), and the SVG renders without throwing.
+    const card = container.querySelector('[data-testid="inverter-mini-card"]');
+    expect(card).not.toBeNull();
+    const rows = Array.from(card!.querySelectorAll('text')).map((t) => t.textContent ?? '');
+    expect(rows[1]).toBe('—');
     expect(container.querySelector('svg')).not.toBeNull();
   });
 
