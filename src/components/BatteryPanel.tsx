@@ -1,6 +1,6 @@
 import { memo } from 'react';
 import type { InverterSnapshot } from '../lib/types';
-import { formatPower, formatPercent, formatVoltage, formatCurrent, formatTemp, formatEnergy } from '../lib/format';
+import { formatPower, formatPercent, formatVoltage, formatCurrent, formatTemp, formatEnergy, finiteAbs } from '../lib/format';
 import { batteryModeDisplayLabel } from '../lib/energyFlow';
 import BatteryGauge from './BatteryGauge';
 
@@ -59,7 +59,7 @@ function BatteryPanelInner({ snapshot: s }: Props) {
           <span className="text-text-secondary">Power</span>
           <span className="text-text-primary font-mono text-right">
             {s.battery_state === 'discharging' ? '−' : s.battery_state === 'charging' ? '+' : ''}
-            {formatPower(Math.abs(s.battery_power))}
+            {formatPower(finiteAbs(s.battery_power))}
           </span>
           {/* EPS (Emergency Power Supply) output — only visible when the
               backup leg is actively feeding loads. IR(31) reads 0 on
@@ -78,7 +78,7 @@ function BatteryPanelInner({ snapshot: s }: Props) {
           <span className="text-text-secondary">Voltage</span>
           <span className="text-text-primary font-mono text-right">{formatVoltage(s.battery_voltage)}</span>
           <span className="text-text-secondary">Current</span>
-          <span className="text-text-primary font-mono text-right">{formatCurrent(Math.abs(s.battery_current))}</span>
+          <span className="text-text-primary font-mono text-right">{formatCurrent(finiteAbs(s.battery_current))}</span>
           <span className="text-text-secondary">Temperature</span>
           <span className="text-text-primary font-mono text-right">{formatTemp(s.battery_temperature)}</span>
           <span className="text-text-secondary">Mode</span>

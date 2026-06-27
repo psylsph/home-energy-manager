@@ -154,13 +154,38 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
     expect(flowById(chg, 'discharge')).toBeUndefined();
 
     // discharge → battery→home, displayed as negative because power leaves the battery node.
-    const dis = buildEnergyFlows(snap({ battery_state: 'discharging', battery_power: 1400 }));
+    const dis = buildEnergyFlows(
+      snap({ battery_state: 'discharging', battery_power: 1400, home_power: 800 }),
+    );
     const df = flowById(dis, 'discharge');
     expect(df).toBeDefined();
     expect(df!.from).toBe('battery');
     expect(df!.to).toBe('home');
+    expect(df!.watts).toBe(1400);
     expect(df!.direction).toBe('discharge');
     expect(dis.nodes.find((n) => n.id === 'battery')!.value).toBe('-1.4kW');
+  });
+
+  it('emits a battery→grid discharge_to_grid flow when discharge exceeds the house load (issue #155)', () => {
+    // Battery 2 kW, house 500 W. Excess 1.5 kW flows battery→grid directly,
+    // so the moving dot ends at the grid as the GivEnergy app shows.
+    const vm = buildEnergyFlows(
+      snap({ battery_state: 'discharging', battery_power: 2000, home_power: 500 }),
+    );
+    const excess = vm.flows.find((f) => f.id === 'discharge_to_grid');
+    expect(excess).toBeDefined();
+    expect(excess!.from).toBe('battery');
+    expect(excess!.to).toBe('grid');
+    expect(excess!.watts).toBe(1500);
+    expect(excess!.direction).toBe('export');
+  });
+
+  it('does not emit a battery→grid flow when the house absorbs all of the discharge (issue #155)', () => {
+    // Battery 500 W, house 800 W. No excess to export.
+    const vm = buildEnergyFlows(
+      snap({ battery_state: 'discharging', battery_power: 500, home_power: 800 }),
+    );
+    expect(vm.flows.find((f) => f.id === 'discharge_to_grid')).toBeUndefined();
   });
 
   it('never emits a self-flow for home (it is the hub, not a spoke)', () => {
@@ -258,6 +283,87 @@ describe('buildEnergyFlows — EV charger', () => {
     // A never-reached host → "Not Found" (issue #138).
     const vm2 = buildEnergyFlows(snap(), { evcPowerW: 0, showEvc: true, evcLabel: 'Not Found' });
     expect(vm2.nodes.find((n) => n.id === 'ev')!.unit).toBe('Not Found');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Gateway device: null telemetry fields
+// ---------------------------------------------------------------------------
+//
+// The GivEnergy Gateway (DTC 0x70xx) doesn't expose battery temperature,
+// inverter temperature, battery voltage/current, or PV voltage — those live
+// on each child AIO's own BMS. The backend decoder sets these fields to
+// f32::NAN, and serde_json serializes NaN as `null` in JSON (JSON has no
+// NaN representation). The view-model must not call .toFixed() on these null
+// values — that was the regression that crashed the app on launch for
+// Gateway users ("Cannot read properties of null (reading 'toFixed')").
+// The old inverter-centred diagram used the formatTemp/formatVoltage helpers
+// (which guard with Number.isFinite); the home-centred rewrite called .toFixed
+// directly and regressed.
+describe('buildEnergyFlows — Gateway null telemetry fields', () => {
+  // The `snap()` helper types these fields as `number`, but the Gateway
+  // payload arrives as `null` at runtime — that's the whole bug. Cast through
+  // `unknown` to simulate the deserialised JSON faithfully.
+  function gatewaySnap(): InverterSnapshot {
+    return snap({
+      inverter_temperature: null as unknown as number,
+      battery_temperature: null as unknown as number,
+      battery_voltage: null as unknown as number,
+      battery_current: null as unknown as number,
+      pv1_voltage: null as unknown as number,
+      pv2_voltage: null as unknown as number,
+      pv1_current: 0,
+      pv2_current: 0,
+      device_type_display: 'Gateway',
+    });
+  }
+
+  it('does not throw when inverter_temperature is null (Gateway)', () => {
+    expect(() => buildEnergyFlows(gatewaySnap())).not.toThrow();
+  });
+
+  it('renders the inverter node temperature unit as an em-dash when NaN/null', () => {
+    const vm = buildEnergyFlows(gatewaySnap());
+    const inverter = vm.nodes.find((n) => n.id === 'inverter');
+    expect(inverter).toBeDefined();
+    expect(inverter!.unit).toBe('—');
+  });
+
+  it('does not throw when PV voltage/current fields are null (Gateway)', () => {
+    expect(() => buildEnergyFlows(gatewaySnap())).not.toThrow();
+  });
+
+  it('renders the solar node current when PV voltage is null but current is a number (Gateway)', () => {
+    // Gateway sets pv1_voltage to NaN (→ null) but pv1_current comes from a
+    // real register. With pv1_voltage null the `> 0` branch is false, so the
+    // node falls back to the current label — never a throw.
+    const vm = buildEnergyFlows(gatewaySnap());
+    const solar = vm.nodes.find((n) => n.id === 'solar');
+    expect(solar).toBeDefined();
+    // pv1_current=0 + pv2_current=0 → 0.0A (0 is finite, so not the em-dash).
+    expect(solar!.unit).toBe('0.0A');
+  });
+
+  it('does not throw even when PV current fields are also null (defence in depth)', () => {
+    const allNull = snap({
+      inverter_temperature: null as unknown as number,
+      pv1_voltage: null as unknown as number,
+      pv2_voltage: null as unknown as number,
+      pv1_current: null as unknown as number,
+      pv2_current: null as unknown as number,
+    });
+    expect(() => buildEnergyFlows(allNull)).not.toThrow();
+  });
+
+  it('renders the solar node voltage when pv1_voltage is a real number', () => {
+    // A live PV voltage takes priority over current (matches the legacy diagram).
+    const vm = buildEnergyFlows(snap({ pv1_voltage: 350.4, pv2_current: 0 }));
+    expect(vm.nodes.find((n) => n.id === 'solar')!.unit).toBe('350.4V');
+  });
+
+  it('renders the solar node current when pv1_voltage is 0 but current is live', () => {
+    const vm = buildEnergyFlows(snap({ pv1_voltage: 0, pv1_current: 5.2, pv2_current: 1.3 }));
+    expect(vm.nodes.find((n) => n.id === 'solar')!.unit).toBe('6.5A');
   });
 });
 

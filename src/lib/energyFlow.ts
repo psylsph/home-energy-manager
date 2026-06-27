@@ -37,6 +37,9 @@ import {
   formatPercent,
   formatPower,
   formatVisualPower,
+  formatVoltage,
+  formatCurrent,
+  formatTemp,
 } from './format';
 
 /** Default noise floor — matches the store's `visualNoiseThreshold` default. */
@@ -245,8 +248,17 @@ export function buildEnergyFlows(
       `${formatPower(absBattery)} charging battery`);
   }
   if (isDischarging) {
+    // Battery → home: feed the house first (issue #155).
     push('discharge', 'battery', 'home', absBattery, 'discharge',
       `${formatPower(absBattery)} from battery`);
+    // Battery → grid: any excess (battery outflow exceeds the house load)
+    // is the timed / forced discharge export. Drawn directly battery→grid
+    // (yellow, outer orbit) so the dot ends at the grid instead of the house.
+    if (absBattery > s.home_power && s.home_power > noise) {
+      push('discharge_to_grid', 'battery', 'grid',
+        absBattery - s.home_power, 'export',
+        `${formatPower(absBattery - s.home_power)} exporting`);
+    }
   }
   // No self-flow for home: it is the hub, not a spoke. Its consumption is
   // shown as the hub node's value, not as a directed flow.
@@ -262,8 +274,8 @@ export function buildEnergyFlows(
       label: 'Solar',
       value: formatVisualPower(s.solar_power, noise),
       unit: s.pv1_voltage > 0
-        ? `${s.pv1_voltage.toFixed(1)}V`
-        : `${(s.pv1_current + s.pv2_current).toFixed(1)}A`,
+        ? formatVoltage(s.pv1_voltage)
+        : formatCurrent(s.pv1_current + s.pv2_current),
       color: FLOW_COLORS.solar,
       active: solarActive,
     },
@@ -296,7 +308,7 @@ export function buildEnergyFlows(
       id: 'inverter',
       label: 'Inverter',
       value: s.device_type_display || '—',
-      unit: `${s.inverter_temperature.toFixed(1)}°C`,
+      unit: formatTemp(s.inverter_temperature),
       color: FLOW_COLORS.inverter,
       active: solarActive || isImporting || isExporting || isCharging || isDischarging,
     },

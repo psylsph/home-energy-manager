@@ -31,6 +31,13 @@ export default function ColdBatteryWarning() {
 
   if (!snapshot) return null;
 
+  // Gateway devices don't expose battery temperature (the Gateway
+  // aggregates SOC/power/energy but not per-pack temperature — that
+  // lives on each AIO's own BMS). The backend sets this field to NaN,
+  // which serde_json serializes as null. Skip the warning entirely
+  // when the value isn't a finite number.
+  if (!Number.isFinite(snapshot.battery_temperature)) return null;
+
   const threshold = alerts?.batt_temp_min ?? 0;
   const forceShow =
     developerMode && localStorage.getItem('dev_force_cold_warning') === 'true';
