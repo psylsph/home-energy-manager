@@ -331,6 +331,22 @@ interface DotProps {
   reduced: boolean;
 }
 
+function FlowTrack({ flow, flows, posOf }: Omit<DotProps, 'maxW' | 'reduced'>) {
+  const routed = flowPath(flow, flows, posOf);
+  return (
+    <path
+      data-flow-track-id={flow.id}
+      data-route={routed.route}
+      d={routed.path}
+      fill="none"
+      stroke={routed.color}
+      strokeWidth={6}
+      strokeLinecap="round"
+      opacity={0.34}
+    />
+  );
+}
+
 function FlowDot({ flow, flows, posOf, maxW, reduced }: DotProps) {
   const routed = flowPath(flow, flows, posOf);
   const strength = Math.min(1, flow.watts / maxW);
@@ -638,10 +654,20 @@ function EnergyOrbitDiagramInner({
             <StaticTrack key={id} id={id} posOf={posOf} />
           ))}
 
+          {/* Source-coloured active tracks sit on top of the idle grey rails. */}
+          {vm.flows.map((f) => (
+            <FlowTrack
+              key={`track-${f.id}`}
+              flow={f}
+              flows={vm.flows}
+              posOf={posOf}
+            />
+          ))}
+
           {/* Moving dots show active flow direction and strength. */}
           {vm.flows.map((f) => (
             <FlowDot
-              key={f.id}
+              key={`dot-${f.id}`}
               flow={f}
               flows={vm.flows}
               posOf={posOf}
