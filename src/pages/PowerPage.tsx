@@ -10,7 +10,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { fetchHistory, isTauri } from '../lib/api';
+import { apiGet, fetchHistory, isTauri } from '../lib/api';
 import {
   getHistoryChartGridProps,
   HISTORY_RANGE_MS,
@@ -98,6 +98,15 @@ interface PowerReportSummary {
   socAvg: number | null;
   solarCoveragePct: number | null;
   gridDependencyPct: number | null;
+  // Issue #131: cost totals matching the selected range/offset. Sourced
+  // from /api/report (server-integrated from the today_*_kwh counters and
+  // the configured tariff). All values are GBP.
+  importCostGbp: number;
+  exportIncomeGbp: number;
+  netCostGbp: number;
+  standingChargeGbp: number;
+  standingChargePPerDay: number;
+  daysInRange: number;
 }
 
 interface PowerReport {
@@ -249,6 +258,23 @@ function formatPercentValue(value: number | null): string {
 
 function formatWatts(value: number): string {
   return formatPower(value);
+}
+
+/** Format a £ amount to 2 decimal places. Returns "—" if the value is
+ * zero and `hideZero` is true (used for the standing-charge tile so it
+ * doesn't show "£0.00" when no standing charge is configured). */
+function formatGbp(value: number, hideZero: boolean = false): string {
+  if (hideZero && value === 0) return '—';
+  return `£${value.toFixed(2)}`;
+}
+
+/** Render the per-day standing-charge subtitle shown on the standing
+ * charge card, e.g. " (54.86p/day × 7d)". Returns the empty string when
+ * no standing charge is configured or the days count is 0 / 1. */
+function standingChargeSubtitle(summary: PowerReportSummary): string {
+  if (summary.standingChargePPerDay <= 0 || summary.daysInRange <= 0) return '';
+  const daysSuffix = summary.daysInRange === 1 ? '1d' : `${summary.daysInRange}d`;
+  return ` <span style="font-size:11px;color:#64748b">(${summary.standingChargePPerDay.toFixed(2)}p/day × ${daysSuffix})</span>`;
 }
 
 function formatLocalDateTime(ts: number): string {
@@ -500,6 +526,16 @@ function calculatePowerReport(rows: PowerRow[], range: HistoryRange, domain: [nu
     socAvg,
     solarCoveragePct: homeKwh > 0 ? solarKwh / homeKwh * 100 : null,
     gridDependencyPct: homeKwh > 0 ? importKwh / homeKwh * 100 : null,
+    // Issue #131: cost totals sourced from /api/report (server-side
+    // integration against the configured tariff + standing charge). When
+    // the fetch hasn't returned yet, these stay at 0 and the report tiles
+    // show "—" via the formatGbp fallback in the export rendering.
+    importCostGbp: 0,
+    exportIncomeGbp: 0,
+    netCostGbp: 0,
+    standingChargeGbp: 0,
+    standingChargePPerDay: 0,
+    daysInRange: 0,
   };
 
   return {
@@ -523,6 +559,15 @@ function exportPowerCSV(report: PowerReport, rows: PowerRow[]) {
     ['Net Grid kWh', s.netGridKwh.toFixed(3)],
     ['Total Battery Charge kWh', s.batteryChargeKwh.toFixed(3)],
     ['Total Battery Discharge kWh', s.batteryDischargeKwh.toFixed(3)],
+    // Issue #131: cost totals matching the selected range. Issue #131:
+    // standing charge is the per-day amount × number of days the window
+    // touches; the kWh component is the rest of import cost.
+    ['Total Import Cost GBP', s.importCostGbp.toFixed(2)],
+    ['Total Export Income GBP', s.exportIncomeGbp.toFixed(2)],
+    ['Total Net Cost GBP', s.netCostGbp.toFixed(2)],
+    ['Standing Charge GBP', s.standingChargeGbp.toFixed(2)],
+    ['Standing Charge p/day', s.standingChargePPerDay.toFixed(2)],
+    ['Days in Range', s.daysInRange.toString()],
     ['Peak Solar W', Math.round(s.peakSolarW).toString()],
     ['Peak Home Load W', Math.round(s.peakHomeW).toString()],
     ['Peak Grid Import W', Math.round(s.peakGridImportW).toString()],
@@ -811,6 +856,18 @@ function exportPowerPDF(report: PowerReport, rows: PowerRow[]): 'opened' | 'down
     <div class="card"><span>Peak import/export</span><strong>${formatWatts(s.peakGridImportW)} / ${formatWatts(s.peakGridExportW)}</strong></div>
   </section>
 
+  <!-- Issue #131: cost tiles matching the selected range/offset. Sourced
+       from /api/report (server-integrated from the today_*_kwh counters
+       and the configured tariff + standing charge). The kWh × rate
+       component and the standing-charge component are shown separately
+       so the user can see where the fixed daily cost comes from. -->
+  <section class="grid-cards">
+    <div class="card"><span>Import cost</span><strong style="color:#dc2626">${formatGbp(s.importCostGbp)}</strong></div>
+    <div class="card"><span>Export income</span><strong style="color:#0284c7">${formatGbp(s.exportIncomeGbp)}</strong></div>
+    <div class="card"><span>Net cost</span><strong>${formatGbp(s.netCostGbp)}</strong></div>
+    <div class="card"><span>Standing charge</span><strong>${formatGbp(s.standingChargeGbp)}${standingChargeSubtitle(s)}</strong></div>
+  </section>
+
   ${renderCombinedPowerChart(rows)}
   ${renderBarChart('Solar generation vs home load', report.buckets, [
     { key: 'solarKwh', label: 'Solar', color: '#F59E0B' },
@@ -905,6 +962,64 @@ export default function PowerPage() {
   });
   const [mutedSeries, setMutedSeries] = useState<Partial<Record<PowerChartKey, boolean>>>({});
   const [exportToast, setExportToast] = useState<string | null>(null);
+  // Issue #131: cost totals matching the selected range, fetched from
+  // /api/report. Defaults to zeroed values while the request is in flight
+  // or fails — the report degrades gracefully to kWh-only when the
+  // backend hasn't returned cost data yet.
+  const [cost, setCost] = useState<{
+    importCostGbp: number;
+    exportIncomeGbp: number;
+    netCostGbp: number;
+    standingChargeGbp: number;
+    standingChargePPerDay: number;
+    daysInRange: number;
+  }>({
+    importCostGbp: 0,
+    exportIncomeGbp: 0,
+    netCostGbp: 0,
+    standingChargeGbp: 0,
+    standingChargePPerDay: 0,
+    daysInRange: 0,
+  });
+
+  // Re-fetch cost whenever the user changes range / offset. We pass the
+  // same query params as the History page's graph fetcher so the totals
+  // always match what's on screen.
+  useEffect(() => {
+    let cancelled = false;
+    const params = new URLSearchParams();
+    params.set('range', range);
+    if (offset) params.set('offset', String(offset));
+    if (rolling) params.set('rolling', 'true');
+    apiGet<{
+      ok: boolean;
+      import_cost_gbp: number;
+      export_income_gbp: number;
+      net_cost_gbp: number;
+      standing_charge_gbp: number;
+      days_in_range: number;
+      standing_charge_p_per_day: number;
+    }>(`/api/report?${params.toString()}`)
+      .then((res) => {
+        if (cancelled || !res.ok) return;
+        setCost({
+          importCostGbp: res.import_cost_gbp ?? 0,
+          exportIncomeGbp: res.export_income_gbp ?? 0,
+          netCostGbp: res.net_cost_gbp ?? 0,
+          standingChargeGbp: res.standing_charge_gbp ?? 0,
+          standingChargePPerDay: res.standing_charge_p_per_day ?? 0,
+          daysInRange: res.days_in_range ?? 0,
+        });
+      })
+      .catch(() => {
+        // Network failure / no backend — keep the previous cost values
+        // rather than zeroing them, so a transient blip doesn't make
+        // the report flicker to £0.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [range, offset, rolling, refreshKey]);
 
   const handleRangeChange = (r: HistoryRange) => {
     setRange(r);
@@ -945,7 +1060,28 @@ export default function PowerPage() {
     [data, range, xDomain],
   );
   const yDomain = useMemo(() => calculateDomain(rows), [rows]);
-  const report = useMemo(() => calculatePowerReport(rows, range, displayDomain, offset), [rows, range, displayDomain, offset]);
+  const report = useMemo(() => {
+    const r = calculatePowerReport(rows, range, displayDomain, offset);
+    // Issue #131: overlay the cost totals fetched from /api/report onto
+    // the in-memory report summary. The kWh integration runs client-side
+    // from the rendered Power samples; the cost integration runs server-side
+    // from the cumulative today_*_kwh counters (so it matches the History
+    // page's cost graph exactly). Until /api/report returns, the cost
+    // fields stay at their default of 0 and the report tiles render as
+    // "—" — see the exportPowerPDF fallback for that.
+    return {
+      ...r,
+      summary: {
+        ...r.summary,
+        importCostGbp: cost.importCostGbp,
+        exportIncomeGbp: cost.exportIncomeGbp,
+        netCostGbp: cost.netCostGbp,
+        standingChargeGbp: cost.standingChargeGbp,
+        standingChargePPerDay: cost.standingChargePPerDay,
+        daysInRange: cost.daysInRange,
+      },
+    };
+  }, [rows, range, displayDomain, offset, cost]);
   const hasData = rows.length > 0;
   const waitingForLiveData = snapshot == null;
   const toggleSeries = (key: PowerChartKey) => {

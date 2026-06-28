@@ -292,6 +292,10 @@ export default function SettingsPage() {
   const [exportTariffCfg, setExportTariffCfg] = useState<TariffConfig>(() =>
     flatTariffConfig(0.15),
   );
+  // Issue #131: daily fixed import-side standing charge (pence/day). Empty
+  // string is the uninitialised state; we coerce to 0 on save so the backend
+  // gets a clean number and a blank input means "no standing charge".
+  const [importStandingCharge, setImportStandingCharge] = useState<string>('');
 
   // General
   const [saving, setSaving] = useState(false);
@@ -383,6 +387,14 @@ export default function SettingsPage() {
         } else if (s.export_tariff != null) {
           setExportTariffCfg(flatTariffConfig(s.export_tariff));
         }
+        // Issue #131: hydrate the standing-charge input from disk. The
+        // field is optional on `PollSettings` for back-compat with installs
+        // that haven't written it yet — treat `undefined` / `null` as 0.
+        setImportStandingCharge(
+          s.import_standing_charge_p_per_day != null && s.import_standing_charge_p_per_day > 0
+            ? String(s.import_standing_charge_p_per_day)
+            : '',
+        );
         if (s.hidden_panels) {
           setHiddenPanels(s.hidden_panels);
         }
@@ -564,11 +576,21 @@ export default function SettingsPage() {
       flash('Tariff configuration is invalid', false);
       return;
     }
+    // Issue #131: coerce the standing charge to a clean non-negative
+    // number. An empty input means "no standing charge" → 0. Non-numeric
+    // junk from a paste is also coerced to 0 rather than blocking the save,
+    // since the field is informational and a typo is far less disruptive
+    // than a stuck save button.
+    const standingChargeNum = Number(importStandingCharge);
+    const standingChargePPerDay = Number.isFinite(standingChargeNum) && standingChargeNum > 0
+      ? standingChargeNum
+      : 0;
     setSaving(true);
     try {
       await apiPost('/api/settings', {
         import_tariff_config: importTariffCfg,
         export_tariff_config: exportTariffCfg,
+        import_standing_charge_p_per_day: standingChargePPerDay,
       });
       flash('Tariff rates saved', true);
     } catch (err) {
@@ -1159,6 +1181,32 @@ export default function SettingsPage() {
           config={exportTariffCfg}
           onChange={setExportTariffCfg}
         />
+
+        {/* Issue #131: standing charge (p/day) for the import direction.
+            UK-style tariffs (Octopus Flux, etc.) charge a flat daily fee on
+            top of the per-kWh rate; without this the History cost graph reads
+            low by ~standing charge per day. Empty / 0 = no standing charge. */}
+        <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-2">
+          <label className="flex flex-col gap-1 max-w-xs">
+            <span className="text-text-primary text-sm font-sans font-medium">
+              Standing charge (p/day)
+            </span>
+            <input
+              type="number"
+              step="0.01"
+              min="0"
+              inputMode="decimal"
+              value={importStandingCharge}
+              placeholder="e.g. 54.86"
+              onChange={(e) => setImportStandingCharge(e.target.value)}
+              aria-label="Import standing charge in pence per day"
+              className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+            />
+            <span className="text-text-secondary text-xs font-sans">
+              Daily fixed import cost added to every History cost total. UK Octopus Flux ≈ 54.86. Leave blank for no standing charge.
+            </span>
+          </label>
+        </div>
 
         <button
           onClick={handleTariffSave}

@@ -655,6 +655,15 @@ pub struct Settings {
     /// Export electricity tariff in £/kWh.
     #[serde(default = "default_export_tariff")]
     pub export_tariff: f64,
+    /// Daily fixed standing charge for the import direction, in pence/day.
+    /// UK-style tariffs (Octopus Flux, etc.) charge a flat daily fee on top
+    /// of the per-kWh rate; the History cost series adds
+    /// `standing_charge × days_in_window` once per query window so the
+    /// cumulative cost graph includes the fixed component. Defaults to 0
+    /// (no standing charge) for back-compat with settings.json files written
+    /// before this field was added — see issue #131.
+    #[serde(default)]
+    pub import_standing_charge_p_per_day: f64,
 
     /// Auto winter mode enabled.
     #[serde(default)]
@@ -993,6 +1002,10 @@ impl Default for Settings {
             auto_connect: true,
             import_tariff: default_import_tariff(),
             export_tariff: default_export_tariff(),
+            // Issue #131: zero by default — older installs have no standing
+            // charge and we don't want to silently start adding one to the
+            // History cost graph for users who haven't configured it.
+            import_standing_charge_p_per_day: 0.0,
             auto_winter_enabled: false,
             auto_winter_cold_threshold: default_aw_cold_threshold(),
             auto_winter_recovery_threshold: default_aw_recovery_threshold(),
@@ -1192,6 +1205,7 @@ mod tests {
             auto_connect: false,
             import_tariff: 0.30,
             export_tariff: 0.15,
+            import_standing_charge_p_per_day: 54.86,
             auto_winter_enabled: true,
             auto_winter_cold_threshold: 5.0,
             auto_winter_recovery_threshold: 10.0,
@@ -1509,6 +1523,7 @@ mod tests {
             auto_connect: true,
             import_tariff: 0.285,
             export_tariff: 0.15,
+            import_standing_charge_p_per_day: 0.0,
             auto_winter_enabled: false,
             auto_winter_cold_threshold: 8.0,
             auto_winter_recovery_threshold: 12.0,

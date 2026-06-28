@@ -302,7 +302,14 @@ pub fn generate_daily_summary_text(
         }
     }
     let export_income = t.export_kwh * export_rate;
-    let net_cost = import_cost - export_income;
+    // Issue #131: the daily import cost above is the per-kWh component only.
+    // UK-style tariffs also charge a flat daily standing fee (pence/day)
+    // that doesn't scale with usage — add it to the import total so the
+    // reported "Net cost" matches the user's actual bill. The Settings page
+    // exposes this on the import side only (export SEG has no standing fee).
+    let standing_charge_gbp = (settings.import_standing_charge_p_per_day.max(0.0)) / 100.0;
+    let import_cost_with_standing = import_cost + standing_charge_gbp;
+    let net_cost = import_cost_with_standing - export_income;
     let self_suff = if t.home_kwh > 0.0 {
         (1.0 - t.import_kwh / t.home_kwh).clamp(0.0, 1.0) * 100.0
     } else {
@@ -325,7 +332,7 @@ pub fn generate_daily_summary_text(
     msg.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━\n");
     msg.push_str(&format!(
         "📥 Import: <b>{:.1} kWh</b> — £{:.2}\n",
-        t.import_kwh, import_cost
+        t.import_kwh, import_cost_with_standing
     ));
     // Show per-window breakdown when there are multiple distinct rates.
     if window_kwh.len() > 1 {
@@ -340,6 +347,17 @@ pub fn generate_daily_summary_text(
                 ));
             }
         }
+    }
+    // Issue #131: when a standing charge is configured, list it as a separate
+    // line so the user can see where the daily fixed cost is coming from.
+    // The amount is already rolled into the £{:.2} shown above for Import
+    // and into the "Net cost" total below.
+    if standing_charge_gbp > 0.0 {
+        msg.push_str(&format!(
+            "   ↳ Standing charge: <b>£{:.2}</b> ({}p/day)\n",
+            standing_charge_gbp,
+            settings.import_standing_charge_p_per_day
+        ));
     }
     msg.push_str(&format!(
         "📤 Export: <b>{:.1} kWh</b> — £{:.2}\n",
@@ -1178,5 +1196,120 @@ mod tests {
         assert_eq!(cfg.rate_for_minutes(3 * 60), Some(0.10));
         // 12:00 → peak
         assert_eq!(cfg.rate_for_minutes(12 * 60), Some(0.30));
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #131: standing charge in the daily consumption report.
+    //
+    // The report must roll the configured import-side standing charge into
+    // both the import cost and the net-cost lines, AND surface a labelled
+    // footnote so the user can see where the daily fixed cost is coming
+    // from. When no standing charge is configured, the message must look
+    // exactly as it did before (no stray footnote).
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal Settings struct with `import_tariff_config` set to a
+    /// single slot covering the whole day at `flat_import` £/kWh. Mirrors
+    /// the default behaviour for users who haven't migrated to a ToU
+    /// tariff config. Avoids a `field_reassign_with_default` clippy lint by
+    /// building the struct literal with explicit fields rather than
+    /// post-construction reassignment.
+    fn settings_with_flat_import(flat_import: f64) -> crate::settings::Settings {
+        crate::settings::Settings {
+            import_tariff: flat_import,
+            import_tariff_config: Some(crate::settings::TariffConfig::flat(flat_import)),
+            ..crate::settings::Settings::default()
+        }
+    }
+
+    /// Two readings that, integrated, give 1 kWh of grid import at +1000 W.
+    /// The positive grid value reflects the inverter's "imported from grid"
+    /// convention; `positive_part` in this codebase treats positive grid as
+    /// import. The trapezoid integration between t=0 and t=3600 at +1000 W
+    /// yields exactly 1.0 kWh.
+    fn import_rows() -> Vec<ReadingRow> {
+        vec![
+            dummy_reading(0, 0, 0, 1000, 1000, 50.0),
+            dummy_reading(3600, 0, 0, 1000, 1000, 60.0),
+        ]
+    }
+
+    #[test]
+    fn test_daily_report_no_standing_charge_omits_footnote() {
+        // Baseline: when `import_standing_charge_p_per_day` is 0 (the
+        // default), the report must NOT add a "Standing charge" line. This
+        // guards against regression for users who haven't configured one.
+        let s = settings_with_flat_import(0.25);
+        let msg = generate_daily_summary_text(&import_rows(), "2026-06-27", &s)
+            .expect("enough data");
+        assert!(
+            !msg.contains("Standing charge"),
+            "report must not show a standing-charge footnote when none is configured"
+        );
+        // And the import line should still be £0.25 (1 kWh × £0.25).
+        assert!(
+            msg.contains("£0.25"),
+            "import cost should still be the per-kWh component only; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_daily_report_includes_standing_charge_in_net_cost() {
+        // With a 54.86p/day standing charge, the net cost must equal
+        // per-kWh cost (£0.25) + standing (£0.5486) = £0.7986, rounded to
+        // 2dp. This is the headline behaviour the user asked for: a
+        // bill-accurate total.
+        let mut s = settings_with_flat_import(0.25);
+        s.import_standing_charge_p_per_day = 54.86;
+        let msg = generate_daily_summary_text(&import_rows(), "2026-06-27", &s)
+            .expect("enough data");
+        assert!(
+            msg.contains("Net cost: <b>£0.80</b>"),
+            "net cost should include the standing charge (0.25 + 0.5486 ≈ 0.80); got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_daily_report_emits_standing_charge_footnote_line() {
+        // The footnote line is the user-facing affordance: it tells them
+        // the daily fixed cost exists and where it came from.
+        let mut s = settings_with_flat_import(0.25);
+        s.import_standing_charge_p_per_day = 54.86;
+        let msg = generate_daily_summary_text(&import_rows(), "2026-06-27", &s)
+            .expect("enough data");
+        assert!(
+            msg.contains("Standing charge:"),
+            "expected a labelled standing-charge footnote; got: {msg}"
+        );
+        // The 2dp value (£0.55).
+        assert!(
+            msg.contains("£0.55"),
+            "footnote should show the standing charge rounded to 2dp; got: {msg}"
+        );
+        // And the originating p/day figure so the user can verify the
+        // setting they entered.
+        assert!(
+            msg.contains("54.86p/day"),
+            "footnote should show the configured p/day figure; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_daily_report_negative_standing_charge_is_clamped() {
+        // A negative standing charge is nonsensical (no tariff credits a
+        // daily fee). The implementation clamps to 0 — the resulting
+        // report must look like the no-standing-charge baseline.
+        let mut s = settings_with_flat_import(0.25);
+        s.import_standing_charge_p_per_day = -10.0;
+        let msg = generate_daily_summary_text(&import_rows(), "2026-06-27", &s)
+            .expect("enough data");
+        assert!(
+            !msg.contains("Standing charge"),
+            "negative standing charge must be clamped (no footnote expected); got: {msg}"
+        );
+        assert!(
+            msg.contains("Net cost: <b>£0.25</b>"),
+            "net cost should equal the per-kWh component only (got: {msg})"
+        );
     }
 }
