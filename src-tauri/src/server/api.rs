@@ -1495,6 +1495,26 @@ pub async fn set_timed_discharge(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
+    // The portal-style Timed Discharge feature is implemented with the
+    // battery pause registers HR318 (battery_pause_mode) and HR319/320
+    // (battery_pause_slot), which only exist in the HR 300-359 AC-config
+    // block. That block is present solely on AC-coupled, AC-three-phase and
+    // residential All-in-One models (see DeviceType::supports_timed_discharge
+    // / givenergy-modbus `_AC_CONFIG_BLOCK_MODELS`). On every other family
+    // (DC hybrids incl. Gen1/2/3/4, pure three-phase, Gateway, EMS, PV
+    // inverter) the registers are absent: the write times out or is silently
+    // dropped, and because we never poll HR 300-359 there either,
+    // `battery_pause_mode` stays at its default of 0 forever — so the toggle
+    // could never reflect an enabled state. Refuse up front with a clear
+    // error so the UI can hide the control.
+    let device_type = latest_device_type(&state).await;
+    if !device_type.supports_timed_discharge() {
+        return error_response(&format!(
+            "Timed Discharge is not supported on {} inverters",
+            device_type.display_name()
+        ));
+    }
+
     let enabled = body["enabled"].as_bool().unwrap_or(true);
     let mut writes = Vec::new();
 
@@ -4869,7 +4889,10 @@ mod tests {
                 HR_BATTERY_PAUSE_MODE, HR_BATTERY_PAUSE_SLOT_1_END,
                 HR_BATTERY_PAUSE_SLOT_1_START,
             };
-            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            // AC-coupled exposes the HR 300-359 block that holds the pause
+            // registers (HR318-320); Gen3 Hybrid no longer does and is refused
+            // (see timed_discharge_refused_on_unsupported_device below).
+            let state = make_state_with_device(DeviceType::ACCoupled).await;
             let body = serde_json::json!({
                 "enabled": true,
                 "start_hour": 3,
@@ -4901,6 +4924,119 @@ mod tests {
                     .map(|w| w.value),
                 Some(2)
             );
+        })
+        .await;
+    }
+
+    // -- Timed Discharge device gating ------------------------------------
+    //
+    // The pause registers (HR318-320) only exist on AC-coupled /
+    // AC-three-phase / residential All-in-One models. Every other family is
+    // refused with HTTP 400 and queues NO writes — otherwise the poll loop
+    // would burn write-drain cycles hitting registers the dongle times out
+    // on, and the toggle could never round-trip (the snapshot never reflects
+    // an enabled state because we don't poll HR 300-359 there). Gen1 Hybrid
+    // is the originally reported case; Gen3 Hybrid is the regression guard
+    // for removing the AC-config block from its poll set.
+    #[tokio::test]
+    async fn timed_discharge_refused_on_gen1_hybrid() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen1Hybrid).await;
+            let body = serde_json::json!({
+                "enabled": true,
+                "start_hour": 3,
+                "end_hour": 4,
+            });
+            let (status, res) = set_timed_discharge(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(res.get("ok"), Some(&serde_json::Value::Bool(false)));
+            // No pause-register writes must be queued on an unsupported device.
+            assert!(drain_pending_writes(&state).await.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn timed_discharge_refused_on_gen3_hybrid_after_ac_config_block_removal() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            let body = serde_json::json!({ "enabled": true });
+            let (status, _res) = set_timed_discharge(State(state.clone()), Json(body)).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "Gen3 Hybrid must refuse now that it no longer polls HR 300-359"
+            );
+            assert!(drain_pending_writes(&state).await.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn timed_discharge_refused_on_three_phase_gateway_ems_and_pv() {
+        with_isolated_config_dir_async(|| async {
+            for dt in [
+                DeviceType::ThreePhase,
+                DeviceType::HybridHvGen3,
+                DeviceType::AllInOneHybrid,
+                DeviceType::AioCommercial,
+                DeviceType::Gateway,
+                DeviceType::Ems,
+                DeviceType::EmsCommercial,
+                DeviceType::PvInverter,
+            ] {
+                let state = make_state_with_device(dt).await;
+                let body = serde_json::json!({ "enabled": true });
+                let (status, _res) =
+                    set_timed_discharge(State(state.clone()), Json(body.clone())).await;
+                assert_eq!(
+                    status,
+                    StatusCode::BAD_REQUEST,
+                    "{dt:?} must refuse Timed Discharge"
+                );
+                assert!(
+                    drain_pending_writes(&state).await.is_empty(),
+                    "{dt:?} must queue no pause-register writes"
+                );
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn timed_discharge_accepted_on_every_supported_device() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_BATTERY_PAUSE_MODE;
+            // AC-coupled / AC-three-phase / residential All-in-One all expose
+            // HR318-320 and must accept the write.
+            for dt in [
+                DeviceType::ACCoupled,
+                DeviceType::ACCoupledMk2,
+                DeviceType::ACThreePhase,
+                DeviceType::AllInOne6kW,
+                DeviceType::AllInOne3_6kW,
+                DeviceType::AllInOne5kW,
+            ] {
+                let state = make_state_with_device(dt).await;
+                let body = serde_json::json!({
+                    "enabled": true,
+                    "start_hour": 3,
+                    "end_hour": 4,
+                });
+                let (status, _res) =
+                    set_timed_discharge(State(state.clone()), Json(body.clone())).await;
+                assert_eq!(status, StatusCode::OK, "{dt:?} must accept Timed Discharge");
+                let writes = drain_pending_writes(&state).await;
+                assert_all_whitelisted(&writes);
+                assert_eq!(
+                    writes
+                        .iter()
+                        .find(|w| w.address == HR_BATTERY_PAUSE_MODE)
+                        .map(|w| w.value),
+                    Some(2),
+                    "{dt:?} must arm pause-discharge (HR318=2)"
+                );
+            }
         })
         .await;
     }

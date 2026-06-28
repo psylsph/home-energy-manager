@@ -406,7 +406,15 @@ impl DeviceType {
             Self::HybridHvGen3 | Self::AllInOneHybrid | Self::ThreePhase | Self::AioCommercial => {
                 EXTENDED_AND_THREE_PHASE_BLOCKS
             }
-            Self::AllInOne6kW | Self::AllInOne3_6kW | Self::AllInOne5kW | Self::Gen3Hybrid => {
+            // Residential All-in-One models carry an AC output stage and expose
+            // the HR 300-359 config block (EPS, export priority, pause mode/slot).
+            // Gen3 Hybrid is deliberately NOT here: per givenergy-modbus
+            // `_AC_CONFIG_BLOCK_MODELS = {AC, AC_3PH, ALL_IN_ONE}` the DC-coupled
+            // Gen3 hybrid lacks the AC-output register block and the dongle
+            // times out when polled for HR 300-359. Polling it wasted a cycle
+            // and (worse) made the pause-discharge / EPS / Timed Discharge
+            // registers appear readable when the hardware has no such state.
+            Self::AllInOne6kW | Self::AllInOne3_6kW | Self::AllInOne5kW => {
                 EXTENDED_AND_AC_CONFIG_BLOCKS
             }
             dt if dt.supports_gen3_extended() => &[EXTENDED_SLOTS_BLOCK],
@@ -561,6 +569,41 @@ impl DeviceType {
     /// (or worse, corrupts unrelated state). Used by `set_eps` to refuse the
     /// write and by the frontend to hide the toggle.
     pub fn supports_eps(&self) -> bool {
+        matches!(
+            self,
+            Self::ACCoupled
+                | Self::ACCoupledMk2
+                | Self::ACThreePhase
+                | Self::AllInOne6kW
+                | Self::AllInOne3_6kW
+                | Self::AllInOne5kW
+        )
+    }
+
+    /// Whether this device supports the portal-style single-slot "Timed
+    /// Discharge" feature, implemented via the battery pause registers
+    /// (`battery_pause_mode` HR 318, `battery_pause_slot` HR 319-320).
+    ///
+    /// Those registers live in the HR 300-359 AC-config block, which per
+    /// givenergy-modbus `_AC_CONFIG_BLOCK_MODELS = {AC, AC_3PH, ALL_IN_ONE}`
+    /// only AC-coupled, AC-three-phase and residential All-in-One models
+    /// expose. On every other family (DC hybrids incl. Gen1/2/3/4, Polar,
+    /// Gen3+, pure three-phase, AIO Commercial, AIO Hybrid, HV Gen3,
+    /// Gateway, EMS, PV inverter) the block is absent, so the pause
+    /// registers can neither be written nor read back — the toggle would
+    /// silently do nothing and never reflect an enabled state (the exact
+    /// symptom reported on Gen1 Hybrid). GivTCP independently confirms the
+    /// pause slots are absent on the Gen1 Hybrid (`read.py:573`).
+    ///
+    /// The supported set is identical to [`DeviceType::supports_eps`] today
+    /// because HR 317 / 318-320 share the same register block, but the two
+    /// features are kept as separate predicates so a future firmware that
+    /// decouples them can diverge without touching call sites.
+    ///
+    /// Used by `set_timed_discharge` to refuse the write with HTTP 400 and
+    /// by the frontend to hide both the Quick Action button and the Timed
+    /// Discharge schedule section.
+    pub fn supports_timed_discharge(&self) -> bool {
         matches!(
             self,
             Self::ACCoupled
@@ -1482,18 +1525,28 @@ mod tests {
     }
 
     #[test]
-    fn gen3_hybrid_polls_ac_config_for_pause_discharge_registers() {
+    fn gen3_hybrid_does_not_poll_ac_config_block() {
         use crate::modbus::registers::{AC_CONFIG_BLOCK, EXTENDED_SLOTS_BLOCK};
 
+        // Per givenergy-modbus `_AC_CONFIG_BLOCK_MODELS = {AC, AC_3PH,
+        // ALL_IN_ONE}` the DC-coupled Gen3 hybrid lacks the HR 300-359
+        // AC-output register block — the dongle times out when polled for
+        // it. Gen3 must therefore NOT poll AC_CONFIG_BLOCK. It still polls
+        // the extended schedule block (HR 240-299) for its 10 charge /
+        // discharge slots and per-slot target SOCs.
         let extras = DeviceType::Gen3Hybrid.extra_poll_blocks();
         assert!(
             extras.iter().any(|b| b.start == EXTENDED_SLOTS_BLOCK.start),
             "Gen3 must still poll HR240-299 for extended schedule slots"
         );
         assert!(
-            extras.iter().any(|b| b.start == AC_CONFIG_BLOCK.start),
-            "Gen3 must poll HR300-359 so HR318/319/320 Timed Discharge state is visible"
+            !extras.iter().any(|b| b.start == AC_CONFIG_BLOCK.start),
+            "Gen3 must NOT poll HR300-359 — that AC-output block is absent on DC hybrids "
         );
+        // Sanity: Gen3 no longer reports the pause/EPS registers, so the
+        // Timed Discharge feature is unsupported on it.
+        assert!(!DeviceType::Gen3Hybrid.supports_timed_discharge());
+        assert!(!DeviceType::Gen3Hybrid.supports_eps());
     }
 
     #[test]
@@ -1649,6 +1702,102 @@ mod tests {
                 dt.supports_eps(),
                 has_ac_config,
                 "supports_eps / AC_CONFIG_BLOCK polling mismatch for {:?}",
+                dt
+            );
+        }
+
+        // Gen3 Hybrid is the regression guard for removing the AC config
+        // block from its poll set: it must neither poll HR 300-359 nor claim
+        // EPS / Timed Discharge support.
+        assert!(!DeviceType::Gen3Hybrid
+            .extra_poll_blocks()
+            .iter()
+            .any(|b| b.start == 300));
+        assert!(!DeviceType::Gen3Hybrid.supports_eps());
+    }
+
+    // -----------------------------------------------------------------------
+    // supports_timed_discharge on each device type — same register block as
+    // supports_eps (HR 300-359 holds HR318/319/320), but kept as a distinct
+    // predicate so the two features can diverge if firmware ever decouples
+    // them. Mirrors givenergy-modbus `_AC_CONFIG_BLOCK_MODELS`.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn supports_timed_discharge_for_ac_coupled_and_aio_families() {
+        // Only models that expose the HR 300-359 AC-config block can read /
+        // write the battery pause registers (HR 318-320) that drive the
+        // portal-style Timed Discharge feature.
+        assert!(DeviceType::ACCoupled.supports_timed_discharge());
+        assert!(DeviceType::ACCoupledMk2.supports_timed_discharge());
+        assert!(DeviceType::ACThreePhase.supports_timed_discharge());
+        assert!(DeviceType::AllInOne6kW.supports_timed_discharge());
+        assert!(DeviceType::AllInOne3_6kW.supports_timed_discharge());
+        assert!(DeviceType::AllInOne5kW.supports_timed_discharge());
+    }
+
+    #[test]
+    fn supports_timed_discharge_rejects_dc_hybrid_and_pure_three_phase() {
+        // DC hybrids have no AC-output register block, so HR 318-320 are
+        // undefined. This is the exact Gen1 Hybrid regression: the feature
+        // wrote pause registers that don't exist and never read them back.
+        assert!(!DeviceType::Gen1Hybrid.supports_timed_discharge());
+        assert!(!DeviceType::Gen2Hybrid.supports_timed_discharge());
+        assert!(!DeviceType::Gen3Hybrid.supports_timed_discharge());
+        assert!(!DeviceType::Gen4Hybrid.supports_timed_discharge());
+        assert!(!DeviceType::PolarHybrid.supports_timed_discharge());
+        assert!(!DeviceType::Gen3PlusHybrid.supports_timed_discharge());
+
+        // Pure three-phase / HV / AIO-hybrid families use the 1000-range
+        // control bank, not HR 300-359.
+        assert!(!DeviceType::ThreePhase.supports_timed_discharge());
+        assert!(!DeviceType::AioCommercial.supports_timed_discharge());
+        assert!(!DeviceType::HybridHvGen3.supports_timed_discharge());
+        assert!(!DeviceType::AllInOneHybrid.supports_timed_discharge());
+
+        // Devices with no inverter control surface at all.
+        assert!(!DeviceType::Gateway.supports_timed_discharge());
+        assert!(!DeviceType::Ems.supports_timed_discharge());
+        assert!(!DeviceType::EmsCommercial.supports_timed_discharge());
+        assert!(!DeviceType::PvInverter.supports_timed_discharge());
+
+        // Unknown is conservatively rejected so the API returns a clear 400
+        // rather than writing pause registers we can't prove exist.
+        assert!(!DeviceType::Unknown(0).supports_timed_discharge());
+    }
+
+    #[test]
+    fn supports_timed_discharge_matches_extra_poll_blocks_for_ac_config() {
+        // The set of devices that poll HR 300-359 (and therefore can read
+        // back HR 318-320 on the next snapshot) must equal the set that
+        // supports Timed Discharge. Otherwise we'd either poll the pause
+        // registers on a device that ignores them (wasted cycle / timeout)
+        // or expose a toggle whose state can never be reflected back.
+        let models = [
+            DeviceType::ACCoupled,
+            DeviceType::ACCoupledMk2,
+            DeviceType::ACThreePhase,
+            DeviceType::AllInOne6kW,
+            DeviceType::AllInOne3_6kW,
+            DeviceType::AllInOne5kW,
+            // Gen3 Hybrid is the key negative case: it used to poll HR
+            // 300-359 (and so falsely appeared to support Timed Discharge)
+            // until the block was removed.
+            DeviceType::Gen3Hybrid,
+            DeviceType::Gen1Hybrid,
+            DeviceType::Gen2Hybrid,
+            DeviceType::ThreePhase,
+            DeviceType::AioCommercial,
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOneHybrid,
+            DeviceType::Gateway,
+        ];
+        for dt in models {
+            let has_ac_config = dt.extra_poll_blocks().iter().any(|b| b.start == 300);
+            assert_eq!(
+                dt.supports_timed_discharge(),
+                has_ac_config,
+                "supports_timed_discharge / AC_CONFIG_BLOCK polling mismatch for {:?}",
                 dt
             );
         }
