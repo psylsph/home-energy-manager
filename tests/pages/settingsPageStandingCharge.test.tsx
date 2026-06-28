@@ -25,6 +25,7 @@ vi.mock('../../src/lib/api', () => ({
           // Issue #131: surface a non-zero standing charge so we can assert
           // the input hydrates correctly on load.
           import_standing_charge_p_per_day: 54.86,
+          full_power_discharge_in_eco_mode: false,
         },
       };
     }
@@ -96,6 +97,7 @@ describe('<SettingsPage/> — Standing charge input (issue #131)', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    useInverterStore.setState({ developerMode: false });
     cleanup();
   });
 
@@ -135,6 +137,24 @@ describe('<SettingsPage/> — Standing charge input (issue #131)', () => {
       expect(
         await screen.findByText(/Daily fixed import cost/i),
       ).toBeDefined();
+    });
+
+    it('saves the full-power-discharge-in-eco-mode compatibility toggle', async () => {
+      useInverterStore.setState({ developerMode: true });
+      render(<SettingsPage />);
+
+      const label = await screen.findByText(/Full-power discharge while Eco stays on/i);
+      const card = label.closest('.bg-bg-elevated');
+      expect(card).not.toBeNull();
+      const toggle = card!.querySelector('.relative.cursor-pointer');
+      expect(toggle).not.toBeNull();
+      fireEvent.click(toggle!);
+
+      await waitFor(() => {
+        expect(apiPost).toHaveBeenCalledWith('/api/settings', {
+          full_power_discharge_in_eco_mode: true,
+        });
+      });
     });
 
     it('places the standing-charge card between Export editor and Save button', async () => {

@@ -53,6 +53,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/report", get(api::get_report))
         // Control endpoints
         .route("/api/control/mode", post(api::set_mode))
+        .route("/api/control/eco", post(api::set_eco))
+        .route("/api/control/timed-charge", post(api::set_timed_charge))
+        .route("/api/control/timed-export", post(api::set_timed_export))
+        .route("/api/control/timed-discharge", post(api::set_timed_discharge))
         .route("/api/control/charge-slot", post(api::set_charge_slot))
         .route("/api/control/discharge-slot", post(api::set_discharge_slot))
         .route("/api/control/reserve", post(api::set_reserve))

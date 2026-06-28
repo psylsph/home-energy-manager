@@ -3,27 +3,7 @@ import { useInverterStore } from '../store/useInverterStore';
 import { useAction } from '../hooks/useAction';
 import { apiPost, apiGet } from '../lib/api';
 import { deviceSupportsEps } from '../lib/deviceCapabilities';
-import { stageBackupAsPending } from '../lib/dischargeSlotBackup';
-import type { ScheduleSlot, SetModeResponse } from '../lib/types';
-
-type BatteryMode = 'unknown' | 'eco' | 'eco_paused' | 'timed_demand' | 'timed_export' | 'export_paused';
-
-const ECO_MODES: { key: BatteryMode; label: string; tooltip: string }[] = [
-  { key: 'eco', label: 'Eco', tooltip: 'Automatic — charges from solar, discharges to cover home demand' },
-  { key: 'eco_paused', label: 'Eco Paused', tooltip: 'Battery stops discharging (SOC reserve set to 100%). Still charges from solar.' },
-];
-
-const TIMED_MODES: { key: BatteryMode; label: string; tooltip: string }[] = [
-  { key: 'timed_demand', label: 'Timed Discharge', tooltip: 'Battery covers home demand automatically, plus follows your export schedule during slot times' },
-  { key: 'timed_export', label: 'Timed Export', tooltip: 'Discharges the battery at full power, exporting surplus to the grid during slot times' },
-  { key: 'export_paused', label: 'Paused', tooltip: 'Pauses scheduled discharge. Schedule is kept for next time.' },
-];
-
-type ModeCategory = 'eco' | 'timed';
-
-function modeToCategory(mode: BatteryMode): ModeCategory {
-  return mode === 'eco' || mode === 'eco_paused' ? 'eco' : 'timed';
-}
+import type { ScheduleSlot } from '../lib/types';
 
 function ActionButton({
   label,
@@ -1546,7 +1526,11 @@ function LoadLimiterSection() {
 
 export default function ControlPage() {
   const { snapshot, developerMode } = useInverterStore();
-  const modeAction = useAction();
+  const [ecoSaving, setEcoSaving] = useState(false);
+  const [timedChargeSaving, setTimedChargeSaving] = useState(false);
+  const [timedExportSaving, setTimedExportSaving] = useState(false);
+  const [timedDischargeSaving, setTimedDischargeSaving] = useState(false);
+  const [timedDischargeOverride, setTimedDischargeOverride] = useState<boolean | null>(null);
 
   // Battery limits: local draft state while dragging, otherwise from snapshot
   const [draftReserve, setDraftReserve] = useState<number | null>(null);
@@ -1587,6 +1571,13 @@ export default function ControlPage() {
 
   const currentMode = snapshot?.battery_mode ?? 'eco';
   const cosyActive = snapshot?.cosy_active ?? false;
+  const ecoEnabled = snapshot?.battery_power_mode != null
+    ? snapshot.battery_power_mode === 1
+    : currentMode === 'eco' || currentMode === 'eco_paused' || currentMode === 'timed_demand';
+  const timedChargeEnabled = snapshot?.enable_charge ?? false;
+  const timedExportEnabled = snapshot?.enable_discharge ?? false;
+  const snapshotTimedDischargeEnabled = snapshot?.battery_pause_mode === 2;
+  const timedDischargeEnabled = timedDischargeOverride ?? snapshotTimedDischargeEnabled;
 
   // Show draft while dragging; once snapshot confirms the saved value, use snapshot.
   // Default to null (no data) until the first snapshot arrives to avoid showing
@@ -1763,17 +1754,6 @@ export default function ControlPage() {
         enabled: false, start_hour: 16, start_minute: 0, end_hour: 19, end_minute: 0, target_soc: 4,
       } as ScheduleSlot));
 
-  const { pendingDischargeSlots, setPendingDischargeSlots, clearPendingDischargeSlots } = useInverterStore();
-  const [requestedMode, setRequestedMode] = useState<BatteryMode | null>(null);
-
-  // Clear requested mode after 30s timeout (safety net for unconfirmed writes).
-  // The inverter confirming the change is handled by deriving effectiveMode below.
-  useEffect(() => {
-    if (!requestedMode) return;
-    const timeout = setTimeout(() => setRequestedMode(null), 10_000);
-    return () => clearTimeout(timeout);
-  }, [requestedMode]);
-
   // Force-discharge local override auto-clear after 10s. Prevents stale
   // overrides from previous interactions or failed writes from sticking.
   useEffect(() => {
@@ -1789,92 +1769,94 @@ export default function ControlPage() {
     return () => clearTimeout(timeout);
   }, [localForceChargeOverride]);
 
-  // Use requested mode unless the inverter has already caught up
-  const effectiveMode = (requestedMode && requestedMode !== currentMode)
-    ? requestedMode
-    : currentMode;
+  const dischargeSlots: ScheduleSlot[] = baseDischargeSlots;
 
-  const isTimedMode = modeToCategory(effectiveMode) === 'timed';
+  const pauseSlot = snapshot?.battery_pause_slot;
+  const timedDischargeSlot: ScheduleSlot = snapshotTimedDischargeEnabled && pauseSlot?.enabled
+    ? {
+        enabled: true,
+        // HR319/320 stores the inverse pause window. Display the demand
+        // window the user asked for: pause end → pause start.
+        start_hour: pauseSlot.end_hour,
+        start_minute: pauseSlot.end_minute,
+        end_hour: pauseSlot.start_hour,
+        end_minute: pauseSlot.start_minute,
+        target_soc: 100,
+      }
+    : {
+        enabled: timedDischargeEnabled,
+        start_hour: 3,
+        start_minute: 0,
+        end_hour: 4,
+        end_minute: 0,
+        target_soc: 100,
+      };
 
-  // In Eco mode, overlay any pending local edits on top of the base slots.
-  // In Timed mode, just use the inverter-reported slots directly.
-  const dischargeSlots: ScheduleSlot[] = isTimedMode
-    ? baseDischargeSlots
-    : baseDischargeSlots.map((s, i) => pendingDischargeSlots[i] ?? s);
+  useEffect(() => {
+    if (timedDischargeOverride == null) return;
+    const timeout = setTimeout(() => setTimedDischargeOverride(null), 10_000);
+    return () => clearTimeout(timeout);
+  }, [timedDischargeOverride]);
 
-  // A discharge slot is considered "configured" if it has a non-zero time window.
-  const isDischargeSlotConfigured = (s: ScheduleSlot) =>
-    s.enabled && (s.start_hour !== s.end_hour || s.start_minute !== s.end_minute);
-
-  // Check if any discharge slot is ready (either existing on inverter, or pending locally).
-  const hasAnyDischargeSlot =
-    dischargeSlots.some(s => isDischargeSlotConfigured(s)) ||
-    Object.keys(pendingDischargeSlots).length > 0;
-
-  const handleModeChange = async (mode: BatteryMode) => {
-    setRequestedMode(mode);
+  const handleEcoToggle = async () => {
+    const enabled = !ecoEnabled;
+    setEcoSaving(true);
     try {
-      // Build the request body. When switching to Timed mode with pending
-      // local discharge slots, send everything atomically so HR59=1 is
-      // never set without slot constraints.
-      let body: Record<string, unknown> = { mode };
-      const hasPending = Object.keys(pendingDischargeSlots).length > 0;
-      if (modeToCategory(mode) === 'timed' && hasPending) {
-        const slots: { slot: number; enabled: boolean; start_hour: number; start_minute: number; end_hour: number; end_minute: number; target_soc: number }[] = [];
-        Object.entries(pendingDischargeSlots).forEach(([i, s]) => {
-          const idx = Number(i);
-          slots.push({
-            slot: idx + 1,
-            enabled: s.enabled,
-            start_hour: s.start_hour,
-            start_minute: s.start_minute,
-            end_hour: s.end_hour,
-            end_minute: s.end_minute,
-            target_soc: s.target_soc,
-          });
-        });
-        body = { ...body, discharge_slots: slots };
-      }
+      await apiPost('/api/control/eco', { enabled });
+    } finally {
+      setEcoSaving(false);
+    }
+  };
 
-      // Call the backend directly so we can inspect the response. The
-      // Eco/Pause transitions may echo back a captured discharge schedule
-      // (see issue #137), and we want to surface that to the UI as
-      // pending edits so the Eco-mode slot editor shows the user's saved
-      // schedule after an Eco→Timed→Eco round-trip.
-      const response = await apiPost<SetModeResponse>('/api/control/mode', body);
-      modeAction.markSuccess();
+  const handleTimedChargeToggle = async () => {
+    const enabled = !timedChargeEnabled;
+    setTimedChargeSaving(true);
+    try {
+      await apiPost('/api/control/timed-charge', { enabled });
+    } finally {
+      setTimedChargeSaving(false);
+    }
+  };
 
-      // Successful Timed switch: clear pending (they're now on the inverter).
-      if (modeToCategory(mode) === 'timed' && hasPending) {
-        clearPendingDischargeSlots();
-      }
+  const handleTimedExportToggle = async () => {
+    const enabled = !timedExportEnabled;
+    setTimedExportSaving(true);
+    try {
+      await apiPost('/api/control/timed-export', { enabled });
+    } finally {
+      setTimedExportSaving(false);
+    }
+  };
 
-      // Successful Eco/Pause/Export Paused switch with a captured backup:
-      // stage the captured slots as pending edits so the Eco-mode UI shows
-      // them. Only overwrites pending if pending is empty (the user is not
-      // mid-edit) — pending wins over a stale backup.
-      const wentEcoLike =
-        mode === 'eco' || mode === 'eco_paused' || mode === 'export_paused';
-      const staged = stageBackupAsPending(
-        wentEcoLike ? response.discharge_slots_backup : undefined,
-        hasPending ? pendingDischargeSlots : {},
-      );
-      if (staged) {
-        setPendingDischargeSlots(staged);
-      }
-    } catch (e) {
-      modeAction.markError((e as Error).message);
-      setRequestedMode(null);
+  const handleTimedDischargeToggle = async () => {
+    const enabled = !timedDischargeEnabled;
+    setTimedDischargeSaving(true);
+    setTimedDischargeOverride(enabled);
+    try {
+      await apiPost('/api/control/timed-discharge', {
+        enabled,
+        start_hour: timedDischargeSlot.start_hour,
+        start_minute: timedDischargeSlot.start_minute,
+        end_hour: timedDischargeSlot.end_hour,
+        end_minute: timedDischargeSlot.end_minute,
+      });
+    } catch {
+      setTimedDischargeOverride(null);
+    } finally {
+      setTimedDischargeSaving(false);
     }
   };
 
   const handleSlotSave = async (index: number, slot: ScheduleSlot, path: string) => {
-    const isDischarge = path === '/api/control/discharge-slot';
-
-    // In Eco mode, hold discharge slot edits locally — don't write to inverter.
-    if (isDischarge && !isTimedMode) {
-      const next = { ...pendingDischargeSlots, [index]: slot };
-      setPendingDischargeSlots(next);
+    if (path === '/api/control/timed-discharge') {
+      setTimedDischargeOverride(slot.enabled);
+      await apiPost(path, {
+        enabled: slot.enabled,
+        start_hour: slot.start_hour,
+        start_minute: slot.start_minute,
+        end_hour: slot.end_hour,
+        end_minute: slot.end_minute,
+      });
       return;
     }
 
@@ -2030,7 +2012,7 @@ export default function ControlPage() {
       </section>
 
 
-      {/* Section 2: Battery Mode */}
+      {/* Section 2: Independent battery mechanisms */}
       <section className="space-y-3">
         <div className="flex items-center gap-3">
           <h2 className="text-text-primary font-semibold text-lg">Battery Mode</h2>
@@ -2040,77 +2022,74 @@ export default function ControlPage() {
               Cosy Charging
             </span>
           )}
-          <div className="flex rounded-lg border border-bg-elevated overflow-hidden">
-            {([
-              { key: 'eco' as ModeCategory, label: 'Eco' },
-              { key: 'timed' as ModeCategory, label: 'Timed' },
-            ] as const).map(({ key, label }) => (
-              <button
-                key={key}
-                onClick={() => {
-                  if (key === 'eco') handleModeChange('eco');
-                  else if (hasAnyDischargeSlot) handleModeChange('timed_demand');
-                }}
-                disabled={key === 'timed' && !hasAnyDischargeSlot}
-                title={key === 'timed' && !hasAnyDischargeSlot ? 'Configure at least one discharge slot before switching to Timed mode' : undefined}
-                className={`px-4 py-1.5 text-xs font-medium transition flex items-center gap-1.5 ${key === 'timed' && !hasAnyDischargeSlot
-                    ? 'text-text-secondary/40 cursor-not-allowed'
-                    : modeToCategory(effectiveMode) === key
-                      ? 'bg-battery/20 text-battery'
-                      : 'text-text-secondary hover:bg-bg-surface'
-                  }`}
-              >
-                {modeAction.loading && modeToCategory(requestedMode ?? currentMode) === key && (
-                  <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
-                )}
-                {label}
-              </button>
-            ))}
-          </div>
         </div>
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+          <button
+            type="button"
+            onClick={handleEcoToggle}
+            disabled={ecoSaving}
+            aria-pressed={ecoEnabled}
+            className={`px-3 py-3 rounded-lg border text-xs font-medium transition flex flex-col items-start gap-1 ${ecoEnabled
+                ? 'bg-battery/20 border-battery text-battery'
+                : 'bg-bg-surface border-transparent hover:border-battery/40 text-text-secondary'
+              } disabled:opacity-50`}
+          >
+            <span className="flex items-center justify-center gap-2 w-full text-sm">
+              {ecoSaving && <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />}
+              <b>Eco</b>
+            </span>
+            <span className="text-[11px] text-text-secondary">Battery Covers Home Demand</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleTimedChargeToggle}
+            disabled={timedChargeSaving}
+            aria-pressed={timedChargeEnabled}
+            className={`px-3 py-3 rounded-lg border text-xs font-medium transition flex flex-col items-start gap-1 ${timedChargeEnabled
+                ? 'bg-battery/20 border-battery text-battery'
+                : 'bg-bg-surface border-transparent hover:border-battery/40 text-text-secondary'
+              } disabled:opacity-50`}
+          >
+            <span className="flex items-center justify-center gap-2 w-full text-sm">
+              {timedChargeSaving && <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />}
+              <b>Timed Charge</b>
+            </span>
+            <span className="text-[11px] text-text-secondary">Performs Charge During Specified Time(s)</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleTimedDischargeToggle}
+            disabled={timedDischargeSaving}
+            aria-pressed={timedDischargeEnabled}
+            className={`px-3 py-3 rounded-lg border text-xs font-medium transition flex flex-col items-start gap-1 ${timedDischargeEnabled
+                ? 'bg-battery/20 border-battery text-battery'
+                : 'bg-bg-surface border-transparent hover:border-battery/40 text-text-secondary'
+              } disabled:opacity-50`}
+          >
+            <span className="flex items-center justify-center gap-2 w-full text-sm">
+              {timedDischargeSaving && <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />}
+              <b>Timed Discharge</b>
+            </span>
+            <span className="text-[11px] text-text-secondary">Only Allow Discharge During Specified Time</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleTimedExportToggle}
+            disabled={timedExportSaving}
+            aria-pressed={timedExportEnabled}
+            className={`px-3 py-3 rounded-lg border text-xs font-medium transition flex flex-col items-start gap-1 ${timedExportEnabled
+                ? 'bg-battery/20 border-battery text-battery'
+                : 'bg-bg-surface border-transparent hover:border-battery/40 text-text-secondary'
+              } disabled:opacity-50`}
+          >
+            <span className="flex items-center justify-center gap-2 w-full text-sm">
+              {timedExportSaving && <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />}
+              <b>Timed Export</b>
+            </span>
+            <span className="text-[11px] text-text-secondary">Forces Battery Export During Specified Time(s)</span>
+          </button>
 
-        {/* Sub-mode buttons */}
-        <div className="grid grid-cols-2 gap-2">
-          {(modeToCategory(effectiveMode) === 'eco' ? ECO_MODES : TIMED_MODES).map(({ key, label, tooltip }) => {
-            // issue #156: timed_export is its own mode, not an alias for
-            // timed_demand. HR(27) is the sole register separating them
-            // (1 = match demand / discharge to home, 0 = max power / export
-            // surplus), so they must render and post as distinct modes.
-            const isActive = effectiveMode === key;
-            return (
-              <button
-                key={key}
-                title={tooltip}
-                onClick={() => handleModeChange(key)}
-                disabled={modeAction.loading}
-                className={`px-3 py-3 rounded-lg border text-xs font-medium transition w-full flex items-center justify-center gap-2 ${isActive
-                    ? 'bg-battery/20 border-battery text-battery'
-                    : 'bg-bg-surface border-transparent hover:border-battery/40 hover:bg-bg-bg-elevated text-text-secondary'
-                  } disabled:opacity-50`}
-              >
-                {modeAction.loading && requestedMode === key && (
-                  <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
-                )}
-                {label}
-              </button>
-            );
-          })}
         </div>
-        {modeAction.loading && (
-          <p className="text-battery text-sm flex items-center gap-1.5">
-            <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
-            Sending command…
-          </p>
-        )}
-        {requestedMode && !modeAction.loading && (
-          <p className="text-amber-400 text-sm flex items-center gap-1.5">
-            <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
-            Settings are being applied — this may take up to 10 seconds
-          </p>
-        )}
-        {modeAction.error && (
-          <p className="text-red-400 text-sm">{modeAction.error}</p>
-        )}
       </section>
 
       {/* Section 3: Charging Mode */}
@@ -2122,8 +2101,8 @@ export default function ControlPage() {
           <h2 className="text-text-primary font-semibold">Charge/Discharge Schedules</h2>
           <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm text-text-primary">
             <div className="font-semibold mb-1">Schedules are hidden for this inverter model</div>
-            This three-phase/HV inverter uses a different schedule register map
-            (HR 1113-1121). Reading real-time data is supported,GivEnergy Cloud
+            This three-phase/HV inverter uses a different schedule register map.
+            Reading real-time data is supported,GivEnergy Cloud
             editing is disabled until those registers are implemented safely.
           </div>
         </section>
@@ -2139,17 +2118,14 @@ export default function ControlPage() {
                 <div key="slot-warn-charge" className="space-y-2">
                   {showSlotOrderingWarning && (
                     <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-text-primary">
-                      <div className="font-semibold mb-1">
-                        Slot labels differ from the GivEnergy cloud
-                      </div>
-                      Our app uses the canonical Modbus register layout from the{' '}
-                      <code>givenergy-modbus</code> reference library, which labels
-                      charge slots in the opposite order to the GivEnergy cloud UI:
-                      our <strong>Slot 1</strong> is the cloud&apos;s <strong>Slot 2</strong>{' '}
-                      (registers HR 94-95) and vice versa (registers HR 31-32). The
-                      underlying schedule data is identical — only the labels differ.
-                      If your schedule appears in a different slot than you expected,
-                      this is why.
+                        <div className="font-semibold mb-1">
+                          Slot labels differ from the GivEnergy cloud
+                        </div>
+                        This app uses the canonical Modbus register layout from the{' '}
+                        <code>givenergy-modbus</code> reference library, which labels
+                        discharge slots in the opposite order to the GivEnergy cloud UI:
+                        our <strong>Slot 1</strong> is the cloud&apos;s <strong>Slot 2</strong>{' '}
+                        and vice versa. The underlying schedule data is identical — only the labels differ.
                     </div>
                   )}
                   {isLegacyGen3Fw && (
@@ -2158,7 +2134,7 @@ export default function ControlPage() {
                         Older Gen3 firmware detected (ARM FW {snapshot?.firmware_version})
                       </div>
                       Slot 2 and beyond (and per-slot target SOCs) come from extended
-                      registers (HR 240-299) that your inverter firmware does not fully
+                      registers that your inverter firmware does not fully
                       support. Values shown here may be stale or incorrect. GivEnergy&apos;s
                       own cloud UI generally hides these slots on this firmware. Updating
                       your inverter firmware to version 303 or later (if available) will
@@ -2181,20 +2157,28 @@ export default function ControlPage() {
         </div>
       </section>}
 
-      {/* Section 5: Discharge Schedule — always visible.
-          In Eco mode, slot edits are held locally until the user switches to Timed.
-          The Timed button is locked until at least one discharge slot is configured. */}
+      {/* Section 5: Timed Discharge — portal-style pause-discharge inverse window. */}
+      {!cosyEnabled && chargeMode !== 'agile' && !schedulesUnsupported && (
+        <section className="space-y-3">
+          <h2 className="text-text-primary font-semibold text-lg">Timed Discharge</h2>
+          <p className="text-text-secondary/60 text-xs">Please Allow upto 10 Seconds for Changes to Save</p>
+          <ScheduleSlotEditor
+            key={`timed-discharge-${timedDischargeSlot.enabled}-${timedDischargeSlot.start_hour}:${timedDischargeSlot.start_minute}-${timedDischargeSlot.end_hour}:${timedDischargeSlot.end_minute}`}
+            slotIndex={0}
+            slot={timedDischargeSlot}
+            onSave={handleSlotSave}
+            showTargetSoc={false}
+            apiPath="/api/control/timed-discharge"
+            masterArmed={timedDischargeEnabled}
+          />
+        </section>
+      )}
+
+      {/* Section 6: Timed Export / DC Discharge Schedule — always visible and saved directly. */}
       {!cosyEnabled && chargeMode !== 'agile' && !schedulesUnsupported && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold text-lg">Discharge Schedule</h2>
-          {!isTimedMode && (
-            <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-text-primary">
-              Configure your discharge slots here, then switch to <strong>Timed</strong> mode to activate them. Slots are saved only to this device/client until you switch.
-            </div>
-          )}
-          {isTimedMode && (
-            <p className="text-text-secondary/60 text-xs">Please Allow upto 10 Seconds for Changes to Save</p>
-          )}
+          <p className="text-text-secondary/60 text-xs">Please Allow upto 10 Seconds for Changes to Save</p>
           <div className="space-y-3">
             {dischargeSlots.map((slot, i) => (
               <>
@@ -2205,12 +2189,11 @@ export default function ControlPage() {
                         <div className="font-semibold mb-1">
                           Slot labels differ from the GivEnergy cloud
                         </div>
-                        Our app uses the canonical Modbus register layout from the{' '}
+                        This app uses the canonical Modbus register layout from the{' '}
                         <code>givenergy-modbus</code> reference library, which labels
                         discharge slots in the opposite order to the GivEnergy cloud UI:
                         our <strong>Slot 1</strong> is the cloud&apos;s <strong>Slot 2</strong>{' '}
-                        (registers HR 56-57) and vice versa (registers HR 44-45). The
-                        underlying schedule data is identical — only the labels differ.
+                        and vice versa. The underlying schedule data is identical — only the labels differ.
                       </div>
                     )}
                     {isLegacyGen3Fw && (
@@ -2218,7 +2201,7 @@ export default function ControlPage() {
                         <div className="font-semibold mb-1">
                           Older Gen3 firmware detected (ARM FW {snapshot?.firmware_version})
                         </div>
-                        Slot 2 and beyond come from extended registers (HR 240-299) that
+                        Slot 2 and beyond come from extended registers that
                         your inverter firmware does not fully support. Values shown here
                         may be stale or incorrect.
                       </div>

@@ -72,10 +72,12 @@ test.describe('Control Page - Battery Mode', () => {
     await expect(page.locator('text=Battery Mode')).toBeVisible({ timeout: 15_000 });
   });
 
-  test('should show Eco and Timed toggle buttons', async ({ page }) => {
+  test('should show all independent battery mechanism controls', async ({ page }) => {
     await page.goto('/#/control');
-    await expect(page.locator('text=/Eco/').first()).toBeVisible({ timeout: 15_000 });
-    await expect(page.locator('text=/Timed/').first()).toBeVisible();
+    await expect(page.getByRole('button', { name: /Eco/ })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText('Timed Charge').first()).toBeVisible();
+    await expect(page.getByText('Timed Export').first()).toBeVisible();
+    await expect(page.getByText('Timed Discharge').first()).toBeVisible();
   });
 
   test('should switch to Eco mode via API', async ({ baseUrl }) => {

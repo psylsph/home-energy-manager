@@ -802,6 +802,7 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             // Issue #131: surface the import-side standing charge so the
             // Settings page can hydrate its p/day input on load.
             "import_standing_charge_p_per_day": settings.import_standing_charge_p_per_day,
+            "full_power_discharge_in_eco_mode": settings.full_power_discharge_in_eco_mode,
             "import_tariff_config": settings.import_tariff_config,
             "export_tariff_config": settings.export_tariff_config,
             "hidden_panels": settings.hidden_panels,
@@ -903,6 +904,12 @@ pub async fn update_settings(
     // let a UI bug silently invert the cost graph.
     if let Some(sc) = body.get("import_standing_charge_p_per_day").and_then(|v| v.as_f64()) {
         persist.import_standing_charge_p_per_day = sc.max(0.0);
+    }
+    if let Some(enabled) = body
+        .get("full_power_discharge_in_eco_mode")
+        .and_then(|v| v.as_bool())
+    {
+        persist.full_power_discharge_in_eco_mode = enabled;
     }
     if let Some(ref cfg) = import_tariff_config {
         persist.import_tariff_config = Some(cfg.clone());
@@ -1060,6 +1067,12 @@ fn settings_log_fields(
         out.push(format!(
             "import_standing_charge={}p/day",
             persist.import_standing_charge_p_per_day
+        ));
+    }
+    if is_present("full_power_discharge_in_eco_mode") {
+        out.push(format!(
+            "full_power_discharge_in_eco_mode={}",
+            persist.full_power_discharge_in_eco_mode
         ));
     }
     if is_present("import_tariff_config") {
@@ -1375,6 +1388,160 @@ pub async fn set_mode(
         }
         Err(e) => error_response(&format!("Validation error: {}", e)),
     }
+}
+
+/// POST /api/control/eco — toggle Eco / self-consumption (HR27) independently.
+///
+/// Body: `{ "enabled": true }` writes HR27=1; false writes HR27=0.
+pub async fn set_eco(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<Value>) {
+    let enabled = body["enabled"].as_bool().unwrap_or(true);
+    let cmd = ControlCommand::SetBatteryPowerMode {
+        mode: if enabled { 1 } else { 0 },
+    };
+    match cmd.encode() {
+        Ok(writes) => {
+            tracing::info!("SetEco encoded: {:?}", writes);
+            queue_writes(&state, writes).await;
+            ok_response(if enabled { "Eco enabled" } else { "Eco disabled" })
+        }
+        Err(e) => error_response(&format!("Validation error: {}", e)),
+    }
+}
+
+/// POST /api/control/timed-charge — toggle scheduled charge (HR96)
+/// independently of Eco / export / pause controls.
+///
+/// Body: `{ "enabled": true }`.
+pub async fn set_timed_charge(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<Value>) {
+    let enabled = body["enabled"].as_bool().unwrap_or(true);
+    let cmd = ControlCommand::SetEnableCharge { enabled };
+    match cmd.encode() {
+        Ok(writes) => {
+            tracing::info!("SetTimedCharge encoded: {:?}", writes);
+            queue_writes(&state, writes).await;
+            ok_response(if enabled {
+                "Timed Charge enabled"
+            } else {
+                "Timed Charge disabled"
+            })
+        }
+        Err(e) => error_response(&format!("Validation error: {}", e)),
+    }
+}
+
+/// POST /api/control/timed-export — toggle scheduled DC export (HR59)
+/// independently of the Eco switch.
+///
+/// Body: `{ "enabled": true }`. When enabling, HR27 is written according to
+/// the user-configured `full_power_discharge_in_eco_mode` capability override:
+/// flag on => leave Eco enabled (HR27=1), flag off => legacy safe export mode
+/// (HR27=0). Disabling only clears HR59 so Eco remains whatever the Eco toggle
+/// says.
+pub async fn set_timed_export(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<Value>) {
+    let enabled = body["enabled"].as_bool().unwrap_or(true);
+    let mut writes = Vec::new();
+
+    if enabled {
+        let keep_eco = crate::settings::Settings::load().full_power_discharge_in_eco_mode;
+        let power_mode = if keep_eco { 1 } else { 0 };
+        for cmd in [
+            ControlCommand::SetBatteryPowerMode { mode: power_mode },
+            ControlCommand::SetEnableDischarge { enabled: true },
+        ] {
+            match cmd.encode() {
+                Ok(mut w) => writes.append(&mut w),
+                Err(e) => return error_response(&format!("Validation error: {}", e)),
+            }
+        }
+        if let Some(soc) = body["soc_reserve"].as_u64() {
+            match (ControlCommand::SetBatterySocReserve { reserve: soc as u16 }).encode() {
+                Ok(mut w) => writes.append(&mut w),
+                Err(e) => return error_response(&format!("Validation error: {}", e)),
+            }
+        }
+    } else {
+        match (ControlCommand::SetEnableDischarge { enabled: false }).encode() {
+            Ok(mut w) => writes.append(&mut w),
+            Err(e) => return error_response(&format!("Validation error: {}", e)),
+        }
+    }
+
+    tracing::info!("SetTimedExport encoded: {:?}", writes);
+    queue_writes(&state, writes).await;
+    ok_response(if enabled {
+        "Timed Export enabled"
+    } else {
+        "Timed Export disabled"
+    })
+}
+
+/// POST /api/control/timed-discharge — configure/toggle the portal-style
+/// single-slot Timed Discharge mechanism.
+///
+/// GivEnergy Cloud implements this with the battery pause registers: HR318=2
+/// (`Pause Discharge`) and HR319/320 set to the inverse of the desired demand
+/// window. For a user slot 03:00-04:00 we write a pause window 04:00-03:00,
+/// so the battery only covers demand inside the visible slot.
+pub async fn set_timed_discharge(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<Value>) {
+    let enabled = body["enabled"].as_bool().unwrap_or(true);
+    let mut writes = Vec::new();
+
+    if enabled {
+        let start_hour = body["start_hour"].as_u64().unwrap_or(0) as u8;
+        let start_minute = body["start_minute"].as_u64().unwrap_or(0) as u8;
+        let end_hour = body["end_hour"].as_u64().unwrap_or(0) as u8;
+        let end_minute = body["end_minute"].as_u64().unwrap_or(0) as u8;
+        if start_hour > 23 || end_hour > 23 {
+            return error_response("Hour must be 0-23");
+        }
+        if start_minute > 59 || end_minute > 59 {
+            return error_response("Minute must be 0-59");
+        }
+        let pause_start = encode_hhmm(end_hour, end_minute);
+        let pause_end = encode_hhmm(start_hour, start_minute);
+        for cmd in [
+            ControlCommand::SetPauseSlot {
+                start: pause_start,
+                end: pause_end,
+            },
+            ControlCommand::SetPauseMode { mode: 2 },
+        ] {
+            match cmd.encode() {
+                Ok(mut w) => writes.append(&mut w),
+                Err(e) => return error_response(&format!("Validation error: {}", e)),
+            }
+        }
+    } else {
+        for cmd in [
+            ControlCommand::SetPauseMode { mode: 0 },
+            ControlCommand::SetPauseSlot { start: 0, end: 0 },
+        ] {
+            match cmd.encode() {
+                Ok(mut w) => writes.append(&mut w),
+                Err(e) => return error_response(&format!("Validation error: {}", e)),
+            }
+        }
+    }
+
+    tracing::info!("SetTimedDischarge encoded: {:?}", writes);
+    queue_writes(&state, writes).await;
+    ok_response(if enabled {
+        "Timed Discharge enabled"
+    } else {
+        "Timed Discharge disabled"
+    })
 }
 
 /// POST /api/control/charge-slot — configure a charge schedule slot.
@@ -4585,6 +4752,159 @@ mod tests {
         .await;
     }
 
+    // -- Split control register contracts (issue #131 follow-up / portal parity) ----
+
+    #[tokio::test]
+    async fn set_eco_toggles_hr27_only() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_BATTERY_POWER_MODE;
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            let body = serde_json::json!({ "enabled": true });
+            let _ = set_eco(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert_eq!(writes.len(), 1);
+            assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
+            assert_eq!(writes[0].value, 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn timed_charge_toggle_writes_hr96_only() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_ENABLE_CHARGE;
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            let body = serde_json::json!({ "enabled": true });
+            let _ = set_timed_charge(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert_eq!(writes.len(), 1);
+            assert_eq!(writes[0].address, HR_ENABLE_CHARGE);
+            assert_eq!(writes[0].value, 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn timed_export_legacy_setting_disables_eco_for_full_export() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{HR_BATTERY_POWER_MODE, HR_ENABLE_DISCHARGE};
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            let body = serde_json::json!({ "enabled": true });
+            let _ = set_timed_export(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_BATTERY_POWER_MODE)
+                    .map(|w| w.value),
+                Some(0)
+            );
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_ENABLE_DISCHARGE)
+                    .map(|w| w.value),
+                Some(1)
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn timed_export_capability_setting_leaves_eco_enabled() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{HR_BATTERY_POWER_MODE, HR_ENABLE_DISCHARGE};
+            let settings = crate::settings::Settings {
+                full_power_discharge_in_eco_mode: true,
+                ..Default::default()
+            };
+            settings.save().expect("save capability setting");
+
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            let body = serde_json::json!({ "enabled": true });
+            let _ = set_timed_export(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_BATTERY_POWER_MODE)
+                    .map(|w| w.value),
+                Some(1)
+            );
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_ENABLE_DISCHARGE)
+                    .map(|w| w.value),
+                Some(1)
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn timed_export_disable_only_clears_hr59() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_ENABLE_DISCHARGE;
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            let body = serde_json::json!({ "enabled": false });
+            let _ = set_timed_export(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert_eq!(writes.len(), 1);
+            assert_eq!(writes[0].address, HR_ENABLE_DISCHARGE);
+            assert_eq!(writes[0].value, 0);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn timed_discharge_writes_pause_discharge_inverse_window() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_BATTERY_PAUSE_MODE, HR_BATTERY_PAUSE_SLOT_1_END,
+                HR_BATTERY_PAUSE_SLOT_1_START,
+            };
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            let body = serde_json::json!({
+                "enabled": true,
+                "start_hour": 3,
+                "start_minute": 0,
+                "end_hour": 4,
+                "end_minute": 0,
+            });
+            let _ = set_timed_discharge(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_BATTERY_PAUSE_SLOT_1_START)
+                    .map(|w| w.value),
+                Some(400)
+            );
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_BATTERY_PAUSE_SLOT_1_END)
+                    .map(|w| w.value),
+                Some(300)
+            );
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_BATTERY_PAUSE_MODE)
+                    .map(|w| w.value),
+                Some(2)
+            );
+        })
+        .await;
+    }
+
     // -- set_mode register contract (issue #156) --------------------------
     //
     // The frontend fix for issue #156 will surface Timed Export as its own
@@ -7650,6 +7970,28 @@ mod tests {
             assert_eq!(
                 get_body["data"]["import_standing_charge_p_per_day"],
                 serde_json::json!(54.86)
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_settings_persists_full_power_discharge_in_eco_mode() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "full_power_discharge_in_eco_mode": true,
+            });
+            let (status, _) = update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let saved = crate::settings::Settings::load();
+            assert!(saved.full_power_discharge_in_eco_mode);
+
+            let (_, get_body) = get_settings(State(state)).await;
+            assert_eq!(
+                get_body["data"]["full_power_discharge_in_eco_mode"],
+                serde_json::json!(true)
             );
         })
         .await;

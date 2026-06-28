@@ -665,6 +665,15 @@ pub struct Settings {
     #[serde(default)]
     pub import_standing_charge_p_per_day: f64,
 
+    /// Whether this inverter can perform full-power scheduled discharge while
+    /// Eco / self-consumption (HR27=1) remains enabled. GivEnergy exposes this
+    /// as the cloud-only `full-power-discharge-in-eco-mode` flag; there is no
+    /// local Modbus register for it, so HEM stores an explicit user override.
+    /// Defaults to false for backward-compatible safe Timed Export behaviour
+    /// (disable Eco before arming HR59).
+    #[serde(default)]
+    pub full_power_discharge_in_eco_mode: bool,
+
     /// Auto winter mode enabled.
     #[serde(default)]
     pub auto_winter_enabled: bool,
@@ -1006,6 +1015,7 @@ impl Default for Settings {
             // charge and we don't want to silently start adding one to the
             // History cost graph for users who haven't configured it.
             import_standing_charge_p_per_day: 0.0,
+            full_power_discharge_in_eco_mode: false,
             auto_winter_enabled: false,
             auto_winter_cold_threshold: default_aw_cold_threshold(),
             auto_winter_recovery_threshold: default_aw_recovery_threshold(),
@@ -1206,6 +1216,7 @@ mod tests {
             import_tariff: 0.30,
             export_tariff: 0.15,
             import_standing_charge_p_per_day: 54.86,
+            full_power_discharge_in_eco_mode: true,
             auto_winter_enabled: true,
             auto_winter_cold_threshold: 5.0,
             auto_winter_recovery_threshold: 10.0,
@@ -1524,6 +1535,7 @@ mod tests {
             import_tariff: 0.285,
             export_tariff: 0.15,
             import_standing_charge_p_per_day: 0.0,
+            full_power_discharge_in_eco_mode: false,
             auto_winter_enabled: false,
             auto_winter_cold_threshold: 8.0,
             auto_winter_recovery_threshold: 12.0,

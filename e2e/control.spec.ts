@@ -365,6 +365,81 @@ test.describe('API Control Endpoints', () => {
     expect(findWrite(writes, 110)!.value).toBe(4);  // SOC reserve
   });
 
+  test('POST /api/control/timed-export defaults to legacy HR27=0 export mode', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await clearWrites(drainModbusWrites);
+
+    const resp = await fetch(`${baseUrl}/api/control/timed-export`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: true }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 2, 15_000);
+    expect(findWrite(writes, 27)!.value).toBe(0);
+    expect(findWrite(writes, 59)!.value).toBe(1);
+  });
+
+  test('POST /api/control/timed-export can leave Eco enabled when compatibility setting is on', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await clearWrites(drainModbusWrites);
+    await fetch(`${baseUrl}/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ full_power_discharge_in_eco_mode: true }),
+    });
+
+    const resp = await fetch(`${baseUrl}/api/control/timed-export`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: true }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 2, 15_000);
+    expect(findWrite(writes, 27)!.value).toBe(1);
+    expect(findWrite(writes, 59)!.value).toBe(1);
+
+    await fetch(`${baseUrl}/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ full_power_discharge_in_eco_mode: false }),
+    });
+  });
+
+  test('POST /api/control/timed-discharge writes HR318 pause-discharge inverse window', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await clearWrites(drainModbusWrites);
+
+    const resp = await fetch(`${baseUrl}/api/control/timed-discharge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        enabled: true,
+        start_hour: 3,
+        start_minute: 0,
+        end_hour: 4,
+        end_minute: 0,
+      }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 3, 15_000);
+    expect(findWrite(writes, 319)!.value).toBe(400);
+    expect(findWrite(writes, 320)!.value).toBe(300);
+    expect(findWrite(writes, 318)!.value).toBe(2);
+  });
+
   test('POST /api/control/charge-slot sends correct writes', async ({
     baseUrl,
     drainModbusWrites,

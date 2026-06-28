@@ -406,7 +406,7 @@ impl DeviceType {
             Self::HybridHvGen3 | Self::AllInOneHybrid | Self::ThreePhase | Self::AioCommercial => {
                 EXTENDED_AND_THREE_PHASE_BLOCKS
             }
-            Self::AllInOne6kW | Self::AllInOne3_6kW | Self::AllInOne5kW => {
+            Self::AllInOne6kW | Self::AllInOne3_6kW | Self::AllInOne5kW | Self::Gen3Hybrid => {
                 EXTENDED_AND_AC_CONFIG_BLOCKS
             }
             dt if dt.supports_gen3_extended() => &[EXTENDED_SLOTS_BLOCK],
@@ -1479,6 +1479,21 @@ mod tests {
                 "{dt:?} should not poll HR1000-1079"
             );
         }
+    }
+
+    #[test]
+    fn gen3_hybrid_polls_ac_config_for_pause_discharge_registers() {
+        use crate::modbus::registers::{AC_CONFIG_BLOCK, EXTENDED_SLOTS_BLOCK};
+
+        let extras = DeviceType::Gen3Hybrid.extra_poll_blocks();
+        assert!(
+            extras.iter().any(|b| b.start == EXTENDED_SLOTS_BLOCK.start),
+            "Gen3 must still poll HR240-299 for extended schedule slots"
+        );
+        assert!(
+            extras.iter().any(|b| b.start == AC_CONFIG_BLOCK.start),
+            "Gen3 must poll HR300-359 so HR318/319/320 Timed Discharge state is visible"
+        );
     }
 
     #[test]

@@ -66,6 +66,8 @@ export interface InverterSnapshot {
   home_energy_today_kwh: number;
   battery_modules: BatteryModule[];
   battery_mode: 'unknown' | 'eco' | 'eco_paused' | 'timed_demand' | 'timed_export' | 'export_paused';
+  /** Raw Eco / self-consumption register HR27: 1 = Eco, 0 = export/max-power mode. */
+  battery_power_mode?: number;
   battery_reserve: number;
   charge_rate: number;
   discharge_rate: number;
@@ -111,6 +113,10 @@ export interface InverterSnapshot {
   supports_battery_calibration: boolean;
   ac_eps_enabled: boolean;
   ac_export_priority: number;
+  /** Battery pause mode HR318: 0 disabled, 1 pause charge, 2 pause discharge, 3 pause both. */
+  battery_pause_mode?: number;
+  /** Battery pause slot HR319/320. For Timed Discharge, HEM displays the inverse as the demand window. */
+  battery_pause_slot?: ScheduleSlot;
 
   // -- Gateway-specific (absent on every other device; optional for backward compat) --
   parallel_aio_count?: number;
@@ -196,6 +202,8 @@ export interface PollSettings {
    * didn't carry the field. Issue #131.
    */
   import_standing_charge_p_per_day?: number;
+  /** User override for the cloud-only `full-power-discharge-in-eco-mode` inverter flag. */
+  full_power_discharge_in_eco_mode?: boolean;
   import_tariff_config: TariffConfig | null;
   export_tariff_config: TariffConfig | null;
   hidden_panels: string[];
