@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.47.0] - 2026-06-28
+
+### Added
+
+- **Timed Discharge is now available on Gen3 Hybrid inverters running ARM firmware 312 or newer.** The pause-discharge registers (HR 318-320) behind the Timed Discharge feature were unreachable on Gen3 Hybrid because the full HR 300-359 AC-config block times out on that family; the app now reads them with a targeted 3-register probe instead. The toggle and schedule section appear only when the inverter reports ARM firmware 312 or above, matching the reporter's observed behaviour.
+
+- **The Inverter page battery summary now shows the four independent mechanisms side by side.** Instead of a single derived label like "Timed Demand", the Battery section lists Eco, Timed Charge, Timed Export and Timed Discharge with off / armed / active states, using the same battery-accent dots as the Control page buttons. This fixes the mislabel where an inverter running Eco plus full-power Timed Export showed as "Timed Demand".
+
+### Fixed
+
+- **Zero-length schedule slots (00:00–00:00) no longer read as an always-active window.** They are now treated as disabled, which keeps the new "armed · ... now" suffixes from lighting up when a slot is effectively empty.
+
 ## [0.46.2] - 2026-06-28
 
 ### Fixed

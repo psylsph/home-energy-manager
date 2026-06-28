@@ -372,6 +372,16 @@ describe('deriveBatteryModeRows', () => {
     expect(r.state).toBe('armed');
   });
 
+  it('treats a missing battery_power_mode as Eco off', () => {
+    const rows = deriveBatteryModeRows(makeSnapshot({ battery_power_mode: undefined }));
+    expect(findRow(rows, 'eco').state).toBe('off');
+  });
+
+  it('treats a missing battery_pause_mode as Timed Discharge off', () => {
+    const rows = deriveBatteryModeRows(makeSnapshot({ battery_pause_mode: undefined }));
+    expect(findRow(rows, 'timed_discharge').state).toBe('off');
+  });
+
   it('uses battery_state as the authoritative power-direction signal', () => {
     // battery_power sign is ignored when battery_state disagrees.
     const rows = deriveBatteryModeRows(
