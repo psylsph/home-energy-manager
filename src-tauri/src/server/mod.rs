@@ -46,6 +46,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             get(api::get_settings).post(api::update_settings),
         )
         .route("/api/history", get(api::get_history))
+        // Cost totals for the Power page Consumption Report (issue #131).
+        // Accepts the same range/offset/explicit-window params as
+        // /api/history but returns a flat JSON object with per-direction
+        // cost totals + standing-charge breakdown.
+        .route("/api/report", get(api::get_report))
         // Control endpoints
         .route("/api/control/mode", post(api::set_mode))
         .route("/api/control/charge-slot", post(api::set_charge_slot))

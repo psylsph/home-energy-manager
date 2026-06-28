@@ -799,6 +799,9 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "http_port": settings.http_port,
             "import_tariff": settings.import_tariff,
             "export_tariff": settings.export_tariff,
+            // Issue #131: surface the import-side standing charge so the
+            // Settings page can hydrate its p/day input on load.
+            "import_standing_charge_p_per_day": settings.import_standing_charge_p_per_day,
             "import_tariff_config": settings.import_tariff_config,
             "export_tariff_config": settings.export_tariff_config,
             "hidden_panels": settings.hidden_panels,
@@ -894,6 +897,13 @@ pub async fn update_settings(
     persist.auto_connect = true;
     persist.import_tariff = import_tariff;
     persist.export_tariff = export_tariff;
+    // Issue #131: standing charge is pence/day; we accept any non-negative
+    // number. Negative values are clamped to 0 — a standing charge that
+    // *credits* the customer doesn't exist in any real UK tariff and would
+    // let a UI bug silently invert the cost graph.
+    if let Some(sc) = body.get("import_standing_charge_p_per_day").and_then(|v| v.as_f64()) {
+        persist.import_standing_charge_p_per_day = sc.max(0.0);
+    }
     if let Some(ref cfg) = import_tariff_config {
         persist.import_tariff_config = Some(cfg.clone());
     }
@@ -1045,6 +1055,12 @@ fn settings_log_fields(
     }
     if is_present("export_tariff") {
         out.push(format!("export_tariff={}", persist.export_tariff));
+    }
+    if is_present("import_standing_charge_p_per_day") {
+        out.push(format!(
+            "import_standing_charge={}p/day",
+            persist.import_standing_charge_p_per_day
+        ));
     }
     if is_present("import_tariff_config") {
         let slots = persist
@@ -2279,6 +2295,8 @@ pub async fn get_history(
 
     // Resolve tariff configs only when a cost field is requested, falling back
     // to a flat single-slot config built from the legacy scalar rate.
+    // Issue #131: also carry the import-side standing charge (pence/day)
+    // so the cost series includes the daily fixed component.
     let cost_cfgs = if want_import_cost || want_export_income {
         let s = crate::settings::Settings::load();
         let import_cfg = s
@@ -2289,7 +2307,13 @@ pub async fn get_history(
             .export_tariff_config
             .clone()
             .unwrap_or_else(|| crate::settings::TariffConfig::flat(s.export_tariff));
-        Some((import_cfg, export_cfg, s.import_tariff, s.export_tariff))
+        Some((
+            import_cfg,
+            export_cfg,
+            s.import_tariff,
+            s.export_tariff,
+            s.import_standing_charge_p_per_day,
+        ))
     } else {
         None
     };
@@ -2323,7 +2347,14 @@ pub async fn get_history(
                         )?
                     };
 
-                    if let Some((import_cfg, export_cfg, flat_import, flat_export)) = &cost_cfgs {
+                    if let Some((
+                        import_cfg,
+                        export_cfg,
+                        flat_import,
+                        flat_export,
+                        import_standing_charge_p_per_day,
+                    )) = &cost_cfgs
+                    {
                         if want_import_cost {
                             let series = db.query_cost_series(
                                 &window,
@@ -2331,6 +2362,12 @@ pub async fn get_history(
                                 "today_import_kwh",
                                 import_cfg,
                                 *flat_import,
+                                // Issue #131: include the daily standing
+                                // charge on the import cost series. Export
+                                // direction doesn't carry one (UK SEG has
+                                // no standing fee on exports), so it stays
+                                // at 0 on the export side.
+                                *import_standing_charge_p_per_day,
                             )?;
                             data.insert(
                                 crate::history::IMPORT_COST_FIELD.to_string(),
@@ -2344,6 +2381,9 @@ pub async fn get_history(
                                 "today_export_kwh",
                                 export_cfg,
                                 *flat_export,
+                                // Issue #131: no export-side standing charge
+                                // today (UI has no input for it).
+                                0.0,
                             )?;
                             data.insert(
                                 crate::history::EXPORT_INCOME_FIELD.to_string(),
@@ -2367,6 +2407,193 @@ pub async fn get_history(
             }
         }
         None => server_error("History database not available"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Consumption report cost endpoint (issue #131)
+//
+// The Power page's Consumption Report button needs per-window cost totals
+// matching the same range / offset the user is looking at in the graphs.
+// The cost is built server-side from the same `today_import_kwh` /
+// `today_export_kwh` counters and the configured tariffs the History page
+// uses, plus the standing charge applied once per local day covered by
+// the window (matching the per-day step pattern in the History cost
+// graph).
+// ---------------------------------------------------------------------------
+
+/// GET /api/report — cost totals for the Power page Consumption Report.
+///
+/// Query params mirror `/api/history`: `range`, `offset`, `rolling`,
+/// `start_ms`, `end_ms`. Returns a flat JSON object:
+///   `{ ok, import_cost_gbp, export_income_gbp, net_cost_gbp,
+///      standing_charge_gbp, days_in_range }`
+/// where every cost figure is the cumulative £ total over the queried
+/// window (per-kWh component + standing-charge step sum), and
+/// `days_in_range` is the count of distinct local calendar days the
+/// window touches (used by the frontend for the footnote line and for
+/// deriving the per-day average).
+pub async fn get_report(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HistoryQuery>,
+) -> (StatusCode, Json<Value>) {
+    let range_str = params.range.as_deref().unwrap_or("24h");
+    let offset = params.offset.unwrap_or(0);
+    let rolling = params.rolling.unwrap_or(false);
+
+    let (range_secs, bucket_secs) = match range_str {
+        "1h" => (3600, 30),
+        "6h" => (3600 * 6, 60),
+        "12h" => (3600 * 12, 120),
+        "24h" => (86400, 300),
+        "today" => (86400, 300),
+        "7d" => (86400 * 7, 1800),
+        "30d" => (86400 * 30, 7200),
+        "6m" => (86400 * 180, 43200),
+        "1y" => (86400 * 365, 86400),
+        "month" => (0, 3600),
+        _ => {
+            return error_response(
+                "Invalid range. Use: 1h, 6h, 12h, 24h, today, 7d, 30d, 6m, 1y, month",
+            )
+        }
+    };
+
+    let explicit_window: Option<(i64, i64)> =
+        if let (Some(start_ms), Some(end_ms)) = (params.start_ms, params.end_ms) {
+            if start_ms >= end_ms {
+                return error_response("Invalid report window: start_ms must be before end_ms");
+            }
+            Some((start_ms.div_euclid(1000), (end_ms + 999).div_euclid(1000)))
+        } else if rolling && range_str != "month" && range_str != "today" {
+            let end_ts = chrono::Utc::now().timestamp() - offset * range_secs;
+            Some((end_ts - range_secs, end_ts))
+        } else if range_str == "today" {
+            let now = chrono::Local::now();
+            let start_date = now.date_naive() - chrono::Duration::days(offset);
+            let start_local = start_date.and_hms_opt(0, 0, 0).unwrap();
+            let start_local_dt = chrono::Local
+                .from_local_datetime(&start_local)
+                .earliest()
+                .unwrap();
+            let end_date = start_date.succ_opt().unwrap();
+            let end_local = end_date.and_hms_opt(0, 0, 0).unwrap();
+            let end_ts = chrono::Local
+                .from_local_datetime(&end_local)
+                .earliest()
+                .unwrap()
+                .timestamp();
+            Some((start_local_dt.timestamp(), end_ts))
+        } else if range_str == "month" {
+            let now = chrono::Local::now();
+            let total_months = now.year() * 12 + (now.month() as i32) - 1 - offset as i32;
+            let target_year = total_months.div_euclid(12);
+            let target_month = (total_months.rem_euclid(12) + 1) as u32;
+            let start_local = chrono::NaiveDate::from_ymd_opt(target_year, target_month, 1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap();
+            let start_local_dt = chrono::Local
+                .from_local_datetime(&start_local)
+                .earliest()
+                .unwrap();
+            let (next_year, next_month) = if target_month == 12 {
+                (target_year + 1, 1u32)
+            } else {
+                (target_year, target_month + 1)
+            };
+            let end_local = chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap();
+            let end_local_dt = chrono::Local
+                .from_local_datetime(&end_local)
+                .earliest()
+                .unwrap();
+            Some((start_local_dt.timestamp(), end_local_dt.timestamp()))
+        } else {
+            None
+        };
+
+    let window = crate::history::HistoryWindow {
+        range_secs,
+        offset,
+        explicit_window,
+    };
+
+    let (start_ts, end_ts) = window.resolve();
+
+    let s = crate::settings::Settings::load();
+    let import_tariff = s
+        .import_tariff_config
+        .clone()
+        .unwrap_or_else(|| crate::settings::TariffConfig::flat(s.import_tariff));
+    let export_tariff = s
+        .export_tariff_config
+        .clone()
+        .unwrap_or_else(|| crate::settings::TariffConfig::flat(s.export_tariff));
+    let standing_charge_p_per_day = s.import_standing_charge_p_per_day.max(0.0);
+    let flat_import = s.import_tariff;
+    let flat_export = s.export_tariff;
+
+    let history_db = state.history.lock().await.clone();
+    let Some(db) = history_db else {
+        return server_error("History database not available");
+    };
+
+    // Run the cost integration on a blocking thread — same SQLite mutex
+    // pattern as `/api/history`. We need both the import and export cost
+    // series; the standing charge is the same on both (UK bills charge
+    // standing fees on the import side only, never on exports).
+    let result = tokio::task::spawn_blocking(move || {
+        let import_series = db.query_cost_series(
+            &window,
+            bucket_secs,
+            "today_import_kwh",
+            &import_tariff,
+            flat_import,
+            standing_charge_p_per_day,
+        )?;
+        let export_series = db.query_cost_series(
+            &window,
+            bucket_secs,
+            "today_export_kwh",
+            &export_tariff,
+            flat_export,
+            // Issue #131: no export-side standing charge today (UI has no
+            // input for it).
+            0.0,
+        )?;
+        let import_cost_gbp = import_series
+            .last()
+            .map(|p| p.v)
+            .unwrap_or(standing_charge_p_per_day / 100.0);
+        let export_income_gbp = export_series.last().map(|p| p.v).unwrap_or(0.0);
+        // The standing-charge component of the import total is the
+        // number of distinct local days the window covers × per-day
+        // amount. The per-kWh component is the rest. We surface both
+        // separately so the frontend can show a clear "kWh + standing
+        // charge = total" breakdown in the report footnote.
+        let days_in_range = crate::history::days_in_local_window(start_ts, end_ts);
+        let standing_charge_gbp =
+            days_in_range as f64 * standing_charge_p_per_day / 100.0;
+        let net_cost_gbp = import_cost_gbp - export_income_gbp;
+        Ok::<_, String>(serde_json::json!({
+            "ok": true,
+            "import_cost_gbp": import_cost_gbp,
+            "export_income_gbp": export_income_gbp,
+            "net_cost_gbp": net_cost_gbp,
+            "standing_charge_gbp": standing_charge_gbp,
+            "days_in_range": days_in_range,
+            "standing_charge_p_per_day": standing_charge_p_per_day,
+        }))
+    })
+    .await;
+
+    match result {
+        Ok(Ok(json)) => (StatusCode::OK, Json(json)),
+        Ok(Err(e)) => error_response(&e),
+        Err(e) => error_response(&format!("Report query join error: {e}")),
     }
 }
 
@@ -7389,6 +7616,458 @@ mod tests {
                 saved.api_port, 7338,
                 "api_port should not be affected when clearing api_key"
             );
+        })
+        .await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #131: standing charge (pence/day) round-trip through the
+    // settings API. The SettingsPage posts a numeric pence/day value;
+    // the backend must persist it on disk and return it via GET so the
+    // frontend can rehydrate the input. Negative values must be clamped
+    // to 0 to prevent a UI typo from silently inverting the cost graph.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn update_settings_persists_standing_charge() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "import_standing_charge_p_per_day": 54.86,
+            });
+            let (status, _) = update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let saved = crate::settings::Settings::load();
+            assert!(
+                (saved.import_standing_charge_p_per_day - 54.86).abs() < 1e-9,
+                "standing charge must persist as the requested pence/day; got {}",
+                saved.import_standing_charge_p_per_day
+            );
+
+            // Round-trip through GET so the Settings page can rehydrate.
+            let (_, get_body) = get_settings(State(state)).await;
+            assert_eq!(
+                get_body["data"]["import_standing_charge_p_per_day"],
+                serde_json::json!(54.86)
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_settings_standing_charge_zero_clears_existing_value() {
+        with_isolated_config_dir_async(|| async {
+            // Seed an existing standing charge on disk.
+            let mut s = crate::settings::Settings::load();
+            s.import_standing_charge_p_per_day = 54.86;
+            s.save().expect("settings save");
+
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "import_standing_charge_p_per_day": 0.0,
+            });
+            let (status, _) = update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let saved = crate::settings::Settings::load();
+            assert_eq!(
+                saved.import_standing_charge_p_per_day, 0.0,
+                "explicit 0 must clear the standing charge"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_settings_standing_charge_negative_is_clamped_to_zero() {
+        // Issue #131: a negative standing charge would invert the cost
+        // series (subtracting from the cumulative total). The backend
+        // clamps any negative input to 0 so a UI typo can't silently
+        // produce a misleading bill total.
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "import_standing_charge_p_per_day": -100.0,
+            });
+            let (status, _) = update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let saved = crate::settings::Settings::load();
+            assert_eq!(
+                saved.import_standing_charge_p_per_day, 0.0,
+                "negative standing charge must be clamped to 0"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_settings_omitted_standing_charge_preserves_disk_value() {
+        // The SettingsPage POST always sends every tariff field. We must
+        // not regress: an admin tool that PATCHes only some fields should
+        // leave the standing charge untouched.
+        with_isolated_config_dir_async(|| async {
+            let mut s = crate::settings::Settings::load();
+            s.import_standing_charge_p_per_day = 54.86;
+            s.save().expect("settings save");
+
+            let state = Arc::new(AppState::new());
+            // Empty body — no fields at all. The handler must skip the
+            // standing charge branch entirely.
+            let body = serde_json::json!({});
+            let (status, _) = update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let saved = crate::settings::Settings::load();
+            assert!(
+                (saved.import_standing_charge_p_per_day - 54.86).abs() < 1e-9,
+                "omitted standing charge must preserve the on-disk value"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_settings_returns_standing_charge_for_legacy_settings_json() {
+        // Back-compat: a settings.json written before this field existed
+        // has no `import_standing_charge_p_per_day` key. The Settings
+        // struct defaults to 0 (via `#[serde(default)]`), and the GET
+        // endpoint must surface that default so the frontend can render
+        // a blank input rather than "NaN" or "undefined".
+        with_isolated_config_dir_async(|| async {
+            // Write a settings.json without the standing-charge field at
+            // all, mimicking a pre-#131 install.
+            let dir = crate::settings::Settings::settings_dir();
+            std::fs::create_dir_all(&dir).expect("settings dir");
+            let path = dir.join("settings.json");
+            let body = serde_json::json!({
+                "host": "10.0.0.1",
+                "port": 8899,
+                "serial": "LEGACY123",
+                "poll_interval": 20,
+                "http_port": 7337,
+                "auto_connect": true,
+                "import_tariff": 0.25,
+                "export_tariff": 0.15,
+            });
+            std::fs::write(&path, serde_json::to_vec_pretty(&body).unwrap())
+                .expect("write settings");
+
+            let state = Arc::new(AppState::new());
+            let (_, get_body) = get_settings(State(state)).await;
+            assert_eq!(
+                get_body["data"]["import_standing_charge_p_per_day"],
+                serde_json::json!(0.0),
+                "legacy settings.json must yield 0 for the new field"
+            );
+        })
+        .await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #131: GET /api/report — cost totals for the Power page
+    // Consumption Report, scoped to the same range / offset as the graph.
+    //
+    // These tests verify the endpoint integrates against the same
+    // `today_*_kwh` counters and tariff config the History cost graph uses
+    // (so totals on the Power page match what the user sees on the History
+    // page), AND adds the import-side standing charge once per local day
+    // the window covers (matching the per-day step pattern).
+    // -----------------------------------------------------------------------
+
+    /// Build an `AppState` with a fresh HistoryDb wired in, plus a
+    /// settings file with the supplied import tariff + standing charge.
+    /// Returns the state and the temp DB path so tests can clean up.
+    ///
+    /// Must be called from inside a `#[tokio::test]` runtime. The test
+    /// runtime blocks on the install via a oneshot channel rather than
+    /// `block_on`, since `block_on` is illegal from inside the running
+    /// runtime that `#[tokio::test]` provides.
+    fn build_report_test_state(
+        import_tariff_rate: f64,
+        export_tariff_rate: f64,
+        standing_charge_p_per_day: f64,
+    ) -> std::sync::Arc<AppState> {
+        let mut s = crate::settings::Settings::load();
+        s.import_tariff = import_tariff_rate;
+        s.export_tariff = export_tariff_rate;
+        s.import_tariff_config = Some(crate::settings::TariffConfig::flat(import_tariff_rate));
+        s.export_tariff_config = Some(crate::settings::TariffConfig::flat(export_tariff_rate));
+        s.import_standing_charge_p_per_day = standing_charge_p_per_day;
+        s.save().expect("save settings");
+
+        let tmp_path = std::env::temp_dir().join(format!(
+            "givenergy-test-history-{}.db",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = crate::history::HistoryDb::open(&tmp_path).expect("open history db");
+        let db_arc = std::sync::Arc::new(db);
+
+        let state = std::sync::Arc::new(AppState::new());
+        // AppState::history uses `tokio::sync::Mutex`, so installing the
+        // db requires a running tokio runtime. We're already inside a
+        // `#[tokio::test]` runtime, but `block_on` is illegal from the
+        // worker thread. Solution: spawn a fresh thread with its own
+        // single-threaded runtime and have it install the db. The fresh
+        // runtime has no parent, so `block_on` works there. We block
+        // synchronously on a `std::sync::mpsc` channel.
+        let state_for_install = state.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("install runtime");
+            rt.block_on(async move {
+                let mut guard = state_for_install.history.lock().await;
+                *guard = Some(db_arc);
+            });
+            let _ = tx.send(());
+        });
+        rx.recv().expect("install thread");
+
+        let _ = tmp_path; // caller cleans up the temp db file
+        state
+    }
+
+    /// Convenience: insert a daily-resetting counter ramp matching what
+    /// `insert_export_day` in the history test module does. Mirrors the
+    /// 30-min granularity so the cost integration has data to walk.
+    fn seed_today_import_kwh(db: &crate::history::HistoryDb, day_offset: i64, daily_kwh: f32) {
+        let date = chrono::Local::now().date_naive()
+            + chrono::Duration::days(day_offset);
+        let midnight = chrono::Local
+            .from_local_datetime(&date.and_hms_opt(0, 0, 0).unwrap())
+            .earliest()
+            .unwrap()
+            .timestamp();
+        for step in 0..48i64 {
+            let ts = midnight + step * 1800;
+            // Linear ramp from 0 → daily_kwh across the day. Step 0 is
+            // just after midnight (counter has been reset) and step 47
+            // is just before the next midnight (counter holds the day's
+            // total).
+            let frac: f32 = step as f32 / 47.0;
+            let snap = crate::inverter::model::InverterSnapshot {
+                timestamp: ts,
+                today_import_kwh: daily_kwh * frac,
+                ..Default::default()
+            };
+            db.insert_reading(&snap);
+        }
+    }
+
+    #[tokio::test]
+    async fn get_report_returns_zero_costs_for_window_with_no_readings() {
+        // Empty history → import_cost == standing charge (the seeded "no
+        // data" bucket), export_income == 0. The endpoint must not 500.
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.25, 0.15, 54.86);
+            let (status, json) = get_report(
+                State(state.clone()),
+                Query(HistoryQuery {
+                    range: Some("24h".to_string()),
+                    fields: None,
+                    offset: Some(0),
+                    rolling: Some(false),
+                    start_ms: None,
+                    end_ms: None,
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            // 24h window touches 2 local days, so standing charge = 2 ×
+            // 54.86p = £1.0972. No import kWh data, so import_cost_gbp
+            // equals standing_charge_gbp exactly.
+            let standing = json["standing_charge_gbp"].as_f64().unwrap();
+            let import_cost = json["import_cost_gbp"].as_f64().unwrap();
+            let export_income = json["export_income_gbp"].as_f64().unwrap();
+            let net_cost = json["net_cost_gbp"].as_f64().unwrap();
+            let days = json["days_in_range"].as_u64().unwrap();
+            assert!(
+                (standing - 1.0972).abs() < 1e-3,
+                "24h window must credit 2 days of standing charge (£1.0972); got {standing}"
+            );
+            assert!(
+                (import_cost - 1.0972).abs() < 1e-3,
+                "import cost must equal standing charge when there are no kWh readings; got {import_cost}"
+            );
+            assert!(
+                export_income.abs() < 1e-6,
+                "export income must be zero with no readings; got {export_income}"
+            );
+            assert!(
+                (net_cost - 1.0972).abs() < 1e-3,
+                "net cost must equal standing charge (no kWh to offset); got {net_cost}"
+            );
+            assert_eq!(days, 2, "24h window must report 2 distinct local days");
+
+            // Clean up the temp db.
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_report_combines_kwh_cost_and_standing_charge() {
+        // 1 day of 5 kWh import at £0.25 plus 54.86p/day standing charge.
+        // import_cost = 5 × 0.25 + 0.5486 = 1.7986.
+        // days_in_range = 2 (24h crosses a midnight).
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.25, 0.15, 54.86);
+            seed_today_import_kwh(
+                state
+                    .history
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .as_ref(),
+                0,
+                5.0,
+            );
+
+            let (status, json) = get_report(
+                State(state.clone()),
+                Query(HistoryQuery {
+                    range: Some("24h".to_string()),
+                    fields: None,
+                    offset: Some(0),
+                    rolling: Some(false),
+                    start_ms: None,
+                    end_ms: None,
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+
+            let import_cost = json["import_cost_gbp"].as_f64().unwrap();
+            // The exact value depends on the cost-integration walk
+            // including the daily counter reset, but it must include
+            // BOTH the kWh component AND the standing charge. We allow
+            // a generous tolerance because the ramp shape varies.
+            assert!(
+                import_cost > 1.25 + 0.5486 - 0.1,
+                "import cost must include both kWh cost (~£1.25) and standing charge (£0.5486); got {import_cost}"
+            );
+            assert!(
+                import_cost < 1.25 + 1.10 + 0.1,
+                "import cost must not be wildly inflated; got {import_cost}"
+            );
+
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_report_standing_charge_scales_with_days_in_range() {
+        // 7-day window: standing charge = 7 × 54.86p = £3.8402 (plus 8
+        // days touched at the calendar boundaries, depending on exact
+        // local time the test runs). The key invariant is that more
+        // days → higher standing charge.
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.25, 0.15, 54.86);
+            let (status_24h, json_24h) = get_report(
+                State(state.clone()),
+                Query(HistoryQuery {
+                    range: Some("24h".to_string()),
+                    fields: None,
+                    offset: Some(0),
+                    rolling: Some(false),
+                    start_ms: None,
+                    end_ms: None,
+                }),
+            )
+            .await;
+            let (status_7d, json_7d) = get_report(
+                State(state.clone()),
+                Query(HistoryQuery {
+                    range: Some("7d".to_string()),
+                    fields: None,
+                    offset: Some(0),
+                    rolling: Some(false),
+                    start_ms: None,
+                    end_ms: None,
+                }),
+            )
+            .await;
+            assert_eq!(status_24h, StatusCode::OK);
+            assert_eq!(status_7d, StatusCode::OK);
+
+            let sc_24h = json_24h["standing_charge_gbp"].as_f64().unwrap();
+            let sc_7d = json_7d["standing_charge_gbp"].as_f64().unwrap();
+            assert!(
+                sc_7d > sc_24h,
+                "7-day window must have a larger standing charge than 24h (24h={sc_24h}, 7d={sc_7d})"
+            );
+            // 7-day window touches 7-8 distinct local days; 24h touches
+            // 2. The 7-day standing charge must be roughly 3.5-4× the
+            // 24h one (allowing for the boundary day count difference).
+            assert!(
+                sc_7d > sc_24h * 3.0,
+                "7-day standing charge must be substantially larger than 24h (24h={sc_24h}, 7d={sc_7d})"
+            );
+
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_report_zero_standing_charge_omits_per_day_addition() {
+        // When the user has not configured a standing charge, the cost
+        // totals reflect the per-kWh component only. The standing_charge
+        // field must be 0, not silently summed from defaults.
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.25, 0.15, 0.0);
+            let (status, json) = get_report(
+                State(state.clone()),
+                Query(HistoryQuery {
+                    range: Some("24h".to_string()),
+                    fields: None,
+                    offset: Some(0),
+                    rolling: Some(false),
+                    start_ms: None,
+                    end_ms: None,
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                json["standing_charge_gbp"].as_f64().unwrap(),
+                0.0,
+                "no configured standing charge → £0 standing charge"
+            );
+            assert_eq!(
+                json["standing_charge_p_per_day"].as_f64().unwrap(),
+                0.0
+            );
+
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_report_rejects_invalid_range() {
+        // Bad range → 400, not 500.
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.25, 0.15, 54.86);
+            let (status, _json) = get_report(
+                State(state.clone()),
+                Query(HistoryQuery {
+                    range: Some("not-a-range".to_string()),
+                    fields: None,
+                    offset: Some(0),
+                    rolling: Some(false),
+                    start_ms: None,
+                    end_ms: None,
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+
         })
         .await;
     }

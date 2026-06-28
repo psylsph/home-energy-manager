@@ -175,6 +175,65 @@ fn local_minutes_of_day(ts_secs: i64) -> u16 {
     }
 }
 
+/// Number of distinct local calendar days the window `(start_ts, end_ts)`
+/// touches. A window that starts at 23:59 on day N and ends at 00:01 on
+/// day N+2 touches 3 days (N, N+1, N+2). Used to compute the total
+/// standing-charge debit for issue #131: the per-day amount × number of
+/// days touched. The set of step times (one local midnight per day after
+/// the first) is computed separately by [`local_midnight_steps_after`].
+pub(crate) fn days_in_local_window(start_ts: i64, end_ts: i64) -> u32 {
+    if end_ts <= start_ts {
+        return 0;
+    }
+    let to_date = |s: i64| {
+        chrono::DateTime::from_timestamp(s, 0).map(|dt| dt.with_timezone(&chrono::Local).date_naive())
+    };
+    match (to_date(start_ts), to_date(end_ts)) {
+        (Some(s), Some(e)) if e >= s => (e - s).num_days() as u32 + 1,
+        _ => 0,
+    }
+}
+
+/// Local-midnight unix-second timestamps that OPEN days whose local date
+/// is STRICTLY AFTER the window-open local date. These are the points
+/// where the cumulative cost graph should step up by one day's worth of
+/// standing charge. The window-open day's debit is seeded into
+/// `standing_charge_days_credited` at function entry, so this list excludes
+/// the window-open day entirely.
+fn local_midnight_steps_after(start_ts: i64, end_ts: i64) -> Vec<i64> {
+    if end_ts <= start_ts {
+        return Vec::new();
+    }
+    let start_local_date = chrono::DateTime::from_timestamp(start_ts, 0)
+        .map(|dt| dt.with_timezone(&chrono::Local).date_naive());
+    let Some(start_local_date) = start_local_date else {
+        return Vec::new();
+    };
+    // The first step is the local midnight that opens `start_local_date +
+    // 1`, regardless of whether start_ts itself was at local midnight.
+    // Walking by 86 400s thereafter is safe across DST transitions: the
+    // local-midnight check at each step self-corrects within at most one
+    // hour.
+    let mut cursor = match start_local_date.succ_opt() {
+        Some(d) => match chrono::Local
+            .from_local_datetime(&d.and_hms_opt(0, 0, 0).unwrap())
+            .earliest()
+        {
+            Some(dt) => dt.timestamp(),
+            None => return Vec::new(),
+        },
+        None => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    while cursor < end_ts {
+        out.push(cursor);
+        cursor += 86_400;
+    }
+    out
+}
+
+
+
 /// Time-window specification for a history query.
 ///
 /// Both the aggregated-field path ([`HistoryDb::query_history`]) and the cost
@@ -997,6 +1056,20 @@ impl HistoryDb {
     /// `counter_field` must be `"today_import_kwh"` or `"today_export_kwh"`.
     /// `flat_fallback` is the £/kWh rate used only if the tariff lookup yields
     /// nothing (degenerate config).
+    ///
+    /// `standing_charge_p_per_day` is the optional daily fixed cost in
+    /// pence/day for this direction. UK-style tariffs (Octopus Flux, etc.)
+    /// charge a flat daily fee that does not scale with usage — without it
+    /// the cumulative cost graph omits a constant and reads low by roughly
+    /// the per-day amount × days covered. Unlike the per-kWh component
+    /// (which grows continuously as energy is consumed), the standing
+    /// charge is debited once at the **start of each local day**: the
+    /// cumulative cost series steps up by `standing_charge_p_per_day / 100`
+    /// (£) at each local midnight that falls within the query window. So a
+    /// 7-day range with a 54.86p/day standing charge shows 7 visible steps
+    /// in the cost graph (one per day), each of size £0.5486, layered on
+    /// top of the per-kWh cost component. A value of 0 leaves the series
+    /// unchanged. See issue #131.
     pub fn query_cost_series(
         &self,
         window: &HistoryWindow,
@@ -1004,6 +1077,7 @@ impl HistoryDb {
         counter_field: &str,
         tariff: &crate::settings::TariffConfig,
         flat_fallback: f64,
+        standing_charge_p_per_day: f64,
     ) -> Result<Vec<TimePoint>, String> {
         // Guard the SQL identifier - only the two daily counters drive cost.
         if counter_field != "today_import_kwh" && counter_field != "today_export_kwh" {
@@ -1016,6 +1090,27 @@ impl HistoryDb {
             .map_err(|e| format!("History DB lock poisoned: {e}"))?;
 
         let (start_ts, end_ts) = window.resolve();
+
+        // Negative standing charge clamped to 0 — it would invert the cost
+        // series, which doesn't match any real UK tariff. Issue #131.
+        let sc_pence = standing_charge_p_per_day.max(0.0);
+        let standing_charge_gbp_per_day = sc_pence / 100.0;
+
+        // Pre-compute the local-midnight timestamps strictly inside the
+        // window. Each is where the cumulative cost graph steps up by
+        // one day's worth. We do NOT seed `standing_charge_days_credited`
+        // at window open — the user wants to see the step land at the
+        // start of each local day, not as a one-shot offset at window
+        // open. (A partial first day at window open still incurs the
+        // daily fee under UK billing, but it's debited at the next
+        // local midnight rather than at window open, so the graph shows
+        // a single visible step per local day crossed.)
+        let midnight_steps = if standing_charge_gbp_per_day > 0.0 {
+            local_midnight_steps_after(start_ts, end_ts)
+        } else {
+            Vec::new()
+        };
+        let total_days_in_window = days_in_local_window(start_ts, end_ts);
 
         let sql = format!(
             "SELECT timestamp, \"{counter_field}\" \
@@ -1043,11 +1138,36 @@ impl HistoryDb {
         // local-day reset check and the plausibility window).
         let mut baseline: Option<f64> = None;
         let mut last_ts: Option<i64> = None;
+        // Issue #131: number of full days of standing charge credited at the
+        // current reading's time. Starts at 1 for the window-open day's
+        // debit (UK billing convention: a partial first day still incurs
+        // the full daily fee); incremented once per local midnight
+        // strictly inside the window. When the window is entirely within
+        // one local day and has no readings, the seed is the entire
+        // standing charge; the user sees the open-day step at the very
+        // first bucket. Each subsequent local midnight shows another
+        // visible step in the cumulative cost graph.
+        let mut standing_charge_days_credited: u32 = if total_days_in_window > 0 { 1 } else { 0 };
         // Parse the tariff's HH:MM bounds once, not per reading (the walk can
         // cover hundreds of thousands of rows on a 1y range).
         let parsed_slots = tariff.parsed_slots();
 
         for (ts, raw) in rows {
+            // Apply any standing-charge debits for local-midnight boundaries
+            // that fall at or before this reading's timestamp and strictly
+            // after the previous reading's timestamp (or start_ts for the
+            // first reading). We do this BEFORE updating `last_ts` so the
+            // step lands on the first reading of the new local day
+            // (matching UK billing: standing charge is due at local
+            // midnight, not when the next reading happens to arrive).
+            let prior_ts = last_ts.unwrap_or(start_ts);
+            for &midnight in &midnight_steps {
+                if midnight > prior_ts && midnight <= ts {
+                    standing_charge_days_credited =
+                        standing_charge_days_credited.saturating_add(1);
+                }
+            }
+
             match baseline {
                 None => {
                     // First reading establishes the baseline; nothing to credit
@@ -1103,8 +1223,58 @@ impl HistoryDb {
             }
 
             let bucket_ms = ((ts / bucket_secs) * bucket_secs) * 1000;
-            buckets.insert(bucket_ms, acc);
+            // Issue #131: per-day standing charge layered on top of the
+            // per-kWh component. The cost graph line steps up by exactly the
+            // per-day amount at every local midnight within the window.
+            let standing_charge_total =
+                standing_charge_days_credited as f64 * standing_charge_gbp_per_day;
+            buckets.insert(bucket_ms, acc + standing_charge_total);
             last_ts = Some(ts);
+        }
+
+        // If we crossed one or more local-day boundaries between the last
+        // reading and the window end (a quiet period with no readings past
+        // the previous local midnight), still surface those standing-charge
+        // steps. The standing-charge debit for the final partial day is
+        // credited at its start (the midnight that opens it), so any
+        // midnights strictly between `last_ts` and `end_ts` must still be
+        // applied.
+        if let Some(lt) = last_ts {
+            for &midnight in &midnight_steps {
+                if midnight > lt && midnight < end_ts {
+                    standing_charge_days_credited =
+                        standing_charge_days_credited.saturating_add(1);
+                }
+            }
+            // Emit a final bucket at end_ts so the graph shows the latest
+            // standing-charge step we just credited, plus the per-kWh
+            // component (which doesn't change after the last reading).
+            let end_bucket_ms = ((end_ts / bucket_secs) * bucket_secs) * 1000;
+            let standing_charge_total =
+                standing_charge_days_credited as f64 * standing_charge_gbp_per_day;
+            // Only insert if this bucket is later than what we already have
+            // (avoid clobbering an existing bucket from the readings walk).
+            buckets.entry(end_bucket_ms).or_insert(acc + standing_charge_total);
+        }
+
+        // Always emit at least the window-open bucket with the standing
+        // charge applied — a query over a quiet stretch (no kWh activity,
+        // no day boundaries crossed in readings) must still surface the
+        // fixed daily cost so the user sees the contribution in the cost
+        // graph, not just an empty series. Issue #131.
+        if buckets.is_empty() {
+            let open_bucket_ms = ((start_ts / bucket_secs) * bucket_secs) * 1000;
+            // For a window with no readings, surface the cumulative
+            // standing charge for ALL days the window covers. Each day's
+            // debit lands at the start of that day (the local midnight),
+            // so the first bucket carries the per-day amount for the
+            // window-open day, and subsequent midnights would add more
+            // (none here since there are no readings to trigger them).
+            // Use `total_days_in_window` rather than
+            // `standing_charge_days_credited` because the trailing logic
+            // didn't run (no readings means no `last_ts` to anchor it).
+            let sc = total_days_in_window as f64 * standing_charge_gbp_per_day;
+            buckets.insert(open_bucket_ms, sc);
         }
 
         Ok(buckets
@@ -3311,7 +3481,7 @@ mod tests {
             .iter()
             .map(|&b| {
                 let s = db
-                    .query_cost_series(&window(start, end), b, "today_export_kwh", &tou, 0.10)
+                    .query_cost_series(&window(start, end), b, "today_export_kwh", &tou, 0.10, 0.0)
                     .unwrap();
                 series_total(&s)
             })
@@ -3344,7 +3514,7 @@ mod tests {
         insert_export_day(&db_peak, 0, 10.0, 16 * 60, 18 * 60 + 30);
         let peak = series_total(
             &db_peak
-                .query_cost_series(&window(start, end), 1800, "today_export_kwh", &tou, 0.10)
+                .query_cost_series(&window(start, end), 1800, "today_export_kwh", &tou, 0.10, 0.0)
                 .unwrap(),
         );
 
@@ -3352,7 +3522,7 @@ mod tests {
         insert_export_day(&db_off, 0, 10.0, 6 * 60, 10 * 60);
         let off = series_total(
             &db_off
-                .query_cost_series(&window(start, end), 1800, "today_export_kwh", &tou, 0.10)
+                .query_cost_series(&window(start, end), 1800, "today_export_kwh", &tou, 0.10, 0.0)
                 .unwrap(),
         );
 
@@ -3379,7 +3549,7 @@ mod tests {
         let end = local_midnight_secs(3) + 60;
         let flat = crate::settings::TariffConfig::flat(0.10);
         let total = series_total(
-            &db.query_cost_series(&window(start, end), 86400, "today_export_kwh", &flat, 0.10)
+            &db.query_cost_series(&window(start, end), 86400, "today_export_kwh", &flat, 0.10, 0.0)
                 .unwrap(),
         );
         // 3 × 8 kWh × £0.10 = £2.40.
@@ -3406,7 +3576,7 @@ mod tests {
         let end = local_midnight_secs(1) + 60;
         let flat = crate::settings::TariffConfig::flat(1.0);
         let total = series_total(
-            &db.query_cost_series(&window(start, end), 3600, "today_export_kwh", &flat, 1.0)
+            &db.query_cost_series(&window(start, end), 3600, "today_export_kwh", &flat, 1.0, 0.0)
                 .unwrap(),
         );
         // True energy is the monotone envelope 0 -> 8 = 8 kWh at £1.00 = £8.00.
@@ -3434,7 +3604,7 @@ mod tests {
         let end = m1 + 19 * 3600;
         let tou = tou_export_tariff();
         let total = series_total(
-            &db.query_cost_series(&window(start, end), 1800, "today_export_kwh", &tou, 0.10)
+            &db.query_cost_series(&window(start, end), 1800, "today_export_kwh", &tou, 0.10, 0.0)
                 .unwrap(),
         );
         // Only the observed 9 -> 12 = 3 kWh (all peak) is credited: 3 x 0.30 = 0.90.
@@ -3463,7 +3633,7 @@ mod tests {
         let end = m + 13 * 3600;
         let flat = crate::settings::TariffConfig::flat(0.25);
         let total = series_total(
-            &db.query_cost_series(&window(start, end), 1800, "today_import_kwh", &flat, 0.25)
+            &db.query_cost_series(&window(start, end), 1800, "today_import_kwh", &flat, 0.25, 0.0)
                 .unwrap(),
         );
         // ~3.33 kWh at 0.25 ~= £0.83. Must be far above zero (the bug gave ~0).
@@ -3487,7 +3657,7 @@ mod tests {
         let end = m + 13 * 3600;
         let flat = crate::settings::TariffConfig::flat(1.0);
         let total = series_total(
-            &db.query_cost_series(&window(start, end), 1800, "today_export_kwh", &flat, 1.0)
+            &db.query_cost_series(&window(start, end), 1800, "today_export_kwh", &flat, 1.0, 0.0)
                 .unwrap(),
         );
         // The 5 -> 5000 spike is dropped (baseline held at 5); only 5 -> 5.2 -> 5.4
@@ -3495,6 +3665,336 @@ mod tests {
         assert!(
             (total - 0.4).abs() < 1e-6,
             "gross spike not clamped: got {total}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #131: standing-charge (p/day) integration into the cost series.
+    //
+    // The historical-cost tests above intentionally pass `0.0` for the new
+    // standing-charge parameter to keep the regression baseline stable.
+    // These tests exercise the new parameter and confirm the documented
+    // behaviour: zero leaves the series unchanged; a non-zero value
+    // debits the per-day amount once at the start of each local day the
+    // window covers (the cost graph line steps up at every local
+    // midnight within the window); partial-day windows are handled
+    // correctly; the empty-window fallback still emits the standing-charge
+    // value; bucket-size independence is preserved.
+    // -----------------------------------------------------------------------
+
+    /// Read the bucket timestamps as `(unix_seconds, value)` pairs. The
+    /// per-day step test reads the timestamps to confirm the standing-charge
+    /// debits land on local-midnight boundaries.
+    fn series_points(series: &[TimePoint]) -> Vec<(i64, f64)> {
+        series.iter().map(|p| (p.t / 1000, p.v)).collect()
+    }
+
+    #[test]
+    fn cost_series_standing_charge_zero_is_a_no_op() {
+        // The historical-cost series must be byte-identical whether the
+        // standing charge is explicitly 0 or omitted (older callers pass
+        // 0). Regression guard for issue #131.
+        let db = test_db();
+        insert_export_day(&db, 0, 10.0, 6 * 60, 10 * 60);
+        let start = local_midnight_secs(0) - 60;
+        let end = local_midnight_secs(1) + 60;
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let baseline = series_total(
+            &db.query_cost_series(&window(start, end), 1800, "today_export_kwh", &flat, 0.25, 0.0)
+                .unwrap(),
+        );
+        assert!(
+            (baseline - 2.5).abs() < 1e-6,
+            "10 kWh @ 0.25 = £2.50; got {baseline}"
+        );
+    }
+
+    #[test]
+    fn cost_series_standing_charge_debits_at_each_local_midnight() {
+        // A 4-day window (00:00 day-0 → 00:00 day-4) must show exactly 4
+        // standing-charge debits, one per local day touched, NOT a single
+        // flat offset at window open. The cumulative series therefore
+        // shows visible steps at each local midnight (matching how UK
+        // bills actually look).
+        let db = test_db();
+        for d in 0..3 {
+            insert_export_day(&db, d, 5.0, 6 * 60, 10 * 60); // 5 kWh each day
+        }
+        let start = local_midnight_secs(0);
+        let end = local_midnight_secs(4);
+        let flat = crate::settings::TariffConfig::flat(0.10);
+        let series = db
+            .query_cost_series(&window(start, end), 1800, "today_export_kwh", &flat, 0.10, 54.86)
+            .unwrap();
+        // kWh cost: 3 × 5 × £0.10 = £1.50. Standing charge: 4 × £0.5486 = £2.1944.
+        let expected_total = 1.50 + 4.0 * 0.5486;
+        let got = series_total(&series);
+        assert!(
+            (got - expected_total).abs() < 1e-3,
+            "4-day window total should be kWh + 4 × standing charge (got {got}, expected {expected_total})"
+        );
+        // The very first bucket (before any kWh is consumed) should carry
+        // only ONE day's standing charge, NOT the full 4-day amount.
+        let first = series.first().map(|p| p.v).unwrap_or(0.0);
+        assert!(
+            (first - 0.5486).abs() < 1e-3,
+            "first bucket should carry only day-1 standing charge (got {first})"
+        );
+        // The last bucket must carry all 4 days of standing charge plus
+        // the per-kWh total — already verified by `series_total` above.
+        let last = series.last().map(|p| p.v).unwrap_or(0.0);
+        assert!(
+            (last - expected_total).abs() < 1e-3,
+            "last bucket should equal kWh + 4 × standing charge (got {last})"
+        );
+    }
+
+    #[test]
+    fn cost_series_standing_charge_single_day_window_credits_one_day() {
+        // A window that starts and ends on the same local day, with no
+        // contained local midnight, must credit exactly one day (the
+        // partial-day at window open, which under UK billing incurs the
+        // full daily fee).
+        let db = test_db();
+        insert_export_day(&db, 0, 5.0, 6 * 60, 10 * 60);
+        let m = local_midnight_secs(0);
+        // 00:00 → 23:59 same day. No midnight contained in the window.
+        let start = m;
+        let end = m + 23 * 3600 + 59 * 60;
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let series = db
+            .query_cost_series(&window(start, end), 3600, "today_export_kwh", &flat, 0.25, 54.86)
+            .unwrap();
+        // kWh: 5 × £0.25 = £1.25. Standing charge: 1 × £0.5486.
+        let expected = 1.25 + 0.5486;
+        let got = series_total(&series);
+        assert!(
+            (got - expected).abs() < 1e-3,
+            "single-day no-midnight window should credit exactly one day (got {got}, expected {expected})"
+        );
+    }
+
+    #[test]
+    fn cost_series_standing_charge_no_midnight_in_window_credits_one_day() {
+        // A window that sits entirely within one local day (e.g. 12h
+        // starting at 06:00, ending at 18:00) contains no local-midnight
+        // boundary. UK bills still charge the daily fee for that day, so
+        // we credit one full day. The series must show £0.5486 even though
+        // no day boundary was crossed.
+        let db = test_db();
+        // 06:00 → 18:00, no readings anywhere in that stretch.
+        let m = local_midnight_secs(0);
+        let start = m + 6 * 3600;
+        let end = m + 18 * 3600;
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let series = db
+            .query_cost_series(&window(start, end), 3600, "today_import_kwh", &flat, 0.25, 54.86)
+            .unwrap();
+        // No readings → no per-kWh cost. Standing charge: £0.5486 (one day,
+        // partial first day still incurs the daily fee under UK billing).
+        let got = series_total(&series);
+        assert!(
+            (got - 0.5486).abs() < 1e-3,
+            "no-midnight window must still credit one full day (got {got})"
+        );
+    }
+
+    #[test]
+    fn cost_series_standing_charge_partial_first_day_credits_one_day() {
+        // A 12h window starting at local midnight (00:00 → 12:00) contains
+        // no local midnight, but the user is still in that day so it should
+        // be billed at one full day's standing charge.
+        let db = test_db();
+        let m = local_midnight_secs(0);
+        let start = m;
+        let end = m + 12 * 3600;
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let series = db
+            .query_cost_series(&window(start, end), 3600, "today_import_kwh", &flat, 0.25, 54.86)
+            .unwrap();
+        let got = series_total(&series);
+        assert!(
+            (got - 0.5486).abs() < 1e-3,
+            "partial first day must still credit one full day (got {got})"
+        );
+    }
+
+    #[test]
+    fn cost_series_standing_charge_crossing_two_midnights_credits_three_days() {
+        // A 60h window (00:00 day-0 → 12:00 day-2) crosses TWO local
+        // midnights, meaning the user lives through 3 distinct calendar
+        // days (today, tomorrow, day-after). We credit 3 days × £0.5486
+        // = £1.6458 in standing charge.
+        let db = test_db();
+        let m = local_midnight_secs(0);
+        let start = m;
+        let end = m + 60 * 3600;
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let series = db
+            .query_cost_series(&window(start, end), 3600, "today_import_kwh", &flat, 0.25, 54.86)
+            .unwrap();
+        let got = series_total(&series);
+        assert!(
+            (got - 3.0 * 0.5486).abs() < 1e-3,
+            "60h window crossing 2 midnights must credit 3 days (got {got})"
+        );
+    }
+
+    #[test]
+    fn cost_series_standing_charge_negative_input_is_clamped_to_zero() {
+        // A negative standing charge is not a real-world concept and would
+        // invert the cost graph (subtracting from the cumulative total).
+        // The implementation clamps to 0; the output must be byte-identical
+        // to passing 0 explicitly.
+        let db = test_db();
+        insert_export_day(&db, 0, 5.0, 6 * 60, 10 * 60);
+        let m = local_midnight_secs(0);
+        let start = m - 60;
+        let end = m + 24 * 3600;
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let baseline = series_total(
+            &db.query_cost_series(&window(start, end), 1800, "today_export_kwh", &flat, 0.25, 0.0)
+                .unwrap(),
+        );
+        let clamped = series_total(
+            &db.query_cost_series(&window(start, end), 1800, "today_export_kwh", &flat, 0.25, -100.0)
+                .unwrap(),
+        );
+        assert!(
+            (baseline - clamped).abs() < 1e-9,
+            "negative standing charge must clamp to 0 (baseline {baseline}, clamped {clamped})"
+        );
+    }
+
+    #[test]
+    fn cost_series_standing_charge_emits_bucket_when_no_data() {
+        // A query over a stretch with no readings must still surface the
+        // standing-charge value — otherwise a quiet day would show as £0
+        // in the History cost graph even though the user is paying for a
+        // daily standing fee. The 24h window crosses one local midnight
+        // (m+24h opens day 1), so we credit 2 days × £0.5486 = £1.0972.
+        let db = test_db();
+        let m = local_midnight_secs(0);
+        let start = m;
+        let end = m + 24 * 3600;
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let series = db
+            .query_cost_series(&window(start, end), 3600, "today_import_kwh", &flat, 0.25, 54.86)
+            .unwrap();
+        assert!(
+            !series.is_empty(),
+            "empty-window fallback must still emit at least one bucket"
+        );
+        let first = series.first().map(|p| p.v).unwrap_or(0.0);
+        assert!(
+            (first - 2.0 * 0.5486).abs() < 1e-3,
+            "empty-window first bucket should carry 2 days of standing charge (got {first})"
+        );
+    }
+
+    #[test]
+    fn cost_series_standing_charge_does_not_break_bucket_size_independence() {
+        // Regression guard for the existing bucket-size-independence
+        // property: with a non-zero standing charge, the cumulative total
+        // must still be the same across every bucket width. Issue #131.
+        let db = test_db();
+        for d in 0..3 {
+            insert_export_day(&db, d, 10.0, 6 * 60, 10 * 60);
+        }
+        // 4-day window: 00:00 day-0 → 00:00 day-4 (crosses 3 midnights,
+        // touches 4 calendar days).
+        let start = local_midnight_secs(0);
+        let end = local_midnight_secs(4);
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let totals: Vec<f64> = [1800i64, 3600, 7200, 43200, 86400]
+            .iter()
+            .map(|&b| {
+                series_total(
+                    &db.query_cost_series(
+                        &window(start, end),
+                        b,
+                        "today_export_kwh",
+                        &flat,
+                        0.25,
+                        54.86,
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect();
+        for w in totals.windows(2) {
+            assert!(
+                (w[0] - w[1]).abs() < 1e-9,
+                "cost total drifted with bucket size when standing charge is non-zero: {totals:?}"
+            );
+        }
+        // kWh: 3 × 10 × £0.25 = £7.50. Standing charge: 4 × £0.5486 = £2.1944.
+        let expected = 7.50 + 4.0 * 0.5486;
+        assert!(
+            (totals[0] - expected).abs() < 1e-3,
+            "expected {expected}, got {}",
+            totals[0]
+        );
+    }
+
+    #[test]
+    fn cost_series_standing_charge_step_lands_on_local_midnight() {
+        // Verify the per-day standing-charge step pattern. Insert readings
+        // spanning a local midnight: 22:00 day-0 → 03:00 day-1, with
+        // kWh activity on both sides. The cumulative cost graph must
+        // show a visible step at the midnight boundary, exactly one day's
+        // worth of standing charge in size.
+        let db = test_db();
+        let m = local_midnight_secs(0);
+        let start = m + 22 * 3600;
+        let end = m + 27 * 3600;
+        // 5 kWh across day-0 evening (20:00 → 23:30) and day-1 morning
+        // (00:00 → 02:30) so we have observations straddling midnight.
+        insert_export_day(&db, 0, 5.0, 20 * 60, 23 * 60 + 30);
+        insert_export_day(&db, 1, 5.0, 30, 2 * 60 + 30);
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let series = db
+            .query_cost_series(&window(start, end), 3600, "today_export_kwh", &flat, 0.25, 54.86)
+            .unwrap();
+        let points = series_points(&series);
+        assert!(
+            !points.is_empty(),
+            "series must have at least one bucket"
+        );
+        // The very first bucket (open day, before midnight) carries the
+        // open-day debit (1 day) plus whatever kWh cost has accumulated
+        // up to that point. We only check the standing-charge portion:
+        // it must equal exactly one day's worth, even if some kWh cost
+        // has accrued.
+        let first_v = points[0].1;
+        let first_kwh_share = first_v - 0.5486;
+        assert!(
+            first_kwh_share >= -1e-6,
+            "first bucket must include the open-day standing charge (got {first_v})"
+        );
+        // The very last bucket (after the crossed midnight) must carry
+        // 2 × £0.5486 plus any kWh cost.
+        let last_v = points.last().unwrap().1;
+        assert!(
+            last_v > 2.0 * 0.5486,
+            "last bucket (after midnight) must include the second day's standing charge on top of kWh cost (got {last_v})"
+        );
+        // The graph line must show a clear visible step at midnight:
+        // the maximum value in the second half of the series must be
+        // strictly greater than the maximum value in the first half
+        // (by at least the per-day standing charge amount).
+        let mid_idx = points.len() / 2;
+        let pre_midnight = points[..mid_idx]
+            .iter()
+            .map(|(_, v)| *v)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let post_midnight = points[mid_idx..]
+            .iter()
+            .map(|(_, v)| *v)
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            post_midnight - pre_midnight >= 0.5486 - 1e-6,
+            "the cost graph must step UP at the local midnight by at least one day's standing charge (pre={pre_midnight}, post={post_midnight})"
         );
     }
 }

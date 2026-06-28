@@ -188,6 +188,14 @@ export interface PollSettings {
   http_port: number;
   import_tariff: number;
   export_tariff: number;
+  /**
+   * Optional daily fixed cost for the import direction, in pence/day (p/day).
+   * Sourced from UK-style tariffs (Octopus Flux, etc.) that charge a flat
+   * standing fee on top of the per-kWh rate. Defaults to 0 (no standing
+   * charge) when absent from the persisted settings file — older installs
+   * didn't carry the field. Issue #131.
+   */
+  import_standing_charge_p_per_day?: number;
   import_tariff_config: TariffConfig | null;
   export_tariff_config: TariffConfig | null;
   hidden_panels: string[];
