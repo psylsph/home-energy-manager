@@ -50,7 +50,7 @@ type MetricTab = 'battery' | 'solar' | 'grid' | 'home' | 'cost' | 'temperature';
 interface ChartDef {
   key: string;
   title: string;
-  fields: { field: string; color: string; label?: string; transform?: (v: number) => number }[];
+  fields: { field: string; color: string; label?: string }[];
   unit: string;
   yDomain?: [number, number];
   /**
@@ -98,9 +98,14 @@ function getCharts(tab: MetricTab): ChartDef[] {
           key: 'battery-power',
           title: 'Charge / Discharge Power',
           unit: 'W',
+          // Server-derived directional fields: each direction's magnitude is
+          // averaged independently per bucket, so charge and discharge don't
+          // cancel inside a wide (12h/24h) bucket. Splitting a single signed
+          // `battery_power` by sign on the client AFTER the server averaged it
+          // collapsed both series toward 0 at coarse zoom.
           fields: [
-            { field: 'battery_power', color: '#22C55E', label: 'Charge', transform: (v: number) => v < 0 ? Math.abs(v) : 0 },
-            { field: 'battery_power', color: '#EF4444', label: 'Discharge', transform: (v: number) => v > 0 ? v : 0 },
+            { field: '_charge_power', color: '#22C55E', label: 'Charge' },
+            { field: '_discharge_power', color: '#EF4444', label: 'Discharge' },
           ],
         },
         {
@@ -141,9 +146,12 @@ function getCharts(tab: MetricTab): ChartDef[] {
           key: 'grid-power',
           title: 'Grid Power (W)',
           unit: 'W',
+          // Server-derived directional fields (see Charge/Discharge above):
+          // import and export are each averaged independently per bucket so a
+          // day that both imports and exports no longer collapses to its net.
           fields: [
-            { field: 'grid_power', color: '#22C55E', label: 'Export', transform: (v: number) => v > 0 ? v : 0 },
-            { field: 'grid_power', color: '#EF4444', label: 'Import', transform: (v: number) => v < 0 ? Math.abs(v) : 0 },
+            { field: '_grid_export_power', color: '#22C55E', label: 'Export' },
+            { field: '_grid_import_power', color: '#EF4444', label: 'Import' },
           ],
         },
         {
@@ -323,9 +331,7 @@ function ChartCard({ chart, data, range, domain, ticks, gridLineWeight }: {
     const out: Record<string, number | null> = { t: row.t };
     chart.fields.forEach((f, i) => {
       const name = seriesNames[i];
-      const raw = row[f.field];
-      const value = raw !== undefined && f.transform ? f.transform(raw) : (raw ?? null);
-      out[name] = value ?? null;
+      out[name] = row[f.field] ?? null;
     });
     return out;
   });

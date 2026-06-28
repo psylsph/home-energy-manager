@@ -134,6 +134,52 @@ pub fn is_cost_field(field: &str) -> bool {
     field == IMPORT_COST_FIELD || field == EXPORT_INCOME_FIELD
 }
 
+/// Field names for the server-derived DIRECTIONAL power series.
+///
+/// The stored `battery_power` and `grid_power` columns are SIGNED (negative =
+/// charge / grid-import, positive = discharge / grid-export). Splitting them by
+/// sign on the client AFTER the server has `AVG`-aggregated each bucket lets the
+/// two directions cancel inside a wide bucket, collapsing the directional charts
+/// toward 0 at coarse zoom (a full day of charging and discharging nets to ~0,
+/// so the 24h-bucket 1-year view flat-lines). These derived fields instead
+/// average each direction's magnitude independently per bucket - the signed
+/// split happens INSIDE the `AVG`, before aggregation - so the directions never
+/// cancel. Mirrors the derive-then-downsample pattern already used for
+/// `_import_cost` / `_export_income`.
+pub const CHARGE_POWER_FIELD: &str = "_charge_power";
+pub const DISCHARGE_POWER_FIELD: &str = "_discharge_power";
+pub const GRID_IMPORT_POWER_FIELD: &str = "_grid_import_power";
+pub const GRID_EXPORT_POWER_FIELD: &str = "_grid_export_power";
+
+/// Map a directional field to `(source_column, signed-magnitude SQL)`.
+///
+/// The magnitude expression is averaged per bucket; the source column drives the
+/// `IS NOT NULL` row guard (the `CASE` itself is never NULL). Both halves are
+/// compile-time string literals over a fixed column, so the formatted SQL
+/// carries no untrusted input - this is what lets directional fields safely
+/// bypass the `is_allowed_field` column whitelist in `query_history`.
+fn directional_sql(field: &str) -> Option<(&'static str, &'static str)> {
+    match field {
+        CHARGE_POWER_FIELD => Some((
+            "battery_power",
+            "CASE WHEN battery_power < 0 THEN -battery_power ELSE 0 END",
+        )),
+        DISCHARGE_POWER_FIELD => Some((
+            "battery_power",
+            "CASE WHEN battery_power > 0 THEN battery_power ELSE 0 END",
+        )),
+        GRID_IMPORT_POWER_FIELD => Some((
+            "grid_power",
+            "CASE WHEN grid_power < 0 THEN -grid_power ELSE 0 END",
+        )),
+        GRID_EXPORT_POWER_FIELD => Some((
+            "grid_power",
+            "CASE WHEN grid_power > 0 THEN grid_power ELSE 0 END",
+        )),
+        _ => None,
+    }
+}
+
 /// Coarse upper bound (kW) used only to reject a grossly corrupted counter
 /// value that slipped past ingestion. A per-reading delta is discarded only if
 /// it would require sustaining more than this over the actual elapsed time
@@ -968,42 +1014,58 @@ impl HistoryDb {
         let mut result = serde_json::Map::new();
 
         for field in fields {
-            if !is_allowed_field(field) {
-                continue;
-            }
+            // Directional power fields (`_charge_power`, `_grid_import_power`, …)
+            // are derived: they average a SIGNED-SPLIT magnitude of an existing
+            // column so charge/discharge (or import/export) don't cancel within a
+            // bucket. They bypass the plain `is_allowed_field` column whitelist
+            // via `directional_sql`, which only maps a fixed set of names to
+            // constant SQL over a known column. Everything downstream (bucketing,
+            // TimePoint shape) is identical to a plain aggregated field.
+            let (table, value_expr, null_guard) =
+                if let Some((source_col, magnitude_expr)) = directional_sql(field) {
+                    (
+                        "readings",
+                        format!("AVG({magnitude_expr})"),
+                        format!("\"{source_col}\""),
+                    )
+                } else {
+                    if !is_allowed_field(field) {
+                        continue;
+                    }
 
-            let agg = if is_cumulative_field(field) {
-                "MAX"
-            } else {
-                "AVG"
-            };
+                    let agg = if is_cumulative_field(field) {
+                        "MAX"
+                    } else {
+                        "AVG"
+                    };
 
-            let table = if is_weather_field(field) {
-                "weather_observations"
-            } else {
-                "readings"
-            };
-            // Weather observations store temperature in `temperature_c` rather
-            // than the requested field name, so the SELECT has to alias the
-            // column. Every other field shares its name with the column.
-            let select_col = if is_weather_field(field) {
-                "temperature_c".to_string()
-            } else {
-                format!("\"{field}\"")
-            };
+                    let table = if is_weather_field(field) {
+                        "weather_observations"
+                    } else {
+                        "readings"
+                    };
+                    // Weather observations store temperature in `temperature_c`
+                    // rather than the requested field name, so the SELECT has to
+                    // alias the column. Every other field shares its name with
+                    // the column.
+                    let select_col = if is_weather_field(field) {
+                        "temperature_c".to_string()
+                    } else {
+                        format!("\"{field}\"")
+                    };
+
+                    (table, format!("{agg}({select_col})"), select_col)
+                };
 
             let sql = format!(
                 "SELECT \
                     ((timestamp / {bucket}) * {bucket}) * 1000 AS t_bucket, \
-                    {agg}({select_col}) AS v \
+                    {value_expr} AS v \
                  FROM {table} \
-                 WHERE timestamp >= ?1 AND timestamp < ?2 AND {select_col} IS NOT NULL \
+                 WHERE timestamp >= ?1 AND timestamp < ?2 AND {null_guard} IS NOT NULL \
                  GROUP BY t_bucket \
                  ORDER BY t_bucket",
                 bucket = bucket_secs,
-                agg = agg,
-                table = table,
-                select_col = select_col,
             );
 
             let mut stmt = conn
@@ -1510,6 +1572,96 @@ mod tests {
         let db = test_db();
         let result = db
             .query_history(600, 60, 0, &["DROP TABLE readings".to_string()], None)
+            .unwrap();
+        assert!(result.is_empty());
+    }
+
+    /// Regression for the directional sign-cancellation bug: within a single
+    /// bucket that contains both charging and discharging, the net
+    /// `AVG(battery_power)`
+    /// cancels toward 0 - which is exactly what the old client-side sign split
+    /// saw, collapsing both directional series. The derived `_charge_power` /
+    /// `_discharge_power` (and grid import/export) fields must instead report
+    /// each direction's true average magnitude, because the split happens
+    /// inside the aggregate.
+    #[test]
+    fn directional_fields_do_not_cancel_within_a_bucket() {
+        let db = test_db();
+        let base = 1_700_000_000i64;
+
+        // Four readings inside one bucket. Battery nets to exactly 0
+        // (-2000, +2000, -1000, +1000) yet charges in two and discharges in
+        // two. Grid imports (-3000, -1000) and exports (+2000, +500) in the
+        // same bucket. (Sign convention: battery/grid negative = charge/import.)
+        let samples = [
+            (base, -2000i32, -3000i32),
+            (base + 60, 2000, 2000),
+            (base + 120, -1000, -1000),
+            (base + 180, 1000, 500),
+        ];
+        for (ts, battery_power, grid_power) in samples {
+            db.insert_reading(&InverterSnapshot {
+                timestamp: ts,
+                battery_power,
+                grid_power,
+                ..Default::default()
+            });
+        }
+
+        // One 24h bucket so all four readings aggregate together - the coarse
+        // bucket case where the broken client split flat-lined.
+        let result = db
+            .query_history(
+                100_000_000,
+                86_400,
+                0,
+                &[
+                    "battery_power".to_string(),
+                    CHARGE_POWER_FIELD.to_string(),
+                    DISCHARGE_POWER_FIELD.to_string(),
+                    GRID_IMPORT_POWER_FIELD.to_string(),
+                    GRID_EXPORT_POWER_FIELD.to_string(),
+                ],
+                None,
+            )
+            .unwrap();
+
+        let single = |field: &str| -> f64 {
+            let pts: Vec<TimePoint> =
+                serde_json::from_value(result.get(field).cloned().unwrap()).unwrap();
+            assert_eq!(pts.len(), 1, "expected one bucket for {field}, got {}", pts.len());
+            pts[0].v
+        };
+
+        // Net average cancels to ~0 - the symptom the directional fields fix.
+        assert!(
+            single("battery_power").abs() < 1.0,
+            "net battery_power should cancel to ~0, got {}",
+            single("battery_power"),
+        );
+
+        // charge magnitudes 2000,0,1000,0 -> avg 750; discharge 0,2000,0,1000 -> 750.
+        assert!((single(CHARGE_POWER_FIELD) - 750.0).abs() < 0.01);
+        assert!((single(DISCHARGE_POWER_FIELD) - 750.0).abs() < 0.01);
+        // import magnitudes 3000,0,1000,0 -> avg 1000; export 0,2000,0,500 -> 625.
+        assert!((single(GRID_IMPORT_POWER_FIELD) - 1000.0).abs() < 0.01);
+        assert!((single(GRID_EXPORT_POWER_FIELD) - 625.0).abs() < 0.01);
+    }
+
+    /// Directional fields bypass the column whitelist via an exact name->SQL
+    /// map, so a lookalike / injection-shaped field name must still be rejected
+    /// with no SQL built.
+    #[test]
+    fn rejects_directional_lookalike_field() {
+        let db = test_db();
+        let result = db
+            .query_history(
+                600,
+                60,
+                0,
+                &["_charge_power; DROP TABLE readings".to_string()],
+                None,
+            )
             .unwrap();
         assert!(result.is_empty());
     }

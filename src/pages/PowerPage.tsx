@@ -51,6 +51,15 @@ interface PowerRow {
   gridPower: number | null;
   homePower: number | null;
   soc: number | null;
+  // Directional magnitudes (W, >= 0), pre-split server-side before bucket
+  // aggregation. The Consumption Report integrates / peaks these instead of
+  // re-splitting the net battery/grid power, which cancels charge against
+  // discharge (import against export) within a wide bucket. Null when a
+  // timestamp has no sample.
+  chargePower: number | null;
+  dischargePower: number | null;
+  gridImportPower: number | null;
+  gridExportPower: number | null;
 }
 
 interface PowerHistoryState {
@@ -59,7 +68,16 @@ interface PowerHistoryState {
   error: string;
 }
 
-const HISTORY_FIELDS = ['solar_power', 'battery_power', 'grid_power', 'home_power', 'soc'];
+// The net battery_power / grid_power drive the combined power CHART (one signed
+// line each). The directional `_charge_power` / `_discharge_power` /
+// `_grid_import_power` / `_grid_export_power` fields are split by sign on the
+// server BEFORE bucket aggregation and drive the Consumption Report's
+// directional energy + peak figures, so charge/discharge (import/export) no
+// longer cancel within a wide bucket.
+const HISTORY_FIELDS = [
+  'solar_power', 'battery_power', 'grid_power', 'home_power', 'soc',
+  '_charge_power', '_discharge_power', '_grid_import_power', '_grid_export_power',
+];
 const EMPTY_HISTORY_DATA: Record<string, TimePoint[]> = {};
 
 interface PowerBucket {
@@ -161,6 +179,10 @@ function buildPowerRows(data: Record<string, TimePoint[]>): PowerRow[] {
   const grid = pointsByTimestamp(data.grid_power);
   const home = pointsByTimestamp(data.home_power);
   const soc = pointsByTimestamp(data.soc);
+  const charge = pointsByTimestamp(data._charge_power);
+  const discharge = pointsByTimestamp(data._discharge_power);
+  const gridImport = pointsByTimestamp(data._grid_import_power);
+  const gridExport = pointsByTimestamp(data._grid_export_power);
   const timestamps = new Set<number>();
 
   for (const field of HISTORY_FIELDS) {
@@ -175,6 +197,10 @@ function buildPowerRows(data: Record<string, TimePoint[]>): PowerRow[] {
     const gridValue = grid.get(t);
     const homeValue = home.get(t);
     const socValue = soc.get(t);
+    const chargeValue = charge.get(t);
+    const dischargeValue = discharge.get(t);
+    const gridImportValue = gridImport.get(t);
+    const gridExportValue = gridExport.get(t);
 
     return {
       t,
@@ -183,6 +209,10 @@ function buildPowerRows(data: Record<string, TimePoint[]>): PowerRow[] {
       gridPower: gridValue == null ? null : -gridValue,
       homePower: homeValue == null ? null : Math.max(homeValue, 0),
       soc: socValue == null ? null : Math.min(100, Math.max(0, socValue)),
+      chargePower: chargeValue == null ? null : Math.max(chargeValue, 0),
+      dischargePower: dischargeValue == null ? null : Math.max(dischargeValue, 0),
+      gridImportPower: gridImportValue == null ? null : Math.max(gridImportValue, 0),
+      gridExportPower: gridExportValue == null ? null : Math.max(gridExportValue, 0),
     };
   });
 }
@@ -364,10 +394,6 @@ function positivePart(value: number | null | undefined): number {
   return Math.max(value ?? 0, 0);
 }
 
-function negativeMagnitude(value: number | null | undefined): number {
-  return Math.max(-(value ?? 0), 0);
-}
-
 function integratePair(
   a: number | null,
   b: number | null,
@@ -474,10 +500,14 @@ function calculatePowerReport(rows: PowerRow[], range: HistoryRange, domain: [nu
 
     const solar = integratePair(a.solarPower, b.solarPower, hours, positivePart);
     const home = integratePair(a.homePower, b.homePower, hours, positivePart);
-    const gridImport = integratePair(a.gridPower, b.gridPower, hours, positivePart);
-    const gridExport = integratePair(a.gridPower, b.gridPower, hours, negativeMagnitude);
-    const batteryCharge = integratePair(a.batteryPower, b.batteryPower, hours, negativeMagnitude);
-    const batteryDischarge = integratePair(a.batteryPower, b.batteryPower, hours, positivePart);
+    // Directional energy integrates the server-split magnitudes (already >= 0),
+    // not the net grid/battery power. Integrating the net would let a bucket's
+    // import and export (charge and discharge) cancel before integration - the
+    // same sign-cancellation the History directional charts had.
+    const gridImport = integratePair(a.gridImportPower, b.gridImportPower, hours, positivePart);
+    const gridExport = integratePair(a.gridExportPower, b.gridExportPower, hours, positivePart);
+    const batteryCharge = integratePair(a.chargePower, b.chargePower, hours, positivePart);
+    const batteryDischarge = integratePair(a.dischargePower, b.dischargePower, hours, positivePart);
 
     solarKwh += solar;
     homeKwh += home;
@@ -517,10 +547,13 @@ function calculatePowerReport(rows: PowerRow[], range: HistoryRange, domain: [nu
     batteryDischargeKwh,
     peakSolarW: Math.max(0, ...sortedRows.map((row) => positivePart(row.solarPower))),
     peakHomeW: Math.max(0, ...sortedRows.map((row) => positivePart(row.homePower))),
-    peakGridImportW: Math.max(0, ...sortedRows.map((row) => positivePart(row.gridPower))),
-    peakGridExportW: Math.max(0, ...sortedRows.map((row) => negativeMagnitude(row.gridPower))),
-    peakBatteryChargeW: Math.max(0, ...sortedRows.map((row) => negativeMagnitude(row.batteryPower))),
-    peakBatteryDischargeW: Math.max(0, ...sortedRows.map((row) => positivePart(row.batteryPower))),
+    // Peaks come from the directional magnitudes too (no net cancellation).
+    // These remain a max of per-bucket AVERAGES, so they understate the true
+    // instantaneous peak at coarse buckets - same as peakSolarW / peakHomeW.
+    peakGridImportW: Math.max(0, ...sortedRows.map((row) => positivePart(row.gridImportPower))),
+    peakGridExportW: Math.max(0, ...sortedRows.map((row) => positivePart(row.gridExportPower))),
+    peakBatteryChargeW: Math.max(0, ...sortedRows.map((row) => positivePart(row.chargePower))),
+    peakBatteryDischargeW: Math.max(0, ...sortedRows.map((row) => positivePart(row.dischargePower))),
     socMin,
     socMax,
     socAvg,
