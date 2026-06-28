@@ -4,11 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.44.0] - 2026-06-28
+
 ### Added
 
 - **Standing charge (p/day) on the Energy Tariffs editor.** UK-style tariffs charge a flat daily fee on top of the per-kWh rate; the Settings page now exposes a single "Standing charge (p/day)" input directly below the Export tariff card. The value rolls into the History page's cumulative Import Cost graph as a visible per-day step (the line steps up by one day's worth at every local midnight the window covers), into the daily Consumption Report's Net cost line with a labelled footnote showing where the fixed cost came from, and into the Power page's Consumption Report as four new cost tiles (Import Cost, Export Income, Net Cost, Standing Charge) honouring the currently-selected range and offset. Leave blank for no standing charge. (#131)
 
 ### Changed
+
+- **Control page battery presets now match GivEnergy Cloud’s independent mechanisms.** Eco, Timed Charge, Timed Export and Timed Discharge are shown as separate controls that can coexist instead of one mutually-exclusive mode picker. Timed Discharge now uses the inverter’s pause-discharge window internally, and Settings → Developer includes a compatibility toggle for inverters that can run full-power Timed Export while Eco stays enabled.
 
 - **Battery and grid power values no longer carry a `−` / `+` sign prefix on the Status, Battery, or Inverter pages.** The orbit nodes and BatteryPanel used to show things like `-839W + Discharging` and `-198W + Exporting`, which read as a sign-convention bug for non-technical users. Now they show the plain magnitude (`839W`, `198W`) and rely on the existing status badge and the Generating / Importing / Charging / Discharging / Exporting / Idle status word under each orbit node to convey direction.
 
