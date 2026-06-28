@@ -808,13 +808,23 @@ mod tests {
         let writes = cmd.encode().unwrap();
         assert_eq!(writes.len(), 3);
         assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
-        assert_eq!(writes[0].value, 1, "Timed Demand must keep match-demand (HR27=1)");
+        assert_eq!(
+            writes[0].value, 1,
+            "Timed Demand must keep match-demand (HR27=1)"
+        );
         assert_eq!(writes[1].address, HR_ENABLE_DISCHARGE);
-        assert_eq!(writes[1].value, 1, "Timed Demand must arm the schedule (HR59=1)");
+        assert_eq!(
+            writes[1].value, 1,
+            "Timed Demand must arm the schedule (HR59=1)"
+        );
         assert_eq!(writes[2].address, HR_BATTERY_SOC_RESERVE);
         assert_eq!(writes[2].value, 10);
         for w in &writes {
-            assert!(SAFE_WRITE_REGS.contains(&w.address), "HR{} not whitelisted", w.address);
+            assert!(
+                SAFE_WRITE_REGS.contains(&w.address),
+                "HR{} not whitelisted",
+                w.address
+            );
         }
     }
 
@@ -828,13 +838,23 @@ mod tests {
         let writes = cmd.encode().unwrap();
         assert_eq!(writes.len(), 3);
         assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
-        assert_eq!(writes[0].value, 0, "Timed Export must use max-power (HR27=0)");
+        assert_eq!(
+            writes[0].value, 0,
+            "Timed Export must use max-power (HR27=0)"
+        );
         assert_eq!(writes[1].address, HR_ENABLE_DISCHARGE);
-        assert_eq!(writes[1].value, 1, "Timed Export must arm the schedule (HR59=1)");
+        assert_eq!(
+            writes[1].value, 1,
+            "Timed Export must arm the schedule (HR59=1)"
+        );
         assert_eq!(writes[2].address, HR_BATTERY_SOC_RESERVE);
         assert_eq!(writes[2].value, 20);
         for w in &writes {
-            assert!(SAFE_WRITE_REGS.contains(&w.address), "HR{} not whitelisted", w.address);
+            assert!(
+                SAFE_WRITE_REGS.contains(&w.address),
+                "HR{} not whitelisted",
+                w.address
+            );
         }
     }
 
@@ -846,13 +866,23 @@ mod tests {
         let writes = cmd.encode().unwrap();
         assert_eq!(writes.len(), 3);
         assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
-        assert_eq!(writes[0].value, 0, "Export Paused stays in the export family (HR27=0)");
+        assert_eq!(
+            writes[0].value, 0,
+            "Export Paused stays in the export family (HR27=0)"
+        );
         assert_eq!(writes[1].address, HR_ENABLE_DISCHARGE);
-        assert_eq!(writes[1].value, 0, "Export Paused disarms the schedule (HR59=0)");
+        assert_eq!(
+            writes[1].value, 0,
+            "Export Paused disarms the schedule (HR59=0)"
+        );
         assert_eq!(writes[2].address, HR_BATTERY_SOC_RESERVE);
         assert_eq!(writes[2].value, 4);
         for w in &writes {
-            assert!(SAFE_WRITE_REGS.contains(&w.address), "HR{} not whitelisted", w.address);
+            assert!(
+                SAFE_WRITE_REGS.contains(&w.address),
+                "HR{} not whitelisted",
+                w.address
+            );
         }
     }
 
