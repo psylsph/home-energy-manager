@@ -767,6 +767,13 @@ pub struct Settings {
     /// Agile Octopus discharge threshold in p/kWh.
     #[serde(default = "default_agile_discharge_threshold")]
     pub agile_discharge_threshold: f64,
+    /// Override base URL for the Octopus Agile pricing API. Defaults to
+    /// the real Octopus endpoint. Self-hosters can point at a mirror;
+    /// tests point at a local mock server that returns canned prices
+    /// so the slot-based state machine can be exercised end-to-end
+    /// without network access. Empty string means "use the default".
+    #[serde(default)]
+    pub agile_api_base_url: String,
 
     /// Cosy charging mode enabled.
     #[serde(default)]
@@ -1133,6 +1140,7 @@ impl Default for Settings {
             agile_region: default_agile_region(),
             agile_charge_threshold: default_agile_charge_threshold(),
             agile_discharge_threshold: default_agile_discharge_threshold(),
+            agile_api_base_url: String::new(),
             cosy_enabled: false,
             cosy_slots: (0..3).map(|_| CosySlot::default()).collect(),
             cosy_active_persisted: false,
@@ -1337,6 +1345,7 @@ mod tests {
             agile_region: "B".to_string(),
             agile_charge_threshold: 12.5,
             agile_discharge_threshold: 35.0,
+            agile_api_base_url: String::new(),
             cosy_enabled: false,
             cosy_slots: vec![],
             cosy_active_persisted: false,
@@ -1657,6 +1666,7 @@ mod tests {
             agile_region: "A".to_string(),
             agile_charge_threshold: 10.0,
             agile_discharge_threshold: 30.0,
+            agile_api_base_url: String::new(),
             cosy_enabled: false,
             cosy_slots: vec![],
             cosy_active_persisted: false,

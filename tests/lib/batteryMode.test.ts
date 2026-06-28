@@ -395,4 +395,72 @@ describe('deriveBatteryModeRows', () => {
     );
     expect(findRow(rows, 'timed_export').state).toBe('armed');
   });
+
+  // -----------------------------------------------------------------
+  // Slot-based Agile integration
+  // -----------------------------------------------------------------
+  //
+  // The slot-based Agile refactor writes a real charge slot (HR 94/95)
+  // plus enable_charge=1 when a cheap window is active. This means the
+  // four-row summary correctly shows 'Timed Charge — active · charging
+  // now' during a cheap Agile window, where the legacy ForceCharge
+  // approach only set enable_charge without a slot and the summary
+  // would have shown 'armed' forever. These tests pin the integration
+  // so a future refactor can't regress it.
+
+  it('shows Timed Charge as active during a slot-driven Agile cheap window', () => {
+    // Agile Charge Only mode: enable_charge=1, a charge slot covers
+    // the current time, and the battery is charging. The summary
+    // should report 'active · charging now' — this is the fix the
+    // slot-based Agile refactor delivers over the legacy ForceCharge
+    // path (which set enable_charge without writing slot times).
+    const now = new Date();
+    const slotStart = new Date(now.getTime() - 5 * 60_000); // 5 min ago
+    const slotEnd = new Date(now.getTime() + 25 * 60_000); // 25 min ahead
+    const rows = deriveBatteryModeRows(
+      makeSnapshot({
+        enable_charge: true,
+        charge_slots: [{
+          enabled: true,
+          start_hour: slotStart.getHours(),
+          start_minute: slotStart.getMinutes(),
+          end_hour: slotEnd.getHours(),
+          end_minute: slotEnd.getMinutes(),
+          target_soc: 100,
+        }],
+        battery_state: 'charging',
+        battery_power: -2000,
+      }),
+      now,
+    );
+    const r = findRow(rows, 'timed_charge');
+    expect(r.state).toBe('active');
+    expect(r.description).toBe('armed · charging now');
+  });
+
+  it('shows Timed Export as active during a slot-driven Agile expensive window', () => {
+    // Symmetric for the discharge side.
+    const now = new Date();
+    const slotStart = new Date(now.getTime() - 5 * 60_000);
+    const slotEnd = new Date(now.getTime() + 25 * 60_000);
+    const rows = deriveBatteryModeRows(
+      makeSnapshot({
+        enable_discharge: true,
+        discharge_slots: [{
+          enabled: true,
+          start_hour: slotStart.getHours(),
+          start_minute: slotStart.getMinutes(),
+          end_hour: slotEnd.getHours(),
+          end_minute: slotEnd.getMinutes(),
+          target_soc: 4,
+        }],
+        battery_state: 'discharging',
+        battery_power: 2500,
+      }),
+      now,
+    );
+    const r = findRow(rows, 'timed_export');
+    expect(r.state).toBe('active');
+    expect(r.description).toBe('armed · exporting now');
+  });
 });
