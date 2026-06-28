@@ -23,7 +23,7 @@
  * Agile sub-mode is active.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
 
 vi.mock('../../src/lib/api', () => ({
   apiGet: vi.fn(async (path: string) => {
@@ -574,6 +574,83 @@ describe('<ControlPage/> — Agile scope UI', () => {
       expect(screen.queryByRole('heading', { name: 'Charge Schedule', exact: true })).toBeNull();
       expect(screen.queryByRole('heading', { name: 'Discharge Schedule', exact: true })).toBeNull();
       expect(screen.queryByRole('heading', { name: 'Timed Discharge', exact: true })).toBeNull();
+    });
+  });
+
+  // -----------------------------------------------------------------
+  // Threshold gap enforcement
+  // -----------------------------------------------------------------
+  //
+  // The Apply handler (saveConfig) clamps the discharge threshold up to
+  // charge_threshold + 5 before POSTing, so an inverted or overlapping
+  // pair can never reach the backend. These tests pin the clamp because
+  // an inverted pair would make the state machine never charge (price is
+  // always >= the discharge threshold) — a silent footgun.
+
+  it('clamps discharge threshold up to charge_threshold + 5 when the pair is inverted', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ agile_scope: 'full', agile_enabled: true }),
+    });
+    const { default: ControlPage } = await import('../../src/pages/ControlPage');
+    render(<ControlPage />);
+
+    // Scope to the AgileControls root (it shares a root with the
+    // thresholds AND the Save button, which disambiguates it from the
+    // per-slot "Save" buttons in the schedule editors below).
+    const agileRoot = screen.getByText('Charge when below').closest('div.space-y-4')!;
+    const chargeSlider = within(
+      screen.getByText('Charge when below').parentElement!.parentElement!,
+    ).getByRole('slider');
+    const dischargeSlider = within(
+      screen.getByText('Discharge when above').parentElement!.parentElement!,
+    ).getByRole('slider');
+
+    // Drag charge above discharge (inverted).
+    fireEvent.change(chargeSlider, { target: { value: '30' } });
+    fireEvent.change(dischargeSlider, { target: { value: '10' } });
+
+    // The Agile Apply button reads "Save" (Cosy's reads "Apply").
+    fireEvent.click(within(agileRoot).getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(apiPost).toHaveBeenCalledWith(
+        '/api/agile',
+        expect.objectContaining({
+          charge_threshold: 30,
+          discharge_threshold: 35, // clamped up to charge + 5
+        }),
+      );
+    });
+  });
+
+  it('leaves a valid 5p+ gap untouched on Apply', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ agile_scope: 'full', agile_enabled: true }),
+    });
+    const { default: ControlPage } = await import('../../src/pages/ControlPage');
+    render(<ControlPage />);
+
+    const agileRoot = screen.getByText('Charge when below').closest('div.space-y-4')!;
+    const chargeSlider = within(
+      screen.getByText('Charge when below').parentElement!.parentElement!,
+    ).getByRole('slider');
+    const dischargeSlider = within(
+      screen.getByText('Discharge when above').parentElement!.parentElement!,
+    ).getByRole('slider');
+
+    // 12p / 35p — a 23p gap, well clear of the clamp.
+    fireEvent.change(chargeSlider, { target: { value: '12' } });
+    fireEvent.change(dischargeSlider, { target: { value: '35' } });
+    fireEvent.click(within(agileRoot).getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(apiPost).toHaveBeenCalledWith(
+        '/api/agile',
+        expect.objectContaining({
+          charge_threshold: 12,
+          discharge_threshold: 35,
+        }),
+      );
     });
   });
 });
