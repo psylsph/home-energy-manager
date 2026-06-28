@@ -757,6 +757,7 @@ function EnergyOrbitDiagramInner({
                 textAnchor="middle"
                 fill="var(--app-text-secondary, #8B949E)"
                 fontSize={11}
+                fontWeight={600}
                 fontFamily="var(--font-sans, sans-serif)"
               >
                 {inverter.unit}
@@ -767,6 +768,7 @@ function EnergyOrbitDiagramInner({
                 textAnchor="middle"
                 fill="var(--app-text-secondary, #8B949E)"
                 fontSize={11}
+                fontWeight={600}
                 fontFamily="var(--font-sans, sans-serif)"
               >
                 {batteryMode}
