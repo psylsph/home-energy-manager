@@ -69,12 +69,12 @@ use crate::inverter::sanitizer::{
 };
 use crate::inverter::state_machines::{
     build_force_discharge_auto_revert_writes, check_auto_winter, check_load_limiter,
-    clear_cosy_slot_registers, cosy_slot_register_writes, persist_agile_state, persist_cosy_active,
-    write_registers_to_inverter,
+    clear_cosy_slot_registers, cosy_slot_register_writes, persist_cosy_active,
+    write_registers_to_inverter, AgileSlotAction,
 };
 pub use crate::inverter::state_machines::{
-    AgileState, AutoWinterConfig, AutoWinterSaved, AutoWinterState, LoadLimiterConfig,
-    LoadLimiterSaved, LoadLimiterState, PriceSlot,
+    AutoWinterConfig, AutoWinterSaved, AutoWinterState, LoadLimiterConfig, LoadLimiterSaved,
+    LoadLimiterState, PriceSlot,
 };
 use crate::modbus::client::ModbusClient;
 use crate::modbus::registers::{HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET};
@@ -329,8 +329,6 @@ pub struct AppState {
     pub load_limiter_saved: Arc<Mutex<Option<LoadLimiterSaved>>>,
     /// Whether cosy charging is currently active (force-charging in a slot).
     pub cosy_active: Arc<Mutex<bool>>,
-    /// Agile Octopus state machine (Idle / Charging / Discharging).
-    pub agile_state: Arc<Mutex<AgileState>>,
     /// Cached Octopus Agile prices for the current region.
     pub cached_agile_prices: Arc<Mutex<Vec<PriceSlot>>>,
     /// Most recently decoded EV charger snapshot.
@@ -397,7 +395,6 @@ impl AppState {
             cosy_active: Arc::new(Mutex::new(
                 crate::settings::Settings::load().cosy_active_persisted,
             )),
-            agile_state: Arc::new(Mutex::new(AgileState::Idle)),
             cached_agile_prices: Arc::new(Mutex::new(Vec::new())),
             alert_config: Arc::new(Mutex::new(crate::settings::Settings::load().alerts_config)),
             alert_debounce: Arc::new(Mutex::new(crate::alerts::AlertDebounce::new())),
@@ -448,7 +445,6 @@ impl AppState {
             cosy_active: Arc::new(Mutex::new(
                 crate::settings::Settings::load().cosy_active_persisted,
             )),
-            agile_state: Arc::new(Mutex::new(AgileState::Idle)),
             cached_agile_prices: Arc::new(Mutex::new(Vec::new())),
             alert_config: Arc::new(Mutex::new(crate::settings::Settings::load().alerts_config)),
             alert_debounce: Arc::new(Mutex::new(crate::alerts::AlertDebounce::new())),
@@ -959,20 +955,16 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                         }
                     }
 
-                    // The in-memory `agile_state` always starts at Idle, so the
-                    // Agile state machine will re-evaluate the current price and
-                    // (re)send the appropriate command on the first poll. We log
-                    // the persisted value here so a restart that left the inverter
-                    // mid-charge/discharge is visible in the logs.
-                    if settings.agile_enabled
-                        && settings.agile_state_persisted != "idle"
-                        && !settings.agile_state_persisted.is_empty()
-                    {
-                        tracing::info!(
-                            persisted = %settings.agile_state_persisted,
-                            "Agile: restart detected with active persisted state - will re-evaluate current price and re-send command on first poll"
-                        );
-                    }
+                    // Slot-based Agile: the inverter itself holds the slot
+                    // schedule, so a restart that left the inverter mid-charge
+                    // is automatically handled — the slot continues to fire
+                    // until its end time. The first poll after restart
+                    // evaluates the current price and writes the next slot
+                    // (or disarms with AgileClearActiveSlot if scope == Off).
+                    // We log the legacy `agile_state_persisted` here for
+                    // operators who want to see what the previous run was
+                    // doing — it's now diagnostic-only and the field is
+                    // ignored on read.
                 }
 
                 // ---- Inner poll loop ----
@@ -1901,7 +1893,14 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     // machine runs, so the broadcast reflects the
                                     // post-transition value.)
                                     snapshot.cosy_enabled = poll_settings.cosy_enabled;
+                                    // `agile_enabled` is the legacy boolean mirror of
+                                    // `agile_scope != Off`. The slot-based Agile block
+                                    // later in this poll updates both `agile_enabled`
+                                    // and the new `agile_scope` field from the
+                                    // authoritative scope — see below.
                                     snapshot.agile_enabled = poll_settings.agile_enabled;
+                                    snapshot.agile_scope =
+                                        crate::settings::agile_scope_for_settings(&poll_settings);
 
                                     // Persist saved values to disk so they survive a
                                     // restart. When winter mode deactivates, saved
@@ -2260,13 +2259,34 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 }
 
                                 // ---- Agile Octopus mode ----
+                                //
+                                // Slot-based state machine (replaces the legacy
+                                // `ForceCharge`/`ForceDischarge` block). Decides what
+                                // (if anything) to write to the inverter each poll
+                                // based on:
+                                //   - the active `AgileScope` (Off/Full/ChargeOnly/DischargeOnly)
+                                //   - the current Octopus price vs. the user's thresholds
+                                //   - whether Cosy or Auto-Winter is in control of the
+                                //     charge side (in which case we defer)
+                                //
+                                // The inverter itself becomes the source of truth for
+                                // whether a slot is currently firing — we just write
+                                // the slot 1 start/end times and let the inverter's
+                                // native schedule mechanism run the rest.
                                 {
                                     let settings = &poll_settings;
-                                    if settings.agile_enabled {
-                                        // Find current price from cache, or refresh
+                                    let scope = crate::settings::agile_scope_for_settings(settings);
+                                    let action = if scope == crate::settings::AgileScope::Off {
+                                        // Scope off — disarm any preloaded slot.
+                                        AgileSlotAction::Idle
+                                    } else {
+                                        // Fetch current price (from cache or Octopus API).
                                         let now_ts = chrono::Utc::now().timestamp();
                                         let prices = state.cached_agile_prices.lock().await;
-                                        let current_price = prices.iter().find(|s| now_ts >= s.valid_from && now_ts < s.valid_to).map(|s| s.pence);
+                                        let current_price = prices
+                                            .iter()
+                                            .find(|s| now_ts >= s.valid_from && now_ts < s.valid_to)
+                                            .map(|s| s.pence);
 
                                         let price = if current_price.is_some() {
                                             current_price
@@ -2279,8 +2299,9 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             // current slot drops out of the window - which silently
                                             // leaves the state machine Idle and never discharges.
                                             drop(prices);
-                                            let region = &settings.agile_region;
-                                            let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                                            let region = settings.agile_region.clone();
+                                            let today =
+                                                chrono::Utc::now().format("%Y-%m-%d").to_string();
                                             let url = format!(
                                                 "https://api.octopus.energy/v1/products/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-{region}/standard-unit-rates/?period_from={today}T00:00:00Z&page_size=96"
                                             );
@@ -2311,195 +2332,161 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 
                                             match fetch_result {
                                                 Ok(Ok(fresh)) => {
-                                                    let mut prices = state.cached_agile_prices.lock().await;
+                                                    let mut prices =
+                                                        state.cached_agile_prices.lock().await;
                                                     *prices = fresh;
-                                                    prices.iter().find(|s| now_ts >= s.valid_from && now_ts < s.valid_to).map(|s| s.pence)
+                                                    prices
+                                                        .iter()
+                                                        .find(|s| {
+                                                            now_ts >= s.valid_from
+                                                                && now_ts < s.valid_to
+                                                        })
+                                                        .map(|s| s.pence)
                                                 }
                                                 Ok(Err(e)) => {
                                                     tracing::warn!("Agile: failed to fetch prices: {e}");
                                                     None
                                                 }
                                                 Err(e) => {
-                                                    tracing::error!("Agile: spawn_blocking failed: {e}");
+                                                    tracing::error!(
+                                                        "Agile: spawn_blocking failed: {e}"
+                                                    );
                                                     None
                                                 }
                                             }
                                         };
 
-                                        if let Some(price) = price {
-                                            let charge_threshold = settings.agile_charge_threshold;
-                                            let discharge_threshold = settings.agile_discharge_threshold;
+                                        // Snapshot-side flags for the cosy / auto-winter
+                                        // conflict guard. These are async mutexes so we
+                                        // snapshot them once at the top of this block.
+                                        let cosy_active = *state.cosy_active.lock().await;
+                                        let auto_winter_active = snapshot.auto_winter_active;
 
-                                            let ag_state = state.agile_state.lock().await;
-                                            tracing::debug!(
-                                                price,
-                                                charge_threshold,
-                                                discharge_threshold,
-                                                state = ?*ag_state,
-                                                inverter_mode = ?snapshot.battery_mode,
-                                                "Agile: evaluating current slot",
+                                        let cache_snapshot: Vec<PriceSlot> = {
+                                            let guard = state.cached_agile_prices.lock().await;
+                                            (*guard).clone()
+                                        };
+                                        let action = crate::inverter::state_machines::evaluate_agile_slot(
+                                            scope,
+                                            price,
+                                            settings.agile_charge_threshold,
+                                            settings.agile_discharge_threshold,
+                                            &cache_snapshot,
+                                            now_ts,
+                                            cosy_active,
+                                            auto_winter_active,
+                                            &chrono::Local,
+                                        );
+                                        tracing::debug!(
+                                            price = ?price,
+                                            scope = ?scope,
+                                            ?action,
+                                            "Agile: evaluated current slot",
+                                        );
+                                        action
+                                    };
+
+                                    // Convert the action into register writes.
+                                    let use_3ph =
+                                        snapshot.device_type.uses_three_phase_schedule_slots();
+                                    // Defer means cosy/auto-winter owns the inverter —
+                                    // don't touch it this poll. We still set the
+                                    // snapshot fields below so the frontend sees
+                                    // consistent state, but we skip the write loop.
+                                    let skip_writes = matches!(action, AgileSlotAction::Defer);
+                                    let cmd = match &action {
+                                        AgileSlotAction::Charge {
+                                            start_hhmm,
+                                            end_hhmm,
+                                            target_soc,
+                                        } => {
+                                            tracing::info!(
+                                                "Agile: cheap window, charging {start_hhmm:04}–{end_hhmm:04} to {target_soc}%"
                                             );
-
-                                            if price <= charge_threshold {
-                                                if *ag_state != AgileState::Charging {
-                                                    // Enter charge mode
-                                                                                    tracing::info!("Agile: price {price}p ≤ {charge_threshold}p - force charging");
-                                                    drop(ag_state);
-                                                    let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
-                                                    let cmd = if use_3ph {
-                                                        ControlCommand::ThreePhaseForceCharge { target_soc: 100 }
-                                                    } else {
-                                                        ControlCommand::ForceCharge { target_soc: 100 }
-                                                    };
-                                                    let mut all_ok = true;
-                                                    if let Ok(writes) = cmd.encode() {
-                                                        for w in &writes {
-                                                            if let Err(e) = client.write_register(w.address, w.value).await {
-                                                                tracing::error!("Agile: write reg {} failed: {e}", w.address);
-                                                                all_ok = false;
-                                                            }
-                                                            tokio::time::sleep(Duration::from_millis(1500)).await;
-                                                        }
-                                                    } else {
-                                                        all_ok = false;
-                                                    }
-                                                    if all_ok {
-                                                        *state.agile_state.lock().await = AgileState::Charging;
-                                                        persist_agile_state(AgileState::Charging);
-                                                    }
-                                                }
-                                            } else if price >= discharge_threshold {
-                                                if *ag_state != AgileState::Discharging {
-                                                    // Enter discharge mode
-                                                                                    tracing::info!("Agile: price {price}p ≥ {discharge_threshold}p - force discharging");
-                                                    drop(ag_state);
-                                                    let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
-                                                    let cmd = if use_3ph {
-                                                        ControlCommand::ThreePhaseForceDischarge
-                                                    } else {
-                                                        ControlCommand::ForceDischarge
-                                                    };
-                                                    let mut all_ok = true;
-                                                    if let Ok(writes) = cmd.encode() {
-                                                        for w in &writes {
-                                                            if let Err(e) = client.write_register(w.address, w.value).await {
-                                                                tracing::error!("Agile: write reg {} failed: {e}", w.address);
-                                                                all_ok = false;
-                                                            }
-                                                            tokio::time::sleep(Duration::from_millis(1500)).await;
-                                                        }
-                                                    } else {
-                                                        all_ok = false;
-                                                    }
-                                                    if all_ok {
-                                                        *state.agile_state.lock().await = AgileState::Discharging;
-                                                        persist_agile_state(AgileState::Discharging);
-                                                    }
+                                            if use_3ph {
+                                                ControlCommand::ThreePhaseAgileChargeSlot {
+                                                    start_hhmm: *start_hhmm,
+                                                    end_hhmm: *end_hhmm,
+                                                    target_soc: *target_soc,
                                                 }
                                             } else {
-                                                // Hold - price between thresholds: revert to Eco mode
-                                                if *ag_state != AgileState::Idle {
-                                                                                    tracing::info!("Agile: hold (price {price}p), reverting to Eco");
-                                                    drop(ag_state);
-                                                    let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
-                                                    let cmd = if use_3ph {
-                                                        ControlCommand::ThreePhaseCosyExit
-                                                    } else {
-                                                        ControlCommand::CosyExit
-                                                    };
-                                                    let mut all_ok = true;
-                                                    if let Ok(writes) = cmd.encode() {
-                                                        for w in &writes {
-                                                            if let Err(e) = client.write_register(w.address, w.value).await {
-                                                                tracing::error!("Agile: write reg {} failed: {e}", w.address);
-                                                                all_ok = false;
-                                                            }
-                                                            tokio::time::sleep(Duration::from_millis(1500)).await;
-                                                        }
-                                                    } else {
-                                                        all_ok = false;
-                                                    }
-                                                    if all_ok {
-                                                        *state.agile_state.lock().await = AgileState::Idle;
-                                                        persist_agile_state(AgileState::Idle);
-                                                    }
+                                                ControlCommand::AgileChargeSlot {
+                                                    start_hhmm: *start_hhmm,
+                                                    end_hhmm: *end_hhmm,
+                                                    target_soc: *target_soc,
                                                 }
-                                            }
-                                        } else {
-                                            // No price data available for current time
-                                            // Reset to idle so we don't get stuck in previous state
-                                            let cached_count = state.cached_agile_prices.lock().await.len();
-                                            let mut ag_state = state.agile_state.lock().await;
-                                            if *ag_state != AgileState::Idle {
-                                                *ag_state = AgileState::Idle;
-                                                persist_agile_state(AgileState::Idle);
-                                                tracing::warn!(
-                                                    cached_slots = cached_count,
-                                                    "Agile: no price data for current time, reset to idle",
-                                                );
-                                            } else {
-                                                tracing::warn!(
-                                                    cached_slots = cached_count,
-                                                    "Agile: no price data for current time (still idle)",
-                                                );
                                             }
                                         }
-                                    } else {
-                                        // Agile mode disabled - if we were actively
-                                        // charging/discharging, revert to Eco so the
-                                        // inverter doesn't stay force-charging after a
-                                        // switch to Standard mode.
-                                        //
-                                        // IMPORTANT: check if cosy is actively in slot
-                                        // before sending CosyExit. The cosy block runs
-                                        // BEFORE the agile block in each poll, so if
-                                        // cosy just entered, we'd undo its force-charge.
-                                        // In that case, just clear the agile flag
-                                        // without sending conflicting writes.
-                                        let ag_state = state.agile_state.lock().await;
-                                        let was_state = *ag_state;
-                                        if *ag_state != AgileState::Idle {
-                                            if *state.cosy_active.lock().await {
-                                                // Cosy is in control - just clear the
-                                                // agile flag, don't send CosyExit
-                                                // (which would stop the cosy charge).
-                                                drop(ag_state);
-                                                *state.agile_state.lock().await = AgileState::Idle;
-                                                persist_agile_state(AgileState::Idle);
-                                                tracing::info!(
-                                                    "Agile: disabled while {:?} but cosy is active - cleared flag without reverting",
-                                                    was_state
-                                                );
+                                        AgileSlotAction::Discharge { start_hhmm, end_hhmm } => {
+                                            tracing::info!(
+                                                "Agile: expensive window, discharging (export) {start_hhmm:04}–{end_hhmm:04}"
+                                            );
+                                            if use_3ph {
+                                                ControlCommand::ThreePhaseAgileDischargeSlot {
+                                                    start_hhmm: *start_hhmm,
+                                                    end_hhmm: *end_hhmm,
+                                                }
                                             } else {
-                                                tracing::info!("Agile: mode disabled while {:?} - reverting to Eco", was_state);
-                                                drop(ag_state);
-                                                let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
-                                                let cmd = if use_3ph {
-                                                    ControlCommand::ThreePhaseCosyExit
-                                                } else {
-                                                    ControlCommand::CosyExit
-                                                };
-                                                let mut all_ok = true;
-                                                if let Ok(writes) = cmd.encode() {
-                                                    for w in &writes {
-                                                        if let Err(e) = client.write_register(w.address, w.value).await {
-                                                            tracing::error!("Agile: write reg {} failed: {e}", w.address);
-                                                            all_ok = false;
-                                                        }
-                                                        tokio::time::sleep(Duration::from_millis(1500)).await;
-                                                    }
-                                                } else {
+                                                ControlCommand::AgileDischargeSlot {
+                                                    start_hhmm: *start_hhmm,
+                                                    end_hhmm: *end_hhmm,
+                                                }
+                                            }
+                                        }
+                                        AgileSlotAction::Defer => {
+                                            // Cosy or auto-winter owns this side. Don't
+                                            // touch the inverter. Logged at debug only
+                                            // because this fires every poll during a
+                                            // cosy slot.
+                                            tracing::debug!("Agile: deferring (cosy/auto-winter owns charge side)");
+                                            // Use a no-op command — the skip_writes guard
+                                            // below prevents this from being written.
+                                            ControlCommand::AgileClearActiveSlot
+                                        }
+                                        AgileSlotAction::Idle => {
+                                            // Mid-band price, out-of-scope mode, or no
+                                            // price data. Disarm any preloaded slot.
+                                            tracing::debug!("Agile: idle, clearing active slot");
+                                            if use_3ph {
+                                                ControlCommand::ThreePhaseAgileClearActiveSlot
+                                            } else {
+                                                ControlCommand::AgileClearActiveSlot
+                                            }
+                                        }
+                                    };
+
+                                    if !skip_writes {
+                                        if let Ok(writes) = cmd.encode() {
+                                            let mut all_ok = true;
+                                            for w in &writes {
+                                                if let Err(e) =
+                                                    client.write_register(w.address, w.value).await
+                                                {
+                                                    tracing::error!(
+                                                        "Agile: write reg {} failed: {e}",
+                                                        w.address
+                                                    );
                                                     all_ok = false;
                                                 }
-                                                if all_ok {
-                                                    *state.agile_state.lock().await = AgileState::Idle;
-                                                    persist_agile_state(AgileState::Idle);
-                                                } else {
-                                                    tracing::warn!("Agile: exit writes failed - will retry on next poll");
-                                                }
+                                                tokio::time::sleep(Duration::from_millis(1500)).await;
+                                            }
+                                            if !all_ok {
+                                                tracing::warn!(
+                                                    "Agile: slot writes failed — will retry on next poll"
+                                                );
                                             }
                                         }
                                     }
+
+                                    // Update the snapshot fields the frontend reads.
+                                    // `agile_scope` carries the user's selected mode
+                                    // (Off / Full / ChargeOnly / DischargeOnly); the
+                                    // frontend uses it for the Inverter-page summary
+                                    // and for hiding/showing schedule sections.
+                                    snapshot.agile_active = action.is_active();
+                                    snapshot.agile_state = action.label().to_string();
+                                    snapshot.agile_enabled = scope != crate::settings::AgileScope::Off;
+                                    snapshot.agile_scope = scope;
                                 }
 
                                 // ---- Email alerts ----
@@ -2823,9 +2810,12 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 // - e.g. showing "Cosy Active" for an extra poll
                                 // after the slot actually ended.
                                 snapshot.cosy_active = *state.cosy_active.lock().await;
-                                let ag = state.agile_state.lock().await;
-                                snapshot.agile_active = *ag != AgileState::Idle;
-                                snapshot.agile_state = format!("{:?}", *ag);
+                                // NOTE: snapshot.agile_active / agile_state / agile_enabled
+                                // are now set by the slot-based Agile block earlier in
+                                // this poll. Don't touch them here — overwriting would
+                                // regress the Inverter-page summary that derives
+                                // "Timed Charge — active" from enable_charge + slot
+                                // window + battery_state.
 
                                 {
                                     let mut latest = state.latest_snapshot.lock().await;

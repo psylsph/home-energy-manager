@@ -33,20 +33,19 @@ use crate::modbus::registers::{
 // Agile Octopus price types
 // ===========================================================================
 
+#[derive(Debug, Clone)]
 pub struct PriceSlot {
     pub pence: f64,
     pub valid_from: i64, // unix timestamp
     pub valid_to: i64,   // unix timestamp
 }
 
-/// Current state of the Agile Octopus state machine.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum AgileState {
-    #[default]
-    Idle,
-    Charging,
-    Discharging,
-}
+// The legacy `AgileState { Idle, Charging, Discharging }` enum was removed
+// in the slot-based refactor. The new `AgileSlotAction` enum below carries
+// per-poll decisions directly to the write loop, and the inverter's own
+// slot registers are the source of truth for "is a slot currently firing".
+// The `agile_state_persisted` settings field is kept for diagnostic logging
+// but is no longer read at runtime.
 
 // ===========================================================================
 // Auto-winter mode: types + transition logic
@@ -217,34 +216,13 @@ pub(crate) fn persist_cosy_active_sync(active: bool) {
     }
 }
 
-/// Persist the Agile Octopus runtime state so a crash/restart can detect
-/// that the inverter was left mid-charge/discharge and re-evaluate on the
-/// first poll. The in-memory `agile_state` always restarts at Idle, forcing
-/// a fresh decision (and command send) regardless of the persisted value.
-pub(crate) fn persist_agile_state(ag_state: AgileState) {
-    let label = match ag_state {
-        AgileState::Idle => "idle",
-        AgileState::Charging => "charging",
-        AgileState::Discharging => "discharging",
-    };
-    let label_str = label.to_string();
-    #[cfg(not(test))]
-    {
-        tokio::task::spawn_blocking(move || persist_agile_state_sync(label_str));
-    }
-    #[cfg(test)]
-    persist_agile_state_sync(label_str);
-}
-
-pub(crate) fn persist_agile_state_sync(label: String) {
-    let mut settings = crate::settings::Settings::load();
-    if settings.agile_state_persisted != label {
-        settings.agile_state_persisted = label.clone();
-        if let Err(e) = settings.save() {
-            tracing::warn!(state = &label, "Failed to persist agile_state: {e}");
-        }
-    }
-}
+// `persist_agile_state` and `persist_agile_state_sync` were removed in
+// the slot-based Agile refactor. The slot-based approach derives state
+// from the inverter's own slot registers on every poll, so there's
+// nothing to persist or recover. The startup log line at
+// `poll.rs:962-976` has been replaced with a snapshot-based diagnostic
+// that reads the inverter's actual `enable_charge` / `enable_discharge`
+// state instead of the legacy `agile_state_persisted` string.
 
 // ===========================================================================
 // Cosy slot register-write generators
@@ -907,6 +885,228 @@ pub(crate) fn build_force_discharge_auto_revert_writes(
     }
 
     Some(writes)
+}
+
+// ===========================================================================
+// Agile Octopus slot-based decision logic
+// ===========================================================================
+
+/// Outcome of the price-vs-scope evaluation that drives the slot-based
+/// Agile state machine.
+///
+/// Replaces the legacy `AgileState { Idle, Charging, Discharging }` enum
+/// (which only told you what the inverter was doing — the slot-based
+/// approach drives the inverter through its native schedule mechanism,
+/// so the "state" is whatever the inverter itself reports via its
+/// registers). The poll loop converts this into register writes; the
+/// `Charge { .. }` and `Discharge { .. }` variants include the slot
+/// window so the encoder knows which HHMM pair to write.
+///
+/// `Defer { .. }` is the cosy/auto-winter conflict signal — the price
+/// is in scope (cheap or expensive) but another mechanism is in
+/// control, so we don't touch the inverter. `Idle` means the price is
+/// mid-band, out of scope for the current mode, or no price data is
+/// available.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AgileSlotAction {
+    /// Cheap-window charge: drive the inverter through its native
+    /// charge slot 1 with these HHMM boundaries and target SOC.
+    Charge {
+        start_hhmm: u16,
+        end_hhmm: u16,
+        target_soc: u16,
+    },
+    /// Expensive-window discharge (with export — option β).
+    Discharge {
+        start_hhmm: u16,
+        end_hhmm: u16,
+    },
+    /// Cosy or auto-winter is in control of the matching side. Don't
+    /// touch the inverter — let the other mechanism own this poll.
+    Defer,
+    /// Mid-band price, out-of-scope mode, or no price data. The poll
+    /// loop calls `AgileClearActiveSlot` to disarm any preloaded slot.
+    Idle,
+}
+
+impl AgileSlotAction {
+    /// True when this action drives the inverter (Charge / Discharge /
+    /// Idle-and-clear / Defer-noop).
+    pub fn is_active(&self) -> bool {
+        matches!(self, AgileSlotAction::Charge { .. } | AgileSlotAction::Discharge { .. })
+    }
+
+    /// Snapshot-side label for this action, matching the wire shape the
+    /// frontend reads as `snapshot.agile_state`. Idle returns "idle" so
+    /// a Defer (cosy in control) and an Idle (mid-band) look the same to
+    /// the frontend, which is correct: the inverter isn't doing anything
+    /// price-driven.
+    pub fn label(&self) -> &'static str {
+        match self {
+            AgileSlotAction::Charge { .. } => "charging",
+            AgileSlotAction::Discharge { .. } => "discharging",
+            AgileSlotAction::Defer | AgileSlotAction::Idle => "idle",
+        }
+    }
+}
+
+/// Compute the slot-driven action the Agile state machine should take
+/// this poll.
+///
+/// `cached_prices` is the Octopus price cache (newest-first per the
+/// Octopus API response order). The function finds the slot whose
+/// `valid_from <= now < valid_to`, then walks forward through the
+/// cache to find the end of the contiguous cheap/expensive run, and
+/// returns the corresponding slot boundaries as HHMM packed values.
+///
+/// `cosy_active` and `auto_winter_active` defer the charge-side action
+/// to whichever mechanism is currently in control (mirrors the
+/// cosy-conflict guard added in `04eee32`).
+///
+/// `local_tz` is the timezone used to convert unix timestamps into
+/// HHMM values that match the inverter's slot registers (which are
+/// stored in local time). Pass `chrono::Local` in production and
+/// `chrono::Utc` (or any fixed offset) in tests for determinism.
+///
+/// Threshold arg count exceeds the clippy default (7) because the
+/// state-machine split between cache lookup, conflict guards, and
+/// timezone conversion is clearest as a flat argument list. Splitting
+/// into a wrapper struct just to satisfy the lint would obscure the
+/// call site without simplifying testing.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_agile_slot<Tz: chrono::TimeZone>(
+    scope: crate::settings::AgileScope,
+    price: Option<f64>,
+    charge_threshold: f64,
+    discharge_threshold: f64,
+    cached_prices: &[PriceSlot],
+    now_unix_ts: i64,
+    cosy_active: bool,
+    auto_winter_active: bool,
+    local_tz: &Tz,
+) -> AgileSlotAction {
+    use crate::settings::AgileScope;
+
+    // No scope — nothing to do. The poll loop calls
+    // AgileClearActiveSlot on this path to disarm any stale preloaded
+    // slot from a previous run.
+    if scope == AgileScope::Off {
+        return AgileSlotAction::Idle;
+    }
+    // No price data — same as mid-band: disarm any active slot.
+    let price = match price {
+        Some(p) => p,
+        None => return AgileSlotAction::Idle,
+    };
+
+    // Mid-band: inverter obeys whatever the user has armed manually.
+    if price > charge_threshold && price < discharge_threshold {
+        return AgileSlotAction::Idle;
+    }
+
+    // Determine whether this price is in scope for the current mode.
+    let wants_charge = price <= charge_threshold && scope.owns_charge();
+    let wants_discharge = price >= discharge_threshold && scope.owns_discharge();
+
+    if wants_charge {
+        // Cosy/auto-winter conflict guard: if either is active on the
+        // charge side, defer to them. They run before Agile in the
+        // poll loop and own the HR_ENABLE_CHARGE register this poll.
+        if cosy_active || auto_winter_active {
+            return AgileSlotAction::Defer;
+        }
+        // Find the contiguous cheap run starting now.
+        return match contiguous_run_window(
+            cached_prices,
+            now_unix_ts,
+            |p| p <= charge_threshold,
+        ) {
+            Some((start_unix, end_unix)) => AgileSlotAction::Charge {
+                start_hhmm: unix_to_hhmm(start_unix, local_tz),
+                end_hhmm: unix_to_hhmm(end_unix, local_tz),
+                target_soc: 100,
+            },
+            None => AgileSlotAction::Idle,
+        };
+    }
+
+    if wants_discharge {
+        // Discharge side has no cosy/auto-winter conflict — those
+        // mechanisms are charge-only.
+        return match contiguous_run_window(
+            cached_prices,
+            now_unix_ts,
+            |p| p >= discharge_threshold,
+        ) {
+            Some((start_unix, end_unix)) => AgileSlotAction::Discharge {
+                start_hhmm: unix_to_hhmm(start_unix, local_tz),
+                end_hhmm: unix_to_hhmm(end_unix, local_tz),
+            },
+            None => AgileSlotAction::Idle,
+        };
+    }
+
+    // Price is in band for the opposite side (cheap price but
+    // DischargeOnly mode, or expensive price but ChargeOnly mode) — do
+    // nothing; the user's manual schedule owns the other side.
+    AgileSlotAction::Idle
+}
+
+/// Find the boundaries of the contiguous run of half-hour slots
+/// matching `matches` starting at the slot that contains
+/// `now_unix_ts`.
+///
+/// Returns the unix timestamp of the start of the current slot and
+/// the unix timestamp of the end of the last slot in the run. Returns
+/// `None` if no slot contains `now_unix_ts`.
+///
+/// The Octopus cache is newest-first (per the API's results order):
+/// index 0 is the latest slot, index N-1 is the earliest. To walk
+/// FORWARD in time from `now_unix_ts`, we move toward LOWER indices.
+/// The run ends at the first slot where the predicate fails, or at
+/// the first gap in coverage (slot.valid_from != current end).
+fn contiguous_run_window(
+    cached_prices: &[PriceSlot],
+    now_unix_ts: i64,
+    matches: impl Fn(f64) -> bool,
+) -> Option<(i64, i64)> {
+    // Find the slot containing now_unix_ts.
+    let current_idx = cached_prices
+        .iter()
+        .position(|s| now_unix_ts >= s.valid_from && now_unix_ts < s.valid_to)?;
+    let current = &cached_prices[current_idx];
+    if !matches(current.pence) {
+        return None;
+    }
+    let start_unix = current.valid_from;
+    let mut end_unix = current.valid_to;
+    // Walk forward in time: toward LOWER indices (newer slots in the
+    // newest-first cache). `rev()` gives us [current_idx-1,
+    // current_idx-2, ..., 0], which is descending valid_to order —
+    // forward in time.
+    for slot in cached_prices.iter().take(current_idx).rev() {
+        // Coverage gap: this slot doesn't abut the previous one
+        // (Octopus sometimes returns partial ranges).
+        if slot.valid_from != end_unix {
+            break;
+        }
+        if !matches(slot.pence) {
+            break;
+        }
+        end_unix = slot.valid_to;
+    }
+    Some((start_unix, end_unix))
+}
+
+/// Convert a unix timestamp to a packed HHMM value (matching the
+/// inverter's HHMM register format). Truncates to the timezone
+/// passed in — the inverter's slot registers are local-time, so
+/// production passes `chrono::Local` and tests pass a fixed offset.
+fn unix_to_hhmm<Tz: chrono::TimeZone>(unix_ts: i64, tz: &Tz) -> u16 {
+    let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(unix_ts, 0)
+        .unwrap_or_else(|| chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap());
+    let local = dt.with_timezone(tz);
+    (local.hour() as u16) * 100 + (local.minute() as u16)
 }
 
 // ===========================================================================
@@ -1898,5 +2098,421 @@ mod tests {
             None,
         );
         assert!(writes.is_some(), "should fire at exact boundary");
+    }
+
+    // ==================================================================
+    // evaluate_agile_slot tests
+    // ==================================================================
+    //
+    // The slot-based Agile state machine has three responsibilities:
+    //   1. Pick the right side (charge vs discharge) for the current
+    //      price + scope.
+    //   2. Detect contiguous cheap/expensive runs starting now so the
+    //      slot we write covers the whole window in one FC6 sequence.
+    //   3. Defer when Cosy or AutoWinter is in control of the same side.
+    //
+    // Tests pin all three so future scope additions (e.g. ChargeOnly)
+    // can't silently regress Standard-mode behaviour.
+
+    use crate::settings::AgileScope;
+
+    /// Build a PriceSlot cache in newest-first order, the shape the
+    /// Octopus API returns. Times are unix seconds; 30-min slots.
+    fn make_cache(slots: &[(i64, i64, f64)]) -> Vec<PriceSlot> {
+        let mut v: Vec<PriceSlot> = slots
+            .iter()
+            .map(|&(from, to, pence)| PriceSlot {
+                pence,
+                valid_from: from,
+                valid_to: to,
+            })
+            .collect();
+        // Sort newest-first (descending valid_to) so the fixture matches
+        // the real Octopus response shape.
+        v.sort_by_key(|s| std::cmp::Reverse(s.valid_to));
+        v
+    }
+
+    #[test]
+    fn evaluate_agile_off_scope_returns_idle() {
+        let cache = make_cache(&[(0, 1800, 5.0)]);
+        let action = evaluate_agile_slot(
+            AgileScope::Off,
+            Some(5.0),
+            10.0,
+            30.0,
+            &cache,
+            900,
+            false,
+            false,
+            &chrono::Utc,
+        );
+        assert_eq!(action, AgileSlotAction::Idle);
+        assert!(!action.is_active());
+    }
+
+    #[test]
+    fn evaluate_agile_no_price_data_returns_idle() {
+        let cache = make_cache(&[(0, 1800, 5.0)]);
+        let action = evaluate_agile_slot(
+            AgileScope::Full,
+            None,
+            10.0,
+            30.0,
+            &cache,
+            900,
+            false,
+            false,
+            &chrono::Utc,
+        );
+        assert_eq!(action, AgileSlotAction::Idle);
+    }
+
+    #[test]
+    fn evaluate_agile_cheap_price_full_scope_returns_charge() {
+        // 02:00–02:30 cheap slot, query at 02:10 (600s into the slot).
+        // Cache in newest-first order with the cheap slot mid-list.
+        // Using UTC for the timezone parameter makes the HHMM
+        // conversion deterministic across CI machines.
+        let slot_start = 2 * 3600; // 02:00 UTC
+        let slot_end = slot_start + 1800; // 02:30 UTC
+        let now_ts = slot_start + 600; // 02:10 UTC
+        let cache = make_cache(&[
+            (slot_end, slot_end + 1800, 30.0),    // 02:30–03:00 expensive
+            (slot_start, slot_end, 5.0),         // 02:00–02:30 cheap (current)
+            (slot_start - 1800, slot_start, 8.0), // 01:30–02:00 mid
+        ]);
+        let action = evaluate_agile_slot(
+            AgileScope::Full,
+            Some(5.0),
+            10.0,
+            30.0,
+            &cache,
+            now_ts,
+            false,
+            false,
+            &chrono::Utc,
+        );
+        match action {
+            AgileSlotAction::Charge { start_hhmm, end_hhmm, target_soc } => {
+                assert_eq!(start_hhmm, 200);
+                assert_eq!(end_hhmm, 230); // current slot only — 02:30 is expensive
+                assert_eq!(target_soc, 100);
+            }
+            other => panic!("expected Charge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluate_agile_contiguous_cheap_run_spans_whole_run() {
+        // Three back-to-back cheap slots 02:00–03:30. The action should
+        // span all three because the price stays below the threshold.
+        let s0 = 2 * 3600;       // 02:00
+        let s1 = s0 + 1800;      // 02:30
+        let s2 = s0 + 3600;      // 03:00
+        let s3 = s0 + 5400;      // 03:30 (expensive start)
+        let now_ts = s0 + 600;   // 02:10
+        let cache = make_cache(&[
+            (s3, s3 + 1800, 35.0), // expensive after the run
+            (s2, s3, 4.0),         // 03:00–03:30 cheap
+            (s1, s2, 6.0),         // 02:30–03:00 cheap
+            (s0, s1, 5.0),         // 02:00–02:30 cheap (current)
+        ]);
+        let action = evaluate_agile_slot(
+            AgileScope::Full,
+            Some(5.0),
+            10.0,
+            30.0,
+            &cache,
+            now_ts,
+            false,
+            false,
+            &chrono::Utc,
+        );
+        match action {
+            AgileSlotAction::Charge { start_hhmm, end_hhmm, .. } => {
+                assert_eq!(start_hhmm, 200);
+                assert_eq!(end_hhmm, 330, "should span all three cheap slots");
+            }
+            other => panic!("expected Charge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluate_agile_expensive_price_returns_discharge() {
+        let slot_start = 17 * 3600;
+        let slot_end = slot_start + 1800;
+        let now_ts = slot_start + 600;
+        let cache = make_cache(&[
+            (slot_end, slot_end + 1800, 15.0),    // drops back to mid
+            (slot_start, slot_end, 35.0),         // 17:00–17:30 expensive
+            (slot_start - 1800, slot_start, 20.0), // 16:30–17:00 mid
+        ]);
+        let action = evaluate_agile_slot(
+            AgileScope::Full,
+            Some(35.0),
+            10.0,
+            30.0,
+            &cache,
+            now_ts,
+            false,
+            false,
+            &chrono::Utc,
+        );
+        match action {
+            AgileSlotAction::Discharge { start_hhmm, end_hhmm } => {
+                assert_eq!(start_hhmm, 1700);
+                assert_eq!(end_hhmm, 1730);
+            }
+            other => panic!("expected Discharge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluate_agile_mid_band_returns_idle() {
+        let cache = make_cache(&[(0, 1800, 20.0)]);
+        let action = evaluate_agile_slot(
+            AgileScope::Full,
+            Some(20.0),
+            10.0,
+            30.0,
+            &cache,
+            900,
+            false,
+            false,
+            &chrono::Utc,
+        );
+        assert_eq!(action, AgileSlotAction::Idle);
+    }
+
+    #[test]
+    fn evaluate_agile_charge_only_ignores_expensive_price() {
+        // Scope=ChargeOnly, expensive price → the user's discharge
+        // schedule owns the discharge side, so we return Idle.
+        let slot_start = 17 * 3600;
+        let slot_end = slot_start + 1800;
+        let cache = make_cache(&[
+            (slot_start, slot_end, 35.0),
+            (slot_start - 1800, slot_start, 20.0),
+        ]);
+        let action = evaluate_agile_slot(
+            AgileScope::ChargeOnly,
+            Some(35.0),
+            10.0,
+            30.0,
+            &cache,
+            slot_start + 600,
+            false,
+            false,
+            &chrono::Utc,
+        );
+        assert_eq!(
+            action,
+            AgileSlotAction::Idle,
+            "ChargeOnly must ignore expensive prices"
+        );
+    }
+
+    #[test]
+    fn evaluate_agile_discharge_only_ignores_cheap_price() {
+        // Scope=DischargeOnly, cheap price → the user's charge schedule
+        // owns the charge side.
+        let slot_start = 2 * 3600;
+        let slot_end = slot_start + 1800;
+        let cache = make_cache(&[
+            (slot_start, slot_end, 5.0),
+            (slot_start - 1800, slot_start, 20.0),
+        ]);
+        let action = evaluate_agile_slot(
+            AgileScope::DischargeOnly,
+            Some(5.0),
+            10.0,
+            30.0,
+            &cache,
+            slot_start + 600,
+            false,
+            false,
+            &chrono::Utc,
+        );
+        assert_eq!(
+            action,
+            AgileSlotAction::Idle,
+            "DischargeOnly must ignore cheap prices"
+        );
+    }
+
+    #[test]
+    fn evaluate_agile_cosy_active_defers_charge() {
+        // Cheap price, but cosy is in control. We must NOT overwrite
+        // HR_ENABLE_CHARGE with our own value — let cosy's preload
+        // win (cosy runs first in the poll loop). Returning Defer
+        // tells the poll loop to skip writes this iteration.
+        let slot_start = 2 * 3600;
+        let slot_end = slot_start + 1800;
+        let cache = make_cache(&[(slot_start, slot_end, 5.0)]);
+        let action = evaluate_agile_slot(
+            AgileScope::Full,
+            Some(5.0),
+            10.0,
+            30.0,
+            &cache,
+            slot_start + 600,
+            true, // cosy_active
+            false,
+            &chrono::Utc,
+        );
+        assert_eq!(action, AgileSlotAction::Defer);
+        assert_eq!(action.label(), "idle");
+    }
+
+    #[test]
+    fn evaluate_agile_auto_winter_active_defers_charge() {
+        let slot_start = 2 * 3600;
+        let slot_end = slot_start + 1800;
+        let cache = make_cache(&[(slot_start, slot_end, 5.0)]);
+        let action = evaluate_agile_slot(
+            AgileScope::Full,
+            Some(5.0),
+            10.0,
+            30.0,
+            &cache,
+            slot_start + 600,
+            false,
+            true, // auto_winter_active
+            &chrono::Utc,
+        );
+        assert_eq!(action, AgileSlotAction::Defer);
+    }
+
+    #[test]
+    fn evaluate_agile_defer_does_not_apply_to_discharge() {
+        // Even with cosy in control, DischargeOnly should still fire
+        // because cosy's mechanism is charge-only.
+        let slot_start = 17 * 3600;
+        let slot_end = slot_start + 1800;
+        let cache = make_cache(&[(slot_start, slot_end, 35.0)]);
+        let action = evaluate_agile_slot(
+            AgileScope::DischargeOnly,
+            Some(35.0),
+            10.0,
+            30.0,
+            &cache,
+            slot_start + 600,
+            true, // cosy_active — should NOT defer discharge
+            false,
+            &chrono::Utc,
+        );
+        assert!(
+            matches!(action, AgileSlotAction::Discharge { .. }),
+            "DischargeOnly must fire regardless of cosy_active"
+        );
+    }
+
+    #[test]
+    fn evaluate_agile_coverage_gap_breaks_run() {
+        // Two cheap slots with a gap in between (Octopus sometimes
+        // returns partial ranges). The run should NOT span the gap.
+        let s0 = 2 * 3600;
+        let s1 = s0 + 1800;
+        let s2 = s0 + 7200; // 2-hour gap
+        let s3 = s2 + 1800;
+        let cache = make_cache(&[
+            (s3, s3 + 1800, 35.0), // gap-end expensive
+            (s2, s3, 4.0),         // 04:00–04:30 cheap (gap tail)
+            (s1, s2, 35.0),        // gap head: expensive, breaks the run
+            (s0, s1, 5.0),         // 02:00–02:30 cheap (current)
+        ]);
+        let action = evaluate_agile_slot(
+            AgileScope::Full,
+            Some(5.0),
+            10.0,
+            30.0,
+            &cache,
+            s0 + 600,
+            false,
+            false,
+            &chrono::Utc,
+        );
+        match action {
+            AgileSlotAction::Charge { end_hhmm, .. } => {
+                assert_eq!(end_hhmm, 230, "gap should bound the run");
+            }
+            other => panic!("expected Charge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluate_agile_now_ts_not_in_any_slot_returns_idle() {
+        // The cache has slots but `now_unix_ts` doesn't match any of
+        // them (e.g. clock skew or stale cache). Return Idle.
+        let cache = make_cache(&[(0, 1800, 5.0)]);
+        let action = evaluate_agile_slot(
+            AgileScope::Full,
+            Some(5.0),
+            10.0,
+            30.0,
+            &cache,
+            86400, // a totally different time
+            false,
+            false,
+            &chrono::Utc,
+        );
+        assert_eq!(action, AgileSlotAction::Idle);
+    }
+
+    #[test]
+    fn evaluate_agile_label_for_known_actions() {
+        let charge = AgileSlotAction::Charge {
+            start_hhmm: 0,
+            end_hhmm: 0,
+            target_soc: 100,
+        };
+        assert_eq!(charge.label(), "charging");
+        assert!(charge.is_active());
+
+        let discharge = AgileSlotAction::Discharge {
+            start_hhmm: 0,
+            end_hhmm: 0,
+        };
+        assert_eq!(discharge.label(), "discharging");
+        assert!(discharge.is_active());
+
+        assert_eq!(AgileSlotAction::Defer.label(), "idle");
+        assert!(!AgileSlotAction::Defer.is_active());
+        assert_eq!(AgileSlotAction::Idle.label(), "idle");
+        assert!(!AgileSlotAction::Idle.is_active());
+    }
+
+    #[test]
+    fn standard_charge_schedule_unchanged_after_agile_refactor() {
+        // Regression guard for the "don't break Standard mode" promise.
+        // The cosy_slot_register_writes function is the foundation of
+        // both Cosy mode and the user's manual charge schedule on the
+        // Standard path. Its writes must be byte-identical to before
+        // the slot-based Agile refactor.
+        let slot = crate::settings::CosySlot {
+            enabled: true,
+            start_hour: 2,
+            start_minute: 0,
+            end_hour: 5,
+            end_minute: 30,
+            target_soc: 100,
+        };
+        let writes = cosy_slot_register_writes(&slot, DeviceType::Gen3Hybrid, true);
+        // 5 base writes + 1 extended-slot target SOC for Gen3+ = 6.
+        // (Gen3+ writes HR_CHARGE_TARGET_SOC_1 alongside HR_CHARGE_TARGET_SOC.)
+        assert_eq!(writes.len(), 6);
+        assert_eq!(writes[0].address, HR_CHARGE_SLOT_1_START);
+        assert_eq!(writes[0].value, 200);
+        assert_eq!(writes[1].address, HR_CHARGE_SLOT_1_END);
+        assert_eq!(writes[1].value, 530);
+        assert_eq!(writes[2].address, HR_ENABLE_CHARGE);
+        assert_eq!(writes[2].value, 1);
+        assert_eq!(writes[3].address, HR_ENABLE_CHARGE_TARGET);
+        assert_eq!(writes[3].value, 1);
+        assert_eq!(writes[4].address, HR_CHARGE_TARGET_SOC);
+        assert_eq!(writes[4].value, 100);
+        assert_eq!(writes[5].address, crate::modbus::registers::HR_CHARGE_TARGET_SOC_1);
+        assert_eq!(writes[5].value, 100);
     }
 }
