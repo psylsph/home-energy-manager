@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.46.1] - 2026-06-28
+
 ### Fixed
 
 - **Gen 1 Hybrid "Battery Charged" and "Battery Discharged" home-page tiles no longer flat-line at 0.0 kWh on firmwares that populate alt1 but not alt2.** The decoder's alt2 (IR(182)/IR(183)) override for Gen1 Hybrid was unconditional, so on firmwares — like ARM 451 — that leave those alt2 registers at 0 while alt1 (IR(36)/IR(37)) carries the real daily totals, the override wiped out the working alt1 values and the home page tiles read 0.0 kWh even while the inverter was clearly charging and discharging. The override now only fires when at least one alt2 register is non-zero, so the alt1 totals remain visible on those firmwares. (#164)
