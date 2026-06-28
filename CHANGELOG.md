@@ -2,7 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.48.1] - 2026-06-28
+
+### Changed
+
+- **The Android APK that v0.48.0 advertised in its download table is now actually published.** 0.48.0 is otherwise unchanged — this release exists to ship the missing Chromebook / Android build after the v0.48.0 release pipeline failed to upload the APK twice in a row on transient GitHub-Actions infrastructure blips. The release workflow now retries the Android CLI install and build steps so the next infrastructure hiccup doesn't lose an asset again.
 
 ## [0.48.0] - 2026-06-28
 
