@@ -186,7 +186,8 @@ pub(crate) fn days_in_local_window(start_ts: i64, end_ts: i64) -> u32 {
         return 0;
     }
     let to_date = |s: i64| {
-        chrono::DateTime::from_timestamp(s, 0).map(|dt| dt.with_timezone(&chrono::Local).date_naive())
+        chrono::DateTime::from_timestamp(s, 0)
+            .map(|dt| dt.with_timezone(&chrono::Local).date_naive())
     };
     match (to_date(start_ts), to_date(end_ts)) {
         (Some(s), Some(e)) if e >= s => (e - s).num_days() as u32 + 1,
@@ -231,8 +232,6 @@ fn local_midnight_steps_after(start_ts: i64, end_ts: i64) -> Vec<i64> {
     }
     out
 }
-
-
 
 /// Time-window specification for a history query.
 ///
@@ -1163,8 +1162,7 @@ impl HistoryDb {
             let prior_ts = last_ts.unwrap_or(start_ts);
             for &midnight in &midnight_steps {
                 if midnight > prior_ts && midnight <= ts {
-                    standing_charge_days_credited =
-                        standing_charge_days_credited.saturating_add(1);
+                    standing_charge_days_credited = standing_charge_days_credited.saturating_add(1);
                 }
             }
 
@@ -1242,8 +1240,7 @@ impl HistoryDb {
         if let Some(lt) = last_ts {
             for &midnight in &midnight_steps {
                 if midnight > lt && midnight < end_ts {
-                    standing_charge_days_credited =
-                        standing_charge_days_credited.saturating_add(1);
+                    standing_charge_days_credited = standing_charge_days_credited.saturating_add(1);
                 }
             }
             // Emit a final bucket at end_ts so the graph shows the latest
@@ -1254,7 +1251,9 @@ impl HistoryDb {
                 standing_charge_days_credited as f64 * standing_charge_gbp_per_day;
             // Only insert if this bucket is later than what we already have
             // (avoid clobbering an existing bucket from the readings walk).
-            buckets.entry(end_bucket_ms).or_insert(acc + standing_charge_total);
+            buckets
+                .entry(end_bucket_ms)
+                .or_insert(acc + standing_charge_total);
         }
 
         // Always emit at least the window-open bucket with the standing
@@ -3514,7 +3513,14 @@ mod tests {
         insert_export_day(&db_peak, 0, 10.0, 16 * 60, 18 * 60 + 30);
         let peak = series_total(
             &db_peak
-                .query_cost_series(&window(start, end), 1800, "today_export_kwh", &tou, 0.10, 0.0)
+                .query_cost_series(
+                    &window(start, end),
+                    1800,
+                    "today_export_kwh",
+                    &tou,
+                    0.10,
+                    0.0,
+                )
                 .unwrap(),
         );
 
@@ -3522,7 +3528,14 @@ mod tests {
         insert_export_day(&db_off, 0, 10.0, 6 * 60, 10 * 60);
         let off = series_total(
             &db_off
-                .query_cost_series(&window(start, end), 1800, "today_export_kwh", &tou, 0.10, 0.0)
+                .query_cost_series(
+                    &window(start, end),
+                    1800,
+                    "today_export_kwh",
+                    &tou,
+                    0.10,
+                    0.0,
+                )
                 .unwrap(),
         );
 
@@ -3549,8 +3562,15 @@ mod tests {
         let end = local_midnight_secs(3) + 60;
         let flat = crate::settings::TariffConfig::flat(0.10);
         let total = series_total(
-            &db.query_cost_series(&window(start, end), 86400, "today_export_kwh", &flat, 0.10, 0.0)
-                .unwrap(),
+            &db.query_cost_series(
+                &window(start, end),
+                86400,
+                "today_export_kwh",
+                &flat,
+                0.10,
+                0.0,
+            )
+            .unwrap(),
         );
         // 3 × 8 kWh × £0.10 = £2.40.
         assert!((total - 2.4).abs() < 1e-6, "expected £2.40, got {total}");
@@ -3576,8 +3596,15 @@ mod tests {
         let end = local_midnight_secs(1) + 60;
         let flat = crate::settings::TariffConfig::flat(1.0);
         let total = series_total(
-            &db.query_cost_series(&window(start, end), 3600, "today_export_kwh", &flat, 1.0, 0.0)
-                .unwrap(),
+            &db.query_cost_series(
+                &window(start, end),
+                3600,
+                "today_export_kwh",
+                &flat,
+                1.0,
+                0.0,
+            )
+            .unwrap(),
         );
         // True energy is the monotone envelope 0 -> 8 = 8 kWh at £1.00 = £8.00.
         assert!(
@@ -3604,8 +3631,15 @@ mod tests {
         let end = m1 + 19 * 3600;
         let tou = tou_export_tariff();
         let total = series_total(
-            &db.query_cost_series(&window(start, end), 1800, "today_export_kwh", &tou, 0.10, 0.0)
-                .unwrap(),
+            &db.query_cost_series(
+                &window(start, end),
+                1800,
+                "today_export_kwh",
+                &tou,
+                0.10,
+                0.0,
+            )
+            .unwrap(),
         );
         // Only the observed 9 -> 12 = 3 kWh (all peak) is credited: 3 x 0.30 = 0.90.
         // The pre-resumption 9 kWh is not retroactively priced at the peak rate
@@ -3633,8 +3667,15 @@ mod tests {
         let end = m + 13 * 3600;
         let flat = crate::settings::TariffConfig::flat(0.25);
         let total = series_total(
-            &db.query_cost_series(&window(start, end), 1800, "today_import_kwh", &flat, 0.25, 0.0)
-                .unwrap(),
+            &db.query_cost_series(
+                &window(start, end),
+                1800,
+                "today_import_kwh",
+                &flat,
+                0.25,
+                0.0,
+            )
+            .unwrap(),
         );
         // ~3.33 kWh at 0.25 ~= £0.83. Must be far above zero (the bug gave ~0).
         assert!(
@@ -3657,8 +3698,15 @@ mod tests {
         let end = m + 13 * 3600;
         let flat = crate::settings::TariffConfig::flat(1.0);
         let total = series_total(
-            &db.query_cost_series(&window(start, end), 1800, "today_export_kwh", &flat, 1.0, 0.0)
-                .unwrap(),
+            &db.query_cost_series(
+                &window(start, end),
+                1800,
+                "today_export_kwh",
+                &flat,
+                1.0,
+                0.0,
+            )
+            .unwrap(),
         );
         // The 5 -> 5000 spike is dropped (baseline held at 5); only 5 -> 5.2 -> 5.4
         // = 0.4 kWh of real growth is credited: 0.4 x 1.0 = £0.40.
@@ -3700,8 +3748,15 @@ mod tests {
         let end = local_midnight_secs(1) + 60;
         let flat = crate::settings::TariffConfig::flat(0.25);
         let baseline = series_total(
-            &db.query_cost_series(&window(start, end), 1800, "today_export_kwh", &flat, 0.25, 0.0)
-                .unwrap(),
+            &db.query_cost_series(
+                &window(start, end),
+                1800,
+                "today_export_kwh",
+                &flat,
+                0.25,
+                0.0,
+            )
+            .unwrap(),
         );
         assert!(
             (baseline - 2.5).abs() < 1e-6,
@@ -3724,7 +3779,14 @@ mod tests {
         let end = local_midnight_secs(4);
         let flat = crate::settings::TariffConfig::flat(0.10);
         let series = db
-            .query_cost_series(&window(start, end), 1800, "today_export_kwh", &flat, 0.10, 54.86)
+            .query_cost_series(
+                &window(start, end),
+                1800,
+                "today_export_kwh",
+                &flat,
+                0.10,
+                54.86,
+            )
             .unwrap();
         // kWh cost: 3 × 5 × £0.10 = £1.50. Standing charge: 4 × £0.5486 = £2.1944.
         let expected_total = 1.50 + 4.0 * 0.5486;
@@ -3763,7 +3825,14 @@ mod tests {
         let end = m + 23 * 3600 + 59 * 60;
         let flat = crate::settings::TariffConfig::flat(0.25);
         let series = db
-            .query_cost_series(&window(start, end), 3600, "today_export_kwh", &flat, 0.25, 54.86)
+            .query_cost_series(
+                &window(start, end),
+                3600,
+                "today_export_kwh",
+                &flat,
+                0.25,
+                54.86,
+            )
             .unwrap();
         // kWh: 5 × £0.25 = £1.25. Standing charge: 1 × £0.5486.
         let expected = 1.25 + 0.5486;
@@ -3788,7 +3857,14 @@ mod tests {
         let end = m + 18 * 3600;
         let flat = crate::settings::TariffConfig::flat(0.25);
         let series = db
-            .query_cost_series(&window(start, end), 3600, "today_import_kwh", &flat, 0.25, 54.86)
+            .query_cost_series(
+                &window(start, end),
+                3600,
+                "today_import_kwh",
+                &flat,
+                0.25,
+                54.86,
+            )
             .unwrap();
         // No readings → no per-kWh cost. Standing charge: £0.5486 (one day,
         // partial first day still incurs the daily fee under UK billing).
@@ -3810,7 +3886,14 @@ mod tests {
         let end = m + 12 * 3600;
         let flat = crate::settings::TariffConfig::flat(0.25);
         let series = db
-            .query_cost_series(&window(start, end), 3600, "today_import_kwh", &flat, 0.25, 54.86)
+            .query_cost_series(
+                &window(start, end),
+                3600,
+                "today_import_kwh",
+                &flat,
+                0.25,
+                54.86,
+            )
             .unwrap();
         let got = series_total(&series);
         assert!(
@@ -3831,7 +3914,14 @@ mod tests {
         let end = m + 60 * 3600;
         let flat = crate::settings::TariffConfig::flat(0.25);
         let series = db
-            .query_cost_series(&window(start, end), 3600, "today_import_kwh", &flat, 0.25, 54.86)
+            .query_cost_series(
+                &window(start, end),
+                3600,
+                "today_import_kwh",
+                &flat,
+                0.25,
+                54.86,
+            )
             .unwrap();
         let got = series_total(&series);
         assert!(
@@ -3853,12 +3943,26 @@ mod tests {
         let end = m + 24 * 3600;
         let flat = crate::settings::TariffConfig::flat(0.25);
         let baseline = series_total(
-            &db.query_cost_series(&window(start, end), 1800, "today_export_kwh", &flat, 0.25, 0.0)
-                .unwrap(),
+            &db.query_cost_series(
+                &window(start, end),
+                1800,
+                "today_export_kwh",
+                &flat,
+                0.25,
+                0.0,
+            )
+            .unwrap(),
         );
         let clamped = series_total(
-            &db.query_cost_series(&window(start, end), 1800, "today_export_kwh", &flat, 0.25, -100.0)
-                .unwrap(),
+            &db.query_cost_series(
+                &window(start, end),
+                1800,
+                "today_export_kwh",
+                &flat,
+                0.25,
+                -100.0,
+            )
+            .unwrap(),
         );
         assert!(
             (baseline - clamped).abs() < 1e-9,
@@ -3879,7 +3983,14 @@ mod tests {
         let end = m + 24 * 3600;
         let flat = crate::settings::TariffConfig::flat(0.25);
         let series = db
-            .query_cost_series(&window(start, end), 3600, "today_import_kwh", &flat, 0.25, 54.86)
+            .query_cost_series(
+                &window(start, end),
+                3600,
+                "today_import_kwh",
+                &flat,
+                0.25,
+                54.86,
+            )
             .unwrap();
         assert!(
             !series.is_empty(),
@@ -3954,13 +4065,17 @@ mod tests {
         insert_export_day(&db, 1, 5.0, 30, 2 * 60 + 30);
         let flat = crate::settings::TariffConfig::flat(0.25);
         let series = db
-            .query_cost_series(&window(start, end), 3600, "today_export_kwh", &flat, 0.25, 54.86)
+            .query_cost_series(
+                &window(start, end),
+                3600,
+                "today_export_kwh",
+                &flat,
+                0.25,
+                54.86,
+            )
             .unwrap();
         let points = series_points(&series);
-        assert!(
-            !points.is_empty(),
-            "series must have at least one bucket"
-        );
+        assert!(!points.is_empty(), "series must have at least one bucket");
         // The very first bucket (open day, before midnight) carries the
         // open-day debit (1 day) plus whatever kWh cost has accumulated
         // up to that point. We only check the standing-charge portion:

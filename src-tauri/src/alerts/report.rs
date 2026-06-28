@@ -355,8 +355,7 @@ pub fn generate_daily_summary_text(
     if standing_charge_gbp > 0.0 {
         msg.push_str(&format!(
             "   ↳ Standing charge: <b>£{:.2}</b> ({}p/day)\n",
-            standing_charge_gbp,
-            settings.import_standing_charge_p_per_day
+            standing_charge_gbp, settings.import_standing_charge_p_per_day
         ));
     }
     msg.push_str(&format!(
@@ -1240,8 +1239,8 @@ mod tests {
         // default), the report must NOT add a "Standing charge" line. This
         // guards against regression for users who haven't configured one.
         let s = settings_with_flat_import(0.25);
-        let msg = generate_daily_summary_text(&import_rows(), "2026-06-27", &s)
-            .expect("enough data");
+        let msg =
+            generate_daily_summary_text(&import_rows(), "2026-06-27", &s).expect("enough data");
         assert!(
             !msg.contains("Standing charge"),
             "report must not show a standing-charge footnote when none is configured"
@@ -1261,8 +1260,8 @@ mod tests {
         // bill-accurate total.
         let mut s = settings_with_flat_import(0.25);
         s.import_standing_charge_p_per_day = 54.86;
-        let msg = generate_daily_summary_text(&import_rows(), "2026-06-27", &s)
-            .expect("enough data");
+        let msg =
+            generate_daily_summary_text(&import_rows(), "2026-06-27", &s).expect("enough data");
         assert!(
             msg.contains("Net cost: <b>£0.80</b>"),
             "net cost should include the standing charge (0.25 + 0.5486 ≈ 0.80); got: {msg}"
@@ -1275,8 +1274,8 @@ mod tests {
         // the daily fixed cost exists and where it came from.
         let mut s = settings_with_flat_import(0.25);
         s.import_standing_charge_p_per_day = 54.86;
-        let msg = generate_daily_summary_text(&import_rows(), "2026-06-27", &s)
-            .expect("enough data");
+        let msg =
+            generate_daily_summary_text(&import_rows(), "2026-06-27", &s).expect("enough data");
         assert!(
             msg.contains("Standing charge:"),
             "expected a labelled standing-charge footnote; got: {msg}"
@@ -1301,8 +1300,8 @@ mod tests {
         // report must look like the no-standing-charge baseline.
         let mut s = settings_with_flat_import(0.25);
         s.import_standing_charge_p_per_day = -10.0;
-        let msg = generate_daily_summary_text(&import_rows(), "2026-06-27", &s)
-            .expect("enough data");
+        let msg =
+            generate_daily_summary_text(&import_rows(), "2026-06-27", &s).expect("enough data");
         assert!(
             !msg.contains("Standing charge"),
             "negative standing charge must be clamped (no footnote expected); got: {msg}"
