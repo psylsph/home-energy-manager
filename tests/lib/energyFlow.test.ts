@@ -6,8 +6,18 @@ import {
   batteryFillFraction,
   DEFAULT_NOISE_THRESHOLD_W,
   socColor,
+  isAnySlotActive,
 } from '../../src/lib/energyFlow';
 import type { InverterSnapshot, ScheduleSlot } from '../../src/lib/types';
+
+const slot = (h0: number, m0: number, h1: number, m1: number): ScheduleSlot => ({
+  enabled: true,
+  start_hour: h0,
+  start_minute: m0,
+  end_hour: h1,
+  end_minute: m1,
+  target_soc: 100,
+});
 
 /** Minimal snapshot with override-able fields. SOC/power fields default to
  *  a sane "everything idle" baseline; tests spread over the fields they
@@ -474,10 +484,6 @@ describe('batteryFillFraction', () => {
 // ---------------------------------------------------------------------------
 
 describe('batteryModeDisplayLabel', () => {
-  const slot = (h0: number, m0: number, h1: number, m1: number): ScheduleSlot => ({
-    enabled: true, start_hour: h0, start_minute: m0, end_hour: h1, end_minute: m1, target_soc: 100,
-  });
-
   it('returns the raw mode label by default', () => {
     expect(batteryModeDisplayLabel('eco', false, false, false, false, [], [])).toBe('Eco');
     expect(batteryModeDisplayLabel('timed_demand', false, false, false, false, [], [])).toBe('Timed Demand');
@@ -610,5 +616,33 @@ describe('buildSummaryText', () => {
       homeActive: true, homeWatts: 7500,
       evcActive: true, evcWatts: 7000,
     })).toBe('Solar is powering the home, charging the EV at 7.0kW.');
+  });
+});
+
+describe('isAnySlotActive', () => {
+  it('treats a zero-length slot (00:00–00:00) as inactive', () => {
+    const slots = [slot(0, 0, 0, 0)];
+    const now = new Date('2026-06-28T12:00:00');
+    expect(isAnySlotActive(slots, now)).toBe(false);
+  });
+
+  it('treats a disabled slot as inactive', () => {
+    const slots = [{ ...slot(0, 0, 23, 59), enabled: false }];
+    const now = new Date('2026-06-28T12:00:00');
+    expect(isAnySlotActive(slots, now)).toBe(false);
+  });
+
+  it('is active inside a normal non-wrapping window', () => {
+    const slots = [slot(10, 0, 14, 0)];
+    expect(isAnySlotActive(slots, new Date('2026-06-28T12:00:00'))).toBe(true);
+    expect(isAnySlotActive(slots, new Date('2026-06-28T09:00:00'))).toBe(false);
+    expect(isAnySlotActive(slots, new Date('2026-06-28T15:00:00'))).toBe(false);
+  });
+
+  it('is active inside a midnight-wrapping window', () => {
+    const slots = [slot(23, 0, 1, 0)];
+    expect(isAnySlotActive(slots, new Date('2026-06-28T23:30:00'))).toBe(true);
+    expect(isAnySlotActive(slots, new Date('2026-06-29T00:30:00'))).toBe(true);
+    expect(isAnySlotActive(slots, new Date('2026-06-28T12:00:00'))).toBe(false);
   });
 });
