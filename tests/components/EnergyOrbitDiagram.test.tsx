@@ -152,13 +152,15 @@ describe('EnergyOrbitDiagram', () => {
     expect(container.querySelectorAll('[data-flow-id]').length).toBe(0);
   });
 
-  it('shows import/export sign direction and friendly status text when status words are on', () => {
+  it('shows the direction signal as a status word under the node and the magnitude as a plain positive value when status words are on', () => {
     useInverterStore.setState({ showFlowStatusWords: true });
     const exporting = render(<EnergyOrbitDiagram snapshot={makeSnapshot({ grid_power: 4300 })} />);
     const exportValues = Array.from(exporting.container.querySelectorAll('text')).map(
       (t) => t.textContent ?? '',
     );
-    expect(exportValues).toContain('-4.3kW');
+    // Magnitude is plain (no `-` prefix); direction lives in the status word
+    // below the node so the two never conflict.
+    expect(exportValues).toContain('4.3kW');
     expect(exportValues).toContain('Exporting');
 
     cleanup();
@@ -166,11 +168,14 @@ describe('EnergyOrbitDiagram', () => {
     const impValues = Array.from(importing.container.querySelectorAll('text')).map(
       (t) => t.textContent ?? '',
     );
-    expect(impValues).toContain('+2.0kW');
+    expect(impValues).toContain('2.0kW');
     expect(impValues).toContain('Importing');
   });
 
   it('hides node status words by default and shows them when enabled', () => {
+    // resetStore() in beforeEach forces showFlowStatusWords=false so this
+    // test exercises the OFF path. The default in the live app is ON (see
+    // loadShowFlowStatusWords), covered in settingsPageNodeStatusWords.
     const hidden = render(
       <EnergyOrbitDiagram snapshot={makeSnapshot({ grid_power: 4300 })} />,
     );
@@ -205,7 +210,8 @@ describe('EnergyOrbitDiagram', () => {
     expect(container.querySelector('[data-testid="battery-glyph-fill"]')?.getAttribute('fill')).toBe(socColor(31));
     const labels = Array.from(container.querySelectorAll('text')).map((t) => t.textContent ?? '');
     expect(labels).toContain('31%');
-    expect(labels).toContain('-1.4kW');
+    // Magnitude is plain; direction lives in the "Discharging" status word.
+    expect(labels).toContain('1.4kW');
     expect(labels).toContain('Discharging');
   });
 

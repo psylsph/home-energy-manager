@@ -72,7 +72,11 @@ interface InverterState {
   connectFailures: number;
   /**
    * Whether to show short status words under orbit nodes (Generating,
-   * Importing, Charging, etc.). Default: off.
+   * Importing, Charging, etc.). Default: on — the words carry the
+   * direction signal that used to live in a `+`/`-` prefix on the
+   * value, so a non-technical user reading "−839W + Discharging"
+   * doesn't have to reconcile two contradictory signs. The toggle in
+   * Settings remains for users who prefer the bare value.
    */
   showFlowStatusWords: boolean;
   /**
@@ -210,9 +214,17 @@ function loadPanelGraphsYLock(): boolean {
 
 function loadShowFlowStatusWords(): boolean {
   try {
-    return localStorage.getItem('showFlowStatusWords') === 'true';
+    // Default to ON: the status words (Generating / Importing / Charging /
+    // Discharging / Exporting / Idle) under each orbit node carry the
+    // direction signal that used to live in a `-`/`+` prefix on the value.
+    // Showing the words by default makes the diagram self-explanatory for
+    // non-technical users without them having to find a Settings toggle.
+    // The toggle remains in Settings so users who prefer the bare value
+    // can still turn it off.
+    const stored = localStorage.getItem('showFlowStatusWords');
+    return stored === null ? true : stored === 'true';
   } catch {
-    return false;
+    return true;
   }
 }
 

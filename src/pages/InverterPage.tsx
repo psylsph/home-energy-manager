@@ -226,7 +226,7 @@ export default function InverterPage() {
         <h2 className="text-text-primary font-semibold text-lg mb-4">Grid</h2>
         <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
           <span className="text-text-secondary">Grid Power</span>
-          <span className="text-text-primary font-mono text-right">{formatPower(s.grid_power)}</span>
+          <span className="text-text-primary font-mono text-right">{formatPower(finiteAbs(s.grid_power))}</span>
           <span className="text-text-secondary">Grid Voltage</span>
           <span className="text-text-primary font-mono text-right">{formatVoltage(s.grid_voltage)}</span>
           <span className="text-text-secondary">Grid Frequency</span>
@@ -255,7 +255,7 @@ export default function InverterPage() {
           <span className="text-text-secondary">Current</span>
           <span className="text-text-primary font-mono text-right">{formatCurrent(finiteAbs(s.battery_current))}</span>
           <span className="text-text-secondary">Power</span>
-          <span className="text-text-primary font-mono text-right">{formatPower(s.battery_power)}</span>
+          <span className="text-text-primary font-mono text-right">{formatPower(finiteAbs(s.battery_power))}</span>
           <span className="text-text-secondary">Temperature</span>
           <span className="text-text-primary font-mono text-right">{formatTemp(s.battery_temperature)}</span>
           <span className="text-text-secondary">Capacity</span>

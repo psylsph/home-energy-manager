@@ -58,7 +58,10 @@ function BatteryPanelInner({ snapshot: s }: Props) {
         <div className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1.5 text-sm">
           <span className="text-text-secondary">Power</span>
           <span className="text-text-primary font-mono text-right">
-            {s.battery_state === 'discharging' ? '−' : s.battery_state === 'charging' ? '+' : ''}
+            {/* Magnitude only — the Charging/Discharging/Idle badge
+                above carries the direction signal, so "-839W" alongside a
+                "Discharging" label was redundant and read as a bug to
+                non-technical users. */}
             {formatPower(finiteAbs(s.battery_power))}
           </span>
           {/* EPS (Emergency Power Supply) output — only visible when the

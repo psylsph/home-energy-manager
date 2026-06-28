@@ -104,3 +104,48 @@ describe('<InverterPage/> Gateway null telemetry fields', () => {
     expect(currentRow?.nextElementSibling?.textContent).toBe('7.8A');
   });
 });
+
+describe('<InverterPage/> Power row sign convention', () => {
+  // InverterPage's Grid Power and Battery Power rows used to render the
+  // signed snapshot value directly (-839W for discharging, -198W for
+  // exporting). For consistency with BatteryPanel and the orbit diagram,
+  // these are now plain positive magnitudes — the direction signal is
+  // implicit (these are raw readouts on the technical Inverter page, but
+  // the same value elsewhere in the app is positive, so changing this
+  // site too avoids a confusing cross-page mismatch).
+  function rowValue(container: HTMLElement, label: string): string {
+    const labelEl = Array.from(container.querySelectorAll('span.text-text-secondary'))
+      .find((r) => r.textContent === label);
+    const value = labelEl?.nextElementSibling?.textContent;
+    if (!value) throw new Error(`row not found: ${label}`);
+    return value;
+  }
+
+  it('battery Power row shows plain positive magnitude when discharging', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ battery_state: 'discharging', battery_power: 839 }),
+    });
+    const { container } = render(<InverterPage />);
+    expect(rowValue(container, 'Power')).toBe('839W');
+  });
+
+  it('battery Power row shows plain positive magnitude when charging', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ battery_state: 'charging', battery_power: -3100 }),
+    });
+    const { container } = render(<InverterPage />);
+    expect(rowValue(container, 'Power')).toBe('3.1kW');
+  });
+
+  it('Grid Power row shows plain positive magnitude when exporting', () => {
+    useInverterStore.setState({ snapshot: makeSnapshot({ grid_power: 198 }) });
+    const { container } = render(<InverterPage />);
+    expect(rowValue(container, 'Grid Power')).toBe('198W');
+  });
+
+  it('Grid Power row shows plain positive magnitude when importing', () => {
+    useInverterStore.setState({ snapshot: makeSnapshot({ grid_power: -2200 }) });
+    const { container } = render(<InverterPage />);
+    expect(rowValue(container, 'Grid Power')).toBe('2.2kW');
+  });
+});

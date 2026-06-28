@@ -70,3 +70,48 @@ describe('<BatteryPanel/> Gateway null telemetry fields', () => {
     expect(currentRow?.nextElementSibling?.textContent).toBe('7.8A');
   });
 });
+
+describe('<BatteryPanel/> Power row sign convention', () => {
+  // The Power row used to render "-839W" alongside a "Discharging" badge,
+  // which read as a sign-convention bug. The badge above the row carries
+  // the direction signal; the value is the plain magnitude. Lock that
+  // contract in here so future refactors can't quietly reintroduce the
+  // "−" / "+" prefix.
+  function powerRow(container: HTMLElement): string {
+    const rows = Array.from(container.querySelectorAll('span.text-text-secondary'));
+    const powerRow = rows.find((r) => r.textContent === 'Power');
+    const value = powerRow?.nextElementSibling?.textContent;
+    if (!value) throw new Error('Power row not found');
+    return value;
+  }
+
+  it('discharging battery shows plain positive magnitude, no leading − or +', () => {
+    const s = {
+      ...snapshot(),
+      battery_state: 'discharging' as const,
+      battery_power: 839,
+    } as InverterSnapshot;
+    const { container } = render(<BatteryPanel snapshot={s} />);
+    expect(powerRow(container)).toBe('839W');
+  });
+
+  it('charging battery shows plain positive magnitude, no leading +', () => {
+    const s = {
+      ...snapshot(),
+      battery_state: 'charging' as const,
+      battery_power: -3100,
+    } as InverterSnapshot;
+    const { container } = render(<BatteryPanel snapshot={s} />);
+    expect(powerRow(container)).toBe('3.1kW');
+  });
+
+  it('idle battery shows plain 0W (no sign prefix on a zero value either)', () => {
+    const s = {
+      ...snapshot(),
+      battery_state: 'idle' as const,
+      battery_power: 0,
+    } as InverterSnapshot;
+    const { container } = render(<BatteryPanel snapshot={s} />);
+    expect(powerRow(container)).toBe('0W');
+  });
+});
