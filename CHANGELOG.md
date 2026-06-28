@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.45.0] - 2026-06-28
+
+### Changed
+
+- **Energy Tariffs now support up to 10 windows per tariff (was 6).** Both the Import and Export tariff editors on the Settings page can now hold up to 10 time-of-use windows — matching the inverter's own 10-slot schedule ceiling so Octopus Flux-style tariffs with multiple rate bands can be mirrored 1:1 without compressing windows. The "Add window" button hides itself at the new cap; existing tariff configs in `settings.json` keep their slot count unchanged.
+
 ## [0.44.0] - 2026-06-28
 
 ### Added

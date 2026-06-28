@@ -150,12 +150,26 @@ describe('addTariffSlot', () => {
     }
   });
 
-  test('respects the 6-slot cap', () => {
+  test('respects the 10-slot cap', () => {
     let cfg = flatTariffConfig(0.10);
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 20; i++) {
       cfg = addTariffSlot(cfg, 0.10);
     }
-    expect(cfg.slots.length).toBeLessThanOrEqual(6);
+    expect(cfg.slots.length).toBeLessThanOrEqual(10);
+  });
+
+  test('grows to exactly the cap, then stops', () => {
+    // Pins MAX_TARIFF_SLOTS = 10. From a flat config, 9 successful adds
+    // reach the cap (1 → 10 slots); the 10th add must be a no-op.
+    let cfg = flatTariffConfig(0.10);
+    for (let i = 0; i < 9; i++) {
+      cfg = addTariffSlot(cfg, 0.10);
+    }
+    expect(cfg.slots).toHaveLength(10);
+    const beforeNoOp = cfg;
+    const afterNoOp = addTariffSlot(cfg, 0.10);
+    expect(afterNoOp).toBe(beforeNoOp);
+    expect(afterNoOp.slots).toHaveLength(10);
   });
 
   test('new slot uses the supplied defaultRate (not the split slot\'s rate)', () => {
