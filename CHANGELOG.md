@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.46.0] - 2026-06-28
+
+### Added
+
+- **Timed Discharge and Discharge Schedule are now editable in Cosy mode.** Selecting Cosy in the Charging Mode dropdown used to hide the Timed Discharge pause window and the Discharge Schedule (the slot editor that drives Timed Export), forcing users back to Standard just to configure them. Since Cosy now only owns the force-charge side and pause-discharge / Timed Export are independent inverter mechanisms, both sections stay visible in Cosy — you can layer them, e.g. Cosy force-charges 02:00–05:00 while Timed Discharge blocks discharge outside 16:00–19:00. Agile still hides both, since price-based logic owns both directions there.
+
 ## [0.45.0] - 2026-06-28
 
 ### Changed
