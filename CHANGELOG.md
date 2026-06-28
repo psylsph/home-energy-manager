@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.46.2] - 2026-06-28
+
+### Fixed
+
+- **Timed Discharge is now hidden on inverters that can't use it.** The pause-discharge window behind Timed Discharge only exists on AC-coupled, AC three-phase and All-in-One models; on every DC hybrid (Gen 1/2/3/4 included), three-phase, Gateway and EMS inverter the toggle and its schedule were shown but silently did nothing, because those controls don't exist there and the inverter never reported the state back. Those models now hide the Timed Discharge toggle and its schedule section, and the backend rejects the request instead of silently dropping it.
+
+- **Gen 3 Hybrid no longer wastes a poll cycle on an AC-output block it doesn't have.** It was being asked every cycle for the AC-config registers that only AC-coupled and All-in-One models expose, needlessly risking a timeout on each poll.
+
 ## [0.46.1] - 2026-06-28
 
 ### Fixed
