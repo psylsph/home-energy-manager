@@ -94,12 +94,13 @@ const BATTERY_MODE_LABELS: Record<string, string> = {
 };
 
 /** True when `now` falls inside any enabled slot's [start, end) window. */
-function isAnySlotActive(slots: ScheduleSlot[] | undefined, now: Date): boolean {
+export function isAnySlotActive(slots: ScheduleSlot[] | undefined, now: Date): boolean {
   const curMin = now.getHours() * 60 + now.getMinutes();
   return (slots ?? []).some((slot) => {
     if (!slot.enabled) return false;
     const startMin = slot.start_hour * 60 + slot.start_minute;
     const endMin = slot.end_hour * 60 + slot.end_minute;
+    if (startMin === endMin) return false;
     return startMin < endMin
       ? curMin >= startMin && curMin < endMin
       : curMin >= startMin || curMin < endMin;

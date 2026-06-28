@@ -1,6 +1,7 @@
 import { useInverterStore } from '../store/useInverterStore';
-import { formatPower, formatVoltage, formatCurrent, formatTemp, formatEnergy, formatPercent, formatFrequency, formatOperatingHours, formatBatteryMode, finiteAbs } from '../lib/format';
+import { formatPower, formatVoltage, formatCurrent, formatTemp, formatEnergy, formatPercent, formatFrequency, formatOperatingHours, finiteAbs } from '../lib/format';
 import ColdBatteryWarning from '../components/ColdBatteryWarning';
+import BatteryModeSummary from '../components/BatteryModeSummary';
 import { deviceSupportsExportLimit } from '../lib/deviceCapabilities';
 
 export default function InverterPage() {
@@ -246,8 +247,10 @@ export default function InverterPage() {
       <section className="bg-bg-surface rounded-2xl p-5">
         <h2 className="text-text-primary font-semibold text-lg mb-4">Battery</h2>
         <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
-          <span className="text-text-secondary">Battery Mode</span>
-          <span className="text-text-primary font-mono text-right">{formatBatteryMode(s.battery_mode)}</span>
+          <span className="text-text-secondary">Modes</span>
+          <div className="text-text-primary text-right">
+            <BatteryModeSummary snapshot={s} />
+          </div>
           <span className="text-text-secondary">SOC</span>
           <span className="text-text-primary font-mono text-right">{formatPercent(s.soc)}</span>
           <span className="text-text-secondary">Voltage</span>
