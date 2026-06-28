@@ -111,8 +111,11 @@ export function halfHourOptions(): string[] {
 
 /**
  * Maximum number of tariff windows (slots) per tariff (import/export).
+ *
+ * Matches the inverter's own 10-slot schedule ceiling so users can mirror
+ * GivEnergy Cloud's slot count 1:1 when authoring time-of-use tariffs.
  */
-export const MAX_TARIFF_SLOTS = 6;
+export const MAX_TARIFF_SLOTS = 10;
 
 /**
  * Add a new tariff window by **splitting** the longest existing window at
