@@ -665,8 +665,11 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
 /// For Gen1 Hybrid inverters the reference declares the alternative daily
 /// registers (`alt2`) authoritative; on some Gen1 firmware IR(36)/IR(37)
 /// read 0 while IR(182)/IR(183) contain the real daily values. All other
-/// single-phase models continue to use IR(36)/IR(37). The final consumption
-/// recomputation in `decode_snapshot` picks up any override here.
+/// single-phase models continue to use IR(36)/IR(37). The override below is
+/// conservative — it only fires when alt2 has real data — because some
+/// Gen1 firmware revisions do the *opposite* and leave alt2 at 0 while
+/// populating alt1 (see issue #164). The final consumption recomputation
+/// in `decode_snapshot` picks up any override here.
 fn decode_input_180_181(data: &[u16], snap: &mut InverterSnapshot) {
     // IR(180)/IR(181) are confirmed by givenergy-modbus as alternative
     // battery total energy counters (deci-kWh). `get_reg` is bounds-safe,
@@ -683,9 +686,26 @@ fn decode_input_180_181(data: &[u16], snap: &mut InverterSnapshot) {
     // daily battery energy to alt2 (IR(182)/IR(183)). Override the values
     // previously set from IR(37)/IR(36) only when the device type has been
     // decoded and is specifically Gen1.
+    //
+    // Guard: only override when at least one alt2 register carries real data.
+    // Some Gen1 firmware revisions (e.g. ARM 451 as reported in issue #164)
+    // populate alt1 (IR(36)/IR(37)) with the true daily totals and leave
+    // alt2 at 0 — on those firmwares the unconditional override wipes out
+    // the working alt1 values with 0.0, making the "Battery Charged /
+    // Discharged" tiles on the home page flat-line at 0 kWh even while the
+    // inverter is clearly charging/discharging. Skipping the override when
+    // both alt2 registers read 0 keeps the alt1 totals visible. The
+    // reference library's `_BATTERY_ENERGY_SOURCE` LUT unconditionally
+    // routes HYBRID_GEN1 → alt2, so on a firmware where alt2 is empty the
+    // reference would also show 0; HEM's conservative fallback is a
+    // behavioural improvement over the reference, not a regression of it.
     if snap.device_type == DeviceType::Gen1Hybrid {
-        snap.today_discharge_kwh = get_reg(data, 2) as f32 * 0.1; // IR(182): e_battery_discharge_today_alt2
-        snap.today_charge_kwh = get_reg(data, 3) as f32 * 0.1; // IR(183): e_battery_charge_today_alt2
+        let alt2_charge_raw = get_reg(data, 3); // IR(183)
+        let alt2_discharge_raw = get_reg(data, 2); // IR(182)
+        if alt2_charge_raw != 0 || alt2_discharge_raw != 0 {
+            snap.today_discharge_kwh = alt2_discharge_raw as f32 * 0.1; // IR(182): e_battery_discharge_today_alt2
+            snap.today_charge_kwh = alt2_charge_raw as f32 * 0.1; // IR(183): e_battery_charge_today_alt2
+        }
     }
 }
 
@@ -2452,6 +2472,96 @@ mod tests {
         // Consumption uses primary values:
         // solar(15) + import(2) + discharge(2.5) - export(3) - charge(4) = 12.5
         assert!((snap.today_consumption_kwh - 12.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn gen1_hybrid_alt2_zero_falls_back_to_alt1() {
+        // Repro of issue #164: some Gen1 Hybrid firmware revisions (e.g. ARM
+        // 451 as reported) populate IR(36)/IR(37) with the real daily
+        // totals and leave IR(182)/IR(183) at 0 — the *opposite* of the
+        // givenergy-modbus reference capture's wire data. The decoder must
+        // detect the empty alt2 source and keep the alt1 values rather than
+        // unconditionally overriding them with 0. Previously this caused the
+        // "Battery Charged / Discharged" home-page tiles to read 0.0 kWh
+        // even while the inverter was clearly charging/discharging.
+        let mut input_data = vec![0u16; 60];
+        input_data[1] = 300; // PV1 voltage = 30.0 V (so PV1 energy counts)
+        input_data[8] = 50; // PV1 current = 5.0 A
+        input_data[2] = 300; // PV2 voltage = 30.0 V
+        input_data[9] = 40; // PV2 current = 4.0 A
+        input_data[17] = 100; // PV1 today = 10.0 kWh
+        input_data[19] = 50; // PV2 today = 5.0 kWh
+        input_data[25] = 30; // export today = 3.0 kWh
+        input_data[26] = 20; // import today = 2.0 kWh
+        input_data[35] = 10; // AC charge today = 1.0 kWh
+        input_data[36] = 40; // primary charge today = 4.0 kWh
+        input_data[37] = 25; // primary discharge today = 2.5 kWh
+        let input_block = make_block(RegisterType::Input, 0, 60, "input_0_59", input_data);
+
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x2001; // DTC family 0x20
+        holding_data[21] = 451; // issue #164 reporter's ARM firmware
+        holding_data[27] = 1;
+        let holding_block = make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data);
+
+        // alt1 totals are populated; alt2 daily registers (IR(182)/IR(183))
+        // read 0 on this firmware, so the override must be skipped.
+        let alt_data = vec![12345u16, 60000, 0, 0];
+        let alt_block = make_block(RegisterType::Input, 180, 4, "input_180_181", alt_data);
+
+        let snap = decode_snapshot(&[holding_block, input_block, alt_block]);
+        assert_eq!(snap.device_type, DeviceType::Gen1Hybrid);
+        // Lifetime totals still come from alt1 (per the reference's LUT).
+        assert!((snap.total_discharge_kwh - 1234.5).abs() < 1e-6);
+        assert!((snap.total_charge_kwh - 6000.0).abs() < 1e-6);
+        // Daily totals keep the alt1 values when alt2 reads 0.
+        assert!((snap.today_discharge_kwh - 2.5).abs() < 1e-6);
+        assert!((snap.today_charge_kwh - 4.0).abs() < 1e-6);
+        // Consumption recomputation uses the alt1 values:
+        // solar(15) + import(2) + discharge(2.5) - export(3) - charge(4) = 12.5
+        assert!((snap.today_consumption_kwh - 12.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn gen1_hybrid_alt2_partial_still_overrides() {
+        // Edge case: a firmware where one alt2 register is populated but the
+        // other reads 0 (e.g. mid-day rollover on a counter that hasn't yet
+        // accumulated). The override must still fire — we don't want to
+        // half-apply a mixed signal. A partial alt2 means the firmware does
+        // populate the alt2 bank, so we trust the present value and the
+        // missing one is a legitimate zero.
+        let mut input_data = vec![0u16; 60];
+        input_data[1] = 300; // PV1 voltage = 30.0 V
+        input_data[8] = 50; // PV1 current = 5.0 A
+        input_data[2] = 300; // PV2 voltage = 30.0 V
+        input_data[9] = 40; // PV2 current = 4.0 A
+        input_data[17] = 100; // PV1 today = 10.0 kWh
+        input_data[19] = 50; // PV2 today = 5.0 kWh
+        input_data[25] = 30; // export today = 3.0 kWh
+        input_data[26] = 20; // import today = 2.0 kWh
+        input_data[35] = 10; // AC charge today = 1.0 kWh
+        input_data[36] = 40; // alt1 charge today = 4.0 kWh (would be overridden)
+        input_data[37] = 25; // alt1 discharge today = 2.5 kWh (would be overridden)
+        let input_block = make_block(RegisterType::Input, 0, 60, "input_0_59", input_data);
+
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x2001;
+        holding_data[21] = 451;
+        holding_data[27] = 1;
+        let holding_block = make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data);
+
+        // IR(183) populated (55 → 5.5 kWh), IR(182) zero — partial alt2.
+        let alt_data = vec![12345u16, 60000, 0, 55];
+        let alt_block = make_block(RegisterType::Input, 180, 4, "input_180_181", alt_data);
+
+        let snap = decode_snapshot(&[holding_block, input_block, alt_block]);
+        assert_eq!(snap.device_type, DeviceType::Gen1Hybrid);
+        // Override fires because at least one alt2 register is non-zero.
+        assert!((snap.today_discharge_kwh - 0.0).abs() < 1e-6);
+        assert!((snap.today_charge_kwh - 5.5).abs() < 1e-6);
+        // Consumption recomputes from the (mixed) alt2 values:
+        // solar(15) + import(2) + discharge(0) - export(3) - charge(5.5) = 8.5
+        assert!((snap.today_consumption_kwh - 8.5).abs() < 1e-6);
     }
 
     #[test]
