@@ -2157,8 +2157,14 @@ export default function ControlPage() {
         </div>
       </section>}
 
-      {/* Section 5: Timed Discharge — portal-style pause-discharge inverse window. */}
-      {!cosyEnabled && chargeMode !== 'agile' && !schedulesUnsupported && (
+      {/* Section 5: Timed Discharge — portal-style pause-discharge inverse window.
+          Visible in Cosy mode too: Cosy only owns the force-charge side
+          (timed-charge window), and the pause-discharge window is an
+          independent inverter mechanism, so the user can layer them
+          (e.g. "force-charge 02:00–05:00, and only allow discharge
+          16:00–19:00"). Hidden in Agile because Agile manages discharge
+          automatically from live prices. */}
+      {chargeMode !== 'agile' && !schedulesUnsupported && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold text-lg">Timed Discharge</h2>
           <p className="text-text-secondary/60 text-xs">Please Allow upto 10 Seconds for Changes to Save</p>
@@ -2174,8 +2180,13 @@ export default function ControlPage() {
         </section>
       )}
 
-      {/* Section 6: Timed Export / DC Discharge Schedule — always visible and saved directly. */}
-      {!cosyEnabled && chargeMode !== 'agile' && !schedulesUnsupported && (
+      {/* Section 6: Timed Export / DC Discharge Schedule — visible in Cosy
+          mode too: Cosy only owns the force-charge side, and
+          enable_discharge (the schedule that drives Timed Export) is an
+          independent inverter mechanism. The user can configure Timed Export
+          windows while Cosy handles charging. Hidden in Agile because Agile
+          drives both charge and discharge from prices. */}
+      {chargeMode !== 'agile' && !schedulesUnsupported && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold text-lg">Discharge Schedule</h2>
           <p className="text-text-secondary/60 text-xs">Please Allow upto 10 Seconds for Changes to Save</p>
