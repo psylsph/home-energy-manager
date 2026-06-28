@@ -73,3 +73,44 @@ export function deviceSupportsExportLimit(
     || code.startsWith('82')
   );
 }
+
+/**
+ * Whether the inverter supports the portal-style single-slot "Timed
+ * Discharge" feature.
+ *
+ * The feature is implemented with the battery pause registers —
+ * `battery_pause_mode` (HR 318) and `battery_pause_slot` (HR 319-320) — which
+ * live in the HR 300-359 AC-config block. That block is present only on
+ * AC-coupled, AC-three-phase and residential All-in-One models, exactly the
+ * same set as EPS (HR 317 shares the block). On every other family (DC
+ * hybrids incl. Gen1/2/3/4, Polar, Gen3+, pure three-phase, AIO Commercial,
+ * AIO Hybrid, HV Gen3, Gateway, EMS, PV inverter) the registers don't exist:
+ * the write is dropped/times out and `battery_pause_mode` never reflects an
+ * enabled state, so the toggle appeared broken (the originally reported
+ * Gen1 Hybrid symptom).
+ *
+ * Mirrors the backend's `DeviceType::supports_timed_discharge` and the
+ * givenergy-modbus reference library's
+ * `_AC_CONFIG_BLOCK_MODELS = {AC, AC_3PH, ALL_IN_ONE}` (also corroborated by
+ * GivTCP `read.py:573`, which excludes Gen1 Hybrid from the pause slots).
+ *
+ * Used by `ControlPage` to hide both the Quick Action button and the Timed
+ * Discharge schedule section, and kept as a dedicated predicate (rather than
+ * reusing `deviceSupportsEps`) so the two features can diverge if firmware
+ * ever decouples them.
+ *
+ * Returns false when the device type code is missing (pre-snapshot state) so
+ * the UI doesn't briefly flash a control the backend will reject with 400.
+ */
+export function deviceSupportsTimedDischarge(
+  snapshot: Pick<InverterSnapshot, 'device_type_code'> | null | undefined,
+): boolean {
+  const code = snapshot?.device_type_code;
+  if (!code) return false;
+  return (
+    code === '3001'
+    || code === '3002'
+    || code.startsWith('60')
+    || code.startsWith('80')
+  );
+}

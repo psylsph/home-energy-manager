@@ -190,9 +190,15 @@ function makeSnapshot(overrides: Partial<InverterSnapshot> = {}): InverterSnapsh
     firmware_version: '318',
     dsp_firmware_version: '318',
     dc_dsp_firmware_version: '',
-    device_type: 'gen3',
-    device_type_display: 'Gen3',
-    device_type_code: '2001',
+    device_type: 'ac_coupled',
+    device_type_display: 'AC Coupled',
+    // AC-coupled (3001) exposes the HR 300-359 block, so BOTH the Timed
+    // Discharge section (pause registers HR318-320) and the Discharge
+    // Schedule (HR 56-57) render — this file verifies Cosy mode shows /
+    // hides them together. A Gen-hybrid fixture (2001) would now hide Timed
+    // Discharge entirely and the Cosy-visibility assertions would be
+    // meaningless.
+    device_type_code: '3001',
     battery_calibration_stage: 0,
     enable_ammeter: false,
     enable_reversed_ct_clamp: false,

@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { useInverterStore } from '../store/useInverterStore';
 import { useAction } from '../hooks/useAction';
 import { apiPost, apiGet } from '../lib/api';
-import { deviceSupportsEps } from '../lib/deviceCapabilities';
+import { deviceSupportsEps, deviceSupportsTimedDischarge } from '../lib/deviceCapabilities';
 import type { ScheduleSlot } from '../lib/types';
 
 function ActionButton({
@@ -1595,6 +1595,14 @@ export default function ControlPage() {
   // control that cannot work.
   const supportsEps = deviceSupportsEps(snapshot);
 
+  // Whether this inverter exposes the battery pause registers (HR318-320)
+  // that drive the portal-style Timed Discharge feature. Same AC-config
+  // block as EPS (HR317) — see lib/deviceCapabilities.ts. On DC hybrids and
+  // every other non-AC model the registers don't exist, so both the Quick
+  // Action button and the dedicated schedule section are hidden and the
+  // backend refuses the write with HTTP 400.
+  const supportsTimedDischarge = deviceSupportsTimedDischarge(snapshot);
+
   // ARM firmware version as integer (e.g. 318, 352, 449). Used for firmware-gating
   // the extended schedule block on Gen3 hybrids.
   const armFwNum = snapshot?.firmware_version != null && snapshot.firmware_version !== ''
@@ -2056,22 +2064,24 @@ export default function ControlPage() {
             </span>
             <span className="text-[11px] text-text-secondary">Performs Charge During Specified Time(s)</span>
           </button>
-          <button
-            type="button"
-            onClick={handleTimedDischargeToggle}
-            disabled={timedDischargeSaving}
-            aria-pressed={timedDischargeEnabled}
-            className={`px-3 py-3 rounded-lg border text-xs font-medium transition flex flex-col items-start gap-1 ${timedDischargeEnabled
-                ? 'bg-battery/20 border-battery text-battery'
-                : 'bg-bg-surface border-transparent hover:border-battery/40 text-text-secondary'
-              } disabled:opacity-50`}
-          >
-            <span className="flex items-center justify-center gap-2 w-full text-sm">
-              {timedDischargeSaving && <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />}
-              <b>Timed Discharge</b>
-            </span>
-            <span className="text-[11px] text-text-secondary">Only Allow Discharge During Specified Time</span>
-          </button>
+          {supportsTimedDischarge && (
+            <button
+              type="button"
+              onClick={handleTimedDischargeToggle}
+              disabled={timedDischargeSaving}
+              aria-pressed={timedDischargeEnabled}
+              className={`px-3 py-3 rounded-lg border text-xs font-medium transition flex flex-col items-start gap-1 ${timedDischargeEnabled
+                  ? 'bg-battery/20 border-battery text-battery'
+                  : 'bg-bg-surface border-transparent hover:border-battery/40 text-text-secondary'
+                } disabled:opacity-50`}
+            >
+              <span className="flex items-center justify-center gap-2 w-full text-sm">
+                {timedDischargeSaving && <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />}
+                <b>Timed Discharge</b>
+              </span>
+              <span className="text-[11px] text-text-secondary">Only Allow Discharge During Specified Time</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={handleTimedExportToggle}
@@ -2163,8 +2173,11 @@ export default function ControlPage() {
           independent inverter mechanism, so the user can layer them
           (e.g. "force-charge 02:00–05:00, and only allow discharge
           16:00–19:00"). Hidden in Agile because Agile manages discharge
-          automatically from live prices. */}
-      {chargeMode !== 'agile' && !schedulesUnsupported && (
+          automatically from live prices. Hidden on devices without the
+          HR 300-359 block (DC hybrids, three-phase, Gateway, EMS, PV
+          inverter) since the pause registers don't exist there — see
+          supportsTimedDischarge / lib/deviceCapabilities.ts. */}
+      {chargeMode !== 'agile' && !schedulesUnsupported && supportsTimedDischarge && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold text-lg">Timed Discharge</h2>
           <p className="text-text-secondary/60 text-xs">Please Allow upto 10 Seconds for Changes to Save</p>

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, within } from '@testing-library/react';
+import { render, screen, cleanup, within } from '@testing-library/react';
 
 vi.mock('../../src/lib/api', () => ({
   apiGet: vi.fn(async (path: string) => {
@@ -57,7 +57,6 @@ vi.mock('../../src/lib/api', () => ({
 
 import ControlPage from '../../src/pages/ControlPage';
 import { useInverterStore } from '../../src/store/useInverterStore';
-import { apiPost } from '../../src/lib/api';
 import type { InverterSnapshot, ScheduleSlot } from '../../src/lib/types';
 
 function silenceConsoleError() {
@@ -77,12 +76,6 @@ function emptySlot(overrides: Partial<ScheduleSlot> = {}): ScheduleSlot {
 }
 
 function makeSnapshot(overrides: Partial<InverterSnapshot> = {}): InverterSnapshot {
-  const exportSlot = emptySlot({
-    enabled: true,
-    start_hour: 17,
-    end_hour: 19,
-    target_soc: 20,
-  });
   return {
     timestamp: Math.floor(Date.now() / 1000),
     solar_power: 0,
@@ -150,7 +143,7 @@ function makeSnapshot(overrides: Partial<InverterSnapshot> = {}): InverterSnapsh
     max_charge_slots: 2,
     max_discharge_slots: 2,
     charge_slots: [emptySlot(), emptySlot()],
-    discharge_slots: [exportSlot, emptySlot()],
+    discharge_slots: [emptySlot(), emptySlot()],
     meters: [],
     inverter_serial: 'FD2328G358',
     firmware_version: '318',
@@ -172,10 +165,16 @@ function makeSnapshot(overrides: Partial<InverterSnapshot> = {}): InverterSnapsh
   };
 }
 
-describe('<ControlPage/> — independent battery mechanisms', () => {
+describe('<ControlPage/> — Timed Discharge device gating', () => {
+  // The pause registers (HR318-320) only exist in the HR 300-359 block, which
+  // is exclusive to AC-coupled (3001/3002), AC three-phase (60xx) and
+  // residential All-in-One (80xx). On every other family both the Quick
+  // Action button (Battery Mode section) and the dedicated schedule section
+  // (heading "Timed Discharge") must be hidden, and no /api/control/
+  // timed-discharge call should be possible from the UI.
+
   beforeEach(() => {
     silenceConsoleError();
-    vi.mocked(apiPost).mockClear();
     vi.stubGlobal(
       'matchMedia',
       vi.fn().mockImplementation((query: string) => ({
@@ -205,63 +204,62 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
     return section;
   }
 
-  it('shows Eco, Timed Charge, Timed Export and Timed Discharge together on a supported device', async () => {
-    // The default fixture is a Gen hybrid (2001), which does NOT expose the
-    // HR 300-359 block and so hides Timed Discharge. Render on an AC-coupled
-    // inverter (3001) so all four independent mechanisms are visible.
-    useInverterStore.setState({
-      snapshot: makeSnapshot({ device_type_code: '3001' }),
-      developerMode: false,
-    });
-    render(<ControlPage />);
+  describe('hidden on devices without the HR 300-359 block', () => {
+    it.each([
+      ['1001', 'Gen1 hybrid (reported case)'],
+      ['2001', 'Gen hybrid (pre-ARM-refined)'],
+      ['4001', 'Three-phase'],
+      ['7001', 'Gateway'],
+      ['8101', 'Hybrid HV Gen3'],
+      ['8301', 'Gen4 hybrid'],
+      ['2301', 'PV inverter'],
+    ])('hides the button and section for %s (%s)', async (code) => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ device_type_code: code }),
+        developerMode: false,
+      });
+      render(<ControlPage />);
 
-    const section = await batteryModeSection();
-    expect(within(section).getByText('Eco')).toBeDefined();
-    expect(within(section).getByText('Timed Charge')).toBeDefined();
-    expect(within(section).getByText('Timed Export')).toBeDefined();
-    expect(within(section).getByText('Timed Discharge')).toBeDefined();
+      // Quick Action button is absent from the Battery Mode section.
+      const section = await batteryModeSection();
+      expect(within(section).queryByText('Timed Discharge')).toBeNull();
+
+      // Dedicated schedule section (its own heading) is also absent.
+      expect(screen.queryByRole('heading', { name: 'Timed Discharge' })).toBeNull();
+
+      // The three always-available mechanisms still render, proving we hid
+      // only Timed Discharge and not the whole section.
+      expect(within(section).getByText('Eco')).toBeDefined();
+      expect(within(section).getByText('Timed Charge')).toBeDefined();
+      expect(within(section).getByText('Timed Export')).toBeDefined();
+    });
   });
 
-  it('toggles Timed Export through the split endpoint, not the old combined mode endpoint', async () => {
-    useInverterStore.setState({ snapshot: makeSnapshot({ enable_discharge: false }), developerMode: false });
-    render(<ControlPage />);
+  describe('shown on devices with the HR 300-359 block', () => {
+    it.each([
+      ['3001', 'AC-coupled'],
+      ['3002', 'AC-coupled Mk2'],
+      ['8001', 'AIO 6kW'],
+      ['80FF', 'AIO family'],
+    ])('shows the button and section for %s (%s)', async (code) => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ device_type_code: code }),
+        developerMode: false,
+      });
+      render(<ControlPage />);
 
-    const section = await batteryModeSection();
-    fireEvent.click(within(section).getByText('Timed Export').closest('button')!);
-
-    expect(vi.mocked(apiPost)).toHaveBeenCalledWith('/api/control/timed-export', { enabled: true });
-    expect(vi.mocked(apiPost).mock.calls.some(([path]) => path === '/api/control/mode')).toBe(false);
+      const section = await batteryModeSection();
+      expect(within(section).getByText('Timed Discharge')).toBeDefined();
+      expect(screen.getByRole('heading', { name: 'Timed Discharge' })).toBeDefined();
+    });
   });
 
-  it('toggles Timed Charge independently through HR96 endpoint', async () => {
-    useInverterStore.setState({ snapshot: makeSnapshot({ enable_charge: false }), developerMode: false });
+  it('stays hidden before the first snapshot arrives', async () => {
+    useInverterStore.setState({ snapshot: null, developerMode: false });
     render(<ControlPage />);
 
-    const section = await batteryModeSection();
-    fireEvent.click(within(section).getByText('Timed Charge').closest('button')!);
-
-    expect(vi.mocked(apiPost)).toHaveBeenCalledWith('/api/control/timed-charge', { enabled: true });
-  });
-
-  it('saves Timed Discharge as a separate pause-window mechanism', async () => {
-    // Timed Discharge requires the HR 300-359 block; render on AC-coupled
-    // (3001) where the button is visible. The default Gen-hybrid fixture
-    // (2001) hides the control.
-    useInverterStore.setState({
-      snapshot: makeSnapshot({ device_type_code: '3001', battery_pause_mode: 0 }),
-      developerMode: false,
-    });
-    render(<ControlPage />);
-
-    const section = await batteryModeSection();
-    fireEvent.click(within(section).getByText('Timed Discharge').closest('button')!);
-
-    expect(vi.mocked(apiPost)).toHaveBeenCalledWith('/api/control/timed-discharge', {
-      enabled: true,
-      start_hour: 3,
-      start_minute: 0,
-      end_hour: 4,
-      end_minute: 0,
-    });
+    await screen.findByRole('heading', { name: 'Battery Mode' });
+    expect(screen.queryByText('Timed Discharge')).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Timed Discharge' })).toBeNull();
   });
 });
