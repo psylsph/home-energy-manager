@@ -3483,11 +3483,13 @@ pub async fn set_cosy(
 /// GET /api/agile — get Agile Octopus config.
 pub async fn get_agile(State(_state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let settings = crate::settings::Settings::load();
+    let scope = crate::settings::agile_scope_for_settings(&settings);
     (
         StatusCode::OK,
         Json(json!({
         "ok": true,
-        "enabled": settings.agile_enabled,
+        "enabled": scope.is_enabled(),
+        "scope": scope,
         "region": settings.agile_region,
         "charge_threshold": settings.agile_charge_threshold,
         "discharge_threshold": settings.agile_discharge_threshold,
@@ -3496,12 +3498,53 @@ pub async fn get_agile(State(_state): State<Arc<AppState>>) -> (StatusCode, Json
 }
 
 /// POST /api/agile — update Agile Octopus config.
+///
+/// Accepts either:
+///   - `{ enabled: bool, ... }` — legacy shape; `enabled=true` maps to
+///     `AgileScope::Full`, `enabled=false` maps to `AgileScope::Off`.
+///   - `{ scope: "off"|"full"|"charge_only"|"discharge_only", ... }` —
+///     new explicit shape. Takes precedence over `enabled` when both
+///     are provided.
+///
+/// Both shapes are accepted on the same endpoint so existing frontends
+/// keep working unchanged. New frontends should send `scope` explicitly.
 pub async fn set_agile(
     State(_state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
+    use crate::settings::AgileScope;
     let mut app_settings = crate::settings::Settings::load();
-    app_settings.agile_enabled = body["enabled"].as_bool().unwrap_or(false);
+
+    // New explicit `scope` field wins over legacy `enabled` when both are
+    // provided. This keeps the wire API additive — old frontends sending
+    // only `enabled` keep working, new frontends can use `scope`.
+    let explicit_scope = body
+        .get("scope")
+        .and_then(|v| v.as_str())
+        .and_then(parse_agile_scope);
+    let new_scope = match explicit_scope {
+        Some(scope) => scope,
+        None => {
+            // Legacy: derive scope from the boolean `enabled` flag.
+            // `None` (key absent) defaults to `enabled = false` to match
+            // the pre-existing behaviour in this endpoint.
+            let enabled = body["enabled"].as_bool().unwrap_or(false);
+            if enabled {
+                AgileScope::Full
+            } else {
+                AgileScope::Off
+            }
+        }
+    };
+
+    // Keep the legacy `agile_enabled` boolean in sync with the new scope
+    // so older settings files (and any future code that reads the bool
+    // directly) see the same intent. The migration helper in
+    // `settings::agile_scope_for_settings` will still prefer the explicit
+    // scope when both fields disagree.
+    app_settings.agile_scope = new_scope;
+    app_settings.agile_enabled = new_scope != AgileScope::Off;
+
     if let Some(r) = body["region"].as_str() {
         app_settings.agile_region = r.to_string();
     }
@@ -3514,6 +3557,21 @@ pub async fn set_agile(
     }
 
     ok_response("Agile config updated")
+}
+
+/// Parse an `AgileScope` from a string. Accepts the snake_case variants
+/// serialised in `AgileScope`'s serde representation. Returns `None` for
+/// unknown values so the API caller can fall back to the legacy boolean
+/// without erroring.
+fn parse_agile_scope(s: &str) -> Option<crate::settings::AgileScope> {
+    use crate::settings::AgileScope;
+    match s {
+        "off" => Some(AgileScope::Off),
+        "full" => Some(AgileScope::Full),
+        "charge_only" => Some(AgileScope::ChargeOnly),
+        "discharge_only" => Some(AgileScope::DischargeOnly),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3763,6 +3821,14 @@ pub async fn backfill_weather(State(state): State<Arc<AppState>>) -> (StatusCode
 mod tests {
     use super::*;
     use crate::test_util::with_isolated_config_dir_async;
+
+    /// Construct a minimal `AppState` for use in endpoint tests that
+    /// don't exercise the poll loop or websocket layer. The settings
+    /// are loaded fresh per call so each test sees its own isolated
+    /// config dir (see `with_isolated_config_dir_async`).
+    fn test_state() -> Arc<crate::AppState> {
+        Arc::new(crate::AppState::new())
+    }
 
     #[test]
     fn three_phase_slot_selection_uses_three_phase_register_commands() {
@@ -9375,5 +9441,156 @@ mod tests {
             );
             assert_eq!(snap["meter_energy_kwh"], serde_json::json!(1234.5));
         }
+    }
+
+    // ==================================================================
+    // Agile scope API tests
+    // ==================================================================
+    //
+    // The new `scope` field is the explicit, additive replacement for the
+    // legacy `enabled` boolean. Both shapes must be accepted on POST and
+    // GET must return both fields so existing frontends keep working.
+
+    use crate::settings::AgileScope;
+
+    #[test]
+    fn parse_agile_scope_accepts_all_four_variants() {
+        assert_eq!(parse_agile_scope("off"), Some(AgileScope::Off));
+        assert_eq!(parse_agile_scope("full"), Some(AgileScope::Full));
+        assert_eq!(parse_agile_scope("charge_only"), Some(AgileScope::ChargeOnly));
+        assert_eq!(
+            parse_agile_scope("discharge_only"),
+            Some(AgileScope::DischargeOnly)
+        );
+    }
+
+    #[test]
+    fn parse_agile_scope_rejects_unknown_values() {
+        // Unknown values return None so the caller falls back to the
+        // legacy boolean path. We don't error on the wire — a typo in
+        // the front-end shouldn't break the user's existing settings.
+        assert_eq!(parse_agile_scope(""), None);
+        assert_eq!(parse_agile_scope("Full"), None); // case-sensitive
+        assert_eq!(parse_agile_scope("CHARGE_ONLY"), None);
+        assert_eq!(parse_agile_scope("charge"), None);
+        assert_eq!(parse_agile_scope("invalid"), None);
+    }
+
+    #[tokio::test]
+    async fn get_agile_returns_scope_field() {
+        // Round-trip: write a known scope, read it back via GET, verify
+        // both `enabled` (legacy mirror) and `scope` (new explicit) are
+        // present. This pins the wire shape so future field renames
+        // can't silently break the front-end.
+        crate::test_util::with_isolated_config_dir_async(async || {
+            let mut s = crate::settings::Settings::load();
+            s.agile_scope = AgileScope::ChargeOnly;
+            s.agile_enabled = true;
+            s.save().unwrap();
+
+            let (status, Json(body)) = get_agile(State(test_state())).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["ok"], serde_json::json!(true));
+            assert_eq!(body["enabled"], serde_json::json!(true)); // legacy mirror
+            assert_eq!(body["scope"], serde_json::json!("charge_only"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_agile_off_scope_reports_disabled() {
+        crate::test_util::with_isolated_config_dir_async(async || {
+            let mut s = crate::settings::Settings::load();
+            s.agile_scope = AgileScope::Off;
+            s.agile_enabled = false;
+            s.save().unwrap();
+
+            let (_status, Json(body)) = get_agile(State(test_state())).await;
+            assert_eq!(body["enabled"], serde_json::json!(false));
+            assert_eq!(body["scope"], serde_json::json!("off"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_agile_with_explicit_scope_persists() {
+        crate::test_util::with_isolated_config_dir_async(async || {
+            // Send the new explicit shape; verify it lands in settings.
+            let body = serde_json::json!({
+                "scope": "charge_only",
+                "region": "C",
+                "charge_threshold": 8.5,
+                "discharge_threshold": 25.0,
+            });
+            let (status, _) = set_agile(State(test_state()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let s = crate::settings::Settings::load();
+            assert_eq!(s.agile_scope, AgileScope::ChargeOnly);
+            assert!(s.agile_enabled); // legacy mirror updated
+            assert_eq!(s.agile_region, "C");
+            assert!((s.agile_charge_threshold - 8.5).abs() < 1e-9);
+            assert!((s.agile_discharge_threshold - 25.0).abs() < 1e-9);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_agile_with_legacy_enabled_still_works() {
+        // Backwards compat: existing frontends that still POST
+        // `{ enabled: true, ... }` keep working unchanged.
+        crate::test_util::with_isolated_config_dir_async(async || {
+            let body = serde_json::json!({
+                "enabled": true,
+                "region": "A",
+            });
+            let (status, _) = set_agile(State(test_state()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let s = crate::settings::Settings::load();
+            assert_eq!(s.agile_scope, AgileScope::Full);
+            assert!(s.agile_enabled);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_agile_explicit_scope_overrides_legacy_enabled() {
+        // If both fields are sent, the explicit scope wins. A front-end
+        // that sends `{ enabled: false, scope: "discharge_only" }` is
+        // explicitly asking for DischargeOnly — respect that, not the
+        // legacy bool.
+        crate::test_util::with_isolated_config_dir_async(async || {
+            let body = serde_json::json!({
+                "enabled": false,
+                "scope": "discharge_only",
+            });
+            let (status, _) = set_agile(State(test_state()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let s = crate::settings::Settings::load();
+            assert_eq!(s.agile_scope, AgileScope::DischargeOnly);
+            assert!(s.agile_enabled); // mirror updated to match scope
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_agile_unknown_scope_falls_back_to_legacy() {
+        // Unknown scope string — don't error, just fall back to the
+        // boolean. The user shouldn't have their settings wiped because
+        // of a typo or a down-level front-end.
+        crate::test_util::with_isolated_config_dir_async(async || {
+            let body = serde_json::json!({
+                "scope": "turbo",
+                "enabled": true,
+            });
+            let (status, _) = set_agile(State(test_state()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let s = crate::settings::Settings::load();
+            assert_eq!(s.agile_scope, AgileScope::Full);
+        })
+        .await;
     }
 }

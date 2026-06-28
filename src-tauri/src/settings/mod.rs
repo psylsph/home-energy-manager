@@ -633,6 +633,61 @@ impl From<&crate::inverter::model::ScheduleSlot> for DischargeSlotBackup {
     }
 }
 
+/// Which sides of the inverter the Agile Octopus mode drives.
+///
+/// Replaces the old boolean `agile_enabled` flag with three explicit
+/// modes plus an "off" sentinel:
+///
+/// - `Off` — Agile is disabled; the inverter obeys the user's manual
+///   charge/discharge schedule (the "Standard" mode on the front-end).
+/// - `Full` — prices drive both charging (cheap windows) and discharging
+///   (expensive windows). Same as the pre-existing `agile_enabled = true`
+///   behaviour.
+/// - `ChargeOnly` — prices drive charging only; the user's discharge
+///   schedule keeps full control of the discharge side. The discharge
+///   schedule section remains visible on the Control page but is
+///   rendered greyed out with a "controlled by manual timer" label.
+/// - `DischargeOnly` — symmetric: prices drive discharging only; the
+///   user's charge schedule keeps full control of the charge side.
+///
+/// The variant serialises as `"off" | "full" | "charge_only" |
+/// "discharge_only"` (snake_case). Default is `Off`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgileScope {
+    #[default]
+    Off,
+    Full,
+    ChargeOnly,
+    DischargeOnly,
+}
+
+impl AgileScope {
+    /// True when this scope is enabled in any direction.
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, AgileScope::Off)
+    }
+
+    /// True when this scope drives the charge side (cheap-window force
+    /// charge). True for `Full` and `ChargeOnly`.
+    pub fn owns_charge(self) -> bool {
+        matches!(self, AgileScope::Full | AgileScope::ChargeOnly)
+    }
+
+    /// True when this scope drives the discharge side (expensive-window
+    /// export). True for `Full` and `DischargeOnly`.
+    pub fn owns_discharge(self) -> bool {
+        matches!(self, AgileScope::Full | AgileScope::DischargeOnly)
+    }
+
+    /// Back-compat shim for the legacy `agile_enabled: bool` wire field.
+    /// `enabled = scope != Off` so existing frontends that read the
+    /// boolean keep working unchanged.
+    pub fn as_enabled(self) -> bool {
+        self.is_enabled()
+    }
+}
+
 /// Application settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -693,6 +748,16 @@ pub struct Settings {
     /// Agile Octopus mode enabled.
     #[serde(default)]
     pub agile_enabled: bool,
+    /// Agile Octopus scope (Off / Full / ChargeOnly / DischargeOnly).
+    ///
+    /// Replaces the boolean `agile_enabled` for new code paths. The
+    /// legacy `agile_enabled` field is preserved above for backwards
+    /// compatibility with settings.json files written by v0.47.0 and
+    /// earlier — see `agile_scope_for_settings` for the migration rule
+    /// (legacy `agile_enabled = true` maps to `Full`, false maps to
+    /// `Off`).
+    #[serde(default)]
+    pub agile_scope: AgileScope,
     /// Agile Octopus region code (A-P).
     #[serde(default = "default_agile_region")]
     pub agile_region: String,
@@ -896,6 +961,35 @@ fn default_agile_discharge_threshold() -> f64 {
     30.0
 }
 
+/// Resolve the effective Agile scope for a loaded `Settings`, applying
+/// the v0.47 → v0.48+ migration.
+///
+/// Settings written before the `agile_scope` field existed store the
+/// mode intent as a boolean `agile_enabled`. We default `agile_scope`
+/// to `Off` via `#[serde(default)]`, which means a legacy
+/// `agile_enabled = true` file would silently turn Agile off. This
+/// helper consults both fields and returns the right scope:
+///
+/// - New settings files (post-migration) carry an explicit
+///   `agile_scope` so the helper returns it verbatim.
+/// - Legacy settings files have `agile_enabled = true` and no
+///   `agile_scope`. The helper maps this to `Full`, preserving the
+///   user's original intent.
+///
+/// Returns `AgileScope::Off` only when both fields indicate off, so a
+/// fresh-defaults settings file (both off) stays off.
+pub fn agile_scope_for_settings(settings: &Settings) -> AgileScope {
+    // New-format files: explicit scope wins.
+    if settings.agile_scope != AgileScope::Off {
+        return settings.agile_scope;
+    }
+    // Legacy: boolean was the source of truth. Migrate on read.
+    if settings.agile_enabled {
+        return AgileScope::Full;
+    }
+    AgileScope::Off
+}
+
 // ===========================================================================
 // Email alerts config
 // ===========================================================================
@@ -1035,6 +1129,7 @@ impl Default for Settings {
             import_tariff_config: None,
             export_tariff_config: None,
             agile_enabled: false,
+            agile_scope: AgileScope::default(),
             agile_region: default_agile_region(),
             agile_charge_threshold: default_agile_charge_threshold(),
             agile_discharge_threshold: default_agile_discharge_threshold(),
@@ -1238,6 +1333,7 @@ mod tests {
             import_tariff_config: None,
             export_tariff_config: None,
             agile_enabled: true,
+            agile_scope: AgileScope::Full,
             agile_region: "B".to_string(),
             agile_charge_threshold: 12.5,
             agile_discharge_threshold: 35.0,
@@ -1557,6 +1653,7 @@ mod tests {
             import_tariff_config: None,
             export_tariff_config: None,
             agile_enabled: false,
+            agile_scope: AgileScope::default(),
             agile_region: "A".to_string(),
             agile_charge_threshold: 10.0,
             agile_discharge_threshold: 30.0,
@@ -1664,6 +1761,149 @@ mod tests {
             mapped.is_empty(),
             "empty slots array must produce 0 entries, not regenerate defaults"
         );
+    }
+
+    // ======================================================================
+    // AgileScope settings tests
+    // ======================================================================
+
+    #[test]
+    fn agile_scope_defaults_to_off() {
+        let s = Settings::default();
+        assert_eq!(s.agile_scope, AgileScope::Off);
+        assert!(!s.agile_scope.is_enabled());
+        assert!(!s.agile_scope.owns_charge());
+        assert!(!s.agile_scope.owns_discharge());
+    }
+
+    #[test]
+    fn agile_scope_full_owns_both_sides() {
+        let scope = AgileScope::Full;
+        assert!(scope.is_enabled());
+        assert!(scope.owns_charge());
+        assert!(scope.owns_discharge());
+        assert!(scope.as_enabled());
+    }
+
+    #[test]
+    fn agile_scope_charge_only_owns_only_charge() {
+        let scope = AgileScope::ChargeOnly;
+        assert!(scope.is_enabled());
+        assert!(scope.owns_charge());
+        assert!(!scope.owns_discharge());
+    }
+
+    #[test]
+    fn agile_scope_discharge_only_owns_only_discharge() {
+        let scope = AgileScope::DischargeOnly;
+        assert!(scope.is_enabled());
+        assert!(!scope.owns_charge());
+        assert!(scope.owns_discharge());
+    }
+
+    #[test]
+    fn agile_scope_serialises_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&AgileScope::Off).unwrap(),
+            "\"off\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AgileScope::Full).unwrap(),
+            "\"full\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AgileScope::ChargeOnly).unwrap(),
+            "\"charge_only\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AgileScope::DischargeOnly).unwrap(),
+            "\"discharge_only\""
+        );
+    }
+
+    #[test]
+    fn agile_scope_roundtrip() {
+        // Saving and reloading preserves all four variants.
+        for scope in [
+            AgileScope::Off,
+            AgileScope::Full,
+            AgileScope::ChargeOnly,
+            AgileScope::DischargeOnly,
+        ] {
+            let s = Settings {
+                agile_scope: scope,
+                ..Settings::default()
+            };
+            let json = serde_json::to_string(&s).unwrap();
+            let decoded: Settings = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded.agile_scope, scope, "roundtrip for {scope:?}");
+        }
+    }
+
+    #[test]
+    fn agile_scope_migration_legacy_enabled_true_becomes_full() {
+        // A legacy v0.47 settings.json has `agile_enabled = true` and no
+        // `agile_scope` field. The migration helper should map that to
+        // Full so the user's original intent survives the upgrade.
+        let s = Settings {
+            agile_enabled: true,
+            agile_scope: AgileScope::default(), // missing in legacy JSON
+            ..Settings::default()
+        };
+        assert_eq!(agile_scope_for_settings(&s), AgileScope::Full);
+    }
+
+    #[test]
+    fn agile_scope_migration_legacy_enabled_false_stays_off() {
+        let s = Settings {
+            agile_enabled: false,
+            agile_scope: AgileScope::default(),
+            ..Settings::default()
+        };
+        assert_eq!(agile_scope_for_settings(&s), AgileScope::Off);
+    }
+
+    #[test]
+    fn agile_scope_explicit_field_wins_over_legacy_enabled() {
+        // If a new-format file somehow has both fields, the explicit
+        // scope field wins. This catches a regression where a buggy
+        // settings UI writes `agile_enabled = false` alongside
+        // `agile_scope = ChargeOnly` — the user explicitly picked
+        // ChargeOnly, so respect that.
+        let s = Settings {
+            agile_enabled: false,
+            agile_scope: AgileScope::ChargeOnly,
+            ..Settings::default()
+        };
+        assert_eq!(agile_scope_for_settings(&s), AgileScope::ChargeOnly);
+    }
+
+    #[test]
+    fn legacy_settings_json_without_scope_field_parses_with_default() {
+        // A real v0.47 settings.json (no `agile_scope` field) must parse
+        // without error and yield AgileScope::Off. This is the on-disk
+        // upgrade path. We mirror the minimum-required field set used by
+        // the existing `legacy_*` tests below.
+        let legacy_json = r#"{
+            "host": "192.168.1.50",
+            "port": 8899,
+            "serial": "",
+            "poll_interval": 60,
+            "auto_connect": true,
+            "import_tariff": 0.285,
+            "export_tariff": 0.15,
+            "hidden_panels": [],
+            "evc_host": "",
+            "disable_auto_discovery": true,
+            "minimal_telemetry_mode": false,
+            "agile_enabled": true
+        }"#;
+        let s: Settings = serde_json::from_str(legacy_json)
+            .expect("legacy v0.47 settings.json must parse");
+        assert_eq!(s.agile_scope, AgileScope::Off); // serde default
+        assert!(s.agile_enabled);
+        // Migration helper produces the user's actual intent.
+        assert_eq!(agile_scope_for_settings(&s), AgileScope::Full);
     }
 
     // ======================================================================
