@@ -69,9 +69,6 @@ vi.mock('../../src/lib/openExternal', () => ({
   openExternal: vi.fn().mockResolvedValue(undefined),
 }));
 
-import SettingsPage from '../../src/pages/SettingsPage';
-import { useInverterStore } from '../../src/store/useInverterStore';
-
 function silenceConsoleError() {
   return vi.spyOn(console, 'error').mockImplementation(() => {});
 }
@@ -92,44 +89,61 @@ describe('<SettingsPage/> — Energy Flow diagram node status words', () => {
   beforeEach(() => {
     silenceConsoleError();
     localStorage.removeItem('showFlowStatusWords');
-    useInverterStore.setState({ showFlowStatusWords: false });
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
     cleanup();
     localStorage.removeItem('showFlowStatusWords');
-    useInverterStore.setState({ showFlowStatusWords: false });
   });
 
-  it('defaults node status words to off', async () => {
-    // The "Show Overview Sentence" toggle was removed (commit 22fe1b8) along
-    // with its store flag's consumers; only the node-status-words toggle
-    // remains in this sub-section, so that's all we default-check here.
-    render(<SettingsPage />);
+  it('defaults node status words to ON so non-technical users see Generating / Importing / Charging by default', async () => {
+    // The status words carry the direction signal that used to live in a
+    // `+`/`-` prefix on the orbit node value (e.g. "-839W + Discharging"
+    // used to read as a bug). Now that the orbit and BatteryPanel show
+    // plain magnitudes, the words are the primary direction signal, so
+    // they're on by default. The toggle remains in Settings so a user
+    // who prefers the bare value can still turn them off.
+    //
+    // We force a fresh module load so the store re-reads localStorage and
+    // picks up the (absent) key; otherwise the cached store from a prior
+    // test would carry whatever state the previous test set it to.
+    vi.resetModules();
+    const { default: FreshSettingsPage } = await import('../../src/pages/SettingsPage');
+    const { useInverterStore: freshStore } = await import('../../src/store/useInverterStore');
 
+    render(<FreshSettingsPage />);
     await screen.findByText('Show Node Status Words');
 
-    expect(useInverterStore.getState().showFlowStatusWords).toBe(false);
+    expect(freshStore.getState().showFlowStatusWords).toBe(true);
     expect(localStorage.getItem('showFlowStatusWords')).toBeNull();
   });
 
   it('clicking the node-status toggle shows/hides node words, persisting each choice', async () => {
-    render(<SettingsPage />);
+    // Fresh-load the store so it picks up the absent localStorage key and
+    // initializes to the ON default, then exercise the toggle in both
+    // directions.
+    vi.resetModules();
+    const { default: FreshSettingsPage } = await import('../../src/pages/SettingsPage');
+    const { useInverterStore: freshStore } = await import('../../src/store/useInverterStore');
+
+    render(<FreshSettingsPage />);
     await screen.findByText('Show Node Status Words');
 
+    // The toggle starts checked (default-on). First click turns it off.
     fireEvent.click(toggleFor('Show Node Status Words'));
 
     await waitFor(() => {
-      expect(useInverterStore.getState().showFlowStatusWords).toBe(true);
-      expect(localStorage.getItem('showFlowStatusWords')).toBe('true');
+      expect(freshStore.getState().showFlowStatusWords).toBe(false);
+      expect(localStorage.getItem('showFlowStatusWords')).toBe('false');
     });
 
+    // Second click re-enables.
     fireEvent.click(toggleFor('Show Node Status Words'));
 
     await waitFor(() => {
-      expect(useInverterStore.getState().showFlowStatusWords).toBe(false);
-      expect(localStorage.getItem('showFlowStatusWords')).toBe('false');
+      expect(freshStore.getState().showFlowStatusWords).toBe(true);
+      expect(localStorage.getItem('showFlowStatusWords')).toBe('true');
     });
   });
 });

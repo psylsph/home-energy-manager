@@ -120,30 +120,34 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
   });
 
   it('treats +grid_power as export (home→grid) and −grid_power as import (grid→home)', () => {
-    // Export: +4.3kW internally, displayed as -4.3kW because power leaves the home.
+    // Export: +4.3kW internally. Magnitude shown as a plain positive value;
+    // the direction signal lives in the "Exporting" / "Importing" status
+    // word rendered under the orbit node, not in a `+`/`-` prefix.
     const exp = buildEnergyFlows(snap({ grid_power: 4300 }));
     const ef = flowById(exp, 'export');
     expect(ef).toBeDefined();
     expect(ef!.from).toBe('home');
     expect(ef!.to).toBe('grid');
     expect(ef!.direction).toBe('export');
-    expect(exp.nodes.find((n) => n.id === 'grid')!.value).toBe('-4.3kW');
+    expect(exp.nodes.find((n) => n.id === 'grid')!.value).toBe('4.3kW');
     expect(flowById(exp, 'import')).toBeUndefined();
 
-    // Import: −2kW internally, displayed as +2.0kW because power enters the home.
+    // Import: −2kW internally. Same — magnitude is positive; direction
+    // comes from the status word below.
     const imp = buildEnergyFlows(snap({ grid_power: -2000 }));
     const imf = flowById(imp, 'import');
     expect(imf).toBeDefined();
     expect(imf!.from).toBe('grid');
     expect(imf!.to).toBe('home');
     expect(imf!.direction).toBe('import');
-    expect(imp.nodes.find((n) => n.id === 'grid')!.value).toBe('+2.0kW');
+    expect(imp.nodes.find((n) => n.id === 'grid')!.value).toBe('2.0kW');
     expect(flowById(imp, 'export')).toBeUndefined();
   });
 
   it('uses battery_state (not sign alone) to pick charge vs discharge direction', () => {
     // battery_state drives direction; battery_power magnitude is the watts.
-    // charging → home→battery (charge).
+    // charging → home→battery (charge). Node value is the plain magnitude;
+    // the "Charging" badge below carries the direction signal.
     const chg = buildEnergyFlows(snap({ battery_state: 'charging', battery_power: -241 }));
     const cf = flowById(chg, 'charge');
     expect(cf).toBeDefined();
@@ -151,10 +155,12 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
     expect(cf!.to).toBe('battery');
     expect(cf!.watts).toBe(241);
     expect(cf!.direction).toBe('charge');
-    expect(chg.nodes.find((n) => n.id === 'battery')!.value).toBe('+241W');
+    expect(chg.nodes.find((n) => n.id === 'battery')!.value).toBe('241W');
     expect(flowById(chg, 'discharge')).toBeUndefined();
 
-    // discharge → battery→home, displayed as negative because power leaves the battery node.
+    // discharge → battery→home, again plain magnitude + direction in the
+    // badge ("Discharging"). Showing "-1.4kW" next to "Discharging" used
+    // to read as a sign-convention bug to non-technical users.
     const dis = buildEnergyFlows(
       snap({ battery_state: 'discharging', battery_power: 1400, home_power: 800 }),
     );
@@ -165,7 +171,7 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
     expect(df!.watts).toBe(1400);
     expect(df!.direction).toBe('discharge');
     expect(df!.color).toBe(socColor(dis.nodes.find((n) => n.id === 'battery')!.ringPercent!));
-    expect(dis.nodes.find((n) => n.id === 'battery')!.value).toBe('-1.4kW');
+    expect(dis.nodes.find((n) => n.id === 'battery')!.value).toBe('1.4kW');
   });
 
   it('emits a battery→grid discharge_to_grid flow when discharge exceeds the house load (issue #155)', () => {
@@ -199,6 +205,29 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
     const home = vm.nodes.find((n) => n.id === 'home');
     expect(home).toBeDefined();
     expect(home!.active).toBe(true);
+  });
+
+  // The sign-prefix on the orbit node value used to read as "-839W" next
+  // to a "Discharging" badge, which looked like a bug to non-technical
+  // users. The direction signal now lives in the status word below the
+  // node; the value is the plain magnitude. Lock that contract in here
+  // so future refactors can't quietly reintroduce the prefixes.
+  it('grid and battery node values are always non-negative magnitudes', () => {
+    // Each combination: export, import, charge, discharge, idle.
+    const cases = [
+      { name: 'export', snap: snap({ grid_power: 4300 }) },
+      { name: 'import', snap: snap({ grid_power: -2000 }) },
+      { name: 'charge', snap: snap({ battery_state: 'charging', battery_power: -241 }) },
+      { name: 'discharge', snap: snap({ battery_state: 'discharging', battery_power: 839 }) },
+      { name: 'idle', snap: snap({ battery_power: 0, grid_power: 0 }) },
+    ];
+    for (const c of cases) {
+      const vm = buildEnergyFlows(c.snap);
+      const gridValue = vm.nodes.find((n) => n.id === 'grid')!.value;
+      const batteryValue = vm.nodes.find((n) => n.id === 'battery')!.value;
+      expect(gridValue, `${c.name} grid value must not start with - or +`).not.toMatch(/^[+-]/);
+      expect(batteryValue, `${c.name} battery value must not start with - or +`).not.toMatch(/^[+-]/);
+    }
   });
 });
 

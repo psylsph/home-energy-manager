@@ -290,7 +290,11 @@ export function buildEnergyFlows(
     {
       id: 'grid',
       label: 'Grid',
-      value: `${isExporting ? '-' : isImporting ? '+' : ''}${formatVisualPower(absGrid, noise)}`,
+      // Direction lives in the status word below the node ("Importing" /
+      // "Exporting"), so the magnitude is shown as a plain positive number
+      // here. The old `+` / `-` prefix on the value was redundant with the
+      // badge and read as "negative discharge" to non-technical users.
+      value: formatVisualPower(absGrid, noise),
       unit: `${formatVoltage(s.grid_voltage)}/${formatFrequency(s.grid_frequency)}`,
       color: FLOW_COLORS.grid,
       active: isImporting || isExporting,
@@ -306,7 +310,11 @@ export function buildEnergyFlows(
     {
       id: 'battery',
       label: 'Battery',
-      value: `${isDischarging ? '-' : isCharging ? '+' : ''}${formatVisualPower(absBattery, noise)}`,
+      // Magnitude only — the "Charging" / "Discharging" / "Idle" badge
+      // (and the SOC · mode unit line) already tells the user which way
+      // the energy is flowing. Showing "-839W" alongside a "Discharging"
+      // label made it look like a bug.
+      value: formatVisualPower(absBattery, noise),
       unit: `${formatPercent(s.soc)} · ${modeLabel}`,
       color: batteryColor,
       ringPercent: s.soc,
