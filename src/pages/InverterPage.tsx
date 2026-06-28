@@ -309,7 +309,19 @@ export default function InverterPage() {
           </span>
           <span className="text-text-secondary">Agile Mode</span>
           <span className={`font-mono text-right ${s.agile_active ? 'text-battery' : s.agile_enabled ? 'text-amber-400' : 'text-text-secondary'}`}>
-            {s.agile_active ? 'Active' : s.agile_enabled ? 'Enabled' : 'Disabled'}
+            {s.agile_active
+              ? (s.agile_state === 'charging'
+                  ? 'Charging'
+                  : s.agile_state === 'discharging'
+                    ? 'Discharging'
+                    : 'Active')
+              : s.agile_scope === 'charge_only'
+                ? 'Enabled (charge only)'
+                : s.agile_scope === 'discharge_only'
+                  ? 'Enabled (discharge only)'
+                  : s.agile_enabled
+                    ? 'Enabled (waiting for slot)'
+                    : 'Disabled'}
           </span>
 
           <span className="text-text-secondary">Battery Calibration</span>

@@ -5,6 +5,14 @@ import { apiPost, apiGet } from '../lib/api';
 import { deviceSupportsEps, deviceSupportsTimedDischarge } from '../lib/deviceCapabilities';
 import type { ScheduleSlot } from '../lib/types';
 
+/**
+ * Front-end charging-mode dropdown values. Maps 1:1 to the backend
+ * `AgileScope` enum but adds `'standard'` (which the backend models as
+ * `AgileScope::Off` plus `cosy_enabled = false`) and `'cosy'` (which
+ * the backend models as `cosy_enabled = true` regardless of scope).
+ */
+type ChargeMode = 'standard' | 'cosy' | 'agile' | 'agile_charge' | 'agile_discharge';
+
 function ActionButton({
   label,
   icon,
@@ -92,6 +100,19 @@ function ScheduleSlotEditor({
   showTargetSoc,
   apiPath = '/api/control/discharge-slot',
   masterArmed = true,
+  /**
+   * Visual treatment:
+   *   - 'normal'        — fully editable, default.
+   *   - 'agile_readonly' — greyed-out (existing `notArmed` opacity-60)
+   *                        PLUS an explicit "Controlled by manual timer"
+   *                        label so the user understands why the slot is
+   *                        locked when an Agile sub-mode is active.
+   * The schedule itself remains editable in `agile_readonly` mode so
+   * the user can pre-configure their manual schedule; the grey +
+   * label just signals "Agile has taken over the slot, so changes
+   * here won't affect the inverter while Agile is on".
+   */
+  mode = 'normal',
 }: {
   slotIndex: number;
   slot: ScheduleSlot;
@@ -105,6 +126,7 @@ function ScheduleSlotEditor({
    *  (currently the discharge schedule, whose Eco/Timed arming model is
    *  different) keep the original always-armed rendering. */
   masterArmed?: boolean;
+  mode?: 'normal' | 'agile_readonly';
 }) {
   const [local, setLocal] = useState<ScheduleSlot>({ ...slot });
   const [saving, setSaving] = useState(false);
@@ -163,6 +185,15 @@ function ScheduleSlotEditor({
       className={`bg-bg-surface rounded-xl p-3 space-y-2 transition ${notArmed ? 'opacity-60' : ''
         }`}
     >
+      {mode === 'agile_readonly' && (
+        // Explain the dim styling. This label appears above the slot
+        // body, distinct from the existing "configured but not armed"
+        // opacity-60 rendering, so the user can tell why their slot
+        // looks dim while an Agile sub-mode is active.
+        <div className="text-[11px] text-text-secondary/80 italic border-l-2 border-battery/40 pl-2">
+          Controlled by manual timer — not changed by Agile.
+        </div>
+      )}
       <div className="flex items-center justify-between">
         <span className="text-text-primary text-sm font-medium">Slot {slotIndex + 1}</span>
         <button
@@ -416,7 +447,7 @@ function AutoWinterSection() {
 }
 
 /** Charging mode section — select between Standard, Cosy, or Agile charging. */
-function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: 'standard' | 'cosy' | 'agile'; cosyActive: boolean; onModeChange: (m: 'standard' | 'cosy' | 'agile') => void }) {
+function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeMode; cosyActive: boolean; onModeChange: (m: ChargeMode) => void }) {
   const [slots, setSlots] = useState<
     { enabled: boolean; start_hour: number; start_minute: number; end_hour: number; end_minute: number; target_soc: number }[]
   >([]);
@@ -446,17 +477,24 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: 'standa
     })();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleModeChange = async (newMode: 'standard' | 'cosy' | 'agile') => {
+  const handleModeChange = async (newMode: ChargeMode) => {
     // Don't switch until slots have loaded
     if (!loaded || slots.length === 0) return;
     const cosyEnabled = newMode === 'cosy';
-    const agileEnabled = newMode === 'agile';
+    // Translate the new 5-value scope into the backend's wire format.
+    // The backend accepts `{ scope }` (new) or `{ enabled }` (legacy).
+    // We always send scope so the front-end's intent is explicit.
+    const scopeValue: 'off' | 'full' | 'charge_only' | 'discharge_only' =
+      newMode === 'standard' ? 'off' :
+      newMode === 'agile' ? 'full' :
+      newMode === 'agile_charge' ? 'charge_only' :
+      'discharge_only';
     onModeChange(newMode);
     setSaving(true);
     try {
       await Promise.all([
         apiPost('/api/cosy', { enabled: cosyEnabled, slots }),
-        apiPost('/api/agile', { enabled: agileEnabled }),
+        apiPost('/api/agile', { scope: scopeValue }),
       ]);
       setSaveFeedback('saved');
     } catch {
@@ -486,21 +524,30 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: 'standa
         <div className="flex items-center gap-2">
           <select
           value={mode}
-          onChange={(e) => handleModeChange(e.target.value as 'standard' | 'cosy' | 'agile')}
+          onChange={(e) => handleModeChange(e.target.value as ChargeMode)}
           disabled={saving}
           className="bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-3 py-1.5 border border-transparent focus:border-battery outline-none cursor-pointer"
         >
           <option value="standard">Standard</option>
           <option value="cosy">Cosy</option>
-          <option value="agile">Agile</option>
+          <optgroup label="Agile">
+            <option value="agile">Agile (full)</option>
+            <option value="agile_charge">Agile — Charge only</option>
+            <option value="agile_discharge">Agile — Discharge only</option>
+          </optgroup>
         </select>
           <button
             onClick={async () => {
               setSaving(true);
               try {
+                const scopeValue: 'off' | 'full' | 'charge_only' | 'discharge_only' =
+                  mode === 'standard' ? 'off' :
+                  mode === 'agile' ? 'full' :
+                  mode === 'agile_charge' ? 'charge_only' :
+                  'discharge_only';
                 await Promise.all([
                   apiPost('/api/cosy', { enabled: mode === 'cosy', slots }),
-                  apiPost('/api/agile', { enabled: mode === 'agile' }),
+                  apiPost('/api/agile', { scope: scopeValue }),
                 ]);
                 setSaveFeedback('saved');
               } catch {
@@ -517,7 +564,7 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: 'standa
       </div>
       </div>
 
-      {(mode === 'cosy' || mode === 'agile') && (
+      {(mode === 'cosy' || mode === 'agile' || mode === 'agile_charge' || mode === 'agile_discharge') && (
         <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-2.5 space-y-1">
           <div className="flex items-center gap-1.5">
             <span className="text-[10px] font-bold text-text-primary uppercase tracking-wide">Beta</span>
@@ -526,7 +573,11 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: 'standa
           <p className="text-[11px] text-text-secondary leading-relaxed">
             {mode === 'cosy'
               ? 'Cosy mode schedules force-charging based on time slots you define. The app must stay running for slot entry and exit to work — if you close it mid-slot, the inverter stays in force-charge mode until you reopen the app or stop it manually.'
-              : 'Agile mode automatically charges and discharges based on live Octopus prices. The app must stay running for price checks and switching to work — if you close it, the inverter stays in whatever mode it was last set to.'
+              : mode === 'agile'
+                ? 'Agile mode automatically charges and discharges based on live Octopus prices. The app must stay running for price checks and switching to work — if you close it, the inverter stays in whatever mode it was last set to.'
+                : mode === 'agile_charge'
+                  ? 'Agile — Charge only drives the cheap-side charge slot from prices, while your Discharge Schedule and Timed Discharge keep full control of the discharge side. The app must stay running for price checks to keep the charge slot current.'
+                  : 'Agile — Discharge only drives the expensive-side discharge slot from prices, while your Charge Schedule keeps full control of the charge side. The app must stay running for price checks to keep the discharge slot current.'
             }
           </p>
         </div>
@@ -634,7 +685,17 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: 'standa
         </div>
       )}
 
-      {mode === 'agile' && <AgileControls />}
+      {(mode === 'agile' || mode === 'agile_charge' || mode === 'agile_discharge') && (
+        <AgileControls
+          scope={
+            mode === 'agile_charge'
+              ? 'charge_only'
+              : mode === 'agile_discharge'
+                ? 'discharge_only'
+                : 'full'
+          }
+        />
+      )}
     </section>
   );
 }
@@ -771,8 +832,8 @@ function PriceSummary({ prices, decisionForPrice }: {
   );
 }
 
-/** Agile Octopus controls — shown when Agile charging mode is selected. */
-function AgileControls() {
+/** Agile Octopus controls — shown when any Agile charging mode is selected. */
+function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_only' }) {
   const [chargeThreshold, setChargeThreshold] = useState(10);
   const [dischargeThreshold, setDischargeThreshold] = useState(30);
   const [region, setRegion] = useState('A');
@@ -960,6 +1021,24 @@ function AgileControls() {
   };
 
   const saveConfig = async () => {
+    // Enforce a 5p minimum gap between charge and discharge thresholds.
+    // An inverted or overlapping pair (e.g. charge at 30p, discharge
+    // at 25p) means the inverter would never charge — the price is
+    // always >= the discharge threshold so the slot would always be
+    // discharge-shaped, and vice versa. Clamp on save rather than
+    // rejecting so the user can still adjust one slider at a time.
+    const MIN_GAP = 5;
+    let safeDischarge = dischargeThreshold;
+    if (safeDischarge - chargeThreshold < MIN_GAP) {
+      if (chargeThreshold > dischargeThreshold) {
+        // User dragged the charge slider above discharge: bump discharge up.
+        safeDischarge = chargeThreshold + MIN_GAP;
+      } else {
+        // User dragged discharge down too close: bump discharge up.
+        safeDischarge = chargeThreshold + MIN_GAP;
+      }
+      setDischargeThreshold(safeDischarge);
+    }
     setSaving(true);
     setSaveFeedback(null);
     try {
@@ -967,7 +1046,7 @@ function AgileControls() {
         enabled: true,
         region,
         charge_threshold: chargeThreshold,
-        discharge_threshold: dischargeThreshold,
+        discharge_threshold: safeDischarge,
       });
       setSaveFeedback('saved');
     } catch {
@@ -1035,7 +1114,11 @@ function AgileControls() {
         </select>
       </div>
 
-      {/* Charge threshold */}
+      {/* Charge threshold — hidden in Discharge Only mode (user's charge
+          schedule owns charging). Always rendered in Full and Charge
+          Only modes. The hidden threshold's value is preserved in
+          state so flipping back to Full restores it. */}
+      {scope !== 'discharge_only' && (
       <div className="space-y-1">
         <div className="flex items-center justify-between">
           <span className="text-text-secondary text-sm">Charge when below</span>
@@ -1051,11 +1134,23 @@ function AgileControls() {
           className="w-full"
         />
         <p className="text-text-secondary text-xs">
-          Force-charge the battery from the grid when the current half-hour price is at or below this threshold.
+          Charge the battery from the grid during any contiguous run of cheap half-hour slots at or below this price. Eco mode.
         </p>
       </div>
+      )}
+      {scope === 'discharge_only' && (
+        // Hint that the threshold is set but hidden because this mode
+        // ignores it. Prevents the user thinking their setting has been
+        // wiped when they switch modes.
+        <div className="text-[11px] text-text-secondary/80 italic px-1">
+          Charge threshold: {chargeThreshold}p/kWh (set, hidden because Discharge Only mode ignores charging).
+        </div>
+      )}
 
-      {/* Discharge threshold */}
+      {/* Discharge threshold — hidden in Charge Only mode (user's
+          discharge schedule owns discharging). Always rendered in Full
+          and Discharge Only modes. */}
+      {scope !== 'charge_only' && (
       <div className="space-y-1">
         <div className="flex items-center justify-between">
           <span className="text-text-secondary text-sm">Discharge when above</span>
@@ -1071,9 +1166,15 @@ function AgileControls() {
           className="w-full"
         />
         <p className="text-text-secondary text-xs">
-          Discharge the battery to power the home when the current half-hour price is at or above this threshold.
+          Discharge the battery to the grid at full power during any contiguous run of expensive half-hour slots at or above this price. Export mode.
         </p>
       </div>
+      )}
+      {scope === 'charge_only' && (
+        <div className="text-[11px] text-text-secondary/80 italic px-1">
+          Discharge threshold: {dischargeThreshold}p/kWh (set, hidden because Charge Only mode ignores discharging).
+        </div>
+      )}
 
       {/* Price forecast — 12 columns × 4 rows, no scroll */}
       <div className="space-y-2">
@@ -1537,12 +1638,26 @@ export default function ControlPage() {
   const [draftCharge, setDraftCharge] = useState<number | null>(null);
   const [draftDischarge, setDraftDischarge] = useState<number | null>(null);
   const [draftActivePower, setDraftActivePower] = useState<number | null>(null);
-  type ChargeMode = 'standard' | 'cosy' | 'agile';
+  // ChargeMode is defined at module scope so it can be referenced by
+  // the `CosyChargingSection` component declared earlier in this file.
   const snapshotCosyEnabled = snapshot?.cosy_enabled ?? false;
+  const snapshotAgileScope = snapshot?.agile_scope ?? 'off';
   const [localChargeOverride, setLocalChargeOverride] = useState<ChargeMode | null>(null);
-  // Use local override if user has interacted; otherwise derive from snapshot.
-  // Snapshot only knows cosy_enabled (boolean), so 'agile' can only come from a local override.
-  const chargeMode: ChargeMode = localChargeOverride ?? (snapshotCosyEnabled ? 'cosy' : 'standard');
+  // Use local override if user has interacted; otherwise derive from the
+  // backend snapshot. Cosy wins if both are enabled (the two modes are
+  // mutually exclusive in practice but this gives a deterministic
+  // display order).
+  const chargeMode: ChargeMode = localChargeOverride ?? (
+    snapshotCosyEnabled
+      ? 'cosy'
+      : snapshotAgileScope === 'charge_only'
+        ? 'agile_charge'
+        : snapshotAgileScope === 'discharge_only'
+          ? 'agile_discharge'
+          : snapshotAgileScope === 'full'
+            ? 'agile'
+            : 'standard'
+  );
   const cosyEnabled = chargeMode === 'cosy';
   const setChargeMode = (m: ChargeMode) => {
     setLocalChargeOverride(m);
@@ -1561,9 +1676,22 @@ export default function ControlPage() {
   useEffect(() => {
     (async () => {
       try {
-        const res = await apiGet<{ ok: boolean; enabled: boolean }>('/api/agile');
-        if (res.ok && res.enabled) {
-          setLocalChargeOverride('agile');
+        // The backend now returns an explicit `scope` field plus the
+        // legacy `enabled` boolean. Prefer the explicit scope; fall
+        // back to `enabled` for backends that haven't been upgraded.
+        const res = await apiGet<{
+          ok: boolean;
+          enabled?: boolean;
+          scope?: 'off' | 'full' | 'charge_only' | 'discharge_only';
+        }>('/api/agile');
+        if (res.ok) {
+          if (res.scope === 'charge_only') {
+            setLocalChargeOverride('agile_charge');
+          } else if (res.scope === 'discharge_only') {
+            setLocalChargeOverride('agile_discharge');
+          } else if (res.scope === 'full' || res.enabled) {
+            setLocalChargeOverride('agile');
+          }
         }
       } catch { /* use defaults */ }
     })();
@@ -2105,8 +2233,37 @@ export default function ControlPage() {
       {/* Section 3: Charging Mode */}
       <CosyChargingSection mode={chargeMode} cosyActive={cosyActive} onModeChange={setChargeMode} />
 
+      {/*
+        Visibility matrix for the three schedule sections below. The
+        `chargeMode` is the user-facing charging-mode dropdown value;
+        `agileOwnsCharge` and `agileOwnsDischarge` are derived from
+        the active scope. Sections that Agile has taken over are
+        hidden; the rest are shown, with `mode="agile_readonly"` on
+        `ScheduleSlotEditor` when the schedule coexists with an
+        Agile sub-mode (rendering them dimmed + labelled).
+
+        - Standard mode: all three sections visible, fully editable.
+        - Cosy mode: all three sections visible (Cosy owns the
+          charge-side mechanism; the discharge schedules are
+          independent inverter mechanisms per the existing
+          `cosy_discharge_slots` design).
+        - Agile (full): all three sections hidden (Agile owns both).
+        - Agile — Charge only: Charge Schedule hidden; Timed
+          Discharge and Discharge Schedule visible + greyed.
+        - Agile — Discharge only: Timed Discharge and Discharge
+          Schedule hidden; Charge Schedule visible + greyed.
+      */}
+      {(() => {
+        const agileOwnsCharge = chargeMode === 'agile' || chargeMode === 'agile_charge';
+        const agileOwnsDischarge = chargeMode === 'agile' || chargeMode === 'agile_discharge';
+        const scheduleModeForSlots: 'normal' | 'agile_readonly' =
+          chargeMode === 'agile_charge' || chargeMode === 'agile_discharge'
+            ? 'agile_readonly'
+            : 'normal';
+        return (
+          <>
       {/* Section 4: Charge Schedule */}
-      {!cosyEnabled && chargeMode !== 'agile' && schedulesUnsupported && (
+      {!cosyEnabled && !agileOwnsCharge && schedulesUnsupported && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold">Charge/Discharge Schedules</h2>
           <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm text-text-primary">
@@ -2118,7 +2275,7 @@ export default function ControlPage() {
         </section>
       )}
 
-      {!cosyEnabled && chargeMode !== 'agile' && !schedulesUnsupported && <section className="space-y-3">
+      {!cosyEnabled && !agileOwnsCharge && !schedulesUnsupported && <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Charge Schedule</h2>
         <p className="text-text-secondary/60 text-xs">Please Allow upto 10 Seconds for Changes to Save</p>
         <div className="space-y-3">
@@ -2161,6 +2318,7 @@ export default function ControlPage() {
                 showTargetSoc
                 apiPath="/api/control/charge-slot"
                 masterArmed={snapshot?.enable_charge === true}
+                mode={scheduleModeForSlots}
               />
             </>
           ))}
@@ -2172,12 +2330,14 @@ export default function ControlPage() {
           (timed-charge window), and the pause-discharge window is an
           independent inverter mechanism, so the user can layer them
           (e.g. "force-charge 02:00–05:00, and only allow discharge
-          16:00–19:00"). Hidden in Agile because Agile manages discharge
-          automatically from live prices. Hidden on devices without the
-          HR 300-359 block (DC hybrids, three-phase, Gateway, EMS, PV
-          inverter) since the pause registers don't exist there — see
+          16:00–19:00"). Hidden in Agile (full) and Agile — Discharge
+          Only because those modes drive discharge from prices. Visible
+          in Agile — Charge Only because charge-only doesn't touch the
+          discharge side. Hidden on devices without the HR 300-359
+          block (DC hybrids, three-phase, Gateway, EMS, PV inverter)
+          since the pause registers don't exist there — see
           supportsTimedDischarge / lib/deviceCapabilities.ts. */}
-      {chargeMode !== 'agile' && !schedulesUnsupported && supportsTimedDischarge && (
+      {!agileOwnsDischarge && !schedulesUnsupported && supportsTimedDischarge && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold text-lg">Timed Discharge</h2>
           <p className="text-text-secondary/60 text-xs">Please Allow upto 10 Seconds for Changes to Save</p>
@@ -2189,6 +2349,7 @@ export default function ControlPage() {
             showTargetSoc={false}
             apiPath="/api/control/timed-discharge"
             masterArmed={timedDischargeEnabled}
+            mode={scheduleModeForSlots}
           />
         </section>
       )}
@@ -2197,9 +2358,11 @@ export default function ControlPage() {
           mode too: Cosy only owns the force-charge side, and
           enable_discharge (the schedule that drives Timed Export) is an
           independent inverter mechanism. The user can configure Timed Export
-          windows while Cosy handles charging. Hidden in Agile because Agile
-          drives both charge and discharge from prices. */}
-      {chargeMode !== 'agile' && !schedulesUnsupported && (
+          windows while Cosy handles charging. Hidden in Agile (full) and
+          Agile — Discharge Only because those modes drive discharge from
+          prices. Visible in Agile — Charge Only because charge-only
+          doesn't touch the discharge side. */}
+      {!agileOwnsDischarge && !schedulesUnsupported && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold text-lg">Discharge Schedule</h2>
           <p className="text-text-secondary/60 text-xs">Please Allow upto 10 Seconds for Changes to Save</p>
@@ -2244,12 +2407,16 @@ export default function ControlPage() {
                   // target SOC — the slider would silently do nothing.
                   showTargetSoc={maxDischargeSlots > 2}
                   apiPath="/api/control/discharge-slot"
+                  mode={scheduleModeForSlots}
                 />
               </>
             ))}
           </div>
         </section>
       )}
+          </>
+        );
+      })()}
 
       {/* Section 6: Battery and Power Controls */}
       <section className="space-y-3">

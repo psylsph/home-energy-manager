@@ -94,6 +94,13 @@ export interface InverterSnapshot {
   agile_active: boolean;
   agile_state: 'idle' | 'charging' | 'discharging';
   agile_enabled: boolean;
+  /**
+   * Active Agile Octopus scope. Replaces the boolean `agile_enabled`
+   * for new code paths. Front-end derives its `chargeMode` from this
+   * field plus the cosy flag. Defaults to `'off'` for backends that
+   * predate the slot-based refactor.
+   */
+  agile_scope?: 'off' | 'full' | 'charge_only' | 'discharge_only';
   max_charge_slots: number;
   max_discharge_slots: number;
   charge_slots: ScheduleSlot[];
