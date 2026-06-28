@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Agile Octopus mode now drives the inverter through its native charge and discharge slot schedule instead of the momentary force-charge / force-discharge registers.** The inverter itself becomes the source of truth for whether a slot is firing, which removes a whole class of crash-recovery and cosy-conflict bugs and lets the four-row mode summary on the Inverter page correctly show "Timed Charge — active · charging now" during a cheap window (previously it only ever showed "armed" because no slot was actually written).
+
+- **Two new Agile sub-modes — "Agile — Charge only" and "Agile — Discharge only" — let price-driven decisions run alongside your manual schedule.** Charge Only drives the cheap-window charge slot from Octopus prices while your Discharge Schedule and Timed Discharge keep full control of the discharge side; Discharge Only is symmetric. The dropdown groups the three Agile options under an optgroup so they're easy to find.
+
+- **Schedule sections that coexist with an Agile sub-mode are now greyed out with an explicit "Controlled by manual timer — not changed by Agile" label.** Previously a slot rendered dim could mean either "configured but not armed" or "Agile has taken over", and there was no way to tell which. The label makes the reason self-explanatory.
+
+- **The Agile threshold sliders hide themselves when their direction isn't owned by the active sub-mode**, with a small hint showing the hidden value so you know your setting is preserved. A 5p minimum gap between the charge and discharge thresholds is now enforced on save to keep the pair from being inverted or overlapping.
+
+### Changed
+
+- **The Octopus Agile pricing endpoint is now configurable** via a new `api_base_url` field on `/api/agile`, defaulting to the real Octopus URL. Self-hosters can point at a mirror; the test suite points at a local mock server.
+
+### Fixed
+
+- **The "Discharge when above" help text no longer claims the battery only powers the home.** Agile discharges to the grid at full power during expensive windows (export mode), which is the whole point of running it against Octopus prices; the help text now says so.
+
 ## [0.47.0] - 2026-06-28
 
 ### Added

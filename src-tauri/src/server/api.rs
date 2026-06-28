@@ -3493,6 +3493,7 @@ pub async fn get_agile(State(_state): State<Arc<AppState>>) -> (StatusCode, Json
         "region": settings.agile_region,
         "charge_threshold": settings.agile_charge_threshold,
         "discharge_threshold": settings.agile_discharge_threshold,
+        "api_base_url": settings.agile_api_base_url,
         })),
     )
 }
@@ -3550,6 +3551,11 @@ pub async fn set_agile(
     }
     app_settings.agile_charge_threshold = body["charge_threshold"].as_f64().unwrap_or(10.0);
     app_settings.agile_discharge_threshold = body["discharge_threshold"].as_f64().unwrap_or(30.0);
+    // Optional Octopus base URL override — used by tests to point at a
+    // local mock server, and by self-hosters to point at a mirror.
+    if let Some(u) = body["api_base_url"].as_str() {
+        app_settings.agile_api_base_url = u.to_string();
+    }
 
     if let Err(e) = app_settings.save() {
         tracing::warn!("Failed to persist agile config: {e}");

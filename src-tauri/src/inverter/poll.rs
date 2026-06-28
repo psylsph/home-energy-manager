@@ -2300,10 +2300,19 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             // leaves the state machine Idle and never discharges.
                                             drop(prices);
                                             let region = settings.agile_region.clone();
-                                            let today =
+            let today =
                                                 chrono::Utc::now().format("%Y-%m-%d").to_string();
+                                            // Configurable base URL: defaults to the real Octopus
+                                            // endpoint; tests and self-hosters can override via
+            // `settings.agile_api_base_url` to point at a local mock
+            // server or mirror.
+                                            let base = if settings.agile_api_base_url.is_empty() {
+                                                "https://api.octopus.energy".to_string()
+                                            } else {
+                                                settings.agile_api_base_url.clone()
+                                            };
                                             let url = format!(
-                                                "https://api.octopus.energy/v1/products/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-{region}/standard-unit-rates/?period_from={today}T00:00:00Z&page_size=96"
+                                                "{base}/v1/products/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-{region}/standard-unit-rates/?period_from={today}T00:00:00Z&page_size=96"
                                             );
                                             let fetch_result = tokio::task::spawn_blocking(move || -> Result<Vec<PriceSlot>, String> {
                                                 let mut resp = ureq::get(&url)
