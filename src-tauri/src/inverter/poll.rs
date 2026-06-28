@@ -1051,6 +1051,50 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                             Ok(blocks) => {
                                 let mut snapshot = decode_snapshot(&blocks);
 
+                                // Gen3 Hybrid targeted pause-register probe. The
+                                // full HR 300-359 AC-config block times out on
+                                // this family (#162 / commit fdd8272), but a
+                                // 3-register read of HR 318-320 succeeds on ARM
+                                // fw >= 312 — the path that lets the
+                                // portal-style Timed Discharge feature work on
+                                // Gen3 Hybrid. Read it out-of-band here so a
+                                // timeout can't fail the whole poll cycle; on
+                                // failure carry forward the previous pause
+                                // values so the UI doesn't flicker to "off".
+                                if snapshot.device_type
+                                    == DeviceType::Gen3Hybrid
+                                    && snapshot
+                                        .firmware_version
+                                        .parse::<u16>()
+                                        .is_ok_and(|fw| fw >= 312)
+                                {
+                                    match client
+                                        .read_registers(
+                                            crate::modbus::framer::RegisterType::Holding,
+                                            crate::modbus::registers::HR_BATTERY_PAUSE_MODE,
+                                            3,
+                                        )
+                                        .await
+                                    {
+                                        Ok(data) => {
+                                            crate::inverter::decoder::
+                                                decode_holding_318_320(&data, &mut snapshot);
+                                        }
+                                        Err(e) => {
+                                            tracing::debug!(
+                                                "Gen3 pause-register targeted read failed: {e}"
+                                            );
+                                            let prev = state.latest_snapshot.lock().await;
+                                            if let Some(p) = prev.as_ref() {
+                                                snapshot.battery_pause_mode =
+                                                    p.battery_pause_mode;
+                                                snapshot.battery_pause_slot =
+                                                    p.battery_pause_slot.clone();
+                                            }
+                                        }
+                                    }
+                                }
+
                                 // Check all 60-register blocks against the known dongle
                                 // memory-leak corruption fingerprint. If the dongle serves
                                 // its own TCP/IP memory instead of register values, the

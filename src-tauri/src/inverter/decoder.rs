@@ -1048,6 +1048,23 @@ fn decode_holding_300_359(data: &[u16], snap: &mut InverterSnapshot) {
     snap.battery_pause_slot = decode_timeslot(data, 319 - 300, 320 - 300);
 }
 
+/// Decode the targeted HR 318-320 pause-register probe.
+///
+/// On Gen3 Hybrid (ARM fw >= 312) the full HR 300-359 AC-config block times
+/// out on the dongle (#162), but a 3-register read of HR 318-320 succeeds.
+/// `data` is therefore indexed from HR 318 (index 0), not HR 300 — this is a
+/// distinct entry point from `decode_holding_300_359`, which indexes the
+/// same fields from the base-300 block. Only the pause fields are decoded
+/// here; HR 311/313/314/317 (export priority / AC limits / EPS) are not part
+/// of the probe and are left untouched.
+pub fn decode_holding_318_320(data: &[u16], snap: &mut InverterSnapshot) {
+    if data.len() < 3 {
+        return;
+    }
+    snap.battery_pause_mode = get_reg(data, 0) as u8;
+    snap.battery_pause_slot = decode_timeslot(data, 1, 2);
+}
+
 /// Decode holding registers 1080-1124 (three-phase battery/control block).
 ///
 /// Three-phase and commercial/HV models mirror key single-phase battery controls
@@ -4516,6 +4533,38 @@ mod tests {
         ];
         let snap = decode_snapshot(&blocks);
         assert!(snap.ac_eps_enabled, "AIO EPS must be enabled from HR 317");
+    }
+
+    /// The targeted HR 318-320 probe (Gen3 Hybrid path) must decode the
+    /// pause mode and slot from a base-318 3-element slice, independent of
+    /// the HR 300-359 block decode. Mirrors what `poll.rs` feeds it after a
+    /// targeted `read_registers(Holding, 318, 3)`.
+    #[test]
+    fn decode_holding_318_320_targeted_probe() {
+        let mut snap = InverterSnapshot::default();
+
+        // HR 318 = pause mode 2 (pause discharge), HR 319 = 22:00, HR 320 = 06:00.
+        decode_holding_318_320(&[2, 2200, 600], &mut snap);
+        assert_eq!(snap.battery_pause_mode, 2);
+        assert!(snap.battery_pause_slot.enabled);
+        assert_eq!(snap.battery_pause_slot.start_hour, 22);
+        assert_eq!(snap.battery_pause_slot.end_hour, 6);
+    }
+
+    /// A short read (fewer than 3 registers) must be a no-op rather than
+    /// indexing out of range — `poll.rs` guards on `data.len() >= 3` but the
+    /// decoder defends independently.
+    #[test]
+    fn decode_holding_318_320_short_read_is_noop() {
+        let mut snap = InverterSnapshot {
+            battery_pause_mode: 2,
+            ..Default::default()
+        };
+        decode_holding_318_320(&[2, 2200], &mut snap);
+        assert_eq!(
+            snap.battery_pause_mode, 2,
+            "short read must not clear fields"
+        );
     }
 
     /// The All-in-One battery pause mode must come from HR 318.

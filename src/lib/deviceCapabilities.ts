@@ -83,16 +83,21 @@ export function deviceSupportsExportLimit(
  * live in the HR 300-359 AC-config block. That block is present only on
  * AC-coupled, AC-three-phase and residential All-in-One models, exactly the
  * same set as EPS (HR 317 shares the block). On every other family (DC
- * hybrids incl. Gen1/2/3/4, Polar, Gen3+, pure three-phase, AIO Commercial,
+ * hybrids incl. Gen1/2/4, Polar, Gen3+, pure three-phase, AIO Commercial,
  * AIO Hybrid, HV Gen3, Gateway, EMS, PV inverter) the registers don't exist:
  * the write is dropped/times out and `battery_pause_mode` never reflects an
  * enabled state, so the toggle appeared broken (the originally reported
  * Gen1 Hybrid symptom).
  *
- * Mirrors the backend's `DeviceType::supports_timed_discharge` and the
- * givenergy-modbus reference library's
- * `_AC_CONFIG_BLOCK_MODELS = {AC, AC_3PH, ALL_IN_ONE}` (also corroborated by
- * GivTCP `read.py:573`, which excludes Gen1 Hybrid from the pause slots).
+ * Gen3 Hybrid is the deliberate exception: the full HR 300-359 block times
+ * out on this family, but a targeted 3-register probe of HR 318-320 succeeds
+ * on ARM firmware >= 312 (reported working on fw 318). So Gen3 Hybrid with
+ * `device_type_code` 0x20xx + ARM fw century 3 (>= 312) qualifies here, and
+ * the backend probes those registers out-of-band in `poll.rs`.
+ *
+ * Mirrors the backend's `DeviceType::supports_timed_discharge` (which takes
+ * the ARM firmware version) and the givenergy-modbus reference library's
+ * `_AC_CONFIG_BLOCK_MODELS = {AC, AC_3PH, ALL_IN_ONE}` for the AC/AIO set.
  *
  * Used by `ControlPage` to hide both the Quick Action button and the Timed
  * Discharge schedule section, and kept as a dedicated predicate (rather than
@@ -103,14 +108,28 @@ export function deviceSupportsExportLimit(
  * the UI doesn't briefly flash a control the backend will reject with 400.
  */
 export function deviceSupportsTimedDischarge(
-  snapshot: Pick<InverterSnapshot, 'device_type_code'> | null | undefined,
+  snapshot: Pick<InverterSnapshot, 'device_type_code' | 'firmware_version'> | null | undefined,
 ): boolean {
   const code = snapshot?.device_type_code;
   if (!code) return false;
-  return (
+  if (
     code === '3001'
     || code === '3002'
     || code.startsWith('60')
     || code.startsWith('80')
-  );
+  ) {
+    return true;
+  }
+  // Gen3 Hybrid (device code 0x20xx, ARM firmware century 3) reaches the
+  // pause registers via a targeted 3-register probe rather than the full
+  // HR 300-359 block (which times out on this family). Enabled only at
+  // ARM fw >= 312. Mirrors the backend's
+  // `DeviceType::Gen3Hybrid && arm_fw >= 312` rule.
+  if (code.startsWith('20')) {
+    const armFw = parseInt(snapshot?.firmware_version ?? '', 10);
+    if (Number.isFinite(armFw) && Math.floor(armFw / 100) === 3 && armFw >= 312) {
+      return true;
+    }
+  }
+  return false;
 }
