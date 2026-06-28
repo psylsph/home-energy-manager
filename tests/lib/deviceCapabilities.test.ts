@@ -99,6 +99,45 @@ describe('deviceSupportsTimedDischarge', () => {
     });
   });
 
+  describe('Gen3 Hybrid firmware-gated targeted probe', () => {
+    // Gen3 Hybrid (device code 0x20xx, ARM fw century 3) reaches the pause
+    // registers via a targeted 3-register probe, enabled only at ARM fw >= 312.
+    it.each([
+      ['2001', '312'],
+      ['2001', '318'],
+      ['2001', '399'],
+      ['2003', '350'],
+    ])(
+      'returns true for Gen3 code %s at ARM fw %s',
+      (code, fw) => {
+        expect(
+          deviceSupportsTimedDischarge({
+            device_type_code: code,
+            firmware_version: fw,
+          } as never),
+        ).toBe(true);
+      },
+    );
+
+    it.each([
+      ['2001', '300', 'below threshold'],
+      ['2001', '311', 'just below threshold'],
+      ['2001', '', 'no firmware reported'],
+      ['2001', 'garbage', 'unparseable firmware'],
+      // Gen2 shares the 0x20xx prefix (ARM fw century 8/9); must NOT qualify
+      // even at high firmware, since it's a different generation.
+      ['2001', '812', 'Gen2 firmware century'],
+      ['2001', '449', 'Gen1 firmware century'],
+    ])('returns false for code %s at ARM fw %s (%s)', (code, fw) => {
+      expect(
+        deviceSupportsTimedDischarge({
+          device_type_code: code,
+          firmware_version: fw,
+        } as never),
+      ).toBe(false);
+    });
+  });
+
   it('returns false when device_type_code is missing', () => {
     expect(deviceSupportsTimedDischarge(null)).toBe(false);
     expect(deviceSupportsTimedDischarge(undefined)).toBe(false);

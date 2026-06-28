@@ -207,7 +207,6 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
   describe('hidden on devices without the HR 300-359 block', () => {
     it.each([
       ['1001', 'Gen1 hybrid (reported case)'],
-      ['2001', 'Gen hybrid (pre-ARM-refined)'],
       ['4001', 'Three-phase'],
       ['7001', 'Gateway'],
       ['8101', 'Hybrid HV Gen3'],
@@ -251,6 +250,40 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
       const section = await batteryModeSection();
       expect(within(section).getByText('Timed Discharge')).toBeDefined();
       expect(screen.getByRole('heading', { name: 'Timed Discharge' })).toBeDefined();
+    });
+  });
+
+  describe('Gen3 Hybrid firmware-gated targeted probe', () => {
+    // Gen3 Hybrid (device code 2001, ARM fw century 3) reaches the pause
+    // registers via a targeted 3-register probe, not the HR 300-359 block.
+    // The default fixture's firmware_version is '318' (>= 312) so the
+    // feature shows; override to a sub-threshold firmware to prove it hides.
+    it('shows the button and section for 2001 at ARM fw 318', async () => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ device_type_code: '2001', firmware_version: '318' }),
+        developerMode: false,
+      });
+      render(<ControlPage />);
+
+      const section = await batteryModeSection();
+      expect(within(section).getByText('Timed Discharge')).toBeDefined();
+      expect(screen.getByRole('heading', { name: 'Timed Discharge' })).toBeDefined();
+    });
+
+    it.each([
+      ['300', 'below threshold'],
+      ['311', 'just below threshold'],
+      ['', 'no firmware reported'],
+    ])('hides the button and section for 2001 at ARM fw %s (%s)', async (fw) => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ device_type_code: '2001', firmware_version: fw }),
+        developerMode: false,
+      });
+      render(<ControlPage />);
+
+      const section = await batteryModeSection();
+      expect(within(section).queryByText('Timed Discharge')).toBeNull();
+      expect(screen.queryByRole('heading', { name: 'Timed Discharge' })).toBeNull();
     });
   });
 

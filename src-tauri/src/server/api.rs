@@ -83,6 +83,24 @@ async fn latest_device_type(state: &Arc<AppState>) -> DeviceType {
         .unwrap_or(DeviceType::Gen2Hybrid)
 }
 
+/// ARM firmware version (HR 21) from the latest snapshot, parsed to a u16.
+///
+/// Used where a capability decision depends on firmware — notably
+/// `DeviceType::supports_timed_discharge`, which enables the Gen3 Hybrid
+/// pause-register probe only at ARM fw >= 312. Returns 0 when no snapshot is
+/// available or the firmware string is empty/unparseable, which safely
+/// evaluates as "below threshold" so the feature stays hidden until a real
+/// reading arrives.
+async fn latest_arm_fw(state: &Arc<AppState>) -> u16 {
+    state
+        .latest_snapshot
+        .lock()
+        .await
+        .as_ref()
+        .and_then(|s| s.firmware_version.parse::<u16>().ok())
+        .unwrap_or(0)
+}
+
 /// Resolve the AC-coupled and three-phase routing flags from a single lock,
 /// returning `(is_ac_coupled, is_three_phase)`.
 ///
@@ -902,7 +920,10 @@ pub async fn update_settings(
     // number. Negative values are clamped to 0 — a standing charge that
     // *credits* the customer doesn't exist in any real UK tariff and would
     // let a UI bug silently invert the cost graph.
-    if let Some(sc) = body.get("import_standing_charge_p_per_day").and_then(|v| v.as_f64()) {
+    if let Some(sc) = body
+        .get("import_standing_charge_p_per_day")
+        .and_then(|v| v.as_f64())
+    {
         persist.import_standing_charge_p_per_day = sc.max(0.0);
     }
     if let Some(enabled) = body
@@ -1405,7 +1426,11 @@ pub async fn set_eco(
         Ok(writes) => {
             tracing::info!("SetEco encoded: {:?}", writes);
             queue_writes(&state, writes).await;
-            ok_response(if enabled { "Eco enabled" } else { "Eco disabled" })
+            ok_response(if enabled {
+                "Eco enabled"
+            } else {
+                "Eco disabled"
+            })
         }
         Err(e) => error_response(&format!("Validation error: {}", e)),
     }
@@ -1463,7 +1488,11 @@ pub async fn set_timed_export(
             }
         }
         if let Some(soc) = body["soc_reserve"].as_u64() {
-            match (ControlCommand::SetBatterySocReserve { reserve: soc as u16 }).encode() {
+            match (ControlCommand::SetBatterySocReserve {
+                reserve: soc as u16,
+            })
+            .encode()
+            {
                 Ok(mut w) => writes.append(&mut w),
                 Err(e) => return error_response(&format!("Validation error: {}", e)),
             }
@@ -1497,18 +1526,19 @@ pub async fn set_timed_discharge(
 ) -> (StatusCode, Json<Value>) {
     // The portal-style Timed Discharge feature is implemented with the
     // battery pause registers HR318 (battery_pause_mode) and HR319/320
-    // (battery_pause_slot), which only exist in the HR 300-359 AC-config
-    // block. That block is present solely on AC-coupled, AC-three-phase and
-    // residential All-in-One models (see DeviceType::supports_timed_discharge
-    // / givenergy-modbus `_AC_CONFIG_BLOCK_MODELS`). On every other family
-    // (DC hybrids incl. Gen1/2/3/4, pure three-phase, Gateway, EMS, PV
-    // inverter) the registers are absent: the write times out or is silently
-    // dropped, and because we never poll HR 300-359 there either,
-    // `battery_pause_mode` stays at its default of 0 forever — so the toggle
-    // could never reflect an enabled state. Refuse up front with a clear
-    // error so the UI can hide the control.
+    // (battery_pause_slot). Two paths reach them:
+    //  - AC-coupled / AC-three-phase / residential All-in-One models expose
+    //    the full HR 300-359 AC-config block (givenergy-modbus
+    //    `_AC_CONFIG_BLOCK_MODELS`).
+    //  - Gen3 Hybrid (ARM fw >= 312) reaches them via a targeted 3-register
+    //    probe — the full HR 300-359 block times out on this family (#162).
+    // On every other family the registers are absent: the write times out or
+    // is silently dropped and `battery_pause_mode` stays 0 forever, so the
+    // toggle could never reflect an enabled state. Refuse up front with a
+    // clear error so the UI can hide the control.
     let device_type = latest_device_type(&state).await;
-    if !device_type.supports_timed_discharge() {
+    let arm_fw = latest_arm_fw(&state).await;
+    if !device_type.supports_timed_discharge(arm_fw) {
         return error_response(&format!(
             "Timed Discharge is not supported on {} inverters",
             device_type.display_name()
@@ -2762,8 +2792,7 @@ pub async fn get_report(
         // separately so the frontend can show a clear "kWh + standing
         // charge = total" breakdown in the report footnote.
         let days_in_range = crate::history::days_in_local_window(start_ts, end_ts);
-        let standing_charge_gbp =
-            days_in_range as f64 * standing_charge_p_per_day / 100.0;
+        let standing_charge_gbp = days_in_range as f64 * standing_charge_p_per_day / 100.0;
         let net_cost_gbp = import_cost_gbp - export_income_gbp;
         Ok::<_, String>(serde_json::json!({
             "ok": true,
@@ -4004,6 +4033,20 @@ mod tests {
         state
     }
 
+    /// Like [`make_state_with_device`] but also sets the ARM firmware version
+    /// string, so firmware-gated capability checks (e.g. Gen3 Hybrid's
+    /// ARM fw >= 312 threshold for Timed Discharge) can be exercised.
+    async fn make_state_with_device_and_fw(device_type: DeviceType, arm_fw: u16) -> Arc<AppState> {
+        let state = Arc::new(AppState::new());
+        let snapshot = crate::inverter::model::InverterSnapshot {
+            device_type,
+            firmware_version: arm_fw.to_string(),
+            ..Default::default()
+        };
+        *state.latest_snapshot.lock().await = Some(snapshot);
+        state
+    }
+
     /// Drain the pending-writes queue and flatten the batches into one vec.
     async fn drain_pending_writes(state: &Arc<AppState>) -> Vec<RegisterWrite> {
         let mut pw = state.pending_writes.lock().await;
@@ -4886,8 +4929,7 @@ mod tests {
     async fn timed_discharge_writes_pause_discharge_inverse_window() {
         with_isolated_config_dir_async(|| async {
             use crate::modbus::registers::{
-                HR_BATTERY_PAUSE_MODE, HR_BATTERY_PAUSE_SLOT_1_END,
-                HR_BATTERY_PAUSE_SLOT_1_START,
+                HR_BATTERY_PAUSE_MODE, HR_BATTERY_PAUSE_SLOT_1_END, HR_BATTERY_PAUSE_SLOT_1_START,
             };
             // AC-coupled exposes the HR 300-359 block that holds the pause
             // registers (HR318-320); Gen3 Hybrid no longer does and is refused
@@ -5035,6 +5077,57 @@ mod tests {
                         .map(|w| w.value),
                     Some(2),
                     "{dt:?} must arm pause-discharge (HR318=2)"
+                );
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn timed_discharge_gen3_hybrid_gated_on_arm_firmware_312() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_BATTERY_PAUSE_MODE;
+            // Gen3 Hybrid reaches the pause registers via the targeted
+            // HR 318-320 probe, enabled only at ARM fw >= 312.
+            for fw in [0u16, 300, 311] {
+                let state = make_state_with_device_and_fw(DeviceType::Gen3Hybrid, fw).await;
+                let (status, _res) = set_timed_discharge(
+                    State(state.clone()),
+                    Json(serde_json::json!({ "enabled": true })),
+                )
+                .await;
+                assert_eq!(
+                    status,
+                    StatusCode::BAD_REQUEST,
+                    "Gen3 fw {fw} must refuse Timed Discharge"
+                );
+                assert!(drain_pending_writes(&state).await.is_empty());
+            }
+            for fw in [312u16, 318, 399] {
+                let state = make_state_with_device_and_fw(DeviceType::Gen3Hybrid, fw).await;
+                let (status, _res) = set_timed_discharge(
+                    State(state.clone()),
+                    Json(serde_json::json!({
+                        "enabled": true,
+                        "start_hour": 3,
+                        "end_hour": 4,
+                    })),
+                )
+                .await;
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "Gen3 fw {fw} must accept Timed Discharge"
+                );
+                let writes = drain_pending_writes(&state).await;
+                assert_all_whitelisted(&writes);
+                assert_eq!(
+                    writes
+                        .iter()
+                        .find(|w| w.address == HR_BATTERY_PAUSE_MODE)
+                        .map(|w| w.value),
+                    Some(2),
+                    "Gen3 fw {fw} must arm pause-discharge (HR318=2)"
                 );
             }
         })
@@ -8316,8 +8409,7 @@ mod tests {
     /// `insert_export_day` in the history test module does. Mirrors the
     /// 30-min granularity so the cost integration has data to walk.
     fn seed_today_import_kwh(db: &crate::history::HistoryDb, day_offset: i64, daily_kwh: f32) {
-        let date = chrono::Local::now().date_naive()
-            + chrono::Duration::days(day_offset);
+        let date = chrono::Local::now().date_naive() + chrono::Duration::days(day_offset);
         let midnight = chrono::Local
             .from_local_datetime(&date.and_hms_opt(0, 0, 0).unwrap())
             .earliest()
@@ -8518,11 +8610,7 @@ mod tests {
                 0.0,
                 "no configured standing charge → £0 standing charge"
             );
-            assert_eq!(
-                json["standing_charge_p_per_day"].as_f64().unwrap(),
-                0.0
-            );
-
+            assert_eq!(json["standing_charge_p_per_day"].as_f64().unwrap(), 0.0);
         })
         .await;
     }
@@ -8545,7 +8633,6 @@ mod tests {
             )
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
-
         })
         .await;
     }

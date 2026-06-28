@@ -603,8 +603,21 @@ impl DeviceType {
     /// Used by `set_timed_discharge` to refuse the write with HTTP 400 and
     /// by the frontend to hide both the Quick Action button and the Timed
     /// Discharge schedule section.
-    pub fn supports_timed_discharge(&self) -> bool {
-        matches!(
+    ///
+    /// `arm_fw` is the ARM firmware version (HR 21) — only consulted for the
+    /// Gen3 Hybrid case below; ignored for the AC/AIO families which carry
+    /// the pause registers unconditionally.
+    ///
+    /// Gen3 Hybrid (DTC 0x2001/0x2003, ARM fw century 3) is a deliberate
+    /// exception: the full HR 300-359 AC-config block times out on this
+    /// family (#162 / commit fdd8272), so it never appears in
+    /// `extra_poll_blocks`. But a targeted 3-register read of HR 318-320
+    /// succeeds on ARM firmware >= 312 (reported working on fw 318), so the
+    /// feature is enabled there via a dedicated probe in `poll.rs` rather
+    /// than the block poll. Older Gen3 firmware (< 312) is gated out until
+    /// confirmed.
+    pub fn supports_timed_discharge(&self, arm_fw: u16) -> bool {
+        if matches!(
             self,
             Self::ACCoupled
                 | Self::ACCoupledMk2
@@ -612,7 +625,10 @@ impl DeviceType {
                 | Self::AllInOne6kW
                 | Self::AllInOne3_6kW
                 | Self::AllInOne5kW
-        )
+        ) {
+            return true;
+        }
+        matches!(self, Self::Gen3Hybrid) && arm_fw >= 312
     }
 }
 
@@ -1543,9 +1559,12 @@ mod tests {
             !extras.iter().any(|b| b.start == AC_CONFIG_BLOCK.start),
             "Gen3 must NOT poll HR300-359 — that AC-output block is absent on DC hybrids "
         );
-        // Sanity: Gen3 no longer reports the pause/EPS registers, so the
-        // Timed Discharge feature is unsupported on it.
-        assert!(!DeviceType::Gen3Hybrid.supports_timed_discharge());
+        // Sanity: Gen3 never polls the HR300-359 block, so EPS (which is
+        // block-bound) stays unsupported. Timed Discharge is different — it
+        // reaches HR 318-320 via a targeted probe gated on ARM fw >= 312, so
+        // at fw 0 (below threshold) it's unsupported here; see
+        // `supports_timed_discharge_gen3_hybrid_gated_on_arm_firmware_312`.
+        assert!(!DeviceType::Gen3Hybrid.supports_timed_discharge(0));
         assert!(!DeviceType::Gen3Hybrid.supports_eps());
     }
 
@@ -1727,43 +1746,78 @@ mod tests {
     fn supports_timed_discharge_for_ac_coupled_and_aio_families() {
         // Only models that expose the HR 300-359 AC-config block can read /
         // write the battery pause registers (HR 318-320) that drive the
-        // portal-style Timed Discharge feature.
-        assert!(DeviceType::ACCoupled.supports_timed_discharge());
-        assert!(DeviceType::ACCoupledMk2.supports_timed_discharge());
-        assert!(DeviceType::ACThreePhase.supports_timed_discharge());
-        assert!(DeviceType::AllInOne6kW.supports_timed_discharge());
-        assert!(DeviceType::AllInOne3_6kW.supports_timed_discharge());
-        assert!(DeviceType::AllInOne5kW.supports_timed_discharge());
+        // portal-style Timed Discharge feature. arm_fw is ignored for these.
+        assert!(DeviceType::ACCoupled.supports_timed_discharge(0));
+        assert!(DeviceType::ACCoupledMk2.supports_timed_discharge(0));
+        assert!(DeviceType::ACThreePhase.supports_timed_discharge(0));
+        assert!(DeviceType::AllInOne6kW.supports_timed_discharge(0));
+        assert!(DeviceType::AllInOne3_6kW.supports_timed_discharge(0));
+        assert!(DeviceType::AllInOne5kW.supports_timed_discharge(0));
+    }
+
+    #[test]
+    fn supports_timed_discharge_gen3_hybrid_gated_on_arm_firmware_312() {
+        // Gen3 Hybrid reaches the pause registers via a targeted 3-register
+        // probe (not the HR 300-359 block), which only succeeds on newer
+        // firmware. fw 312 is the confirmed threshold; below it the feature
+        // is gated out to avoid probing registers the dongle won't answer.
+        assert!(
+            !DeviceType::Gen3Hybrid.supports_timed_discharge(0),
+            "no firmware"
+        );
+        assert!(
+            !DeviceType::Gen3Hybrid.supports_timed_discharge(300),
+            "fw 300"
+        );
+        assert!(
+            !DeviceType::Gen3Hybrid.supports_timed_discharge(311),
+            "fw 311"
+        );
+        assert!(
+            DeviceType::Gen3Hybrid.supports_timed_discharge(312),
+            "fw 312"
+        );
+        assert!(
+            DeviceType::Gen3Hybrid.supports_timed_discharge(318),
+            "fw 318"
+        );
+        assert!(
+            DeviceType::Gen3Hybrid.supports_timed_discharge(399),
+            "fw 399"
+        );
     }
 
     #[test]
     fn supports_timed_discharge_rejects_dc_hybrid_and_pure_three_phase() {
-        // DC hybrids have no AC-output register block, so HR 318-320 are
-        // undefined. This is the exact Gen1 Hybrid regression: the feature
-        // wrote pause registers that don't exist and never read them back.
-        assert!(!DeviceType::Gen1Hybrid.supports_timed_discharge());
-        assert!(!DeviceType::Gen2Hybrid.supports_timed_discharge());
-        assert!(!DeviceType::Gen3Hybrid.supports_timed_discharge());
-        assert!(!DeviceType::Gen4Hybrid.supports_timed_discharge());
-        assert!(!DeviceType::PolarHybrid.supports_timed_discharge());
-        assert!(!DeviceType::Gen3PlusHybrid.supports_timed_discharge());
+        // DC hybrids (other than the Gen3 fw>=312 exception above) have no
+        // AC-output register block, so HR 318-320 are undefined. This is the
+        // exact Gen1 Hybrid regression: the feature wrote pause registers
+        // that don't exist and never read them back. Pass a high arm_fw to
+        // prove these are rejected on device type alone, not firmware.
+        assert!(!DeviceType::Gen1Hybrid.supports_timed_discharge(318));
+        assert!(!DeviceType::Gen2Hybrid.supports_timed_discharge(318));
+        // Gen3 Hybrid below the fw 312 threshold is rejected here too.
+        assert!(!DeviceType::Gen3Hybrid.supports_timed_discharge(300));
+        assert!(!DeviceType::Gen4Hybrid.supports_timed_discharge(318));
+        assert!(!DeviceType::PolarHybrid.supports_timed_discharge(318));
+        assert!(!DeviceType::Gen3PlusHybrid.supports_timed_discharge(318));
 
         // Pure three-phase / HV / AIO-hybrid families use the 1000-range
         // control bank, not HR 300-359.
-        assert!(!DeviceType::ThreePhase.supports_timed_discharge());
-        assert!(!DeviceType::AioCommercial.supports_timed_discharge());
-        assert!(!DeviceType::HybridHvGen3.supports_timed_discharge());
-        assert!(!DeviceType::AllInOneHybrid.supports_timed_discharge());
+        assert!(!DeviceType::ThreePhase.supports_timed_discharge(318));
+        assert!(!DeviceType::AioCommercial.supports_timed_discharge(318));
+        assert!(!DeviceType::HybridHvGen3.supports_timed_discharge(318));
+        assert!(!DeviceType::AllInOneHybrid.supports_timed_discharge(318));
 
         // Devices with no inverter control surface at all.
-        assert!(!DeviceType::Gateway.supports_timed_discharge());
-        assert!(!DeviceType::Ems.supports_timed_discharge());
-        assert!(!DeviceType::EmsCommercial.supports_timed_discharge());
-        assert!(!DeviceType::PvInverter.supports_timed_discharge());
+        assert!(!DeviceType::Gateway.supports_timed_discharge(318));
+        assert!(!DeviceType::Ems.supports_timed_discharge(318));
+        assert!(!DeviceType::EmsCommercial.supports_timed_discharge(318));
+        assert!(!DeviceType::PvInverter.supports_timed_discharge(318));
 
         // Unknown is conservatively rejected so the API returns a clear 400
         // rather than writing pause registers we can't prove exist.
-        assert!(!DeviceType::Unknown(0).supports_timed_discharge());
+        assert!(!DeviceType::Unknown(0).supports_timed_discharge(318));
     }
 
     #[test]
@@ -1780,10 +1834,12 @@ mod tests {
             DeviceType::AllInOne6kW,
             DeviceType::AllInOne3_6kW,
             DeviceType::AllInOne5kW,
-            // Gen3 Hybrid is the key negative case: it used to poll HR
-            // 300-359 (and so falsely appeared to support Timed Discharge)
-            // until the block was removed.
-            DeviceType::Gen3Hybrid,
+            // Gen3 Hybrid is excluded from this consistency check: it is the
+            // deliberate exception that supports Timed Discharge (at ARM fw
+            // >= 312) via a targeted 3-register HR 318-320 probe rather than
+            // the HR 300-359 block, so its `supports_timed_discharge` answer
+            // is intentionally decoupled from the block poll. See the
+            // dedicated `gen3_hybrid_gated_on_arm_firmware_312` test above.
             DeviceType::Gen1Hybrid,
             DeviceType::Gen2Hybrid,
             DeviceType::ThreePhase,
@@ -1795,7 +1851,7 @@ mod tests {
         for dt in models {
             let has_ac_config = dt.extra_poll_blocks().iter().any(|b| b.start == 300);
             assert_eq!(
-                dt.supports_timed_discharge(),
+                dt.supports_timed_discharge(0),
                 has_ac_config,
                 "supports_timed_discharge / AC_CONFIG_BLOCK polling mismatch for {:?}",
                 dt

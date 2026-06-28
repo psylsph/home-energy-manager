@@ -598,6 +598,19 @@ pub const AC_CONFIG_BLOCK: RegisterBlock = RegisterBlock {
     name: "holding_300_359",
 };
 
+/// Targeted 3-register probe of the battery pause registers (HR 318-320).
+/// Used on Gen3 Hybrid (ARM fw >= 312), where the full `AC_CONFIG_BLOCK`
+/// (HR 300-359) times out on the dongle (#162) but this narrow read
+/// succeeds. Polled separately in `poll.rs`, not part of any model's
+/// `extra_poll_blocks`. The writes themselves go through `SAFE_WRITE_REGS`
+/// (which already lists 318-320) and are independent of this read.
+pub const PAUSE_BLOCK: RegisterBlock = RegisterBlock {
+    start: HR_BATTERY_PAUSE_MODE, // 318
+    count: 3,
+    register_type: RegisterType::Holding,
+    name: "holding_318_320",
+};
+
 /// Three-phase configuration block — HR 1080-1124 mirror the key single-phase
 /// battery/control settings at different addresses.
 pub const THREE_PHASE_CONFIG_BLOCK: RegisterBlock = RegisterBlock {
