@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.48.0] - 2026-06-28
+
 ### Added
 
 - **Agile Octopus mode now drives the inverter through its native charge and discharge slot schedule instead of the momentary force-charge / force-discharge registers.** The inverter itself becomes the source of truth for whether a slot is firing, which removes a whole class of crash-recovery and cosy-conflict bugs and lets the four-row mode summary on the Inverter page correctly show "Timed Charge — active · charging now" during a cheap window (previously it only ever showed "armed" because no slot was actually written).
