@@ -17,6 +17,13 @@ export const SPIKE_THRESHOLDS: Record<string, number> = {
   battery_power: 4000,
   grid_power: 4000,
   home_power: 4000,
+  // Server-derived directional power magnitudes (split from battery_power /
+  // grid_power before bucket aggregation). Same scale as their source field,
+  // so the same 4000 W threshold applies.
+  _charge_power: 4000,
+  _discharge_power: 4000,
+  _grid_import_power: 4000,
+  _grid_export_power: 4000,
   // Daily energy counters (kWh) — these are cumulative monotonic counters
   // used to derive cost via delta computation. Even a small corruption of
   // 3-5 kWh produces a ~£1 cost spike at standard tariff rates.

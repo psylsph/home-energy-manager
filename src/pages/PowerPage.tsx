@@ -35,6 +35,14 @@ import { SeriesLegend } from '../components/SeriesLegend';
 import type { SeriesLegendItem } from '../components/SeriesLegend';
 import type { HistoryRange, TimePoint } from '../lib/types';
 import { useInverterStore } from '../store/useInverterStore';
+import {
+  bucketSocAvg,
+  calculatePowerReport,
+  type PowerRow,
+  type PowerBucket,
+  type PowerReport,
+  type PowerReportSummary,
+} from './powerReport';
 
 type PowerSeriesKey =
   | 'solarPower'
@@ -44,75 +52,23 @@ type PowerSeriesKey =
 
 type PowerChartKey = PowerSeriesKey | 'soc';
 
-interface PowerRow {
-  t: number;
-  solarPower: number | null;
-  batteryPower: number | null;
-  gridPower: number | null;
-  homePower: number | null;
-  soc: number | null;
-}
-
 interface PowerHistoryState {
   range: HistoryRange | null;
   data: Record<string, TimePoint[]>;
   error: string;
 }
 
-const HISTORY_FIELDS = ['solar_power', 'battery_power', 'grid_power', 'home_power', 'soc'];
+// The net battery_power / grid_power drive the combined power CHART (one signed
+// line each). The directional `_charge_power` / `_discharge_power` /
+// `_grid_import_power` / `_grid_export_power` fields are split by sign on the
+// server BEFORE bucket aggregation and drive the Consumption Report's
+// directional energy + peak figures, so charge/discharge (import/export) no
+// longer cancel within a wide bucket.
+const HISTORY_FIELDS = [
+  'solar_power', 'battery_power', 'grid_power', 'home_power', 'soc',
+  '_charge_power', '_discharge_power', '_grid_import_power', '_grid_export_power',
+];
 const EMPTY_HISTORY_DATA: Record<string, TimePoint[]> = {};
-
-interface PowerBucket {
-  start: number;
-  label: string;
-  solarKwh: number;
-  homeKwh: number;
-  importKwh: number;
-  exportKwh: number;
-  batteryChargeKwh: number;
-  batteryDischargeKwh: number;
-  socMin: number | null;
-  socMax: number | null;
-  socSum: number;
-  socCount: number;
-}
-
-interface PowerReportSummary {
-  periodLabel: string;
-  generatedAt: Date;
-  solarKwh: number;
-  homeKwh: number;
-  importKwh: number;
-  exportKwh: number;
-  netGridKwh: number;
-  batteryChargeKwh: number;
-  batteryDischargeKwh: number;
-  peakSolarW: number;
-  peakHomeW: number;
-  peakGridImportW: number;
-  peakGridExportW: number;
-  peakBatteryChargeW: number;
-  peakBatteryDischargeW: number;
-  socMin: number | null;
-  socMax: number | null;
-  socAvg: number | null;
-  solarCoveragePct: number | null;
-  gridDependencyPct: number | null;
-  // Issue #131: cost totals matching the selected range/offset. Sourced
-  // from /api/report (server-integrated from the today_*_kwh counters and
-  // the configured tariff). All values are GBP.
-  importCostGbp: number;
-  exportIncomeGbp: number;
-  netCostGbp: number;
-  standingChargeGbp: number;
-  standingChargePPerDay: number;
-  daysInRange: number;
-}
-
-interface PowerReport {
-  summary: PowerReportSummary;
-  buckets: PowerBucket[];
-}
 
 const POWER_SERIES: { key: PowerSeriesKey; label: string; color: string }[] = [
   { key: 'solarPower', label: 'Combined PV', color: '#F59E0B' },
@@ -161,6 +117,10 @@ function buildPowerRows(data: Record<string, TimePoint[]>): PowerRow[] {
   const grid = pointsByTimestamp(data.grid_power);
   const home = pointsByTimestamp(data.home_power);
   const soc = pointsByTimestamp(data.soc);
+  const charge = pointsByTimestamp(data._charge_power);
+  const discharge = pointsByTimestamp(data._discharge_power);
+  const gridImport = pointsByTimestamp(data._grid_import_power);
+  const gridExport = pointsByTimestamp(data._grid_export_power);
   const timestamps = new Set<number>();
 
   for (const field of HISTORY_FIELDS) {
@@ -175,6 +135,10 @@ function buildPowerRows(data: Record<string, TimePoint[]>): PowerRow[] {
     const gridValue = grid.get(t);
     const homeValue = home.get(t);
     const socValue = soc.get(t);
+    const chargeValue = charge.get(t);
+    const dischargeValue = discharge.get(t);
+    const gridImportValue = gridImport.get(t);
+    const gridExportValue = gridExport.get(t);
 
     return {
       t,
@@ -183,6 +147,10 @@ function buildPowerRows(data: Record<string, TimePoint[]>): PowerRow[] {
       gridPower: gridValue == null ? null : -gridValue,
       homePower: homeValue == null ? null : Math.max(homeValue, 0),
       soc: socValue == null ? null : Math.min(100, Math.max(0, socValue)),
+      chargePower: chargeValue == null ? null : Math.max(chargeValue, 0),
+      dischargePower: dischargeValue == null ? null : Math.max(dischargeValue, 0),
+      gridImportPower: gridImportValue == null ? null : Math.max(gridImportValue, 0),
+      gridExportPower: gridExportValue == null ? null : Math.max(gridExportValue, 0),
     };
   });
 }
@@ -348,200 +316,6 @@ function batteryDirection(value: number | null): string {
 function gridDirection(value: number | null): string {
   if (value == null || Math.abs(value) < 1) return 'Idle';
   return value > 0 ? 'Importing' : 'Exporting';
-}
-
-function medianIntervalMs(rows: PowerRow[]): number | null {
-  const intervals = rows
-    .slice(1)
-    .map((row, i) => row.t - rows[i].t)
-    .filter((dt) => dt > 0)
-    .sort((a, b) => a - b);
-  if (intervals.length === 0) return null;
-  return intervals[Math.floor(intervals.length / 2)];
-}
-
-function positivePart(value: number | null | undefined): number {
-  return Math.max(value ?? 0, 0);
-}
-
-function negativeMagnitude(value: number | null | undefined): number {
-  return Math.max(-(value ?? 0), 0);
-}
-
-function integratePair(
-  a: number | null,
-  b: number | null,
-  hours: number,
-  transform: (value: number | null | undefined) => number,
-): number {
-  if (a == null && b == null) return 0;
-  if (a == null) return transform(b) * hours / 1000;
-  if (b == null) return transform(a) * hours / 1000;
-  return ((transform(a) + transform(b)) / 2) * hours / 1000;
-}
-
-function bucketGranularity(range: HistoryRange): 'hour' | 'day' | 'month' {
-  if (range === '6m' || range === '1y') return 'month';
-  if (range === '7d' || range === '30d' || range === 'month') return 'day';
-  return 'hour';
-}
-
-function bucketStartMs(ts: number, range: HistoryRange): number {
-  const d = new Date(ts);
-  switch (bucketGranularity(range)) {
-    case 'month':
-      return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
-    case 'day':
-      return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-    case 'hour':
-      return new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours()).getTime();
-  }
-}
-
-function bucketLabel(start: number, range: HistoryRange): string {
-  const d = new Date(start);
-  switch (bucketGranularity(range)) {
-    case 'month':
-      return d.toLocaleDateString([], { month: 'short', year: 'numeric' });
-    case 'day':
-      if (range === 'month') return String(d.getDate());
-      return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
-    case 'hour':
-      return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit' });
-  }
-}
-
-function emptyBucket(start: number, range: HistoryRange): PowerBucket {
-  return {
-    start,
-    label: bucketLabel(start, range),
-    solarKwh: 0,
-    homeKwh: 0,
-    importKwh: 0,
-    exportKwh: 0,
-    batteryChargeKwh: 0,
-    batteryDischargeKwh: 0,
-    socMin: null,
-    socMax: null,
-    socSum: 0,
-    socCount: 0,
-  };
-}
-
-function addSoc(bucket: PowerBucket, soc: number | null) {
-  if (soc == null) return;
-  bucket.socMin = bucket.socMin == null ? soc : Math.min(bucket.socMin, soc);
-  bucket.socMax = bucket.socMax == null ? soc : Math.max(bucket.socMax, soc);
-  bucket.socSum += soc;
-  bucket.socCount += 1;
-}
-
-function bucketSocAvg(bucket: PowerBucket): number | null {
-  return bucket.socCount > 0 ? bucket.socSum / bucket.socCount : null;
-}
-
-function calculatePowerReport(rows: PowerRow[], range: HistoryRange, domain: [number, number], offset: number): PowerReport {
-  const buckets = new Map<number, PowerBucket>();
-  const getBucket = (ts: number) => {
-    const start = bucketStartMs(ts, range);
-    const existing = buckets.get(start);
-    if (existing) return existing;
-    const created = emptyBucket(start, range);
-    buckets.set(start, created);
-    return created;
-  };
-
-  const sortedRows = rows.filter((row) => row.t >= domain[0] && row.t <= domain[1]).sort((a, b) => a.t - b.t);
-  const medianMs = medianIntervalMs(sortedRows);
-  const maxGapMs = medianMs == null ? Infinity : medianMs * 3.5;
-
-  let solarKwh = 0;
-  let homeKwh = 0;
-  let importKwh = 0;
-  let exportKwh = 0;
-  let batteryChargeKwh = 0;
-  let batteryDischargeKwh = 0;
-
-  for (let i = 0; i < sortedRows.length - 1; i++) {
-    const a = sortedRows[i];
-    const b = sortedRows[i + 1];
-    const rawDt = b.t - a.t;
-    if (rawDt <= 0 || rawDt > maxGapMs) continue;
-    const start = Math.max(a.t, domain[0]);
-    const end = Math.min(b.t, domain[1]);
-    const hours = (end - start) / 3600000;
-    if (hours <= 0) continue;
-
-    const solar = integratePair(a.solarPower, b.solarPower, hours, positivePart);
-    const home = integratePair(a.homePower, b.homePower, hours, positivePart);
-    const gridImport = integratePair(a.gridPower, b.gridPower, hours, positivePart);
-    const gridExport = integratePair(a.gridPower, b.gridPower, hours, negativeMagnitude);
-    const batteryCharge = integratePair(a.batteryPower, b.batteryPower, hours, negativeMagnitude);
-    const batteryDischarge = integratePair(a.batteryPower, b.batteryPower, hours, positivePart);
-
-    solarKwh += solar;
-    homeKwh += home;
-    importKwh += gridImport;
-    exportKwh += gridExport;
-    batteryChargeKwh += batteryCharge;
-    batteryDischargeKwh += batteryDischarge;
-
-    const midpoint = start + (end - start) / 2;
-    const bucket = getBucket(midpoint);
-    bucket.solarKwh += solar;
-    bucket.homeKwh += home;
-    bucket.importKwh += gridImport;
-    bucket.exportKwh += gridExport;
-    bucket.batteryChargeKwh += batteryCharge;
-    bucket.batteryDischargeKwh += batteryDischarge;
-  }
-
-  for (const row of sortedRows) {
-    addSoc(getBucket(row.t), row.soc);
-  }
-
-  const socValues = sortedRows.map((row) => row.soc).filter((soc): soc is number => soc != null);
-  const socMin = socValues.length ? Math.min(...socValues) : null;
-  const socMax = socValues.length ? Math.max(...socValues) : null;
-  const socAvg = socValues.length ? socValues.reduce((acc, soc) => acc + soc, 0) / socValues.length : null;
-
-  const summary: PowerReportSummary = {
-    periodLabel: powerWindowLabel(range, offset),
-    generatedAt: new Date(),
-    solarKwh,
-    homeKwh,
-    importKwh,
-    exportKwh,
-    netGridKwh: importKwh - exportKwh,
-    batteryChargeKwh,
-    batteryDischargeKwh,
-    peakSolarW: Math.max(0, ...sortedRows.map((row) => positivePart(row.solarPower))),
-    peakHomeW: Math.max(0, ...sortedRows.map((row) => positivePart(row.homePower))),
-    peakGridImportW: Math.max(0, ...sortedRows.map((row) => positivePart(row.gridPower))),
-    peakGridExportW: Math.max(0, ...sortedRows.map((row) => negativeMagnitude(row.gridPower))),
-    peakBatteryChargeW: Math.max(0, ...sortedRows.map((row) => negativeMagnitude(row.batteryPower))),
-    peakBatteryDischargeW: Math.max(0, ...sortedRows.map((row) => positivePart(row.batteryPower))),
-    socMin,
-    socMax,
-    socAvg,
-    solarCoveragePct: homeKwh > 0 ? solarKwh / homeKwh * 100 : null,
-    gridDependencyPct: homeKwh > 0 ? importKwh / homeKwh * 100 : null,
-    // Issue #131: cost totals sourced from /api/report (server-side
-    // integration against the configured tariff + Standing Charge). When
-    // the fetch hasn't returned yet, these stay at 0 and the report tiles
-    // show "—" via the formatGbp fallback in the export rendering.
-    importCostGbp: 0,
-    exportIncomeGbp: 0,
-    netCostGbp: 0,
-    standingChargeGbp: 0,
-    standingChargePPerDay: 0,
-    daysInRange: 0,
-  };
-
-  return {
-    summary,
-    buckets: [...buckets.values()].sort((a, b) => a.start - b.start),
-  };
 }
 
 function exportPowerCSV(report: PowerReport, rows: PowerRow[]) {
@@ -1061,7 +835,12 @@ export default function PowerPage() {
   );
   const yDomain = useMemo(() => calculateDomain(rows), [rows]);
   const report = useMemo(() => {
-    const r = calculatePowerReport(rows, range, displayDomain, offset);
+    const r = calculatePowerReport(
+      rows,
+      range,
+      displayDomain,
+      powerWindowLabel(range, offset),
+    );
     // Issue #131: overlay the cost totals fetched from /api/report onto
     // the in-memory report summary. The kWh integration runs client-side
     // from the rendered Power samples; the cost integration runs server-side
@@ -1225,7 +1004,10 @@ export default function PowerPage() {
           <button
             type="button"
             onClick={() => {
-              exportPowerCSV(calculatePowerReport(rows, range, displayDomain, offset), rows);
+              exportPowerCSV(
+                calculatePowerReport(rows, range, displayDomain, powerWindowLabel(range, offset)),
+                rows,
+              );
               setExportToast('CSV downloaded to your Downloads folder — ' + report.summary.periodLabel);
             }}
             disabled={loading || !hasData || Boolean(error)}
@@ -1236,7 +1018,10 @@ export default function PowerPage() {
           <button
             type="button"
             onClick={() => {
-              const result = exportPowerPDF(calculatePowerReport(rows, range, displayDomain, offset), rows);
+              const result = exportPowerPDF(
+                calculatePowerReport(rows, range, displayDomain, powerWindowLabel(range, offset)),
+                rows,
+              );
               setExportToast(
                 result === 'downloaded'
                   ? 'Consumption report downloaded to your Downloads folder — ' + report.summary.periodLabel
