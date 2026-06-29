@@ -7,11 +7,11 @@
  */
 
 import { type FullConfig } from '@playwright/test';
-import { ChildProcess, spawn } from 'child_process';
+import { ChildProcess, execSync, spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as os from 'os';
 import { fileURLToPath } from 'url';
+import { writeTestSettings, type TestSettingsFixture } from './test-settings.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -39,18 +39,39 @@ const SIMULATOR_PATH = path.resolve(
 
 let simulatorProcess: ChildProcess | null = null;
 let backendProcess: ChildProcess | null = null;
-let configDir: string;
+let settingsFixture: TestSettingsFixture | null = null;
+
+/**
+ * Kill any leftover processes on our ports. Called on setup and on
+ * unexpected exit to prevent orphaned backends from blocking the ports.
+ */
+function killLeftoverProcesses() {
+  try {
+    execSync(`fuser -k 18899/tcp 2>/dev/null || true`, { stdio: 'ignore' });
+    execSync(`fuser -k 17337/tcp 2>/dev/null || true`, { stdio: 'ignore' });
+  } catch { /* ignore */ }
+}
+
+// Guard against orphaned processes when the test runner is killed
+// (Ctrl+C, crash, OOM, etc.) before globalTeardown runs. Without this,
+// the backend and simulator keep running and block ports 17337/18899
+// until manually killed — which breaks subsequent test runs.
+process.on('exit', () => {
+  if (backendProcess || simulatorProcess) {
+    if (backendProcess) backendProcess.kill('SIGKILL');
+    if (simulatorProcess) simulatorProcess.kill('SIGKILL');
+  }
+  killLeftoverProcesses();
+});
+process.on('SIGINT', () => { process.exit(2); });
+process.on('SIGTERM', () => { process.exit(15); });
 
 export default async function globalSetup(_config: FullConfig) {
   console.log('[local-setup] Starting local E2E test infrastructure...');
 
   // Kill any leftover processes on our ports from previous test runs
-  try {
-    const { execSync } = await import('child_process');
-    execSync(`fuser -k 18899/tcp 2>/dev/null || true`, { stdio: 'ignore' });
-    execSync(`fuser -k 17337/tcp 2>/dev/null || true`, { stdio: 'ignore' });
-    await new Promise((r) => setTimeout(r, 500));
-  } catch { /* ignore */ }
+  killLeftoverProcesses();
+  await new Promise((r) => setTimeout(r, 500));
 
   // Verify build artifacts
   if (!fs.existsSync(SIMULATOR_PATH)) {
@@ -104,36 +125,15 @@ export default async function globalSetup(_config: FullConfig) {
   // Wait for simulator to start
   await new Promise((r) => setTimeout(r, 2000));
 
-  // Create temp config directory with settings pointing at simulator
-  configDir = path.join(os.tmpdir(), `givenergy-e2e-local-${process.pid}`);
-  fs.mkdirSync(configDir, { recursive: true });
-  fs.mkdirSync(path.join(configDir, '.givenergy-local'), { recursive: true });
-
-  const settings = {
-    host: '127.0.0.1',
+  // Write a test settings.json in a per-process temp dir via the shared
+  // helper — same isolation contract as the mock-modbus suite, so neither
+  // global setup touches the user's real ~/.givenergy-local/.
+  settingsFixture = await writeTestSettings({
+    tag: 'sim',
     port: MODBUS_PORT,
-    serial: '',
-    poll_interval: 5,
-    http_port: HTTP_PORT,
-    auto_connect: true,
-    import_tariff: 0.285,
-    export_tariff: 0.15,
-    auto_winter_enabled: false,
-    auto_winter_cold_threshold: 8.0,
-    auto_winter_recovery_threshold: 12.0,
-    auto_winter_target_soc: 80,
-    auto_winter_debounce_readings: 2,
-    cosy_enabled: false,
-    cosy_slots: [
-      { enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100 },
-      { enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100 },
-      { enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100 },
-    ],
-  };
-  fs.writeFileSync(
-    path.join(configDir, '.givenergy-local', 'settings.json'),
-    JSON.stringify(settings, null, 2),
-  );
+    httpPort: HTTP_PORT,
+    pollInterval: 5,
+  });
 
   // Start the headless backend
   console.log('[local-setup] Starting headless backend on port', HTTP_PORT);
@@ -144,8 +144,7 @@ export default async function globalSetup(_config: FullConfig) {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        HOME: configDir,
-        GIVENERGY_LOCAL_CONFIG_DIR: path.join(configDir, '.givenergy-local'),
+        ...settingsFixture.env,
       },
     },
   );
@@ -233,13 +232,10 @@ async function cleanup() {
   }
   // Small delay to let file handles close
   await new Promise((r) => setTimeout(r, 500));
-  if (configDir && fs.existsSync(configDir)) {
-    try {
-      fs.rmSync(configDir, { recursive: true, force: true });
-      console.log('[local-setup] Cleaned up temp dir:', configDir);
-    } catch (e) {
-      console.warn('[local-setup] Failed to clean temp dir:', e);
-    }
+  if (settingsFixture) {
+    await settingsFixture.cleanup();
+    settingsFixture = null;
+    console.log('[local-setup] Cleaned up temp settings dir');
   }
 }
 

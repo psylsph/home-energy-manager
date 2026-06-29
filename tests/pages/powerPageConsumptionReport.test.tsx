@@ -126,7 +126,7 @@ describe('<PowerPage/> — Consumption Report cost integration (issue #131)', ()
     });
 
     it('does not include standing_charge_p_per_day as a query param', async () => {
-      // Issue #131: the standing charge is configured server-side via
+      // Issue #131: the Standing Charge is configured server-side via
       // /api/settings, NOT passed as a query param to /api/report. If
       // it ever leaks into the URL, the cost endpoint would silently
       // double-count (server has its own copy).

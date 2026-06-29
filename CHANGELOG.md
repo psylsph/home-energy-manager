@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.49.0] - 2026-06-29
+
+### Removed
+
+- **Minimal Telemetry Mode toggle removed.** The Developer-mode option that skipped optional model-specific poll blocks (extended schedule slots, AC config, three-phase config, gateway input banks) to reduce per-cycle timeout exposure on unstable dongles was added in 0.47.0 and, in practice, was almost never the right answer — the limit-slider regression it was meant to head off (AC-coupled / three-phase charge and discharge limits sit in optional blocks at HR 313/314 and HR 1108/1110) proved easier to fix by always polling those specific registers than by gating the whole block set behind a flag nobody could predict the consequences of turning on. Removing the toggle means one less hidden switch in Settings, one less thing for a tester to remember to set, and one less branch the poll loop has to carry for the indefinite future.
+
+- **"Full-power discharge in Eco mode" setting removed.** This was a cloud-only `full-power-discharge-in-eco-mode` GivEnergy feature with no local Modbus register — HEM stored an explicit user override so a Timed Export slot would force full power output while Eco / self-consumption (HR 27 = 1) stayed on. In practice the override was a footgun: it would silently change how every Eco-window discharge behaved, and the underlying behaviour it tried to reproduce is not actually reliably available without the cloud-side handshake. Settings that have the field written will simply ignore it on next load.
+
+### Added
+
+- **A shared `<AwaitingConnection/>` placeholder component replaces the copy-pasted spinner blocks that used to live inline on the Status, Battery, Solar, Inverter, Meters and Control pages.** They had drifted apart in both wording and gating — the Status page used one set of strings, the Control page used another, and Battery / Solar / Inverter / Meters each had their own "Connect to an inverter" card with subtly different copy. Centralising them keeps the alignment permanent; the message line (Waiting for data / Connection lost — reconnecting / Disconnected — will retry automatically), the host line and the Retry button all come from one source. The Control page now also gates on `!snapshot || connectionState !== 'connected'` (matching the other tabs) instead of just `connectionState !== 'connected'`, so the very first cycle after TCP comes up — when the backend has nothing yet to show — looks the same as a reconnect.
+
+- **End-to-end tests now use a single shared, isolated settings helper.** Every Playwright spec previously wrote its own hand-rolled `settings.json` under `os.tmpdir()`, with subtly different schemas (some missing `disable_auto_discovery`, some omitting the `alerts_config` / `weather_config` blocks, the gateway script relying on `HOME` alone with no `GIVENERGY_LOCAL_CONFIG_DIR` fallback). The new `e2e/test-settings.ts` (with a `.mjs` mirror for Node-only scripts) writes a complete test-appropriate config under a unique per-call temp dir, sets both `HOME` and `GIVENERGY_LOCAL_CONFIG_DIR` on the spawned backend, disables LAN discovery, and disables alerts + weather so a test run never contacts Telegram, ntfy, Pushover or Open-Meteo. The Rust `with_isolated_config_dir` helper was rebuilt around an RAII `IsolationGuard` so the env-var reset and temp-dir cleanup are panic-safe; a new pair of tests pin the isolation contract (sync and async panic paths, plus "never touches a staged production config").
+
+### Fixed
+
+- **Modbus writes now reach AC-coupled and Gen1 inverters.** The poll loop correctly switches the read slave to `0x31` for those models, but every write was hard-coded to `0x11`. The dongle echoed the frame back so the call looked successful, but the inverter at `0x31` never received the write — charge targets, discharge slots, mode changes and limits silently had no effect on AC-coupled and Gen1 installs. Writes now go to the same slave the inverter is actually listening on.
+
+- **The desktop app now binds only the configured port.** Launching a second Home Energy Manager used to fall forward to 7338, 7339, etc. (up to 20 ports), leaving two processes running and risking the window attaching to the older instance's UI; both headless and dev builds already bound a single port. The production build now matches them, and shows a clear "another instance is likely already running" error if the bind fails.
+
+### Changed
+
+- **The Settings page labels and tooltips now consistently use the capitalised form "Standing Charge"** (matching the same wording in the daily consumption report and Telegram / ntfy / Pushover messages). No functional change.
+
 ## [0.48.1] - 2026-06-28
 
 ### Changed
@@ -74,7 +98,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- **Standing charge (p/day) on the Energy Tariffs editor.** UK-style tariffs charge a flat daily fee on top of the per-kWh rate; the Settings page now exposes a single "Standing charge (p/day)" input directly below the Export tariff card. The value rolls into the History page's cumulative Import Cost graph as a visible per-day step (the line steps up by one day's worth at every local midnight the window covers), into the daily Consumption Report's Net cost line with a labelled footnote showing where the fixed cost came from, and into the Power page's Consumption Report as four new cost tiles (Import Cost, Export Income, Net Cost, Standing Charge) honouring the currently-selected range and offset. Leave blank for no standing charge. (#131)
+- **Standing Charge (p/day) on the Energy Tariffs editor.** UK-style tariffs charge a flat daily fee on top of the per-kWh rate; the Settings page now exposes a single "Standing Charge (p/day)" input directly below the Export tariff card. The value rolls into the History page's cumulative Import Cost graph as a visible per-day step (the line steps up by one day's worth at every local midnight the window covers), into the daily Consumption Report's Net cost line with a labelled footnote showing where the fixed cost came from, and into the Power page's Consumption Report as four new cost tiles (Import Cost, Export Income, Net Cost, Standing Charge) honouring the currently-selected range and offset. Leave blank for no Standing Charge. (#131)
 
 ### Changed
 

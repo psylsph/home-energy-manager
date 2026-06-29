@@ -15,6 +15,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { fileURLToPath } from 'url';
 import { setTimeout as sleep } from 'timers/promises';
+import { writeTestSettings } from './test-settings.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -60,34 +61,31 @@ async function startSimulator() {
 
 async function startBackend() {
   console.log(`[gateway-test] Starting backend on port ${HTTP_PORT}...`);
-  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'givenergy-gateway-test-'));
-  const dataDir = path.join(configDir, '.givenergy-local');
-  fs.mkdirSync(dataDir, { recursive: true });
 
-  const settings = {
-    host: '127.0.0.1', port: MODBUS_PORT, serial: '', poll_interval: 5,
-    http_port: HTTP_PORT, auto_connect: true,
-    import_tariff: 0.285, export_tariff: 0.15,
-    auto_winter_enabled: false, auto_winter_cold_threshold: 8.0,
-    auto_winter_recovery_threshold: 12.0, auto_winter_target_soc: 80,
-    auto_winter_debounce_readings: 2,
-    cosy_enabled: false, developer_mode: true,
-    cosy_slots: Array.from({ length: 3 }, () => ({
-      enabled: false, start_hour: 0, start_minute: 0,
-      end_hour: 0, end_minute: 0, target_soc: 100,
-    })),
-  };
-  fs.writeFileSync(path.join(dataDir, 'settings.json'), JSON.stringify(settings, null, 2));
+  // Use the shared isolation helper. The previous version of this script
+  // only set HOME and never set GIVENERGY_LOCAL_CONFIG_DIR, which meant a
+  // dirs-crate quirk on certain platforms could fall back to the user's
+  // real ~/.givenergy-local/ config — silently testing against production
+  // settings. The helper enforces both env vars, plus writes a complete
+  // test settings.json with disable_auto_discovery: true so the backend
+  // can't scan the LAN if the simulator is slow to accept.
+  const settingsFixture = await writeTestSettings({
+    tag: 'gateway',
+    host: '127.0.0.1',
+    port: MODBUS_PORT,
+    httpPort: HTTP_PORT,
+    pollInterval: 5,
+  });
 
   const proc = spawn(BACKEND_PATH, ['--headless', '--port', String(HTTP_PORT), '--dist', DIST_DIR], {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, HOME: configDir, RUST_LOG: 'warn' },
+    env: { ...process.env, ...settingsFixture.env, RUST_LOG: 'warn' },
   });
   proc.stdout.on('data', d => process.stdout.write(`[backend] ${d}`));
   proc.stderr.on('data', d => process.stderr.write(`[backend:err] ${d}`));
   proc.on('exit', code => console.log(`[gateway-test] Backend exited (${code})`));
   await sleep(3000);
-  return { proc, configDir };
+  return { proc, settingsFixture };
 }
 
 async function fetchJson(url) {
@@ -133,7 +131,7 @@ async function main() {
   await sleep(500);
 
   const sim = await startSimulator();
-  const { proc: backend, configDir } = await startBackend();
+  const { proc: backend, settingsFixture } = await startBackend();
 
   try {
     const baseUrl = `http://127.0.0.1:${HTTP_PORT}`;
@@ -172,7 +170,7 @@ async function main() {
     backend.kill('SIGTERM'); sim.kill('SIGTERM');
     await sleep(1000);
     backend.kill('SIGKILL'); sim.kill('SIGKILL');
-    try { fs.rmSync(configDir, { recursive: true }); } catch {}
+    try { await settingsFixture.cleanup(); } catch {}
     killPort(MODBUS_PORT); killPort(HTTP_PORT);
   }
   process.exit(failed > 0 ? 1 : 0);

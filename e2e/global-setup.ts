@@ -7,9 +7,9 @@ import { type FullConfig } from '@playwright/test';
 import { ChildProcess, spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as os from 'os';
 import { fileURLToPath } from 'url';
 import { startModbusServer, stopModbusServer } from './mock-modbus.js';
+import { writeTestSettings, type TestSettingsFixture } from './test-settings.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,7 +27,7 @@ const BINARY_PATH = path.resolve(
 );
 
 let backendProcess: ChildProcess | null = null;
-let configDir: string;
+let settingsFixture: TestSettingsFixture | null = null;
 
 export default async function globalSetup(_config: FullConfig) {
   console.log('[global-setup] Starting E2E test infrastructure...');
@@ -57,36 +57,17 @@ export default async function globalSetup(_config: FullConfig) {
   console.log('[global-setup] Starting mock Modbus server on port', MODBUS_PORT);
   await startModbusServer(MODBUS_PORT);
 
-  // Create temp config directory with settings pointing at mock server
-  configDir = path.join(os.tmpdir(), `givenergy-e2e-${process.pid}`);
-  fs.mkdirSync(configDir, { recursive: true });
-  fs.mkdirSync(path.join(configDir, '.givenergy-local'), { recursive: true });
-
-  const settings = {
-    host: '127.0.0.1',
+  // Write a test settings.json in a per-process temp dir. Uses the shared
+  // helper so this suite can't accidentally touch the user's real
+  // ~/.givenergy-local/settings.json. See e2e/test-settings.ts for the
+  // full isolation contract.
+  settingsFixture = await writeTestSettings({
+    tag: 'mock',
     port: MODBUS_PORT,
     serial: 'SA12345678',
-    poll_interval: 5,
-    http_port: HTTP_PORT,
-    auto_connect: true,
-    import_tariff: 0.285,
-    export_tariff: 0.15,
-    auto_winter_enabled: false,
-    auto_winter_cold_threshold: 8.0,
-    auto_winter_recovery_threshold: 12.0,
-    auto_winter_target_soc: 80,
-    auto_winter_debounce_readings: 2,
-    cosy_enabled: false,
-    cosy_slots: [
-      { enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100 },
-      { enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100 },
-      { enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100 },
-    ],
-  };
-  fs.writeFileSync(
-    path.join(configDir, '.givenergy-local', 'settings.json'),
-    JSON.stringify(settings, null, 2),
-  );
+    httpPort: HTTP_PORT,
+    pollInterval: 5,
+  });
 
   // Start the headless backend
   console.log('[global-setup] Starting headless backend on port', HTTP_PORT);
@@ -97,8 +78,7 @@ export default async function globalSetup(_config: FullConfig) {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        HOME: configDir,
-        GIVENERGY_LOCAL_CONFIG_DIR: path.join(configDir, '.givenergy-local'),
+        ...settingsFixture.env,
         RUST_LOG: process.env.RUST_LOG || 'info',
       },
     },
@@ -179,13 +159,10 @@ async function cleanup() {
   await stopModbusServer();
   // Small delay to let file handles close
   await new Promise((r) => setTimeout(r, 500));
-  if (configDir && fs.existsSync(configDir)) {
-    try {
-      fs.rmSync(configDir, { recursive: true, force: true });
-      console.log('[global-setup] Cleaned up temp dir:', configDir);
-    } catch (e) {
-      console.warn('[global-setup] Failed to clean temp dir:', e);
-    }
+  if (settingsFixture) {
+    await settingsFixture.cleanup();
+    settingsFixture = null;
+    console.log('[global-setup] Cleaned up temp settings dir');
   }
 }
 

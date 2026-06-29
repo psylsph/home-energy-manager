@@ -219,70 +219,59 @@ pub async fn start_server_with_frontend(
     }
 }
 
-/// Start the HTTP server with frontend static file serving, trying successive
-/// ports if the preferred port is already in use.
+/// Start the HTTP server with frontend static file serving on a single port.
 ///
 /// Desktop Tauri windows navigate to the Axum origin for same-origin API and
-/// WebSocket access. If an older app version is still listening on the preferred
-/// port, blindly navigating there shows the old frontend. This helper reports
-/// the actual bound port before serving so the window always attaches to the
-/// newly-started process.
-pub async fn start_server_with_frontend_on_available_port(
+/// WebSocket access. Only the requested `port` is ever bound — if it is already
+/// taken (typically another Home Energy Manager instance still running, or some
+/// other process squatting on the port) the function reports a clear error
+/// rather than silently grabbing the next free port. This keeps the app on the
+/// configured port (GUI `http_port` or headless `--port`) and avoids the
+/// confusion of a second server running on an unexpected port while an existing
+/// instance answers on the configured one.
+///
+/// `bound_tx` receives `Ok(port)` once the bind succeeds (before serving begins)
+/// or `Err(message)` with a user-facing explanation, so the desktop window
+/// navigates only after a successful bind and surfaces a clear error otherwise.
+pub async fn start_server_with_frontend_on_port(
     state: Arc<AppState>,
     bind_addr: &str,
-    preferred_port: u16,
+    port: u16,
     dist_dir: String,
     bound_tx: std::sync::mpsc::Sender<Result<u16, String>>,
 ) {
-    const MAX_PORT_ATTEMPTS: u16 = 20;
+    let addr = format!("{}:{}", bind_addr, port);
+    tracing::info!(
+        "HTTP server attempting bind on {} (serving frontend from {})",
+        addr,
+        dist_dir
+    );
 
-    let mut last_error = None;
-    for offset in 0..MAX_PORT_ATTEMPTS {
-        let Some(port) = preferred_port.checked_add(offset) else {
-            break;
-        };
-        let addr = format!("{}:{}", bind_addr, port);
-        tracing::info!(
-            "HTTP server attempting bind on {} (serving frontend from {})",
-            addr,
-            dist_dir
-        );
-
-        let listener = match tokio::net::TcpListener::bind(&addr).await {
-            Ok(listener) => listener,
-            Err(e) => {
-                let message = format!("Failed to bind HTTP server on {addr}: {e}");
-                if e.kind() == std::io::ErrorKind::AddrInUse {
-                    tracing::warn!("{message}; trying next port");
-                    last_error = Some(message);
-                    continue;
-                }
-
-                tracing::error!("{message}");
-                let _ = bound_tx.send(Err(message));
-                return;
-            }
-        };
-
-        tracing::info!("HTTP server bound on {}", addr);
-        let _ = bound_tx.send(Ok(port));
-        let app = create_router_with_frontend(state, &dist_dir)
-            .into_make_service_with_connect_info::<std::net::SocketAddr>();
-        if let Err(e) = axum::serve(listener, app).await {
-            tracing::error!("HTTP server error: {e}");
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            let message = if e.kind() == std::io::ErrorKind::AddrInUse {
+                format!(
+                    "Port {port} is already in use. Another Home Energy Manager instance is \
+                     likely already running — quit it (or change the port in Settings / via \
+                     --port) and reopen the app. (Details: {e})"
+                )
+            } else {
+                format!("Failed to bind HTTP server on {addr}: {e}")
+            };
+            tracing::error!("HTTP server bind failed: {message}");
+            let _ = bound_tx.send(Err(message));
+            return;
         }
-        return;
-    }
+    };
 
-    let message = last_error.unwrap_or_else(|| {
-        format!(
-            "No available HTTP server port in range {}-{}",
-            preferred_port,
-            preferred_port.saturating_add(MAX_PORT_ATTEMPTS - 1)
-        )
-    });
-    tracing::error!("{message}");
-    let _ = bound_tx.send(Err(message));
+    tracing::info!("HTTP server bound on {}", addr);
+    let _ = bound_tx.send(Ok(port));
+    let app = create_router_with_frontend(state, &dist_dir)
+        .into_make_service_with_connect_info::<std::net::SocketAddr>();
+    if let Err(e) = axum::serve(listener, app).await {
+        tracing::error!("HTTP server error: {e}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -605,5 +594,108 @@ mod tests {
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         })
         .await;
+    }
+
+    // ======================================================================
+    // Single-port binding (no fall-forward)
+    // ======================================================================
+
+    /// Spawn `start_server_with_frontend_on_port` with a fresh state and a
+    /// throwaway `dist_dir` path. Returns the channel receiver and the spawned
+    /// task handle so the caller can assert on the bind outcome and abort the
+    /// task either way. `dist_dir` is only consulted by `ServeDir` when
+    /// serving actual HTTP requests, which these tests never make — the bind
+    /// path itself does not touch the filesystem, so the path doesn't have
+    /// to point at a real directory.
+    fn spawn_single_port_bind(
+        port: u16,
+    ) -> (
+        std::sync::mpsc::Receiver<Result<u16, String>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let state = Arc::new(AppState::new());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = tokio::spawn(async move {
+            start_server_with_frontend_on_port(
+                state,
+                "127.0.0.1",
+                port,
+                String::from("/tmp/nonexistent-dist-for-test"),
+                tx,
+            )
+            .await;
+        });
+        (rx, handle)
+    }
+
+    /// Reports the exact requested port on success — the predecessor function
+    /// reported `Ok(preferred_port + offset)` after a fall-forward loop, so
+    /// asserting equality here pins the removed behaviour.
+    ///
+    /// Uses the multi-threaded runtime flavour because the test body blocks
+    /// on `std::sync::mpsc::recv_timeout` while the spawned server task is
+    /// itself blocked on `send`; under current-thread (the default) that
+    /// deadlocks. Production doesn't hit this because the receiver runs in
+    /// `tauri::Builder.setup` (a sync thread), not a tokio runtime.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn binds_only_the_specified_port_on_success() {
+        // Grab a free ephemeral port via the OS, then release it so the
+        // function can bind it. The reuse window between drop and bind is
+        // tiny on localhost; if the OS ever does reuse the port, the
+        // assertions below catch it.
+        let holder = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = holder.local_addr().unwrap().port();
+        drop(holder);
+
+        let (rx, handle) = spawn_single_port_bind(port);
+
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("bind should report within timeout");
+        assert_eq!(
+            result,
+            Ok(port),
+            "function must report Ok exactly the requested port (no fall-forward)"
+        );
+
+        handle.abort();
+    }
+
+    /// Key regression test: when the requested port is already in use, the
+    /// function must report `Err` rather than silently retrying successive
+    /// ports. The old behaviour would have sent `Ok(port + 1)` after a
+    /// single `AddrInUse` failure.
+    ///
+    /// Multi-threaded flavour for the same reason as the success-path test:
+    /// the blocking `recv_timeout` cannot share a single-threaded runtime
+    /// with the spawned server task.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn does_not_fall_forward_when_port_in_use() {
+        // Hold the port for the entire test so the in-use state is
+        // deterministic — the function cannot ever succeed here.
+        let holder = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = holder.local_addr().unwrap().port();
+
+        let (rx, handle) = spawn_single_port_bind(port);
+
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("bind should report outcome within timeout");
+        let err = result.expect_err(
+            "the predecessor function would have sent Ok(port+1) here; the new \
+             function must report Err so the desktop window surfaces an error \
+             instead of silently starting on the next free port",
+        );
+        assert!(
+            err.contains("already in use"),
+            "user-facing error must explain the port is in use, got: {err}"
+        );
+        assert!(
+            err.contains(&port.to_string()),
+            "user-facing error must name the offending port, got: {err}"
+        );
+
+        drop(holder);
+        handle.abort();
     }
 }

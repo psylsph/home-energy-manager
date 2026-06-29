@@ -20,8 +20,8 @@ import { test, expect } from './local-fixture.js';
 import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as os from 'os';
 import { fileURLToPath } from 'url';
+import { writeTestSettings, type TestSettingsFixture } from './test-settings.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -44,6 +44,9 @@ async function startInfrastructure(
 ): Promise<{ httpPort: number; cleanup: () => Promise<void> }> {
   const modbusPort = basePort;
   const httpPort = basePort + 1;
+  // Each misbehaviour mode spins up its own backend, so each one needs
+  // its own isolated settings.json under a unique temp dir.
+  let settingsFixture: TestSettingsFixture | null = null;
 
   // Kill any leftover processes on our ports
   try {
@@ -105,32 +108,15 @@ async function startInfrastructure(
   // Wait for simulator to start
   await new Promise((r) => setTimeout(r, 2000));
 
-  // Create temp config directory
-  const configDir = path.join(os.tmpdir(), `givenergy-e2e-${misbehaviour}-${process.pid}`);
-  fs.mkdirSync(configDir, { recursive: true });
-  fs.mkdirSync(path.join(configDir, '.givenergy-local'), { recursive: true });
-
-  const settings = {
-    host: '127.0.0.1',
+  // Use the shared helper so this suite obeys the same isolation contract
+  // as the other e2e setups: temp settings.json + HOME and
+  // GIVENERGY_LOCAL_CONFIG_DIR both set on the backend child process.
+  settingsFixture = await writeTestSettings({
+    tag: `misbehaviour-${misbehaviour}`,
     port: modbusPort,
-    serial: '',
-    poll_interval: 2,
-    http_port: httpPort,
-    auto_connect: true,
-    import_tariff: 0.285,
-    export_tariff: 0.15,
-    auto_winter_enabled: false,
-    cosy_enabled: false,
-    cosy_slots: [
-      { enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100 },
-      { enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100 },
-      { enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100 },
-    ],
-  };
-  fs.writeFileSync(
-    path.join(configDir, '.givenergy-local', 'settings.json'),
-    JSON.stringify(settings, null, 2),
-  );
+    httpPort,
+    pollInterval: 2,
+  });
 
   // Start the headless backend
   console.log(`[setup] Starting backend on port ${httpPort}`);
@@ -141,8 +127,7 @@ async function startInfrastructure(
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        HOME: configDir,
-        GIVENERGY_LOCAL_CONFIG_DIR: path.join(configDir, '.givenergy-local'),
+        ...settingsFixture.env,
       },
     },
   );
@@ -178,7 +163,10 @@ async function startInfrastructure(
     // Cleanup on failure
     backend.kill('SIGTERM');
     simulator.kill('SIGTERM');
-    try { fs.rmSync(configDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    if (settingsFixture) {
+      await settingsFixture.cleanup();
+      settingsFixture = null;
+    }
     throw new Error(`Backend did not become ready for misbehaviour=${misbehaviour}`);
   }
 
@@ -201,7 +189,10 @@ async function startInfrastructure(
     });
 
     await new Promise((r) => setTimeout(r, 500));
-    try { fs.rmSync(configDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    if (settingsFixture) {
+      await settingsFixture.cleanup();
+      settingsFixture = null;
+    }
     console.log(`[cleanup] Done (misbehaviour=${misbehaviour})`);
   };
 

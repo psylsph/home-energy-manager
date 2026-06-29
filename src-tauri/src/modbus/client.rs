@@ -1337,78 +1337,6 @@ impl ModbusClient {
         Ok(results)
     }
 
-    /// Read a single block with per-block retry on timeout, appending to
-    /// `results` on success. Errors are non-fatal — this is intended for
-    /// the optional-but-essential limit block under minimal telemetry mode
-    /// (see [`read_all_with_extras`]). We don't want a single timeout to
-    /// fail the whole poll, but we *do* want a few retries because the
-    /// limit slider visibly reverts to 0% if this read is missed.
-    async fn read_one_block_with_retry(
-        &mut self,
-        block: &'static crate::modbus::registers::RegisterBlock,
-        results: &mut Vec<BlockRead>,
-        max_retries: u8,
-    ) {
-        let reg_type = match block.register_type {
-            super::registers::RegisterType::Input => RegisterType::Input,
-            super::registers::RegisterType::Holding => RegisterType::Holding,
-        };
-
-        // Pace against the previous block read.
-        tokio::time::sleep(self.inter_request_delay).await;
-
-        let mut last_err: Option<ClientError> = None;
-        for attempt in 0..=max_retries {
-            if attempt > 0 {
-                tracing::debug!(
-                    block = block.name,
-                    attempt = attempt + 1,
-                    max = max_retries + 1,
-                    "Retrying essential limit block read after timeout"
-                );
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-
-            let t0 = std::time::Instant::now();
-            match self
-                .read_registers(reg_type, block.start, block.count)
-                .await
-            {
-                Ok(data) => {
-                    tracing::debug!(
-                        block = block.name,
-                        start = block.start,
-                        count = block.count,
-                        received = data.len(),
-                        elapsed_ms = t0.elapsed().as_millis() as u64,
-                        "Essential limit block read OK"
-                    );
-                    results.push(BlockRead { block, data });
-                    return;
-                }
-                Err(ClientError::Timeout) => {
-                    last_err = Some(ClientError::Timeout);
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        block = block.name,
-                        error = %e,
-                        "Essential limit block read skipped (non-fatal)"
-                    );
-                    return;
-                }
-            }
-        }
-
-        if let Some(e) = last_err {
-            tracing::debug!(
-                block = block.name,
-                error = %e,
-                "Essential limit block read exhausted retries (non-fatal)"
-            );
-        }
-    }
-
     /// Read all standard poll blocks, returning raw data per block.
     ///
     /// Iterates over [`STANDARD_POLL_BLOCKS`] and issues a read request for
@@ -1425,12 +1353,6 @@ impl ModbusClient {
     /// are still returned. This is because extended blocks may not be
     /// supported by all firmware versions of a given model.
     ///
-    /// When `minimal_telemetry` is true, the optional model-specific blocks
-    /// (extended slots, AC config, three-phase config, meter/gateway input
-    /// banks) are skipped entirely. This trades some UI detail (slots 3-10,
-    /// AC limits) for reduced per-cycle timeout exposure on chronically
-    /// unstable dongles. Standard blocks (always needed) are always read.
-    ///
     /// Standard blocks are read with per-block retry on timeout
     /// ([`read_blocks_resilient`]) so a single slow block doesn't fail the
     /// entire poll cycle. Model-specific blocks are read with a single
@@ -1438,7 +1360,6 @@ impl ModbusClient {
     pub async fn read_all_with_extras(
         &mut self,
         device_type: Option<&crate::inverter::model::DeviceType>,
-        minimal_telemetry: bool,
     ) -> Result<Vec<BlockRead>, ClientError> {
         // Three-phase models read all real-time telemetry from the
         // IR(1000-1414) range, making input_0_59 and input_180_181
@@ -1459,54 +1380,38 @@ impl ModbusClient {
         let mut results = self.read_blocks_resilient(standard_blocks, 2).await?;
 
         if let Some(dt) = device_type {
-            if minimal_telemetry {
-                tracing::debug!("Minimal telemetry mode - skipping optional model-specific blocks");
-                // AC-coupled and three-phase families store their
-                // *active* charge/discharge limit register in an optional
-                // block (AC_CONFIG_BLOCK / THREE_PHASE_CONFIG_BLOCK). If
-                // we skip that block, the limit slider reads 0% even
-                // though the inverter is genuinely at the value the user
-                // set. Always poll the essential limit block so the
-                // value can be displayed, even when minimal telemetry
-                // skips everything else. See `DeviceType::essential_limit_block`.
-                if let Some(essential) = dt.essential_limit_block() {
-                    self.read_one_block_with_retry(essential, &mut results, 2)
-                        .await;
-                }
-            } else {
-                for block in model_specific_blocks_in_poll_order(dt) {
-                    // Pause between blocks to let the dongle catch up.
-                    tokio::time::sleep(self.inter_request_delay).await;
+            for block in model_specific_blocks_in_poll_order(dt) {
+                // Pause between blocks to let the dongle catch up.
+                tokio::time::sleep(self.inter_request_delay).await;
 
-                    let reg_type = match block.register_type {
-                        super::registers::RegisterType::Input => RegisterType::Input,
-                        super::registers::RegisterType::Holding => RegisterType::Holding,
-                    };
+                let reg_type = match block.register_type {
+                    super::registers::RegisterType::Input => RegisterType::Input,
+                    super::registers::RegisterType::Holding => RegisterType::Holding,
+                };
 
-                    let t0 = std::time::Instant::now();
-                    match self
-                        .read_registers(reg_type, block.start, block.count)
-                        .await
-                    {
-                        Ok(data) => {
-                            tracing::debug!(
-                                block = block.name,
-                                start = block.start,
-                                count = block.count,
-                                received = data.len(),
-                                elapsed_ms = t0.elapsed().as_millis() as u64,
-                                "Model-specific block read OK"
-                            );
-                            results.push(BlockRead { block, data });
-                        }
-                        Err(e) => {
-                            tracing::debug!(
-                                block = block.name,
-                                error = %e,
-                                "Model-specific block read skipped (non-fatal)"
-                            );
-                            // Continue — model-specific blocks are optional.
-                        }
+                let t0 = std::time::Instant::now();
+                match self
+                    .read_registers(reg_type, block.start, block.count)
+                    .await
+                {
+                    Ok(data) => {
+                        tracing::debug!(
+                            block = block.name,
+                            start = block.start,
+                            count = block.count,
+                            received = data.len(),
+                            elapsed_ms = t0.elapsed().as_millis() as u64,
+                            "Model-specific block read OK"
+                        );
+                        results.push(BlockRead { block, data });
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            block = block.name,
+                            error = %e,
+                            "Model-specific block read skipped (non-fatal)"
+                        );
+                        // Continue — model-specific blocks are optional.
                     }
                 }
             }
@@ -3331,285 +3236,6 @@ mod tests {
             "age should be <1s after a recent read, got {:?}",
             age
         );
-    }
-
-    // =======================================================================
-    // read_all_with_extras minimal_telemetry tests
-    // =======================================================================
-
-    #[tokio::test]
-    async fn read_all_with_extras_minimal_telemetry_skips_optional_blocks() {
-        use crate::inverter::model::DeviceType;
-
-        // Standard blocks only (no optional model-specific blocks).
-        // The server only provides responses for the 4 standard blocks.
-        // If minimal_telemetry=true, read_all_with_extras should NOT
-        // attempt any optional blocks, so the server doesn't need to
-        // provide them.
-        let responses = vec![
-            // input_0_59
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x04,
-                base: 0,
-                data: (0..60).collect(),
-            },
-            // holding_0_59
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x03,
-                base: 0,
-                data: (100..160).collect(),
-            },
-            // holding_60_119
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x03,
-                base: 60,
-                data: (200..260).collect(),
-            },
-            // input_180_181: IR 180-183
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x04,
-                base: 180,
-                data: (500..504).collect(),
-            },
-        ];
-
-        let (_port, _server, mut client) = setup_client_with_server(responses).await;
-
-        // With minimal_telemetry=true and a Gen3 device type (which has
-        // extended slots as optional blocks), only standard blocks should
-        // be returned.
-        let blocks = client
-            .read_all_with_extras(Some(&DeviceType::Gen3Hybrid), true)
-            .await
-            .unwrap();
-
-        // Should have exactly 4 standard blocks, no optional ones
-        assert_eq!(blocks.len(), 4);
-        assert_eq!(blocks[0].block.name, "input_0_59");
-        assert_eq!(blocks[1].block.name, "holding_0_59");
-        assert_eq!(blocks[2].block.name, "holding_60_119");
-        assert_eq!(blocks[3].block.name, "input_180_181");
-    }
-
-    #[tokio::test]
-    async fn read_all_with_extras_minimal_telemetry_false_reads_optional_blocks() {
-        use crate::inverter::model::DeviceType;
-
-        // Standard blocks + optional extended slots (HR 240-299) for Gen3.
-        let responses = vec![
-            // input_0_59
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x04,
-                base: 0,
-                data: (0..60).collect(),
-            },
-            // holding_0_59
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x03,
-                base: 0,
-                data: (100..160).collect(),
-            },
-            // holding_60_119
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x03,
-                base: 60,
-                data: (200..260).collect(),
-            },
-            // input_180_181: IR 180-183
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x04,
-                base: 180,
-                data: (500..504).collect(),
-            },
-            // extended_slots (HR 240-299) — optional block for Gen3
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x03,
-                base: 240,
-                data: (300..360).collect(),
-            },
-        ];
-
-        let (_port, _server, mut client) = setup_client_with_server(responses).await;
-
-        // With minimal_telemetry=false, optional blocks should be read.
-        let blocks = client
-            .read_all_with_extras(Some(&DeviceType::Gen3Hybrid), false)
-            .await
-            .unwrap();
-
-        // Should have 5 blocks (4 standard + 1 optional)
-        assert_eq!(blocks.len(), 5);
-        assert!(blocks.iter().any(|b| b.block.name == "holding_240_299"));
-    }
-
-    /// Minimal Telemetry Mode must NOT skip the AC config block on
-    /// AC-coupled inverters, because that's the only place HR 313/314
-    /// (the active charge/discharge limit registers) can be read back.
-    /// Skipping it makes the limit slider show 0% even when the inverter
-    /// is at the value the user just set.
-    #[tokio::test]
-    async fn read_all_with_extras_minimal_telemetry_keeps_ac_config_for_ac_coupled() {
-        use crate::inverter::model::DeviceType;
-
-        let responses = vec![
-            // input_0_59
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x04,
-                base: 0,
-                data: (0..60).collect(),
-            },
-            // holding_0_59
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x03,
-                base: 0,
-                data: (100..160).collect(),
-            },
-            // holding_60_119
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x03,
-                base: 60,
-                data: (200..260).collect(),
-            },
-            // input_180_181: IR 180-183
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x04,
-                base: 180,
-                data: (500..504).collect(),
-            },
-            // holding_300_359 (AC config block) — the essential limit
-            // block for AC-coupled. Must be read even with minimal
-            // telemetry on, otherwise the charge/discharge limit slider
-            // shows 0% after every write.
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x03,
-                base: 300,
-                data: (700..760).collect(),
-            },
-        ];
-
-        let (_port, _server, mut client) = setup_client_with_server(responses).await;
-
-        let blocks = client
-            .read_all_with_extras(Some(&DeviceType::ACCoupled), true)
-            .await
-            .unwrap();
-
-        // 4 standard + 1 essential = 5.
-        assert_eq!(blocks.len(), 5);
-        assert!(
-            blocks.iter().any(|b| b.block.name == "holding_300_359"),
-            "AC config block must be polled under minimal telemetry for AC-coupled \
-             so HR 313/314 read-back reflects the user's last write"
-        );
-    }
-
-    /// Three-phase / HV / AIO commercial / AIO hybrid have the same issue
-    /// with HR 1108/1110 (which shadow the single-phase HR 313/314).
-    /// Minimal telemetry must still poll the three-phase config block.
-    #[tokio::test]
-    async fn read_all_with_extras_minimal_telemetry_keeps_three_phase_config_for_three_phase() {
-        use crate::inverter::model::DeviceType;
-
-        let responses = vec![
-            // holding_0_59 (lean standard set for three-phase)
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x03,
-                base: 0,
-                data: (100..160).collect(),
-            },
-            // holding_60_119
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x03,
-                base: 60,
-                data: (200..260).collect(),
-            },
-            // holding_1080_1124 (three-phase config block) — the
-            // essential limit block for three-phase families.
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x03,
-                base: 1080,
-                data: (1500..1545).collect(),
-            },
-        ];
-
-        let (_port, _server, mut client) = setup_client_with_server(responses).await;
-
-        let blocks = client
-            .read_all_with_extras(Some(&DeviceType::ThreePhase), true)
-            .await
-            .unwrap();
-
-        // 2 lean-standard + 1 essential = 3.
-        assert_eq!(blocks.len(), 3);
-        assert!(
-            blocks.iter().any(|b| b.block.name == "holding_1080_1124"),
-            "Three-phase config block must be polled under minimal telemetry \
-             so HR 1108/1110 read-back reflects the user's last write"
-        );
-    }
-
-    /// DC-coupled hybrids have their charge/discharge limit in HR 111/112,
-    /// which lives in the always-polled `holding_60_119` block. Minimal
-    /// telemetry mode must NOT add any extra reads for them — that would
-    /// defeat the timeout-reduction purpose of the mode.
-    #[tokio::test]
-    async fn read_all_with_extras_minimal_telemetry_no_extra_reads_for_gen3() {
-        use crate::inverter::model::DeviceType;
-
-        let responses = vec![
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x04,
-                base: 0,
-                data: (0..60).collect(),
-            },
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x03,
-                base: 0,
-                data: (100..160).collect(),
-            },
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x03,
-                base: 60,
-                data: (200..260).collect(),
-            },
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x04,
-                base: 180,
-                data: (500..504).collect(),
-            },
-        ];
-
-        let (_port, _server, mut client) = setup_client_with_server(responses).await;
-
-        let blocks = client
-            .read_all_with_extras(Some(&DeviceType::Gen3Hybrid), true)
-            .await
-            .unwrap();
-
-        // Just the standard set — no carve-out for DC-coupled hybrids.
-        assert_eq!(blocks.len(), 4);
-        assert!(!blocks.iter().any(|b| b.block.name == "holding_240_299"));
     }
 
     // =======================================================================

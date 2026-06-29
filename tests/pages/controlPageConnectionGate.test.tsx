@@ -26,7 +26,6 @@ vi.mock('../../src/lib/api', () => ({
           import_tariff: 0.285,
           export_tariff: 0.15,
           import_tariff_config: null,
-          full_power_discharge_in_eco_mode: false,
         },
       };
     }
@@ -58,6 +57,7 @@ vi.mock('../../src/lib/api', () => ({
 import ControlPage from '../../src/pages/ControlPage';
 import { useInverterStore } from '../../src/store/useInverterStore';
 import type { InverterSnapshot } from '../../src/lib/types';
+import { apiPost } from '../../src/lib/api';
 
 // ---------------------------------------------------------------------------
 // ControlPage used to render the full set of controls even when the
@@ -310,8 +310,8 @@ describe('<ControlPage/> — connection-state gate', () => {
   });
 
   it('POSTs to /api/reconnect when the Retry button is clicked', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
-    vi.stubGlobal('fetch', fetchMock);
+    const apiPostMock = vi.mocked(apiPost);
+    apiPostMock.mockClear();
 
     useInverterStore.setState({
       snapshot: makeSnapshot(),
@@ -324,10 +324,10 @@ describe('<ControlPage/> — connection-state gate', () => {
     const retryButton = screen.getByRole('button', { name: /Retry now/i });
     fireEvent.click(retryButton);
 
-    // The button drives `POST /api/reconnect` directly (same endpoint the
-    // StatusPage retry button uses) so a click from the ControlPage
-    // yields the same backend behaviour.
-    expect(fetchMock).toHaveBeenCalledWith('/api/reconnect', { method: 'POST' });
+    // The button drives `POST /api/reconnect` via the shared apiPost helper
+    // (same endpoint the StatusPage retry button uses) so a click from the
+    // ControlPage yields the same backend behaviour.
+    expect(apiPostMock).toHaveBeenCalledWith('/api/reconnect');
 
     // The button shows "Reconnecting…" while the request is in flight.
     expect(screen.getByText(/Reconnecting…/)).toBeDefined();
@@ -338,8 +338,9 @@ describe('<ControlPage/> — connection-state gate', () => {
     // surface — the poll loop's own back-off keeps retrying, so the
     // user's manual retry is best-effort. A thrown promise here would
     // surface as an unhandled rejection in production.
-    const fetchMock = vi.fn().mockRejectedValue(new Error('network down'));
-    vi.stubGlobal('fetch', fetchMock);
+    const apiPostMock = vi.mocked(apiPost);
+    apiPostMock.mockClear();
+    apiPostMock.mockRejectedValueOnce(new Error('network down'));
 
     useInverterStore.setState({
       snapshot: makeSnapshot(),
@@ -354,6 +355,6 @@ describe('<ControlPage/> — connection-state gate', () => {
     const retryButton = screen.getByRole('button', { name: /Retry now/i });
     expect(() => fireEvent.click(retryButton)).not.toThrow();
     expect(screen.getByText(/Connection lost/i)).toBeDefined();
-    expect(fetchMock).toHaveBeenCalled();
+    expect(apiPostMock).toHaveBeenCalled();
   });
 });

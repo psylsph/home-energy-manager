@@ -262,7 +262,7 @@ function formatWatts(value: number): string {
 
 /** Format a £ amount to 2 decimal places. Returns "—" if the value is
  * zero and `hideZero` is true (used for the standing-charge tile so it
- * doesn't show "£0.00" when no standing charge is configured). */
+ * doesn't show "£0.00" when no Standing Charge is configured). */
 function formatGbp(value: number, hideZero: boolean = false): string {
   if (hideZero && value === 0) return '—';
   return `£${value.toFixed(2)}`;
@@ -270,7 +270,7 @@ function formatGbp(value: number, hideZero: boolean = false): string {
 
 /** Render the per-day standing-charge subtitle shown on the standing
  * charge card, e.g. " (54.86p/day × 7d)". Returns the empty string when
- * no standing charge is configured or the days count is 0 / 1. */
+ * no Standing Charge is configured or the days count is 0 / 1. */
 function standingChargeSubtitle(summary: PowerReportSummary): string {
   if (summary.standingChargePPerDay <= 0 || summary.daysInRange <= 0) return '';
   const daysSuffix = summary.daysInRange === 1 ? '1d' : `${summary.daysInRange}d`;
@@ -527,7 +527,7 @@ function calculatePowerReport(rows: PowerRow[], range: HistoryRange, domain: [nu
     solarCoveragePct: homeKwh > 0 ? solarKwh / homeKwh * 100 : null,
     gridDependencyPct: homeKwh > 0 ? importKwh / homeKwh * 100 : null,
     // Issue #131: cost totals sourced from /api/report (server-side
-    // integration against the configured tariff + standing charge). When
+    // integration against the configured tariff + Standing Charge). When
     // the fetch hasn't returned yet, these stay at 0 and the report tiles
     // show "—" via the formatGbp fallback in the export rendering.
     importCostGbp: 0,
@@ -560,7 +560,7 @@ function exportPowerCSV(report: PowerReport, rows: PowerRow[]) {
     ['Total Battery Charge kWh', s.batteryChargeKwh.toFixed(3)],
     ['Total Battery Discharge kWh', s.batteryDischargeKwh.toFixed(3)],
     // Issue #131: cost totals matching the selected range. Issue #131:
-    // standing charge is the per-day amount × number of days the window
+    // Standing Charge is the per-day amount × number of days the window
     // touches; the kWh component is the rest of import cost.
     ['Total Import Cost GBP', s.importCostGbp.toFixed(2)],
     ['Total Export Income GBP', s.exportIncomeGbp.toFixed(2)],
@@ -858,14 +858,14 @@ function exportPowerPDF(report: PowerReport, rows: PowerRow[]): 'opened' | 'down
 
   <!-- Issue #131: cost tiles matching the selected range/offset. Sourced
        from /api/report (server-integrated from the today_*_kwh counters
-       and the configured tariff + standing charge). The kWh × rate
+       and the configured tariff + Standing Charge). The kWh × rate
        component and the standing-charge component are shown separately
        so the user can see where the fixed daily cost comes from. -->
   <section class="grid-cards">
     <div class="card"><span>Import cost</span><strong style="color:#dc2626">${formatGbp(s.importCostGbp)}</strong></div>
     <div class="card"><span>Export income</span><strong style="color:#0284c7">${formatGbp(s.exportIncomeGbp)}</strong></div>
     <div class="card"><span>Net cost</span><strong>${formatGbp(s.netCostGbp)}</strong></div>
-    <div class="card"><span>Standing charge</span><strong>${formatGbp(s.standingChargeGbp)}${standingChargeSubtitle(s)}</strong></div>
+    <div class="card"><span>Standing Charge</span><strong>${formatGbp(s.standingChargeGbp)}${standingChargeSubtitle(s)}</strong></div>
   </section>
 
   ${renderCombinedPowerChart(rows)}

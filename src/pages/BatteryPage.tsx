@@ -4,6 +4,7 @@ import { formatPercent, formatVoltage, formatTemp } from '../lib/format';
 import ColdBatteryWarning from '../components/ColdBatteryWarning';
 import BatteryPanel from '../components/BatteryPanel';
 import BatterySocChart from '../components/BatterySocChart';
+import AwaitingConnection from '../components/AwaitingConnection';
 
 const BMS_REGISTER_LABELS = ['IR90', 'IR91', 'IR92', 'IR93', 'IR94'];
 const BMS_STATUS_LABELS = ['status_1', 'status_2', 'status_3', 'status_4', 'status_5', 'status_6', 'status_7'];
@@ -14,20 +15,17 @@ function formatHex(value: number, width: number): string {
 }
 
 export default function BatteryPage() {
-  const { snapshot, developerMode, panelGraphsEnabled } = useInverterStore();
+  const { snapshot, developerMode, panelGraphsEnabled, connectionState } = useInverterStore();
   const [expandedModule, setExpandedModule] = useState<number | null>(null);
 
-  if (!snapshot) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
-        <div className="w-10 h-10 border-4 border-flow-active border-t-transparent rounded-full animate-spin" />
-        <p className="text-text-secondary text-sm font-sans">Waiting for data…</p>
-        <p className="text-text-secondary/60 text-xs font-sans text-center max-w-xs">
-          If data doesn't appear, try restarting the app and check your firewall settings.
-          See the <a href="https://github.com/psylsph/home-energy-manager/blob/master/FAQ.md" target="_blank" rel="noopener noreferrer" className="text-flow-active hover:underline">FAQ</a> for help.
-        </p>
-      </div>
-    );
+  // Gate on connectivity rather than snapshot presence alone: the poll loop
+  // clears `latest_snapshot` on disconnect, but a stale snapshot lingers on
+  // the WS until the next Connection { state: Reconnecting } frame. Rendering
+  // the page against that stale data was misleading — see ControlPage's gate
+  // for the original report. The shared placeholder keeps the wording and
+  // gating aligned across every tab.
+  if (!snapshot || connectionState !== 'connected') {
+    return <AwaitingConnection connectionState={connectionState} showFaq />;
   }
 
   const s = snapshot;

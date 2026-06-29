@@ -22,10 +22,9 @@ vi.mock('../../src/lib/api', () => ({
           import_tariff_config: null,
           export_tariff_config: null,
           evc_host: '',
-          // Issue #131: surface a non-zero standing charge so we can assert
+          // Issue #131: surface a non-zero Standing Charge so we can assert
           // the input hydrates correctly on load.
           import_standing_charge_p_per_day: 54.86,
-          full_power_discharge_in_eco_mode: false,
         },
       };
     }
@@ -88,7 +87,7 @@ function silenceConsoleError() {
   return vi.spyOn(console, 'error').mockImplementation(() => {});
 }
 
-describe('<SettingsPage/> — Standing charge input (issue #131)', () => {
+describe('<SettingsPage/> — Standing Charge input (issue #131)', () => {
   beforeEach(() => {
     silenceConsoleError();
     vi.mocked(apiPost).mockClear();
@@ -102,7 +101,7 @@ describe('<SettingsPage/> — Standing charge input (issue #131)', () => {
   });
 
   describe('render', () => {
-    it('renders the standing charge input below the Export tariff editor', async () => {
+    it('renders the Standing Charge input below the Export tariff editor', async () => {
       // The input lives in its own bordered card directly under the Export
       // TariffSlotEditor, with the Save Tariffs button further down. The
       // exact ordering matters — the issue specifically asks for the input
@@ -110,7 +109,7 @@ describe('<SettingsPage/> — Standing charge input (issue #131)', () => {
       render(<SettingsPage />);
 
       const input = await screen.findByLabelText(
-        /Import standing charge in pence per day/i,
+        /Import Standing Charge in pence per day/i,
       );
       expect(input).toBeDefined();
       // It should be a number input with sensible step / min attrs.
@@ -118,12 +117,12 @@ describe('<SettingsPage/> — Standing charge input (issue #131)', () => {
       expect(input.getAttribute('min')).toBe('0');
     });
 
-    it('hydrates the input from the server-provided standing charge', async () => {
+    it('hydrates the input from the server-provided Standing Charge', async () => {
       // The mocked /api/settings returns 54.86; the input must show that
       // exact value once settings load.
       render(<SettingsPage />);
       const input = await screen.findByLabelText(
-        /Import standing charge in pence per day/i,
+        /Import Standing Charge in pence per day/i,
       );
       await waitFor(() => {
         expect((input as HTMLInputElement).value).toBe('54.86');
@@ -139,27 +138,9 @@ describe('<SettingsPage/> — Standing charge input (issue #131)', () => {
       ).toBeDefined();
     });
 
-    it('saves the full-power-discharge-in-eco-mode compatibility toggle', async () => {
-      useInverterStore.setState({ developerMode: true });
-      render(<SettingsPage />);
-
-      const label = await screen.findByText(/Full-power discharge while Eco stays on/i);
-      const card = label.closest('.bg-bg-elevated');
-      expect(card).not.toBeNull();
-      const toggle = card!.querySelector('.relative.cursor-pointer');
-      expect(toggle).not.toBeNull();
-      fireEvent.click(toggle!);
-
-      await waitFor(() => {
-        expect(apiPost).toHaveBeenCalledWith('/api/settings', {
-          full_power_discharge_in_eco_mode: true,
-        });
-      });
-    });
-
     it('places the standing-charge card between Export editor and Save button', async () => {
       // The Section 4 (Energy Tariffs) ordering is:
-      //   Import editor → Export editor → Standing charge card → Save button.
+      //   Import editor → Export editor → Standing Charge card → Save button.
       // Future refactors must not relocate the input to a different section
       // — this guards against accidentally moving it into Section 5
       // (Local Weather) or somewhere else entirely.
@@ -169,7 +150,7 @@ describe('<SettingsPage/> — Standing charge input (issue #131)', () => {
         name: 'Export',
         level: 3,
       });
-      const standingLabel = await screen.findByText(/Standing charge \(p\/day\)/);
+      const standingLabel = await screen.findByText(/Standing Charge \(p\/day\)/);
       const saveButton = await screen.findByRole('button', { name: /Save Tariffs/i });
 
       const section = exportHeading.closest('section');
@@ -190,10 +171,10 @@ describe('<SettingsPage/> — Standing charge input (issue #131)', () => {
   });
 
   describe('save round-trip', () => {
-    it('Save Tariffs posts the standing charge in pence/day', async () => {
+    it('Save Tariffs posts the Standing Charge in pence/day', async () => {
       render(<SettingsPage />);
       const input = await screen.findByLabelText(
-        /Import standing charge in pence per day/i,
+        /Import Standing Charge in pence per day/i,
       );
 
       // Edit to a fresh value and click Save Tariffs.
@@ -213,12 +194,12 @@ describe('<SettingsPage/> — Standing charge input (issue #131)', () => {
       });
     });
 
-    it('blank input serialises to 0 (no standing charge)', async () => {
+    it('blank input serialises to 0 (no Standing Charge)', async () => {
       // Clear the field — saving with an empty value should persist 0, the
-      // documented "no standing charge" sentinel.
+      // documented "no Standing Charge" sentinel.
       render(<SettingsPage />);
       const input = await screen.findByLabelText(
-        /Import standing charge in pence per day/i,
+        /Import Standing Charge in pence per day/i,
       );
       fireEvent.change(input, { target: { value: '' } });
       const saveButton = await screen.findByRole('button', { name: /Save Tariffs/i });
@@ -238,7 +219,7 @@ describe('<SettingsPage/> — Standing charge input (issue #131)', () => {
       // serialise into settings.json as the literal string "NaN").
       render(<SettingsPage />);
       const input = await screen.findByLabelText(
-        /Import standing charge in pence per day/i,
+        /Import Standing Charge in pence per day/i,
       );
       fireEvent.change(input, { target: { value: 'abc' } });
       const saveButton = await screen.findByRole('button', { name: /Save Tariffs/i });

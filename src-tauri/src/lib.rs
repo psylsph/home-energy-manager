@@ -16,7 +16,7 @@ use inverter::poll::{run_poll_loop, AppState};
 use server::logs::{LogCaptureLayer, LogRing};
 use server::{
     start_readonly_server, start_server, start_server_with_frontend,
-    start_server_with_frontend_on_available_port,
+    start_server_with_frontend_on_port,
 };
 use settings::Settings;
 use std::sync::Arc;
@@ -150,7 +150,6 @@ async fn initialize_app_state(
         ps.interval_secs = app_settings.poll_interval;
         ps.evc_host = app_settings.evc_host.clone();
         ps.evc_port = app_settings.evc_port;
-        ps.minimal_telemetry_mode = app_settings.minimal_telemetry_mode;
     }
 
     // Apply saved auto-winter config
@@ -394,7 +393,7 @@ pub fn run() {
 
                 let (bound_tx, bound_rx) = std::sync::mpsc::channel();
                 tauri::async_runtime::spawn(async move {
-                    start_server_with_frontend_on_available_port(
+                    start_server_with_frontend_on_port(
                         server_state,
                         "0.0.0.0",
                         http_port,
@@ -405,9 +404,11 @@ pub fn run() {
                 });
 
                 // Navigate the Tauri window only after the embedded Axum server
-                // has actually bound. If an older app still owns :7337, the
-                // server falls forward to the next free port and we navigate to
-                // that new port instead of accidentally displaying the old app.
+                // has actually bound. The server binds exactly the configured
+                // `http_port`; if that port is already taken (typically another
+                // Home Energy Manager instance still running) the bind fails and
+                // the window shows a clear startup error instead of silently
+                // attaching to the existing instance's UI.
                 let bind_result = bound_rx.recv_timeout(std::time::Duration::from_secs(3));
                 if let Some(window) = app.get_webview_window("main") {
                     match bind_result {
