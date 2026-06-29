@@ -91,6 +91,16 @@ export interface InverterSnapshot {
   load_limiter_active: boolean;
   cosy_active: boolean;
   cosy_enabled: boolean;
+  agile_active: boolean;
+  agile_state: 'idle' | 'charging' | 'discharging';
+  agile_enabled: boolean;
+  /**
+   * Active Agile Octopus scope. Replaces the boolean `agile_enabled`
+   * for new code paths. Front-end derives its `chargeMode` from this
+   * field plus the cosy flag. Defaults to `'off'` for backends that
+   * predate the slot-based refactor.
+   */
+  agile_scope?: 'off' | 'full' | 'charge_only' | 'discharge_only';
   max_charge_slots: number;
   max_discharge_slots: number;
   charge_slots: ScheduleSlot[];
@@ -199,12 +209,23 @@ export interface PollSettings {
    * didn't carry the field. Issue #131.
    */
   import_standing_charge_p_per_day?: number;
+  /** User override for the cloud-only `full-power-discharge-in-eco-mode` inverter flag. */
+  full_power_discharge_in_eco_mode?: boolean;
   import_tariff_config: TariffConfig | null;
   export_tariff_config: TariffConfig | null;
   hidden_panels: string[];
   evc_host: string;
   evc_port: number;
   disable_auto_discovery: boolean;
+  /**
+   * When true, the poll loop skips optional model-specific register blocks
+   * (extended slots, AC config, three-phase config, gateway input banks) to
+   * reduce per-cycle timeout exposure on chronically unstable dongles. The
+   * standard blocks (and per-battery BMS / HV BCU reads) always run. Surfaced
+   * in the Developer section of Settings because it's a tradeoff between UI
+   * detail and connection stability — most users should leave it off.
+   */
+  minimal_telemetry_mode: boolean;
   /** Whether the user has opted in to launching the app on system login.
    *  Wired through tauri-plugin-autostart (HKCU\…\Run on Windows,
    *  LaunchAgent on macOS, ~/.config/autostart/*.desktop on Linux).

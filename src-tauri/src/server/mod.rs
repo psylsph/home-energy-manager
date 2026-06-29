@@ -92,6 +92,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         // Cosy charging
         .route("/api/cosy", get(api::get_cosy).post(api::set_cosy))
+        // Agile Octopus
+        .route("/api/agile", get(api::get_agile).post(api::set_agile))
         // Load discharge limiter
         .route(
             "/api/load-limiter",

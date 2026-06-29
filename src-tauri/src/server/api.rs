@@ -820,12 +820,14 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             // Issue #131: surface the import-side standing charge so the
             // Settings page can hydrate its p/day input on load.
             "import_standing_charge_p_per_day": settings.import_standing_charge_p_per_day,
+            "full_power_discharge_in_eco_mode": settings.full_power_discharge_in_eco_mode,
             "import_tariff_config": settings.import_tariff_config,
             "export_tariff_config": settings.export_tariff_config,
             "hidden_panels": settings.hidden_panels,
             "evc_host": settings.evc_host,
             "evc_port": settings.evc_port,
             "disable_auto_discovery": settings.disable_auto_discovery,
+            "minimal_telemetry_mode": settings.minimal_telemetry_mode,
             "autostart_enabled": settings.autostart_enabled,
             "api_key": settings.api_key,
             "api_port": settings.api_port,
@@ -924,6 +926,12 @@ pub async fn update_settings(
     {
         persist.import_standing_charge_p_per_day = sc.max(0.0);
     }
+    if let Some(enabled) = body
+        .get("full_power_discharge_in_eco_mode")
+        .and_then(|v| v.as_bool())
+    {
+        persist.full_power_discharge_in_eco_mode = enabled;
+    }
     if let Some(ref cfg) = import_tariff_config {
         persist.import_tariff_config = Some(cfg.clone());
     }
@@ -948,6 +956,9 @@ pub async fn update_settings(
     }
     if let Some(d) = body.get("disable_auto_discovery").and_then(|v| v.as_bool()) {
         persist.disable_auto_discovery = d;
+    }
+    if let Some(m) = body.get("minimal_telemetry_mode").and_then(|v| v.as_bool()) {
+        persist.minimal_telemetry_mode = m;
     }
     // Persist the user's autostart preference. The actual platform
     // autostart entry is driven from the frontend via the
@@ -1016,6 +1027,7 @@ pub async fn update_settings(
         settings.evc_host = disk.evc_host.clone();
         settings.evc_port = disk.evc_port;
         settings.disable_auto_discovery = disk.disable_auto_discovery;
+        settings.minimal_telemetry_mode = disk.minimal_telemetry_mode;
     }
 
     let connection_changed =
@@ -1078,6 +1090,12 @@ fn settings_log_fields(
             persist.import_standing_charge_p_per_day
         ));
     }
+    if is_present("full_power_discharge_in_eco_mode") {
+        out.push(format!(
+            "full_power_discharge_in_eco_mode={}",
+            persist.full_power_discharge_in_eco_mode
+        ));
+    }
     if is_present("import_tariff_config") {
         let slots = persist
             .import_tariff_config
@@ -1113,6 +1131,12 @@ fn settings_log_fields(
         out.push(format!(
             "disable_auto_discovery={}",
             persist.disable_auto_discovery
+        ));
+    }
+    if is_present("minimal_telemetry_mode") {
+        out.push(format!(
+            "minimal_telemetry_mode={}",
+            persist.minimal_telemetry_mode
         ));
     }
     if is_present("autostart_enabled") {
@@ -1169,6 +1193,10 @@ fn parse_settings(body: &serde_json::Value) -> Result<PollSettings, String> {
         evc_host: String::new(), // merged from disk settings separately
         evc_port: 502,
         disable_auto_discovery,
+        minimal_telemetry_mode: body
+            .get("minimal_telemetry_mode")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     })
 }
 
@@ -1436,6 +1464,7 @@ pub async fn set_timed_charge(
 /// independently of the Eco switch.
 ///
 /// Body: `{ "enabled": true }`. When enabling, HR27 is written according to
+/// the user-configured `full_power_discharge_in_eco_mode` capability override:
 /// flag on => leave Eco enabled (HR27=1), flag off => legacy safe export mode
 /// (HR27=0). Disabling only clears HR59 so Eco remains whatever the Eco toggle
 /// says.
@@ -1447,7 +1476,8 @@ pub async fn set_timed_export(
     let mut writes = Vec::new();
 
     if enabled {
-        let power_mode = 0;
+        let keep_eco = crate::settings::Settings::load().full_power_discharge_in_eco_mode;
+        let power_mode = if keep_eco { 1 } else { 0 };
         for cmd in [
             ControlCommand::SetBatteryPowerMode { mode: power_mode },
             ControlCommand::SetEnableDischarge { enabled: true },
@@ -3447,6 +3477,110 @@ pub async fn set_cosy(
 }
 
 // ---------------------------------------------------------------------------
+// Agile Octopus endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /api/agile — get Agile Octopus config.
+pub async fn get_agile(State(_state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let settings = crate::settings::Settings::load();
+    let scope = crate::settings::agile_scope_for_settings(&settings);
+    (
+        StatusCode::OK,
+        Json(json!({
+        "ok": true,
+        "enabled": scope.is_enabled(),
+        "scope": scope,
+        "region": settings.agile_region,
+        "charge_threshold": settings.agile_charge_threshold,
+        "discharge_threshold": settings.agile_discharge_threshold,
+        "api_base_url": settings.agile_api_base_url,
+        })),
+    )
+}
+
+/// POST /api/agile — update Agile Octopus config.
+///
+/// Accepts either:
+///   - `{ enabled: bool, ... }` — legacy shape; `enabled=true` maps to
+///     `AgileScope::Full`, `enabled=false` maps to `AgileScope::Off`.
+///   - `{ scope: "off"|"full"|"charge_only"|"discharge_only", ... }` —
+///     new explicit shape. Takes precedence over `enabled` when both
+///     are provided.
+///
+/// Both shapes are accepted on the same endpoint so existing frontends
+/// keep working unchanged. New frontends should send `scope` explicitly.
+pub async fn set_agile(
+    State(_state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<Value>) {
+    use crate::settings::AgileScope;
+    let mut app_settings = crate::settings::Settings::load();
+
+    // New explicit `scope` field wins over legacy `enabled` when both are
+    // provided. This keeps the wire API additive — old frontends sending
+    // only `enabled` keep working, new frontends can use `scope`.
+    let explicit_scope = body
+        .get("scope")
+        .and_then(|v| v.as_str())
+        .and_then(parse_agile_scope);
+    let new_scope = match explicit_scope {
+        Some(scope) => scope,
+        None => {
+            // Legacy: derive scope from the boolean `enabled` flag.
+            // `None` (key absent) defaults to `enabled = false` to match
+            // the pre-existing behaviour in this endpoint.
+            let enabled = body["enabled"].as_bool().unwrap_or(false);
+            if enabled {
+                AgileScope::Full
+            } else {
+                AgileScope::Off
+            }
+        }
+    };
+
+    // Keep the legacy `agile_enabled` boolean in sync with the new scope
+    // so older settings files (and any future code that reads the bool
+    // directly) see the same intent. The migration helper in
+    // `settings::agile_scope_for_settings` will still prefer the explicit
+    // scope when both fields disagree.
+    app_settings.agile_scope = new_scope;
+    app_settings.agile_enabled = new_scope != AgileScope::Off;
+
+    if let Some(r) = body["region"].as_str() {
+        app_settings.agile_region = r.to_string();
+    }
+    app_settings.agile_charge_threshold = body["charge_threshold"].as_f64().unwrap_or(10.0);
+    app_settings.agile_discharge_threshold = body["discharge_threshold"].as_f64().unwrap_or(30.0);
+    // Optional Octopus base URL override — used by tests to point at a
+    // local mock server, and by self-hosters to point at a mirror.
+    if let Some(u) = body["api_base_url"].as_str() {
+        app_settings.agile_api_base_url = u.to_string();
+    }
+
+    if let Err(e) = app_settings.save() {
+        tracing::warn!("Failed to persist agile config: {e}");
+        return server_error(&format!("Failed to save: {e}"));
+    }
+
+    ok_response("Agile config updated")
+}
+
+/// Parse an `AgileScope` from a string. Accepts the snake_case variants
+/// serialised in `AgileScope`'s serde representation. Returns `None` for
+/// unknown values so the API caller can fall back to the legacy boolean
+/// without erroring.
+fn parse_agile_scope(s: &str) -> Option<crate::settings::AgileScope> {
+    use crate::settings::AgileScope;
+    match s {
+        "off" => Some(AgileScope::Off),
+        "full" => Some(AgileScope::Full),
+        "charge_only" => Some(AgileScope::ChargeOnly),
+        "discharge_only" => Some(AgileScope::DischargeOnly),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Load discharge limiter endpoints
 // ---------------------------------------------------------------------------
 
@@ -4819,6 +4953,7 @@ mod tests {
         with_isolated_config_dir_async(|| async {
             use crate::modbus::registers::{HR_BATTERY_POWER_MODE, HR_ENABLE_DISCHARGE};
             let settings = crate::settings::Settings {
+                full_power_discharge_in_eco_mode: true,
                 ..Default::default()
             };
             settings.save().expect("save capability setting");
@@ -4833,7 +4968,7 @@ mod tests {
                     .iter()
                     .find(|w| w.address == HR_BATTERY_POWER_MODE)
                     .map(|w| w.value),
-                Some(0)
+                Some(1)
             );
             assert_eq!(
                 writes
@@ -8141,6 +8276,29 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn update_settings_persists_full_power_discharge_in_eco_mode() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "full_power_discharge_in_eco_mode": true,
+            });
+            let (status, _) = update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let saved = crate::settings::Settings::load();
+            assert!(saved.full_power_discharge_in_eco_mode);
+
+            let (_, get_body) = get_settings(State(state)).await;
+            assert_eq!(
+                get_body["data"]["full_power_discharge_in_eco_mode"],
+                serde_json::json!(true)
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn update_settings_standing_charge_zero_clears_existing_value() {
         with_isolated_config_dir_async(|| async {
             // Seed an existing standing charge on disk.
@@ -9120,6 +9278,12 @@ mod tests {
                     "disable_auto_discovery=false",
                     false,
                 ),
+                (
+                    "minimal_telemetry_mode",
+                    json!(true),
+                    "minimal_telemetry_mode=true",
+                    true,
+                ),
             ] {
                 let body = serde_json::json!({ field: value });
                 let (status, json) = update_settings(State(state.clone()), Json(body)).await;
@@ -9137,6 +9301,7 @@ mod tests {
                 let actual = match field {
                     "autostart_enabled" => saved.autostart_enabled,
                     "disable_auto_discovery" => saved.disable_auto_discovery,
+                    "minimal_telemetry_mode" => saved.minimal_telemetry_mode,
                     _ => unreachable!(),
                 };
                 assert_eq!(actual, expected_disk, "{field} must be persisted");
@@ -9282,5 +9447,156 @@ mod tests {
             );
             assert_eq!(snap["meter_energy_kwh"], serde_json::json!(1234.5));
         }
+    }
+
+    // ==================================================================
+    // Agile scope API tests
+    // ==================================================================
+    //
+    // The new `scope` field is the explicit, additive replacement for the
+    // legacy `enabled` boolean. Both shapes must be accepted on POST and
+    // GET must return both fields so existing frontends keep working.
+
+    use crate::settings::AgileScope;
+
+    #[test]
+    fn parse_agile_scope_accepts_all_four_variants() {
+        assert_eq!(parse_agile_scope("off"), Some(AgileScope::Off));
+        assert_eq!(parse_agile_scope("full"), Some(AgileScope::Full));
+        assert_eq!(parse_agile_scope("charge_only"), Some(AgileScope::ChargeOnly));
+        assert_eq!(
+            parse_agile_scope("discharge_only"),
+            Some(AgileScope::DischargeOnly)
+        );
+    }
+
+    #[test]
+    fn parse_agile_scope_rejects_unknown_values() {
+        // Unknown values return None so the caller falls back to the
+        // legacy boolean path. We don't error on the wire — a typo in
+        // the front-end shouldn't break the user's existing settings.
+        assert_eq!(parse_agile_scope(""), None);
+        assert_eq!(parse_agile_scope("Full"), None); // case-sensitive
+        assert_eq!(parse_agile_scope("CHARGE_ONLY"), None);
+        assert_eq!(parse_agile_scope("charge"), None);
+        assert_eq!(parse_agile_scope("invalid"), None);
+    }
+
+    #[tokio::test]
+    async fn get_agile_returns_scope_field() {
+        // Round-trip: write a known scope, read it back via GET, verify
+        // both `enabled` (legacy mirror) and `scope` (new explicit) are
+        // present. This pins the wire shape so future field renames
+        // can't silently break the front-end.
+        crate::test_util::with_isolated_config_dir_async(async || {
+            let mut s = crate::settings::Settings::load();
+            s.agile_scope = AgileScope::ChargeOnly;
+            s.agile_enabled = true;
+            s.save().unwrap();
+
+            let (status, Json(body)) = get_agile(State(test_state())).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["ok"], serde_json::json!(true));
+            assert_eq!(body["enabled"], serde_json::json!(true)); // legacy mirror
+            assert_eq!(body["scope"], serde_json::json!("charge_only"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_agile_off_scope_reports_disabled() {
+        crate::test_util::with_isolated_config_dir_async(async || {
+            let mut s = crate::settings::Settings::load();
+            s.agile_scope = AgileScope::Off;
+            s.agile_enabled = false;
+            s.save().unwrap();
+
+            let (_status, Json(body)) = get_agile(State(test_state())).await;
+            assert_eq!(body["enabled"], serde_json::json!(false));
+            assert_eq!(body["scope"], serde_json::json!("off"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_agile_with_explicit_scope_persists() {
+        crate::test_util::with_isolated_config_dir_async(async || {
+            // Send the new explicit shape; verify it lands in settings.
+            let body = serde_json::json!({
+                "scope": "charge_only",
+                "region": "C",
+                "charge_threshold": 8.5,
+                "discharge_threshold": 25.0,
+            });
+            let (status, _) = set_agile(State(test_state()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let s = crate::settings::Settings::load();
+            assert_eq!(s.agile_scope, AgileScope::ChargeOnly);
+            assert!(s.agile_enabled); // legacy mirror updated
+            assert_eq!(s.agile_region, "C");
+            assert!((s.agile_charge_threshold - 8.5).abs() < 1e-9);
+            assert!((s.agile_discharge_threshold - 25.0).abs() < 1e-9);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_agile_with_legacy_enabled_still_works() {
+        // Backwards compat: existing frontends that still POST
+        // `{ enabled: true, ... }` keep working unchanged.
+        crate::test_util::with_isolated_config_dir_async(async || {
+            let body = serde_json::json!({
+                "enabled": true,
+                "region": "A",
+            });
+            let (status, _) = set_agile(State(test_state()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let s = crate::settings::Settings::load();
+            assert_eq!(s.agile_scope, AgileScope::Full);
+            assert!(s.agile_enabled);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_agile_explicit_scope_overrides_legacy_enabled() {
+        // If both fields are sent, the explicit scope wins. A front-end
+        // that sends `{ enabled: false, scope: "discharge_only" }` is
+        // explicitly asking for DischargeOnly — respect that, not the
+        // legacy bool.
+        crate::test_util::with_isolated_config_dir_async(async || {
+            let body = serde_json::json!({
+                "enabled": false,
+                "scope": "discharge_only",
+            });
+            let (status, _) = set_agile(State(test_state()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let s = crate::settings::Settings::load();
+            assert_eq!(s.agile_scope, AgileScope::DischargeOnly);
+            assert!(s.agile_enabled); // mirror updated to match scope
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_agile_unknown_scope_falls_back_to_legacy() {
+        // Unknown scope string — don't error, just fall back to the
+        // boolean. The user shouldn't have their settings wiped because
+        // of a typo or a down-level front-end.
+        crate::test_util::with_isolated_config_dir_async(async || {
+            let body = serde_json::json!({
+                "scope": "turbo",
+                "enabled": true,
+            });
+            let (status, _) = set_agile(State(test_state()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let s = crate::settings::Settings::load();
+            assert_eq!(s.agile_scope, AgileScope::Full);
+        })
+        .await;
     }
 }

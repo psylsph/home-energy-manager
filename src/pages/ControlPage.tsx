@@ -1,25 +1,17 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { useInverterStore } from '../store/useInverterStore';
 import { useAction } from '../hooks/useAction';
 import { apiPost, apiGet } from '../lib/api';
 import { deviceSupportsEps, deviceSupportsTimedDischarge } from '../lib/deviceCapabilities';
 import type { ScheduleSlot } from '../lib/types';
 
-/** Format a duration in seconds to a human-readable string. */
-function formatDuration(totalSec: number): string {
-  if (totalSec < 60) return `${Math.floor(totalSec)}s`;
-  if (totalSec < 3600) {
-    const m = Math.floor(totalSec / 60);
-    const s = Math.floor(totalSec % 60);
-    return `${m}m ${s}s`;
-  }
-  const h = Math.floor(totalSec / 3600);
-  const m = Math.floor((totalSec % 3600) / 60);
-  return `${h}h ${m}m`;
-}
-
-/** Front-end charging-mode dropdown values. */
-type ChargeMode = 'standard' | 'cosy';
+/**
+ * Front-end charging-mode dropdown values. Maps 1:1 to the backend
+ * `AgileScope` enum but adds `'standard'` (which the backend models as
+ * `AgileScope::Off` plus `cosy_enabled = false`) and `'cosy'` (which
+ * the backend models as `cosy_enabled = true` regardless of scope).
+ */
+type ChargeMode = 'standard' | 'cosy' | 'agile' | 'agile_charge' | 'agile_discharge';
 
 function ActionButton({
   label,
@@ -490,10 +482,20 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
     if (!loaded || slots.length === 0) return;
     const cosyEnabled = newMode === 'cosy';
     // Translate the new 5-value scope into the backend's wire format.
+    // The backend accepts `{ scope }` (new) or `{ enabled }` (legacy).
+    // We always send scope so the front-end's intent is explicit.
+    const scopeValue: 'off' | 'full' | 'charge_only' | 'discharge_only' =
+      newMode === 'standard' ? 'off' :
+      newMode === 'agile' ? 'full' :
+      newMode === 'agile_charge' ? 'charge_only' :
+      'discharge_only';
     onModeChange(newMode);
     setSaving(true);
     try {
-      await apiPost('/api/cosy', { enabled: cosyEnabled, slots });
+      await Promise.all([
+        apiPost('/api/cosy', { enabled: cosyEnabled, slots }),
+        apiPost('/api/agile', { scope: scopeValue }),
+      ]);
       setSaveFeedback('saved');
     } catch {
       setSaveFeedback('error');
@@ -528,12 +530,25 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
         >
           <option value="standard">Standard</option>
           <option value="cosy">Cosy</option>
+          <optgroup label="Agile">
+            <option value="agile">Agile (full)</option>
+            <option value="agile_charge">Agile — Charge only</option>
+            <option value="agile_discharge">Agile — Discharge only</option>
+          </optgroup>
         </select>
           <button
             onClick={async () => {
               setSaving(true);
               try {
-                await apiPost('/api/cosy', { enabled: mode === 'cosy', slots });
+                const scopeValue: 'off' | 'full' | 'charge_only' | 'discharge_only' =
+                  mode === 'standard' ? 'off' :
+                  mode === 'agile' ? 'full' :
+                  mode === 'agile_charge' ? 'charge_only' :
+                  'discharge_only';
+                await Promise.all([
+                  apiPost('/api/cosy', { enabled: mode === 'cosy', slots }),
+                  apiPost('/api/agile', { scope: scopeValue }),
+                ]);
                 setSaveFeedback('saved');
               } catch {
                 setSaveFeedback('error');
@@ -549,14 +564,21 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
       </div>
       </div>
 
-      {mode === 'cosy' && (
+      {(mode === 'cosy' || mode === 'agile' || mode === 'agile_charge' || mode === 'agile_discharge') && (
         <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-2.5 space-y-1">
           <div className="flex items-center gap-1.5">
             <span className="text-[10px] font-bold text-text-primary uppercase tracking-wide">Beta</span>
             <span className="text-[11px] text-text-primary font-medium">App must be kept running</span>
           </div>
           <p className="text-[11px] text-text-secondary leading-relaxed">
-            Cosy mode schedules force-charging based on time slots you define. The app must stay running for slot entry and exit to work — if you close it mid-slot, the inverter stays in force-charge mode until you reopen the app or stop it manually.
+            {mode === 'cosy'
+              ? 'Cosy mode schedules force-charging based on time slots you define. The app must stay running for slot entry and exit to work — if you close it mid-slot, the inverter stays in force-charge mode until you reopen the app or stop it manually.'
+              : mode === 'agile'
+                ? 'Agile mode automatically charges and discharges based on live Octopus prices. The app must stay running for price checks and switching to work — if you close it, the inverter stays in whatever mode it was last set to.'
+                : mode === 'agile_charge'
+                  ? 'Agile — Charge only drives the cheap-side charge slot from prices, while your Discharge Schedule and Timed Discharge keep full control of the discharge side. The app must stay running for price checks to keep the charge slot current.'
+                  : 'Agile — Discharge only drives the expensive-side discharge slot from prices, while your Charge Schedule keeps full control of the charge side. The app must stay running for price checks to keep the discharge slot current.'
+            }
           </p>
         </div>
       )}
@@ -662,7 +684,587 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
           </button>
         </div>
       )}
+
+      {(mode === 'agile' || mode === 'agile_charge' || mode === 'agile_discharge') && (
+        <AgileControls
+          scope={
+            mode === 'agile_charge'
+              ? 'charge_only'
+              : mode === 'agile_discharge'
+                ? 'discharge_only'
+                : 'full'
+          }
+        />
+      )}
     </section>
+  );
+}
+
+// Map UK postcode area (first 1-2 letters) to Octopus GSP group letter.
+// Based on Distribution Network Operator boundaries and tariff regions.
+const POSTCODE_AREA_TO_GSP: Record<string, string> = {
+  // GSP A — Eastern England
+  CB: 'A', CO: 'A', IP: 'A', NR: 'A', PE: 'A', AL: 'A', CM: 'A', EN: 'A', SG: 'A', SS: 'A', WD: 'A',
+  // GSP B — East Midlands
+  CV: 'B', DE: 'B', DN: 'B', LE: 'B', LN: 'B', NG: 'B', NN: 'B',
+  // GSP C — London
+  BR: 'C', CR: 'C', DA: 'C', E: 'C', EC: 'C', HA: 'C', IG: 'C', KT: 'C', N: 'C', NW: 'C',
+  RM: 'C', SE: 'C', SM: 'C', SW: 'C', TW: 'C', UB: 'C', W: 'C', WC: 'C',
+  // GSP D — North Wales & Merseyside
+  CH: 'D',  L: 'D', LL: 'D', WA: 'D',
+  // GSP E — West Midlands
+  B: 'E', DY: 'E', ST: 'E', TF: 'E', WS: 'E', WV: 'E', WR: 'E',
+  // GSP F — North East England
+  DH: 'F', DL: 'F', NE: 'F', SR: 'F', TS: 'F',
+  // GSP G — North West England
+  BB: 'G', BL: 'G', CA: 'G', FY: 'G', LA: 'G', M: 'G', OL: 'G', PR: 'G', SK: 'G', WN: 'G',
+  // GSP H — Southern England
+  BN: 'H', GU: 'H', PO: 'H', RH: 'H', SO: 'H',
+  // GSP J — South East England
+  CT: 'J', ME: 'J', TN: 'J',
+  // GSP K — South Wales
+  CF: 'K', LD: 'K', NP: 'K', SA: 'K',
+  // GSP L — South West England
+  BA: 'L', BS: 'L', DT: 'L', EX: 'L', PL: 'L', TA: 'L', TQ: 'L', TR: 'L', SN: 'L', SP: 'L', GL: 'L',
+  // GSP M — Yorkshire
+  BD: 'M', HD: 'M', HG: 'M', HX: 'M', HU: 'M', LS: 'M', WF: 'M', YO: 'M',
+  // GSP N — South & Central Scotland
+  DD: 'N', DG: 'N', EH: 'N', FK: 'N', G: 'N', KA: 'N', KY: 'N', ML: 'N', TD: 'N',
+  // GSP P — North Scotland
+  AB: 'P', HS: 'P', IV: 'P', KW: 'P', ZE: 'P',
+};
+
+/** Summary bar shown below the price forecast grid. */
+function PriceSummary({ prices, decisionForPrice }: {
+  prices: { validFrom: Date; validTo: Date; pence: number }[];
+  decisionForPrice: (p: number) => 'charge' | 'discharge' | 'nothing';
+}) {
+  const { snapshot } = useInverterStore();
+  const [importTariff, setImportTariff] = useState(0.285);
+  const [exportTariff, setExportTariff] = useState(0.15);
+
+  // Load tariff config from backend
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await apiGet<{ ok: boolean; data: { import_tariff: number; export_tariff: number; import_tariff_config: unknown } }>('/api/settings');
+        if (res.ok) {
+          setImportTariff(res.data.import_tariff);
+          setExportTariff(res.data.export_tariff);
+        }
+      } catch { /* use defaults */ }
+    })();
+  }, []);
+
+  const now = new Date();
+  const upcoming = prices.filter(s => s.validTo > now);
+  const chargeSlots = upcoming.filter(s => decisionForPrice(s.pence) === 'charge');
+  const dischargeSlots = upcoming.filter(s => decisionForPrice(s.pence) === 'discharge');
+  const idleSlots = upcoming.filter(s => decisionForPrice(s.pence) === 'nothing');
+
+  const avgChargePrice = chargeSlots.length
+    ? chargeSlots.reduce((a, s) => a + s.pence, 0) / chargeSlots.length
+    : 0;
+  const avgDischargePrice = dischargeSlots.length
+    ? dischargeSlots.reduce((a, s) => a + s.pence, 0) / dischargeSlots.length
+    : 0;
+  const minPrice = upcoming.length ? Math.min(...upcoming.map(s => s.pence)) : 0;
+  const maxPrice = upcoming.length ? Math.max(...upcoming.map(s => s.pence)) : 0;
+
+  // Rough daily saving estimate
+  // Assume each 30-min slot can charge/discharge at 1/48 of daily battery throughput.
+  // Typical: one full charge cycle per day at battery capacity.
+  const battKwh = snapshot?.battery_capacity_kwh ?? 5;
+  const chargeSaving = chargeSlots.length
+    ? (chargeSlots.length / 48) * battKwh * Math.max(0, importTariff - avgChargePrice / 100)
+    : 0;
+  const dischargeSaving = dischargeSlots.length
+    ? (dischargeSlots.length / 48) * battKwh * Math.max(0, avgDischargePrice / 100 - (exportTariff))
+    : 0;
+  const totalSaving = chargeSaving + dischargeSaving;
+
+  return (
+    <div className="bg-bg-surface rounded-lg p-2.5 space-y-1.5">
+      <div className="flex items-center gap-3 text-xs text-text-secondary flex-wrap">
+        <span className="flex items-center gap-1">
+          <span className="inline-block w-2 h-2 rounded-full bg-battery" />
+          {chargeSlots.length} charge
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="inline-block w-2 h-2 rounded-full bg-orange-500" />
+          {dischargeSlots.length} discharge
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="inline-block w-2 h-2 rounded-full bg-text-secondary/30" />
+          {idleSlots.length} hold
+        </span>
+        <span className="text-text-secondary/50">·</span>
+        <span>Min {minPrice.toFixed(1)}p</span>
+        <span className="text-text-secondary/50">·</span>
+        <span>Max {maxPrice.toFixed(1)}p</span>
+      </div>
+      {chargeSlots.length > 0 && (
+        <div className="text-xs text-text-secondary">
+          Avg charge price: <span className="font-mono text-battery">{avgChargePrice.toFixed(1)}p</span>
+          {avgChargePrice < importTariff * 100 && (
+            <> — saves <span className="font-mono text-battery">{(importTariff * 100 - avgChargePrice).toFixed(1)}p</span>/kWh vs standard rate</>
+          )}
+        </div>
+      )}
+      {dischargeSlots.length > 0 && (
+        <div className="text-xs text-text-secondary">
+          Avg discharge price: <span className="font-mono text-orange-400">{avgDischargePrice.toFixed(1)}p</span>
+          {avgDischargePrice > exportTariff * 100 && (
+            <> — earns <span className="font-mono text-orange-400">{(avgDischargePrice - exportTariff * 100).toFixed(1)}p</span>/kWh vs standard export</>
+          )}
+        </div>
+      )}
+      {totalSaving > 0.01 && (
+        <div className="text-xs font-medium">
+          Estimated daily saving:{' '}
+          <span className="font-mono text-battery">£{totalSaving.toFixed(2)}</span>
+          {battKwh > 0 && (
+            <span className="text-text-secondary"> ({(battKwh).toFixed(1)}kWh battery, {(importTariff * 100).toFixed(1)}p import)</span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Agile Octopus controls — shown when any Agile charging mode is selected. */
+function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_only' }) {
+  const [chargeThreshold, setChargeThreshold] = useState(10);
+  const [dischargeThreshold, setDischargeThreshold] = useState(30);
+  const [region, setRegion] = useState('A');
+  const [postcode, setPostcode] = useState('');
+  const [postcodeLookup, setPostcodeLookup] = useState<'idle' | 'loading' | 'found' | 'not_found' | 'error'>('idle');
+
+  const regions = [
+    { code: 'A', label: 'Eastern England' },
+    { code: 'B', label: 'East Midlands' },
+    { code: 'C', label: 'London' },
+    { code: 'D', label: 'North Wales & Merseyside' },
+    { code: 'E', label: 'West Midlands' },
+    { code: 'F', label: 'North East England' },
+    { code: 'G', label: 'North West England' },
+    { code: 'H', label: 'Southern England' },
+    { code: 'J', label: 'South East England' },
+    { code: 'K', label: 'South Wales' },
+    { code: 'L', label: 'South West England' },
+    { code: 'M', label: 'Yorkshire' },
+    { code: 'N', label: 'South & Central Scotland' },
+    { code: 'P', label: 'North Scotland' },
+  ];
+
+  const lookUpPostcode = useCallback(async (pc: string) => {
+    const clean = pc.replace(/\s+/g, '').toUpperCase();
+    if (clean.length < 3) return;
+    setPostcodeLookup('loading');
+    try {
+      const res = await fetch(`https://api.postcodes.io/postcodes/${encodeURIComponent(clean)}`);
+      if (!res.ok) {
+        setPostcodeLookup('not_found');
+        return;
+      }
+      const json = await res.json();
+      if (json.status !== 200) {
+        setPostcodeLookup('not_found');
+        return;
+      }
+      // Extract postcode area (first 1-2 alpha characters)
+      const match = clean.match(/^([A-Z]{1,2})/);
+      if (!match) {
+        setPostcodeLookup('not_found');
+        return;
+      }
+      const area = match[1];
+      const gsp = POSTCODE_AREA_TO_GSP[area];
+      if (gsp) {
+        setRegion(gsp);
+        setPostcodeLookup('found');
+      } else {
+        setPostcodeLookup('not_found');
+      }
+    } catch {
+      setPostcodeLookup('error');
+    }
+  }, []);
+
+  const debouncedPostcode = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handlePostcodeChange = (value: string) => {
+    setPostcode(value);
+    if (debouncedPostcode.current) clearTimeout(debouncedPostcode.current);
+    if (value.replace(/\s+/g, '').length >= 3) {
+      debouncedPostcode.current = setTimeout(() => lookUpPostcode(value), 500);
+    } else {
+      setPostcodeLookup('idle');
+    }
+  };
+
+  // Half-hourly price data from Octopus API
+  interface PriceSlot {
+    validFrom: Date;
+    validTo: Date;
+    pence: number;
+  }
+
+  // Cache prices keyed by date (YYYY-MM-DD) so the display survives API handovers
+  const pricesCache = useRef<Record<string, PriceSlot[]>>({});
+
+  const [displaySlots, setDisplaySlots] = useState<PriceSlot[]>([]);
+  const [pricesLoading, setPricesLoading] = useState(false);
+  const [pricesError, setPricesError] = useState<string | null>(null);
+
+  // Rolling window: return up to 48 upcoming slots from cache
+  const computeRollingWindow = useCallback(() => {
+    const now = new Date();
+    const allCached = Object.values(pricesCache.current)
+      .flat()
+      .sort((a, b) => a.validFrom.getTime() - b.validFrom.getTime());
+    const startIdx = allCached.findIndex(s => s.validTo.getTime() > now.getTime());
+    return startIdx >= 0 ? allCached.slice(startIdx, startIdx + 48) : [];
+  }, []);
+
+  // Fetch prices from Octopus API (covering today onwards), cache by date so
+  // the display survives the API's next-day handover, and re-fetch every 5
+  // minutes to pick up newly published prices. The fetch logic lives inside
+  // the effect (rather than a useCallback) so the react-hooks linter doesn't
+  // trace the synchronous setState calls as cascading-render triggers.
+  useEffect(() => {
+    let cancelled = false;
+
+    const load = async () => {
+      setPricesLoading(true);
+      setPricesError(null);
+      try {
+        const now = new Date();
+        const todayStr = now.toISOString().slice(0, 10); // YYYY-MM-DD
+
+        const baseUrl = `https://api.octopus.energy/v1/products/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-${region}/standard-unit-rates/`;
+        const url = `${baseUrl}?period_from=${todayStr}T00:00:00Z&page_size=96`;
+        const res = await fetch(url);
+        if (!res.ok) {
+          if (!cancelled) setPricesError(`API returned ${res.status}`);
+          return;
+        }
+        const json = await res.json();
+        const slots: PriceSlot[] = (json.results || []).map((r: { valid_from: string; valid_to: string; value_inc_vat: number }) => ({
+          validFrom: new Date(r.valid_from),
+          validTo: new Date(r.valid_to),
+          pence: r.value_inc_vat,
+        }));
+
+        // Update cache by date
+        const newCache = { ...pricesCache.current };
+        for (const slot of slots) {
+          const key = slot.validFrom.toISOString().slice(0, 10);
+          if (!newCache[key]) newCache[key] = [];
+          // Deduplicate by slot start time
+          if (!newCache[key].some(s => s.validFrom.getTime() === slot.validFrom.getTime())) {
+            newCache[key].push(slot);
+          }
+        }
+        // Prune cache: keep only today, yesterday (just fetched), and tomorrow
+        const yesterday = new Date(now.getTime() - 86400000);
+        const keepKeys = [
+          yesterday.toISOString().slice(0, 10),
+          todayStr,
+          new Date(now.getTime() + 86400000).toISOString().slice(0, 10),
+        ];
+        for (const key of Object.keys(newCache)) {
+          if (!keepKeys.includes(key)) delete newCache[key];
+        }
+        pricesCache.current = newCache;
+
+        if (!cancelled) setDisplaySlots(computeRollingWindow());
+      } catch (e) {
+        if (!cancelled) setPricesError((e as Error).message);
+      } finally {
+        if (!cancelled) setPricesLoading(false);
+      }
+    };
+
+    load();
+    const interval = setInterval(load, 5 * 60 * 1000); // every 5 minutes
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [region, computeRollingWindow]);
+
+  // Recompute rolling window every 30 seconds (for the "now" indicator)
+  useEffect(() => {
+    const tick = setInterval(() => setDisplaySlots(computeRollingWindow()), 30000);
+    return () => clearInterval(tick);
+  }, [computeRollingWindow]);
+
+  const [saving, setSaving] = useState(false);
+  const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
+
+  // Load config from backend on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await apiGet<{ ok: boolean; enabled: boolean; region: string; charge_threshold: number; discharge_threshold: number }>('/api/agile');
+        if (res.ok) {
+          setRegion(res.region);
+          setChargeThreshold(res.charge_threshold);
+          setDischargeThreshold(res.discharge_threshold);
+        }
+      } catch { /* use defaults */ }
+    })();
+  }, []);
+
+  // Determine charge/discharge decision for a given price
+  const decisionForPrice = (pence: number): 'charge' | 'discharge' | 'nothing' => {
+    if (pence <= chargeThreshold) return 'charge';
+    if (pence >= dischargeThreshold) return 'discharge';
+    return 'nothing';
+  };
+
+  const saveConfig = async () => {
+    // Enforce a 5p minimum gap between charge and discharge thresholds.
+    // An inverted or overlapping pair (e.g. charge at 30p, discharge
+    // at 25p) means the inverter would never charge — the price is
+    // always >= the discharge threshold so the slot would always be
+    // discharge-shaped, and vice versa. Clamp on save rather than
+    // rejecting so the user can still adjust one slider at a time.
+    const MIN_GAP = 5;
+    let safeDischarge = dischargeThreshold;
+    if (safeDischarge - chargeThreshold < MIN_GAP) {
+      if (chargeThreshold > dischargeThreshold) {
+        // User dragged the charge slider above discharge: bump discharge up.
+        safeDischarge = chargeThreshold + MIN_GAP;
+      } else {
+        // User dragged discharge down too close: bump discharge up.
+        safeDischarge = chargeThreshold + MIN_GAP;
+      }
+      setDischargeThreshold(safeDischarge);
+    }
+    setSaving(true);
+    setSaveFeedback(null);
+    try {
+      await apiPost('/api/agile', {
+        enabled: true,
+        region,
+        charge_threshold: chargeThreshold,
+        discharge_threshold: safeDischarge,
+      });
+      setSaveFeedback('saved');
+    } catch {
+      setSaveFeedback('error');
+    }
+    setSaving(false);
+    setTimeout(() => setSaveFeedback(null), 2000);
+  };
+
+  return (
+    <div className="space-y-4 mt-3">
+      <p className="text-text-secondary/60 text-xs">
+        Automatically charges when Agile prices are low and discharges when prices are high.
+        Prices are fetched from the public Octopus Energy API — no account needed.
+      </p>
+
+      {/* Postcode lookup */}
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between">
+          <span className="text-text-secondary text-sm">Postcode</span>
+          {postcodeLookup === 'found' && (
+            <span className="text-xs text-battery">Region set to {region}</span>
+          )}
+          {postcodeLookup === 'loading' && (
+            <span className="text-xs text-text-secondary flex items-center gap-1">
+              <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
+              Looking up…
+            </span>
+          )}
+          {postcodeLookup === 'not_found' && (
+            <span className="text-xs text-amber-400">Could not determine region</span>
+          )}
+          {postcodeLookup === 'error' && (
+            <span className="text-xs text-red-400">Lookup failed</span>
+          )}
+        </div>
+        <div className="flex gap-2">
+          <input
+            type="text"
+            placeholder="e.g. SW1A 1AA"
+            value={postcode}
+            onChange={(e) => handlePostcodeChange(e.target.value)}
+            className="flex-1 bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-3 py-2 border border-transparent focus:border-battery outline-none"
+          />
+        </div>
+        <p className="text-text-secondary text-xs">
+          Enter your postcode to auto-detect your Octopus region. Powered by postcodes.io.
+        </p>
+      </div>
+
+      {/* Region selector */}
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between">
+          <span className="text-text-secondary text-sm">Region</span>
+          <span className="font-mono text-text-primary text-xs">{region}</span>
+        </div>
+        <select
+          value={region}
+          onChange={(e) => setRegion(e.target.value)}
+          className="w-full bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-3 py-2 border border-transparent focus:border-battery outline-none cursor-pointer"
+        >
+          {regions.map((r) => (
+            <option key={r.code} value={r.code}>{r.label}</option>
+          ))}
+        </select>
+      </div>
+
+      {/* Charge threshold — hidden in Discharge Only mode (user's charge
+          schedule owns charging). Always rendered in Full and Charge
+          Only modes. The hidden threshold's value is preserved in
+          state so flipping back to Full restores it. */}
+      {scope !== 'discharge_only' && (
+      <div className="space-y-1">
+        <div className="flex items-center justify-between">
+          <span className="text-text-secondary text-sm">Charge when below</span>
+          <span className="font-mono text-text-primary text-sm">{chargeThreshold}p/kWh</span>
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={50}
+          step={0.5}
+          value={chargeThreshold}
+          onChange={(e) => setChargeThreshold(Number(e.target.value))}
+          className="w-full"
+        />
+        <p className="text-text-secondary text-xs">
+          Charge the battery from the grid during any contiguous run of cheap half-hour slots at or below this price. Eco mode.
+        </p>
+      </div>
+      )}
+      {scope === 'discharge_only' && (
+        // Hint that the threshold is set but hidden because this mode
+        // ignores it. Prevents the user thinking their setting has been
+        // wiped when they switch modes.
+        <div className="text-[11px] text-text-secondary/80 italic px-1">
+          Charge threshold: {chargeThreshold}p/kWh (set, hidden because Discharge Only mode ignores charging).
+        </div>
+      )}
+
+      {/* Discharge threshold — hidden in Charge Only mode (user's
+          discharge schedule owns discharging). Always rendered in Full
+          and Discharge Only modes. */}
+      {scope !== 'charge_only' && (
+      <div className="space-y-1">
+        <div className="flex items-center justify-between">
+          <span className="text-text-secondary text-sm">Discharge when above</span>
+          <span className="font-mono text-text-primary text-sm">{dischargeThreshold}p/kWh</span>
+        </div>
+        <input
+          type="range"
+          min={5}
+          max={100}
+          step={0.5}
+          value={dischargeThreshold}
+          onChange={(e) => setDischargeThreshold(Number(e.target.value))}
+          className="w-full"
+        />
+        <p className="text-text-secondary text-xs">
+          Discharge the battery to the grid at full power during any contiguous run of expensive half-hour slots at or above this price. Export mode.
+        </p>
+      </div>
+      )}
+      {scope === 'charge_only' && (
+        <div className="text-[11px] text-text-secondary/80 italic px-1">
+          Discharge threshold: {dischargeThreshold}p/kWh (set, hidden because Charge Only mode ignores discharging).
+        </div>
+      )}
+
+      {/* Price forecast — 12 columns × 4 rows, no scroll */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-text-secondary text-sm">Price Forecast</span>
+          {pricesLoading && (
+            <span className="text-xs text-text-secondary flex items-center gap-1">
+              <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
+              Loading…
+            </span>
+          )}
+          {pricesError && (
+            <span className="text-xs text-red-400">{pricesError}</span>
+          )}
+        </div>
+
+        {displaySlots.length === 0 && !pricesLoading && (
+          <p className="text-text-secondary text-xs py-2">No price data available.</p>
+        )}
+
+        {displaySlots.length > 0 && (
+          <>
+            <div className="bg-bg-surface rounded-lg p-2 space-y-0.5">
+              {/* 4 rows × 12 columns = up to 48 half-hour slots */}
+              {Array.from({ length: 4 }, (_, row) => (
+                <div key={row} className="grid grid-cols-12 gap-0.5">
+                  {Array.from({ length: 12 }, (_, col) => {
+                    const idx = row * 12 + col;
+                    const slot = displaySlots[idx];
+                    if (!slot) return <div key={col} />;
+                    const decision = decisionForPrice(slot.pence);
+                    const now = new Date();
+                    const isPast = slot.validTo <= now;
+                    const isNow = slot.validFrom <= now && slot.validTo > now;
+                    const mins = String(slot.validFrom.getMinutes()).padStart(2, '0');
+                    let barColor = 'bg-bg-elevated';
+                    if (!isPast) {
+                      if (decision === 'charge') barColor = 'bg-battery';
+                      else if (decision === 'discharge') barColor = 'bg-orange-500';
+                      else barColor = 'bg-text-secondary/30';
+                    }
+                    return (
+                      <div
+                        key={col}
+                        className={`flex flex-col items-center rounded-sm py-0.5 ${barColor} ${isNow ? 'border-2 border-red-500 animate-pulse' : ''} ${isPast ? 'opacity-30' : ''}`}
+                        title={`${slot.validFrom.toLocaleTimeString()} - ${slot.validTo.toLocaleTimeString()}: ${slot.pence.toFixed(1)}p — ${isPast ? 'past' : decision}`}
+                      >
+                        <span className="text-[9px] leading-none font-mono">{slot.pence.toFixed(1)}</span>
+                        <span className="text-[7px] leading-none text-text-secondary mt-px">:{mins}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+
+            {/* Summary bar */}
+            <PriceSummary prices={displaySlots} decisionForPrice={decisionForPrice} />
+          </>
+        )}
+
+        {/* Legend */}
+        <div className="flex gap-3 text-[10px] text-text-secondary">
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-2.5 h-2.5 rounded-sm bg-battery" />
+            Charge
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-2.5 h-2.5 rounded-sm bg-text-secondary/30" />
+            Hold
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-2.5 h-2.5 rounded-sm bg-orange-500" />
+            Discharge
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-2.5 h-2.5 rounded-sm opacity-30 bg-bg-elevated" />
+            Past
+          </span>
+        </div>
+      </div>
+
+      <button
+        onClick={saveConfig}
+        disabled={saving}
+        className="w-full py-2 bg-battery/20 text-battery rounded-lg text-sm font-medium hover:bg-battery/30 transition disabled:opacity-50"
+      >
+        {saving ? 'Saving...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save'}
+      </button>
+    </div>
   );
 }
 
@@ -1024,7 +1626,7 @@ function LoadLimiterSection() {
 
 
 export default function ControlPage() {
-  const { snapshot, developerMode, connectionState, connectedHost, connectedSince } = useInverterStore();
+  const { snapshot, developerMode, connectionState, connectedHost } = useInverterStore();
   const [ecoSaving, setEcoSaving] = useState(false);
   const [timedChargeSaving, setTimedChargeSaving] = useState(false);
   const [timedExportSaving, setTimedExportSaving] = useState(false);
@@ -1047,19 +1649,6 @@ export default function ControlPage() {
   // Connection { state: Reconnecting } frame. Showing controls against that
   // stale data was the source of the "really confusing" report.
   const [manualReconnecting, setManualReconnecting] = useState(false);
-  const [now, setNow] = useState(Date.now());
-
-  // Tick the live clock for the "Last connected for" counter.
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, []);
-
-  const durationSec =
-    connectedSince != null
-      ? (now - connectedSince) / 1000
-      : 0;
-
   const handleManualReconnect = useCallback(async () => {
     setManualReconnecting(true);
     try {
@@ -1078,13 +1667,22 @@ export default function ControlPage() {
   // ChargeMode is defined at module scope so it can be referenced by
   // the `CosyChargingSection` component declared earlier in this file.
   const snapshotCosyEnabled = snapshot?.cosy_enabled ?? false;
+  const snapshotAgileScope = snapshot?.agile_scope ?? 'off';
   const [localChargeOverride, setLocalChargeOverride] = useState<ChargeMode | null>(null);
   // Use local override if user has interacted; otherwise derive from the
-  // backend snapshot.
+  // backend snapshot. Cosy wins if both are enabled (the two modes are
+  // mutually exclusive in practice but this gives a deterministic
+  // display order).
   const chargeMode: ChargeMode = localChargeOverride ?? (
     snapshotCosyEnabled
       ? 'cosy'
-      : 'standard'
+      : snapshotAgileScope === 'charge_only'
+        ? 'agile_charge'
+        : snapshotAgileScope === 'discharge_only'
+          ? 'agile_discharge'
+          : snapshotAgileScope === 'full'
+            ? 'agile'
+            : 'standard'
   );
   const cosyEnabled = chargeMode === 'cosy';
   const setChargeMode = (m: ChargeMode) => {
@@ -1100,13 +1698,26 @@ export default function ControlPage() {
     }).catch(() => {});
   };
 
-  // On mount, load cosy config from backend to seed the local override.
+  // On mount, load agile config from backend to seed the local override.
   useEffect(() => {
     (async () => {
       try {
-        const cosyRes = await apiGet<{ ok: boolean; enabled: boolean }>('/api/cosy');
-        if (cosyRes.ok && cosyRes.enabled) {
-          setLocalChargeOverride('cosy');
+        // The backend now returns an explicit `scope` field plus the
+        // legacy `enabled` boolean. Prefer the explicit scope; fall
+        // back to `enabled` for backends that haven't been upgraded.
+        const res = await apiGet<{
+          ok: boolean;
+          enabled?: boolean;
+          scope?: 'off' | 'full' | 'charge_only' | 'discharge_only';
+        }>('/api/agile');
+        if (res.ok) {
+          if (res.scope === 'charge_only') {
+            setLocalChargeOverride('agile_charge');
+          } else if (res.scope === 'discharge_only') {
+            setLocalChargeOverride('agile_discharge');
+          } else if (res.scope === 'full' || res.enabled) {
+            setLocalChargeOverride('agile');
+          }
         }
       } catch { /* use defaults */ }
     })();
@@ -1478,11 +2089,6 @@ export default function ControlPage() {
             Host: {connectedHost.replace(/:.*$/, '')}
           </p>
         )}
-        {connectedSince != null && durationSec > 0 && (
-          <p className="text-text-secondary/60 text-xs font-sans">
-            Last connected for {formatDuration(durationSec)}
-          </p>
-        )}
         <button
           onClick={handleManualReconnect}
           disabled={manualReconnecting}
@@ -1709,10 +2315,16 @@ export default function ControlPage() {
           Schedule hidden; Charge Schedule visible + greyed.
       */}
       {(() => {
+        const agileOwnsCharge = chargeMode === 'agile' || chargeMode === 'agile_charge';
+        const agileOwnsDischarge = chargeMode === 'agile' || chargeMode === 'agile_discharge';
+        const scheduleModeForSlots: 'normal' | 'agile_readonly' =
+          chargeMode === 'agile_charge' || chargeMode === 'agile_discharge'
+            ? 'agile_readonly'
+            : 'normal';
         return (
           <>
       {/* Section 4: Charge Schedule */}
-      {!cosyEnabled && schedulesUnsupported && (
+      {!cosyEnabled && !agileOwnsCharge && schedulesUnsupported && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold">Charge/Discharge Schedules</h2>
           <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm text-text-primary">
@@ -1724,7 +2336,7 @@ export default function ControlPage() {
         </section>
       )}
 
-      {!cosyEnabled && !schedulesUnsupported && <section className="space-y-3">
+      {!cosyEnabled && !agileOwnsCharge && !schedulesUnsupported && <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Charge Schedule</h2>
         <p className="text-text-secondary/60 text-xs">Please Allow upto 10 Seconds for Changes to Save</p>
         <div className="space-y-3">
@@ -1767,7 +2379,7 @@ export default function ControlPage() {
                 showTargetSoc
                 apiPath="/api/control/charge-slot"
                 masterArmed={snapshot?.enable_charge === true}
-                mode={'normal'}
+                mode={scheduleModeForSlots}
               />
             </>
           ))}
@@ -1786,7 +2398,7 @@ export default function ControlPage() {
           block (DC hybrids, three-phase, Gateway, EMS, PV inverter)
           since the pause registers don't exist there — see
           supportsTimedDischarge / lib/deviceCapabilities.ts. */}
-      {!schedulesUnsupported && supportsTimedDischarge && (
+      {!agileOwnsDischarge && !schedulesUnsupported && supportsTimedDischarge && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold text-lg">Timed Discharge</h2>
           <p className="text-text-secondary/60 text-xs">Please Allow upto 10 Seconds for Changes to Save</p>
@@ -1798,7 +2410,7 @@ export default function ControlPage() {
             showTargetSoc={false}
             apiPath="/api/control/timed-discharge"
             masterArmed={timedDischargeEnabled}
-            mode={'normal'}
+            mode={scheduleModeForSlots}
           />
         </section>
       )}
@@ -1811,7 +2423,7 @@ export default function ControlPage() {
           Agile — Discharge Only because those modes drive discharge from
           prices. Visible in Agile — Charge Only because charge-only
           doesn't touch the discharge side. */}
-      {!schedulesUnsupported && (
+      {!agileOwnsDischarge && !schedulesUnsupported && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold text-lg">Discharge Schedule</h2>
           <p className="text-text-secondary/60 text-xs">Please Allow upto 10 Seconds for Changes to Save</p>
@@ -1856,7 +2468,7 @@ export default function ControlPage() {
                   // target SOC — the slider would silently do nothing.
                   showTargetSoc={maxDischargeSlots > 2}
                   apiPath="/api/control/discharge-slot"
-                  mode={'normal'}
+                  mode={scheduleModeForSlots}
                 />
               </>
             ))}
