@@ -5,6 +5,19 @@ import { apiPost, apiGet } from '../lib/api';
 import { deviceSupportsEps, deviceSupportsTimedDischarge } from '../lib/deviceCapabilities';
 import type { ScheduleSlot } from '../lib/types';
 
+/** Format a duration in seconds to a human-readable string. */
+function formatDuration(totalSec: number): string {
+  if (totalSec < 60) return `${Math.floor(totalSec)}s`;
+  if (totalSec < 3600) {
+    const m = Math.floor(totalSec / 60);
+    const s = Math.floor(totalSec % 60);
+    return `${m}m ${s}s`;
+  }
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  return `${h}h ${m}m`;
+}
+
 /**
  * Front-end charging-mode dropdown values. Maps 1:1 to the backend
  * `AgileScope` enum but adds `'standard'` (which the backend models as
@@ -1626,7 +1639,7 @@ function LoadLimiterSection() {
 
 
 export default function ControlPage() {
-  const { snapshot, developerMode, connectionState, connectedHost } = useInverterStore();
+  const { snapshot, developerMode, connectionState, connectedHost, connectedSince } = useInverterStore();
   const [ecoSaving, setEcoSaving] = useState(false);
   const [timedChargeSaving, setTimedChargeSaving] = useState(false);
   const [timedExportSaving, setTimedExportSaving] = useState(false);
@@ -1649,6 +1662,19 @@ export default function ControlPage() {
   // Connection { state: Reconnecting } frame. Showing controls against that
   // stale data was the source of the "really confusing" report.
   const [manualReconnecting, setManualReconnecting] = useState(false);
+  const [now, setNow] = useState(Date.now());
+
+  // Tick the live clock for the "Last connected for" counter.
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const durationSec =
+    connectedSince != null
+      ? (now - connectedSince) / 1000
+      : 0;
+
   const handleManualReconnect = useCallback(async () => {
     setManualReconnecting(true);
     try {
@@ -1698,24 +1724,28 @@ export default function ControlPage() {
     }).catch(() => {});
   };
 
-  // On mount, load agile config from backend to seed the local override.
+  // On mount, load agile + cosy config from backend to seed the local override.
   useEffect(() => {
     (async () => {
       try {
-        // The backend now returns an explicit `scope` field plus the
-        // legacy `enabled` boolean. Prefer the explicit scope; fall
-        // back to `enabled` for backends that haven't been upgraded.
-        const res = await apiGet<{
-          ok: boolean;
-          enabled?: boolean;
-          scope?: 'off' | 'full' | 'charge_only' | 'discharge_only';
-        }>('/api/agile');
-        if (res.ok) {
-          if (res.scope === 'charge_only') {
+        // Fetch both in parallel so Cosy can override Agile when both are set.
+        const [agileRes, cosyRes] = await Promise.all([
+          apiGet<{
+            ok: boolean;
+            enabled?: boolean;
+            scope?: 'off' | 'full' | 'charge_only' | 'discharge_only';
+          }>('/api/agile'),
+          apiGet<{ ok: boolean; enabled: boolean }>('/api/cosy'),
+        ]);
+        // Cosy wins if enabled — the snapshot may not have arrived yet.
+        if (cosyRes.ok && cosyRes.enabled) {
+          setLocalChargeOverride('cosy');
+        } else if (agileRes.ok) {
+          if (agileRes.scope === 'charge_only') {
             setLocalChargeOverride('agile_charge');
-          } else if (res.scope === 'discharge_only') {
+          } else if (agileRes.scope === 'discharge_only') {
             setLocalChargeOverride('agile_discharge');
-          } else if (res.scope === 'full' || res.enabled) {
+          } else if (agileRes.scope === 'full' || agileRes.enabled) {
             setLocalChargeOverride('agile');
           }
         }
@@ -2087,6 +2117,11 @@ export default function ControlPage() {
         {connectedHost && (
           <p className="text-text-secondary/60 text-xs font-sans">
             Host: {connectedHost.replace(/:.*$/, '')}
+          </p>
+        )}
+        {connectedSince != null && durationSec > 0 && (
+          <p className="text-text-secondary/60 text-xs font-sans">
+            Last connected for {formatDuration(durationSec)}
           </p>
         )}
         <button

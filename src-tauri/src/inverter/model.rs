@@ -993,22 +993,6 @@ pub struct InverterSnapshot {
     /// True when Cosy tariff mode is enabled in settings (may be between slots).
     #[serde(default)]
     pub cosy_enabled: bool,
-    /// True when the Agile Octopus state machine is actively force-charging or
-    /// force-discharging the battery.
-    pub agile_active: bool,
-    /// Current Agile Octopus state: "idle", "charging", or "discharging".
-    #[serde(default)]
-    pub agile_state: String,
-    /// True when Agile Octopus mode is enabled in settings (may be between
-    /// price thresholds). Derived from `agile_scope != Off`.
-    #[serde(default)]
-    pub agile_enabled: bool,
-    /// Active Agile Octopus scope (Off / Full / ChargeOnly / DischargeOnly).
-    /// Serialised as `"off" | "full" | "charge_only" | "discharge_only"`
-    /// to match the settings JSON wire shape. Defaults to Off so older
-    /// clients that don't read this field still work.
-    #[serde(default)]
-    pub agile_scope: crate::settings::AgileScope,
     /// Battery calibration stage (0=off, 5=balance). Only meaningful for legacy Gen1/Gen2/Polar devices.
     #[serde(default)]
     pub battery_calibration_stage: u8,
