@@ -107,6 +107,7 @@ function displayValue(node: FlowNode): string {
 }
 
 function statusFor(node: FlowNode, flows: EnergyFlow[]): string {
+  if (node.status) return node.status;
   if (node.id === 'solar') return node.active ? 'Generating' : 'Idle';
   if (node.id === 'grid') {
     // Status word driven by rendered flows first, falling back to the raw

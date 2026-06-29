@@ -199,7 +199,9 @@ export async function writeTestSettings(
       postcode: '',
       latitude: null,
       longitude: null,
-      last_backfill_completed: '',
+      // Rust deserializes this as Option<chrono::NaiveDate>; an empty string
+      // is invalid and makes the backend discard the entire settings file.
+      last_backfill_completed: null,
       open_meteo_base_url: 'https://api.open-meteo.com',
     },
 

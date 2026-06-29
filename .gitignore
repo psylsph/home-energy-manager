@@ -46,6 +46,9 @@ test-results/
 .playwright/
 .pyc*
 
+# Coverage output
+coverage/
+
 # GitHub Pages screenshots — regenerated from .github/screenshots/ on every Pages deploy
 # (see .github/workflows/pages.yml "Copy latest screenshots into docs")
 docs/screenshots/

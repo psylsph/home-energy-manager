@@ -104,6 +104,7 @@ jobs:
 
       - name: Build Tauri app (Windows)
         if: matrix.platform == 'windows-latest'
+        shell: bash
         run: |
           for attempt in 1 2 3; do
             if cargo tauri build --target ${{ matrix.target }} --bundles msi; then exit 0; fi
