@@ -16,10 +16,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:desktop": "GIVENERGY_LOCAL_QUIET_DESKTOP=1 bash scripts/install-dev-desktop.sh",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "lint:md": "markdownlint . --ignore node_modules --ignore src-tauri/target --ignore AUDIT.md --ignore REGISTER_AUDIT.md --ignore test-results --ignore ideas",
-    "test": "vitest run && bash tests/scripts/run-with-software-renderer.test.sh",
+    "test": "vitest run && bash tests/scripts/run-with-software-renderer.test.sh && bash tests/scripts/install-dev-desktop.test.sh",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",

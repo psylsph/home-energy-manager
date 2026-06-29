@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, cleanup } from '@testing-library/react';
 import EnergyOrbitDiagram from '../../src/components/EnergyOrbitDiagram';
-import { FLOW_COLORS, socColor } from '../../src/lib/energyFlow';
+import { FLOW_COLORS, BATTERY_OUTPUT_COLOR, socColor } from '../../src/lib/energyFlow';
 import { useInverterStore } from '../../src/store/useInverterStore';
 import type { InverterSnapshot } from '../../src/lib/types';
 
@@ -215,6 +215,84 @@ describe('EnergyOrbitDiagram', () => {
     expect(labels).toContain('Discharging');
   });
 
+  // -------------------------------------------------------------------------
+  // Battery SoC text contrast + battery-origin spoke colour (issue #170).
+  //
+  // The battery *node* keeps its SOC tier colour (red / amber / green) on
+  // fill + ring + glyph body so the user can read charge state at a glance.
+  // But two things must NOT follow that colour:
+  //   1. the on-node SoC % text (same hue as fill → unreadable at every
+  //      tier),
+  //   2. the battery-origin spokes (charge / discharge / discharge_to_grid)
+  //      — power throughput is independent of stored energy, just as the
+  //      solar spokes ignore PV kW and the grid spoke is always red.
+  // -------------------------------------------------------------------------
+
+  it('battery SoC % text uses a contrast fill, not the SoC tier colour (issue #170)', () => {
+    // The SoC % lives inside the battery satellite's text node. We pin the
+    // SVG <text> element that contains "47%" and assert its `fill` attr is
+    // a fixed contrast colour, NOT the amber that the node is filled with
+    // (and NOT the red / green of the other SoC tiers).
+    const { container } = render(
+      <EnergyOrbitDiagram
+        snapshot={makeSnapshot({ soc: 47, battery_state: 'discharging', battery_power: 1400, home_power: 800 })}
+      />,
+    );
+    const allText = Array.from(container.querySelectorAll('text'));
+    const socText = allText.find((t) => (t.textContent ?? '').trim() === '47%');
+    expect(socText).toBeDefined();
+    const fill = socText!.getAttribute('fill') ?? '';
+    // The fix lands the fill on --app-text-primary (a fixed contrast colour).
+    // The previous (buggy) behaviour filled this text with node.color, which
+    // for soc=47 was #F59E0B amber — identical to the node fill at 16 % →
+    // unreadable.
+    expect(fill).not.toBe(socColor(47));
+    expect(fill).not.toBe('');
+    // Negative-direction check (guard against accidentally restoring the bug).
+    expect(fill).not.toBe(FLOW_COLORS.battery);
+  });
+
+  it('battery SoC % text contrast hold at every SoC tier (issue #170)', () => {
+    // Pin the contract: the SoC % text fill must NOT equal any of the three
+    // SOC tier colours. The node fill / ring / glyph may stay tier-coloured;
+    // the on-node percent text must stay on a fixed contrast colour.
+    for (const soc of [10, 30, 80]) {
+      const { container } = render(
+        <EnergyOrbitDiagram snapshot={makeSnapshot({ soc })} />,
+      );
+      const text = Array.from(container.querySelectorAll('text')).find(
+        (t) => (t.textContent ?? '').trim() === `${soc}%`,
+      );
+      expect(text, `soc=${soc}: SoC text element missing`).toBeDefined();
+      const fill = text!.getAttribute('fill') ?? '';
+      expect(fill, `soc=${soc}: must not match its own tier colour`).not.toBe(socColor(soc));
+    }
+  });
+
+  it('solar_charge spoke track (solar covers all of charge) is solar yellow (issue #170)', () => {
+    // With solar 5 kW generating and battery charging 241 W, all of the
+    // charge is attributed to solar. The emitted spoke is `solar_charge`
+    // (solar → battery, yellow). The aggregate `charge` flow is
+    // suppressed when the split covers the whole of the battery charge.
+    const { container } = render(
+      <EnergyOrbitDiagram
+        snapshot={makeSnapshot({
+          solar_power: 5000,
+          home_power: 500,
+          battery_power: -241,
+          battery_state: 'charging',
+          soc: 18,
+        })}
+      />,
+    );
+    const solarChargeTrack = container.querySelector('[data-flow-track-id="solar_charge"]');
+    expect(solarChargeTrack, 'solar_charge track missing').not.toBeNull();
+    expect(solarChargeTrack?.getAttribute('stroke')).toBe(FLOW_COLORS.solar);
+    expect(solarChargeTrack?.getAttribute('stroke')).not.toBe(socColor(18));
+    // Suppressed aggregate `charge` flow — the split replaces it.
+    expect(container.querySelector('[data-flow-track-id="charge"]')).toBeNull();
+  });
+
   it('renders the solar V/A sub-label under the kW value (legacy behaviour)', () => {
     // Live PV voltage + current → "350.4V/6.5A" rendered as a small grey
     // sub-label between the kW value and the optional status word.
@@ -262,7 +340,7 @@ describe('EnergyOrbitDiagram', () => {
         })}
       />,
     );
-    expect(container.querySelector('[data-flow-id="charge"]')?.getAttribute('data-route')).toBe('outer');
+    expect(container.querySelector('[data-flow-id="solar_charge"]')?.getAttribute('data-route')).toBe('outer');
     expect(container.querySelector('[data-flow-id="export"]')?.getAttribute('data-route')).toBe('outer');
     expect(container.querySelector('[data-flow-id="solar"]')?.getAttribute('data-route')).toBe('direct');
   });
@@ -285,10 +363,16 @@ describe('EnergyOrbitDiagram', () => {
     expect(solarTrack?.getAttribute('data-route')).toBe('direct');
     expect(solarTrack?.getAttribute('stroke')).toBe(FLOW_COLORS.solar);
 
-    const chargeTrack = container.querySelector('[data-flow-track-id="charge"]');
-    expect(chargeTrack).not.toBeNull();
-    expect(chargeTrack?.getAttribute('data-route')).toBe('outer');
-    expect(chargeTrack?.getAttribute('stroke')).toBe(FLOW_COLORS.solar);
+    // Per issue #170: when solar covers the battery charge, the visible
+    // spoke is the `solar_charge` (solar → battery) outer arc, yellow per
+    // the "Solar to everywhere always yellow / amber" rule. The aggregate
+    // `charge` flow is no longer emitted (the split replaces it).
+    const solarChargeTrack = container.querySelector('[data-flow-track-id="solar_charge"]');
+    expect(solarChargeTrack).not.toBeNull();
+    expect(solarChargeTrack?.getAttribute('data-route')).toBe('outer');
+    expect(solarChargeTrack?.getAttribute('stroke')).toBe(FLOW_COLORS.solar);
+    expect(solarChargeTrack?.getAttribute('stroke')).not.toBe(BATTERY_OUTPUT_COLOR);
+    expect(solarChargeTrack?.getAttribute('stroke')).not.toBe(FLOW_COLORS.home);
   });
 
   it('draws a battery→grid dot when discharge exceeds the house load (issue #155)', () => {
@@ -310,10 +394,14 @@ describe('EnergyOrbitDiagram', () => {
     expect(discharge?.getAttribute('data-route')).toBe('direct');
     expect(toGrid).not.toBeNull();
     expect(toGrid?.getAttribute('data-route')).toBe('outer');
-    expect(container.querySelector('[data-flow-track-id="discharge"]')?.getAttribute('stroke')).toBe(socColor(50));
+    // Battery-origin spokes use the battery-output green (BATTERY_OUTPUT_COLOR)
+    // at every SOC tier — power throughput is independent of stored charge
+    // (issue #170). The SOC tier colour is reserved for the battery *node*.
+    expect(container.querySelector('[data-flow-track-id="discharge"]')?.getAttribute('stroke')).toBe(BATTERY_OUTPUT_COLOR);
+    expect(container.querySelector('[data-flow-track-id="discharge_to_grid"]')?.getAttribute('stroke')).toBe(BATTERY_OUTPUT_COLOR);
   });
 
-  it('uses the current SOC colour for battery-origin moving balls under reduced motion', () => {
+  it('battery→grid spoke stays on battery-output green under reduced motion (issue #170)', () => {
     mockMatchMedia({ '(prefers-reduced-motion: reduce)': true });
     const { container } = render(
       <EnergyOrbitDiagram
@@ -325,7 +413,9 @@ describe('EnergyOrbitDiagram', () => {
         })}
       />,
     );
-    expect(container.querySelector('[data-flow-id="discharge"]')?.getAttribute('fill')).toBe(socColor(10));
+    // 10 % SOC is a red tier — yet the battery-origin spoke must NOT flip red;
+    // it stays on the battery-output green regardless of stored charge.
+    expect(container.querySelector('[data-flow-id="discharge"]')?.getAttribute('fill')).toBe(BATTERY_OUTPUT_COLOR);
   });
 
   it('does not draw a battery→grid dot when discharge is fully consumed by the house (issue #155)', () => {
@@ -342,6 +432,36 @@ describe('EnergyOrbitDiagram', () => {
     );
     expect(container.querySelector('[data-flow-id="discharge"]')).not.toBeNull();
     expect(container.querySelector('[data-flow-id="discharge_to_grid"]')).toBeNull();
+  });
+
+  it('pins the slower base ball speed so a future tweak does not undo the calmer animation (issue #170)', () => {
+    // The user asked for all balls to slow down by 50 % after the new
+    // spoke-colour work was merged in. BASE_SPEED_PX_PER_S was halved
+    // from 90 → 45, so a simple low-energy spoke traverses roughly twice
+    // as slow as before. This test pins the new base speed by asserting
+    // the per-flow duration: a ~140 px spoke at strength=0 emits a
+    // 1-second clamp (the documented floor) under the new regime, while
+    // the old 90 px/s regime would have produced a much faster spoke
+    // (well under 1 s).
+    //
+    // 140 px / (45 × 0.55) ≈ 5.65 s — well above the 1 s clamp.
+    const { container } = render(
+      <EnergyOrbitDiagram
+        snapshot={makeSnapshot({
+          // One low-strength flow so it doesn't hit the 8 s clamp.
+          // Solar 50 W, home 50 W → strength=1 for the single solar
+          // spoke (maxFlowWatts=50), so speed = 45 × (0.55 + 0.9) ≈ 65
+          // px/s. A ~140 px spoke ≈ 2.15 s.
+          solar_power: 50,
+          home_power: 50,
+        })}
+      />,
+    );
+    const dur = parseFloat(
+      container.querySelector('[data-flow-id="solar"]')?.getAttribute('data-duration') ?? '0',
+    );
+    expect(dur).toBeGreaterThan(1.5);
+    expect(dur).toBeLessThan(8.0);
   });
 
   it('keys dot speed on path length so long arcs do not race', () => {
@@ -373,9 +493,11 @@ describe('EnergyOrbitDiagram', () => {
 
   it('moves higher-energy balls faster than lower-energy balls in the same render', () => {
     // Solar 5 kW + battery charging at 1 kW. The solar flow is the biggest
-    // (strength=1) so it should traverse faster than the 1 kW charge flow
-    // (strength=0.2) — same intent as the original test, but comparing
-    // flows in a single render so the result reflects relative strength.
+    // (strength=1) so it should traverse faster than the 1 kW solar_charge
+    // flow (strength=0.2) — same intent as the original test, but
+    // comparing flows in a single render so the result reflects relative
+    // strength. Note: the battery charging flows are now source-attributed
+    // (solar_charge) rather than the synthetic `charge` flow (issue #170).
     const { container } = render(
       <EnergyOrbitDiagram
         snapshot={makeSnapshot({
@@ -390,7 +512,7 @@ describe('EnergyOrbitDiagram', () => {
       container.querySelector('[data-flow-id="solar"]')?.getAttribute('data-duration') ?? '0',
     );
     const chargeDur = parseFloat(
-      container.querySelector('[data-flow-id="charge"]')?.getAttribute('data-duration') ?? '0',
+      container.querySelector('[data-flow-id="solar_charge"]')?.getAttribute('data-duration') ?? '0',
     );
     expect(solarDur).toBeLessThan(chargeDur);
   });

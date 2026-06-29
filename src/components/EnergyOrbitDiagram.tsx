@@ -11,13 +11,12 @@
  * and string-building live in `src/lib/energyFlow.ts`. This component is only
  * responsible for the radial visual language.
  */
-
 import { memo, useId } from 'react';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { useInverterStore } from '../store/useInverterStore';
 import type { InverterSnapshot } from '../lib/types';
 import type { EnergyFlow, FlowNode, FlowNodeId } from '../types/energyFlow';
-import { buildEnergyFlows, FLOW_COLORS } from '../lib/energyFlow';
+import { buildEnergyFlows, FLOW_COLORS, visualEndpoints } from '../lib/energyFlow';
 import { evcNodeLabel } from '../lib/evcLabel';
 
 interface Props {
@@ -110,8 +109,14 @@ function displayValue(node: FlowNode): string {
 function statusFor(node: FlowNode, flows: EnergyFlow[]): string {
   if (node.id === 'solar') return node.active ? 'Generating' : 'Idle';
   if (node.id === 'grid') {
+    // Status word driven by rendered flows first, falling back to the raw
+    // grid_power direction. The visible `export` spoke is suppressed when
+    // solar ≤ home load (issue #170 final fix), but the grid node should
+    // still read "Exporting" so the user knows the *battery* is exporting
+    // (or pure grid export with no solar at all).
     if (flows.some((f) => f.direction === 'import')) return 'Importing';
     if (flows.some((f) => f.direction === 'export')) return 'Exporting';
+    if (flows.some((f) => f.direction === 'discharge')) return 'Exporting';
     return 'Idle';
   }
   if (node.id === 'battery') {
@@ -244,18 +249,6 @@ interface FlowPath {
   color: string;
 }
 
-function hasFlow(flows: EnergyFlow[], id: string): boolean {
-  return flows.some((f) => f.id === id);
-}
-
-function visualEndpoints(flow: EnergyFlow, flows: EnergyFlow[]): { from: FlowNodeId; to: FlowNodeId } {
-  const solarActive = hasFlow(flows, 'solar');
-
-  if (flow.id === 'charge' && solarActive) return { from: 'solar', to: 'battery' };
-  if (flow.id === 'export' && solarActive) return { from: 'solar', to: 'grid' };
-  return { from: flow.from, to: flow.to };
-}
-
 function isOuterRoute(from: FlowNodeId, to: FlowNodeId): boolean {
   return from !== 'home' && to !== 'home' && from !== 'ev' && to !== 'ev';
 }
@@ -356,8 +349,10 @@ function FlowDot({ flow, flows, posOf, maxW, reduced }: DotProps) {
   // battery→grid outer arc traverse at a comparable visual pace. Higher-
   // energy flows get a modest speed boost (≈2× at full strength vs idle)
   // so a 5 kW export still feels more energetic than a 200 W trickle, but
-  // neither flies across the screen.
-  const BASE_SPEED_PX_PER_S = 90;
+  // neither flies across the screen. The base speed (45 px/s) was halved
+  // from 90 px/s after the user asked for a calmer, slower animation in
+  // the energy-flow diagram (issue #170).
+  const BASE_SPEED_PX_PER_S = 45;
   const speed = BASE_SPEED_PX_PER_S * (0.55 + strength * 0.9);
   const durSeconds = Math.min(8, Math.max(1.0, routed.length / speed));
   const dur = `${durSeconds.toFixed(2)}s`;
@@ -530,11 +525,21 @@ function SatelliteNode({ node, x, y, r, flows, mobile, showStatusWords }: NodePr
       {isBattery ? (
         <>
           <BatteryGlyph node={node} x={x} y={y} />
+          {/*
+           * The battery node's fill is `node.color` (the SOC tier colour)
+           * at ~16 % opacity, so drawing the SoC text in the same
+           * `node.color` produces zero contrast — text and background
+           * share the same hue. Use the fixed primary text colour instead
+           * so the % is legible at every SOC tier (issue #170).
+           * The SoC tier colour is still preserved on the ring + glyph
+           * fill so the colour-coded state of the node itself stays
+           * meaningful.
+           */}
           <text
             x={x - 2}
             y={y + 7}
             textAnchor="middle"
-            fill={node.color}
+            fill="var(--app-text-primary, #F0F6FC)"
             fontSize={mobile ? 18 : 17}
             fontWeight={800}
             fontFamily="var(--font-mono, monospace)"
