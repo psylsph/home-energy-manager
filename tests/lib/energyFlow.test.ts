@@ -132,16 +132,28 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
   });
 
   it('treats +grid_power as export (home→grid) and −grid_power as import (grid→home)', () => {
-    // Export: +4.3kW internally. Magnitude shown as a plain positive value;
-    // the direction signal lives in the "Exporting" / "Importing" status
-    // word rendered under the orbit node, not in a `+`/`-` prefix.
-    const exp = buildEnergyFlows(snap({ grid_power: 4300 }));
+    // Export: +4.3kW internally, with solar driving the surplus so the
+    // export spoke is genuinely emitted under issue #170 source-
+    // attribution (solar powers the home then exports its surplus). The
+    // visual spoke is rerouted to solar → grid (yellow). Magnitude is
+    // shown as a plain positive value; the direction signal lives in
+    // the "Exporting" / "Importing" status word rendered under the
+    // orbit node, not in a `+`/`-` prefix.
+    //
+    // Before issue #170 source-attribution, an export spoke was drawn
+    // for any positive `grid_power` regardless of source; that route is
+    // no longer taken — a grid export with neither solar nor a battery
+    // discharge surplus has no spoke to draw, because there is no
+    // attributable source for the renderer to point at. That case is
+    // covered separately in the matrix below ("no export spoke when
+    // neither solar nor battery is exporting").
+    const exp = buildEnergyFlows(snap({ solar_power: 5000, home_power: 500, grid_power: 4500 }));
     const ef = flowById(exp, 'export');
     expect(ef).toBeDefined();
     expect(ef!.from).toBe('home');
     expect(ef!.to).toBe('grid');
     expect(ef!.direction).toBe('export');
-    expect(exp.nodes.find((n) => n.id === 'grid')!.value).toBe('4.3kW');
+    expect(exp.nodes.find((n) => n.id === 'grid')!.value).toBe('4.5kW');
     expect(flowById(exp, 'import')).toBeUndefined();
 
     // Import: −2kW internally. Same — magnitude is positive; direction
@@ -250,6 +262,62 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
       snap({ battery_state: 'discharging', battery_power: 500, home_power: 800 }),
     );
     expect(vm.flows.find((f) => f.id === 'discharge_to_grid')).toBeUndefined();
+  });
+
+  it('routes the full discharge to grid when the house is idle (issue #172)', () => {
+    // Overnight timed-export / forced discharge with everything off:
+    // battery_power 2000 W, home_power ~0 W, grid_power +1990 W. The
+    // old code substituted `absBattery` for `home_power` whenever the
+    // home was at or below the noise floor, which silently dropped the
+    // battery → grid spoke and drew the full 2 kW as battery → home into
+    // a house that consumes nothing. The fixed path routes the whole
+    // battery output to `discharge_to_grid` and emits no `discharge`
+    // spoke at all.
+    const vm = buildEnergyFlows(
+      snap({ battery_state: 'discharging', battery_power: 2000, home_power: 0, grid_power: 1990 }),
+    );
+    const toGrid = vm.flows.find((f) => f.id === 'discharge_to_grid');
+    expect(toGrid, 'discharge_to_grid missing for idle-home discharge').toBeDefined();
+    expect(toGrid!.from).toBe('battery');
+    expect(toGrid!.to).toBe('grid');
+    expect(toGrid!.watts).toBe(2000);
+    expect(toGrid!.color).toBe(BATTERY_OUTPUT_COLOR);
+    // Home spoke is not emitted — there is no discharge into an idle hub.
+    expect(flowById(vm, 'discharge'), 'discharge spoke must not appear for idle home').toBeUndefined();
+    // And there is no `export` spoke either; the grid reading is
+    // battery-attributed, so it's carried by `discharge_to_grid` only
+    // (avoids the double-count the issue's "Notes" warn about for #155).
+    expect(flowById(vm, 'export'), 'export spoke must not appear when battery owns the grid reading').toBeUndefined();
+  });
+
+  it('routes discharge entirely to grid below the noise floor, splits above it (issue #172)', () => {
+    // Below the noise floor (home_power strictly less than `noise`):
+    //  - batteryToHome clamps to 0, all discharge routes to
+    //    discharge_to_grid. Pins the user-reported bug.
+    // Strictly above the noise floor:
+    //  - normal split — home-direct portion goes home, surplus to
+    //    discharge_to_grid. Pins the issue #155 contract.
+    //
+    // We use 5 W and 50 W so we stay clearly on each side of the
+    // default 20 W floor (the 20 W boundary itself is exercised by
+    // the separate "splits at the noise boundary" test below).
+    const idle = buildEnergyFlows(
+      snap({ battery_state: 'discharging', battery_power: 2000, home_power: 5, grid_power: 1995 }),
+    );
+    const idleToGrid = idle.flows.find((f) => f.id === 'discharge_to_grid');
+    expect(idleToGrid, 'discharge_to_grid missing for below-noise home').toBeDefined();
+    expect(idleToGrid!.watts).toBe(2000);
+    expect(idle.flows.find((f) => f.id === 'discharge'), 'discharge spoke must not appear for below-noise home').toBeUndefined();
+
+    const loaded = buildEnergyFlows(
+      snap({ battery_state: 'discharging', battery_power: 2000, home_power: 50, grid_power: 1950 }),
+    );
+    const loadedDischarge = loaded.flows.find((f) => f.id === 'discharge');
+    const loadedToGrid = loaded.flows.find((f) => f.id === 'discharge_to_grid');
+    expect(loadedDischarge, 'discharge spoke missing for above-noise home').toBeDefined();
+    expect(loadedDischarge!.watts).toBe(50);
+    expect(loadedToGrid, 'discharge_to_grid spoke missing for above-noise home').toBeDefined();
+    expect(loadedToGrid!.watts).toBe(1950);
   });
 
   it('never emits a self-flow for home (it is the hub, not a spoke)', () => {
@@ -481,14 +549,24 @@ describe('buildEnergyFlows — spoke colour = solar > battery > grid priority (i
       expected: [{ flowId: 'import', color: FLOW_COLORS.grid, rationale: 'grid source' }],
     },
     {
-      name: 'home → grid (export) is YELLOW when solar is active (solar wins)',
+      name: 'solar → grid export is YELLOW when solar is active (solar wins)',
       snap: { solar_power: 5000, home_power: 500, grid_power: 4500 },
       expected: [{ flowId: 'export', color: FLOW_COLORS.solar, rationale: 'solar visual-source wins (issue #170)' }],
     },
     {
-      name: 'home → grid (export) without solar is RED',
+      name: 'no export spoke when neither solar nor battery is exporting',
+      // Issue #170 source-attribution: a positive `grid_power` reading
+      // with no solar surplus AND no battery discharge surplus has no
+      // attributable source, so the `export` spoke is not emitted at
+      // all (a rogue noisy grid reading, a holding register still
+      // carrying an export value while nothing is actually flowing,
+      // etc.). The grid node badge still reads "Exporting" — the
+      // diagram just doesn't draw a spoke with no end-attribution.
+      // This was the behaviour the old "export without solar is RED"
+      // matrix entry used to test, before source-attribution removed
+      // the underlying code path.
       snap: { grid_power: 2000, home_power: 500 },
-      expected: [{ flowId: 'export', color: FLOW_COLORS.grid, rationale: 'grid source' }],
+      expected: [], // no spokes asserted; the absence of `export` is the point
     },
     {
       name: 'battery → home (discharge) is green — battery, no solar/grid',

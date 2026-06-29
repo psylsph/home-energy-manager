@@ -362,8 +362,19 @@ export function buildEnergyFlows(
   // home-direct portion is `batteryToHome`; the surplus is `batteryToGrid`.
   // Both quantities may also consume part of the grid reading when the
   // export is partly battery-driven.
+  //
+  // When the house is at or below the noise floor (idle), we clamp the
+  // home-direct portion to 0 rather than drawing a tiny battery → home
+  // spoke into a hub that reads as idle. This is the same rule we apply
+  // to the home hub node itself (`s.home_power > noise` to render the
+  // node as "active"). Routing the full discharge to `discharge_to_grid`
+  // also fixes issue #172, where the old code substituted `absBattery`
+  // for `s.home_power` whenever the home was idle, swallowing the entire
+  // battery output into a "battery → home" spoke for a house that
+  // consumes nothing.
+  const effectiveHomePower = s.home_power > noise ? s.home_power : 0;
   const batteryToHome = isDischarging
-    ? Math.min(absBattery, s.home_power > noise ? s.home_power : absBattery)
+    ? Math.min(absBattery, effectiveHomePower)
     : 0;
   const batteryToGrid = isDischarging
     ? Math.max(0, absBattery - batteryToHome)
