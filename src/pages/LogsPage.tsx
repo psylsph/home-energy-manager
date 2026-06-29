@@ -121,15 +121,15 @@ export default function LogsPage() {
   return (
     <div className="flex flex-col gap-4 max-w-4xl mx-auto px-4 py-6 h-[calc(100vh-10rem)]">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <h1 className="text-text-primary text-lg font-semibold font-sans">Developer Logs</h1>
-        <div className="flex items-center gap-3">
-          <span className="text-text-secondary text-xs font-sans">
+      <div className="flex items-center justify-between gap-2">
+        <h1 className="text-text-primary text-lg font-semibold font-sans truncate min-w-0">Developer Logs</h1>
+        <div className="flex items-center gap-2 shrink-0">
+          <span className="text-text-secondary text-xs font-sans hidden xs:inline">
             {filteredLogs.length}/{logs.length} lines
           </span>
           <button
             onClick={fetchLogs}
-            className="bg-bg-elevated text-text-primary font-sans text-xs px-3 py-1.5 rounded-lg hover:bg-bg-base transition-colors"
+            className="bg-bg-elevated text-text-primary font-sans text-xs px-3 py-1.5 rounded-lg hover:bg-bg-base transition-colors shrink-0"
           >
             Refresh
           </button>
@@ -137,16 +137,16 @@ export default function LogsPage() {
       </div>
 
       {/* Controls */}
-      <div className="flex items-center gap-3">
-        {/* Backend capture level selector */}
-        <div className="flex items-center gap-2">
+      <div className="flex flex-col gap-2">
+        {/* Backend capture level selector — own row */}
+        <div className="flex items-center gap-1.5">
           <span className="text-text-secondary text-xs font-sans shrink-0">Capture:</span>
           <div className="flex rounded-lg overflow-hidden border border-bg-elevated">
             {LEVELS.map((level) => (
               <button
                 key={level}
                 onClick={() => changeCaptureLevel(level)}
-                className={`px-2.5 py-1.5 text-xs font-sans transition-colors ${
+                className={`px-2 py-1.5 text-xs font-sans transition-colors ${
                   captureLevel === level
                     ? 'bg-flow-active text-bg-base font-semibold'
                     : 'bg-bg-elevated text-text-secondary hover:text-text-primary'
@@ -158,22 +158,24 @@ export default function LogsPage() {
           </div>
         </div>
 
-        {/* Text filter input */}
-        <input
-          type="text"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          placeholder="Filter logs…"
-          className="flex-1 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-        />
-        {filter && (
-          <button
-            onClick={() => setFilter('')}
-            className="text-text-secondary text-xs font-sans hover:text-text-primary transition-colors shrink-0"
-          >
-            Clear
-          </button>
-        )}
+        {/* Text filter input + Clear — own row */}
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="Filter logs…"
+            className="flex-1 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+          />
+          {filter && (
+            <button
+              onClick={() => setFilter('')}
+              className="text-text-secondary text-xs font-sans hover:text-text-primary transition-colors shrink-0"
+            >
+              Clear
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Status message */}

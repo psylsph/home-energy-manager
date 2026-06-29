@@ -15,6 +15,7 @@
   --color-grid-stroke-subtle: var(--app-grid-stroke-subtle);
   --font-mono: 'JetBrains Mono', ui-monospace, monospace;
   --font-sans: 'DM Sans', ui-sans-serif, system-ui, sans-serif;
+  --breakpoint-xs: 360px;
 }
 
 :root,

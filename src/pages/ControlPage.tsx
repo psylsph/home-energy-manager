@@ -520,14 +520,14 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
 
   return (
     <section className="space-y-3 border-t border-bg-elevated pt-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
         <h2 className="text-text-primary font-semibold text-lg">Charging Mode</h2>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <select
           value={mode}
           onChange={(e) => handleModeChange(e.target.value as ChargeMode)}
           disabled={saving}
-          className="bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-3 py-1.5 border border-transparent focus:border-battery outline-none cursor-pointer"
+          className="bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-3 py-1.5 border border-transparent focus:border-battery outline-none cursor-pointer w-full sm:w-auto"
         >
           <option value="standard">Standard</option>
           <option value="cosy">Cosy</option>
