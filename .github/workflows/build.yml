@@ -67,6 +67,7 @@ jobs:
             rpm
 
       - name: Install Tauri CLI
+        shell: bash
         run: |
           curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
           # --force bypasses binstall's "already installed" tracking, which
@@ -394,6 +395,7 @@ jobs:
           echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> $GITHUB_ENV
 
       - name: Install Tauri CLI
+        shell: bash
         run: |
           curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
           # --force bypasses binstall's "already installed" tracking, which
