@@ -1,5 +1,6 @@
 import { useInverterStore } from '../store/useInverterStore';
 import type { InverterSnapshot, MeterData } from '../lib/types';
+import AwaitingConnection from '../components/AwaitingConnection';
 
 /** A phase is "active" if it has a plausible non-zero voltage (>10 V). */
 const VOLTAGE_THRESHOLD = 10;
@@ -131,22 +132,28 @@ function CtConfigCard({ snapshot }: { snapshot: InverterSnapshot }) {
 
 export default function MetersPage() {
   const snapshot = useInverterStore((s) => s.snapshot);
+  const connectionState = useInverterStore((s) => s.connectionState);
   const meters = snapshot?.meters;
+
+  // Same gate as Battery / Solar / Inverter / Control: while the backend
+  // has no usable connection, render the shared placeholder instead of a
+  // half-populated meter list bound to stale data. Previously this page
+  // fell through to an inline "Connect to an inverter" card, whose wording
+  // and behaviour didn't match the other tabs.
+  if (!snapshot || connectionState !== 'connected') {
+    return <AwaitingConnection connectionState={connectionState} showFaq />;
+  }
 
   return (
     <div className="flex flex-col gap-4 max-w-2xl mx-auto px-4 py-6">
       <h2 className="text-text-primary font-semibold text-lg">External CT Meters</h2>
 
-      {snapshot && (
-        <CtConfigCard snapshot={snapshot} />
-      )}
+      <CtConfigCard snapshot={snapshot} />
 
       {!meters || meters.length === 0 ? (
         <div className="bg-bg-surface rounded-xl p-6 text-center">
           <p className="text-text-secondary">
-            {snapshot
-              ? 'No external CT meters detected on your system.'
-              : 'Connect to an inverter to see meter data.'}
+            No external CT meters detected on your system.
           </p>
         </div>
       ) : (

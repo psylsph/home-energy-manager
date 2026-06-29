@@ -266,14 +266,6 @@ export default function SettingsPage() {
   const evcHostInvalid = evcHost !== '' && !isValidIpv4Host(evcHost);
 
   const [disableAutoDiscovery, setDisableAutoDiscovery] = useState(false);
-  // Developer-only: skip optional model-specific register blocks (extended
-  // slots, AC config, three-phase config, gateway input banks) to reduce
-  // per-cycle timeout exposure on chronically unstable dongles. Takes
-  // effect on the next poll cycle (the flag is re-read every iteration —
-  // no reconnect needed). Standard blocks and per-battery BMS / HV BCU
-  // reads always run, so SOC / power / battery pages keep working.
-  const [minimalTelemetryMode, setMinimalTelemetryMode] = useState(false);
-  const [fullPowerDischargeInEcoMode, setFullPowerDischargeInEcoMode] = useState(false);
 
   // Start on login (issue #117). The actual platform autostart entry is
   // managed by tauri-plugin-autostart; the persisted preference is the
@@ -293,9 +285,9 @@ export default function SettingsPage() {
   const [exportTariffCfg, setExportTariffCfg] = useState<TariffConfig>(() =>
     flatTariffConfig(0.15),
   );
-  // Issue #131: daily fixed import-side standing charge (pence/day). Empty
+  // Issue #131: daily fixed import-side Standing Charge (pence/day). Empty
   // string is the uninitialised state; we coerce to 0 on save so the backend
-  // gets a clean number and a blank input means "no standing charge".
+  // gets a clean number and a blank input means "no Standing Charge".
   const [importStandingCharge, setImportStandingCharge] = useState<string>('');
 
   // General
@@ -402,8 +394,6 @@ export default function SettingsPage() {
         setEvcHost(s.evc_host ?? '');
         setEvcPort(s.evc_port ?? 502);
         setDisableAutoDiscovery(s.disable_auto_discovery ?? false);
-        setMinimalTelemetryMode(s.minimal_telemetry_mode ?? false);
-        setFullPowerDischargeInEcoMode(s.full_power_discharge_in_eco_mode ?? false);
         setAutostartEnabled(s.autostart_enabled ?? false);
         setApiKey(s.api_key ?? '');
         setApiPort(s.api_port ?? 7338);
@@ -578,8 +568,8 @@ export default function SettingsPage() {
       flash('Tariff configuration is invalid', false);
       return;
     }
-    // Issue #131: coerce the standing charge to a clean non-negative
-    // number. An empty input means "no standing charge" → 0. Non-numeric
+    // Issue #131: coerce the Standing Charge to a clean non-negative
+    // number. An empty input means "no Standing Charge" → 0. Non-numeric
     // junk from a paste is also coerced to 0 rather than blocking the save,
     // since the field is informational and a typo is far less disruptive
     // than a stuck save button.
@@ -1184,14 +1174,14 @@ export default function SettingsPage() {
           onChange={setExportTariffCfg}
         />
 
-        {/* Issue #131: standing charge (p/day) for the import direction.
+        {/* Issue #131: Standing Charge (p/day) for the import direction.
             UK-style tariffs (Octopus Flux, etc.) charge a flat daily fee on
             top of the per-kWh rate; without this the History cost graph reads
-            low by ~standing charge per day. Empty / 0 = no standing charge. */}
+            low by ~Standing Charge per day. Empty / 0 = no Standing Charge. */}
         <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-2">
           <label className="flex flex-col gap-1 max-w-xs">
             <span className="text-text-primary text-sm font-sans font-medium">
-              Standing charge (p/day)
+              Standing Charge (p/day)
             </span>
             <input
               type="number"
@@ -1201,11 +1191,11 @@ export default function SettingsPage() {
               value={importStandingCharge}
               placeholder="e.g. 54.86"
               onChange={(e) => setImportStandingCharge(e.target.value)}
-              aria-label="Import standing charge in pence per day"
+              aria-label="Import Standing Charge in pence per day"
               className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
             />
             <span className="text-text-secondary text-xs font-sans">
-              Daily fixed import cost added to every History cost total. UK Octopus Flux ≈ 54.86. Leave blank for no standing charge.
+              Daily fixed import cost added to every History cost total. UK Octopus Flux ≈ 54.86. Leave blank for no Standing Charge.
             </span>
           </label>
         </div>
@@ -2051,49 +2041,6 @@ export default function SettingsPage() {
         </div>
         {developerMode && (
           <div className="flex flex-col gap-3 pt-2 border-t border-bg-elevated">
-            {/* Minimal Telemetry Mode toggle.
-                Developer-only because it trades UI detail (extended slots,
-                AC HR300-359, three-phase HR1080-1124, gateway IR1600+) for
-                a smaller per-cycle Modbus footprint. On a flaky dongle this
-                can dramatically reduce reconnect storms — standard blocks
-                still provide SOC, battery power, solar, grid, home. The
-                backend applies the flag on the next poll cycle without
-                needing a reconnect (poll.rs re-reads the flag every
-                iteration). */}
-            <div className="flex items-center justify-between bg-bg-elevated rounded-xl px-4 py-3 border border-white/5">
-              <div className="flex flex-col gap-0.5">
-                <span className="text-text-primary text-sm font-sans font-medium">Minimal Telemetry Mode</span>
-                <span className="text-text-secondary text-xs font-sans">
-                  Skip optional model-specific register blocks (extended slots, three-phase telemetry, gateway IR1600+) to reduce per-cycle timeouts on unstable dongles. The AC config block (HR300-359) and three-phase config block (HR1080-1124) are still polled on AC-coupled and three-phase inverters so the battery charge/discharge limit sliders stay accurate. SOC and power readings are unaffected. Takes effect on the next poll cycle.
-                </span>
-              </div>
-              <Toggle
-                checked={minimalTelemetryMode}
-                onChange={(v) => {
-                  setMinimalTelemetryMode(v);
-                  apiPost('/api/settings', { minimal_telemetry_mode: v })
-                    .then(() => flash(v ? 'Minimal telemetry mode enabled — optional blocks will be skipped on the next poll' : 'Minimal telemetry mode disabled — optional blocks will resume on the next poll', true))
-                    .catch((e) => flash(e.message ?? 'Failed to save', false));
-                }}
-              />
-            </div>
-            <div className="flex items-center justify-between bg-bg-elevated rounded-xl px-4 py-3 border border-white/5">
-              <div className="flex flex-col gap-0.5">
-                <span className="text-text-primary text-sm font-sans font-medium">Full-power discharge while Eco stays on</span>
-                <span className="text-text-secondary text-xs font-sans">
-                  Enable only if your inverter has GivEnergy&apos;s cloud flag <code className="text-text-primary">full-power-discharge-in-eco-mode</code>. Timed Export will then leave Eco/self-consumption enabled instead of writing HR27=0.
-                </span>
-              </div>
-              <Toggle
-                checked={fullPowerDischargeInEcoMode}
-                onChange={(v) => {
-                  setFullPowerDischargeInEcoMode(v);
-                  apiPost('/api/settings', { full_power_discharge_in_eco_mode: v })
-                    .then(() => flash(v ? 'Timed Export will leave Eco enabled' : 'Timed Export will use legacy export mode', true))
-                    .catch((e) => flash(e.message ?? 'Failed to save', false));
-                }}
-              />
-            </div>
             <p className="text-text-secondary text-xs font-sans">
               Read-only API for external access (e.g. SolarWatch). Starts a
               second HTTP server on a separate port with Bearer-token auth.

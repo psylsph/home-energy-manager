@@ -26,7 +26,6 @@ vi.mock('../../src/lib/api', () => ({
           import_tariff: 0.285,
           export_tariff: 0.15,
           import_tariff_config: null,
-          full_power_discharge_in_eco_mode: false,
         },
       };
     }
@@ -292,10 +291,18 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
   });
 
   it('stays hidden before the first snapshot arrives', async () => {
+    // Connected but no snapshot yet (the brief window after TCP comes up
+    // but before the first successful poll broadcasts). The connection gate
+    // now fires on `!snapshot` too, so the whole ControlPage is replaced by
+    // the shared placeholder — which means Timed Discharge is certainly
+    // hidden, just along with everything else.
     useInverterStore.setState({ snapshot: null, developerMode: false, connectionState: 'connected' });
     render(<ControlPage />);
 
-    await screen.findByRole('heading', { name: 'Battery Mode' });
+    expect(
+      screen.getByText('Waiting for data…'),
+    ).toBeDefined();
+    expect(screen.queryByRole('heading', { name: 'Battery Mode' })).toBeNull();
     expect(screen.queryByText('Timed Discharge')).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Timed Discharge' })).toBeNull();
   });

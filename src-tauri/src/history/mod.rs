@@ -198,7 +198,7 @@ pub(crate) fn days_in_local_window(start_ts: i64, end_ts: i64) -> u32 {
 /// Local-midnight unix-second timestamps that OPEN days whose local date
 /// is STRICTLY AFTER the window-open local date. These are the points
 /// where the cumulative cost graph should step up by one day's worth of
-/// standing charge. The window-open day's debit is seeded into
+/// Standing Charge. The window-open day's debit is seeded into
 /// `standing_charge_days_credited` at function entry, so this list excludes
 /// the window-open day entirely.
 fn local_midnight_steps_after(start_ts: i64, end_ts: i64) -> Vec<i64> {
@@ -1065,7 +1065,7 @@ impl HistoryDb {
     /// charge is debited once at the **start of each local day**: the
     /// cumulative cost series steps up by `standing_charge_p_per_day / 100`
     /// (£) at each local midnight that falls within the query window. So a
-    /// 7-day range with a 54.86p/day standing charge shows 7 visible steps
+    /// 7-day range with a 54.86p/day Standing Charge shows 7 visible steps
     /// in the cost graph (one per day), each of size £0.5486, layered on
     /// top of the per-kWh cost component. A value of 0 leaves the series
     /// unchanged. See issue #131.
@@ -1090,7 +1090,7 @@ impl HistoryDb {
 
         let (start_ts, end_ts) = window.resolve();
 
-        // Negative standing charge clamped to 0 — it would invert the cost
+        // Negative Standing Charge clamped to 0 — it would invert the cost
         // series, which doesn't match any real UK tariff. Issue #131.
         let sc_pence = standing_charge_p_per_day.max(0.0);
         let standing_charge_gbp_per_day = sc_pence / 100.0;
@@ -1137,13 +1137,13 @@ impl HistoryDb {
         // local-day reset check and the plausibility window).
         let mut baseline: Option<f64> = None;
         let mut last_ts: Option<i64> = None;
-        // Issue #131: number of full days of standing charge credited at the
+        // Issue #131: number of full days of Standing Charge credited at the
         // current reading's time. Starts at 1 for the window-open day's
         // debit (UK billing convention: a partial first day still incurs
         // the full daily fee); incremented once per local midnight
         // strictly inside the window. When the window is entirely within
         // one local day and has no readings, the seed is the entire
-        // standing charge; the user sees the open-day step at the very
+        // Standing Charge; the user sees the open-day step at the very
         // first bucket. Each subsequent local midnight shows another
         // visible step in the cumulative cost graph.
         let mut standing_charge_days_credited: u32 = if total_days_in_window > 0 { 1 } else { 0 };
@@ -1157,7 +1157,7 @@ impl HistoryDb {
             // after the previous reading's timestamp (or start_ts for the
             // first reading). We do this BEFORE updating `last_ts` so the
             // step lands on the first reading of the new local day
-            // (matching UK billing: standing charge is due at local
+            // (matching UK billing: Standing Charge is due at local
             // midnight, not when the next reading happens to arrive).
             let prior_ts = last_ts.unwrap_or(start_ts);
             for &midnight in &midnight_steps {
@@ -1221,7 +1221,7 @@ impl HistoryDb {
             }
 
             let bucket_ms = ((ts / bucket_secs) * bucket_secs) * 1000;
-            // Issue #131: per-day standing charge layered on top of the
+            // Issue #131: per-day Standing Charge layered on top of the
             // per-kWh component. The cost graph line steps up by exactly the
             // per-day amount at every local midnight within the window.
             let standing_charge_total =
@@ -1264,7 +1264,7 @@ impl HistoryDb {
         if buckets.is_empty() {
             let open_bucket_ms = ((start_ts / bucket_secs) * bucket_secs) * 1000;
             // For a window with no readings, surface the cumulative
-            // standing charge for ALL days the window covers. Each day's
+            // Standing Charge for ALL days the window covers. Each day's
             // debit lands at the start of that day (the local midnight),
             // so the first bucket carries the per-day amount for the
             // window-open day, and subsequent midnights would add more
@@ -3740,7 +3740,7 @@ mod tests {
     #[test]
     fn cost_series_standing_charge_zero_is_a_no_op() {
         // The historical-cost series must be byte-identical whether the
-        // standing charge is explicitly 0 or omitted (older callers pass
+        // Standing Charge is explicitly 0 or omitted (older callers pass
         // 0). Regression guard for issue #131.
         let db = test_db();
         insert_export_day(&db, 0, 10.0, 6 * 60, 10 * 60);
@@ -3788,26 +3788,26 @@ mod tests {
                 54.86,
             )
             .unwrap();
-        // kWh cost: 3 × 5 × £0.10 = £1.50. Standing charge: 4 × £0.5486 = £2.1944.
+        // kWh cost: 3 × 5 × £0.10 = £1.50. Standing Charge: 4 × £0.5486 = £2.1944.
         let expected_total = 1.50 + 4.0 * 0.5486;
         let got = series_total(&series);
         assert!(
             (got - expected_total).abs() < 1e-3,
-            "4-day window total should be kWh + 4 × standing charge (got {got}, expected {expected_total})"
+            "4-day window total should be kWh + 4 × Standing Charge (got {got}, expected {expected_total})"
         );
         // The very first bucket (before any kWh is consumed) should carry
-        // only ONE day's standing charge, NOT the full 4-day amount.
+        // only ONE day's Standing Charge, NOT the full 4-day amount.
         let first = series.first().map(|p| p.v).unwrap_or(0.0);
         assert!(
             (first - 0.5486).abs() < 1e-3,
-            "first bucket should carry only day-1 standing charge (got {first})"
+            "first bucket should carry only day-1 Standing Charge (got {first})"
         );
-        // The last bucket must carry all 4 days of standing charge plus
+        // The last bucket must carry all 4 days of Standing Charge plus
         // the per-kWh total — already verified by `series_total` above.
         let last = series.last().map(|p| p.v).unwrap_or(0.0);
         assert!(
             (last - expected_total).abs() < 1e-3,
-            "last bucket should equal kWh + 4 × standing charge (got {last})"
+            "last bucket should equal kWh + 4 × Standing Charge (got {last})"
         );
     }
 
@@ -3834,7 +3834,7 @@ mod tests {
                 54.86,
             )
             .unwrap();
-        // kWh: 5 × £0.25 = £1.25. Standing charge: 1 × £0.5486.
+        // kWh: 5 × £0.25 = £1.25. Standing Charge: 1 × £0.5486.
         let expected = 1.25 + 0.5486;
         let got = series_total(&series);
         assert!(
@@ -3866,7 +3866,7 @@ mod tests {
                 54.86,
             )
             .unwrap();
-        // No readings → no per-kWh cost. Standing charge: £0.5486 (one day,
+        // No readings → no per-kWh cost. Standing Charge: £0.5486 (one day,
         // partial first day still incurs the daily fee under UK billing).
         let got = series_total(&series);
         assert!(
@@ -3879,7 +3879,7 @@ mod tests {
     fn cost_series_standing_charge_partial_first_day_credits_one_day() {
         // A 12h window starting at local midnight (00:00 → 12:00) contains
         // no local midnight, but the user is still in that day so it should
-        // be billed at one full day's standing charge.
+        // be billed at one full day's Standing Charge.
         let db = test_db();
         let m = local_midnight_secs(0);
         let start = m;
@@ -3907,7 +3907,7 @@ mod tests {
         // A 60h window (00:00 day-0 → 12:00 day-2) crosses TWO local
         // midnights, meaning the user lives through 3 distinct calendar
         // days (today, tomorrow, day-after). We credit 3 days × £0.5486
-        // = £1.6458 in standing charge.
+        // = £1.6458 in Standing Charge.
         let db = test_db();
         let m = local_midnight_secs(0);
         let start = m;
@@ -3932,7 +3932,7 @@ mod tests {
 
     #[test]
     fn cost_series_standing_charge_negative_input_is_clamped_to_zero() {
-        // A negative standing charge is not a real-world concept and would
+        // A negative Standing Charge is not a real-world concept and would
         // invert the cost graph (subtracting from the cumulative total).
         // The implementation clamps to 0; the output must be byte-identical
         // to passing 0 explicitly.
@@ -3966,7 +3966,7 @@ mod tests {
         );
         assert!(
             (baseline - clamped).abs() < 1e-9,
-            "negative standing charge must clamp to 0 (baseline {baseline}, clamped {clamped})"
+            "negative Standing Charge must clamp to 0 (baseline {baseline}, clamped {clamped})"
         );
     }
 
@@ -3999,14 +3999,14 @@ mod tests {
         let first = series.first().map(|p| p.v).unwrap_or(0.0);
         assert!(
             (first - 2.0 * 0.5486).abs() < 1e-3,
-            "empty-window first bucket should carry 2 days of standing charge (got {first})"
+            "empty-window first bucket should carry 2 days of Standing Charge (got {first})"
         );
     }
 
     #[test]
     fn cost_series_standing_charge_does_not_break_bucket_size_independence() {
         // Regression guard for the existing bucket-size-independence
-        // property: with a non-zero standing charge, the cumulative total
+        // property: with a non-zero Standing Charge, the cumulative total
         // must still be the same across every bucket width. Issue #131.
         let db = test_db();
         for d in 0..3 {
@@ -4036,10 +4036,10 @@ mod tests {
         for w in totals.windows(2) {
             assert!(
                 (w[0] - w[1]).abs() < 1e-9,
-                "cost total drifted with bucket size when standing charge is non-zero: {totals:?}"
+                "cost total drifted with bucket size when Standing Charge is non-zero: {totals:?}"
             );
         }
-        // kWh: 3 × 10 × £0.25 = £7.50. Standing charge: 4 × £0.5486 = £2.1944.
+        // kWh: 3 × 10 × £0.25 = £7.50. Standing Charge: 4 × £0.5486 = £2.1944.
         let expected = 7.50 + 4.0 * 0.5486;
         assert!(
             (totals[0] - expected).abs() < 1e-3,
@@ -4054,7 +4054,7 @@ mod tests {
         // spanning a local midnight: 22:00 day-0 → 03:00 day-1, with
         // kWh activity on both sides. The cumulative cost graph must
         // show a visible step at the midnight boundary, exactly one day's
-        // worth of standing charge in size.
+        // worth of Standing Charge in size.
         let db = test_db();
         let m = local_midnight_secs(0);
         let start = m + 22 * 3600;
@@ -4085,19 +4085,19 @@ mod tests {
         let first_kwh_share = first_v - 0.5486;
         assert!(
             first_kwh_share >= -1e-6,
-            "first bucket must include the open-day standing charge (got {first_v})"
+            "first bucket must include the open-day Standing Charge (got {first_v})"
         );
         // The very last bucket (after the crossed midnight) must carry
         // 2 × £0.5486 plus any kWh cost.
         let last_v = points.last().unwrap().1;
         assert!(
             last_v > 2.0 * 0.5486,
-            "last bucket (after midnight) must include the second day's standing charge on top of kWh cost (got {last_v})"
+            "last bucket (after midnight) must include the second day's Standing Charge on top of kWh cost (got {last_v})"
         );
         // The graph line must show a clear visible step at midnight:
         // the maximum value in the second half of the series must be
         // strictly greater than the maximum value in the first half
-        // (by at least the per-day standing charge amount).
+        // (by at least the per-day Standing Charge amount).
         let mid_idx = points.len() / 2;
         let pre_midnight = points[..mid_idx]
             .iter()
@@ -4109,7 +4109,7 @@ mod tests {
             .fold(f64::NEG_INFINITY, f64::max);
         assert!(
             post_midnight - pre_midnight >= 0.5486 - 1e-6,
-            "the cost graph must step UP at the local midnight by at least one day's standing charge (pre={pre_midnight}, post={post_midnight})"
+            "the cost graph must step UP at the local midnight by at least one day's Standing Charge (pre={pre_midnight}, post={post_midnight})"
         );
     }
 }

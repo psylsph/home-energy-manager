@@ -267,13 +267,18 @@ describe('<ControlPage/> — Agile scope UI', () => {
         dispatchEvent: vi.fn(),
       })),
     );
+    // ControlPage now gates its controls on connectionState === 'connected'
+    // (matching Battery / Solar / Inverter / Meters). These tests exercise
+    // the Agile-scope UI, not the connection gate, so start each one
+    // connected with a snapshot in place.
+    useInverterStore.setState({ connectionState: 'connected' });
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     cleanup();
-    useInverterStore.setState({ snapshot: null });
+    useInverterStore.setState({ snapshot: null, connectionState: 'disconnected' });
   });
 
   // ---------------------------------------------------------------

@@ -3,23 +3,16 @@ import { formatPower, formatVoltage, formatCurrent, formatTemp, formatEnergy, fo
 import ColdBatteryWarning from '../components/ColdBatteryWarning';
 import BatteryModeSummary from '../components/BatteryModeSummary';
 import { deviceSupportsExportLimit } from '../lib/deviceCapabilities';
+import AwaitingConnection from '../components/AwaitingConnection';
 
 export default function InverterPage() {
   const { snapshot, connectionState } = useInverterStore();
 
-  if (!snapshot) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
-        <div className="w-10 h-10 border-4 border-flow-active border-t-transparent rounded-full animate-spin" />
-        <p className="text-text-secondary text-sm font-sans">
-          {connectionState === 'reconnecting'
-            ? 'Connection lost — reconnecting…'
-            : connectionState === 'disconnected'
-              ? 'Disconnected — will retry automatically'
-              : 'Waiting for data'}
-        </p>
-      </div>
-    );
+  // See BatteryPage / ControlPage for why this gates on connectionState, not
+  // just snapshot presence. The shared placeholder keeps wording aligned and
+  // adds the FAQ paragraph that used to be missing here.
+  if (!snapshot || connectionState !== 'connected') {
+    return <AwaitingConnection connectionState={connectionState} showFaq />;
   }
 
   const s = snapshot;

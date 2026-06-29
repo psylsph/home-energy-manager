@@ -26,7 +26,6 @@ vi.mock('../../src/lib/api', () => ({
           import_tariff: 0.285,
           export_tariff: 0.15,
           import_tariff_config: null,
-          full_power_discharge_in_eco_mode: false,
         },
       };
     }

@@ -1,6 +1,7 @@
 import { useInverterStore } from '../store/useInverterStore';
 import { formatPower, formatEnergy, formatVoltage, formatCurrent } from '../lib/format';
 import SolarPowerChart from '../components/SolarPowerChart';
+import AwaitingConnection from '../components/AwaitingConnection';
 
 function pvColor(pv: number): string {
   return pv === 1 ? '#F59E0B' : '#3B82F6';
@@ -9,23 +10,10 @@ function pvColor(pv: number): string {
 export default function SolarPage() {
   const { snapshot, connectionState, panelGraphsEnabled } = useInverterStore();
 
-  if (!snapshot) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
-        <div className="w-10 h-10 border-4 border-flow-active border-t-transparent rounded-full animate-spin" />
-        <p className="text-text-secondary text-sm font-sans">
-          {connectionState === 'reconnecting'
-            ? 'Connection lost — reconnecting…'
-            : connectionState === 'disconnected'
-              ? 'Disconnected — will retry automatically'
-              : 'Waiting for data'}
-        </p>
-        <p className="text-text-secondary/60 text-xs font-sans text-center max-w-xs">
-          If data doesn't appear, try restarting the app and check your firewall settings.
-          See the <a href="https://github.com/psylsph/home-energy-manager/blob/master/FAQ.md" target="_blank" rel="noopener noreferrer" className="text-flow-active hover:underline">FAQ</a> for help.
-        </p>
-      </div>
-    );
+  // See BatteryPage / ControlPage for why this gates on connectionState, not
+  // just snapshot presence. The shared placeholder keeps wording aligned.
+  if (!snapshot || connectionState !== 'connected') {
+    return <AwaitingConnection connectionState={connectionState} showFaq />;
   }
 
   const hasPv2 = snapshot.pv2_power > 0 || snapshot.pv2_current > 0;

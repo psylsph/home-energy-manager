@@ -44,7 +44,7 @@ Switch the editor to a **base rate + override windows** model:
    = remaining slots) or keep the old shape and only expose the new one
    behind a flag. The migration story needs deciding before the editor
    rewrite.
-2. **Standing charge (#131).** A daily p/day field on the import side,
+2. **Standing Charge (#131).** A daily p/day field on the import side,
    added into History cost totals as `standing_charge × days_in_range`.
    Cleanest to ship together with the editor rewrite since both touch the
    same model.
@@ -56,7 +56,7 @@ Switch the editor to a **base rate + override windows** model:
 - Current editor: `src/pages/SettingsPage.tsx` (`TariffSlotEditor`)
 - Validation: `src/lib/tariff.ts` (`validateTariffConfig`,
   `isTariffConfigValid`)
-- Issues: #132 (supplier-shaped tariffs), #131 (standing charge)
+- Issues: #132 (supplier-shaped tariffs), #131 (Standing Charge)
 
 ---
 

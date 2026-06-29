@@ -817,17 +817,15 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "http_port": settings.http_port,
             "import_tariff": settings.import_tariff,
             "export_tariff": settings.export_tariff,
-            // Issue #131: surface the import-side standing charge so the
+            // Issue #131: surface the import-side Standing Charge so the
             // Settings page can hydrate its p/day input on load.
             "import_standing_charge_p_per_day": settings.import_standing_charge_p_per_day,
-            "full_power_discharge_in_eco_mode": settings.full_power_discharge_in_eco_mode,
             "import_tariff_config": settings.import_tariff_config,
             "export_tariff_config": settings.export_tariff_config,
             "hidden_panels": settings.hidden_panels,
             "evc_host": settings.evc_host,
             "evc_port": settings.evc_port,
             "disable_auto_discovery": settings.disable_auto_discovery,
-            "minimal_telemetry_mode": settings.minimal_telemetry_mode,
             "autostart_enabled": settings.autostart_enabled,
             "api_key": settings.api_key,
             "api_port": settings.api_port,
@@ -916,8 +914,8 @@ pub async fn update_settings(
     persist.auto_connect = true;
     persist.import_tariff = import_tariff;
     persist.export_tariff = export_tariff;
-    // Issue #131: standing charge is pence/day; we accept any non-negative
-    // number. Negative values are clamped to 0 — a standing charge that
+    // Issue #131: Standing Charge is pence/day; we accept any non-negative
+    // number. Negative values are clamped to 0 — a Standing Charge that
     // *credits* the customer doesn't exist in any real UK tariff and would
     // let a UI bug silently invert the cost graph.
     if let Some(sc) = body
@@ -925,12 +923,6 @@ pub async fn update_settings(
         .and_then(|v| v.as_f64())
     {
         persist.import_standing_charge_p_per_day = sc.max(0.0);
-    }
-    if let Some(enabled) = body
-        .get("full_power_discharge_in_eco_mode")
-        .and_then(|v| v.as_bool())
-    {
-        persist.full_power_discharge_in_eco_mode = enabled;
     }
     if let Some(ref cfg) = import_tariff_config {
         persist.import_tariff_config = Some(cfg.clone());
@@ -956,9 +948,6 @@ pub async fn update_settings(
     }
     if let Some(d) = body.get("disable_auto_discovery").and_then(|v| v.as_bool()) {
         persist.disable_auto_discovery = d;
-    }
-    if let Some(m) = body.get("minimal_telemetry_mode").and_then(|v| v.as_bool()) {
-        persist.minimal_telemetry_mode = m;
     }
     // Persist the user's autostart preference. The actual platform
     // autostart entry is driven from the frontend via the
@@ -1027,7 +1016,6 @@ pub async fn update_settings(
         settings.evc_host = disk.evc_host.clone();
         settings.evc_port = disk.evc_port;
         settings.disable_auto_discovery = disk.disable_auto_discovery;
-        settings.minimal_telemetry_mode = disk.minimal_telemetry_mode;
     }
 
     let connection_changed =
@@ -1090,12 +1078,6 @@ fn settings_log_fields(
             persist.import_standing_charge_p_per_day
         ));
     }
-    if is_present("full_power_discharge_in_eco_mode") {
-        out.push(format!(
-            "full_power_discharge_in_eco_mode={}",
-            persist.full_power_discharge_in_eco_mode
-        ));
-    }
     if is_present("import_tariff_config") {
         let slots = persist
             .import_tariff_config
@@ -1131,12 +1113,6 @@ fn settings_log_fields(
         out.push(format!(
             "disable_auto_discovery={}",
             persist.disable_auto_discovery
-        ));
-    }
-    if is_present("minimal_telemetry_mode") {
-        out.push(format!(
-            "minimal_telemetry_mode={}",
-            persist.minimal_telemetry_mode
         ));
     }
     if is_present("autostart_enabled") {
@@ -1193,10 +1169,6 @@ fn parse_settings(body: &serde_json::Value) -> Result<PollSettings, String> {
         evc_host: String::new(), // merged from disk settings separately
         evc_port: 502,
         disable_auto_discovery,
-        minimal_telemetry_mode: body
-            .get("minimal_telemetry_mode")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
     })
 }
 
@@ -1463,11 +1435,9 @@ pub async fn set_timed_charge(
 /// POST /api/control/timed-export — toggle scheduled DC export (HR59)
 /// independently of the Eco switch.
 ///
-/// Body: `{ "enabled": true }`. When enabling, HR27 is written according to
-/// the user-configured `full_power_discharge_in_eco_mode` capability override:
-/// flag on => leave Eco enabled (HR27=1), flag off => legacy safe export mode
-/// (HR27=0). Disabling only clears HR59 so Eco remains whatever the Eco toggle
-/// says.
+/// Body: `{ "enabled": true }`. When enabling, Eco is disabled (HR27=0)
+/// for legacy safe export mode, then HR59 is armed. Disabling only clears
+/// HR59 so Eco remains whatever the Eco toggle says.
 pub async fn set_timed_export(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -1476,10 +1446,8 @@ pub async fn set_timed_export(
     let mut writes = Vec::new();
 
     if enabled {
-        let keep_eco = crate::settings::Settings::load().full_power_discharge_in_eco_mode;
-        let power_mode = if keep_eco { 1 } else { 0 };
         for cmd in [
-            ControlCommand::SetBatteryPowerMode { mode: power_mode },
+            ControlCommand::SetBatteryPowerMode { mode: 0 },
             ControlCommand::SetEnableDischarge { enabled: true },
         ] {
             match cmd.encode() {
@@ -2512,7 +2480,7 @@ pub async fn get_history(
 
     // Resolve tariff configs only when a cost field is requested, falling back
     // to a flat single-slot config built from the legacy scalar rate.
-    // Issue #131: also carry the import-side standing charge (pence/day)
+    // Issue #131: also carry the import-side Standing Charge (pence/day)
     // so the cost series includes the daily fixed component.
     let cost_cfgs = if want_import_cost || want_export_income {
         let s = crate::settings::Settings::load();
@@ -2598,7 +2566,7 @@ pub async fn get_history(
                                 "today_export_kwh",
                                 export_cfg,
                                 *flat_export,
-                                // Issue #131: no export-side standing charge
+                                // Issue #131: no export-side Standing Charge
                                 // today (UI has no input for it).
                                 0.0,
                             )?;
@@ -2634,7 +2602,7 @@ pub async fn get_history(
 // matching the same range / offset the user is looking at in the graphs.
 // The cost is built server-side from the same `today_import_kwh` /
 // `today_export_kwh` counters and the configured tariffs the History page
-// uses, plus the standing charge applied once per local day covered by
+// uses, plus the Standing Charge applied once per local day covered by
 // the window (matching the per-day step pattern in the History cost
 // graph).
 // ---------------------------------------------------------------------------
@@ -2760,7 +2728,7 @@ pub async fn get_report(
 
     // Run the cost integration on a blocking thread — same SQLite mutex
     // pattern as `/api/history`. We need both the import and export cost
-    // series; the standing charge is the same on both (UK bills charge
+    // series; the Standing Charge is the same on both (UK bills charge
     // standing fees on the import side only, never on exports).
     let result = tokio::task::spawn_blocking(move || {
         let import_series = db.query_cost_series(
@@ -2777,7 +2745,7 @@ pub async fn get_report(
             "today_export_kwh",
             &export_tariff,
             flat_export,
-            // Issue #131: no export-side standing charge today (UI has no
+            // Issue #131: no export-side Standing Charge today (UI has no
             // input for it).
             0.0,
         )?;
@@ -4936,39 +4904,6 @@ mod tests {
                     .find(|w| w.address == HR_BATTERY_POWER_MODE)
                     .map(|w| w.value),
                 Some(0)
-            );
-            assert_eq!(
-                writes
-                    .iter()
-                    .find(|w| w.address == HR_ENABLE_DISCHARGE)
-                    .map(|w| w.value),
-                Some(1)
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn timed_export_capability_setting_leaves_eco_enabled() {
-        with_isolated_config_dir_async(|| async {
-            use crate::modbus::registers::{HR_BATTERY_POWER_MODE, HR_ENABLE_DISCHARGE};
-            let settings = crate::settings::Settings {
-                full_power_discharge_in_eco_mode: true,
-                ..Default::default()
-            };
-            settings.save().expect("save capability setting");
-
-            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
-            let body = serde_json::json!({ "enabled": true });
-            let _ = set_timed_export(State(state.clone()), Json(body)).await;
-            let writes = drain_pending_writes(&state).await;
-            assert_all_whitelisted(&writes);
-            assert_eq!(
-                writes
-                    .iter()
-                    .find(|w| w.address == HR_BATTERY_POWER_MODE)
-                    .map(|w| w.value),
-                Some(1)
             );
             assert_eq!(
                 writes
@@ -8242,7 +8177,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Issue #131: standing charge (pence/day) round-trip through the
+    // Issue #131: Standing Charge (pence/day) round-trip through the
     // settings API. The SettingsPage posts a numeric pence/day value;
     // the backend must persist it on disk and return it via GET so the
     // frontend can rehydrate the input. Negative values must be clamped
@@ -8262,7 +8197,7 @@ mod tests {
             let saved = crate::settings::Settings::load();
             assert!(
                 (saved.import_standing_charge_p_per_day - 54.86).abs() < 1e-9,
-                "standing charge must persist as the requested pence/day; got {}",
+                "Standing Charge must persist as the requested pence/day; got {}",
                 saved.import_standing_charge_p_per_day
             );
 
@@ -8277,31 +8212,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_settings_persists_full_power_discharge_in_eco_mode() {
-        with_isolated_config_dir_async(|| async {
-            let state = Arc::new(AppState::new());
-            let body = serde_json::json!({
-                "full_power_discharge_in_eco_mode": true,
-            });
-            let (status, _) = update_settings(State(state.clone()), Json(body)).await;
-            assert_eq!(status, StatusCode::OK);
-
-            let saved = crate::settings::Settings::load();
-            assert!(saved.full_power_discharge_in_eco_mode);
-
-            let (_, get_body) = get_settings(State(state)).await;
-            assert_eq!(
-                get_body["data"]["full_power_discharge_in_eco_mode"],
-                serde_json::json!(true)
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
     async fn update_settings_standing_charge_zero_clears_existing_value() {
         with_isolated_config_dir_async(|| async {
-            // Seed an existing standing charge on disk.
+            // Seed an existing Standing Charge on disk.
             let mut s = crate::settings::Settings::load();
             s.import_standing_charge_p_per_day = 54.86;
             s.save().expect("settings save");
@@ -8316,7 +8229,7 @@ mod tests {
             let saved = crate::settings::Settings::load();
             assert_eq!(
                 saved.import_standing_charge_p_per_day, 0.0,
-                "explicit 0 must clear the standing charge"
+                "explicit 0 must clear the Standing Charge"
             );
         })
         .await;
@@ -8324,7 +8237,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_settings_standing_charge_negative_is_clamped_to_zero() {
-        // Issue #131: a negative standing charge would invert the cost
+        // Issue #131: a negative Standing Charge would invert the cost
         // series (subtracting from the cumulative total). The backend
         // clamps any negative input to 0 so a UI typo can't silently
         // produce a misleading bill total.
@@ -8339,7 +8252,7 @@ mod tests {
             let saved = crate::settings::Settings::load();
             assert_eq!(
                 saved.import_standing_charge_p_per_day, 0.0,
-                "negative standing charge must be clamped to 0"
+                "negative Standing Charge must be clamped to 0"
             );
         })
         .await;
@@ -8349,7 +8262,7 @@ mod tests {
     async fn update_settings_omitted_standing_charge_preserves_disk_value() {
         // The SettingsPage POST always sends every tariff field. We must
         // not regress: an admin tool that PATCHes only some fields should
-        // leave the standing charge untouched.
+        // leave the Standing Charge untouched.
         with_isolated_config_dir_async(|| async {
             let mut s = crate::settings::Settings::load();
             s.import_standing_charge_p_per_day = 54.86;
@@ -8357,7 +8270,7 @@ mod tests {
 
             let state = Arc::new(AppState::new());
             // Empty body — no fields at all. The handler must skip the
-            // standing charge branch entirely.
+            // Standing Charge branch entirely.
             let body = serde_json::json!({});
             let (status, _) = update_settings(State(state.clone()), Json(body)).await;
             assert_eq!(status, StatusCode::OK);
@@ -8365,7 +8278,7 @@ mod tests {
             let saved = crate::settings::Settings::load();
             assert!(
                 (saved.import_standing_charge_p_per_day - 54.86).abs() < 1e-9,
-                "omitted standing charge must preserve the on-disk value"
+                "omitted Standing Charge must preserve the on-disk value"
             );
         })
         .await;
@@ -8415,12 +8328,12 @@ mod tests {
     // These tests verify the endpoint integrates against the same
     // `today_*_kwh` counters and tariff config the History cost graph uses
     // (so totals on the Power page match what the user sees on the History
-    // page), AND adds the import-side standing charge once per local day
+    // page), AND adds the import-side Standing Charge once per local day
     // the window covers (matching the per-day step pattern).
     // -----------------------------------------------------------------------
 
     /// Build an `AppState` with a fresh HistoryDb wired in, plus a
-    /// settings file with the supplied import tariff + standing charge.
+    /// settings file with the supplied import tariff + Standing Charge.
     /// Returns the state and the temp DB path so tests can clean up.
     ///
     /// Must be called from inside a `#[tokio::test]` runtime. The test
@@ -8505,7 +8418,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_report_returns_zero_costs_for_window_with_no_readings() {
-        // Empty history → import_cost == standing charge (the seeded "no
+        // Empty history → import_cost == Standing Charge (the seeded "no
         // data" bucket), export_income == 0. The endpoint must not 500.
         with_isolated_config_dir_async(|| async {
             let state = build_report_test_state(0.25, 0.15, 54.86);
@@ -8522,7 +8435,7 @@ mod tests {
             )
             .await;
             assert_eq!(status, StatusCode::OK);
-            // 24h window touches 2 local days, so standing charge = 2 ×
+            // 24h window touches 2 local days, so Standing Charge = 2 ×
             // 54.86p = £1.0972. No import kWh data, so import_cost_gbp
             // equals standing_charge_gbp exactly.
             let standing = json["standing_charge_gbp"].as_f64().unwrap();
@@ -8532,11 +8445,11 @@ mod tests {
             let days = json["days_in_range"].as_u64().unwrap();
             assert!(
                 (standing - 1.0972).abs() < 1e-3,
-                "24h window must credit 2 days of standing charge (£1.0972); got {standing}"
+                "24h window must credit 2 days of Standing Charge (£1.0972); got {standing}"
             );
             assert!(
                 (import_cost - 1.0972).abs() < 1e-3,
-                "import cost must equal standing charge when there are no kWh readings; got {import_cost}"
+                "import cost must equal Standing Charge when there are no kWh readings; got {import_cost}"
             );
             assert!(
                 export_income.abs() < 1e-6,
@@ -8544,7 +8457,7 @@ mod tests {
             );
             assert!(
                 (net_cost - 1.0972).abs() < 1e-3,
-                "net cost must equal standing charge (no kWh to offset); got {net_cost}"
+                "net cost must equal Standing Charge (no kWh to offset); got {net_cost}"
             );
             assert_eq!(days, 2, "24h window must report 2 distinct local days");
 
@@ -8555,7 +8468,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_report_combines_kwh_cost_and_standing_charge() {
-        // 1 day of 5 kWh import at £0.25 plus 54.86p/day standing charge.
+        // 1 day of 5 kWh import at £0.25 plus 54.86p/day Standing Charge.
         // import_cost = 5 × 0.25 + 0.5486 = 1.7986.
         // days_in_range = 2 (24h crosses a midnight).
         with_isolated_config_dir_async(|| async {
@@ -8589,11 +8502,11 @@ mod tests {
             let import_cost = json["import_cost_gbp"].as_f64().unwrap();
             // The exact value depends on the cost-integration walk
             // including the daily counter reset, but it must include
-            // BOTH the kWh component AND the standing charge. We allow
+            // BOTH the kWh component AND the Standing Charge. We allow
             // a generous tolerance because the ramp shape varies.
             assert!(
                 import_cost > 1.25 + 0.5486 - 0.1,
-                "import cost must include both kWh cost (~£1.25) and standing charge (£0.5486); got {import_cost}"
+                "import cost must include both kWh cost (~£1.25) and Standing Charge (£0.5486); got {import_cost}"
             );
             assert!(
                 import_cost < 1.25 + 1.10 + 0.1,
@@ -8606,10 +8519,10 @@ mod tests {
 
     #[tokio::test]
     async fn get_report_standing_charge_scales_with_days_in_range() {
-        // 7-day window: standing charge = 7 × 54.86p = £3.8402 (plus 8
+        // 7-day window: Standing Charge = 7 × 54.86p = £3.8402 (plus 8
         // days touched at the calendar boundaries, depending on exact
         // local time the test runs). The key invariant is that more
-        // days → higher standing charge.
+        // days → higher Standing Charge.
         with_isolated_config_dir_async(|| async {
             let state = build_report_test_state(0.25, 0.15, 54.86);
             let (status_24h, json_24h) = get_report(
@@ -8643,14 +8556,14 @@ mod tests {
             let sc_7d = json_7d["standing_charge_gbp"].as_f64().unwrap();
             assert!(
                 sc_7d > sc_24h,
-                "7-day window must have a larger standing charge than 24h (24h={sc_24h}, 7d={sc_7d})"
+                "7-day window must have a larger Standing Charge than 24h (24h={sc_24h}, 7d={sc_7d})"
             );
             // 7-day window touches 7-8 distinct local days; 24h touches
-            // 2. The 7-day standing charge must be roughly 3.5-4× the
+            // 2. The 7-day Standing Charge must be roughly 3.5-4× the
             // 24h one (allowing for the boundary day count difference).
             assert!(
                 sc_7d > sc_24h * 3.0,
-                "7-day standing charge must be substantially larger than 24h (24h={sc_24h}, 7d={sc_7d})"
+                "7-day Standing Charge must be substantially larger than 24h (24h={sc_24h}, 7d={sc_7d})"
             );
 
         })
@@ -8659,7 +8572,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_report_zero_standing_charge_omits_per_day_addition() {
-        // When the user has not configured a standing charge, the cost
+        // When the user has not configured a Standing Charge, the cost
         // totals reflect the per-kWh component only. The standing_charge
         // field must be 0, not silently summed from defaults.
         with_isolated_config_dir_async(|| async {
@@ -8680,7 +8593,7 @@ mod tests {
             assert_eq!(
                 json["standing_charge_gbp"].as_f64().unwrap(),
                 0.0,
-                "no configured standing charge → £0 standing charge"
+                "no configured Standing Charge → £0 Standing Charge"
             );
             assert_eq!(json["standing_charge_p_per_day"].as_f64().unwrap(), 0.0);
         })
@@ -9278,12 +9191,6 @@ mod tests {
                     "disable_auto_discovery=false",
                     false,
                 ),
-                (
-                    "minimal_telemetry_mode",
-                    json!(true),
-                    "minimal_telemetry_mode=true",
-                    true,
-                ),
             ] {
                 let body = serde_json::json!({ field: value });
                 let (status, json) = update_settings(State(state.clone()), Json(body)).await;
@@ -9301,7 +9208,6 @@ mod tests {
                 let actual = match field {
                     "autostart_enabled" => saved.autostart_enabled,
                     "disable_auto_discovery" => saved.disable_auto_discovery,
-                    "minimal_telemetry_mode" => saved.minimal_telemetry_mode,
                     _ => unreachable!(),
                 };
                 assert_eq!(actual, expected_disk, "{field} must be persisted");

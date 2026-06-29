@@ -348,13 +348,13 @@ pub fn generate_daily_summary_text(
             }
         }
     }
-    // Issue #131: when a standing charge is configured, list it as a separate
+    // Issue #131: when a Standing Charge is configured, list it as a separate
     // line so the user can see where the daily fixed cost is coming from.
     // The amount is already rolled into the £{:.2} shown above for Import
     // and into the "Net cost" total below.
     if standing_charge_gbp > 0.0 {
         msg.push_str(&format!(
-            "   ↳ Standing charge: <b>£{:.2}</b> ({}p/day)\n",
+            "   ↳ Standing Charge: <b>£{:.2}</b> ({}p/day)\n",
             standing_charge_gbp, settings.import_standing_charge_p_per_day
         ));
     }
@@ -1198,12 +1198,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Issue #131: standing charge in the daily consumption report.
+    // Issue #131: Standing Charge in the daily consumption report.
     //
-    // The report must roll the configured import-side standing charge into
+    // The report must roll the configured import-side Standing Charge into
     // both the import cost and the net-cost lines, AND surface a labelled
     // footnote so the user can see where the daily fixed cost is coming
-    // from. When no standing charge is configured, the message must look
+    // from. When no Standing Charge is configured, the message must look
     // exactly as it did before (no stray footnote).
     // -----------------------------------------------------------------------
 
@@ -1236,13 +1236,13 @@ mod tests {
     #[test]
     fn test_daily_report_no_standing_charge_omits_footnote() {
         // Baseline: when `import_standing_charge_p_per_day` is 0 (the
-        // default), the report must NOT add a "Standing charge" line. This
+        // default), the report must NOT add a "Standing Charge" line. This
         // guards against regression for users who haven't configured one.
         let s = settings_with_flat_import(0.25);
         let msg =
             generate_daily_summary_text(&import_rows(), "2026-06-27", &s).expect("enough data");
         assert!(
-            !msg.contains("Standing charge"),
+            !msg.contains("Standing Charge"),
             "report must not show a standing-charge footnote when none is configured"
         );
         // And the import line should still be £0.25 (1 kWh × £0.25).
@@ -1254,7 +1254,7 @@ mod tests {
 
     #[test]
     fn test_daily_report_includes_standing_charge_in_net_cost() {
-        // With a 54.86p/day standing charge, the net cost must equal
+        // With a 54.86p/day Standing Charge, the net cost must equal
         // per-kWh cost (£0.25) + standing (£0.5486) = £0.7986, rounded to
         // 2dp. This is the headline behaviour the user asked for: a
         // bill-accurate total.
@@ -1264,7 +1264,7 @@ mod tests {
             generate_daily_summary_text(&import_rows(), "2026-06-27", &s).expect("enough data");
         assert!(
             msg.contains("Net cost: <b>£0.80</b>"),
-            "net cost should include the standing charge (0.25 + 0.5486 ≈ 0.80); got: {msg}"
+            "net cost should include the Standing Charge (0.25 + 0.5486 ≈ 0.80); got: {msg}"
         );
     }
 
@@ -1277,13 +1277,13 @@ mod tests {
         let msg =
             generate_daily_summary_text(&import_rows(), "2026-06-27", &s).expect("enough data");
         assert!(
-            msg.contains("Standing charge:"),
+            msg.contains("Standing Charge:"),
             "expected a labelled standing-charge footnote; got: {msg}"
         );
         // The 2dp value (£0.55).
         assert!(
             msg.contains("£0.55"),
-            "footnote should show the standing charge rounded to 2dp; got: {msg}"
+            "footnote should show the Standing Charge rounded to 2dp; got: {msg}"
         );
         // And the originating p/day figure so the user can verify the
         // setting they entered.
@@ -1295,7 +1295,7 @@ mod tests {
 
     #[test]
     fn test_daily_report_negative_standing_charge_is_clamped() {
-        // A negative standing charge is nonsensical (no tariff credits a
+        // A negative Standing Charge is nonsensical (no tariff credits a
         // daily fee). The implementation clamps to 0 — the resulting
         // report must look like the no-standing-charge baseline.
         let mut s = settings_with_flat_import(0.25);
@@ -1303,8 +1303,8 @@ mod tests {
         let msg =
             generate_daily_summary_text(&import_rows(), "2026-06-27", &s).expect("enough data");
         assert!(
-            !msg.contains("Standing charge"),
-            "negative standing charge must be clamped (no footnote expected); got: {msg}"
+            !msg.contains("Standing Charge"),
+            "negative Standing Charge must be clamped (no footnote expected); got: {msg}"
         );
         assert!(
             msg.contains("Net cost: <b>£0.25</b>"),

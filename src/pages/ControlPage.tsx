@@ -4,6 +4,7 @@ import { useAction } from '../hooks/useAction';
 import { apiPost, apiGet } from '../lib/api';
 import { deviceSupportsEps, deviceSupportsTimedDischarge } from '../lib/deviceCapabilities';
 import type { ScheduleSlot } from '../lib/types';
+import AwaitingConnection from '../components/AwaitingConnection';
 
 /**
  * Front-end charging-mode dropdown values. Maps 1:1 to the backend
@@ -1637,27 +1638,21 @@ export default function ControlPage() {
   // When the inverter isn't currently connected, controls would be a lie:
   // the schedule/slot editors bind to a stale snapshot, the Quick Actions
   // and Save buttons POST against a backend that can't write to the dongle,
-  // and the sliders present values the user can't trust. Render a
-  // reconnecting screen at the top of the JSX instead — the existing
-  // Rules of Hooks tests forbid an early `return` here because the rest
-  // of the component declares many `useState` / `useEffect` calls below.
+  // and the sliders present values the user can't trust. The gate is
+  // evaluated at the top of the JSX (after every hook below) rather than as
+  // an early `return` because the rest of the component declares many
+  // `useState` / `useEffect` calls — React Rules of Hooks forbids returning
+  // before them.
   //
-  // We gate on `connectionState !== 'connected'` rather than `snapshot == null`
+  // We gate on `!snapshot || connectionState !== 'connected'` (matching
+  // Battery / Solar / Inverter) rather than `snapshot == null` alone,
   // because we *do* often still have a stale snapshot during a reconnect
   // cycle — the poll loop clears `latest_snapshot` on disconnect, but the
   // backend's last good broadcast lingers on the WS until the next
   // Connection { state: Reconnecting } frame. Showing controls against that
-  // stale data was the source of the "really confusing" report.
-  const [manualReconnecting, setManualReconnecting] = useState(false);
-  const handleManualReconnect = useCallback(async () => {
-    setManualReconnecting(true);
-    try {
-      await fetch('/api/reconnect', { method: 'POST' });
-    } catch { /* swallow — the poll loop's own back-off retries anyway */ }
-    // Reset after a few seconds in case the request doesn't trigger a state change.
-    setTimeout(() => setManualReconnecting(false), 5000);
-  }, []);
-  const isConnected = connectionState === 'connected';
+  // stale data was the source of the "really confusing" report. The shared
+  // <AwaitingConnection/> placeholder carries the aligned wording, the
+  // host line, the Retry button and the "controls disabled" note.
 
   // Battery limits: local draft state while dragging, otherwise from snapshot
   const [draftReserve, setDraftReserve] = useState<number | null>(null);
@@ -2073,34 +2068,14 @@ export default function ControlPage() {
   // none of the controls (and their stale-snapshot bindings) leak through.
   // Rendered at the top of the return so the rest of the component's
   // hooks remain unconditional below (React Rules of Hooks).
-  if (!isConnected) {
+  if (!snapshot || connectionState !== 'connected') {
     return (
-      <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
-        <div className="w-10 h-10 border-4 border-flow-active border-t-transparent rounded-full animate-spin" />
-        <p className="text-text-secondary text-sm font-sans">
-          {connectionState === 'reconnecting'
-            ? 'Connection lost — reconnecting…'
-            : connectionState === 'disconnected'
-              ? 'Disconnected — will retry automatically'
-              : 'Waiting for data'}
-        </p>
-        {connectedHost && (
-          <p className="text-text-secondary/60 text-xs font-sans">
-            Host: {connectedHost.replace(/:.*$/, '')}
-          </p>
-        )}
-        <button
-          onClick={handleManualReconnect}
-          disabled={manualReconnecting}
-          className="px-4 py-1.5 text-xs font-semibold rounded-lg bg-bg-surface hover:bg-white/10 border border-white/10 transition-colors disabled:opacity-50"
-        >
-          {manualReconnecting ? 'Reconnecting…' : 'Retry now'}
-        </button>
-        <p className="text-text-secondary/60 text-xs font-sans text-center max-w-xs">
-          Controls are disabled while the inverter is unreachable. They will
-          reappear automatically once the connection is restored.
-        </p>
-      </div>
+      <AwaitingConnection
+        connectionState={connectionState}
+        connectedHost={connectedHost}
+        showRetry
+        extraNote="Controls are disabled while the inverter is unreachable. They will reappear automatically once the connection is restored."
+      />
     );
   }
 
