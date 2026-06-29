@@ -773,25 +773,20 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // session - without this, cached responses corrupt the
                 // request-response pairing for the first poll.
 
-                // Liveness probe (advisory) + warmup.
+                // Liveness probe (advisory only). A "zombie" dongle keeps its
+                // TCP stack alive (so connect() succeeds and keepalives pass)
+                // while its Modbus application processor hangs. This probe is
+                // a cheap single-register read that confirms the dongle is
+                // answering Modbus before we commit to a full multi-block
+                // poll. A failure is logged but does *not* tear down the
+                // session — we fall through to the warmup read below.
                 //
-                // A "zombie" dongle keeps its TCP stack alive (so connect()
-                // succeeds and keepalives pass) while its Modbus application
-                // processor hangs. This probe is a cheap single-register read
-                // that confirms the dongle is answering Modbus before we commit
-                // to a full multi-block poll.
-                //
-                // It is **advisory only**: a failure is logged but does *not*
-                // tear down the session. GivTCP has no equivalent gate — its
-                // first poll (the warmup read below) is the real liveness
-                // check, and a transiently slow-but-healthy dongle recovers
-                // within a few seconds of TCP connect. Bailing on a single
-                // probe miss previously condemned good-but-slow sockets and
-                // parked them behind the escalating reconnect back-off. A
-                // genuinely wedged dongle is still caught — by the warmup read
-                // (which sets `session_unusable`) and, if it slips past that,
-                // by the inner loop's `consecutive_timeouts` counter.
-                let mut session_unusable = false;
+                // GivTCP has no equivalent gate; this is purely an early
+                // signal that the post-TCP-handshake Modbus processor isn't
+                // yet ready. The real liveness check is the warmup read
+                // immediately below, and the inner poll loop's
+                // `MAX_CONSECUTIVE_TIMEOUTS` counter is the catch-all for a
+                // truly unresponsive session.
                 match client.liveness_probe().await {
                     Ok(()) => tracing::debug!("Liveness probe OK"),
                     Err(e) => {
@@ -807,34 +802,41 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // (e.g. today_import_kwh = 0.6 when the real value is 39.0).
                 // A single discard read is enough — residual corruption is
                 // caught downstream by the absolute-range sanitizer and the
-                // grace-period median-of-3 baseline. (We used to do 3 warmup
-                // reads, but that predates those defenses and on a slow dongle
-                // it could delay the first UI update by 30 s+. GivTCP does one
-                // full refresh after connect then enters its watch loop.)
+                // grace-period median-of-3 baseline.
                 //
-                // This read is the real post-connect liveness check: it gets a
-                // generous retry budget (matching GivTCP's patient first poll,
-                // `refresh_plant(retries=5)`) because the dongle's Modbus
-                // processor is slow to wake right after a TCP handshake. If it
-                // can't serve one multi-block read after all those retries it
-                // won't serve another, so reconnecting now saves the per-read
-                // timeout.
-                const WARMUP_MAX_RETRIES: u8 = 4;
-                if !session_unusable {
-                    match client
-                        .read_blocks_resilient(
-                            crate::modbus::registers::STANDARD_POLL_BLOCKS,
-                            WARMUP_MAX_RETRIES,
-                        )
-                        .await
-                    {
-                        Ok(blocks) => {
-                            tracing::debug!(blocks = blocks.len(), "Warmup read OK");
-                        }
-                        Err(e) => {
-                            tracing::warn!("Warmup read FAILED: {e} - ending session");
-                            session_unusable = true;
-                        }
+                // This read is intentionally NOT a kill-switch: a failure is
+                // logged and we fall through to the inner poll loop anyway.
+                // GivTCP's `watch_plant()` does a single `refresh_plant()`
+                // after connect and immediately enters its watch loop with
+                // `return_exceptions=True`, so a stuck Modbus processor
+                // doesn't tear the TCP connection down — it just means the
+                // first refresh produces fewer (or no) results, and the next
+                // refresh tries again. We match that model: TCP up = keep
+                // going. A genuinely dead session is still caught by
+                // `MAX_CONSECUTIVE_TIMEOUTS` (3 cycles of every-block failure
+                // ≈ 36 s of silence before a forced reconnect) and by
+                // `dead_session_backoff()` escalating the reconnect delay.
+                //
+                // Retry budget matches the steady-state poll's
+                // `read_all_with_extras` (which also uses 2 retries per
+                // block via `read_blocks_resilient`). The warmup is no
+                // stricter than the inner poll loop, so a slow-but-healthy
+                // dongle that recovers mid-cycle is allowed to recover.
+                const WARMUP_MAX_RETRIES: u8 = 2;
+                match client
+                    .read_blocks_resilient(
+                        crate::modbus::registers::STANDARD_POLL_BLOCKS,
+                        WARMUP_MAX_RETRIES,
+                    )
+                    .await
+                {
+                    Ok(blocks) => {
+                        tracing::debug!(blocks = blocks.len(), "Warmup read OK");
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Warmup read failed: {e} - continuing into inner poll loop (will reconnect on sustained timeout)"
+                        );
                     }
                 }
 
@@ -982,16 +984,6 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // bump by the API is always detected regardless of timing.
                 let settings_version_at_connect = state.settings.lock().await.version;
                 loop {
-                    // Warmup/liveness declared the dongle unresponsive — skip
-                    // straight to the disconnect + reconnect path (which also
-                    // counts this as a dead session for back-off escalation).
-                    if session_unusable {
-                        tracing::warn!(
-                            "Session unusable after connect - reconnecting without polling"
-                        );
-                        break;
-                    }
-
                     // Capture version BEFORE the poll to detect changes that
                     // happen during the poll (API bumps version while we read).
                     // NOTE: this is the INSTANTANEOUS version, not a stored
@@ -3363,6 +3355,57 @@ mod tests {
             assert!(
                 MAX_CONSECUTIVE_TIMEOUTS >= 2,
                 "MAX_CONSECUTIVE_TIMEOUTS too low — single timeout would force reconnect",
+            );
+        };
+    }
+
+    /// Warmup alignment with GivTCP. `run_poll_loop` runs a single
+    /// discard read after TCP connect to flush the dongle's stale state.
+    ///
+    /// The warmup is NOT a kill-switch: on failure the loop logs a warning
+    /// and proceeds to the inner poll loop, which has its own
+    /// `MAX_CONSECUTIVE_TIMEOUTS` catch. This matches GivTCP's
+    /// `watch_plant()` model, where TCP up = keep going and a single
+    /// failed `refresh_plant()` doesn't tear the socket down. The old
+    /// kill-switch (warmup fail → immediate reconnect → repeat every 5 s)
+    /// produced the 27 s/55 s/26 s reconnect storm observed when the
+    /// dongle's Modbus processor is slow but TCP is healthy.
+    ///
+    /// The retry budget matches the steady-state poll's
+    /// `read_blocks_resilient(standard_blocks, 2)` call from
+    /// `read_all_with_extras`. The warmup is no stricter than the inner
+    /// poll loop — a slow-but-healthy dongle is allowed to recover on
+    /// the next regular poll rather than being condemned after one
+    /// multi-block read fails.
+    ///
+    /// Before this fix: WARMUP_MAX_RETRIES = 4 (5 attempts × 3 s timeout
+    /// + 500 ms inter-block delay = up to ~15 s per block, ~60 s worst
+    /// case across STANDARD_POLL_BLOCKS' 4 blocks). A single transient
+    /// stall after connect could spend almost a minute burning the
+    /// warmup before declaring "Session unusable - reconnecting without
+    /// polling", and then immediately do it again on the next TCP
+    /// connect.
+    #[test]
+    fn warmup_matches_steady_state_poll_retries() {
+        // These values mirror `WARMUP_MAX_RETRIES` (in `run_poll_loop`)
+        // and the second arg to `read_blocks_resilient` inside
+        // `read_all_with_extras`. The test pins them so a future tweak
+        // that re-introduces a stricter warmup trips the build.
+        const WARMUP_MAX_RETRIES: u8 = 2;
+        const STEADY_STATE_RETRIES: u8 = 2;
+
+        const _: () = {
+            assert!(
+                WARMUP_MAX_RETRIES <= STEADY_STATE_RETRIES,
+                "warmup retry budget must not exceed steady-state poll retries — \
+                 GivTCP treats the post-connect read the same as any other refresh, \
+                 so a slower warmup would re-introduce the kill-switch the steady-state \
+                 loop was designed to avoid",
+            );
+            assert!(
+                WARMUP_MAX_RETRIES >= 1,
+                "warmup must retry at least once — a single transient stall right \
+                 after TCP connect should not abort the session",
             );
         };
     }

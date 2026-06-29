@@ -196,7 +196,7 @@ describe('<ControlPage/> — Load Discharge Limiter status (issue #158)', () => 
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     cleanup();
-    useInverterStore.setState({ snapshot: null });
+    useInverterStore.setState({ snapshot: null, connectionState: 'disconnected' });
   });
 
   /** Resolve the Load Discharge Limiter wrapper so assertions can be
@@ -227,6 +227,7 @@ describe('<ControlPage/> — Load Discharge Limiter status (issue #158)', () => 
         home_power: 10000,
       }),
       developerMode: false,
+      connectionState: 'connected',
     });
     render(<ControlPage />);
 
@@ -256,6 +257,7 @@ describe('<ControlPage/> — Load Discharge Limiter status (issue #158)', () => 
         home_power: 5000, // below 7 kW threshold
       }),
       developerMode: false,
+      connectionState: 'connected',
     });
     render(<ControlPage />);
 
@@ -280,6 +282,7 @@ describe('<ControlPage/> — Load Discharge Limiter status (issue #158)', () => 
         home_power: 10000,
       }),
       developerMode: false,
+      connectionState: 'connected',
     });
     render(<ControlPage />);
 
@@ -301,6 +304,7 @@ describe('<ControlPage/> — Load Discharge Limiter status (issue #158)', () => 
         home_power: 2000,
       }),
       developerMode: false,
+      connectionState: 'connected',
     });
     render(<ControlPage />);
 
@@ -321,6 +325,7 @@ describe('<ControlPage/> — Load Discharge Limiter status (issue #158)', () => 
         home_power: 10000,
       }),
       developerMode: false,
+      connectionState: 'connected',
     });
     render(<ControlPage />);
 
@@ -340,6 +345,7 @@ describe('<ControlPage/> — Load Discharge Limiter status (issue #158)', () => 
         home_power: 0,
       }),
       developerMode: false,
+      connectionState: 'connected',
     });
     render(<ControlPage />);
 
@@ -361,6 +367,7 @@ describe('<ControlPage/> — Load Discharge Limiter status (issue #158)', () => 
         home_power: 2000,
       }),
       developerMode: false,
+      connectionState: 'connected',
     });
     render(<ControlPage />);
 
@@ -381,6 +388,7 @@ describe('<ControlPage/> — Load Discharge Limiter status (issue #158)', () => 
         home_power: 0,
       }),
       developerMode: false,
+      connectionState: 'connected',
     });
     render(<ControlPage />);
 

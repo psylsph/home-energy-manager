@@ -1525,12 +1525,38 @@ function LoadLimiterSection() {
 
 
 export default function ControlPage() {
-  const { snapshot, developerMode } = useInverterStore();
+  const { snapshot, developerMode, connectionState, connectedHost } = useInverterStore();
   const [ecoSaving, setEcoSaving] = useState(false);
   const [timedChargeSaving, setTimedChargeSaving] = useState(false);
   const [timedExportSaving, setTimedExportSaving] = useState(false);
   const [timedDischargeSaving, setTimedDischargeSaving] = useState(false);
   const [timedDischargeOverride, setTimedDischargeOverride] = useState<boolean | null>(null);
+
+  // ---- Connection gate ----
+  // When the inverter isn't currently connected, controls would be a lie:
+  // the schedule/slot editors bind to a stale snapshot, the Quick Actions
+  // and Save buttons POST against a backend that can't write to the dongle,
+  // and the sliders present values the user can't trust. Render a
+  // reconnecting screen at the top of the JSX instead — the existing
+  // Rules of Hooks tests forbid an early `return` here because the rest
+  // of the component declares many `useState` / `useEffect` calls below.
+  //
+  // We gate on `connectionState !== 'connected'` rather than `snapshot == null`
+  // because we *do* often still have a stale snapshot during a reconnect
+  // cycle — the poll loop clears `latest_snapshot` on disconnect, but the
+  // backend's last good broadcast lingers on the WS until the next
+  // Connection { state: Reconnecting } frame. Showing controls against that
+  // stale data was the source of the "really confusing" report.
+  const [manualReconnecting, setManualReconnecting] = useState(false);
+  const handleManualReconnect = useCallback(async () => {
+    setManualReconnecting(true);
+    try {
+      await fetch('/api/reconnect', { method: 'POST' });
+    } catch { /* swallow — the poll loop's own back-off retries anyway */ }
+    // Reset after a few seconds in case the request doesn't trigger a state change.
+    setTimeout(() => setManualReconnecting(false), 5000);
+  }, []);
+  const isConnected = connectionState === 'connected';
 
   // Battery limits: local draft state while dragging, otherwise from snapshot
   const [draftReserve, setDraftReserve] = useState<number | null>(null);
@@ -1914,6 +1940,41 @@ export default function ControlPage() {
     } catch (e: unknown) { console.warn("Slot save failed:", e); }
     setActivePowerSaving(false);
   };
+
+  // Connection gate: when not connected, short-circuit the entire JSX so
+  // none of the controls (and their stale-snapshot bindings) leak through.
+  // Rendered at the top of the return so the rest of the component's
+  // hooks remain unconditional below (React Rules of Hooks).
+  if (!isConnected) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
+        <div className="w-10 h-10 border-4 border-flow-active border-t-transparent rounded-full animate-spin" />
+        <p className="text-text-secondary text-sm font-sans">
+          {connectionState === 'reconnecting'
+            ? 'Connection lost — reconnecting…'
+            : connectionState === 'disconnected'
+              ? 'Disconnected — will retry automatically'
+              : 'Waiting for data'}
+        </p>
+        {connectedHost && (
+          <p className="text-text-secondary/60 text-xs font-sans">
+            Host: {connectedHost.replace(/:.*$/, '')}
+          </p>
+        )}
+        <button
+          onClick={handleManualReconnect}
+          disabled={manualReconnecting}
+          className="px-4 py-1.5 text-xs font-semibold rounded-lg bg-bg-surface hover:bg-white/10 border border-white/10 transition-colors disabled:opacity-50"
+        >
+          {manualReconnecting ? 'Reconnecting…' : 'Retry now'}
+        </button>
+        <p className="text-text-secondary/60 text-xs font-sans text-center max-w-xs">
+          Controls are disabled while the inverter is unreachable. They will
+          reappear automatically once the connection is restored.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-6 max-w-2xl mx-auto px-4 py-6">
