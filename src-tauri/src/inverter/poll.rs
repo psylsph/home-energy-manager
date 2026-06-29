@@ -2394,7 +2394,14 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     // don't touch it this poll. We still set the
                                     // snapshot fields below so the frontend sees
                                     // consistent state, but we skip the write loop.
-                                    let skip_writes = matches!(action, AgileSlotAction::Defer);
+                                    // Skip writes when scope is Off and we're idle — the
+                                    // "disarm any preloaded slot" path was clearing the user's
+                                    // charge/discharge schedule on every poll cycle. Only write
+                                    // AgileClearActiveSlot when the scope is actually active
+                                    // (mid-band price) so the user's manual schedule survives.
+                                    let skip_writes = matches!(action, AgileSlotAction::Defer)
+                                        || (scope == crate::settings::AgileScope::Off
+                                            && matches!(action, AgileSlotAction::Idle));
                                     let cmd = match &action {
                                         AgileSlotAction::Charge {
                                             start_hhmm,
