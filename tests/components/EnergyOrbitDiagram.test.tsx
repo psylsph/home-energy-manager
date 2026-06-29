@@ -96,6 +96,50 @@ describe('EnergyOrbitDiagram', () => {
     expect(rows).toEqual(['Gen 3 Hybrid', '30.0°C', 'Eco']);
   });
 
+  it('widens the inverter mini-card pill so the longest battery-mode label fits (issue: AC coupled + Timed Demand Discharging)', () => {
+    // The pill background is the only <rect> inside the mini-card group.
+    // Before the fix it was 144 viewBox units wide, which clipped
+    // "Timed Demand (Discharging)" (25 chars at fontSize 11) on AC-coupled
+    // inverters whose battery-mode string appended "(Discharging)".
+    const { container } = render(
+      <EnergyOrbitDiagram
+        snapshot={makeSnapshot({
+          device_type_display: 'AC Coupled',
+          battery_mode: 'timed_demand',
+          enable_discharge: true,
+          discharge_slots: [
+            { start_hour: 0, start_minute: 0, end_hour: 23, end_minute: 59, enabled: true },
+          ],
+          battery_state: 'discharging',
+          battery_power: 1500,
+          home_power: 800,
+        })}
+      />,
+    );
+    const card = container.querySelector('[data-testid="inverter-mini-card"]');
+    expect(card).not.toBeNull();
+    const pill = card!.querySelector('rect');
+    expect(pill).not.toBeNull();
+
+    const pillWidth = parseFloat(pill!.getAttribute('width') ?? '0');
+    const pillX = parseFloat(pill!.getAttribute('x') ?? '0');
+    // 144 was the old width — pin that we widened it. The upper bound keeps
+    // the pill from dominating the bottom of the diagram; only the third
+    // row ("Timed Demand (Discharging)") needs the extra room.
+    expect(pillWidth).toBeGreaterThan(144);
+    expect(pillWidth).toBeLessThanOrEqual(180);
+
+    // The pill is centred on the SVG's CX — confirm so a future change to
+    // `x={CX - ...}` does not accidentally drift the chip off-axis.
+    const CX = 260;
+    expect(pillX + pillWidth / 2).toBeCloseTo(CX, 5);
+
+    // Sanity: the worst-case battery-mode label renders into the third row
+    // — guard against a future refactor that drops the label altogether.
+    const rows = Array.from(card!.querySelectorAll('text')).map((t) => t.textContent ?? '');
+    expect(rows[2]).toBe('Timed Demand (Discharging)');
+  });
+
   it('does not crash on a Gateway snapshot with null telemetry fields', () => {
     // The Gateway (DTC 0x70xx) doesn't expose inverter/battery temperature or
     // PV voltage; the backend sends f32::NAN which serde_json serialises as

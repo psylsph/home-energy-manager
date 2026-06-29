@@ -733,11 +733,17 @@ function EnergyOrbitDiagramInner({
             >
               {/* Translucent pill background so the chip stays readable over
                   spokes and flow dots. Sits inside the outer orbit ring,
-                  at the bottom of the SVG below the battery/grid satellites. */}
+                  at the bottom of the SVG below the battery/grid satellites.
+                  Width is sized for the longest realistic battery-mode label
+                  "Timed Demand (Discharging)" (25 chars at fontSize 11
+                  sans-serif ≈ ~140 px) plus a small horizontal margin on
+                  each side. Without the widen the third row clipped
+                  against the pill border on AC-coupled inverters whose
+                  battery mode appended "(Discharging)". */}
               <rect
-                x={CX - 72}
-                y={390}
-                width={144}
+                x={CX - 84}
+                y={385}
+                width={168}
                 height={48}
                 rx={10}
                 fill="var(--app-bg-surface, #161B22)"
@@ -747,7 +753,7 @@ function EnergyOrbitDiagramInner({
               />
               <text
                 x={CX}
-                y={404}
+                y={399}
                 textAnchor="middle"
                 fill="var(--app-text-primary, #F0F6FC)"
                 fontSize={13}
@@ -758,7 +764,7 @@ function EnergyOrbitDiagramInner({
               </text>
               <text
                 x={CX}
-                y={420}
+                y={415}
                 textAnchor="middle"
                 fill="var(--app-text-secondary, #8B949E)"
                 fontSize={11}
@@ -769,7 +775,7 @@ function EnergyOrbitDiagramInner({
               </text>
               <text
                 x={CX}
-                y={434}
+                y={429}
                 textAnchor="middle"
                 fill="var(--app-text-secondary, #8B949E)"
                 fontSize={11}
