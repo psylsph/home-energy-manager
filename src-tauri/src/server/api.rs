@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::inverter::encoder::{ControlCommand, RegisterWrite};
-use crate::inverter::model::DeviceType;
+use crate::inverter::model::{DeviceType, InverterSnapshot};
 use crate::inverter::poll::{AppState, ForceChargeRevert, ForceDischargeRevert, PollSettings};
 use crate::modbus::registers::encode_hhmm;
 use crate::settings::TariffConfig;
@@ -750,6 +750,47 @@ fn build_force_discharge_stop_writes(
     writes
 }
 
+/// Build a minimal safe Stop Discharge sequence after an app restart.
+///
+/// The full stop path normally restores a `ForceDischargeRevert` captured
+/// when Force Discharge was started. That snapshot is volatile and is lost
+/// when the app restarts. If the inverter is still armed for discharge after
+/// the restart, the Quick Actions button still renders as "Stop Discharge",
+/// but the old no-revert path returned 400 and queued no register writes at
+/// all. In that restart-recovery case we cannot restore the user's previous
+/// schedule, but we can safely stop the active discharge: clear the discharge
+/// enable/force flag and return to self-consumption.
+fn build_force_discharge_restart_stop_writes(
+    device_type: DeviceType,
+    snapshot: &InverterSnapshot,
+) -> Vec<RegisterWrite> {
+    use crate::modbus::registers::{
+        HR_3PH_FORCE_DISCHARGE_ENABLE, HR_BATTERY_POWER_MODE, HR_ENABLE_DISCHARGE,
+    };
+
+    if !snapshot.enable_discharge {
+        return Vec::new();
+    }
+
+    let mut writes = Vec::new();
+    if device_type.uses_three_phase_schedule_slots() {
+        writes.push(RegisterWrite {
+            address: HR_3PH_FORCE_DISCHARGE_ENABLE,
+            value: 0,
+        });
+    } else {
+        writes.push(RegisterWrite {
+            address: HR_ENABLE_DISCHARGE,
+            value: 0,
+        });
+    }
+    writes.push(RegisterWrite {
+        address: HR_BATTERY_POWER_MODE,
+        value: 1,
+    });
+    writes
+}
+
 // ---------------------------------------------------------------------------
 // Data endpoints
 // ---------------------------------------------------------------------------
@@ -1435,9 +1476,14 @@ pub async fn set_timed_charge(
 /// POST /api/control/timed-export — toggle scheduled DC export (HR59)
 /// independently of the Eco switch.
 ///
-/// Body: `{ "enabled": true }`. When enabling, Eco is disabled (HR27=0)
-/// for legacy safe export mode, then HR59 is armed. Disabling only clears
-/// HR59 so Eco remains whatever the Eco toggle says.
+/// Body: `{ "enabled": true }`. When enabling, the inverter is switched
+/// to max-power export (HR27=0) and the schedule is armed (HR59=1). When
+/// disabling, BOTH the schedule is cleared (HR59=0) AND the inverter is
+/// returned to self-consumption (HR27=1): the Timed Export enable path
+/// is the only thing that ever writes HR27=0, so it has to be the one
+/// to write HR27=1 again. Leaving HR27=0 after Stop made the button a
+/// no-op — the schedule flag flipped, but the inverter kept force-
+/// exporting to grid.
 pub async fn set_timed_export(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -1466,9 +1512,20 @@ pub async fn set_timed_export(
             }
         }
     } else {
-        match (ControlCommand::SetEnableDischarge { enabled: false }).encode() {
-            Ok(mut w) => writes.append(&mut w),
-            Err(e) => return error_response(&format!("Validation error: {}", e)),
+        // Stopping Timed Export must return the inverter to
+        // self-consumption (HR27=1), not just clear the schedule flag.
+        // The enable path above is the only thing that ever wrote
+        // HR27=0, so it has to be the one to write HR27=1 again —
+        // otherwise the inverter keeps force-exporting to grid with
+        // the schedule flag off.
+        for cmd in [
+            ControlCommand::SetEnableDischarge { enabled: false },
+            ControlCommand::SetBatteryPowerMode { mode: 1 },
+        ] {
+            match cmd.encode() {
+                Ok(mut w) => writes.append(&mut w),
+                Err(e) => return error_response(&format!("Validation error: {}", e)),
+            }
         }
     }
 
@@ -2292,20 +2349,28 @@ pub async fn force_discharge(
 /// discharge flag, discharge slots, and (for three-phase) the
 /// force-discharge and force-charge enable flags.
 ///
-/// Returns an error if no Force Discharge is in progress — this prevents
-/// the user from accidentally clearing a working discharge schedule they
-/// didn't intend to.
+/// If the app restarted while Force Discharge was active, the captured
+/// revert snapshot is gone. In that case, fall back to a minimal safe stop
+/// based on the latest inverter snapshot instead of returning 400 and
+/// sending no writes.
 pub async fn force_discharge_stop(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let device_type = latest_device_type(&state).await;
     let revert = state.force_discharge_revert.lock().await.take();
-    let revert = match revert {
-        Some(r) => r,
-        None => {
+
+    let writes = if let Some(revert) = revert {
+        build_force_discharge_stop_writes(device_type, &revert)
+    } else {
+        let snapshot = state.latest_snapshot.lock().await;
+        let Some(snapshot) = snapshot.as_ref() else {
+            return error_response("No force discharge in progress to stop");
+        };
+        let writes = build_force_discharge_restart_stop_writes(device_type, snapshot);
+        if writes.is_empty() {
             return error_response("No force discharge in progress to stop");
         }
+        writes
     };
 
-    let device_type = latest_device_type(&state).await;
-    let writes = build_force_discharge_stop_writes(device_type, &revert);
     if writes.is_empty() {
         return error_response("No restore writes generated for this device");
     }
@@ -4917,17 +4982,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timed_export_disable_only_clears_hr59() {
+    async fn timed_export_disable_clears_hr59_and_restores_eco_hr27() {
+        // Stopping Timed Export must do BOTH: clear the schedule flag
+        // (HR59=0) and return the inverter to self-consumption (HR27=1).
+        // The Timed Export enable path is the only thing that ever
+        // writes HR27=0, so its disable path is also the only thing
+        // that writes HR27=1 again. Forgetting HR27=1 here made the
+        // Stop button a no-op: the schedule flag flipped off in the
+        // UI, but the inverter kept force-exporting to grid.
         with_isolated_config_dir_async(|| async {
-            use crate::modbus::registers::HR_ENABLE_DISCHARGE;
+            use crate::modbus::registers::{HR_BATTERY_POWER_MODE, HR_ENABLE_DISCHARGE};
             let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
             let body = serde_json::json!({ "enabled": false });
             let _ = set_timed_export(State(state.clone()), Json(body)).await;
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
-            assert_eq!(writes.len(), 1);
-            assert_eq!(writes[0].address, HR_ENABLE_DISCHARGE);
-            assert_eq!(writes[0].value, 0);
+            assert_eq!(writes.len(), 2);
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_ENABLE_DISCHARGE)
+                    .map(|w| w.value),
+                Some(0),
+                "Stop must clear the schedule flag (HR59=0)"
+            );
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|w| w.address == HR_BATTERY_POWER_MODE)
+                    .map(|w| w.value),
+                Some(1),
+                "Stop must return the inverter to self-consumption (HR27=1)"
+            );
         })
         .await;
     }
@@ -7342,7 +7428,83 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn force_discharge_stop_is_one_shot_per_revert() {
+    async fn force_discharge_stop_after_restart_queues_minimal_single_phase_stop() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{HR_BATTERY_POWER_MODE, HR_ENABLE_DISCHARGE};
+
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            {
+                let mut snapshot = state.latest_snapshot.lock().await;
+                let snapshot = snapshot.as_mut().expect("snapshot seeded");
+                snapshot.enable_discharge = true;
+            }
+            assert!(
+                state.force_discharge_revert.lock().await.is_none(),
+                "restart scenario has no in-memory revert"
+            );
+
+            let (status, payload) = force_discharge_stop(State(state.clone())).await;
+            assert_eq!(status, StatusCode::OK, "stop should succeed: {:?}", payload);
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert_eq!(writes.len(), 2);
+            assert!(
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0),
+                "restart fallback must clear HR59"
+            );
+            assert!(
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1),
+                "restart fallback must return to eco/self-consumption"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_discharge_stop_after_restart_queues_minimal_three_phase_stop() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_3PH_FORCE_DISCHARGE_ENABLE, HR_BATTERY_POWER_MODE,
+            };
+
+            let state = make_state_with_device(DeviceType::ThreePhase).await;
+            {
+                let mut snapshot = state.latest_snapshot.lock().await;
+                let snapshot = snapshot.as_mut().expect("snapshot seeded");
+                snapshot.enable_discharge = true;
+            }
+            assert!(
+                state.force_discharge_revert.lock().await.is_none(),
+                "restart scenario has no in-memory revert"
+            );
+
+            let (status, payload) = force_discharge_stop(State(state.clone())).await;
+            assert_eq!(status, StatusCode::OK, "stop should succeed: {:?}", payload);
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert_eq!(writes.len(), 2);
+            assert!(
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_3PH_FORCE_DISCHARGE_ENABLE && w.value == 0),
+                "restart fallback must clear the three-phase force-discharge flag"
+            );
+            assert!(
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1),
+                "restart fallback must return to eco/self-consumption"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_discharge_stop_is_one_shot_per_revert_once_snapshot_is_inactive() {
         with_isolated_config_dir_async(|| async {
             let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
             seed_discharging_pre_state(&state).await;
@@ -7352,6 +7514,16 @@ mod tests {
             let (status, _) = force_discharge_stop(State(state.clone())).await;
             assert_eq!(status, StatusCode::OK);
             let _ = drain_pending_writes(&state).await;
+
+            // The restart fallback intentionally allows Stop Discharge to
+            // work when there is no in-memory revert but the latest snapshot
+            // still shows discharge armed. Once a post-stop poll has observed
+            // HR59=0, a second stop should return to the old no-op/error path.
+            {
+                let mut snapshot = state.latest_snapshot.lock().await;
+                let snapshot = snapshot.as_mut().expect("snapshot seeded");
+                snapshot.enable_discharge = false;
+            }
 
             let (status, _) = force_discharge_stop(State(state.clone())).await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
