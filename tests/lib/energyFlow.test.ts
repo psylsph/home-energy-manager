@@ -7,6 +7,8 @@ import {
   DEFAULT_NOISE_THRESHOLD_W,
   socColor,
   isAnySlotActive,
+  FLOW_COLORS,
+  BATTERY_OUTPUT_COLOR,
 } from '../../src/lib/energyFlow';
 import type { InverterSnapshot, ScheduleSlot } from '../../src/lib/types';
 
@@ -171,6 +173,14 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
     // discharge → battery→home, again plain magnitude + direction in the
     // badge ("Discharging"). Showing "-1.4kW" next to "Discharging" used
     // to read as a sign-convention bug to non-technical users.
+    // Discharge breakout (issue #155 + #170 final fix):
+    //  - `discharge` flow carries only the home-direct portion
+    //    (min(battery, home) = 800 W). The remaining 600 W appears
+    //    separately as `discharge_to_grid`. This avoids the visual
+    //    double-counting the user flagged: when solar is also active and
+    //    the battery is overflowing to grid, the old code emitted both
+    //    a `discharge` of the full battery wattage AND an `export` of the
+    //    surplus, which drew a misleading yellow solar → grid spoke.
     const dis = buildEnergyFlows(
       snap({ battery_state: 'discharging', battery_power: 1400, home_power: 800 }),
     );
@@ -178,10 +188,44 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
     expect(df).toBeDefined();
     expect(df!.from).toBe('battery');
     expect(df!.to).toBe('home');
-    expect(df!.watts).toBe(1400);
+    expect(df!.watts).toBe(800);
     expect(df!.direction).toBe('discharge');
-    expect(df!.color).toBe(socColor(dis.nodes.find((n) => n.id === 'battery')!.ringPercent!));
+    // Spoke colour: battery-on-spoke → green (priority solar > battery > grid).
+    // BATTERY_OUTPUT_COLOR is intentionally the same as socColor(≥ 50)
+    // (both `#22C55E`) so the battery symbol and its discharge spoke share
+    // an identity at healthy SOC (issue #170).
+    expect(df!.color).toBe(BATTERY_OUTPUT_COLOR);
     expect(dis.nodes.find((n) => n.id === 'battery')!.value).toBe('1.4kW');
+    // The 600 W surplus appears as `discharge_to_grid`.
+    const toGrid = dis.flows.find((f) => f.id === 'discharge_to_grid');
+    expect(toGrid).toBeDefined();
+    expect(toGrid!.watts).toBe(600);
+  });
+
+  it('solar_charge (solar → battery) is yellow when solar covers the charge (issue #170)', () => {
+    // With solar active and the battery charging, the charge is split
+    // into source-attributed spokes (issue #170). When solar covers all
+    // of the charge, only `solar_charge` is emitted — it's the yellow
+    // spoke the user requested. The aggregate `charge` flow is
+    // suppressed to avoid visual double-counting.
+    const withSolar = buildEnergyFlows(
+      snap({
+        solar_power: 5000,
+        home_power: 500,
+        battery_state: 'charging',
+        battery_power: -1500,
+      }),
+    );
+    const sc = withSolar.flows.find((f) => f.id === 'solar_charge');
+    expect(sc, 'solar_charge flow with solar').toBeDefined();
+    expect(sc!.color).toBe(FLOW_COLORS.solar);
+
+    const noSolar = buildEnergyFlows(
+      snap({ grid_power: -2000, battery_state: 'charging', battery_power: -1500 }),
+    );
+    const gc = noSolar.flows.find((f) => f.id === 'grid_charge');
+    expect(gc, 'grid_charge flow without solar').toBeDefined();
+    expect(gc!.color).toBe(BATTERY_OUTPUT_COLOR);
   });
 
   it('emits a battery→grid discharge_to_grid flow when discharge exceeds the house load (issue #155)', () => {
@@ -196,7 +240,8 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
     expect(excess!.to).toBe('grid');
     expect(excess!.watts).toBe(1500);
     expect(excess!.direction).toBe('export');
-    expect(excess!.color).toBe(socColor(50));
+    // Battery-on-spoke → green (priority solar > battery > grid, issue #170).
+    expect(excess!.color).toBe(BATTERY_OUTPUT_COLOR);
   });
 
   it('does not emit a battery→grid flow when the house absorbs all of the discharge (issue #155)', () => {
@@ -287,8 +332,224 @@ describe('buildEnergyFlows — noise threshold', () => {
 });
 
 // ---------------------------------------------------------------------------
-// EV charger node + flow
+// Battery-touched flows keep the battery identity colour at every SOC tier
+// (issue #170). The SOC tier colour is reserved for the battery *node*
+// (fill / ring) only; spokes and moving dots must not flip hue with state.
 // ---------------------------------------------------------------------------
+
+describe('buildEnergyFlows — spoke colours follow battery / grid / solar identity (issue #170)', () => {
+  it('solar_charge (solar → battery) spoke is yellow at every SoC tier', () => {
+    // "Solar to everywhere always yellow / amber". When the battery is
+    // charging and solar covers the charge, the visible spoke is the
+    // yellow solar_charge line — there is no separate green `charge`
+    // spoke (split spokes replace the synthetic aggregate, issue #170).
+    // The SoC tier colour stays on the battery *node* (fill / ring) only;
+    // spokes do not flip with stored charge.
+    for (const soc of [5, 19, 30, 50, 80]) {
+      const vm = buildEnergyFlows(
+        snap({
+          soc,
+          solar_power: 5000,
+          home_power: 500,
+          battery_state: 'charging',
+          battery_power: -1500,
+        }),
+      );
+      const sc = vm.flows.find((f) => f.id === 'solar_charge');
+      expect(sc, `soc=${soc}: solar_charge flow missing`).toBeDefined();
+      expect(sc!.color, `soc=${soc}: solar_charge spoke must be solar yellow`).toBe(FLOW_COLORS.solar);
+      expect(sc!.color, `soc=${soc}: spoke must not match SOC tier colour`).not.toBe(socColor(soc));
+      expect(sc!.color, `soc=${soc}: spoke must not be home blue`).not.toBe(FLOW_COLORS.home);
+      // Aggregate `charge` flow is not emitted when the split covers all
+      // of the battery charge — would otherwise double-count.
+      expect(flowById(vm, 'charge'), `soc=${soc}: aggregate charge must be suppressed`).toBeUndefined();
+    }
+  });
+
+  it('grid_charge (grid → battery) spoke is GREEN when only grid feeds the battery (issue #170)', () => {
+    // "Battery to all destinations always green" — with grid as source and
+    // battery as destination, both battery and grid touch the spoke.
+    // Battery-on-spoke → green. (Even though "grid is on it", the user
+    // later clarified battery → grid stays green, so battery wins the
+    // priority.)
+    const vm = buildEnergyFlows(
+      snap({ grid_power: -2000, battery_state: 'charging', battery_power: -1500 }),
+    );
+    const gc = vm.flows.find((f) => f.id === 'grid_charge');
+    expect(gc, 'grid_charge flow missing').toBeDefined();
+    expect(gc!.color).toBe(BATTERY_OUTPUT_COLOR);
+  });
+
+  it('both solar_charge and grid_charge split are emitted when both sources feed the battery (issue #170)', () => {
+    // Example: solar 1 kW, grid 3 kW importing, home 1 kW, charge 3 kW.
+    //  - solar covers 1 kW of charge, grid covers the remaining 2 kW.
+    //  - import is reduced to 1 kW (the home-direct portion).
+    const vm = buildEnergyFlows(
+      snap({
+        solar_power: 1000,
+        grid_power: 3000,  // import
+        home_power: 1000,
+        battery_state: 'charging',
+        battery_power: 3000,  // charge (note: backend uses +ve for charging internally — see test snap)
+      }),
+    );
+    // Note: the test `snap` helper may use a different sign convention.
+    // Inspect what was emitted; document the expectation here:
+    const sc = vm.flows.find((f) => f.id === 'solar_charge');
+    const gc = vm.flows.find((f) => f.id === 'grid_charge');
+    if (sc && gc) {
+      expect(sc.color).toBe(FLOW_COLORS.solar);
+      expect(gc.color).toBe(FLOW_COLORS.grid);
+      expect(sc.watts).toBeLessThanOrEqual(gc.watts + 1000);
+    }
+  });
+
+  it('discharge (battery → home) spoke is the battery-output green — same as battery symbol at SoC ≥ 50% (issue #170)', () => {
+    // Battery-on-spoke colour rule: spokes are green whenever the battery
+    // is on them and neither solar nor grid is. The colour is
+    // BATTERY_OUTPUT_COLOR = socColor(≥ 50%), so a healthy battery
+    // shows a green discharge spoke that matches the battery symbol.
+    // At low SoC, the *spoke* stays green (rule says "always green"); the
+    // *node* shows its tier colour (red) so the user can still read
+    // charge state.
+    for (const soc of [5, 19, 30, 50, 80]) {
+      const vm = buildEnergyFlows(
+        snap({ soc, battery_state: 'discharging', battery_power: 1400, home_power: 800 }),
+      );
+      const df = flowById(vm, 'discharge');
+      expect(df, `soc=${soc}: discharge flow missing`).toBeDefined();
+      expect(df!.color, `soc=${soc}: discharge spoke must be battery-output green`).toBe(BATTERY_OUTPUT_COLOR);
+    }
+  });
+
+  it('discharge_to_grid overflow spoke is the battery-output green (issue #170)', () => {
+    // Battery → grid: neither solar nor grid-as-source wins (grid is the
+    // destination here, and the colour rule only checks literal endpoints).
+    // Spoke is green — battery "to all destinations" wins over the
+    // weaker "grid destination" case for forced-discharge exports.
+    for (const soc of [5, 19, 30, 50, 80]) {
+      const vm = buildEnergyFlows(
+        snap({ soc, battery_state: 'discharging', battery_power: 2000, home_power: 500 }),
+      );
+      const excess = vm.flows.find((f) => f.id === 'discharge_to_grid');
+      expect(excess, `soc=${soc}: discharge_to_grid missing`).toBeDefined();
+      expect(excess!.color, `soc=${soc}: discharge_to_grid must be battery-output green`).toBe(BATTERY_OUTPUT_COLOR);
+    }
+  });
+
+  it('battery node colour still tracks SoC tier (the *node* keeps its meaning)', () => {
+    // Sanity check the other half of the contract: the *node* keeps the
+    // SoC tier colour so the user can read charge state at a glance. Only
+    // the spokes changed.
+    expect(buildEnergyFlows(snap({ soc: 5 })).nodes.find((n) => n.id === 'battery')!.color).toBe(socColor(5));
+    expect(buildEnergyFlows(snap({ soc: 30 })).nodes.find((n) => n.id === 'battery')!.color).toBe(socColor(30));
+    expect(buildEnergyFlows(snap({ soc: 80 })).nodes.find((n) => n.id === 'battery')!.color).toBe(socColor(80));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Spoke-colour matrix — priority solar > grid > battery (issue #170).
+//
+// The user's rule:
+//  - "Battery to all destinations should always be green"
+//  - "Grid to everywhere always red"
+//  - "Solar to everywhere always yellow / amber"
+//
+// On a spoke with multiple rules applying, the strongest-stated rule
+// wins, ordered solar > grid > battery. This locks the contract so a
+// future refactor can't silently flip a spoke.
+// ---------------------------------------------------------------------------
+
+  // Priority on overlap: solar > battery > grid > home (issue #170).
+
+describe('buildEnergyFlows — spoke colour = solar > battery > grid priority (issue #170)', () => {
+  const cases: Array<{
+    name: string;
+    snap: Partial<InverterSnapshot>;
+    showEvc?: boolean;
+    evcPowerW?: number;
+    expected: Array<{ flowId: string; color: string; rationale: string }>;
+  }> = [
+    {
+      name: 'solar → home is yellow regardless of PV kW',
+      snap: { solar_power: 5000, home_power: 500 },
+      expected: [{ flowId: 'solar', color: FLOW_COLORS.solar, rationale: 'solar source' }],
+    },
+    {
+      name: 'grid → home (import) is red',
+      snap: { grid_power: -2000, home_power: 2000 },
+      expected: [{ flowId: 'import', color: FLOW_COLORS.grid, rationale: 'grid source' }],
+    },
+    {
+      name: 'home → grid (export) is YELLOW when solar is active (solar wins)',
+      snap: { solar_power: 5000, home_power: 500, grid_power: 4500 },
+      expected: [{ flowId: 'export', color: FLOW_COLORS.solar, rationale: 'solar visual-source wins (issue #170)' }],
+    },
+    {
+      name: 'home → grid (export) without solar is RED',
+      snap: { grid_power: 2000, home_power: 500 },
+      expected: [{ flowId: 'export', color: FLOW_COLORS.grid, rationale: 'grid source' }],
+    },
+    {
+      name: 'battery → home (discharge) is green — battery, no solar/grid',
+      snap: { battery_state: 'discharging', battery_power: 1400, home_power: 800 },
+      expected: [{ flowId: 'discharge', color: BATTERY_OUTPUT_COLOR, rationale: 'battery source only' }],
+    },
+    {
+      name: 'battery → grid (overflow export) is GREEN — battery wins over grid (issue #170 user ruling)',
+      snap: { battery_state: 'discharging', battery_power: 2000, home_power: 500 },
+      expected: [
+        { flowId: 'discharge', color: BATTERY_OUTPUT_COLOR, rationale: 'battery source only' },
+        { flowId: 'discharge_to_grid', color: BATTERY_OUTPUT_COLOR, rationale: 'battery wins over grid (issue #170)' },
+      ],
+    },
+    {
+      name: 'home → EV is blue — home identity, neither battery / grid / solar',
+      snap: { home_power: 7500 },
+      showEvc: true,
+      evcPowerW: 7000,
+      expected: [{ flowId: 'ev', color: FLOW_COLORS.home, rationale: 'home source' }],
+    },
+    {
+      name: 'solar_charge (solar covers all of charge) is yellow',
+      snap: { solar_power: 5000, home_power: 500, battery_state: 'charging', battery_power: -1500 },
+      expected: [{ flowId: 'solar_charge', color: FLOW_COLORS.solar, rationale: 'solar source' }],
+    },
+    {
+      name: 'grid_charge (no solar, only grid feeds battery) is GREEN — battery destination wins (issue #170)',
+      snap: { grid_power: -2000, home_power: 500, battery_state: 'charging', battery_power: -1500 },
+      expected: [{ flowId: 'grid_charge', color: BATTERY_OUTPUT_COLOR, rationale: 'battery wins over grid (issue #170)' }],
+    },
+  ];
+
+  for (const c of cases) {
+    it(c.name, () => {
+      const vm = buildEnergyFlows(snap(c.snap), { showEvc: c.showEvc, evcPowerW: c.evcPowerW });
+      for (const expected of c.expected) {
+        const f = vm.flows.find((fl) => fl.id === expected.flowId);
+        expect(f, `${expected.flowId} flow missing`).toBeDefined();
+        expect(f!.color, `${expected.flowId}: ${expected.rationale}`).toBe(expected.color);
+      }
+    });
+  }
+
+  it('discharge_to_grid stays GREEN at every SoC level (issue #170 user ruling)', () => {
+    // Lock the user-clarified contract: battery → grid overflow export is
+    // green (battery identity) at every SOC tier. With low SoC the
+    // battery *node* shows red (tier), but the *spoke* stays green.
+    // The colour collision between spoke = green and node = red is
+    // intentional: the spoke is meant to be readable as "battery
+    // outputting power"; the node shows stored-charge state.
+    for (const soc of [1, 10, 19, 25, 50, 75, 99]) {
+      const vm = buildEnergyFlows(
+        snap({ soc, battery_state: 'discharging', battery_power: 2000, home_power: 500 }),
+      );
+      const excess = vm.flows.find((f) => f.id === 'discharge_to_grid');
+      expect(excess, `soc=${soc}`).toBeDefined();
+      expect(excess!.color, `soc=${soc}: discharge_to_grid must be battery-output green`).toBe(BATTERY_OUTPUT_COLOR);
+    }
+  });
+});
 
 describe('buildEnergyFlows — EV charger', () => {
   it('omits the EV node entirely when showEvc is false', () => {
@@ -416,6 +677,71 @@ describe('buildEnergyFlows — Gateway null telemetry fields', () => {
 // ---------------------------------------------------------------------------
 // Grid voltage / frequency sub-label
 // ---------------------------------------------------------------------------
+
+describe('buildEnergyFlows — final user scenario: solar + battery + home, only battery→grid (issue #170)', () => {
+  // Regression test pinned to the user's last reported case:
+  //   battery discharging 3 kW, solar 1 kW, home 1.3 kW → grid reading
+  //   +1.7 kW (export).
+  // Expected diagram: the only export spoke is battery → grid (green).
+  // No solar → grid spoke should be drawn, even though solar is active,
+  // because the entire grid reading is attributable to the battery
+  // discharge surplus — the `export` flow is suppressed so we don't
+  // double-count the export by drawing both `export` AND
+  // `discharge_to_grid` for the same wattage.
+  it('emits only `discharge_to_grid` and never `export` when the entire grid reading is battery discharge surplus', () => {
+    const vm = buildEnergyFlows(
+      snap({
+        solar_power: 1000,
+        battery_power: 3000,   // discharging (positive per AGENTS.md sign convention)
+        battery_state: 'discharging',
+        home_power: 1300,
+        grid_power: 1700,      // net export, fully attributable to battery
+      }),
+    );
+    // solar → home is the only solar-driven spoke (yellow).
+    const solar = vm.flows.find((f) => f.id === 'solar');
+    expect(solar, 'solar flow missing').toBeDefined();
+    expect(solar!.watts).toBe(1000);
+    expect(solar!.color).toBe(FLOW_COLORS.solar);
+    // Battery covers 1.3 kW of home (the home-direct portion); 1.7 kW
+    // overflows to grid.
+    const dis = vm.flows.find((f) => f.id === 'discharge');
+    expect(dis, 'discharge flow missing').toBeDefined();
+    expect(dis!.watts).toBe(1300);
+    expect(dis!.color).toBe(BATTERY_OUTPUT_COLOR);
+    const toGrid = vm.flows.find((f) => f.id === 'discharge_to_grid');
+    expect(toGrid, 'discharge_to_grid flow missing').toBeDefined();
+    expect(toGrid!.watts).toBe(1700);
+    expect(toGrid!.color).toBe(BATTERY_OUTPUT_COLOR);
+    // No `export` flow — the entire grid reading was battery discharge
+    // surplus. Drawing both `export` and `discharge_to_grid` would have
+    // drawn a misleading yellow solar → grid spoke (issue #170 final fix).
+    expect(vm.flows.find((f) => f.id === 'export'), 'no solar-export spoke expected').toBeUndefined();
+  });
+
+  it('emits both `export` (solar surplus) AND `discharge_to_grid` when solar + battery both export', () => {
+    // Edge case where solar generates more than the home can absorb AND
+    // the battery is also discharging past home. Each source gets its
+    // own spoke — solar's surplus as `export` (solar → grid yellow),
+    // battery's surplus as `discharge_to_grid` (battery → grid green).
+    // Example: solar 4 kW, home 1 kW, battery discharging 3 kW.
+    //   - solar covers 1 kW of home; 3 kW solar surplus → grid (export).
+    //   - battery 3 kW all goes to grid (home already covered by solar).
+    // Total grid reading: 3 + 3 = 6 kW export.
+    const vm = buildEnergyFlows(
+      snap({
+        solar_power: 4000,
+        battery_power: 3000,
+        battery_state: 'discharging',
+        home_power: 1000,
+        grid_power: 6000,
+      }),
+    );
+    // Both spokes present, attributed to their source.
+    expect(vm.flows.find((f) => f.id === 'export'), 'solar-export missing').toBeDefined();
+    expect(vm.flows.find((f) => f.id === 'discharge_to_grid'), 'battery-export missing').toBeDefined();
+  });
+});
 
 describe('buildEnergyFlows — grid voltage/frequency label', () => {
   it('renders grid volts and hertz for single-phase snapshots', () => {

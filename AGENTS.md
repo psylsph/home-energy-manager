@@ -272,7 +272,7 @@ When an optional block read fails, `carry_forward_optional_block_values()` prese
 
 ### Linux toolbar icon not showing (GNOME Wayland)
 
-GNOME Wayland 43+ resolves the icon entirely through **application ID matching** (window GTK app ID must match a `.desktop` file ID). Fix: set `"enableGTKAppId": true` in `tauri.conf.json`. Dev mode workaround: run `bash scripts/install-dev-desktop.sh` once. Packaged `.deb`/`.rpm` installs handle this automatically.
+GNOME Wayland 43+ resolves the icon entirely through **application ID matching** (window GTK app ID must match a `.desktop` file ID). Fix: set `"enableGTKAppId": true` in `tauri.conf.json`. For dev mode, `npm run dev:desktop` (wired into Tauri's `beforeDevCommand`) writes / refreshes `~/.local/share/applications/com.givenergy.local.desktop` on every `cargo tauri dev` so the dock icon can't go stale if the repo moves. Packaged `.deb`/`.rpm` installs handle this automatically via their own .desktop file.
 
 ### macOS minimum version: 10.15 (Catalina)
 
