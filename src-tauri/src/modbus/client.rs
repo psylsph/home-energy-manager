@@ -1114,8 +1114,8 @@ impl ModbusClient {
     /// with automatic retries.
     pub async fn write_register(&mut self, register: u16, value: u16) -> Result<(), ClientError> {
         let inner_function: u8 = 6;
-        let request = Self::build_write_register_request(&self.serial, register, value);
-        let key = ResponseKey::from_request(0x11, inner_function, register, 1);
+        let request = Self::build_write_register_request(&self.serial, self.slave, register, value);
+        let key = ResponseKey::from_request(self.slave, inner_function, register, 1);
 
         let max_attempts: u8 = 6;
 
@@ -1188,11 +1188,11 @@ impl ModbusClient {
     /// The payload passed to `encode_frame` is only register + value. The
     /// transparent-protocol CRC/check is appended by `encode_frame` over the
     /// full inner PDU (`0x11 0x06 register value`), matching givenergy-modbus.
-    fn build_write_register_request(serial: &str, register: u16, value: u16) -> Vec<u8> {
+    fn build_write_register_request(serial: &str, slave: u8, register: u16, value: u16) -> Vec<u8> {
         let mut payload = Vec::with_capacity(4);
         payload.extend_from_slice(&register.to_be_bytes());
         payload.extend_from_slice(&value.to_be_bytes());
-        framer::encode_frame(serial, 0x11, 0x06, &payload)
+        framer::encode_frame(serial, slave, 0x06, &payload)
     }
 
     /// Read a set of poll blocks, returning raw data per block.
@@ -1614,7 +1614,7 @@ mod tests {
 
     #[test]
     fn write_register_request_has_single_transparent_crc() {
-        let frame = ModbusClient::build_write_register_request("WG2301G167", 27, 1);
+        let frame = ModbusClient::build_write_register_request("WG2301G167", 0x11, 27, 1);
 
         // 6-byte MBAP + 28-byte transparent payload. The earlier malformed
         // implementation appended an extra write-specific CRC and produced a
