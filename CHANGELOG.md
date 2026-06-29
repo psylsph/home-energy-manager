@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.49.1] - 2026-06-29
+
+### Fixed
+
+- **The release pipeline no longer fails on the Windows matrix runner.** The Install Tauri CLI step was using a bash `for` retry loop while `windows-latest` defaults GitHub Actions to PowerShell, so every Windows release build hit `Missing opening '(' after keyword 'for'.` before it could even compile. The step now pins `shell: bash`, which matches the rest of the matrix and brings Android in line for consistency. No user-visible behaviour change — this release exists so the next one actually publishes its Windows and Android assets.
+
+### Changed
+
+- **`EnergyOrbitDiagram` has more tests.** Battery SOC text now uses a fixed contrast colour rather than the SOC tier colour, so dark-on-dark and light-on-light pairs are enforced by the suite. Solar-only spokes turn yellow when solar covers the whole charge, battery-origin spokes keep a consistent colour regardless of SOC, and discharge / discharge-to-grid flows always use the battery output accent. Pure test work — no shipped surface changes.
+
 ## [0.49.0] - 2026-06-29
 
 ### Removed
