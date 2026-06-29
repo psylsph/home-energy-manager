@@ -194,7 +194,7 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     cleanup();
-    useInverterStore.setState({ snapshot: null });
+    useInverterStore.setState({ snapshot: null, connectionState: 'disconnected' });
   });
 
   async function batteryModeSection() {
@@ -216,6 +216,7 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
       useInverterStore.setState({
         snapshot: makeSnapshot({ device_type_code: code }),
         developerMode: false,
+        connectionState: 'connected',
       });
       render(<ControlPage />);
 
@@ -244,6 +245,7 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
       useInverterStore.setState({
         snapshot: makeSnapshot({ device_type_code: code }),
         developerMode: false,
+        connectionState: 'connected',
       });
       render(<ControlPage />);
 
@@ -262,6 +264,7 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
       useInverterStore.setState({
         snapshot: makeSnapshot({ device_type_code: '2001', firmware_version: '318' }),
         developerMode: false,
+        connectionState: 'connected',
       });
       render(<ControlPage />);
 
@@ -278,6 +281,7 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
       useInverterStore.setState({
         snapshot: makeSnapshot({ device_type_code: '2001', firmware_version: fw }),
         developerMode: false,
+        connectionState: 'connected',
       });
       render(<ControlPage />);
 
@@ -288,7 +292,7 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
   });
 
   it('stays hidden before the first snapshot arrives', async () => {
-    useInverterStore.setState({ snapshot: null, developerMode: false });
+    useInverterStore.setState({ snapshot: null, developerMode: false, connectionState: 'connected' });
     render(<ControlPage />);
 
     await screen.findByRole('heading', { name: 'Battery Mode' });

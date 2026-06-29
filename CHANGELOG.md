@@ -28,6 +28,12 @@ All notable changes to this project will be documented in this file.
 
 - **The "Discharge when above" help text no longer claims the battery only powers the home.** Agile discharges to the grid at full power during expensive windows (export mode), which is the whole point of running it against Octopus prices; the help text now says so.
 
+### Fixed
+
+- **Control page no longer shows editable controls while the inverter connection is lost.** It used to keep rendering the Quick Actions, mode toggles, charge / discharge schedule editors and limit sliders against a stale snapshot during a reconnect cycle, with Save buttons that POSTed to a backend that couldn't reach the dongle — visibly interactive, silently broken. The page now mirrors the Status page's pattern: when the poll loop reports `reconnecting` or `disconnected`, the controls are replaced with a "Connection lost — reconnecting…" screen (with a Retry button) and reappear automatically once the next Connection `{ state: Connected }` frame arrives.
+
+- **The poll loop no longer tears down a TCP-healthy session just because the first read after connect times out.** The old warmup read was a kill-switch: any failure set `session_unusable`, which forced an immediate disconnect / reconnect and incremented the dead-session back-off. When the dongle's TCP stack is fine but its Modbus processor is briefly slow (the exact pattern in the report: three timeouts, immediate TCP reconnect, fresh TCP, warmup fail after 27 s, repeat), this produced an unbroken chain of 5–30 s reconnect cycles with no useful polls in between. The warmup now logs and continues — TCP up means keep going, matching GivTCP's `watch_plant()` model — and a genuinely unresponsive session is still caught by the inner poll loop's 3-cycle timeout budget (~36 s). Warmup retries are now aligned with the steady-state poll's per-block retry budget, so a slow-but-healthy dongle is allowed to recover instead of being condemned after one multi-block read fails.
+
 ## [0.47.0] - 2026-06-28
 
 ### Added

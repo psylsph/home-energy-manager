@@ -234,7 +234,7 @@ describe('<ControlPage/> — Cosy mode discharge schedule visibility', () => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     cleanup();
-    useInverterStore.setState({ snapshot: null });
+    useInverterStore.setState({ snapshot: null, connectionState: 'disconnected' });
   });
 
   async function timedDischargeSection() {
@@ -284,6 +284,7 @@ describe('<ControlPage/> — Cosy mode discharge schedule visibility', () => {
     useInverterStore.setState({
       snapshot: makeSnapshot({ cosy_enabled: true }),
       developerMode: false,
+      connectionState: 'connected',
     });
     render(<ControlPage />);
 
@@ -308,6 +309,7 @@ describe('<ControlPage/> — Cosy mode discharge schedule visibility', () => {
     useInverterStore.setState({
       snapshot: makeSnapshot({ cosy_enabled: false }),
       developerMode: false,
+      connectionState: 'connected',
     });
     render(<ControlPage />);
 
@@ -331,6 +333,7 @@ describe('<ControlPage/> — Cosy mode discharge schedule visibility', () => {
     useInverterStore.setState({
       snapshot: makeSnapshot({ cosy_enabled: false }),
       developerMode: false,
+      connectionState: 'connected',
     });
     render(<ControlPage />);
 
