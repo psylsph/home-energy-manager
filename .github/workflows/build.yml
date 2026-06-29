@@ -69,7 +69,17 @@ jobs:
       - name: Install Tauri CLI
         run: |
           curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
-          cargo binstall --no-confirm tauri-cli
+          # --force bypasses binstall's "already installed" tracking, which
+          # can go stale after a partial ~/.cargo cache restore and leave
+          # `cargo tauri` unfindable ("no such command: tauri"). Retry to
+          # absorb transient GitHub-release download blips.
+          for attempt in 1 2 3; do
+            if cargo binstall --force --no-confirm tauri-cli; then exit 0; fi
+            echo "tauri-cli install failed on attempt $attempt; retrying in 15s..."
+            sleep 15
+          done
+          echo "::error::Failed to install tauri-cli after 3 attempts"
+          exit 1
 
       - name: Build frontend
         run: npm run build
@@ -78,15 +88,40 @@ jobs:
         if: matrix.platform == 'macos-latest'
         env:
           TAURI_BUNDLER_DMG_IGNORE_CI: false
-        run: cargo tauri build --target ${{ matrix.target }} --bundles dmg
+        # Retry the whole build: cargo's own CARGO_NET_RETRY covers within-
+        # attempt download retries, but a sustained crates.io connectivity
+        # blip (e.g. "Connection reset by peer") can still sink a single
+        # attempt. Re-running resumes from the partially-warm registry cache.
+        run: |
+          for attempt in 1 2 3; do
+            if cargo tauri build --target ${{ matrix.target }} --bundles dmg; then exit 0; fi
+            echo "macOS build failed on attempt $attempt; retrying in 20s..."
+            sleep 20
+          done
+          echo "::error::macOS build failed after 3 attempts"
+          exit 1
 
       - name: Build Tauri app (Windows)
         if: matrix.platform == 'windows-latest'
-        run: cargo tauri build --target ${{ matrix.target }} --bundles msi
+        run: |
+          for attempt in 1 2 3; do
+            if cargo tauri build --target ${{ matrix.target }} --bundles msi; then exit 0; fi
+            echo "Windows build failed on attempt $attempt; retrying in 20s..."
+            sleep 20
+          done
+          echo "::error::Windows build failed after 3 attempts"
+          exit 1
 
       - name: Build Tauri app (Linux)
         if: matrix.platform == 'ubuntu-22.04' || matrix.platform == 'ubuntu-24.04-arm'
-        run: cargo tauri build --target ${{ matrix.target }} --bundles deb,rpm
+        run: |
+          for attempt in 1 2 3; do
+            if cargo tauri build --target ${{ matrix.target }} --bundles deb,rpm; then exit 0; fi
+            echo "Linux build failed on attempt $attempt; retrying in 20s..."
+            sleep 20
+          done
+          echo "::error::Linux build failed after 3 attempts"
+          exit 1
 
       - name: Customize macOS DMG
         if: matrix.platform == 'macos-latest'
@@ -361,13 +396,35 @@ jobs:
       - name: Install Tauri CLI
         run: |
           curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
-          cargo binstall --no-confirm tauri-cli
+          # --force bypasses binstall's "already installed" tracking, which
+          # can go stale after a partial ~/.cargo cache restore and leave
+          # `cargo tauri` unfindable ("no such command: tauri"). Retry to
+          # absorb transient GitHub-release download blips.
+          for attempt in 1 2 3; do
+            if cargo binstall --force --no-confirm tauri-cli; then exit 0; fi
+            echo "tauri-cli install failed on attempt $attempt; retrying in 15s..."
+            sleep 15
+          done
+          echo "::error::Failed to install tauri-cli after 3 attempts"
+          exit 1
 
       - name: Initialize Android project
         run: cargo tauri android init --ci
 
       - name: Build APK
-        run: cargo tauri android build --apk --ci
+        # The cross-compile to aarch64-linux-android re-downloads the
+        # full dependency tree from crates.io, which occasionally hits a
+        # transient "Connection reset by peer" during the registry index
+        # update. Retry the whole build; cargo resumes from the warm
+        # registry cache on each attempt.
+        run: |
+          for attempt in 1 2 3; do
+            if cargo tauri android build --apk --ci; then exit 0; fi
+            echo "APK build failed on attempt $attempt; retrying in 20s..."
+            sleep 20
+          done
+          echo "::error::APK build failed after 3 attempts"
+          exit 1
 
       - name: Prepare release assets
         shell: bash
