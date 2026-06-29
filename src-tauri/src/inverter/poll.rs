@@ -157,11 +157,6 @@ pub struct PollSettings {
     pub evc_port: u16,
     /// When true, skip auto-discovery of the dongle on persistent connection failure.
     pub disable_auto_discovery: bool,
-    /// When true, skip optional model-specific poll blocks (extended slots,
-    /// AC config, three-phase config) to reduce per-cycle timeout exposure
-    /// on chronically unstable dongles. Standard blocks and battery reads
-    /// are always performed. Default: false.
-    pub minimal_telemetry_mode: bool,
 }
 
 impl Default for PollSettings {
@@ -175,7 +170,6 @@ impl Default for PollSettings {
             evc_host: String::new(),
             evc_port: 502,
             disable_auto_discovery: true,
-            minimal_telemetry_mode: false,
         }
     }
 }
@@ -833,11 +827,6 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 
                 // Capture the minimal-telemetry flag for this session. It is
                 // read from the in-memory settings (which are synced from disk
-                // at connect time) and passed to `read_all_with_extras` to skip
-                // optional model-specific blocks when the user has opted into
-                // reduced timeout exposure.
-                let minimal_telemetry = state.settings.lock().await.minimal_telemetry_mode;
-
                 // Clear any previous snapshot so the next reading is accepted
                 // without delta sanitization. After a reconnect, the previous
                 // snapshot may contain stale or corrupted values from the old
@@ -1015,7 +1004,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     // dropped during the read cycle. No explicit flush needed.
 
                     let (poll_ok, sanitized, connection_lost) = async {
-                        match client.read_all_with_extras(known_device_type.as_ref(), minimal_telemetry).await {
+                        match client.read_all_with_extras(known_device_type.as_ref()).await {
                             Ok(blocks) => {
                                 let mut snapshot = decode_snapshot(&blocks);
 
@@ -2968,7 +2957,6 @@ mod tests {
         assert!(s.serial.is_empty());
         assert_eq!(s.port, 8899);
         assert_eq!(s.interval_secs, 60);
-        assert!(!s.minimal_telemetry_mode);
     }
 
     #[test]

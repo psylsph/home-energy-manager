@@ -671,9 +671,6 @@ pub struct Settings {
     /// local Modbus register for it, so HEM stores an explicit user override.
     /// Defaults to false for backward-compatible safe Timed Export behaviour
     /// (disable Eco before arming HR59).
-    #[serde(default)]
-    pub full_power_discharge_in_eco_mode: bool,
-
     /// Auto winter mode enabled.
     #[serde(default)]
     pub auto_winter_enabled: bool,
@@ -765,9 +762,6 @@ pub struct Settings {
     /// AC config, three-phase config) to reduce per-cycle timeout exposure
     /// on chronically unstable dongles. Standard blocks and battery reads
     /// are always performed. Default: false.
-    #[serde(default)]
-    pub minimal_telemetry_mode: bool,
-
     /// Full import tariff config with peak/off-peak rates and times.
     /// Falls back to legacy `import_tariff` if `None`.
     #[serde(default)]
@@ -981,7 +975,6 @@ impl Default for Settings {
             // charge and we don't want to silently start adding one to the
             // History cost graph for users who haven't configured it.
             import_standing_charge_p_per_day: 0.0,
-            full_power_discharge_in_eco_mode: false,
             auto_winter_enabled: false,
             auto_winter_cold_threshold: default_aw_cold_threshold(),
             auto_winter_recovery_threshold: default_aw_recovery_threshold(),
@@ -1007,7 +1000,6 @@ impl Default for Settings {
             alerts_config: AlertsConfig::default(),
             weather_config: WeatherConfig::default(),
             disable_auto_discovery: true,
-            minimal_telemetry_mode: false,
             autostart_enabled: false,
             api_key: String::new(),
             api_port: 7338,
@@ -1177,7 +1169,6 @@ mod tests {
             import_tariff: 0.30,
             export_tariff: 0.15,
             import_standing_charge_p_per_day: 54.86,
-            full_power_discharge_in_eco_mode: true,
             auto_winter_enabled: true,
             auto_winter_cold_threshold: 5.0,
             auto_winter_recovery_threshold: 10.0,
@@ -1214,7 +1205,6 @@ mod tests {
                 open_meteo_base_url: "https://api.open-meteo.com".to_string(),
             },
             disable_auto_discovery: true,
-            minimal_telemetry_mode: true,
             autostart_enabled: true,
             api_key: String::new(),
             api_port: 0,
@@ -1245,7 +1235,6 @@ mod tests {
         assert_eq!(decoded.poll_interval, 10);
         assert_eq!(decoded.http_port, 8080);
         assert!(!decoded.auto_connect);
-        assert!(decoded.minimal_telemetry_mode);
         assert!(decoded.auto_winter_enabled);
         assert_eq!(decoded.auto_winter_cold_threshold, 5.0);
         assert_eq!(decoded.auto_winter_recovery_threshold, 10.0);
@@ -1358,8 +1347,7 @@ mod tests {
             "export_tariff": 0.15,
             "hidden_panels": [],
             "evc_host": "",
-            "disable_auto_discovery": true,
-            "minimal_telemetry_mode": false
+            "disable_auto_discovery": true
         }"#;
         let decoded: Settings = serde_json::from_str(legacy).unwrap();
         // Defaults populated via #[serde(default)] on WeatherConfig fields.
@@ -1396,8 +1384,7 @@ mod tests {
             "export_tariff": 0.15,
             "hidden_panels": [],
             "evc_host": "",
-            "disable_auto_discovery": true,
-            "minimal_telemetry_mode": false
+            "disable_auto_discovery": true
         }"#;
         let decoded: Settings = serde_json::from_str(legacy).unwrap();
         assert_eq!(
@@ -1461,8 +1448,7 @@ mod tests {
             "export_tariff": 0.15,
             "hidden_panels": [],
             "evc_host": "",
-            "disable_auto_discovery": true,
-            "minimal_telemetry_mode": false
+            "disable_auto_discovery": true
         }"#;
         let decoded: Settings = serde_json::from_str(legacy).unwrap();
         assert_eq!(
@@ -1491,7 +1477,6 @@ mod tests {
             import_tariff: 0.285,
             export_tariff: 0.15,
             import_standing_charge_p_per_day: 0.0,
-            full_power_discharge_in_eco_mode: false,
             auto_winter_enabled: false,
             auto_winter_cold_threshold: 8.0,
             auto_winter_recovery_threshold: 12.0,
@@ -1519,7 +1504,6 @@ mod tests {
             alerts_config: AlertsConfig::default(),
             weather_config: WeatherConfig::default(),
             disable_auto_discovery: true,
-            minimal_telemetry_mode: false,
             autostart_enabled: false,
             api_key: String::new(),
             api_port: 0,

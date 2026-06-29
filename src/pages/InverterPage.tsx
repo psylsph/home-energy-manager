@@ -307,22 +307,6 @@ export default function InverterPage() {
           <span className={`font-mono text-right ${s.cosy_active ? 'text-battery' : s.cosy_enabled ? 'text-amber-400' : 'text-text-secondary'}`}>
             {s.cosy_active ? 'Active' : s.cosy_enabled ? 'Enabled' : 'Disabled'}
           </span>
-          <span className="text-text-secondary">Agile Mode</span>
-          <span className={`font-mono text-right ${s.agile_active ? 'text-battery' : s.agile_enabled ? 'text-amber-400' : 'text-text-secondary'}`}>
-            {s.agile_active
-              ? (s.agile_state === 'charging'
-                  ? 'Charging'
-                  : s.agile_state === 'discharging'
-                    ? 'Discharging'
-                    : 'Active')
-              : s.agile_scope === 'charge_only'
-                ? 'Enabled (charge only)'
-                : s.agile_scope === 'discharge_only'
-                  ? 'Enabled (discharge only)'
-                  : s.agile_enabled
-                    ? 'Enabled (waiting for slot)'
-                    : 'Disabled'}
-          </span>
 
           <span className="text-text-secondary">Battery Calibration</span>
           <span className="text-text-primary font-mono text-right">{s.battery_calibration_stage > 0 ? `Stage ${s.battery_calibration_stage}` : 'Off'}</span>

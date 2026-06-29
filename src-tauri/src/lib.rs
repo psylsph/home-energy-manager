@@ -150,7 +150,6 @@ async fn initialize_app_state(
         ps.interval_secs = app_settings.poll_interval;
         ps.evc_host = app_settings.evc_host.clone();
         ps.evc_port = app_settings.evc_port;
-        ps.minimal_telemetry_mode = app_settings.minimal_telemetry_mode;
     }
 
     // Apply saved auto-winter config
