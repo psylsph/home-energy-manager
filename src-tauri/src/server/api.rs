@@ -820,14 +820,12 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             // Issue #131: surface the import-side standing charge so the
             // Settings page can hydrate its p/day input on load.
             "import_standing_charge_p_per_day": settings.import_standing_charge_p_per_day,
-            "full_power_discharge_in_eco_mode": settings.full_power_discharge_in_eco_mode,
             "import_tariff_config": settings.import_tariff_config,
             "export_tariff_config": settings.export_tariff_config,
             "hidden_panels": settings.hidden_panels,
             "evc_host": settings.evc_host,
             "evc_port": settings.evc_port,
             "disable_auto_discovery": settings.disable_auto_discovery,
-            "minimal_telemetry_mode": settings.minimal_telemetry_mode,
             "autostart_enabled": settings.autostart_enabled,
             "api_key": settings.api_key,
             "api_port": settings.api_port,
@@ -926,12 +924,6 @@ pub async fn update_settings(
     {
         persist.import_standing_charge_p_per_day = sc.max(0.0);
     }
-    if let Some(enabled) = body
-        .get("full_power_discharge_in_eco_mode")
-        .and_then(|v| v.as_bool())
-    {
-        persist.full_power_discharge_in_eco_mode = enabled;
-    }
     if let Some(ref cfg) = import_tariff_config {
         persist.import_tariff_config = Some(cfg.clone());
     }
@@ -956,9 +948,6 @@ pub async fn update_settings(
     }
     if let Some(d) = body.get("disable_auto_discovery").and_then(|v| v.as_bool()) {
         persist.disable_auto_discovery = d;
-    }
-    if let Some(m) = body.get("minimal_telemetry_mode").and_then(|v| v.as_bool()) {
-        persist.minimal_telemetry_mode = m;
     }
     // Persist the user's autostart preference. The actual platform
     // autostart entry is driven from the frontend via the
@@ -1027,7 +1016,6 @@ pub async fn update_settings(
         settings.evc_host = disk.evc_host.clone();
         settings.evc_port = disk.evc_port;
         settings.disable_auto_discovery = disk.disable_auto_discovery;
-        settings.minimal_telemetry_mode = disk.minimal_telemetry_mode;
     }
 
     let connection_changed =
@@ -1090,12 +1078,6 @@ fn settings_log_fields(
             persist.import_standing_charge_p_per_day
         ));
     }
-    if is_present("full_power_discharge_in_eco_mode") {
-        out.push(format!(
-            "full_power_discharge_in_eco_mode={}",
-            persist.full_power_discharge_in_eco_mode
-        ));
-    }
     if is_present("import_tariff_config") {
         let slots = persist
             .import_tariff_config
@@ -1131,12 +1113,6 @@ fn settings_log_fields(
         out.push(format!(
             "disable_auto_discovery={}",
             persist.disable_auto_discovery
-        ));
-    }
-    if is_present("minimal_telemetry_mode") {
-        out.push(format!(
-            "minimal_telemetry_mode={}",
-            persist.minimal_telemetry_mode
         ));
     }
     if is_present("autostart_enabled") {
@@ -1193,10 +1169,6 @@ fn parse_settings(body: &serde_json::Value) -> Result<PollSettings, String> {
         evc_host: String::new(), // merged from disk settings separately
         evc_port: 502,
         disable_auto_discovery,
-        minimal_telemetry_mode: body
-            .get("minimal_telemetry_mode")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
     })
 }
 
@@ -1464,7 +1436,6 @@ pub async fn set_timed_charge(
 /// independently of the Eco switch.
 ///
 /// Body: `{ "enabled": true }`. When enabling, HR27 is written according to
-/// the user-configured `full_power_discharge_in_eco_mode` capability override:
 /// flag on => leave Eco enabled (HR27=1), flag off => legacy safe export mode
 /// (HR27=0). Disabling only clears HR59 so Eco remains whatever the Eco toggle
 /// says.
@@ -1476,8 +1447,7 @@ pub async fn set_timed_export(
     let mut writes = Vec::new();
 
     if enabled {
-        let keep_eco = crate::settings::Settings::load().full_power_discharge_in_eco_mode;
-        let power_mode = if keep_eco { 1 } else { 0 };
+        let power_mode = 0;
         for cmd in [
             ControlCommand::SetBatteryPowerMode { mode: power_mode },
             ControlCommand::SetEnableDischarge { enabled: true },
@@ -4849,7 +4819,6 @@ mod tests {
         with_isolated_config_dir_async(|| async {
             use crate::modbus::registers::{HR_BATTERY_POWER_MODE, HR_ENABLE_DISCHARGE};
             let settings = crate::settings::Settings {
-                full_power_discharge_in_eco_mode: true,
                 ..Default::default()
             };
             settings.save().expect("save capability setting");
@@ -4864,7 +4833,7 @@ mod tests {
                     .iter()
                     .find(|w| w.address == HR_BATTERY_POWER_MODE)
                     .map(|w| w.value),
-                Some(1)
+                Some(0)
             );
             assert_eq!(
                 writes
@@ -8172,29 +8141,6 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
-    async fn update_settings_persists_full_power_discharge_in_eco_mode() {
-        with_isolated_config_dir_async(|| async {
-            let state = Arc::new(AppState::new());
-            let body = serde_json::json!({
-                "full_power_discharge_in_eco_mode": true,
-            });
-            let (status, _) = update_settings(State(state.clone()), Json(body)).await;
-            assert_eq!(status, StatusCode::OK);
-
-            let saved = crate::settings::Settings::load();
-            assert!(saved.full_power_discharge_in_eco_mode);
-
-            let (_, get_body) = get_settings(State(state)).await;
-            assert_eq!(
-                get_body["data"]["full_power_discharge_in_eco_mode"],
-                serde_json::json!(true)
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
     async fn update_settings_standing_charge_zero_clears_existing_value() {
         with_isolated_config_dir_async(|| async {
             // Seed an existing standing charge on disk.
@@ -9174,12 +9120,6 @@ mod tests {
                     "disable_auto_discovery=false",
                     false,
                 ),
-                (
-                    "minimal_telemetry_mode",
-                    json!(true),
-                    "minimal_telemetry_mode=true",
-                    true,
-                ),
             ] {
                 let body = serde_json::json!({ field: value });
                 let (status, json) = update_settings(State(state.clone()), Json(body)).await;
@@ -9197,7 +9137,6 @@ mod tests {
                 let actual = match field {
                     "autostart_enabled" => saved.autostart_enabled,
                     "disable_auto_discovery" => saved.disable_auto_discovery,
-                    "minimal_telemetry_mode" => saved.minimal_telemetry_mode,
                     _ => unreachable!(),
                 };
                 assert_eq!(actual, expected_disk, "{field} must be persisted");
