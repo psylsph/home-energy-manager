@@ -60,7 +60,7 @@ use tokio::sync::{broadcast, Mutex, Notify};
 use crate::alerts::AlertType;
 use crate::history::HistoryDb;
 use crate::inverter::decoder::decode_snapshot;
-use crate::inverter::encoder::{ControlCommand, RegisterWrite};
+use crate::inverter::encoder::RegisterWrite;
 use crate::inverter::model::{BatteryMode, DeviceType, InverterSnapshot};
 use crate::inverter::sanitizer::{
     carry_forward_battery_modules_with, carry_forward_optional_block_values,
@@ -70,7 +70,7 @@ use crate::inverter::sanitizer::{
 use crate::inverter::state_machines::{
     build_force_discharge_auto_revert_writes, check_auto_winter, check_load_limiter,
     clear_cosy_slot_registers, cosy_slot_register_writes, persist_cosy_active,
-    write_registers_to_inverter, AgileSlotAction,
+    write_registers_to_inverter,
 };
 pub use crate::inverter::state_machines::{
     AutoWinterConfig, AutoWinterSaved, AutoWinterState, LoadLimiterConfig, LoadLimiterSaved,
@@ -133,10 +133,9 @@ pub enum PollMessage {
 // Poll settings
 // ---------------------------------------------------------------------------
 
-// Agile price types (PriceSlot, AgileState) and the automation state-machine
-// types (AutoWinter*, LoadLimiter*) live in [`state_machines`]. They are
-// re-exported below so existing `crate::inverter::poll::*` references keep
-// working.
+// Automation state-machine types (AutoWinter*, LoadLimiter*) live in
+// [`state_machines`]. They are re-exported below so existing
+// `crate::inverter::poll::*` references keep working.
 
 /// Configurable parameters that control the polling loop behaviour.
 #[derive(Debug, Clone)]
@@ -329,8 +328,6 @@ pub struct AppState {
     pub load_limiter_saved: Arc<Mutex<Option<LoadLimiterSaved>>>,
     /// Whether cosy charging is currently active (force-charging in a slot).
     pub cosy_active: Arc<Mutex<bool>>,
-    /// Cached Octopus Agile prices for the current region.
-    pub cached_agile_prices: Arc<Mutex<Vec<PriceSlot>>>,
     /// Most recently decoded EV charger snapshot.
     pub latest_evc: Arc<Mutex<Option<crate::evc::EvcSnapshot>>>,
     /// Email alert configuration.
@@ -395,7 +392,6 @@ impl AppState {
             cosy_active: Arc::new(Mutex::new(
                 crate::settings::Settings::load().cosy_active_persisted,
             )),
-            cached_agile_prices: Arc::new(Mutex::new(Vec::new())),
             alert_config: Arc::new(Mutex::new(crate::settings::Settings::load().alerts_config)),
             alert_debounce: Arc::new(Mutex::new(crate::alerts::AlertDebounce::new())),
             last_report_date: Arc::new(Mutex::new(None)),
@@ -445,7 +441,6 @@ impl AppState {
             cosy_active: Arc::new(Mutex::new(
                 crate::settings::Settings::load().cosy_active_persisted,
             )),
-            cached_agile_prices: Arc::new(Mutex::new(Vec::new())),
             alert_config: Arc::new(Mutex::new(crate::settings::Settings::load().alerts_config)),
             alert_debounce: Arc::new(Mutex::new(crate::alerts::AlertDebounce::new())),
             last_report_date: Arc::new(Mutex::new(None)),
@@ -956,17 +951,6 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                             );
                         }
                     }
-
-                    // Slot-based Agile: the inverter itself holds the slot
-                    // schedule, so a restart that left the inverter mid-charge
-                    // is automatically handled — the slot continues to fire
-                    // until its end time. The first poll after restart
-                    // evaluates the current price and writes the next slot
-                    // (or disarms with AgileClearActiveSlot if scope == Off).
-                    // We log the legacy `agile_state_persisted` here for
-                    // operators who want to see what the previous run was
-                    // doing — it's now diagnostic-only and the field is
-                    // ignored on read.
                 }
 
                 // ---- Inner poll loop ----
@@ -1885,15 +1869,6 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     // machine runs, so the broadcast reflects the
                                     // post-transition value.)
                                     snapshot.cosy_enabled = poll_settings.cosy_enabled;
-                                    // `agile_enabled` is the legacy boolean mirror of
-                                    // `agile_scope != Off`. The slot-based Agile block
-                                    // later in this poll updates both `agile_enabled`
-                                    // and the new `agile_scope` field from the
-                                    // authoritative scope — see below.
-                                    snapshot.agile_enabled = poll_settings.agile_enabled;
-                                    snapshot.agile_scope =
-                                        crate::settings::agile_scope_for_settings(&poll_settings);
-
                                     // Persist saved values to disk so they survive a
                                     // restart. When winter mode deactivates, saved
                                     // becomes None - this clears the persisted values.
@@ -2250,253 +2225,6 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     }
                                 }
 
-                                // ---- Agile Octopus mode ----
-                                //
-                                // Slot-based state machine (replaces the legacy
-                                // `ForceCharge`/`ForceDischarge` block). Decides what
-                                // (if anything) to write to the inverter each poll
-                                // based on:
-                                //   - the active `AgileScope` (Off/Full/ChargeOnly/DischargeOnly)
-                                //   - the current Octopus price vs. the user's thresholds
-                                //   - whether Cosy or Auto-Winter is in control of the
-                                //     charge side (in which case we defer)
-                                //
-                                // The inverter itself becomes the source of truth for
-                                // whether a slot is currently firing — we just write
-                                // the slot 1 start/end times and let the inverter's
-                                // native schedule mechanism run the rest.
-                                {
-                                    let settings = &poll_settings;
-                                    let scope = crate::settings::agile_scope_for_settings(settings);
-                                    let action = if scope == crate::settings::AgileScope::Off {
-                                        // Scope off — disarm any preloaded slot.
-                                        AgileSlotAction::Idle
-                                    } else {
-                                        // Fetch current price (from cache or Octopus API).
-                                        let now_ts = chrono::Utc::now().timestamp();
-                                        let prices = state.cached_agile_prices.lock().await;
-                                        let current_price = prices
-                                            .iter()
-                                            .find(|s| now_ts >= s.valid_from && now_ts < s.valid_to)
-                                            .map(|s| s.pence);
-
-                                        let price = if current_price.is_some() {
-                                            current_price
-                                        } else {
-                                            // Cache miss - fetch fresh prices from Octopus API.
-                                            // Anchor to the start of TODAY (UTC) so the response always
-                                            // includes the current slot. The Agile endpoint returns
-                                            // results newest-first, so a bare page_size=48 returns
-                                            // tomorrow's slots once they're published (~1pm) and the
-                                            // current slot drops out of the window - which silently
-                                            // leaves the state machine Idle and never discharges.
-                                            drop(prices);
-                                            let region = settings.agile_region.clone();
-            let today =
-                                                chrono::Utc::now().format("%Y-%m-%d").to_string();
-                                            // Configurable base URL: defaults to the real Octopus
-                                            // endpoint; tests and self-hosters can override via
-            // `settings.agile_api_base_url` to point at a local mock
-            // server or mirror.
-                                            let base = if settings.agile_api_base_url.is_empty() {
-                                                "https://api.octopus.energy".to_string()
-                                            } else {
-                                                settings.agile_api_base_url.clone()
-                                            };
-                                            let url = format!(
-                                                "{base}/v1/products/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-{region}/standard-unit-rates/?period_from={today}T00:00:00Z&page_size=96"
-                                            );
-                                            let fetch_result = tokio::task::spawn_blocking(move || -> Result<Vec<PriceSlot>, String> {
-                                                let mut resp = ureq::get(&url)
-                                                    .call()
-                                                    .map_err(|e| format!("HTTP error: {e}"))?;
-                                                let body = resp.body_mut().read_to_string()
-                                                    .map_err(|e| format!("read error: {e}"))?;
-                                                let json: serde_json::Value = serde_json::from_str(&body)
-                                                    .map_err(|e| format!("JSON error: {e}"))?;
-                                                let results = json["results"]
-                                                    .as_array()
-                                                    .ok_or_else(|| "missing results".to_string())?;
-                                                let slots: Vec<PriceSlot> = results
-                                                    .iter()
-                                                    .filter_map(|r| {
-                                                        let pence = r["value_inc_vat"].as_f64()?;
-                                                        let from = r["valid_from"].as_str()?;
-                                                        let to = r["valid_to"].as_str()?;
-                                                        let from_ts = chrono::DateTime::parse_from_rfc3339(from).ok()?.timestamp();
-                                                        let to_ts = chrono::DateTime::parse_from_rfc3339(to).ok()?.timestamp();
-                                                        Some(PriceSlot { pence, valid_from: from_ts, valid_to: to_ts })
-                                                    })
-                                                    .collect();
-                                                Ok(slots)
-                                            }).await;
-
-                                            match fetch_result {
-                                                Ok(Ok(fresh)) => {
-                                                    let mut prices =
-                                                        state.cached_agile_prices.lock().await;
-                                                    *prices = fresh;
-                                                    prices
-                                                        .iter()
-                                                        .find(|s| {
-                                                            now_ts >= s.valid_from
-                                                                && now_ts < s.valid_to
-                                                        })
-                                                        .map(|s| s.pence)
-                                                }
-                                                Ok(Err(e)) => {
-                                                    tracing::warn!("Agile: failed to fetch prices: {e}");
-                                                    None
-                                                }
-                                                Err(e) => {
-                                                    tracing::error!(
-                                                        "Agile: spawn_blocking failed: {e}"
-                                                    );
-                                                    None
-                                                }
-                                            }
-                                        };
-
-                                        // Snapshot-side flags for the cosy / auto-winter
-                                        // conflict guard. These are async mutexes so we
-                                        // snapshot them once at the top of this block.
-                                        let cosy_active = *state.cosy_active.lock().await;
-                                        let auto_winter_active = snapshot.auto_winter_active;
-
-                                        let cache_snapshot: Vec<PriceSlot> = {
-                                            let guard = state.cached_agile_prices.lock().await;
-                                            (*guard).clone()
-                                        };
-                                        let action = crate::inverter::state_machines::evaluate_agile_slot(
-                                            scope,
-                                            price,
-                                            settings.agile_charge_threshold,
-                                            settings.agile_discharge_threshold,
-                                            &cache_snapshot,
-                                            now_ts,
-                                            cosy_active,
-                                            auto_winter_active,
-                                            &chrono::Local,
-                                        );
-                                        tracing::debug!(
-                                            price = ?price,
-                                            scope = ?scope,
-                                            ?action,
-                                            "Agile: evaluated current slot",
-                                        );
-                                        action
-                                    };
-
-                                    // Convert the action into register writes.
-                                    let use_3ph =
-                                        snapshot.device_type.uses_three_phase_schedule_slots();
-                                    // Defer means cosy/auto-winter owns the inverter —
-                                    // don't touch it this poll. We still set the
-                                    // snapshot fields below so the frontend sees
-                                    // consistent state, but we skip the write loop.
-                                    // Skip writes when scope is Off and we're idle — the
-                                    // "disarm any preloaded slot" path was clearing the user's
-                                    // charge/discharge schedule on every poll cycle. Only write
-                                    // AgileClearActiveSlot when the scope is actually active
-                                    // (mid-band price) so the user's manual schedule survives.
-                                    let skip_writes = matches!(action, AgileSlotAction::Defer)
-                                        || (scope == crate::settings::AgileScope::Off
-                                            && matches!(action, AgileSlotAction::Idle));
-                                    let cmd = match &action {
-                                        AgileSlotAction::Charge {
-                                            start_hhmm,
-                                            end_hhmm,
-                                            target_soc,
-                                        } => {
-                                            tracing::info!(
-                                                "Agile: cheap window, charging {start_hhmm:04}–{end_hhmm:04} to {target_soc}%"
-                                            );
-                                            if use_3ph {
-                                                ControlCommand::ThreePhaseAgileChargeSlot {
-                                                    start_hhmm: *start_hhmm,
-                                                    end_hhmm: *end_hhmm,
-                                                    target_soc: *target_soc,
-                                                }
-                                            } else {
-                                                ControlCommand::AgileChargeSlot {
-                                                    start_hhmm: *start_hhmm,
-                                                    end_hhmm: *end_hhmm,
-                                                    target_soc: *target_soc,
-                                                }
-                                            }
-                                        }
-                                        AgileSlotAction::Discharge { start_hhmm, end_hhmm } => {
-                                            tracing::info!(
-                                                "Agile: expensive window, discharging (export) {start_hhmm:04}–{end_hhmm:04}"
-                                            );
-                                            if use_3ph {
-                                                ControlCommand::ThreePhaseAgileDischargeSlot {
-                                                    start_hhmm: *start_hhmm,
-                                                    end_hhmm: *end_hhmm,
-                                                }
-                                            } else {
-                                                ControlCommand::AgileDischargeSlot {
-                                                    start_hhmm: *start_hhmm,
-                                                    end_hhmm: *end_hhmm,
-                                                }
-                                            }
-                                        }
-                                        AgileSlotAction::Defer => {
-                                            // Cosy or auto-winter owns this side. Don't
-                                            // touch the inverter. Logged at debug only
-                                            // because this fires every poll during a
-                                            // cosy slot.
-                                            tracing::debug!("Agile: deferring (cosy/auto-winter owns charge side)");
-                                            // Use a no-op command — the skip_writes guard
-                                            // below prevents this from being written.
-                                            ControlCommand::AgileClearActiveSlot
-                                        }
-                                        AgileSlotAction::Idle => {
-                                            // Mid-band price, out-of-scope mode, or no
-                                            // price data. Disarm any preloaded slot.
-                                            tracing::debug!("Agile: idle, clearing active slot");
-                                            if use_3ph {
-                                                ControlCommand::ThreePhaseAgileClearActiveSlot
-                                            } else {
-                                                ControlCommand::AgileClearActiveSlot
-                                            }
-                                        }
-                                    };
-
-                                    if !skip_writes {
-                                        if let Ok(writes) = cmd.encode() {
-                                            let mut all_ok = true;
-                                            for w in &writes {
-                                                if let Err(e) =
-                                                    client.write_register(w.address, w.value).await
-                                                {
-                                                    tracing::error!(
-                                                        "Agile: write reg {} failed: {e}",
-                                                        w.address
-                                                    );
-                                                    all_ok = false;
-                                                }
-                                                tokio::time::sleep(Duration::from_millis(1500)).await;
-                                            }
-                                            if !all_ok {
-                                                tracing::warn!(
-                                                    "Agile: slot writes failed — will retry on next poll"
-                                                );
-                                            }
-                                        }
-                                    }
-
-                                    // Update the snapshot fields the frontend reads.
-                                    // `agile_scope` carries the user's selected mode
-                                    // (Off / Full / ChargeOnly / DischargeOnly); the
-                                    // frontend uses it for the Inverter-page summary
-                                    // and for hiding/showing schedule sections.
-                                    snapshot.agile_active = action.is_active();
-                                    snapshot.agile_state = action.label().to_string();
-                                    snapshot.agile_enabled = scope != crate::settings::AgileScope::Off;
-                                    snapshot.agile_scope = scope;
-                                }
-
                                 // ---- Email alerts ----
                                 //
                                 // Evaluate the sanitized snapshot against user-
@@ -2818,12 +2546,6 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 // - e.g. showing "Cosy Active" for an extra poll
                                 // after the slot actually ended.
                                 snapshot.cosy_active = *state.cosy_active.lock().await;
-                                // NOTE: snapshot.agile_active / agile_state / agile_enabled
-                                // are now set by the slot-based Agile block earlier in
-                                // this poll. Don't touch them here — overwriting would
-                                // regress the Inverter-page summary that derives
-                                // "Timed Charge — active" from enable_charge + slot
-                                // window + battery_state.
 
                                 {
                                     let mut latest = state.latest_snapshot.lock().await;
