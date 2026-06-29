@@ -195,7 +195,7 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     cleanup();
-    useInverterStore.setState({ snapshot: null });
+    useInverterStore.setState({ snapshot: null, connectionState: 'disconnected' });
   });
 
   async function batteryModeSection() {
@@ -212,6 +212,7 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
     useInverterStore.setState({
       snapshot: makeSnapshot({ device_type_code: '3001' }),
       developerMode: false,
+      connectionState: 'connected',
     });
     render(<ControlPage />);
 
@@ -223,7 +224,7 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
   });
 
   it('toggles Timed Export through the split endpoint, not the old combined mode endpoint', async () => {
-    useInverterStore.setState({ snapshot: makeSnapshot({ enable_discharge: false }), developerMode: false });
+    useInverterStore.setState({ snapshot: makeSnapshot({ enable_discharge: false }), developerMode: false, connectionState: 'connected' });
     render(<ControlPage />);
 
     const section = await batteryModeSection();
@@ -234,7 +235,7 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
   });
 
   it('toggles Timed Charge independently through HR96 endpoint', async () => {
-    useInverterStore.setState({ snapshot: makeSnapshot({ enable_charge: false }), developerMode: false });
+    useInverterStore.setState({ snapshot: makeSnapshot({ enable_charge: false }), developerMode: false, connectionState: 'connected' });
     render(<ControlPage />);
 
     const section = await batteryModeSection();
@@ -250,6 +251,7 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
     useInverterStore.setState({
       snapshot: makeSnapshot({ device_type_code: '3001', battery_pause_mode: 0 }),
       developerMode: false,
+      connectionState: 'connected',
     });
     render(<ControlPage />);
 
