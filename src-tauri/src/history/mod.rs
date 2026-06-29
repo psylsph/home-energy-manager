@@ -293,34 +293,76 @@ impl HistoryWindow {
     }
 }
 
+/// A decrease counts as a genuine daily reset only if the counter collapses to
+/// near zero relative to the day's running peak (`RESET_NEAR_ZERO_FRACTION`),
+/// floored by `RESET_FLOOR_KWH` so a tiny peak can't make the threshold absurd.
+/// A glitch dip stays at a substantial fraction of the day's total, so it falls
+/// above this and gets clamped instead.
+const RESET_NEAR_ZERO_FRACTION: f64 = 0.10;
+const RESET_FLOOR_KWH: f64 = 0.5;
+
+/// After a real reset the counter starts a fresh slow ramp from ~0, whereas a
+/// transient comms glitch that momentarily reads ~0 snaps straight back toward
+/// the prior level on the next sample. So a near-zero drop is only treated as a
+/// reset if the *next* point stays below `RESET_RECOVERY_FRACTION` of the peak;
+/// otherwise it's a glitch and gets clamped.
+const RESET_RECOVERY_FRACTION: f64 = 0.5;
+
+/// Whether a decrease from `peak` to `value` is a genuine daily-counter reset
+/// (keep it) rather than a glitch dip (clamp it). `next` is the raw value of
+/// the following point, used to reject a transient single-sample dip to ~0.
+fn is_genuine_reset(peak: f64, value: f64, next: Option<f64>) -> bool {
+    let near_zero = value <= (peak * RESET_NEAR_ZERO_FRACTION).max(RESET_FLOOR_KWH);
+    if !near_zero {
+        return false;
+    }
+    match next {
+        Some(n) => n < peak * RESET_RECOVERY_FRACTION,
+        None => true,
+    }
+}
+
 /// Repair cumulative daily counters after aggregation.
 ///
-/// The inverter's `today_*_kwh` fields are cumulative counters: they should
-/// only rise within a UTC day and reset around UTC midnight. Older app
-/// versions could persist plausible-but-wrong low values after reconnects;
-/// MAX bucket aggregation does not fix a whole bad bucket/plateau. This
-/// display-side repair clamps same-UTC-day decreases to the previous good
-/// value while allowing a normal day-boundary reset.
+/// The inverter's `today_*_kwh` fields are cumulative counters: they rise
+/// through the day and reset to ~0 at the inverter's local midnight. Older app
+/// versions could persist plausible-but-wrong low values after reconnects, and
+/// MAX bucket aggregation does not fix a whole bad bucket/plateau, so this
+/// display-side repair clamps a downward glitch dip back up to the previous
+/// good value - while leaving the genuine once-per-day reset intact.
 ///
-/// UTC is used (not local time) because the inverter's internal clock runs
-/// on UTC — its `today_*_kwh` counters reset at UTC midnight regardless of
-/// the system timezone. Using local time would incorrectly clamp the reset
-/// in timezones east of UTC (e.g. BST, where 23:00–23:59 UTC falls on the
-/// next local day but still carries yesterday's counter values).
+/// The reset is detected from the *data* (a collapse to ~0, see
+/// [`is_genuine_reset`]), NOT from a calendar boundary. The inverter's clock is
+/// set to local time (verified on a GIV-HY5.0: it tracks BST/GMT through DST and
+/// resets `today_*` at local midnight, i.e. 23:00 UTC in summer), and there is
+/// no guarantee every unit is configured the same way, so the repair must not
+/// depend on a fixed offset. An earlier version assumed a fixed UTC-midnight
+/// reset and used a same-UTC-day clamp; for a local-clock inverter in BST that
+/// suppressed the real 23:00 UTC reset and dragged the visible drop to the next
+/// UTC midnight (01:00 BST). Keying off the data works regardless of the
+/// inverter's clock setting or the viewer's timezone.
+///
+/// The same-UTC-day guard is retained only to bound glitch-clamping: in wide
+/// (>= 1 day) buckets each point is a separate daily total, so a lower day is
+/// legitimate day-to-day variation, not a dip to repair.
 fn repair_cumulative_points(points: &mut [TimePoint]) {
-    let mut last_t: Option<i64> = None;
-    let mut last_v: Option<f64> = None;
+    let mut prev: Option<(i64, f64)> = None; // (timestamp_ms, running daily peak)
     let mut repaired = 0usize;
 
-    for point in points {
-        if let (Some(prev_t), Some(prev_v)) = (last_t, last_v) {
-            if same_utc_day(prev_t, point.t) && point.v < prev_v {
-                point.v = prev_v;
+    for i in 0..points.len() {
+        let cur_v = points[i].v;
+        let next_v = points.get(i + 1).map(|p| p.v);
+
+        if let Some((prev_t, prev_v)) = prev {
+            if cur_v < prev_v
+                && !is_genuine_reset(prev_v, cur_v, next_v)
+                && same_utc_day(prev_t, points[i].t)
+            {
+                points[i].v = prev_v;
                 repaired += 1;
             }
         }
-        last_t = Some(point.t);
-        last_v = Some(point.v);
+        prev = Some((points[i].t, points[i].v));
     }
 
     if repaired > 0 {
@@ -1621,6 +1663,62 @@ mod tests {
         let values: Vec<f64> = points.iter().map(|p| p.v).collect();
 
         assert_eq!(values, vec![5.0, 5.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn cumulative_counter_preserves_local_midnight_reset_within_utc_day() {
+        // An inverter on local time (BST) resets today_* at local midnight =
+        // 23:00 UTC, the SAME UTC day as the daytime peak. The drop to ~0 must
+        // be preserved, not clamped back up and deferred to the next UTC
+        // midnight (which showed the graph resetting at 01:00 instead of 00:00
+        // in summer).
+        let db = test_db();
+        let day1 = 1700006400i64; // 2023-11-15 00:00:00 UTC
+
+        db.insert_reading(&make_snapshot_with_kwh(day1 + 72000, 8.0, 0.0)); // 20:00 UTC
+        db.insert_reading(&make_snapshot_with_kwh(day1 + 79200, 8.3, 0.0)); // 22:00 UTC peak
+        db.insert_reading(&make_snapshot_with_kwh(day1 + 82800, 0.0, 0.0)); // 23:00 UTC reset, same UTC day
+        db.insert_reading(&make_snapshot_with_kwh(day1 + 84600, 0.2, 0.0)); // 23:30 UTC fresh ramp
+
+        let result = db
+            .query_history(100_000_000, 600, 0, &["today_import_kwh".to_string()], None)
+            .unwrap();
+        let mut points: Vec<TimePoint> =
+            serde_json::from_value(result.get("today_import_kwh").cloned().unwrap()).unwrap();
+        points.sort_by_key(|p| p.t);
+        let values: Vec<f64> = points.iter().map(|p| p.v).collect();
+
+        let expected = [8.0, 8.3, 0.0, 0.2];
+        assert_eq!(values.len(), expected.len(), "got {values:?}");
+        for (got, want) in values.iter().zip(expected) {
+            assert!((got - want).abs() < 0.01, "got {values:?}, want {expected:?}");
+        }
+    }
+
+    #[test]
+    fn cumulative_counter_clamps_transient_zero_glitch() {
+        // A single bad sample reading ~0 mid-day (comms glitch) that snaps back
+        // to the prior level must still be clamped, not mistaken for a reset.
+        let db = test_db();
+        let base = 1700000000i64;
+
+        db.insert_reading(&make_snapshot_with_kwh(base, 8.0, 0.0));
+        db.insert_reading(&make_snapshot_with_kwh(base + 600, 0.0, 0.0)); // transient glitch
+        db.insert_reading(&make_snapshot_with_kwh(base + 1200, 8.2, 0.0)); // recovers
+
+        let result = db
+            .query_history(100_000_000, 600, 0, &["today_import_kwh".to_string()], None)
+            .unwrap();
+        let mut points: Vec<TimePoint> =
+            serde_json::from_value(result.get("today_import_kwh").cloned().unwrap()).unwrap();
+        points.sort_by_key(|p| p.t);
+        let values: Vec<f64> = points.iter().map(|p| p.v).collect();
+
+        let expected = [8.0, 8.0, 8.2];
+        assert_eq!(values.len(), expected.len(), "got {values:?}");
+        for (got, want) in values.iter().zip(expected) {
+            assert!((got - want).abs() < 0.01, "got {values:?}, want {expected:?}");
+        }
     }
 
     #[test]
