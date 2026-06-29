@@ -935,6 +935,11 @@ fn build_mode_message(snapshot: &InverterSnapshot) -> String {
     } else if snapshot.cosy_enabled {
         flags.push("Cosy idle");
     }
+    if snapshot.agile_active {
+        flags.push("Agile active");
+    } else if snapshot.agile_enabled {
+        flags.push("Agile idle");
+    }
     if snapshot.auto_winter_active {
         flags.push("Auto-winter");
     }
