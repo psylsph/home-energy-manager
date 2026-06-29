@@ -519,6 +519,7 @@ export function buildEnergyFlows(
         : formatCurrent(s.pv1_current + s.pv2_current),
       color: FLOW_COLORS.solar,
       active: solarActive,
+      status: solarActive ? 'Generating' : 'Idle',
     },
     {
       id: 'grid',
@@ -531,6 +532,7 @@ export function buildEnergyFlows(
       unit: `${formatVoltage(s.grid_voltage)}/${formatFrequency(s.grid_frequency)}`,
       color: FLOW_COLORS.grid,
       active: isImporting || isExporting,
+      status: isImporting ? 'Importing' : isExporting ? 'Exporting' : 'Idle',
     },
     {
       id: 'home',
@@ -552,6 +554,7 @@ export function buildEnergyFlows(
       color: batteryColor,
       ringPercent: s.soc,
       active: isCharging || isDischarging,
+      status: isCharging ? 'Charging' : isDischarging ? 'Discharging' : 'Idle',
     },
     {
       id: 'inverter',

@@ -2,6 +2,55 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.50.0] - 2026-06-29
+
+### Fixed
+
+- **Directional power charts no longer collapse to ~0 at coarse zoom.**
+  When the History page bucketed charge and discharge into the same wide
+  time window, the two directions cancelled each other out and the chart
+  looked flat. The server now averages each direction's magnitude
+  independently per bucket, so a battery that charges at 2 kW and
+  discharges at 3 kW across a 6-hour window shows both as separate
+  positive lines instead of a single ~1 kW net. The same fix applies to
+  the Grid Power chart (import vs export). Thanks to
+  [@bendavies](https://github.com/bendavies) for the rework (PR #166).
+
+- **The daily energy chart now resets at the right time during BST.**
+  The inverter's `today_*_kwh` counters reset at local midnight, which
+  in summer is 23:00 UTC. The old code only allowed a reset across a
+  UTC-day boundary, so the chart deferred the visible drop to 01:00
+  instead of 00:00. The reset is now detected from the data itself — a
+  collapse to near zero confirmed by the next sample — so it works
+  correctly for local-clock and UTC-clock inverters in any timezone.
+  Thanks to [@bendavies](https://github.com/bendavies) for the fix
+  (PR #171).
+
+- **Force Discharge with a duration now survives an app restart.**
+  If you set a 20-minute Force Discharge and the app restarted before
+  the window expired, the inverter stayed in the force state
+  indefinitely — the end-time was only tracked in memory. The poll
+  loop now persists the slot end-time and auto-reverts to the pre-force
+  state after a restart, matching the existing in-session behaviour.
+
+- **The energy flow diagram no longer draws a false home spoke when
+  the house is idle.** During a battery discharge with the house at or
+  below the noise floor, the diagram used to route the full discharge
+  through the home node — making it look like the house was consuming
+  power it wasn't. The discharge now routes straight to the grid in
+  that case, matching the home hub's idle rule. (Issue #172)
+
+- **The inverter mini-card pill no longer clips long battery-mode
+  labels.** On AC-coupled inverters the pill below the radial diagram
+  was too narrow for labels like "Timed Demand (Discharging)", which
+  spilled past the border. The pill is now wider and the text is
+  better centred vertically.
+
+- **Mobile layout no longer overflows on the Logs page and Charging
+  Mode selector.** The filter input, Refresh button, capture level
+  selector, and Charging Mode dropdown now stack vertically on narrow
+  viewports instead of running off the right edge of the screen.
+
 ## [0.49.1] - 2026-06-29
 
 ### Fixed

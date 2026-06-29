@@ -55,6 +55,8 @@ export interface FlowNode {
   ringPercent?: number;
   /** Whether this node is currently moving meaningful power. */
   active: boolean;
+  /** Optional pre-derived status word, e.g. "Importing" or "Exporting". */
+  status?: string;
 }
 
 /**

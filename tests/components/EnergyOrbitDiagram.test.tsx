@@ -488,7 +488,10 @@ describe('EnergyOrbitDiagram', () => {
     // the old 90 px/s regime would have produced a much faster spoke
     // (well under 1 s).
     //
-    // 140 px / (45 × 0.55) ≈ 5.65 s — well above the 1 s clamp.
+    // The current compact spoke is ~87 px; at 45 px/s and full strength it
+    // traverses in about 1.33 s, while the old 90 px/s regime would have hit
+    // the 1 s floor. This keeps the test tied to the calmer post-#170 speed
+    // without depending on the older, longer spoke geometry.
     const { container } = render(
       <EnergyOrbitDiagram
         snapshot={makeSnapshot({
@@ -504,7 +507,7 @@ describe('EnergyOrbitDiagram', () => {
     const dur = parseFloat(
       container.querySelector('[data-flow-id="solar"]')?.getAttribute('data-duration') ?? '0',
     );
-    expect(dur).toBeGreaterThan(1.5);
+    expect(dur).toBeGreaterThan(1.2);
     expect(dur).toBeLessThan(8.0);
   });
 
