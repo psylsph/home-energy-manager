@@ -225,7 +225,7 @@ describe('<ControlPage/> — Charge Schedule armed vs not-active (issue #135)', 
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     cleanup();
-    useInverterStore.setState({ snapshot: null });
+    useInverterStore.setState({ snapshot: null, connectionState: 'disconnected' });
   });
 
   /** Resolve the Charge Schedule <section> so assertions can be scoped to
@@ -246,7 +246,7 @@ describe('<ControlPage/> — Charge Schedule armed vs not-active (issue #135)', 
     // HR 96 = 0 (enable_charge OFF), HR 116 = 4, HR 242 = 100. The slot is
     // configured but the inverter will not charge — the UI must dim it
     // (opacity-60) so the user can see it's inert.
-    useInverterStore.setState({ snapshot: makeSnapshot(), developerMode: false });
+    useInverterStore.setState({ snapshot: makeSnapshot(), developerMode: false, connectionState: 'connected' });
     render(<ControlPage />);
 
     const section = await chargeScheduleSection();
@@ -283,6 +283,7 @@ describe('<ControlPage/> — Charge Schedule armed vs not-active (issue #135)', 
         ],
       }),
       developerMode: false,
+      connectionState: 'connected',
     });
     render(<ControlPage />);
 
