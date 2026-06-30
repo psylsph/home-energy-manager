@@ -26,6 +26,8 @@ jobs:
           cache: npm
 
       - run: npm install
+      - name: Verify release versions are in sync
+        run: bash scripts/check-versions.sh
       - run: npm run lint
       - run: npm run build
 

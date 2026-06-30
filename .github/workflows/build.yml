@@ -10,7 +10,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Gate every release: if the three version files disagree, abort
+  # before any platform build spins up. Catches the "bumped two, forgot
+  # one" mistake (the v0.33.2 bug, where tauri.conf.json lagged the other
+  # two). Runs first; both build jobs below depend on it.
+  verify-versions:
+    name: Verify version sync
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check package.json / Cargo.toml / tauri.conf.json agree
+        run: bash scripts/check-versions.sh
+
   build:
+    needs: verify-versions
     permissions:
       contents: write
 
@@ -354,6 +367,7 @@ jobs:
           files: release-assets/*
 
   build-android:
+    needs: verify-versions
     name: Android APK
     permissions:
       contents: write
