@@ -7628,6 +7628,53 @@ mod tests {
         .await;
     }
 
+    /// The minutes path appends the duration slot writes *before* running
+    /// `ForceDischarge::encode()`, whose own slot writes (the 00:00/23:59
+    /// full-day default for slot 1, plus a cleared slot 2) would otherwise
+    /// land later in the queue. The poll loop drains writes and applies them
+    /// sequentially with no deduplication (last write to a given address
+    /// wins on the wire — see `poll.rs`), so those encoder defaults would
+    /// clobber the duration slot. The handler's strip removes them.
+    ///
+    /// The sibling test above reads slot 1 via `Iterator::find`, which
+    /// returns the *first* match (the duration value), so it still passes
+    /// if the strip is deleted. This test pins the strip itself: each slot
+    /// register must appear exactly once. We count rather than check values
+    /// both to be value-agnostic about the regression and to sidestep the
+    /// midnight / 23:59 edge cases where a duration value can legitimately
+    /// equal the encoder default.
+    #[tokio::test]
+    async fn force_discharge_with_minutes_strips_encoder_slot_writes() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END,
+                HR_DISCHARGE_SLOT_2_START,
+            };
+
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let _ =
+                force_discharge(State(state.clone()), Some(Json(json!({ "minutes": 60 })))).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+
+            for addr in [
+                HR_DISCHARGE_SLOT_1_START,
+                HR_DISCHARGE_SLOT_1_END,
+                HR_DISCHARGE_SLOT_2_START,
+                HR_DISCHARGE_SLOT_2_END,
+            ] {
+                let count = writes.iter().filter(|w| w.address == addr).count();
+                assert_eq!(
+                    count, 1,
+                    "slot register {addr} must appear exactly once after the strip; \
+                     a count of 2 means ForceDischarge::encode()'s full-day slot writes \
+                     were not dropped and would overwrite the duration slot on the wire"
+                );
+            }
+        })
+        .await;
+    }
+
     /// The slot writes must come BEFORE the enable_discharge arm, mirroring
     /// the force-charge slot-before-enable ordering test. The inverter
     /// needs the slot to exist before enable_discharge=1 has anything
