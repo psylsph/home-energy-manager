@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.50.2] - 2026-06-30
+
+### Fixed
+
+- **Daily energy figures no longer falsely reset to zero after sunset.**
+  The PV2 daily-energy register reads as zero once the sun goes down, and
+  the app was treating that drop as a legitimate midnight reset — so
+  today's solar generation (and the derived totals) would collapse to zero
+  in the evening and corrupt the history graph. Resets are now only
+  accepted within a ±65-minute window around midnight, and after-dark PV2
+  readings are checked against the aggregate solar register before being
+  trusted.
+
 ## [0.50.1] - 2026-06-29
 
 ### Fixed
