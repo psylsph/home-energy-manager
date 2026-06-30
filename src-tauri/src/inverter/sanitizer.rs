@@ -25,6 +25,8 @@
 
 use std::collections::HashMap;
 
+use chrono::Timelike;
+
 use crate::inverter::model::{BatteryMode, DeviceType, InverterSnapshot};
 
 // ===========================================================================
@@ -1342,6 +1344,22 @@ pub(crate) fn check_power_rate(
 // Main sanitization entry point
 // ===========================================================================
 
+/// Daily counters should only collapse to ~0 around midnight. Allow a generous
+/// 65-minute window either side so an inverter clock that is a little fast/slow
+/// or temporarily offset by a one-hour DST transition still resets cleanly, but
+/// a late-evening false zero (for example PV2 after sunset) is treated as a
+/// corrupt decrease and carried forward.
+const DAILY_RESET_WINDOW_MINS: u32 = 65;
+
+fn is_within_daily_reset_window(timestamp_secs: i64) -> bool {
+    let Some(dt) = chrono::DateTime::from_timestamp(timestamp_secs, 0) else {
+        return false;
+    };
+    let local = dt.with_timezone(&chrono::Local);
+    let minute_of_day = local.hour() * 60 + local.minute();
+    minute_of_day <= DAILY_RESET_WINDOW_MINS || minute_of_day >= 1440 - DAILY_RESET_WINDOW_MINS
+}
+
 /// Sanitize a snapshot against physically impossible register values.
 ///
 /// Compares the freshly-decoded snapshot against the previous one to detect
@@ -2005,8 +2023,15 @@ pub(crate) fn sanitize_snapshot(
                     // Accept raw; absolute range already validated it.
                 }
                 // Midnight rollover: counter legitimately reset to ~0.
-                // Allow if raw is small and prev was large.
-                else if raw < prev_val && raw < 5.0 && prev_val > 5.0 {
+                // Allow if raw is small, prev was large, and the reading lands
+                // near midnight. Without the time guard, persistent false lows
+                // (e.g. PV2 decoded as 0 after sunset) look exactly like a
+                // real reset and get stored into history.
+                else if raw < prev_val
+                    && raw < 5.0
+                    && prev_val > 5.0
+                    && is_within_daily_reset_window(snap.timestamp)
+                {
                     // Legitimate midnight reset - accept raw as-is
                     delta_corrections.0.remove($name);
                 }
@@ -2659,6 +2684,17 @@ pub(crate) fn validate_battery_bms(data: &[u16]) -> bool {
 mod tests {
     use super::*;
     use crate::inverter::model::BatteryModule;
+    use chrono::TimeZone;
+
+    fn local_timestamp(hour: u32, minute: u32) -> i64 {
+        let date = chrono::Local::now().date_naive();
+        let naive = date.and_hms_opt(hour, minute, 0).unwrap();
+        chrono::Local
+            .from_local_datetime(&naive)
+            .earliest()
+            .unwrap()
+            .timestamp()
+    }
 
     #[test]
     fn derive_battery_fields_from_bms_overrides_single_phase_temp() {
@@ -3557,6 +3593,92 @@ mod tests {
             "two-tick derived consumption wobble must not force immediate re-poll"
         );
         assert_eq!(snap.today_consumption_kwh, prev.today_consumption_kwh);
+    }
+
+    #[test]
+    fn daily_energy_false_zero_outside_midnight_window_is_carried_forward() {
+        let prev = InverterSnapshot {
+            timestamp: local_timestamp(22, 29),
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            battery_reserve: 4,
+            today_pv2_kwh: 9.5,
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            timestamp: local_timestamp(22, 30),
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            battery_reserve: 4,
+            today_pv2_kwh: 0.0,
+            ..Default::default()
+        };
+        let mut pending_mode = None;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+        let mut rate_release_counts = RateReleaseCounts::default();
+
+        let sanitized = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+            &mut rate_release_counts,
+        );
+
+        assert!(sanitized, "false pre-midnight zero should be rejected");
+        assert_eq!(snap.today_pv2_kwh, prev.today_pv2_kwh);
+    }
+
+    #[test]
+    fn daily_energy_reset_inside_midnight_window_is_accepted() {
+        let prev = InverterSnapshot {
+            timestamp: local_timestamp(23, 29),
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            battery_reserve: 4,
+            today_pv2_kwh: 9.5,
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            timestamp: local_timestamp(23, 30),
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            battery_reserve: 4,
+            today_pv2_kwh: 0.0,
+            ..Default::default()
+        };
+        let mut pending_mode = None;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+        let mut rate_release_counts = RateReleaseCounts::default();
+
+        let sanitized = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+            &mut rate_release_counts,
+        );
+
+        assert!(!sanitized, "near-midnight reset should pass through");
+        assert_eq!(snap.today_pv2_kwh, 0.0);
+    }
+
+    #[test]
+    fn daily_energy_reset_window_is_sixty_five_minutes_each_side() {
+        assert!(is_within_daily_reset_window(local_timestamp(22, 55)));
+        assert!(!is_within_daily_reset_window(local_timestamp(22, 54)));
+        assert!(is_within_daily_reset_window(local_timestamp(1, 5)));
+        assert!(!is_within_daily_reset_window(local_timestamp(1, 6)));
     }
 
     #[test]

@@ -557,10 +557,16 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     // The post-decode `check_energy_field!` macro is a second line of
     // defence for the combined value.
     //
-    // For the second string (IR(19)) we only include its daily energy
-    // when PV2 has panels connected (pv2_voltage > 0); IR(19) can return
-    // stale or garbage data when no second PV string is present.
+    // For the second string (IR(19)), do not use *instantaneous* PV2 voltage
+    // as the sole presence test. At dusk PV2 voltage legitimately falls to 0
+    // while the daily-energy register still contains the day's total; forcing
+    // it to 0 creates a false pre-midnight reset in history. A live PV2 voltage
+    // still opens the gate immediately. After sunset, accept a plausible IR(19)
+    // value only when the aggregate daily PV register corroborates the PV1+PV2
+    // sum; that keeps no-PV2 systems from displaying stale IR(19) garbage.
     const MAX_DAILY_KWH_TENTHS: u16 = 2_000; // 200 kWh × 10 — same ceiling as the sanitizer
+    const PV_AGGREGATE_CORROBORATION_MARGIN_TENTHS: u16 = 20; // 2 kWh tolerance between registers
+    let ir44_raw = get_reg(data, 44);
     let pv1_raw = get_reg(data, 17);
     let pv1_today = if pv1_raw <= MAX_DAILY_KWH_TENTHS {
         pv1_raw as f32
@@ -568,13 +574,14 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
         // Corrupted IR(17) — exclude this string from the sum.
         0.0
     };
-    let pv2_today = if snap.pv2_voltage > 0.0 {
-        let pv2_raw = get_reg(data, 19);
-        if pv2_raw <= MAX_DAILY_KWH_TENTHS {
-            pv2_raw as f32
-        } else {
-            0.0
-        }
+    let pv2_raw = get_reg(data, 19);
+    let pv2_plausible = pv2_raw <= MAX_DAILY_KWH_TENTHS;
+    let pv2_live = snap.pv2_voltage > 0.0 || snap.pv2_current > 0.0;
+    let pv2_corroborated_after_dark = ir44_raw <= MAX_DAILY_KWH_TENTHS
+        && ir44_raw.saturating_add(PV_AGGREGATE_CORROBORATION_MARGIN_TENTHS)
+            >= pv1_raw.saturating_add(pv2_raw);
+    let pv2_today = if pv2_plausible && (pv2_live || pv2_corroborated_after_dark) {
+        pv2_raw as f32
     } else {
         0.0
     };
@@ -591,7 +598,6 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
         // Fallback to the aggregate register when the per-string data
         // is unavailable (returns the higher value — known to be 5–10%
         // above the per-string sum). Sanitise IR(44) the same way.
-        let ir44_raw = get_reg(data, 44);
         snap.today_solar_kwh = if ir44_raw <= MAX_DAILY_KWH_TENTHS {
             ir44_raw as f32 * 0.1
         } else {
@@ -3883,18 +3889,40 @@ mod tests {
     }
 
     #[test]
-    fn single_phase_per_string_zero_when_pv2_voltage_zero() {
-        // No PV2 string (pv2_voltage == 0) → IR(19) must be ignored regardless
-        // of value; today_pv2_kwh stays at 0.0.
+    fn single_phase_per_string_zero_when_pv2_voltage_zero_and_aggregate_does_not_corroborate() {
+        // No PV2 string (pv2_voltage == 0) with an aggregate that only matches
+        // PV1 → IR(19) is stale garbage and must be ignored.
         let mut snap = InverterSnapshot::default();
         let mut data = vec![0u16; 60];
-        data[2] = 0; // pv2_voltage = 0 — no second string
+        data[2] = 0; // pv2_voltage = 0 — no live second string
         data[17] = 120; // PV1 12.0 kWh
         data[19] = 999; // IR(19) stale garbage — must be ignored
+        data[44] = 122; // aggregate corroborates PV1 only, not PV1+PV2
         decode_input_0_59(&data, &mut snap);
         assert!((snap.today_pv1_kwh - 12.0).abs() < 0.01);
-        assert_eq!(snap.today_pv2_kwh, 0.0, "PV2 must be 0 when no PV2 string");
+        assert_eq!(
+            snap.today_pv2_kwh, 0.0,
+            "uncorroborated PV2 must be ignored"
+        );
         assert!((snap.today_solar_kwh - 12.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn single_phase_per_string_pv2_survives_after_sunset_when_aggregate_corroborates() {
+        // At dusk PV2 voltage can fall to zero before midnight while IR(19)
+        // still holds the day's PV2 total. If the aggregate daily PV register
+        // corroborates PV1+PV2, keep IR(19) instead of forcing a false zero.
+        let mut snap = InverterSnapshot::default();
+        let mut data = vec![0u16; 60];
+        data[2] = 0; // pv2_voltage = 0 after sunset
+        data[9] = 0; // pv2_current = 0 after sunset
+        data[17] = 150; // PV1 15.0 kWh
+        data[19] = 147; // PV2 14.7 kWh
+        data[44] = 300; // aggregate ~30.0 kWh corroborates PV1+PV2
+        decode_input_0_59(&data, &mut snap);
+        assert!((snap.today_pv1_kwh - 15.0).abs() < 0.01);
+        assert!((snap.today_pv2_kwh - 14.7).abs() < 0.01);
+        assert!((snap.today_solar_kwh - 29.7).abs() < 0.01);
     }
 
     #[test]
