@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { renderHook, cleanup, act } from '@testing-library/react';
+import { renderHook, cleanup } from '@testing-library/react';
 import { useInverterStore } from '../../src/store/useInverterStore';
+import type { InverterSnapshot } from '../../src/lib/types';
 
 // Mock the api module
 vi.mock('../../src/lib/api', () => ({
@@ -8,13 +9,18 @@ vi.mock('../../src/lib/api', () => ({
   apiGet: vi.fn(),
 }));
 
+// Minimal event/handler shapes for the mock WebSocket. The real DOM types
+// pull in the full Event / MessageEvent interfaces; we only need the
+// fields the hook actually reads (`data` on messages, `code` on close).
+type WsEvent = { code?: number; reason?: string; data?: string };
+
 // Mock WebSocket
 class MockWebSocket {
   url: string;
-  onopen: ((event: any) => void) | null = null;
-  onmessage: ((event: any) => void) | null = null;
-  onclose: ((event: any) => void) | null = null;
-  onerror: ((event: any) => void) | null = null;
+  onopen: ((event: WsEvent) => void) | null = null;
+  onmessage: ((event: WsEvent) => void) | null = null;
+  onclose: ((event: WsEvent) => void) | null = null;
+  onerror: ((event: WsEvent) => void) | null = null;
   readyState: number = 0;
   static CONNECTING = 0;
   static OPEN = 1;
@@ -37,7 +43,7 @@ class MockWebSocket {
     this.onclose?.({ code: code ?? 1000, reason: reason ?? '' });
   }
 
-  send(data: string) {}
+  send() {}
 }
 
 const mockWsInstances: MockWebSocket[] = [];
@@ -124,7 +130,7 @@ describe('useWebSocket', () => {
   });
 
   it('clears snapshot on non-connected connection message', () => {
-    useInverterStore.setState({ snapshot: { soc: 50 } as any });
+    useInverterStore.setState({ snapshot: { soc: 50 } as unknown as InverterSnapshot });
     renderHook(() => useWebSocket());
 
     const ws = mockWsInstances[0];
