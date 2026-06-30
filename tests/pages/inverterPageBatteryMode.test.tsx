@@ -124,6 +124,16 @@ describe('<InverterPage/> battery mechanism summary', () => {
     expect(screen.getByText('Timed Discharge')).toBeDefined();
   });
 
+  it('lets the Modes block use the full row on mobile', () => {
+    useInverterStore.setState({ snapshot: makeSnapshot() });
+    render(<InverterPage />);
+
+    expect(screen.getByText('Modes').className).toContain('col-span-2');
+    expect(screen.getByTestId('battery-mode-eco').parentElement?.parentElement?.className).toContain(
+      'col-span-2',
+    );
+  });
+
   it('renders every mechanism as off when all registers are clear', () => {
     useInverterStore.setState({ snapshot: makeSnapshot() });
     render(<InverterPage />);

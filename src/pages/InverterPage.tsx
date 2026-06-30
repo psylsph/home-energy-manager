@@ -240,8 +240,8 @@ export default function InverterPage() {
       <section className="bg-bg-surface rounded-2xl p-5">
         <h2 className="text-text-primary font-semibold text-lg mb-4">Battery</h2>
         <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
-          <span className="text-text-secondary">Modes</span>
-          <div className="text-text-primary text-right">
+          <span className="text-text-secondary col-span-2 sm:col-span-1">Modes</span>
+          <div className="text-text-primary col-span-2 sm:col-span-1 sm:text-right">
             <BatteryModeSummary snapshot={s} />
           </div>
           <span className="text-text-secondary">SOC</span>
