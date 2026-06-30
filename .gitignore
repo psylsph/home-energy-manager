@@ -40,6 +40,7 @@ CODE_REVIEW.md
 REGISTER_AUDIT.md
 AUDIT.md
 ideas
+reviews/*
 
 # E2E test results
 test-results/
