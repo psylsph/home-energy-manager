@@ -2301,9 +2301,18 @@ pub async fn force_discharge(
             if minutes.is_some() {
                 // On the minutes path, drop the encoder's slot writes so
                 // the duration slot from `force_discharge_slot_writes`
-                // isn't overwritten by 00:00–23:59. The encoder writes:
-                //   single-phase: HR_DISCHARGE_SLOT_1_START/END, HR_DISCHARGE_SLOT_2_START/END
-                //   3PH:          HR_3PH_DISCHARGE_SLOT_1_START/END, HR_3PH_DISCHARGE_SLOT_2_START/END
+                // isn't overwritten by 00:00–23:59. The single-phase
+                // `ForceDischarge` encoder writes 4 slot registers that
+                // must be stripped here:
+                //   HR_DISCHARGE_SLOT_1_START/END, HR_DISCHARGE_SLOT_2_START/END
+                //
+                // The three-phase branch is a defensive no-op today:
+                // `ThreePhaseForceDischarge::encode()` emits only the
+                // power-mode and force-enable flags — no slot registers —
+                // so there is nothing to strip. It's kept so that if the
+                // encoder ever gains slot writes (mirroring the
+                // single-phase layout), the duration slot is still
+                // preserved instead of clobbered by a default.
                 use crate::modbus::registers::{
                     HR_3PH_DISCHARGE_SLOT_1_END, HR_3PH_DISCHARGE_SLOT_1_START,
                     HR_3PH_DISCHARGE_SLOT_2_END, HR_3PH_DISCHARGE_SLOT_2_START,
@@ -7827,6 +7836,48 @@ mod tests {
                     .iter()
                     .any(|w| w.address == HR_3PH_FORCE_DISCHARGE_ENABLE && w.value == 1),
                 "3PH force discharge with minutes must arm HR_3PH_FORCE_DISCHARGE_ENABLE=1"
+            );
+        })
+        .await;
+    }
+
+    /// Three-phase mirror of `force_discharge_with_minutes_writes_slot_before_enable`:
+    /// the 3PH discharge slot registers must be written before the
+    /// `HR_3PH_FORCE_DISCHARGE_ENABLE` flag is armed, so the inverter
+    /// has a slot to gate once force-discharge turns on.
+    #[tokio::test]
+    async fn force_discharge_with_minutes_writes_slot_before_enable_three_phase() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_3PH_DISCHARGE_SLOT_1_END, HR_3PH_DISCHARGE_SLOT_1_START,
+                HR_3PH_FORCE_DISCHARGE_ENABLE,
+            };
+
+            let state = make_state_with_device(DeviceType::ThreePhase).await;
+            let _ =
+                force_discharge(State(state.clone()), Some(Json(json!({ "minutes": 30 })))).await;
+            let writes = drain_pending_writes(&state).await;
+
+            let start_idx = writes
+                .iter()
+                .position(|w| w.address == HR_3PH_DISCHARGE_SLOT_1_START)
+                .expect("3PH force discharge with minutes must write slot 1 start (HR 1118)");
+            let end_idx = writes
+                .iter()
+                .position(|w| w.address == HR_3PH_DISCHARGE_SLOT_1_END)
+                .expect("3PH force discharge with minutes must write slot 1 end (HR 1119)");
+            let enable_idx = writes
+                .iter()
+                .position(|w| w.address == HR_3PH_FORCE_DISCHARGE_ENABLE)
+                .expect("3PH force discharge with minutes must arm force-discharge flag");
+
+            assert!(
+                start_idx < enable_idx,
+                "3PH slot 1 start must be written before HR_3PH_FORCE_DISCHARGE_ENABLE=1"
+            );
+            assert!(
+                end_idx < enable_idx,
+                "3PH slot 1 end must be written before HR_3PH_FORCE_DISCHARGE_ENABLE=1"
             );
         })
         .await;
