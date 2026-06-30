@@ -77,7 +77,7 @@ Now you can open it with one tap, just like a normal app.
 - Double-check the IP address. If your PC goes to sleep, or you restart your router, the number can change. Just run through Step 2 again to get the new one.
   - To stop the number changing, open **Settings → Network & Internet → Wi-Fi → your network → IP assignment → Edit**, and switch from **Automatic (DHCP)** to **Manual**. Turn on IPv4 and fill in the same IP address as before. That locks it in.
 - Make sure the Home Energy Manager window is still open on your PC (it has to be running for the phone to reach it)
-- Some antivirus or firewall programs (Norton, McAfee, even Windows Defender Firewall) can block the connection. If nothing else works, try temporarily disabling your firewall to see if that's the culprit.
+- A firewall can block the connection. On Windows, antivirus programs (Norton, McAfee, even Windows Defender Firewall) are the usual culprits — try temporarily disabling your firewall to see if that's it. On Linux, if you've enabled `ufw` you'll need to open the port with `sudo ufw allow 7337` (or `sudo firewall-cmd --add-port=7337/tcp --permanent && sudo firewall-cmd --reload` on Fedora/openSUSE).
 
 **Phone says "this site is not secure" or shows a warning:**
 
@@ -173,6 +173,17 @@ This is the same root cause — the app isn't code-signed, so some security suit
    sudo dnf install ./home-energy-manager-*.rpm    # Fedora
    sudo zypper install ./home-energy-manager-*.rpm  # openSUSE
    ```
+
+> **Accessing the app from another device?** The web UI listens on port
+> **7337**. If you'll be opening it from your phone, another computer, or
+> anywhere other than the machine it's running on, you need to let that port
+> through your firewall — otherwise the page simply won't load:
+>
+> - **Ubuntu / Debian** (using `ufw`): `sudo ufw allow 7337`
+> - **Fedora / openSUSE** (using `firewalld`): `sudo firewall-cmd --add-port=7337/tcp --permanent && sudo firewall-cmd --reload`
+>
+> You can skip this if you're only using the app on the same machine it's
+> installed on — it's only needed for remote access.
 
 #### Linux system requirements
 
@@ -297,7 +308,7 @@ This installs `givenergy-local` to `/usr/bin/` — it's now on your PATH.
 givenergy-local --headless
 ```
 
-The web UI is available at `http://<pi-ip>:7337` from any browser on your network.
+The web UI is available at `http://<pi-ip>:7337` from any browser on your network. If it won't load from another device, check your firewall — Raspberry Pi OS doesn't enable one by default, but if you've set up `ufw`, allow the port with `sudo ufw allow 7337`.
 
 **3. Auto-start on boot (systemd)**
 
