@@ -71,6 +71,14 @@ interface InverterState {
   /** Consecutive connection failures since last successful connect. */
   connectFailures: number;
   /**
+   * Epoch ms of the last manual "Reconnect" click (`POST /api/reconnect`).
+   * Drives the header's "Reconnect requested at HH:MM:SS" notice so a click
+   * against an unreachable dongle still produces visible feedback — without
+   * it, the connection-state broadcast is `Reconnecting`→`Reconnecting` and
+   * the click looks inert. `null` until the first click.
+   */
+  reconnectRequestedAt: number | null;
+  /**
    * Whether to show short status words under orbit nodes (Generating,
    * Importing, Charging, etc.). Default: on — the words carry the
    * direction signal that used to live in a `+`/`-` prefix on the
@@ -88,6 +96,8 @@ interface InverterState {
   setSnapshot: (snapshot: InverterSnapshot) => void;
   clearSnapshot: () => void;
   setConnection: (state: ConnectionState, host?: string, connectedSince?: number | null) => void;
+  /** Record that a manual reconnect was just requested (see `reconnectRequestedAt`). */
+  markReconnectRequested: (ts: number) => void;
   setDeveloperMode: (enabled: boolean) => void;
   setThemeMode: (mode: ThemeMode) => void;
   setReadOnly: (enabled: boolean) => void;
@@ -277,6 +287,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   connectedHost: null,
   connectedSince: null,
   connectFailures: 0,
+  reconnectRequestedAt: null,
   developerMode: loadDeveloperMode(),
   themeMode: loadThemeMode(),
   readOnly: loadReadOnly(),
@@ -306,6 +317,7 @@ export const useInverterStore = create<InverterState>((set) => ({
       connectedSince: state === 'connected' ? (connectedSince ?? Date.now()) : null,
       connectFailures: state === 'connected' ? 0 : prev.connectFailures,
     })),
+  markReconnectRequested: (ts) => set({ reconnectRequestedAt: ts }),
   setDeveloperMode: (enabled) => {
     try {
       localStorage.setItem('devMode', String(enabled));

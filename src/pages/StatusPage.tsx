@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { useInverterStore } from '../store/useInverterStore';
-import { apiPost } from '../lib/api';
+import { useReconnect } from '../hooks/useReconnect';
 import EnergyOrbitDiagram from '../components/EnergyOrbitDiagram';
 import BatteryPanel from '../components/BatteryPanel';
 import SummaryTiles from '../components/SummaryTiles';
@@ -49,17 +49,7 @@ export default function StatusPage() {
     return () => clearInterval(id);
   }, [connectionState]);
 
-  const [reconnecting, setReconnecting] = useState(false);
-  const handleReconnect = useCallback(async () => {
-    setReconnecting(true);
-    try {
-      await apiPost('/api/reconnect');
-    } catch {
-      // Ignore — the connection will drop and the WS hook handles reconnection.
-    }
-    // Reset after a timeout in case the request doesn't trigger a state change.
-    setTimeout(() => setReconnecting(false), 5000);
-  }, []);
+  const { reconnect, reconnecting } = useReconnect();
 
   // Re-compute duration every tick (driven by the interval that updates `now`).
   const durationSec =
@@ -99,7 +89,7 @@ export default function StatusPage() {
                   will reboot and should reconnect within a few minutes.
                 </p>
                 <button
-                  onClick={handleReconnect}
+                  onClick={reconnect}
                   disabled={reconnecting}
                   className="self-start mt-1 px-4 py-1.5 text-xs font-semibold rounded-lg bg-amber-600/30 hover:bg-amber-600/50 border border-amber-500/30 transition-colors disabled:opacity-50"
                 >
@@ -123,7 +113,7 @@ export default function StatusPage() {
           )}
           {connectionState !== 'disconnected' && (
             <button
-              onClick={handleReconnect}
+              onClick={reconnect}
               disabled={reconnecting}
               className="px-4 py-1.5 text-xs font-semibold rounded-lg bg-bg-surface hover:bg-white/10 border border-white/10 transition-colors disabled:opacity-50"
             >
@@ -168,7 +158,7 @@ export default function StatusPage() {
             )}
           </div>
           <button
-            onClick={handleReconnect}
+            onClick={reconnect}
             disabled={reconnecting}
             className="px-3 py-1 text-xs font-medium rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 transition-colors disabled:opacity-40"
           >

@@ -11,6 +11,7 @@ vi.mock('../../src/lib/api', () => ({
 
 import AwaitingConnection from '../../src/components/AwaitingConnection';
 import { awaitingConnectionMessage } from '../../src/lib/awaitingConnection';
+import { useInverterStore } from '../../src/store/useInverterStore';
 import type { ConnectionState } from '../../src/lib/types';
 
 // ---------------------------------------------------------------------------
@@ -24,6 +25,9 @@ import type { ConnectionState } from '../../src/lib/types';
 afterEach(() => {
   vi.restoreAllMocks();
   cleanup();
+  // The shared reconnect hook stamps this on every click; reset it so a
+  // click in one test can't leak into another's assertions.
+  useInverterStore.setState({ reconnectRequestedAt: null });
 });
 
 describe('awaitingConnectionMessage() — word by connection state', () => {
