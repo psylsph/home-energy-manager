@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.50.1] - 2026-06-29
+
+### Fixed
+
+- **Windows CI no longer fails on bash retry loops.**
+  The GitHub Actions Windows runner defaults to PowerShell, which rejects
+  `for attempt in 1 2 3; do ... done` syntax. The build step now explicitly
+  sets `shell: bash` so the retry logic works on all platforms.
+
+- **E2E test settings no longer cause the backend to discard the config.**
+  The `last_backfill_completed` field was serialised as an empty string
+  (`""`) instead of `null`, which made Rust's `Option<NaiveDate>`
+  deserializer reject the entire settings file. The backend fell back to
+  defaults (no host, no serial), causing every Modbus-write-verification
+  test to fail. Both the `.ts` source and the compiled `.mjs` copy now
+  emit `null`.
+
+- **Orbit diagram status words now respect the grid direction.**
+  The `statusFor()` function in `EnergyOrbitDiagram` fell through to
+  `'Idle'` for the grid node when no flow had a matching direction,
+  even when `grid_power` was non-zero. The grid, solar, and battery
+  nodes now carry a pre-derived `status` field from `buildEnergyFlows`
+  so the diagram always shows the correct label.
+
+- **Orbit diagram ball-speed test pinned to current geometry.**
+  The `BASE_SPEED_PX_PER_S` was halved from 90 to 45 in a prior release,
+  but the test assertion still expected the old longer spoke duration.
+  The threshold was lowered to match the actual ~87 px spoke at 45 px/s.
+
 ## [0.50.0] - 2026-06-29
 
 ### Fixed
