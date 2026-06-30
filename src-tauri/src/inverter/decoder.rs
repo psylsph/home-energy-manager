@@ -577,6 +577,24 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     let pv2_raw = get_reg(data, 19);
     let pv2_plausible = pv2_raw <= MAX_DAILY_KWH_TENTHS;
     let pv2_live = snap.pv2_voltage > 0.0 || snap.pv2_current > 0.0;
+    // After sunset (PV2 voltage/current both 0) accept IR(19) only when the
+    // aggregate daily-PV register IR(44) corroborates the per-string sum. The
+    // leading `ir44_raw <= MAX_DAILY_KWH_TENTHS` guard is load-bearing: a
+    // 0xFFFF "fingerprint" corruption of IR(44) would saturate-add the margin
+    // to 65535 and trivially satisfy `>=`, vouching for any garbage IR(19).
+    //
+    // Residual weakness: if IR(19) AND IR(44) glitch in concert such that
+    // IR(44) >= IR(17) + IR(19), the gate passes and a corrupt IR(19)
+    // survives decode. Two colluding registers cannot be told apart from a
+    // genuine two-string reading here — there is no independent third signal
+    // available once PV2 has gone dark (a cheap decode-time guard would just
+    // false-positive on real two-string systems). The backstop is the
+    // sanitizer's rate-limit delta check on the COMBINED `today_solar_kwh`:
+    // a no-PV2 system tracks PV1 (not 0), so a sudden collusion-driven jump
+    // in the combined total is flagged as too-fast growth. Only steady-state,
+    // all-day consistent cross-register corruption is undetectable, which is
+    // implausibly coordinated for a dumb dongle glitch. See the
+    // `single_phase_pv2_corroboration_*` / `..._collusion_*` tests.
     let pv2_corroborated_after_dark = ir44_raw <= MAX_DAILY_KWH_TENTHS
         && ir44_raw.saturating_add(PV_AGGREGATE_CORROBORATION_MARGIN_TENTHS)
             >= pv1_raw.saturating_add(pv2_raw);
@@ -3923,6 +3941,56 @@ mod tests {
         assert!((snap.today_pv1_kwh - 15.0).abs() < 0.01);
         assert!((snap.today_pv2_kwh - 14.7).abs() < 0.01);
         assert!((snap.today_solar_kwh - 29.7).abs() < 0.01);
+    }
+
+    #[test]
+    fn single_phase_pv2_corroboration_rejects_fingerprint_aggregate() {
+        // A 0xFFFF "fingerprint" corruption of the aggregate IR(44) must NOT
+        // corroborate IR(19) on a no-PV2 system. Without the leading
+        // `ir44_raw <= MAX_DAILY_KWH_TENTHS` guard the saturating add would
+        // turn 0xFFFF into 65535 and let it satisfy `>=`, vouching for stale
+        // IR(19) garbage. This test pins that guard in place.
+        let mut snap = InverterSnapshot::default();
+        let mut data = vec![0u16; 60];
+        data[2] = 0; // pv2_voltage = 0 — no live second string
+        data[9] = 0; // pv2_current = 0
+        data[17] = 120; // PV1 12.0 kWh (real)
+        data[19] = 300; // IR(19) stale 30.0 kWh — must be ignored
+        data[44] = 0xFFFF; // aggregate corrupted to the fingerprint value
+        decode_input_0_59(&data, &mut snap);
+        assert!((snap.today_pv1_kwh - 12.0).abs() < 0.01);
+        assert_eq!(
+            snap.today_pv2_kwh, 0.0,
+            "a 0xFFFF aggregate must not corroborate IR(19)"
+        );
+        assert!((snap.today_solar_kwh - 12.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn single_phase_pv2_two_register_collusion_is_accepted_limitation() {
+        // KNOWN LIMITATION, pinned here so the behaviour is an intentional
+        // boundary rather than an oversight. When IR(19) AND the aggregate
+        // IR(44) are both corrupted so that IR(44) >= IR(17) + IR(19), the
+        // decode-time corroboration gate passes and the corrupt IR(19)
+        // survives. Two colluding registers cannot be distinguished from a
+        // genuine two-string reading at decode time; the sanitizer's
+        // rate-limit delta check on the combined `today_solar_kwh` is the
+        // backstop for sudden-onset inflation (see the comment on
+        // `pv2_corroborated_after_dark`).
+        let mut snap = InverterSnapshot::default();
+        let mut data = vec![0u16; 60];
+        data[2] = 0; // pv2_voltage = 0 — no live second string
+        data[9] = 0; // pv2_current = 0
+        data[17] = 500; // PV1 50.0 kWh (real)
+        data[19] = 300; // IR(19) corrupt 30.0 kWh
+        data[44] = 820; // IR(44) corrupt 82.0 kWh — corroborates 50 + 30 = 80
+        decode_input_0_59(&data, &mut snap);
+        // Corrupt PV2 survives decode by design (documented limitation).
+        assert!(
+            (snap.today_pv2_kwh - 30.0).abs() < 0.01,
+            "two-register collusion defeats the decode-time gate by design"
+        );
+        assert!((snap.today_solar_kwh - 80.0).abs() < 0.01);
     }
 
     #[test]
