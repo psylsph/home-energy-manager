@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { useInverterStore } from '../../src/store/useInverterStore';
+import type { InverterSnapshot } from '../../src/lib/types';
 
 describe('useInverterStore', () => {
   beforeEach(() => {
@@ -138,13 +139,13 @@ describe('useInverterStore', () => {
 
   describe('setSnapshot / clearSnapshot', () => {
     it('setSnapshot stores the snapshot', () => {
-      const snap = { soc: 50, solar_power: 1000 } as any;
+      const snap = { soc: 50, solar_power: 1000 } as unknown as InverterSnapshot;
       useInverterStore.getState().setSnapshot(snap);
       expect(useInverterStore.getState().snapshot).toBe(snap);
     });
 
     it('clearSnapshot sets snapshot to null', () => {
-      useInverterStore.setState({ snapshot: { soc: 50 } as any });
+      useInverterStore.setState({ snapshot: { soc: 50 } as unknown as InverterSnapshot });
       useInverterStore.getState().clearSnapshot();
       expect(useInverterStore.getState().snapshot).toBeNull();
     });
