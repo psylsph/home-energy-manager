@@ -917,10 +917,7 @@ pub enum AgileSlotAction {
         target_soc: u16,
     },
     /// Expensive-window discharge (with export — option β).
-    Discharge {
-        start_hhmm: u16,
-        end_hhmm: u16,
-    },
+    Discharge { start_hhmm: u16, end_hhmm: u16 },
     /// Cosy or auto-winter is in control of the matching side. Don't
     /// touch the inverter — let the other mechanism own this poll.
     Defer,
@@ -933,7 +930,10 @@ impl AgileSlotAction {
     /// True when this action drives the inverter (Charge / Discharge /
     /// Idle-and-clear / Defer-noop).
     pub fn is_active(&self) -> bool {
-        matches!(self, AgileSlotAction::Charge { .. } | AgileSlotAction::Discharge { .. })
+        matches!(
+            self,
+            AgileSlotAction::Charge { .. } | AgileSlotAction::Discharge { .. }
+        )
     }
 
     /// Snapshot-side label for this action, matching the wire shape the
@@ -1016,11 +1016,7 @@ pub fn evaluate_agile_slot<Tz: chrono::TimeZone>(
             return AgileSlotAction::Defer;
         }
         // Find the contiguous cheap run starting now.
-        return match contiguous_run_window(
-            cached_prices,
-            now_unix_ts,
-            |p| p <= charge_threshold,
-        ) {
+        return match contiguous_run_window(cached_prices, now_unix_ts, |p| p <= charge_threshold) {
             Some((start_unix, end_unix)) => AgileSlotAction::Charge {
                 start_hhmm: unix_to_hhmm(start_unix, local_tz),
                 end_hhmm: unix_to_hhmm(end_unix, local_tz),
@@ -1033,11 +1029,8 @@ pub fn evaluate_agile_slot<Tz: chrono::TimeZone>(
     if wants_discharge {
         // Discharge side has no cosy/auto-winter conflict — those
         // mechanisms are charge-only.
-        return match contiguous_run_window(
-            cached_prices,
-            now_unix_ts,
-            |p| p >= discharge_threshold,
-        ) {
+        return match contiguous_run_window(cached_prices, now_unix_ts, |p| p >= discharge_threshold)
+        {
             Some((start_unix, end_unix)) => AgileSlotAction::Discharge {
                 start_hhmm: unix_to_hhmm(start_unix, local_tz),
                 end_hhmm: unix_to_hhmm(end_unix, local_tz),
@@ -2179,7 +2172,7 @@ mod tests {
         let now_ts = slot_start + 600; // 02:10 UTC
         let cache = make_cache(&[
             (slot_end, slot_end + 1800, 30.0),    // 02:30–03:00 expensive
-            (slot_start, slot_end, 5.0),         // 02:00–02:30 cheap (current)
+            (slot_start, slot_end, 5.0),          // 02:00–02:30 cheap (current)
             (slot_start - 1800, slot_start, 8.0), // 01:30–02:00 mid
         ]);
         let action = evaluate_agile_slot(
@@ -2194,7 +2187,11 @@ mod tests {
             &chrono::Utc,
         );
         match action {
-            AgileSlotAction::Charge { start_hhmm, end_hhmm, target_soc } => {
+            AgileSlotAction::Charge {
+                start_hhmm,
+                end_hhmm,
+                target_soc,
+            } => {
                 assert_eq!(start_hhmm, 200);
                 assert_eq!(end_hhmm, 230); // current slot only — 02:30 is expensive
                 assert_eq!(target_soc, 100);
@@ -2207,11 +2204,11 @@ mod tests {
     fn evaluate_agile_contiguous_cheap_run_spans_whole_run() {
         // Three back-to-back cheap slots 02:00–03:30. The action should
         // span all three because the price stays below the threshold.
-        let s0 = 2 * 3600;       // 02:00
-        let s1 = s0 + 1800;      // 02:30
-        let s2 = s0 + 3600;      // 03:00
-        let s3 = s0 + 5400;      // 03:30 (expensive start)
-        let now_ts = s0 + 600;   // 02:10
+        let s0 = 2 * 3600; // 02:00
+        let s1 = s0 + 1800; // 02:30
+        let s2 = s0 + 3600; // 03:00
+        let s3 = s0 + 5400; // 03:30 (expensive start)
+        let now_ts = s0 + 600; // 02:10
         let cache = make_cache(&[
             (s3, s3 + 1800, 35.0), // expensive after the run
             (s2, s3, 4.0),         // 03:00–03:30 cheap
@@ -2230,7 +2227,11 @@ mod tests {
             &chrono::Utc,
         );
         match action {
-            AgileSlotAction::Charge { start_hhmm, end_hhmm, .. } => {
+            AgileSlotAction::Charge {
+                start_hhmm,
+                end_hhmm,
+                ..
+            } => {
                 assert_eq!(start_hhmm, 200);
                 assert_eq!(end_hhmm, 330, "should span all three cheap slots");
             }
@@ -2244,8 +2245,8 @@ mod tests {
         let slot_end = slot_start + 1800;
         let now_ts = slot_start + 600;
         let cache = make_cache(&[
-            (slot_end, slot_end + 1800, 15.0),    // drops back to mid
-            (slot_start, slot_end, 35.0),         // 17:00–17:30 expensive
+            (slot_end, slot_end + 1800, 15.0),     // drops back to mid
+            (slot_start, slot_end, 35.0),          // 17:00–17:30 expensive
             (slot_start - 1800, slot_start, 20.0), // 16:30–17:00 mid
         ]);
         let action = evaluate_agile_slot(
@@ -2260,7 +2261,10 @@ mod tests {
             &chrono::Utc,
         );
         match action {
-            AgileSlotAction::Discharge { start_hhmm, end_hhmm } => {
+            AgileSlotAction::Discharge {
+                start_hhmm,
+                end_hhmm,
+            } => {
                 assert_eq!(start_hhmm, 1700);
                 assert_eq!(end_hhmm, 1730);
             }
@@ -2512,7 +2516,10 @@ mod tests {
         assert_eq!(writes[3].value, 1);
         assert_eq!(writes[4].address, HR_CHARGE_TARGET_SOC);
         assert_eq!(writes[4].value, 100);
-        assert_eq!(writes[5].address, crate::modbus::registers::HR_CHARGE_TARGET_SOC_1);
+        assert_eq!(
+            writes[5].address,
+            crate::modbus::registers::HR_CHARGE_TARGET_SOC_1
+        );
         assert_eq!(writes[5].value, 100);
     }
 }

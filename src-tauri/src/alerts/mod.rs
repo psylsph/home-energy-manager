@@ -26,8 +26,11 @@ use crate::settings::AlertsConfig;
 pub enum AlertType {
     BatteryTempHigh,
     BatteryTempLow,
+    InverterTempHigh,
+    InverterTempLow,
     BatterySocHigh,
     BatterySocLow,
+    InverterTrip,
     /// The inverter/BMS reported a battery warning via its hardware fault
     /// register (`IR(57) charger_warning_code`). This is distinct from
     /// [`BatteryTempHigh`], which is gated by the user's °C threshold — this
@@ -57,8 +60,11 @@ impl AlertType {
         match self {
             Self::BatteryTempHigh => "Battery Temperature High",
             Self::BatteryTempLow => "Battery Temperature Low",
+            Self::InverterTempHigh => "Inverter Temperature High",
+            Self::InverterTempLow => "Inverter Temperature Low",
             Self::BatterySocHigh => "Battery SOC High",
             Self::BatterySocLow => "Battery SOC Low",
+            Self::InverterTrip => "Inverter Trip",
             Self::GridOffline => "Grid Offline",
             // Deliberately distinct from "Battery Temperature High": this one
             // is the inverter's own hardware warning flag (IR 57), not the
@@ -237,11 +243,24 @@ pub fn evaluate_alerts(snapshot: &InverterSnapshot, config: &AlertsConfig) -> Ve
 
     // Battery temperature
     let temp = snapshot.battery_temperature;
-    if config.batt_temp_max > 0.0 && temp > config.batt_temp_max {
-        alerts.push(AlertType::BatteryTempHigh);
+    if temp.is_finite() {
+        if config.batt_temp_max > 0.0 && temp > config.batt_temp_max {
+            alerts.push(AlertType::BatteryTempHigh);
+        }
+        if config.batt_temp_min > 0.0 && temp < config.batt_temp_min {
+            alerts.push(AlertType::BatteryTempLow);
+        }
     }
-    if config.batt_temp_min > 0.0 && temp < config.batt_temp_min {
-        alerts.push(AlertType::BatteryTempLow);
+
+    // Inverter temperature
+    let inverter_temp = snapshot.inverter_temperature;
+    if inverter_temp.is_finite() {
+        if config.inverter_temp_max > 0.0 && inverter_temp > config.inverter_temp_max {
+            alerts.push(AlertType::InverterTempHigh);
+        }
+        if config.inverter_temp_min > 0.0 && inverter_temp < config.inverter_temp_min {
+            alerts.push(AlertType::InverterTempLow);
+        }
     }
 
     // Battery SOC
@@ -252,11 +271,15 @@ pub fn evaluate_alerts(snapshot: &InverterSnapshot, config: &AlertsConfig) -> Ve
     if config.soc_max < 100 && soc > config.soc_max {
         alerts.push(AlertType::BatterySocHigh);
     }
-    // Grid offline — match the frontend hasGridFault() logic:
-    // also trigger when grid_online is false even if grid_loss is
-    // not set (they come from separate register decodes).
+    // Grid offline: only grid-presence faults. Inverter trips and battery
+    // warnings are separate alert types with their own toggles.
     if config.grid_offline_enabled && (snapshot.grid_loss || !snapshot.grid_online) {
         alerts.push(AlertType::GridOffline);
+    }
+
+    // Inverter trip/fault state.
+    if config.inverter_trip_enabled && snapshot.inverter_trip {
+        alerts.push(AlertType::InverterTrip);
     }
 
     // Battery over-temperature
@@ -1474,9 +1497,12 @@ mod tests {
             cooldown_minutes: 30,
             batt_temp_min: 0.0,
             batt_temp_max: 45.0,
+            inverter_temp_min: 8.0,
+            inverter_temp_max: 60.0,
             soc_min: 10,
             soc_max: 95,
             grid_offline_enabled: false,
+            inverter_trip_enabled: false,
             battery_over_temp_enabled: false,
             connection_lost_enabled: false,
             solar_clipping_enabled: false,
@@ -1620,6 +1646,60 @@ mod tests {
     }
 
     #[test]
+    fn test_battery_temp_ignores_nan() {
+        let mut snap = make_snapshot();
+        snap.battery_temperature = f32::NAN;
+        let alerts = evaluate_alerts(&snap, &alerts_config());
+        assert!(!alerts.contains(&AlertType::BatteryTempHigh));
+        assert!(!alerts.contains(&AlertType::BatteryTempLow));
+    }
+
+    #[test]
+    fn test_inverter_temp_high_triggers() {
+        let mut snap = make_snapshot();
+        snap.inverter_temperature = 65.0;
+        let alerts = evaluate_alerts(&snap, &alerts_config());
+        assert!(alerts.contains(&AlertType::InverterTempHigh));
+    }
+
+    #[test]
+    fn test_inverter_temp_low_triggers() {
+        let mut snap = make_snapshot();
+        snap.inverter_temperature = 5.0;
+        let alerts = evaluate_alerts(&snap, &alerts_config());
+        assert!(alerts.contains(&AlertType::InverterTempLow));
+    }
+
+    #[test]
+    fn test_inverter_temp_no_alert_when_ok() {
+        let snap = make_snapshot();
+        let alerts = evaluate_alerts(&snap, &alerts_config());
+        assert!(!alerts.contains(&AlertType::InverterTempHigh));
+        assert!(!alerts.contains(&AlertType::InverterTempLow));
+    }
+
+    #[test]
+    fn test_inverter_temp_ignores_nan() {
+        let mut snap = make_snapshot();
+        snap.inverter_temperature = f32::NAN;
+        let alerts = evaluate_alerts(&snap, &alerts_config());
+        assert!(!alerts.contains(&AlertType::InverterTempHigh));
+        assert!(!alerts.contains(&AlertType::InverterTempLow));
+    }
+
+    #[test]
+    fn test_inverter_temp_threshold_zero_disables() {
+        let mut snap = make_snapshot();
+        snap.inverter_temperature = 65.0;
+        let mut config = alerts_config();
+        config.inverter_temp_min = 0.0;
+        config.inverter_temp_max = 0.0;
+        let alerts = evaluate_alerts(&snap, &config);
+        assert!(!alerts.contains(&AlertType::InverterTempHigh));
+        assert!(!alerts.contains(&AlertType::InverterTempLow));
+    }
+
+    #[test]
     fn test_soc_low() {
         let mut snap = make_snapshot();
         snap.soc = 5;
@@ -1641,6 +1721,44 @@ mod tests {
     fn test_grid_offline() {
         let mut snap = make_snapshot();
         snap.grid_loss = true;
+        let mut config = alerts_config();
+        config.grid_offline_enabled = true;
+        let alerts = evaluate_alerts(&snap, &config);
+        assert!(alerts.contains(&AlertType::GridOffline));
+    }
+
+    #[test]
+    fn test_grid_offline_does_not_include_inverter_trip() {
+        let mut snap = make_snapshot();
+        snap.inverter_trip = true;
+        let mut config = alerts_config();
+        config.grid_offline_enabled = true;
+        let alerts = evaluate_alerts(&snap, &config);
+        assert!(!alerts.contains(&AlertType::GridOffline));
+    }
+
+    #[test]
+    fn test_inverter_trip() {
+        let mut snap = make_snapshot();
+        snap.inverter_trip = true;
+        let mut config = alerts_config();
+        config.inverter_trip_enabled = true;
+        let alerts = evaluate_alerts(&snap, &config);
+        assert!(alerts.contains(&AlertType::InverterTrip));
+    }
+
+    #[test]
+    fn test_inverter_trip_disabled() {
+        let mut snap = make_snapshot();
+        snap.inverter_trip = true;
+        let alerts = evaluate_alerts(&snap, &alerts_config());
+        assert!(!alerts.contains(&AlertType::InverterTrip));
+    }
+
+    #[test]
+    fn test_grid_offline_when_grid_online_false() {
+        let mut snap = make_snapshot();
+        snap.grid_online = false;
         let mut config = alerts_config();
         config.grid_offline_enabled = true;
         let alerts = evaluate_alerts(&snap, &config);

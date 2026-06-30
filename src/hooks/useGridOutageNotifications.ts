@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { formatPercent, formatPower } from '../lib/format';
-import { gridFaultReason, gridFaultTitle } from '../lib/gridFault';
+import { gridFaultReason } from '../lib/gridFault';
 import { useInverterStore } from '../store/useInverterStore';
 
 function canNotify(): boolean {
@@ -54,9 +54,19 @@ export function useGridOutageNotifications() {
       const discharging = snapshot.battery_power > 0
         ? ` Battery is discharging at ${formatPower(Math.abs(snapshot.battery_power))}.`
         : '';
+      const title = kind === 'grid'
+        ? 'Grid power lost'
+        : kind === 'battery_temp'
+          ? 'Battery over temperature'
+          : 'Inverter trip detected';
+      const reason = kind === 'grid'
+        ? gridFaultReason(snapshot)
+        : kind === 'battery_temp'
+          ? 'Battery over temp warning'
+          : 'Inverter fault';
       sendNotification(
-        gridFaultTitle(snapshot),
-        `The inverter reports ${gridFaultReason(snapshot)}. Battery SOC is ${formatPercent(snapshot.soc)}.${discharging}`,
+        title,
+        `The inverter reports ${reason}. Battery SOC is ${formatPercent(snapshot.soc)}.${discharging}`,
       );
       notifiedForCurrentOutage.current = true;
     }

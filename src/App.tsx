@@ -7,7 +7,7 @@ import { useGridOutageNotifications } from './hooks/useGridOutageNotifications';
 import type { PollSettings } from './lib/types';
 import { apiGet } from './lib/api';
 import { formatPercent, formatTimestamp } from './lib/format';
-import { gridFaultReason, gridFaultTitle, hasGridFault } from './lib/gridFault';
+import { buildSystemAlerts } from './lib/gridFault';
 import { FLOW_COLORS, socColor } from './lib/energyFlow';
 import { useInverterStore } from './store/useInverterStore';
 import StatusPage from './pages/StatusPage';
@@ -39,20 +39,42 @@ function ThemeToggle() {
   );
 }
 
-function GridFaultBanner() {
+function SystemAlertBanners() {
   const snapshot = useInverterStore((state) => state.snapshot);
-  if (!snapshot || !hasGridFault(snapshot)) return null;
+  const [tempConfig, setTempConfig] = useState({ inverter_temp_min: 8, inverter_temp_max: 60 });
+
+  useEffect(() => {
+    let cancelled = false;
+    apiGet<{ ok: boolean; data: { config?: Partial<typeof tempConfig> } }>('/api/alerts')
+      .then((res) => {
+        if (cancelled) return;
+        setTempConfig((prev) => ({
+          inverter_temp_min: Number(res.data.config?.inverter_temp_min ?? prev.inverter_temp_min),
+          inverter_temp_max: Number(res.data.config?.inverter_temp_max ?? prev.inverter_temp_max),
+        }));
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  if (!snapshot) return null;
+  const alerts = buildSystemAlerts(snapshot, tempConfig);
+  if (alerts.length === 0) return null;
 
   return (
-    <div className="bg-red-950/90 border-b border-red-500/40 px-4 py-2 text-red-100 text-sm">
-      <div className="max-w-4xl mx-auto flex items-center gap-2">
-        <span aria-hidden="true">⚠️</span>
-        <strong>{gridFaultTitle(snapshot)}</strong>
-        <span className="text-red-100/85">
-          {gridFaultReason(snapshot)} · Battery {formatPercent(snapshot.soc)}
-        </span>
-      </div>
-    </div>
+    <>
+      {alerts.map((alert) => (
+        <div key={alert.kind} className="bg-red-950/90 border-b border-red-500/40 px-4 py-2 text-red-100 text-sm">
+          <div className="max-w-4xl mx-auto flex items-center gap-2">
+            <span aria-hidden="true">⚠️</span>
+            <strong>{alert.title}</strong>
+            <span className="text-red-100/85">
+              {alert.reason} · Battery {formatPercent(snapshot.soc)}
+            </span>
+          </div>
+        </div>
+      ))}
+    </>
   );
 }
 
@@ -323,7 +345,7 @@ function Layout() {
         </div>
       </header>
 
-      <GridFaultBanner />
+      <SystemAlertBanners />
 
       {/* Content */}
       <main className="flex-1 overflow-auto px-4 py-3 md:px-6 md:py-4 pb-safe">

@@ -52,7 +52,7 @@ to your phone.
 3. Toggle **Enable Alerts** on.
 4. Paste the bot token into **Bot Token**.
 5. Paste the Chat ID into **Chat ID**.
-6. Adjust any temperature or SOC thresholds you care about.
+6. Adjust any battery temperature, inverter temperature, or SOC thresholds you care about.
 7. Click **Save** — a test message should arrive in Telegram shortly.
 
 ### Troubleshooting

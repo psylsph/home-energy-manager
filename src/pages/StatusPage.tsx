@@ -184,12 +184,12 @@ export default function StatusPage() {
             <span className="text-2xl" aria-hidden="true">⚠️</span>
             <div className="flex flex-col gap-1">
               <h2 className="text-sm font-semibold uppercase tracking-wide">
-                {gridFaultTitle(snapshot)}
+                {gridFaultTitle()}
               </h2>
               <p className="text-sm text-red-100/90">
                 The inverter is reporting <strong>{gridFaultReason(snapshot)}</strong>.
                 Battery SOC is {formatPercent(snapshot.soc)}
-                {snapshot.battery_power > 0 ? ` and the battery is discharging at ${formatPower(Math.abs(snapshot.battery_power))}` : ''}.{gridFaultAdvice(snapshot)}
+                {snapshot.battery_power > 0 ? ` and the battery is discharging at ${formatPower(Math.abs(snapshot.battery_power))}` : ''}.{gridFaultAdvice()}
               </p>
             </div>
           </div>

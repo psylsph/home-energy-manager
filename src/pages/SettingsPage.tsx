@@ -306,8 +306,9 @@ export default function SettingsPage() {
     enabled: false, telegram_bot_token: '', telegram_chat_id: '',
     cooldown_minutes: 30,
     batt_temp_min: 0, batt_temp_max: 0,
+    inverter_temp_min: 8, inverter_temp_max: 60,
     soc_min: 4, soc_max: 100,
-    grid_offline_enabled: false, battery_over_temp_enabled: false,
+    grid_offline_enabled: false, inverter_trip_enabled: false, battery_over_temp_enabled: false,
     connection_lost_enabled: false,
     solar_clipping_enabled: false, solar_clipping_ceiling_w: 0,
     ntfy_topic: '',
@@ -447,6 +448,7 @@ export default function SettingsPage() {
   // manual edits are never overwritten and there's no setState-in-effect.
   const generatedNtfyTopic = (serial || snapshot?.inverter_serial) ? `hem-${serial || snapshot?.inverter_serial}` : '';
   const effectiveNtfyTopic = alertsConfig.ntfy_topic || generatedNtfyTopic;
+  const isGateway = snapshot?.device_type_code?.startsWith('70') ?? false;
 
   // Network URL — use LAN IP if available, otherwise fall back to getApiBase()
   const lanUrl = lanIp ? `http://${lanIp}:${getServerPort()}` : getApiBase();
@@ -1511,34 +1513,61 @@ export default function SettingsPage() {
               </label>
             </div>
 
-            {/* Battery temperature & SOC thresholds */}
+            {/* Temperature & SOC thresholds */}
             <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
               <div>
-                <h3 className="text-text-primary text-sm font-sans font-medium">Battery Temperature &amp; SOC</h3>
-                <p className="text-text-secondary/70 text-xs font-sans">
-                  Battery temperature alerts only work with inverters that report
-                  temperature. Not available with a Gateway at this time.
-                </p>
+                <h3 className="text-text-primary text-sm font-sans font-medium">{isGateway ? 'SOC' : 'Temperature & SOC'}</h3>
+                {isGateway ? (
+                  <p className="text-text-secondary/70 text-xs font-sans">
+                    Gateway does not expose battery or inverter temperature telemetry, so temperature alerts are hidden.
+                  </p>
+                ) : (
+                  <p className="text-text-secondary/70 text-xs font-sans">
+                    Battery and inverter temperature alerts only work with devices that report temperature telemetry.
+                  </p>
+                )}
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <label className="flex flex-col gap-1">
-                  <span className="text-text-secondary text-xs font-sans">Temp below °C</span>
-                  <input
-                    type="number" step="0.5" min="0" max="50"
-                    value={alertsConfig.batt_temp_min}
-                    onChange={(e) => setAlertsConfig((p) => ({ ...p, batt_temp_min: Number(e.target.value) }))}
-                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                  />
-                </label>
-                <label className="flex flex-col gap-1">
-                  <span className="text-text-secondary text-xs font-sans">Temp above °C</span>
-                  <input
-                    type="number" step="0.5" min="0" max="80"
-                    value={alertsConfig.batt_temp_max}
-                    onChange={(e) => setAlertsConfig((p) => ({ ...p, batt_temp_max: Number(e.target.value) }))}
-                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-                  />
-                </label>
+                {!isGateway && (
+                  <>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-text-secondary text-xs font-sans">Battery temp below °C</span>
+                      <input
+                        type="number" step="0.5" min="0" max="50"
+                        value={alertsConfig.batt_temp_min}
+                        onChange={(e) => setAlertsConfig((p) => ({ ...p, batt_temp_min: Number(e.target.value) }))}
+                        className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-text-secondary text-xs font-sans">Battery temp above °C</span>
+                      <input
+                        type="number" step="0.5" min="0" max="80"
+                        value={alertsConfig.batt_temp_max}
+                        onChange={(e) => setAlertsConfig((p) => ({ ...p, batt_temp_max: Number(e.target.value) }))}
+                        className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-text-secondary text-xs font-sans">Inverter temp below °C</span>
+                      <input
+                        type="number" step="0.5" min="0" max="100"
+                        value={alertsConfig.inverter_temp_min}
+                        onChange={(e) => setAlertsConfig((p) => ({ ...p, inverter_temp_min: Number(e.target.value) }))}
+                        className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-text-secondary text-xs font-sans">Inverter temp above °C</span>
+                      <input
+                        type="number" step="0.5" min="0" max="120"
+                        value={alertsConfig.inverter_temp_max}
+                        onChange={(e) => setAlertsConfig((p) => ({ ...p, inverter_temp_max: Number(e.target.value) }))}
+                        className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                      />
+                    </label>
+                  </>
+                )}
                 <label className="flex flex-col gap-1">
                   <span className="text-text-secondary text-xs font-sans">SOC below %</span>
                   <input
@@ -1568,6 +1597,13 @@ export default function SettingsPage() {
                 <Toggle
                   checked={alertsConfig.grid_offline_enabled}
                   onChange={(v) => setAlertsConfig((p) => ({ ...p, grid_offline_enabled: v }))}
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-text-primary text-sm font-sans">Inverter Trip</span>
+                <Toggle
+                  checked={alertsConfig.inverter_trip_enabled}
+                  onChange={(v) => setAlertsConfig((p) => ({ ...p, inverter_trip_enabled: v }))}
                 />
               </div>
               <div className="flex items-center justify-between">

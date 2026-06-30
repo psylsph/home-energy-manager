@@ -57,6 +57,32 @@ function defaultSettings(overrides: SettingsShape = {}): SettingsShape {
  * Default /api/* responses for every endpoint SettingsPage hits on mount.
  * Tests can override individual responses via apiGetMock.mockImplementation.
  */
+function alertConfig(overrides: SettingsShape = {}): SettingsShape {
+  return {
+    enabled: false,
+    telegram_bot_token: '',
+    telegram_chat_id: '',
+    cooldown_minutes: 30,
+    batt_temp_min: 0,
+    batt_temp_max: 0,
+    inverter_temp_min: 8,
+    inverter_temp_max: 60,
+    soc_min: 4,
+    soc_max: 100,
+    grid_offline_enabled: false,
+    inverter_trip_enabled: false,
+    battery_over_temp_enabled: false,
+    connection_lost_enabled: false,
+    solar_clipping_enabled: false,
+    solar_clipping_ceiling_w: 0,
+    ntfy_topic: '',
+    ntfy_server: 'https://ntfy.sh',
+    pushover_app_token: '',
+    pushover_user_key: '',
+    ...overrides,
+  };
+}
+
 function mountApiMocks(settingsOverrides: SettingsShape = {}) {
   apiGetMock.mockImplementation(async (path: string) => {
     if (path === '/api/settings') {
@@ -66,12 +92,7 @@ function mountApiMocks(settingsOverrides: SettingsShape = {}) {
       return {
         ok: true,
         data: {
-          config: {
-            enabled: false,
-            telegram: { bot_token: '', chat_id: '', enabled: false },
-            ntfy: { topic: '', server: 'https://ntfy.sh', enabled: false },
-            thresholds: {},
-          },
+          config: alertConfig(),
         },
       };
     }
@@ -289,6 +310,79 @@ describe('<SettingsPage/> — page shell & hydration', () => {
 
       await waitFor(() => {
         expect(apiPostMock).toHaveBeenCalledWith('/api/settings', expect.objectContaining({ host: '192.168.1.20' }));
+      });
+    });
+  });
+
+  describe('notifications temperature thresholds', () => {
+    function mountWithAlerts(snapshot: unknown = null, overrides: SettingsShape = {}) {
+      mountApiMocks();
+      apiGetMock.mockImplementation(async (path: string) => {
+        if (path === '/api/settings') return { ok: true, data: defaultSettings() };
+        if (path === '/api/alerts') return { ok: true, data: { config: alertConfig({ enabled: true, ...overrides }) } };
+        if (path === '/api/weather') return { ok: true, data: { config: {} } };
+        if (path === '/api/status') return { ok: true, lan_ip: null, clients: [] };
+        return { ok: true, data: {} };
+      });
+      useInverterStore.setState({ snapshot: snapshot as never });
+      render(<SettingsPage />);
+    }
+
+    function inputAfterText(text: string): HTMLInputElement {
+      const el = screen.getByText(text);
+      const input = el.closest('label')?.querySelector('input');
+      if (!input) throw new Error(`input not found for ${text}`);
+      return input;
+    }
+
+    it('shows separate battery and inverter temperature bounds for non-Gateway devices', async () => {
+      mountWithAlerts({ device_type_code: '2001' });
+      expect(await screen.findByText('Temperature & SOC')).toBeDefined();
+      expect(screen.getByText('Battery temp below °C')).toBeDefined();
+      expect(screen.getByText('Battery temp above °C')).toBeDefined();
+      expect(screen.getByText('Inverter temp below °C')).toBeDefined();
+      expect(screen.getByText('Inverter temp above °C')).toBeDefined();
+      expect(inputAfterText('Inverter temp below °C').value).toBe('8');
+      expect(inputAfterText('Inverter temp above °C').value).toBe('60');
+    });
+
+    it('shows temperature bounds when no device type is known yet', async () => {
+      mountWithAlerts(null);
+      expect(await screen.findByText('Temperature & SOC')).toBeDefined();
+      expect(screen.getByText('Battery temp below °C')).toBeDefined();
+      expect(screen.getByText('Inverter temp below °C')).toBeDefined();
+    });
+
+    it('hides battery and inverter temperature bounds for Gateway devices', async () => {
+      mountWithAlerts({ device_type_code: '7001' });
+      expect(await screen.findByText('SOC')).toBeDefined();
+      expect(screen.getByText(/Gateway does not expose battery or inverter temperature telemetry/)).toBeDefined();
+      expect(screen.queryByText('Battery temp below °C')).toBeNull();
+      expect(screen.queryByText('Battery temp above °C')).toBeNull();
+      expect(screen.queryByText('Inverter temp below °C')).toBeNull();
+      expect(screen.queryByText('Inverter temp above °C')).toBeNull();
+      expect(screen.getByText('SOC below %')).toBeDefined();
+      expect(screen.getByText('SOC above %')).toBeDefined();
+    });
+
+    it('shows a separate inverter trip alert toggle', async () => {
+      mountWithAlerts({ device_type_code: '2001' });
+      expect(await screen.findByText('Inverter Trip')).toBeDefined();
+    });
+
+    it('posts inverter temperature bounds when saving notification settings', async () => {
+      mountWithAlerts({ device_type_code: '2001' });
+      await screen.findByText('Temperature & SOC');
+      fireEvent.change(inputAfterText('Inverter temp below °C'), { target: { value: '7.5' } });
+      fireEvent.change(inputAfterText('Inverter temp above °C'), { target: { value: '62' } });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Save Notification Settings' }));
+
+      await waitFor(() => {
+        expect(apiPostMock).toHaveBeenCalledWith('/api/alerts', expect.objectContaining({
+          inverter_temp_min: 7.5,
+          inverter_temp_max: 62,
+        }));
       });
     });
   });

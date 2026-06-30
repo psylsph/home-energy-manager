@@ -1005,12 +1005,21 @@ pub struct AlertsConfig {
     pub batt_temp_min: f32,
     /// Battery temperature alert maximum (°C). 0 = disabled.
     pub batt_temp_max: f32,
+    /// Inverter temperature alert minimum (°C). Defaults to 8°C.
+    #[serde(default = "default_inverter_temp_min")]
+    pub inverter_temp_min: f32,
+    /// Inverter temperature alert maximum (°C). Defaults to 60°C.
+    #[serde(default = "default_inverter_temp_max")]
+    pub inverter_temp_max: f32,
     /// Battery SOC alert minimum (%). 0 = disabled.
     pub soc_min: u8,
     /// Battery SOC alert maximum (%). 100 = disabled.
     pub soc_max: u8,
     /// Alert on grid loss.
     pub grid_offline_enabled: bool,
+    /// Alert when the inverter reports a fault/trip state.
+    #[serde(default)]
+    pub inverter_trip_enabled: bool,
     /// Alert when the poll loop loses contact with the inverter. A single
     /// notification fires on disconnect, and a second on reconnect.
     #[serde(default)]
@@ -1056,6 +1065,14 @@ fn default_ntfy_server() -> String {
     "https://ntfy.sh".to_string()
 }
 
+fn default_inverter_temp_min() -> f32 {
+    8.0
+}
+
+fn default_inverter_temp_max() -> f32 {
+    60.0
+}
+
 impl Default for AlertsConfig {
     fn default() -> Self {
         Self {
@@ -1065,9 +1082,12 @@ impl Default for AlertsConfig {
             cooldown_minutes: 30,
             batt_temp_min: 0.0,
             batt_temp_max: 0.0,
+            inverter_temp_min: default_inverter_temp_min(),
+            inverter_temp_max: default_inverter_temp_max(),
             soc_min: 4,
             soc_max: 100,
             grid_offline_enabled: false,
+            inverter_trip_enabled: false,
             connection_lost_enabled: false,
             battery_over_temp_enabled: false,
             solar_clipping_enabled: false,
@@ -1432,6 +1452,8 @@ mod tests {
         let decoded: AlertsConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.pushover_app_token, "test-app-token-123");
         assert_eq!(decoded.pushover_user_key, "test-user-key-456");
+        assert_eq!(decoded.inverter_temp_min, 8.0);
+        assert_eq!(decoded.inverter_temp_max, 60.0);
     }
 
     /// A settings.json written before Pushover shipped (no pushover_* keys)
@@ -1463,6 +1485,8 @@ mod tests {
         assert_eq!(decoded.pushover_user_key, "");
         assert_eq!(decoded.cooldown_minutes, 30);
         assert_eq!(decoded.ntfy_server, "https://ntfy.sh");
+        assert_eq!(decoded.inverter_temp_min, 8.0);
+        assert_eq!(decoded.inverter_temp_max, 60.0);
     }
 
     /// `settings.json` written before the weather feature shipped (no
@@ -1787,10 +1811,7 @@ mod tests {
 
     #[test]
     fn agile_scope_serialises_as_snake_case() {
-        assert_eq!(
-            serde_json::to_string(&AgileScope::Off).unwrap(),
-            "\"off\""
-        );
+        assert_eq!(serde_json::to_string(&AgileScope::Off).unwrap(), "\"off\"");
         assert_eq!(
             serde_json::to_string(&AgileScope::Full).unwrap(),
             "\"full\""
@@ -1881,8 +1902,8 @@ mod tests {
             "disable_auto_discovery": true,
             "agile_enabled": true
         }"#;
-        let s: Settings = serde_json::from_str(legacy_json)
-            .expect("legacy v0.47 settings.json must parse");
+        let s: Settings =
+            serde_json::from_str(legacy_json).expect("legacy v0.47 settings.json must parse");
         assert_eq!(s.agile_scope, AgileScope::Off); // serde default
         assert!(s.agile_enabled);
         // Migration helper produces the user's actual intent.

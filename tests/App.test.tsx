@@ -55,6 +55,7 @@ vi.mock('../src/lib/api', () => ({
 
 // Imported after the vi.mock() calls above (factories are hoisted regardless).
 import App from '../src/App';
+import { apiGet } from '../src/lib/api';
 import { socColor } from '../src/lib/energyFlow';
 import { useInverterStore } from '../src/store/useInverterStore';
 
@@ -152,6 +153,43 @@ describe('<App/> route-level ErrorBoundary coverage (issue 3.4)', () => {
 // flag in beforeEach in addition to clearing localStorage — otherwise a
 // previous test's URL param would leave the store in read-only mode and
 // pollute the next test's assertions.
+
+describe('<App/> system alert banners', () => {
+  beforeEach(() => {
+    silenceConsoleError();
+    vi.mocked(apiGet).mockResolvedValue({ ok: true, data: { config: { inverter_temp_min: 8, inverter_temp_max: 60 } } });
+    useInverterStore.setState({ readOnly: false, snapshot: null });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    cleanup();
+    useInverterStore.setState({ readOnly: false, snapshot: null });
+    window.location.hash = '';
+  });
+
+  it('renders separate banners for grid loss, inverter trip, battery warning, and inverter temperature', async () => {
+    await navigate('/battery');
+    useInverterStore.setState({
+      snapshot: {
+        grid_loss: true,
+        grid_online: false,
+        inverter_trip: true,
+        battery_over_temp: true,
+        inverter_temperature: 65,
+        soc: 80,
+      } as never,
+    });
+
+    render(<App />);
+
+    expect(screen.getByText('Grid power lost')).toBeDefined();
+    expect(screen.getByText('Inverter trip detected')).toBeDefined();
+    expect(screen.getByText('Battery over temperature')).toBeDefined();
+    expect(screen.getByText('Inverter temperature high')).toBeDefined();
+  });
+});
+
 
 describe('<App/> read-only mode (issue #114)', () => {
   beforeEach(() => {
