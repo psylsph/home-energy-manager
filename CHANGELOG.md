@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.51.0] - 2026-06-30
+
+### Added
+
+- **Inverter temperature alerts.** As well as battery temperature, you can
+  now set high and low thresholds for the inverter itself and get a
+  notification — plus a banner at the top of the app — when it crosses
+  them. The new thresholds sit alongside the existing battery temperature
+  ones in Notifications, and are hidden for Gateway systems, which don't
+  report inverter temperature.
+
+- **Fault Status panel on the Inverter page.** Grid loss, inverter trips,
+  and battery over-temperature now have their own section on the Inverter
+  page so you can see at a glance whether anything is faulted, rather than
+  only catching it via the alert banner (issue #174).
+
+- **Inverter Trip notification toggle.** A separate option in
+  Notifications lets you opt into a push alert when the inverter reports a
+  fault, independently of the grid-loss alert.
+
+### Changed
+
+- **Each fault now gets its own banner.** When several things are wrong at
+  once — a grid outage and an inverter trip, say — the app shows a banner
+  for each instead of collapsing them into a single message that only
+  mentioned the first one.
+
 ## [0.50.2] - 2026-06-30
 
 ### Fixed
