@@ -1,7 +1,6 @@
-import { useState, useCallback } from 'react';
 import type { ConnectionState } from '../lib/types';
-import { apiPost } from '../lib/api';
 import { awaitingConnectionMessage } from '../lib/awaitingConnection';
+import { useReconnect } from '../hooks/useReconnect';
 
 const FAQ_URL = 'https://github.com/psylsph/home-energy-manager/blob/master/FAQ.md';
 
@@ -32,19 +31,7 @@ export default function AwaitingConnection({
   extraNote,
   showFaq = false,
 }: AwaitingConnectionProps) {
-  const [retrying, setRetrying] = useState(false);
-  const handleRetry = useCallback(async () => {
-    setRetrying(true);
-    try {
-      await apiPost('/api/reconnect');
-    } catch {
-      // Swallow — the poll loop's own back-off retries regardless of
-      // whether this manual poke landed.
-    }
-    // Reset after a few seconds in case the request doesn't trigger a
-    // state change the WS hook would react to.
-    setTimeout(() => setRetrying(false), 5000);
-  }, []);
+  const { reconnect, reconnecting } = useReconnect();
 
   return (
     <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
@@ -61,11 +48,11 @@ export default function AwaitingConnection({
 
       {showRetry && (
         <button
-          onClick={handleRetry}
-          disabled={retrying}
+          onClick={reconnect}
+          disabled={reconnecting}
           className="px-4 py-1.5 text-xs font-semibold rounded-lg bg-bg-surface hover:bg-white/10 border border-white/10 transition-colors disabled:opacity-50"
         >
-          {retrying ? 'Reconnecting…' : 'Retry now'}
+          {reconnecting ? 'Reconnecting…' : 'Retry now'}
         </button>
       )}
 

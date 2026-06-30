@@ -4,6 +4,7 @@ import MetersPage from './pages/MetersPage';
 import { HashRouter, Routes, Route, NavLink, Navigate, useSearchParams } from 'react-router-dom';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useGridOutageNotifications } from './hooks/useGridOutageNotifications';
+import { useReconnect } from './hooks/useReconnect';
 import type { PollSettings } from './lib/types';
 import { apiGet } from './lib/api';
 import { formatPercent, formatTimestamp } from './lib/format';
@@ -79,7 +80,8 @@ function SystemAlertBanners() {
 }
 
 export function ConnectionIndicator() {
-  const { connectionState, connectedHost, snapshot } = useInverterStore();
+  const { connectionState, connectedHost, snapshot, reconnectRequestedAt } = useInverterStore();
+  const { reconnect, reconnecting } = useReconnect();
   const colors: Record<string, string> = {
     connected: 'bg-green-500',
     reconnecting: 'bg-yellow-500 animate-pulse',
@@ -87,17 +89,33 @@ export function ConnectionIndicator() {
   };
 
   const [now, setNow] = useState(() => Date.now());
+  // Whether the "Reconnect requested at HH:MM:SS" notice is still within
+  // its display window. Recomputed each render from the shared store
+  // timestamp + the ticking `now`. While it's true (or while connected, so
+  // the uptime / last-updated clock stays live) we keep a 1s ticker running;
+  // once the window elapses `recentReconnect` flips false and the effect
+  // cleanup stops the ticker — so it doesn't run forever after a click.
+  const recentReconnect =
+    reconnectRequestedAt != null && now - reconnectRequestedAt < 12_000;
+  const needsTick = connectionState === 'connected' || recentReconnect;
   useEffect(() => {
-    if (connectionState !== 'connected') return;
+    if (!needsTick) return;
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, [connectionState]);
+  }, [needsTick]);
 
   const lastUpdatedMs = snapshot?.timestamp != null ? snapshot.timestamp * 1000 : null;
   const isStale =
     connectionState === 'connected' &&
     lastUpdatedMs != null &&
     now - lastUpdatedMs > 10 * 60 * 1000;
+
+  // Offer a manual reconnect whenever the connection isn't healthy: while
+  // disconnected / reconnecting, AND while connected-but-stale — the classic
+  // zombie dongle, where TCP stays up but data froze. There used to be no
+  // reconnect affordance at all in that last state, so the only escape hatch
+  // was restarting the app.
+  const showReconnectButton = connectionState !== 'connected' || isStale;
 
   return (
     <div className="flex items-center gap-2 text-text-secondary text-xs">
@@ -128,6 +146,32 @@ export function ConnectionIndicator() {
         </div>
       ) : (
         <span className="capitalize">{connectionState}</span>
+      )}
+
+      {/* Manual reconnect: forces an immediate fresh connection cycle. The
+          poll loop retries on its own anyway; this is for "do it now". */}
+      {showReconnectButton && (
+        <button
+          type="button"
+          onClick={reconnect}
+          disabled={reconnecting}
+          className="shrink-0 rounded-full bg-bg-elevated px-2 py-1 text-xs transition hover:text-text-primary focus:outline-none focus:ring-2 focus:ring-flow-active/60 disabled:opacity-50"
+          title="Force a fresh connection to the inverter now"
+        >
+          {reconnecting ? '…' : 'Reconnect'}
+        </button>
+      )}
+
+      {/* Visible feedback that a reconnect was just triggered. Against an
+          unreachable dongle the connection state goes Reconnecting→Reconnecting,
+          so without this timestamp the click looks like it did nothing. */}
+      {recentReconnect && reconnectRequestedAt != null && (
+        <span
+          className="font-mono text-text-secondary/60"
+          title="Reconnect requested"
+        >
+          ↻ {formatTimestamp(reconnectRequestedAt)}
+        </span>
       )}
     </div>
   );
