@@ -14,7 +14,7 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 - **Frontend**: React 19 + TypeScript + Vite 9 + Tailwind CSS 4 + Zustand + Recharts + React Router 7
 - **Backend**: Tauri 2 desktop shell; embedded Axum HTTP/WS server on port **7337**
 - **Modbus**: Custom Rust TCP client to GivEnergy data adapter (port **8899**) aligned with [givenergy-modbus](https://github.com/dewet22/givenergy-modbus) reference library and [GivTCP](https://github.com/dewet22/giv_tcp)
-- **Testing**: Rust unit tests (244) + integration tests with mock TCP server + Playwright end-to-end tests. Local-only E2E use [GivEnergy Simulator](https://github.com/psylsph/givenergy-simulator)
+- **Testing**: Rust unit tests (inline `#[cfg(test)] mod tests` throughout `src-tauri/src/`) + integration tests with mock TCP server + Playwright end-to-end tests. Local-only E2E use [GivEnergy Simulator](https://github.com/psylsph/givenergy-simulator)
 - **References**: Local clones at `~/repos/givenergy-modbus` and `~/repos/giv_tcp` are source of truth for register layout, slot maps, slave addressing, command encoding
 
 ## Prerequisites
@@ -30,7 +30,10 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 | `npm run dev` | Vite dev server on port 5173 |
 | `npm run build` | `tsc -b && vite build` (full typecheck + bundle) |
 | `npm run lint` | `eslint .` |
-| `npm run preview` | `vite preview` |
+| `npm run lint:md` | Lint all markdown (`markdownlint`); run after significant .md edits |
+| `npm run check:versions` | Verify `package.json` / `Cargo.toml` / `tauri.conf.json` agree |
+| `npm run test` | Vitest + all `tests/scripts/*.test.sh` smoke tests (incl. `check-versions`) |
+| `npm run preview` | `vite preview` (preview the production build locally) |
 | `cargo test` (in `src-tauri/`) | Run all Rust unit tests |
 | `cargo clippy` (in `src-tauri/`) | Run Rust linter |
 | `cargo tauri dev` | Dev mode with Tauri window + Vite + hot-reload |
@@ -85,7 +88,7 @@ Run: `npm run lint`
 
 ### Markdown
 
-Run `npx markdownlint '**/*.md' --ignore node_modules` after significant .md edits.
+Run `npm run lint:md` after significant .md edits.
 
 ## Architecture
 
@@ -93,8 +96,8 @@ Run `npx markdownlint '**/*.md' --ignore node_modules` after significant .md edi
 
 Entrypoint: `src/main.tsx`.
 
-- **Pages**: `StatusPage`, `BatteryPage`, `HistoryPage`, `ControlPage` (model-aware rate scaling, slot-labelling warnings), `InverterPage`, `SettingsPage`, `LogsPage` (developer mode only)
-- **Components**: `EnergyFlowDiagram` (radial SVG power flow), `BatteryPanel`, `SummaryTiles`
+- **Pages**: `StatusPage`, `BatteryPage`, `HistoryPage`, `ControlPage` (model-aware rate scaling, slot-labelling warnings), `InverterPage`, `PowerPage`, `SolarPage`, `MetersPage`, `SettingsPage`, `LogsPage` (developer mode only)
+- **Components**: `EnergyOrbitDiagram` (radial SVG power flow; renamed from `EnergyFlowDiagram`), `BatteryPanel`, `BatteryGauge`, `SummaryTiles`, `SolarPowerChart`, `BatterySocChart`, `SeriesLegend`, `ColdBatteryWarning`
 - **Hooks**: `useWebSocket` — connects to `/ws`, reconnects on drop, fetches snapshot via REST
 - **Lib**: `api.ts` (fetch helpers), `format.ts` (formatters), `types.ts` (types), `evcLabel.ts` (EV Charger state → label picker: `Charging` / `Connected` / `Disconnected` / `Not Found`), `validators.ts` (`isValidIpv4Host` for the EVC Charger Address field)
 - **State**: Zustand store (`useInverterStore`) — snapshot, connectionState, connectedHost, developerMode (persisted to localStorage), EV Charger state (`evcHost`, `evcPower`, `evcCharging`, `evcConnected`, `evcEverConnected` latch). The latch distinguishes "charger was here, now offline" from "we've never successfully reached the host" so the diagram can show "Disconnected" vs "Not Found" (issue #138). `resetEvc()` clears the latch when the user saves a new host.
@@ -106,12 +109,14 @@ Frontend talks exclusively to the local Axum server — never directly to the in
 
 - **`lib.rs`** — Tauri app setup + headless CLI; spawns Axum server + Modbus polling loop. Two independent tracing layers: `fmt` layer to stdout (level WARN, override via `RUST_LOG`) and `LogCaptureLayer` into in-memory `LogRing` for dev console (level WARN, runtime-adjustable via `PUT /api/log-level`).
 - **`history/`** — SQLite-backed history (`~/.givenergy-local/history.db`). `HistoryDb` wrapper, schema migration, `insert_reading()`, aggregated `query_history()` with time-bucket AVG (or MAX for cumulative fields).
-- **`inverter/`** — data model, register decode/encode, discovery, poll loop
+- **`inverter/`** — data model, register decode/encode, discovery, poll loop, sanitization
   - `model.rs` — `InverterSnapshot`, `ScheduleSlot`, `BatteryMode`, `BatteryState`, `DeviceType` enum (Gen1-4, AC-coupled, three-phase, AIO, HV Gen3/4, EMS) with model-aware helpers for slave addresses, poll blocks, slot counts, battery protocol selection.
   - `decoder.rs` — converts raw register blocks into `InverterSnapshot`; per-block decoders for holding registers 0-59, 60-119, 240-299 (extended 10-slot schedules), 300-359 (AC config), 1080-1124 (three-phase config).
   - `encoder.rs` — translates `ControlCommand` into whitelist-validated `RegisterWrite` lists. Model-specific commands for AC-coupled and three-phase limits.
-  - `poll.rs` — main polling loop: drain writes → read registers → sanitize → broadcast snapshot. Features: dongle memory-leak fingerprint detection, model-aware slave address switching, carry-forward for optional blocks, two battery protocols (LV at 0x32+; HV at 0xA0→0x70+/0x50+), grace-period median-of-3 baseline hardening, derived three-phase battery fields.
+  - `sanitizer.rs` — the register-corruption defense layer (absolute range checks, delta/rate checks, grace-period median-of-3 hardening). Formerly inline in `poll.rs`; now its own module — the "Data sanitization" section below documents its rules in detail.
+  - `poll.rs` — main polling loop: drain writes → read registers → sanitize (via `sanitizer.rs`) → broadcast snapshot. Features: dongle memory-leak fingerprint detection, model-aware slave address switching, carry-forward for optional blocks, two battery protocols (LV at 0x32+; HV at 0xA0→0x70+/0x50+), derived three-phase battery fields.
   - `discovery.rs` — network scanning with GivEnergy Modbus protocol verification (validates 0x5959 magic header).
+  - `state_machines.rs` — connect/reconnect and battery-protocol state machines.
 - **`modbus/`** — GivEnergy Modbus TCP protocol
   - `client.rs` — `ModbusClient`: connect, read registers, write single register (FC6), stale frame drain, heartbeat handling (echoes dongle heartbeats). Default slave address `0x11`. `read_all_with_extras()` decides optional blocks by device type.
   - `framer.rs` — proprietary frame encode/decode (MBAP header + transparent sub-frame + CRC)
@@ -127,7 +132,7 @@ Frontend talks exclusively to the local Axum server — never directly to the in
 
 ## Data sanitization (register corruption defense)
 
-GivEnergy dongle frequently returns corrupted register values. The sanitizer in `poll.rs` defends with multiple layers:
+GivEnergy dongle frequently returns corrupted register values. The sanitizer (in `inverter/sanitizer.rs`; formerly inline in `poll.rs`) defends with multiple layers:
 
 ### Absolute range checks (always active)
 
@@ -287,9 +292,9 @@ macOS 26.5 blocks ad-hoc signed binaries inside `/Applications`. Three issues: (
 
 ## Release process
 
-1. Bump version in `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`
+1. Bump version in `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`. `npm run check:versions` (also a step in CI and the first check in `npm test`) fails if the three drift — this is the guard against the "bumped two, forgot one" mistake that shipped v0.33.2 with `tauri.conf.json` still reading `0.33.1`.
 2. Update `CHANGELOG.md` with a new heading
-3. Commit, then **immediately tag** (`vX.Y.Z`) — match the changelog heading exactly. Every version heading must have a corresponding git tag. Push both.
+3. Commit, then **immediately tag** (`vX.Y.Z`) — match the changelog heading exactly. Every version heading must have a corresponding git tag. Push both. The release build (`.github/workflows/build.yml`, triggered by `v*` tags) runs `check-versions` as a gating job before any platform build starts, so an out-of-sync tag fails fast instead of producing installers whose bundled version disagrees with the release name.
 4. GitHub Actions builds for macOS (ARM + x64), Linux, Windows and creates a GitHub Release
 
 ### Changelog style
