@@ -1699,7 +1699,12 @@ mod tests {
         let single = |field: &str| -> f64 {
             let pts: Vec<TimePoint> =
                 serde_json::from_value(result.get(field).cloned().unwrap()).unwrap();
-            assert_eq!(pts.len(), 1, "expected one bucket for {field}, got {}", pts.len());
+            assert_eq!(
+                pts.len(),
+                1,
+                "expected one bucket for {field}, got {}",
+                pts.len()
+            );
             pts[0].v
         };
 
@@ -1776,10 +1781,8 @@ mod tests {
         assert!(result.get("_not_a_real_field").is_none());
         // Spot-check a value: that one reading was pure charge and pure
         // export, so the directional avg equals the reading itself.
-        let charge_pts: Vec<TimePoint> = serde_json::from_value(
-            result.get(CHARGE_POWER_FIELD).cloned().unwrap(),
-        )
-        .unwrap();
+        let charge_pts: Vec<TimePoint> =
+            serde_json::from_value(result.get(CHARGE_POWER_FIELD).cloned().unwrap()).unwrap();
         assert_eq!(charge_pts.len(), 1);
         assert!((charge_pts[0].v - 1500.0).abs() < 0.01);
     }
@@ -1838,8 +1841,16 @@ mod tests {
 
         let charge_pts = pts(CHARGE_POWER_FIELD);
         let discharge_pts = pts(DISCHARGE_POWER_FIELD);
-        assert_eq!(charge_pts.len(), 2, "expected two charge buckets, got {charge_pts:?}");
-        assert_eq!(discharge_pts.len(), 2, "expected two discharge buckets, got {discharge_pts:?}");
+        assert_eq!(
+            charge_pts.len(),
+            2,
+            "expected two charge buckets, got {charge_pts:?}"
+        );
+        assert_eq!(
+            discharge_pts.len(),
+            2,
+            "expected two discharge buckets, got {discharge_pts:?}"
+        );
 
         // Bucket A: mean charge = (400+1000+600)/3 = 666.67; discharge = 0.
         let bucket_a_start = (t0 / bucket_secs) * bucket_secs * 1000;
@@ -2036,7 +2047,10 @@ mod tests {
         let expected = [8.0, 8.3, 0.0, 0.2];
         assert_eq!(values.len(), expected.len(), "got {values:?}");
         for (got, want) in values.iter().zip(expected) {
-            assert!((got - want).abs() < 0.01, "got {values:?}, want {expected:?}");
+            assert!(
+                (got - want).abs() < 0.01,
+                "got {values:?}, want {expected:?}"
+            );
         }
     }
 
@@ -2062,7 +2076,10 @@ mod tests {
         let expected = [8.0, 8.0, 8.2];
         assert_eq!(values.len(), expected.len(), "got {values:?}");
         for (got, want) in values.iter().zip(expected) {
-            assert!((got - want).abs() < 0.01, "got {values:?}, want {expected:?}");
+            assert!(
+                (got - want).abs() < 0.01,
+                "got {values:?}, want {expected:?}"
+            );
         }
     }
 

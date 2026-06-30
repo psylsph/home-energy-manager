@@ -2955,7 +2955,13 @@ pub async fn set_alerts(
         config.batt_temp_min = v as f32;
     }
     if let Some(v) = body.get("batt_temp_max").and_then(|v| v.as_f64()) {
-        config.batt_temp_max = v as f32;
+        config.batt_temp_max = v.clamp(0.0, 120.0) as f32;
+    }
+    if let Some(v) = body.get("inverter_temp_min").and_then(|v| v.as_f64()) {
+        config.inverter_temp_min = v.clamp(0.0, 120.0) as f32;
+    }
+    if let Some(v) = body.get("inverter_temp_max").and_then(|v| v.as_f64()) {
+        config.inverter_temp_max = v.clamp(0.0, 120.0) as f32;
     }
     if let Some(v) = body.get("soc_min").and_then(|v| v.as_u64()) {
         config.soc_min = v.min(100) as u8;
@@ -2965,6 +2971,9 @@ pub async fn set_alerts(
     }
     if let Some(v) = body.get("grid_offline_enabled").and_then(|v| v.as_bool()) {
         config.grid_offline_enabled = v;
+    }
+    if let Some(v) = body.get("inverter_trip_enabled").and_then(|v| v.as_bool()) {
+        config.inverter_trip_enabled = v;
     }
     if let Some(v) = body
         .get("connection_lost_enabled")
@@ -7467,9 +7476,7 @@ mod tests {
     #[tokio::test]
     async fn force_discharge_stop_after_restart_queues_minimal_three_phase_stop() {
         with_isolated_config_dir_async(|| async {
-            use crate::modbus::registers::{
-                HR_3PH_FORCE_DISCHARGE_ENABLE, HR_BATTERY_POWER_MODE,
-            };
+            use crate::modbus::registers::{HR_3PH_FORCE_DISCHARGE_ENABLE, HR_BATTERY_POWER_MODE};
 
             let state = make_state_with_device(DeviceType::ThreePhase).await;
             {
@@ -7899,6 +7906,63 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn set_alerts_persists_inverter_trip_toggle() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({ "inverter_trip_enabled": true });
+            let (status, _) = set_alerts(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let cfg = state.alert_config.lock().await.clone();
+            assert!(cfg.inverter_trip_enabled);
+
+            let reloaded = crate::settings::Settings::load();
+            assert!(reloaded.alerts_config.inverter_trip_enabled);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_alerts_persists_inverter_temperature_bounds() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "inverter_temp_min": 7.5,
+                "inverter_temp_max": 62.0,
+            });
+            let (status, _) = set_alerts(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let cfg = state.alert_config.lock().await.clone();
+            assert_eq!(cfg.inverter_temp_min, 7.5);
+            assert_eq!(cfg.inverter_temp_max, 62.0);
+
+            let reloaded = crate::settings::Settings::load();
+            assert_eq!(reloaded.alerts_config.inverter_temp_min, 7.5);
+            assert_eq!(reloaded.alerts_config.inverter_temp_max, 62.0);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_alerts_clamps_inverter_temperature_bounds() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "inverter_temp_min": -10.0,
+                "inverter_temp_max": 999.0,
+            });
+            let (status, _) = set_alerts(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let cfg = state.alert_config.lock().await.clone();
+            assert_eq!(cfg.inverter_temp_min, 0.0);
+            assert_eq!(cfg.inverter_temp_max, 120.0);
+        })
+        .await;
+    }
+
     /// Omitting the Pushover fields from the POST body must leave them
     /// untouched (the API does partial updates). This guards against a
     /// future regression that would wipe credentials whenever the frontend
@@ -7914,7 +7978,7 @@ mod tests {
                 cfg.pushover_user_key = "pre-existing-user".to_string();
             }
 
-            // POST an unrelated field with no Pushover keys in the body.
+            // POST an unrelated field with no Pushover or inverter-temp keys in the body.
             let body = serde_json::json!({ "cooldown_minutes": 15 });
             let (status, _) = set_alerts(State(state.clone()), Json(body)).await;
             assert_eq!(status, StatusCode::OK);
@@ -7929,6 +7993,9 @@ mod tests {
                 "partial update must not wipe the user key"
             );
             assert_eq!(cfg.cooldown_minutes, 15);
+            assert!(!cfg.inverter_trip_enabled);
+            assert_eq!(cfg.inverter_temp_min, 8.0);
+            assert_eq!(cfg.inverter_temp_max, 60.0);
         })
         .await;
     }
@@ -9541,7 +9608,10 @@ mod tests {
     fn parse_agile_scope_accepts_all_four_variants() {
         assert_eq!(parse_agile_scope("off"), Some(AgileScope::Off));
         assert_eq!(parse_agile_scope("full"), Some(AgileScope::Full));
-        assert_eq!(parse_agile_scope("charge_only"), Some(AgileScope::ChargeOnly));
+        assert_eq!(
+            parse_agile_scope("charge_only"),
+            Some(AgileScope::ChargeOnly)
+        );
         assert_eq!(
             parse_agile_scope("discharge_only"),
             Some(AgileScope::DischargeOnly)

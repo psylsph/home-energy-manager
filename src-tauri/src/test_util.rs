@@ -117,12 +117,8 @@ fn is_under_user_home(path: &Path) -> bool {
         return false;
     };
     // canonicalize best-effort; on missing files just compare components.
-    let path_norm = path
-        .canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf());
-    let home_norm = home
-        .canonicalize()
-        .unwrap_or_else(|_| home.clone());
+    let path_norm = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let home_norm = home.canonicalize().unwrap_or_else(|_| home.clone());
     path_norm.starts_with(&home_norm)
 }
 
@@ -200,7 +196,10 @@ mod tests {
         let result = with_isolated_config_dir_async(|| async {
             // Inside the async body, isolation must be active.
             let inside = crate::settings::Settings::settings_dir();
-            assert_ne!(inside, production_path, "isolation inactive inside async body");
+            assert_ne!(
+                inside, production_path,
+                "isolation inactive inside async body"
+            );
             assert!(!is_under_user_home(&inside));
             42_u32
         })

@@ -3,6 +3,7 @@ import { formatPower, formatVoltage, formatCurrent, formatTemp, formatEnergy, fo
 import ColdBatteryWarning from '../components/ColdBatteryWarning';
 import BatteryModeSummary from '../components/BatteryModeSummary';
 import { deviceSupportsExportLimit } from '../lib/deviceCapabilities';
+import { hasGridFault, hasInverterTrip, hasBatteryOverTemp, gridFaultTitle } from '../lib/gridFault';
 import AwaitingConnection from '../components/AwaitingConnection';
 
 export default function InverterPage() {
@@ -76,6 +77,43 @@ export default function InverterPage() {
             );
           })()}
         </div>
+      </section>
+
+      {/* Fault Status — shown for every device type (issue #174).
+          The boolean fault signals (grid_loss / inverter_trip /
+          battery_over_temp) are decoded for all models but were previously
+          surfaced only in the global alert banner (App.tsx), never on this
+          page. The Gateway additionally exposes a hardware relay/AC bitmask
+          (gateway_fault_codes, IR 1622-1623) in its own section below; the
+          two are independent datasets — a grid outage flips grid_online
+          without necessarily setting a bitmask bit, so the bitmask's own
+          "✓ No faults" can coexist with a real grid-loss state shown here.
+          hasGridFault() deliberately ORs grid_loss with !grid_online so the
+          Gateway (whose decode path never sets grid_loss) is covered too. */}
+      <section className="bg-bg-surface rounded-2xl p-5">
+        <h2 className="text-text-primary font-semibold text-lg mb-4">Fault Status</h2>
+        {(() => {
+          // The two non-grid labels mirror buildSystemAlerts() in gridFault.ts
+          // so wording stays consistent with the global banner.
+          const active: string[] = [];
+          if (hasGridFault(s)) active.push(gridFaultTitle());
+          if (hasInverterTrip(s)) active.push('Inverter trip detected');
+          if (hasBatteryOverTemp(s)) active.push('Battery over temperature');
+          if (active.length === 0) {
+            return (
+              <div className="bg-bg-elevated rounded-lg px-3 py-2">
+                <span className="text-battery text-xs font-medium">✓ No faults</span>
+              </div>
+            );
+          }
+          return (
+            <ul className="space-y-1">
+              {active.map((label, i) => (
+                <li key={i} className="bg-warning/10 text-warning rounded-lg px-3 py-1.5 text-xs font-mono">{label}</li>
+              ))}
+            </ul>
+          );
+        })()}
       </section>
 
       {/* Gateway detail — only for Gateway devices */}

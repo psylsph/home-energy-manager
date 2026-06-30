@@ -277,10 +277,7 @@ pub enum ControlCommand {
     /// Three-phase equivalent of `AgileDischargeSlot`: writes HR 1118/1119
     /// (slot 1 times), HR 1122 (force-discharge enable) and HR 27 = 0
     /// (export mode). Mirrors `ThreePhaseForceDischarge`.
-    ThreePhaseAgileDischargeSlot {
-        start_hhmm: u16,
-        end_hhmm: u16,
-    },
+    ThreePhaseAgileDischargeSlot { start_hhmm: u16, end_hhmm: u16 },
     /// Clear any active Agile-driven slot. Single-phase: writes
     /// `HR_ENABLE_CHARGE = 0`, `HR_ENABLE_DISCHARGE = 0`,
     /// `HR_BATTERY_POWER_MODE = 1`, and zeros slot 1 start/end. Idempotent.
@@ -568,7 +565,11 @@ impl ControlCommand {
                     rw(HR_BATTERY_POWER_MODE, 1),         // eco mode (common register)
                 ]
             }
-            ControlCommand::AgileChargeSlot { start_hhmm, end_hhmm, target_soc } => {
+            ControlCommand::AgileChargeSlot {
+                start_hhmm,
+                end_hhmm,
+                target_soc,
+            } => {
                 // Drive the inverter's native slot 1 schedule for the
                 // cheap run. Eco mode stays on (`HR_BATTERY_POWER_MODE`
                 // untouched) so the inverter will charge during the slot
@@ -585,21 +586,28 @@ impl ControlCommand {
                     rw(HR_ENABLE_CHARGE, 1),
                 ]
             }
-            ControlCommand::ThreePhaseAgileChargeSlot { start_hhmm, end_hhmm, target_soc } => {
+            ControlCommand::ThreePhaseAgileChargeSlot {
+                start_hhmm,
+                end_hhmm,
+                target_soc,
+            } => {
                 validate_hhmm(*start_hhmm, "agile 3ph charge slot start")?;
                 validate_hhmm(*end_hhmm, "agile 3ph charge slot end")?;
                 validate_range(*target_soc, 4, 100, "agile 3ph target SOC")?;
                 vec![
-                    rw(HR_BATTERY_POWER_MODE, 1),          // eco mode (common register)
-                    rw(HR_3PH_FORCE_DISCHARGE_ENABLE, 0),  // clear stale discharge
+                    rw(HR_BATTERY_POWER_MODE, 1),         // eco mode (common register)
+                    rw(HR_3PH_FORCE_DISCHARGE_ENABLE, 0), // clear stale discharge
                     rw(HR_3PH_CHARGE_SLOT_1_START, *start_hhmm),
                     rw(HR_3PH_CHARGE_SLOT_1_END, *end_hhmm),
                     rw(HR_3PH_CHARGE_TARGET_SOC, *target_soc),
-                    rw(HR_3PH_AC_CHARGE_ENABLE, 1),        // AC charge (GivTCP sets both)
+                    rw(HR_3PH_AC_CHARGE_ENABLE, 1), // AC charge (GivTCP sets both)
                     rw(HR_3PH_FORCE_CHARGE_ENABLE, 1),
                 ]
             }
-            ControlCommand::AgileDischargeSlot { start_hhmm, end_hhmm } => {
+            ControlCommand::AgileDischargeSlot {
+                start_hhmm,
+                end_hhmm,
+            } => {
                 // Drive the inverter's native slot 1 schedule for the
                 // expensive run. `HR_BATTERY_POWER_MODE = 0` switches the
                 // inverter into export mode for the duration of the slot
@@ -615,7 +623,10 @@ impl ControlCommand {
                     rw(HR_BATTERY_POWER_MODE, 0), // export mode for the slot
                 ]
             }
-            ControlCommand::ThreePhaseAgileDischargeSlot { start_hhmm, end_hhmm } => {
+            ControlCommand::ThreePhaseAgileDischargeSlot {
+                start_hhmm,
+                end_hhmm,
+            } => {
                 validate_hhmm(*start_hhmm, "agile 3ph discharge slot start")?;
                 validate_hhmm(*end_hhmm, "agile 3ph discharge slot end")?;
                 vec![
@@ -623,7 +634,7 @@ impl ControlCommand {
                     rw(HR_3PH_DISCHARGE_SLOT_1_END, *end_hhmm),
                     rw(HR_3PH_FORCE_CHARGE_ENABLE, 0), // clear stale charge
                     rw(HR_3PH_FORCE_DISCHARGE_ENABLE, 1),
-                    rw(HR_BATTERY_POWER_MODE, 0),      // max power → export
+                    rw(HR_BATTERY_POWER_MODE, 0), // max power → export
                 ]
             }
             ControlCommand::AgileClearActiveSlot => {
