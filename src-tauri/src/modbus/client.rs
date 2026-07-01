@@ -199,17 +199,11 @@ pub struct ModbusClient {
     host: String,
     /// TCP port (typically 8899 for GivEnergy).
     port: u16,
-    /// Data adapter serial number (up to 10 Latin-1 characters).
-    /// May be empty for auto-discovery — the dongle's serial is extracted
-    /// from the first response frame header (bytes 8-17).
+    /// Data adapter serial number (up to 10 Latin-1 characters). May be
+    /// empty — GivEnergy dongles accept empty-serial requests. The caller
+    /// owns serial provisioning (sourced from persisted settings via the
+    /// constructor); the client does not auto-discover it from frames.
     serial: String,
-    /// Whether the serial was auto-discovered from a response.
-    serial_discovered: bool,
-    /// Whether the auto-discovered serial is suspect (extracted from a
-    /// truncated/partial frame). When true, the serial should NOT be used
-    /// for subsequent requests — some dongle firmware versions stop
-    /// responding once the serial is set.
-    serial_suspect: bool,
     /// Modbus slave address used for operational inverter reads.
     ///
     /// GivTCP/givenergy-modbus use 0x11 for initial detection/canonical reads,
@@ -248,16 +242,15 @@ pub struct ModbusClient {
 impl ModbusClient {
     /// Create a new client that will connect to `host:port`.
     ///
-    /// If `serial` is empty the client will auto-discover the dongle serial
-    /// from the first response frame header and use it for all subsequent
-    /// requests. This mirrors how GivTCP works — only the IP is needed.
+    /// `serial` is used verbatim for every request frame and may be empty
+    /// (GivEnergy dongles accept empty-serial requests). The client does not
+    /// auto-discover the serial — the caller provisions it (typically from
+    /// persisted settings, or via the network scan in `discovery.rs`).
     pub fn new(host: &str, port: u16, serial: &str) -> Self {
         Self {
             host: host.to_string(),
             port,
             serial: serial.to_string(),
-            serial_discovered: false,
-            serial_suspect: false,
             slave: 0x11, // canonical GivEnergy inverter address for detection
             writer: None,
             timeout: Self::IO_TIMEOUT,
@@ -269,26 +262,9 @@ impl ModbusClient {
         }
     }
 
-    /// Return the current serial (may be empty if not yet discovered).
+    /// Return the current serial (may be empty).
     pub fn serial(&self) -> &str {
         &self.serial
-    }
-
-    /// Return whether the serial was auto-discovered from a response.
-    pub fn serial_was_discovered(&self) -> bool {
-        self.serial_discovered
-    }
-
-    /// Return whether the auto-discovered serial is suspect (extracted from
-    /// a truncated or partial frame). When true, the serial was not set and
-    /// empty serial will be used for all requests.
-    pub fn serial_is_suspect(&self) -> bool {
-        self.serial_suspect
-    }
-
-    /// Update the serial (e.g. after auto-discovery).
-    pub fn set_serial(&mut self, serial: String) {
-        self.serial = serial;
     }
 
     /// Set the Modbus slave address used for operational inverter reads.
@@ -605,8 +581,37 @@ impl ModbusClient {
                         // No matching future -> stale frame, silently dropped.
                     } else if decoded.function >= 0x80 && decoded.payload.len() >= 11 {
                         // Exception frame — scan pending futures for a match
-                        // on the masked function code. O(n) per exception,
-                        // but exceptions are rare in normal operation.
+                        // on the masked function code.
+                        //
+                        // Exception frames cannot be routed by the full
+                        // ResponseKey because the GivEnergy protocol omits
+                        // `base_register` and `count` from the exception
+                        // payload (it carries only the 10-byte serial and
+                        // the 1-byte exception code), so `from_response`
+                        // returns `None` and we fall back to a partial-key
+                        // (slave, function) match.
+                        //
+                        // The pending map is expected to contain at most
+                        // ONE entry per (slave, function, base_register,
+                        // count) tuple: every read path in this file
+                        // (read_registers, read_registers_at_slave,
+                        // read_blocks_resilient, liveness_probe, and the
+                        // poll loop's BMS/meter/BCU probes) issues one
+                        // request at a time and awaits it before issuing
+                        // the next. The scan therefore returns at most one
+                        // matching future in practice (n ≤ 1).
+                        //
+                        // If concurrent reads are ever introduced
+                        // (e.g. via `tokio::join!` over a batch of blocks,
+                        // the same pattern the givenergy-modbus reference
+                        // uses in `Client.execute()`), this scan will
+                        // over-match and the exception will be delivered to
+                        // every future with the matching (slave, function).
+                        // The correct fix in that case is to add a request
+                        // ID to the frame header and key responses by exact
+                        // (slave, function, base, count, request_id) — at
+                        // which point exceptions route correctly without
+                        // any scan.
                         let masked = decoded.function & 0x7F;
                         let mut map = pending.lock().await;
                         // Collect matching keys to avoid borrow issues.
@@ -807,7 +812,38 @@ impl ModbusClient {
         key: ResponseKey,
     ) -> Result<DecodedFrame, ClientError> {
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(key.clone(), tx);
+
+        // Register the pending future under our content key. Use `entry()`
+        // rather than `insert()` so a duplicate in-flight request for the
+        // same (slave, function, base_register, count) tuple is rejected
+        // instead of silently overwriting the previous sender — the previous
+        // caller's `rx` would otherwise be dropped, the previous request
+        // would receive a phantom `NotConnected`, and the new request would
+        // be the only one routed. All current call paths are sequential
+        // (read_registers, read_registers_at_slave, read_blocks_resilient,
+        // liveness_probe, and the poll loop's BMS/meter/BCU probes each
+        // issue one request at a time), so a duplicate key here means
+        // either a programming error (concurrent dispatch introduced in a
+        // refactor) or a stale entry from a previous timed-out request that
+        // the consumer hasn't cleaned up yet. Both are bugs to surface
+        // loudly, not swallow.
+        //
+        // Mirrors the givenergy-modbus reference's "cancel existing and
+        // replace" pattern (client.py:1148-1157) — except we reject rather
+        // than cancel because Rust's `oneshot::Sender` cannot be cancelled,
+        // only dropped. The caller must wait for the previous request to
+        // resolve (or time out) before retrying.
+        match self.pending.lock().await.entry(key.clone()) {
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(tx);
+            }
+            std::collections::hash_map::Entry::Occupied(e) => {
+                return Err(ClientError::InvalidResponse(format!(
+                    "duplicate in-flight request for {:?} (existing sender still pending)",
+                    e.key()
+                )));
+            }
+        }
 
         // Send the frame via the TCP writer.
         let writer = self.writer.as_ref().ok_or(ClientError::NotConnected)?;
@@ -1152,20 +1188,27 @@ impl ModbusClient {
                             decoded.payload.len()
                         )));
                     }
+                    // FC6 (Write Single Register) echoes back both the
+                    // register address AND the value written. We must verify
+                    // both: a frame echoing the correct register but a
+                    // wrong value indicates the write did not commit (the
+                    // dongle has been observed to return such partial acks
+                    // during firmware updates or under load). Checking only
+                    // the register would silently accept corruption.
                     let inner = &decoded.payload[10..];
                     let resp_register = u16::from_be_bytes([inner[0], inner[1]]);
-                    let _resp_value = u16::from_be_bytes([inner[2], inner[3]]);
-                    if resp_register != register {
+                    let resp_value = u16::from_be_bytes([inner[2], inner[3]]);
+                    if resp_register != register || resp_value != value {
                         if attempt + 1 < max_attempts {
                             tracing::debug!(
-                                "Write at {register} got stale ack (reg {resp_register}), retrying"
+                                "Write at {register} got mismatch (reg {resp_register}, val {resp_value}), retrying"
                             );
                             tokio::time::sleep(Duration::from_millis(500)).await;
                             continue;
                         }
                         return Err(ClientError::InvalidResponse(format!(
-                            "write acknowledgment mismatch: register {} vs {}",
-                            resp_register, register
+                            "write acknowledgment mismatch: register {} vs {}, value {} vs {}",
+                            resp_register, register, resp_value, value
                         )));
                     }
                     tracing::debug!("Write ack: register {register} = {value} (0x{value:04X})");
@@ -1216,70 +1259,13 @@ impl ModbusClient {
         framer::encode_frame(serial, slave, 0x06, &payload)
     }
 
-    /// Read a set of poll blocks, returning raw data per block.
-    ///
-    /// Iterates over the provided blocks and issues a read request for each
-    /// one. If any block fails the entire operation fails.
-    pub async fn read_blocks(
-        &mut self,
-        blocks: &'static [RegisterBlock],
-    ) -> Result<Vec<BlockRead>, ClientError> {
-        let mut results = Vec::with_capacity(blocks.len());
-
-        for (i, block) in blocks.iter().enumerate() {
-            // Pause between blocks to let the dongle catch up
-            if i > 0 {
-                tokio::time::sleep(self.inter_request_delay).await;
-            }
-
-            let reg_type = match block.register_type {
-                super::registers::RegisterType::Input => RegisterType::Input,
-                super::registers::RegisterType::Holding => RegisterType::Holding,
-            };
-
-            let t0 = std::time::Instant::now();
-            match self
-                .read_registers(reg_type, block.start, block.count)
-                .await
-            {
-                Ok(data) => {
-                    tracing::debug!(
-                        block = block.name,
-                        start = block.start,
-                        count = block.count,
-                        received = data.len(),
-                        elapsed_ms = t0.elapsed().as_millis() as u64,
-                        "Block read OK"
-                    );
-                    results.push(BlockRead { block, data });
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        block = block.name,
-                        start = block.start,
-                        count = block.count,
-                        elapsed_ms = t0.elapsed().as_millis() as u64,
-                        error = %e,
-                        "Block read FAILED"
-                    );
-                    return Err(e);
-                }
-            }
-        }
-
-        Ok(results)
-    }
-
-    /// Read all standard poll blocks, returning raw data per block.
-    ///
-    /// Iterates over [`STANDARD_POLL_BLOCKS`] and issues a read request for
-    /// each one. If any block fails the entire operation fails.
     /// Read blocks with per-block retry on timeout.
     ///
-    /// Unlike [`read_blocks`], which fails the entire read on the first block
-    /// error, this method retries individual blocks that time out. Only hard
-    /// TCP errors (connection lost, send/receive failure) propagate up
-    /// immediately — timeouts are retried up to `max_retries` times per block.
+    /// Unlike a naive block read (which would fail the entire read on the
+    /// first block error), this method retries individual blocks that time
+    /// out. Only hard TCP errors (connection lost, send/receive failure)
+    /// propagate up immediately — timeouts are retried up to `max_retries`
+    /// times per block.
     ///
     /// This matches the GivEnergy dongle's behaviour: it sometimes pauses
     /// between responses but recovers if re-prompted. Tearing down the TCP
@@ -1356,14 +1342,6 @@ impl ModbusClient {
         }
 
         Ok(results)
-    }
-
-    /// Read all standard poll blocks, returning raw data per block.
-    ///
-    /// Iterates over [`STANDARD_POLL_BLOCKS`] and issues a read request for
-    /// each one. If any block fails the entire operation fails.
-    pub async fn read_all_standard(&mut self) -> Result<Vec<BlockRead>, ClientError> {
-        self.read_blocks(STANDARD_POLL_BLOCKS).await
     }
 
     /// Read standard blocks plus any model-specific extended blocks.
@@ -2461,6 +2439,87 @@ mod tests {
         client.disconnect().await;
     }
 
+    /// Regression test for the duplicate-in-flight-request guard added to
+    /// `send_and_await_response`. The guard uses `HashMap::entry()` to
+    /// reject a second `insert` under an already-occupied key, rather than
+    /// silently overwriting the previous sender (which would cause the
+    /// first caller's `rx` to drop and the first request to fail with a
+    /// phantom `NotConnected`).
+    ///
+    /// All current call paths are sequential, so the guard is a defensive
+    /// check — a duplicate key here means either a programming error
+    /// (concurrent dispatch introduced in a refactor) or a stale entry
+    /// from a previous timed-out request. Both should be surfaced, not
+    /// swallowed.
+    #[tokio::test]
+    async fn duplicate_in_flight_request_is_rejected() {
+        let correct_data: Vec<u16> = (0..20).collect();
+        let responses = vec![MockResponse::ReadResponse {
+            slave: 0x11,
+            function: 0x04,
+            base: 0,
+            data: correct_data,
+        }];
+
+        let (_port, server, mut client) = setup_client_with_server(responses).await;
+
+        // Use the production ResponseKey (the local one in this test module
+        // has different method names — it pre-dates the refactor that added
+        // the production type at the top of the file).
+        let key = super::ResponseKey::from_request(
+            0x11,
+            RegisterType::Input.function_code(),
+            0,
+            20,
+        );
+
+        // Manually occupy the pending map with a sender under the key we
+        // will use. This simulates an in-flight request from a concurrent
+        // caller (the scenario the guard is defending against).
+        let (occupied_tx, _occupied_rx) = oneshot::channel::<DecodedFrame>();
+        client.pending.lock().await.insert(key.clone(), occupied_tx);
+
+        // A second send_and_await_response for the same key must be rejected
+        // with a clear "duplicate in-flight" error.
+        let frame = framer::build_read_request(
+            "TEST123456",
+            0x11,
+            RegisterType::Input,
+            0,
+            20,
+        );
+        let result = client.send_and_await_response(frame, key.clone()).await;
+        match result {
+            Err(ClientError::InvalidResponse(msg)) => {
+                assert!(
+                    msg.contains("duplicate in-flight"),
+                    "guard error must mention 'duplicate in-flight', got: {msg}"
+                );
+            }
+            other => panic!("expected duplicate-in-flight error, got: {other:?}"),
+        }
+
+        // Once the occupied entry is removed (simulating the original
+        // request resolving or timing out), a fresh send_and_await_response
+        // for the same key must succeed normally.
+        client.pending.lock().await.remove(&key);
+        let frame2 = framer::build_read_request(
+            "TEST123456",
+            0x11,
+            RegisterType::Input,
+            0,
+            20,
+        );
+        let result2 = client.send_and_await_response(frame2, key).await;
+        assert!(
+            result2.is_ok(),
+            "after the occupied entry is cleared, a fresh request must succeed, got: {:?}",
+            result2
+        );
+
+        server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn split_register_read_reassembles_correctly() {
         // Reading 60 registers as a single request.
@@ -2488,78 +2547,10 @@ mod tests {
         server.await.unwrap();
     }
 
-    #[tokio::test]
-    async fn read_blocks_returns_all_standard_blocks() {
-        // Each 60-register block is read as a single request.
-        let responses = vec![
-            // input_0_59: IR 0-59
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x04,
-                base: 0,
-                data: (0..60).collect(),
-            },
-            // holding_0_59: HR 0-59
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x03,
-                base: 0,
-                data: (100..160).collect(),
-            },
-            // holding_60_119: HR 60-119
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x03,
-                base: 60,
-                data: (200..260).collect(),
-            },
-            // input_180_181: IR 180-183 (4 registers: lifetime totals plus
-            // Gen1-authoritative alternative daily battery energy)
-            MockResponse::ReadResponse {
-                slave: 0x11,
-                function: 0x04,
-                base: 180,
-                data: (500..504).collect(),
-            },
-        ];
-
-        let (_port, server, mut client) = setup_client_with_server(responses).await;
-
-        let blocks = client.read_blocks(STANDARD_POLL_BLOCKS).await.unwrap();
-        assert_eq!(blocks.len(), 4);
-        assert_eq!(blocks[0].block.name, "input_0_59");
-        assert_eq!(blocks[0].data.len(), 60);
-        assert_eq!(blocks[0].data[0], 0);
-        assert_eq!(blocks[1].block.name, "holding_0_59");
-        assert_eq!(blocks[1].data[0], 100);
-        assert_eq!(blocks[3].block.name, "input_180_181");
-        assert_eq!(blocks[3].data.len(), 4);
-
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn read_blocks_fails_on_first_standard_block_error() {
-        // First block fails — entire read_blocks should fail
-        let responses = vec![MockResponse::Exception {
-            slave: 0x11,
-            function: 0x04,
-            code: 67,
-        }];
-
-        let (_port, server, mut client) = setup_client_with_server(responses).await;
-
-        let result = client.read_blocks(STANDARD_POLL_BLOCKS).await;
-        assert!(
-            result.is_err(),
-            "read_blocks should fail when first block errors"
-        );
-
-        server.await.unwrap();
-    }
-
     // =======================================================================
-    // read_blocks_resilient tests
+    // read_blocks_resilient tests (read_blocks / read_all_standard were removed:
+    // both were dead production code; every poll path — warmup and the main
+    // loop — goes through read_blocks_resilient via read_all_with_extras.)
     // =======================================================================
 
     #[tokio::test]
@@ -2792,6 +2783,60 @@ mod tests {
 
         let result = client.write_register(27, 1).await;
         assert!(result.is_ok(), "Write register failed: {:?}", result);
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_register_rejects_value_mismatch() {
+        // Regression: a write ack echoing the CORRECT register but a WRONG
+        // value must not be accepted as success. The dongle has been seen to
+        // return such partial acks under load; previously only the register
+        // address was checked, so this silent corruption returned Ok.
+        //
+        // The mock cycles its single response across all 6 attempts.
+        let mut payload = Vec::with_capacity(14);
+        payload.extend_from_slice(b"TEST123456"); // 10-byte serial
+        payload.extend_from_slice(&[0x00u8, 0x1B]); // register 27 (correct)
+        payload.extend_from_slice(&[0x00u8, 0x02]); // value 2 (WRONG — wrote 1)
+        let response = crate::modbus::framer::encode_frame("TEST123456", 0x11, 0x06, &payload);
+
+        let responses = vec![MockResponse::Raw(response)];
+
+        let (_port, server, mut client) = setup_client_with_server(responses).await;
+
+        let result = client.write_register(27, 1).await;
+        assert!(
+            result.is_err(),
+            "Write with a wrong-value ack must fail, got: {:?}",
+            result
+        );
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_register_retries_value_mismatch_then_succeeds() {
+        // A first wrong-value ack should trigger a retry; a subsequent
+        // correct-value ack should succeed. Responses cycle wrong, correct.
+        let mut wrong = Vec::with_capacity(14);
+        wrong.extend_from_slice(b"TEST123456");
+        wrong.extend_from_slice(&[0x00u8, 0x1B]); // register 27
+        wrong.extend_from_slice(&[0x00u8, 0x02]); // value 2 (wrong)
+        let wrong_resp = crate::modbus::framer::encode_frame("TEST123456", 0x11, 0x06, &wrong);
+
+        let mut correct = Vec::with_capacity(14);
+        correct.extend_from_slice(b"TEST123456");
+        correct.extend_from_slice(&[0x00u8, 0x1B]); // register 27
+        correct.extend_from_slice(&[0x00u8, 0x01]); // value 1 (correct)
+        let correct_resp = crate::modbus::framer::encode_frame("TEST123456", 0x11, 0x06, &correct);
+
+        let responses = vec![MockResponse::Raw(wrong_resp), MockResponse::Raw(correct_resp)];
+
+        let (_port, server, mut client) = setup_client_with_server(responses).await;
+
+        let result = client.write_register(27, 1).await;
+        assert!(result.is_ok(), "Write should succeed after retry, got: {:?}", result);
 
         server.await.unwrap();
     }
