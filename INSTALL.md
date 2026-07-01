@@ -143,7 +143,9 @@ This is the same root cause — the app isn't code-signed, so some security suit
    - **Apple Silicon** (M1/M2/M3/M4): download the file with `aarch64` in the name
    - **Intel**: download the file with `x64` in the name
 2. Open the `.dmg` and drag the app to your **Applications** folder
-3. On first launch, **right-click** the app → **Open** → **Open** to bypass Gatekeeper
+3. On first launch, either:
+   - **Double-click `Launch.command`** inside the DMG window (auto-handles Gatekeeper), **or**
+   - **Right-click** the app in Applications → **Open** → **Open**
 4. After the first launch, you can open it normally from Launchpad or Spotlight
 
 > **If the app loads but hangs / becomes unresponsive:** This is usually a macOS quarantine flag issue. Run this in Terminal and try again:
