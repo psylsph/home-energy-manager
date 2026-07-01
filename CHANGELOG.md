@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.52.0] - 2026-07-01
+
+### Fixed
+
+- **Agile responds immediately when you change the current price decision.** Saving new "Charge when below" or "Discharge when above" values now re-checks the live 30-minute Agile slot straight away. If the current slot moves from discharge or charge into hold, the app clears the inverter's Agile slot without needing a restart.
+
+- **Saving Agile thresholds no longer turns Agile back on.** The threshold Save button now only saves the threshold values; it no longer sends the old legacy "enabled" flag that could silently switch Standard back to Agile Full. Mode changes also preserve your saved thresholds instead of resetting missing fields to defaults.
+
+- **Agile clears stale slots after a restart or region change.** If the app restarts after an Agile discharge window has ended, or you change Octopus region/location, the backend now re-checks prices and clears any stale inverter slot instead of leaving the old discharge running.
+
 ### Security
 
 - **Tightened release-build workflow token scope.** The `verify-versions` gate in the release workflow now runs with read-only `GITHUB_TOKEN` permissions, matching the principle of least privilege that the other workflows already follow. Closes GitHub code-scanning alert #3.
