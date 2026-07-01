@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **See your import cost broken down on the History Cost graph.** When you
+  have a Standing Charge configured, the Cost tab's Import Cost line is now
+  joined by two more lines: Energy Cost (what you pay for the units you
+  actually import, at your time-of-use rate) and a dashed Standing Charge
+  line (the fixed daily fee). The gap between Import Cost and Energy Cost is
+  the standing charge, so you can see at a glance how much of your bill is
+  the daily charge versus energy used. With no Standing Charge set the chart
+  is unchanged. All three lines can be toggled from the legend and are
+  included in the CSV export.
+
 ## [0.51.1] - 2026-07-01
 
 ### Changed
