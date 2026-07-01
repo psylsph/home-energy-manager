@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.53.0] - 2026-07-01
+
 ### Added
 
 - **See your import cost broken down on the History Cost graph.** When you

@@ -149,9 +149,11 @@ This is the same root cause — the app isn't code-signed, so some security suit
 4. After the first launch, you can open it normally from Launchpad or Spotlight
 
 > **If the app loads but hangs / becomes unresponsive:** This is usually a macOS quarantine flag issue. Run this in Terminal and try again:
+>
 > ```bash
 > xattr -d com.apple.quarantine /Applications/Home\ Energy\ Manager.app
 > ```
+>
 > If it still hangs, open **Console.app**, search for `Home Energy` in the crash logs, and [open an issue](https://github.com/psylsph/home-energy-manager/issues/new) with what you find.
 
 ### Linux
