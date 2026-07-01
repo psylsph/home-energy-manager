@@ -28,7 +28,7 @@
  */
 
 import { test, expect } from './fixture.js';
-import { startBackend, stopBackend } from './backend.js';
+import { restartBackendPreservingState, startBackend, stopBackend } from './backend.js';
 
 // Each spec file runs against a FRESH backend instance so backend-internal
 // state (detected device type, armed slots, battery-mode state machine) can't
@@ -62,12 +62,18 @@ interface MockOctopus {
  * returns results newest-first, so we reverse the array.
  */
 async function startMockOctopus(
-  priceForNow: number,
+  priceForNow: number | Record<string, number>,
   runSlots = 2,
 ): Promise<MockOctopus> {
   let currentPrice = priceForNow;
-  const server = createServer((_req, res) => {
+  const priceForRequest = (url?: string): number => {
+    if (typeof currentPrice === 'number') return currentPrice;
+    const region = url?.match(/AGILE-24-10-01-([A-P])\//)?.[1];
+    return (region && currentPrice[region]) ?? currentPrice.default ?? 20.0;
+  };
+  const server = createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
+    const activePrice = priceForRequest(req.url);
     const now = Date.now();
     // Align to the start of the current 30-min slot.
     const slotMs = 30 * 60_000;
@@ -81,7 +87,7 @@ async function startMockOctopus(
       const slotIndexFromNow = (from - currentSlotStart) / slotMs;
       const inRun = slotIndexFromNow >= 0 && slotIndexFromNow < runSlots;
       results.push({
-        value_inc_vat: inRun ? currentPrice : 20.0,
+        value_inc_vat: inRun ? activePrice : 20.0,
         valid_from: new Date(from).toISOString(),
         valid_to: new Date(to).toISOString(),
       });
@@ -179,6 +185,7 @@ const HR_CHARGE_TARGET_SOC = 116;
 // ---------------------------------------------------------------------------
 
 test.describe('Agile slot-based mode (register-write verification)', () => {
+  test.setTimeout(120_000);
   let mock: MockOctopus | null = null;
 
   test.afterEach(async ({ baseUrl, drainModbusWrites }) => {
@@ -376,6 +383,155 @@ test.describe('Agile slot-based mode (register-write verification)', () => {
     expect(findWrite(writes, HR_DISCHARGE_SLOT_1_END)?.value).toBe(0);
     expect(findWrite(writes, HR_ENABLE_DISCHARGE)?.value).toBe(0);
     expect(findWrite(writes, HR_BATTERY_POWER_MODE)?.value).toBe(1); // eco restored
+  });
+
+  test('threshold-only save re-evaluates the current slot and clears discharge without restart', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    // Regression: changing "Discharge when above" redrew the forecast tiles,
+    // but the backend did not wake/re-evaluate the live 30-minute slot until
+    // an app restart. This pins the live inverter action: if the current price
+    // was discharging under the old threshold, and becomes hold under the new
+    // threshold, the poll loop must immediately write AgileClearActiveSlot.
+    test.setTimeout(90_000);
+    await clearWrites(drainModbusWrites);
+    mock = await startMockOctopus(35.0); // expensive at threshold 30, hold at threshold 40
+
+    await setAgile(baseUrl, {
+      scope: 'full',
+      api_base_url: mock.baseUrl,
+      charge_threshold: 10,
+      discharge_threshold: 30,
+    });
+
+    const armed = await waitForWrites(
+      peekModbusWrites,
+      drainModbusWrites,
+      (w) => lastWrite(w, HR_ENABLE_DISCHARGE)?.value === 1
+        && lastWrite(w, HR_BATTERY_POWER_MODE)?.value === 0,
+      60_000,
+    );
+    expect(lastWrite(armed, HR_ENABLE_DISCHARGE)?.value).toBe(1);
+    expect(lastWrite(armed, HR_BATTERY_POWER_MODE)?.value).toBe(0);
+    await clearWrites(drainModbusWrites);
+
+    // Threshold-only PATCH: no scope/enabled. The backend must preserve Full
+    // mode, wake the poll loop, re-evaluate 35p as hold (below 40p), and clear
+    // the previously armed discharge slot without needing a restart.
+    await setAgile(baseUrl, {
+      charge_threshold: 10,
+      discharge_threshold: 40,
+    });
+
+    const cleared = await waitForWrites(
+      peekModbusWrites,
+      drainModbusWrites,
+      (w) => lastWrite(w, HR_ENABLE_DISCHARGE)?.value === 0
+        && lastWrite(w, HR_BATTERY_POWER_MODE)?.value === 1,
+      60_000,
+    );
+    expect(lastWrite(cleared, HR_ENABLE_DISCHARGE)?.value).toBe(0);
+    expect(lastWrite(cleared, HR_DISCHARGE_SLOT_1_START)?.value).toBe(0);
+    expect(lastWrite(cleared, HR_DISCHARGE_SLOT_1_END)?.value).toBe(0);
+    expect(lastWrite(cleared, HR_BATTERY_POWER_MODE)?.value).toBe(1);
+  });
+
+  test('restart into a hold period clears a discharge slot armed by the previous app process', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    // Regression: if the app died while an Agile discharge slot was armed,
+    // then restarted after the price moved into hold/mid-band, the inverter
+    // kept exporting until the old slot ended. The restarted backend must
+    // re-evaluate the current slot and write AgileClearActiveSlot.
+    test.setTimeout(120_000);
+    await clearWrites(drainModbusWrites);
+    mock = await startMockOctopus(35.0); // expensive under threshold 30
+
+    await setAgile(baseUrl, {
+      scope: 'full',
+      api_base_url: mock.baseUrl,
+      charge_threshold: 10,
+      discharge_threshold: 30,
+    });
+
+    await waitForWrites(
+      peekModbusWrites,
+      drainModbusWrites,
+      (w) => lastWrite(w, HR_ENABLE_DISCHARGE)?.value === 1
+        && lastWrite(w, HR_BATTERY_POWER_MODE)?.value === 0,
+      60_000,
+    );
+    await clearWrites(drainModbusWrites);
+
+    // Simulate the app being killed during the active discharge slot, while
+    // the inverter retains the armed slot registers. On restart the current
+    // price is no longer expensive (35p < 40p), so Agile Full should hold and
+    // clear the stale discharge slot immediately.
+    await setAgile(baseUrl, { discharge_threshold: 40 });
+    await restartBackendPreservingState();
+
+    const cleared = await waitForWrites(
+      peekModbusWrites,
+      drainModbusWrites,
+      (w) => lastWrite(w, HR_ENABLE_DISCHARGE)?.value === 0
+        && lastWrite(w, HR_BATTERY_POWER_MODE)?.value === 1,
+      75_000,
+    );
+    expect(lastWrite(cleared, HR_ENABLE_DISCHARGE)?.value).toBe(0);
+    expect(lastWrite(cleared, HR_DISCHARGE_SLOT_1_START)?.value).toBe(0);
+    expect(lastWrite(cleared, HR_DISCHARGE_SLOT_1_END)?.value).toBe(0);
+    expect(lastWrite(cleared, HR_BATTERY_POWER_MODE)?.value).toBe(1);
+  });
+
+  test('region change refetches prices and actions the changed current slot', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    // Regression: the price cache was not keyed by region/location. Changing
+    // region could leave the old region's current-slot price cached, so the
+    // backend kept actioning the old decision until restart. Region changes
+    // now clear the cache and wake the poll loop, forcing an immediate refetch.
+    test.setTimeout(120_000);
+    await clearWrites(drainModbusWrites);
+    mock = await startMockOctopus({ H: 35.0, A: 20.0, default: 20.0 });
+
+    await setAgile(baseUrl, {
+      scope: 'full',
+      api_base_url: mock.baseUrl,
+      region: 'H',
+      charge_threshold: 10,
+      discharge_threshold: 30,
+    });
+
+    await waitForWrites(
+      peekModbusWrites,
+      drainModbusWrites,
+      (w) => lastWrite(w, HR_ENABLE_DISCHARGE)?.value === 1
+        && lastWrite(w, HR_BATTERY_POWER_MODE)?.value === 0,
+      60_000,
+    );
+    await clearWrites(drainModbusWrites);
+
+    // Region A has 20p for the current slot, which is hold/mid-band for the
+    // same thresholds. Saving the region must refetch and clear discharge.
+    await setAgile(baseUrl, { region: 'A' });
+
+    const cleared = await waitForWrites(
+      peekModbusWrites,
+      drainModbusWrites,
+      (w) => lastWrite(w, HR_ENABLE_DISCHARGE)?.value === 0
+        && lastWrite(w, HR_BATTERY_POWER_MODE)?.value === 1,
+      75_000,
+    );
+    expect(lastWrite(cleared, HR_ENABLE_DISCHARGE)?.value).toBe(0);
+    expect(lastWrite(cleared, HR_DISCHARGE_SLOT_1_START)?.value).toBe(0);
+    expect(lastWrite(cleared, HR_DISCHARGE_SLOT_1_END)?.value).toBe(0);
+    expect(lastWrite(cleared, HR_BATTERY_POWER_MODE)?.value).toBe(1);
   });
 
   test('threshold gap enforcement rejects inverted charge/discharge pair', async ({ baseUrl }) => {

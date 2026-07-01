@@ -950,6 +950,25 @@ impl AgileSlotAction {
     }
 }
 
+/// Whether the poll loop should write the register command produced for an
+/// Agile action.
+///
+/// `Defer` never writes: Cosy/auto-winter owns the charge side this poll.
+/// `Off + Idle` also never writes: when Agile is explicitly off, repeatedly
+/// clearing every poll would clobber the user's manual schedule. Crucially,
+/// active scopes (`Full`, `ChargeOnly`, `DischargeOnly`) DO write `Idle`,
+/// because mid-band/hold means "cancel any Agile slot the previous poll or a
+/// previous app process armed". This is what stops an Agile discharge after a
+/// threshold change or after the app restarts into a hold period.
+pub fn should_write_agile_action(
+    scope: crate::settings::AgileScope,
+    action: &AgileSlotAction,
+) -> bool {
+    use crate::settings::AgileScope;
+    !matches!(action, AgileSlotAction::Defer)
+        && !(scope == AgileScope::Off && matches!(action, AgileSlotAction::Idle))
+}
+
 /// Compute the slot-driven action the Agile state machine should take
 /// this poll.
 ///
@@ -2159,6 +2178,51 @@ mod tests {
             &chrono::Utc,
         );
         assert_eq!(action, AgileSlotAction::Idle);
+    }
+
+    #[test]
+    fn agile_active_scope_idle_writes_clear_for_hold_period() {
+        // Mid-band/hold while Agile is active is not a no-op. It must write
+        // AgileClearActiveSlot so a discharge slot armed by a previous poll —
+        // or by a previous app process before a crash/restart — is cancelled.
+        let cache = make_cache(&[(0, 1800, 20.0)]);
+        let action = evaluate_agile_slot(
+            AgileScope::Full,
+            Some(20.0),
+            10.0,
+            30.0,
+            &cache,
+            900,
+            false,
+            false,
+            &chrono::Utc,
+        );
+        assert_eq!(action, AgileSlotAction::Idle);
+        assert!(should_write_agile_action(AgileScope::Full, &action));
+        assert!(should_write_agile_action(AgileScope::ChargeOnly, &action));
+        assert!(should_write_agile_action(AgileScope::DischargeOnly, &action));
+    }
+
+    #[test]
+    fn agile_off_scope_idle_skips_clear_to_preserve_manual_schedule() {
+        // Off+Idle is the one idle case that must NOT write a clear every
+        // poll, otherwise manually configured schedules get wiped as soon as
+        // Agile is disabled. Explicit scope=off clears happen in the API
+        // handler instead, exactly once on the user action.
+        let action = AgileSlotAction::Idle;
+        assert!(!should_write_agile_action(AgileScope::Off, &action));
+    }
+
+    #[test]
+    fn agile_defer_never_writes() {
+        assert!(!should_write_agile_action(
+            AgileScope::Full,
+            &AgileSlotAction::Defer
+        ));
+        assert!(!should_write_agile_action(
+            AgileScope::ChargeOnly,
+            &AgileSlotAction::Defer
+        ));
     }
 
     #[test]

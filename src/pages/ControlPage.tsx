@@ -1043,8 +1043,14 @@ function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_o
     setSaving(true);
     setSaveFeedback(null);
     try {
+      // Threshold-only PATCH: no `scope`, no `enabled`. The backend treats
+      // absent scope/enabled as "don't touch the mode" (see set_agile's
+      // partial-update logic), so adjusting a slider can't silently flip
+      // the user out of Standard or back into Agile. Previously this
+      // POSTed `enabled: true`, which the backend interpreted as a
+      // legacy mode toggle and flipped scope back to Full even when the
+      // user was saving from the Standard page.
       await apiPost('/api/agile', {
-        enabled: true,
         region,
         charge_threshold: chargeThreshold,
         discharge_threshold: safeDischarge,
