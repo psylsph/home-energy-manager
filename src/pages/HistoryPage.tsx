@@ -8,7 +8,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from 'recharts';
-import { fetchHistory, isTauri } from '../lib/api';
+import { apiGet, fetchHistory, isTauri } from '../lib/api';
 import {
   getHistoryChartGridProps,
   HISTORY_RANGES,
@@ -31,7 +31,7 @@ import { getSeriesOpacity, removeSpikes } from '../lib/chartSeries';
 import { SeriesLegend } from '../components/SeriesLegend';
 import { useInverterStore } from '../store/useInverterStore';
 import type { SeriesLegendItem } from '../components/SeriesLegend';
-import type { HistoryRange } from '../lib/types';
+import type { HistoryRange, PollSettings } from '../lib/types';
 import { computeTempDifferential, computeBatteryExternalDifferential } from '../lib/temperatureChart';
 import { computeTightDomain } from '../lib/chartDomain';
 import { openExternal } from '../lib/openExternal';
@@ -50,7 +50,18 @@ type MetricTab = 'battery' | 'solar' | 'grid' | 'home' | 'cost' | 'temperature';
 interface ChartDef {
   key: string;
   title: string;
-  fields: { field: string; color: string; label?: string }[];
+  fields: {
+    field: string;
+    color: string;
+    label?: string;
+    /**
+     * Optional dashed stroke (Recharts `strokeDasharray`, e.g. "4 3").
+     * Undefined = solid line, matching every existing series. Used to set
+     * the Standing Charge line apart from the solid cost lines it sits
+     * alongside on the Cost tab.
+     */
+    strokeDasharray?: string;
+  }[];
   unit: string;
   yDomain?: [number, number];
   /**
@@ -83,7 +94,7 @@ const TABS: { key: MetricTab; label: string }[] = [
   { key: 'cost', label: 'Cost' },
 ];
 
-function getCharts(tab: MetricTab): ChartDef[] {
+function getCharts(tab: MetricTab, hasStandingCharge: boolean): ChartDef[] {
   switch (tab) {
     case 'battery':
       return [
@@ -206,23 +217,42 @@ function getCharts(tab: MetricTab): ChartDef[] {
           preprocess: (merged) => computeBatteryExternalDifferential(merged),
         },
       ];
-    case 'cost':
+    case 'cost': {
+      // `_import_cost` / `_export_income` are server-derived cumulative
+      // series: the backend integrates the today_*_kwh counters against the
+      // configured tariff at native reading resolution, so the totals are
+      // correct for time-of-use rates and consistent across every range's
+      // bucket width. The frontend just plots them.
+      const fields: ChartDef['fields'] = [
+        { field: '_import_cost', color: '#EF4444', label: 'Import Cost' },
+      ];
+      // When a Standing Charge is configured, break the import cost into its
+      // per-kWh energy component and the fixed daily standing charge, so the
+      // user can see the difference (the gap between Import Cost and Energy
+      // Cost is the standing charge). With no standing charge there's nothing
+      // to differentiate: Energy Cost would just duplicate Import Cost and
+      // Standing Charge would sit flat at £0, so we leave the chart as-is.
+      if (hasStandingCharge) {
+        fields.push(
+          { field: '_import_energy_cost', color: '#F59E0B', label: 'Energy Cost' },
+          {
+            field: '_import_standing_charge',
+            color: '#A78BFA',
+            label: 'Standing Charge',
+            strokeDasharray: '4 3',
+          },
+        );
+      }
+      fields.push({ field: '_export_income', color: '#22C55E', label: 'Export Income' });
       return [
         {
-          // `_import_cost` / `_export_income` are server-derived cumulative
-          // series: the backend integrates the today_*_kwh counters against the
-          // configured tariff at native reading resolution, so the totals are
-          // correct for time-of-use rates and consistent across every range's
-          // bucket width. The frontend just plots them.
           key: 'cost-combined',
           title: 'Import Cost & Export Income',
           unit: '£',
-          fields: [
-            { field: '_import_cost', color: '#EF4444', label: 'Import Cost' },
-            { field: '_export_income', color: '#22C55E', label: 'Export Income' },
-          ],
+          fields,
         },
       ];
+    }
   }
 }
 
@@ -433,6 +463,7 @@ function ChartCard({ chart, data, range, domain, ticks, gridLineWeight }: {
               type="monotone"
               dataKey={seriesNames[i]}
               stroke={f.color}
+              strokeDasharray={f.strokeDasharray}
               fill={`url(#grad-${chart.key}-${i})`}
               opacity={getSeriesOpacity(mutedSeries[seriesNames[i]] ?? false)}
               strokeWidth={2}
@@ -582,7 +613,25 @@ export default function HistoryPage() {
   const [offset, setOffset] = useState(0);
   const lastDateRef = useRef(getHistoryPickerValue(range, offset));
   const [data, setData] = useState<Record<string, TimePoint[]>>({});
-  
+  // Whether an import Standing Charge is configured. Drives the Cost tab's
+  // import-cost breakdown lines: with no standing charge there's nothing to
+  // break out, so the chart stays as Import Cost + Export Income.
+  const [hasStandingCharge, setHasStandingCharge] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiGet<{ ok: boolean; data: PollSettings }>('/api/settings')
+      .then((res) => {
+        if (!cancelled) {
+          setHasStandingCharge((res?.data?.import_standing_charge_p_per_day ?? 0) > 0);
+        }
+      })
+      .catch(() => {
+        // Settings unavailable: leave the breakdown hidden (unchanged chart).
+      });
+    return () => { cancelled = true; };
+  }, []);
+
   const now = useNow();
   const rolling = isRollingHistoryRange(range);
   const refreshKey = shouldRefreshHistoryRange(range, offset) ? now : 0;
@@ -593,7 +642,7 @@ export default function HistoryPage() {
 
   useEffect(() => {
     let cancelled = false;
-    const charts = getCharts(tab);
+    const charts = getCharts(tab, hasStandingCharge);
     const allFields = [
       ...new Set([
         ...charts.flatMap((c) => c.fields.map((f) => f.field)),
@@ -618,7 +667,7 @@ export default function HistoryPage() {
         }
       })
     return () => { cancelled = true; };
-  }, [tab, range, offset, refreshKey, rolling]);
+  }, [tab, range, offset, refreshKey, rolling, hasStandingCharge]);
 
   const handleTabChange = (t: MetricTab) => {
     setTab(t);
@@ -630,7 +679,7 @@ export default function HistoryPage() {
     setOffset(0);
   };
 
-  const charts = getCharts(tab);
+  const charts = getCharts(tab, hasStandingCharge);
   const hasData = Object.values(data).some((pts) => pts.length > 0);
   const [csvToast, setCsvToast] = useState<string | null>(null);
 

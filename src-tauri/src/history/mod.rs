@@ -24,6 +24,23 @@ pub struct TimePoint {
     pub v: f64,
 }
 
+/// One display bucket of a cost/income series, split into its per-kWh energy
+/// component and its fixed daily standing-charge component (both cumulative £
+/// over the query window). The two always sum to the total value
+/// [`HistoryDb::query_cost_series`] plots for the same bucket, so the History
+/// cost chart can draw energy versus standing charge without ever subtracting
+/// one series from another (which would drift with float error and mismatched
+/// bucket timestamps).
+#[derive(Debug, Clone, Copy)]
+pub struct CostComponentPoint {
+    /// Unix timestamp in milliseconds.
+    pub t: i64,
+    /// Cumulative per-kWh (time-of-use) cost at this bucket, in £.
+    pub energy_gbp: f64,
+    /// Cumulative standing-charge (fixed daily fee) at this bucket, in £.
+    pub standing_gbp: f64,
+}
+
 // ---------------------------------------------------------------------------
 // Allowed field whitelist (prevents SQL injection)
 // ---------------------------------------------------------------------------
@@ -129,9 +146,25 @@ fn same_utc_day(a_ms: i64, b_ms: i64) -> bool {
 pub const IMPORT_COST_FIELD: &str = "_import_cost";
 pub const EXPORT_INCOME_FIELD: &str = "_export_income";
 
+/// Import-cost breakdown fields. `_import_cost` is the sum of the two:
+/// `_import_energy_cost` is the per-kWh (time-of-use) component, and
+/// `_import_standing_charge` is the fixed daily standing-charge component
+/// (the once-per-local-day step). Splitting them lets the History cost chart
+/// show what the user pays for energy versus the flat daily fee. Both are
+/// served from the same single [`HistoryDb::query_cost_breakdown`] walk so
+/// `energy + standing` equals `_import_cost` exactly, with no float drift.
+pub const IMPORT_ENERGY_COST_FIELD: &str = "_import_energy_cost";
+pub const IMPORT_STANDING_CHARGE_FIELD: &str = "_import_standing_charge";
+
 /// True for the server-derived cost/income fields.
 pub fn is_cost_field(field: &str) -> bool {
-    field == IMPORT_COST_FIELD || field == EXPORT_INCOME_FIELD
+    matches!(
+        field,
+        IMPORT_COST_FIELD
+            | EXPORT_INCOME_FIELD
+            | IMPORT_ENERGY_COST_FIELD
+            | IMPORT_STANDING_CHARGE_FIELD
+    )
 }
 
 /// Field names for the server-derived DIRECTIONAL power series.
@@ -1166,8 +1199,45 @@ impl HistoryDb {
         Ok(result)
     }
 
-    /// Compute a cumulative cost/income series (£) for a daily energy counter
-    /// over the query window, priced with a time-of-use `tariff`.
+    /// Cumulative cost/income series (£) for a daily energy counter over the
+    /// query window: the per-kWh component plus the standing charge, summed.
+    ///
+    /// This is the total the History "Cost" tab plots as `_import_cost` /
+    /// `_export_income`, and the total the `/api/report` summary sums. It's a
+    /// thin wrapper that adds the two components returned by
+    /// [`HistoryDb::query_cost_breakdown`]; see that method for the full
+    /// pricing and standing-charge-step semantics.
+    pub fn query_cost_series(
+        &self,
+        window: &HistoryWindow,
+        bucket_secs: i64,
+        counter_field: &str,
+        tariff: &crate::settings::TariffConfig,
+        flat_fallback: f64,
+        standing_charge_p_per_day: f64,
+    ) -> Result<Vec<TimePoint>, String> {
+        Ok(self
+            .query_cost_breakdown(
+                window,
+                bucket_secs,
+                counter_field,
+                tariff,
+                flat_fallback,
+                standing_charge_p_per_day,
+            )?
+            .into_iter()
+            .map(|c| TimePoint {
+                t: c.t,
+                v: c.energy_gbp + c.standing_gbp,
+            })
+            .collect())
+    }
+
+    /// Compute a cumulative cost/income **breakdown** series for a daily energy
+    /// counter over the query window, priced with a time-of-use `tariff`. Each
+    /// point carries the per-kWh energy component and the standing-charge
+    /// component separately (see [`CostComponentPoint`]); [`Self::query_cost_series`]
+    /// sums them for callers that only want the total.
     ///
     /// Why this can't reuse the aggregated (`MAX`-bucket) path: a time-of-use
     /// rate must be applied to each energy increment at the moment it actually
@@ -1199,9 +1269,9 @@ impl HistoryDb {
     /// (£) at each local midnight that falls within the query window. So a
     /// 7-day range with a 54.86p/day Standing Charge shows 7 visible steps
     /// in the cost graph (one per day), each of size £0.5486, layered on
-    /// top of the per-kWh cost component. A value of 0 leaves the series
-    /// unchanged. See issue #131.
-    pub fn query_cost_series(
+    /// top of the per-kWh cost component. A value of 0 leaves the standing
+    /// component at zero. See issue #131.
+    pub fn query_cost_breakdown(
         &self,
         window: &HistoryWindow,
         bucket_secs: i64,
@@ -1209,7 +1279,7 @@ impl HistoryDb {
         tariff: &crate::settings::TariffConfig,
         flat_fallback: f64,
         standing_charge_p_per_day: f64,
-    ) -> Result<Vec<TimePoint>, String> {
+    ) -> Result<Vec<CostComponentPoint>, String> {
         // Guard the SQL identifier - only the two daily counters drive cost.
         if counter_field != "today_import_kwh" && counter_field != "today_export_kwh" {
             return Err(format!("Unsupported cost counter field: {counter_field}"));
@@ -1259,10 +1329,13 @@ impl HistoryDb {
             .map_err(|e| format!("Cost query failed: {e}"))?
             .filter_map(SqlResult::ok);
 
-        // bucket_start_ms -> cumulative cost at that bucket's last reading.
-        // BTreeMap keeps display points sorted; the cumulative series is
-        // monotonic non-decreasing so the last write per bucket is its max.
-        let mut buckets: std::collections::BTreeMap<i64, f64> = std::collections::BTreeMap::new();
+        // bucket_start_ms -> (per-kWh energy £, standing-charge £) at that
+        // bucket's last reading. BTreeMap keeps display points sorted; both
+        // components are monotonic non-decreasing so the last write per
+        // bucket is its max. Kept split (rather than pre-summed) so the
+        // breakdown fields and the total both come from this one walk.
+        let mut buckets: std::collections::BTreeMap<i64, (f64, f64)> =
+            std::collections::BTreeMap::new();
         let mut acc = 0.0_f64;
         // `baseline` is the counter value of the last *counted* reading on the
         // current day; `last_ts` is the previous reading's time (for the
@@ -1358,7 +1431,7 @@ impl HistoryDb {
             // per-day amount at every local midnight within the window.
             let standing_charge_total =
                 standing_charge_days_credited as f64 * standing_charge_gbp_per_day;
-            buckets.insert(bucket_ms, acc + standing_charge_total);
+            buckets.insert(bucket_ms, (acc, standing_charge_total));
             last_ts = Some(ts);
         }
 
@@ -1385,7 +1458,7 @@ impl HistoryDb {
             // (avoid clobbering an existing bucket from the readings walk).
             buckets
                 .entry(end_bucket_ms)
-                .or_insert(acc + standing_charge_total);
+                .or_insert((acc, standing_charge_total));
         }
 
         // Always emit at least the window-open bucket with the standing
@@ -1405,12 +1478,16 @@ impl HistoryDb {
             // `standing_charge_days_credited` because the trailing logic
             // didn't run (no readings means no `last_ts` to anchor it).
             let sc = total_days_in_window as f64 * standing_charge_gbp_per_day;
-            buckets.insert(open_bucket_ms, sc);
+            buckets.insert(open_bucket_ms, (0.0, sc));
         }
 
         Ok(buckets
             .into_iter()
-            .map(|(t, v)| TimePoint { t, v })
+            .map(|(t, (energy_gbp, standing_gbp))| CostComponentPoint {
+                t,
+                energy_gbp,
+                standing_gbp,
+            })
             .collect())
     }
 
@@ -1910,6 +1987,22 @@ mod tests {
         assert!(!is_directional_field("_import_cost"));
         assert!(!is_directional_field("_charge_power; DROP TABLE readings"));
         assert!(!is_directional_field(""));
+    }
+
+    /// `is_cost_field` is the single chokepoint that keeps the four derived
+    /// cost fields out of `query_history`'s column-whitelist SQL path and
+    /// routes them to the cost engine instead. Pin all four positives (incl.
+    /// the two breakdown fields) and a few negatives.
+    #[test]
+    fn is_cost_field_helper() {
+        assert!(is_cost_field(IMPORT_COST_FIELD));
+        assert!(is_cost_field(EXPORT_INCOME_FIELD));
+        assert!(is_cost_field(IMPORT_ENERGY_COST_FIELD));
+        assert!(is_cost_field(IMPORT_STANDING_CHARGE_FIELD));
+        assert!(!is_cost_field("today_import_kwh"));
+        assert!(!is_cost_field(CHARGE_POWER_FIELD));
+        assert!(!is_cost_field("_import_cost; DROP TABLE readings"));
+        assert!(!is_cost_field(""));
     }
 
     #[test]
@@ -3880,8 +3973,45 @@ mod tests {
         }
     }
 
+    /// Insert one local day of a daily-resetting IMPORT counter (mirror of
+    /// [`insert_export_day`] on the import side). Used by the cost-breakdown
+    /// tests, where the standing charge only applies to the import direction.
+    fn insert_import_day(
+        db: &HistoryDb,
+        day_offset: i64,
+        daily_kwh: f32,
+        rise_start_min: i64,
+        rise_end_min: i64,
+    ) {
+        let midnight = local_midnight_secs(day_offset);
+        for step in 0..48i64 {
+            let ts = midnight + step * 1800;
+            let min_of_day = step * 30;
+            let frac = if min_of_day <= rise_start_min {
+                0.0
+            } else if min_of_day >= rise_end_min {
+                1.0
+            } else {
+                (min_of_day - rise_start_min) as f64 / (rise_end_min - rise_start_min) as f64
+            };
+            db.insert_reading(&make_snapshot_with_kwh(
+                ts,
+                (daily_kwh as f64 * frac) as f32,
+                0.0,
+            ));
+        }
+    }
+
     fn series_total(series: &[TimePoint]) -> f64 {
         series.last().map(|p| p.v).unwrap_or(0.0)
+    }
+
+    /// Cumulative value of a breakdown component at its last bucket.
+    fn breakdown_energy_total(series: &[CostComponentPoint]) -> f64 {
+        series.last().map(|p| p.energy_gbp).unwrap_or(0.0)
+    }
+    fn breakdown_standing_total(series: &[CostComponentPoint]) -> f64 {
+        series.last().map(|p| p.standing_gbp).unwrap_or(0.0)
     }
 
     /// A `HistoryWindow` pinned to explicit `(start, end)` UTC-second bounds —
@@ -4570,6 +4700,106 @@ mod tests {
         assert!(
             post_midnight - pre_midnight >= 0.5486 - 1e-6,
             "the cost graph must step UP at the local midnight by at least one day's Standing Charge (pre={pre_midnight}, post={post_midnight})"
+        );
+    }
+
+    // -- Import-cost breakdown (energy vs standing charge) -----------------
+
+    #[test]
+    fn cost_breakdown_energy_plus_standing_equals_total_per_bucket() {
+        // The two breakdown components must sum, bucket-for-bucket, to the
+        // total `query_cost_series` plots — the invariant the History chart
+        // relies on to draw energy and standing charge as separate lines
+        // whose implied sum is the (red) total line.
+        let db = test_db();
+        for d in 0..3 {
+            insert_import_day(&db, d, 10.0, 6 * 60, 10 * 60);
+        }
+        let start = local_midnight_secs(0);
+        let end = local_midnight_secs(4);
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let w = window(start, end);
+        let breakdown = db
+            .query_cost_breakdown(&w, 3600, "today_import_kwh", &flat, 0.25, 54.86)
+            .unwrap();
+        let total = db
+            .query_cost_series(&w, 3600, "today_import_kwh", &flat, 0.25, 54.86)
+            .unwrap();
+        assert_eq!(
+            breakdown.len(),
+            total.len(),
+            "breakdown and total series must share the same buckets"
+        );
+        for (c, t) in breakdown.iter().zip(total.iter()) {
+            assert_eq!(c.t, t.t, "bucket timestamps must line up");
+            assert!(
+                (c.energy_gbp + c.standing_gbp - t.v).abs() < 1e-9,
+                "energy ({}) + standing ({}) must equal total ({}) at t={}",
+                c.energy_gbp,
+                c.standing_gbp,
+                t.v,
+                t.t
+            );
+        }
+    }
+
+    #[test]
+    fn cost_breakdown_zero_standing_charge_has_zero_standing_component() {
+        // With no Standing Charge configured, the standing component must be
+        // flat zero and the energy component must equal the whole cost — the
+        // case where the History chart keeps the breakdown lines hidden.
+        let db = test_db();
+        insert_import_day(&db, 0, 12.0, 6 * 60, 10 * 60);
+        let start = local_midnight_secs(0);
+        let end = local_midnight_secs(1);
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let breakdown = db
+            .query_cost_breakdown(&window(start, end), 3600, "today_import_kwh", &flat, 0.25, 0.0)
+            .unwrap();
+        assert!(
+            breakdown.iter().all(|c| c.standing_gbp == 0.0),
+            "standing component must be zero when no Standing Charge is set"
+        );
+        // 12 kWh × £0.25 = £3.00, all in the energy component.
+        assert!(
+            (breakdown_energy_total(&breakdown) - 3.0).abs() < 1e-6,
+            "energy component should carry the full £3.00 (got {})",
+            breakdown_energy_total(&breakdown)
+        );
+        assert!(
+            breakdown_standing_total(&breakdown).abs() < 1e-9,
+            "standing total should be £0.00 (got {})",
+            breakdown_standing_total(&breakdown)
+        );
+    }
+
+    #[test]
+    fn cost_breakdown_splits_energy_from_standing_charge() {
+        // With a Standing Charge configured, the energy component must be the
+        // pure per-kWh cost (independent of the standing charge) and the
+        // standing component must be exactly one debit per local day touched.
+        let db = test_db();
+        for d in 0..3 {
+            insert_import_day(&db, d, 10.0, 6 * 60, 10 * 60);
+        }
+        // 4-day window: 00:00 day-0 → 00:00 day-4 (touches 4 calendar days).
+        let start = local_midnight_secs(0);
+        let end = local_midnight_secs(4);
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let breakdown = db
+            .query_cost_breakdown(&window(start, end), 3600, "today_import_kwh", &flat, 0.25, 54.86)
+            .unwrap();
+        // Energy: 3 days × 10 kWh × £0.25 = £7.50 (NOT inflated by the SC).
+        assert!(
+            (breakdown_energy_total(&breakdown) - 7.50).abs() < 1e-3,
+            "energy component should be the pure per-kWh cost £7.50 (got {})",
+            breakdown_energy_total(&breakdown)
+        );
+        // Standing: 4 days × £0.5486 = £2.1944.
+        assert!(
+            (breakdown_standing_total(&breakdown) - 4.0 * 0.5486).abs() < 1e-3,
+            "standing component should be 4 × £0.5486 (got {})",
+            breakdown_standing_total(&breakdown)
         );
     }
 }
