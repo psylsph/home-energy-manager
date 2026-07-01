@@ -237,7 +237,7 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
     );
     const gc = noSolar.flows.find((f) => f.id === 'grid_charge');
     expect(gc, 'grid_charge flow without solar').toBeDefined();
-    expect(gc!.color).toBe(BATTERY_OUTPUT_COLOR);
+    expect(gc!.color).toBe(FLOW_COLORS.grid);
   });
 
   it('emits a battery→grid discharge_to_grid flow when discharge exceeds the house load (issue #155)', () => {
@@ -434,18 +434,16 @@ describe('buildEnergyFlows — spoke colours follow battery / grid / solar ident
     }
   });
 
-  it('grid_charge (grid → battery) spoke is GREEN when only grid feeds the battery (issue #170)', () => {
-    // "Battery to all destinations always green" — with grid as source and
-    // battery as destination, both battery and grid touch the spoke.
-    // Battery-on-spoke → green. (Even though "grid is on it", the user
-    // later clarified battery → grid stays green, so battery wins the
-    // priority.)
+  it('grid_charge (grid → battery) spoke is red when only grid feeds the battery', () => {
+    // When the battery is drawing from the grid, the visible source is grid.
+    // Keep both the line and moving ball red so grid-fed charging is distinct
+    // from battery output (battery → home / battery → grid), which stays green.
     const vm = buildEnergyFlows(
       snap({ grid_power: -2000, battery_state: 'charging', battery_power: -1500 }),
     );
     const gc = vm.flows.find((f) => f.id === 'grid_charge');
     expect(gc, 'grid_charge flow missing').toBeDefined();
-    expect(gc!.color).toBe(BATTERY_OUTPUT_COLOR);
+    expect(gc!.color).toBe(FLOW_COLORS.grid);
   });
 
   it('both solar_charge and grid_charge split are emitted when both sources feed the battery (issue #170)', () => {
@@ -516,7 +514,7 @@ describe('buildEnergyFlows — spoke colours follow battery / grid / solar ident
 });
 
 // ---------------------------------------------------------------------------
-// Spoke-colour matrix — priority solar > grid > battery (issue #170).
+// Spoke-colour matrix — priority solar > grid-as-source > battery (issue #170).
 //
 // The user's rule:
 //  - "Battery to all destinations should always be green"
@@ -524,13 +522,13 @@ describe('buildEnergyFlows — spoke colours follow battery / grid / solar ident
 //  - "Solar to everywhere always yellow / amber"
 //
 // On a spoke with multiple rules applying, the strongest-stated rule
-// wins, ordered solar > grid > battery. This locks the contract so a
+// wins, ordered solar > grid-as-source > battery. This locks the contract so a
 // future refactor can't silently flip a spoke.
 // ---------------------------------------------------------------------------
 
-  // Priority on overlap: solar > battery > grid > home (issue #170).
+  // Priority on overlap: solar > grid-as-source > battery > home (issue #170).
 
-describe('buildEnergyFlows — spoke colour = solar > battery > grid priority (issue #170)', () => {
+describe('buildEnergyFlows — spoke colour = solar > grid-source > battery priority (issue #170)', () => {
   const cases: Array<{
     name: string;
     snap: Partial<InverterSnapshot>;
@@ -594,9 +592,9 @@ describe('buildEnergyFlows — spoke colour = solar > battery > grid priority (i
       expected: [{ flowId: 'solar_charge', color: FLOW_COLORS.solar, rationale: 'solar source' }],
     },
     {
-      name: 'grid_charge (no solar, only grid feeds battery) is GREEN — battery destination wins (issue #170)',
+      name: 'grid_charge (no solar, only grid feeds battery) is red — grid source wins',
       snap: { grid_power: -2000, home_power: 500, battery_state: 'charging', battery_power: -1500 },
-      expected: [{ flowId: 'grid_charge', color: BATTERY_OUTPUT_COLOR, rationale: 'battery wins over grid (issue #170)' }],
+      expected: [{ flowId: 'grid_charge', color: FLOW_COLORS.grid, rationale: 'grid source' }],
     },
   ];
 

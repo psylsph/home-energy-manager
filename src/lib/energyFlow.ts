@@ -83,13 +83,13 @@ export const FLOW_COLORS = {
 
 /**
  * Fixed colour for *battery-output* spokes (battery → home, battery → grid)
- * and the home → battery charge spoke.
+ * and fallback home → battery charge spokes.
  *
  * Issue #170: "Battery to all destinations should always be green" — the
- * spokes use a single, fixed green so the user sees a consistent signal
- * regardless of stored charge. Power throughput is independent of stored
- * energy (20 A at 80 % is the same throughput as 20 A at 10 %), so the
- * SoC tier colours must not flicker the spokes. The brand colour
+ * battery-output spokes use a single, fixed green so the user sees a
+ * consistent signal regardless of stored charge. Power throughput is
+ * independent of stored energy (20 A at 80 % is the same throughput as
+ * 20 A at 10 %), so the SoC tier colours must not flicker the spokes. The brand colour
  * (`FLOW_COLORS.battery = '#FBBF24'` amber, used for the sidebar Battery
  * icon when no snapshot is available) is a separate identity from this.
  *
@@ -268,14 +268,15 @@ export function buildEnergyFlows(
   //  - "Solar to everywhere always yellow / amber" — solar wins the
   //    colour rule whenever it's on the spoke.
   //  - "Battery to all destinations always green" — battery wins when
-  //    solar is absent (so discharge and discharge_to_grid stay green
-  //    even though the latter touches grid).
-  //  - "Grid to everywhere always red" — grid takes over when neither
-  //    solar nor battery is on the spoke (import, lone grid_charge).
+  //    solar is absent and the battery is the source (so discharge and
+  //    discharge_to_grid stay green even though the latter touches grid).
+  //  - "Grid to everywhere always red" — grid takes over for grid-sourced
+  //    spokes, including grid → battery charging (the battery is drawing
+  //    from grid, so the line and moving ball should be red).
   //
-  // Priority is therefore solar > battery > grid > home. This locks the
-  // "Battery to all destinations" semantics: a battery-as-source spoke is
-  // green even when the destination is grid.
+  // Priority is therefore solar > grid-as-source > battery > home. This
+  // locks the "Battery to all destinations" semantics for battery output,
+  // while keeping grid-fed battery charging visibly red.
   const COLOUR_BY_IDENTITY: Record<FlowNodeId, string> = {
     solar: FLOW_COLORS.solar,
     battery: BATTERY_OUTPUT_COLOR,
@@ -286,8 +287,9 @@ export function buildEnergyFlows(
   };
   const spokeColor = (from: FlowNodeId, to: FlowNodeId): string => {
     if (from === 'solar' || to === 'solar') return COLOUR_BY_IDENTITY.solar;
+    if (from === 'grid') return COLOUR_BY_IDENTITY.grid;
     if (from === 'battery' || to === 'battery') return COLOUR_BY_IDENTITY.battery;
-    if (from === 'grid' || to === 'grid') return COLOUR_BY_IDENTITY.grid;
+    if (to === 'grid') return COLOUR_BY_IDENTITY.grid;
     return COLOUR_BY_IDENTITY[from];
   };
 
@@ -481,7 +483,7 @@ export function buildEnergyFlows(
   // Battery → grid: discharge overflow that exceeds the house load. Drawn
   // directly battery→grid so the dot ends at the grid instead of the
   // house. Source is battery → the spoke stays BATTERY_OUTPUT_COLOR green
-  // (issue #170, priority solar > battery > grid).
+  // (issue #170, priority solar > grid-as-source > battery).
   if (batteryToGrid > noise) {
     push('discharge_to_grid', 'battery', 'grid',
       batteryToGrid, 'export',
