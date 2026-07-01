@@ -82,8 +82,17 @@ pub struct BlockRead {
 // Model-aware poll ordering
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayPollScope {
+    /// Read only the Gateway blocks needed for live dashboard values.
+    Fast,
+    /// Read every Gateway block, including slow-changing detail/config data.
+    Detail,
+}
+
 fn model_specific_blocks_in_poll_order(
     device_type: &crate::inverter::model::DeviceType,
+    gateway_scope: GatewayPollScope,
 ) -> Vec<&'static RegisterBlock> {
     let mut blocks = Vec::new();
 
@@ -98,18 +107,30 @@ fn model_specific_blocks_in_poll_order(
     // the Gateway live here; the standard IR 0-59 / IR 1000-1414 ranges are
     // unmapped on the Gateway. Read before optional config blocks.
     if device_type.needs_gateway_input_blocks() {
-        blocks.extend(super::registers::GATEWAY_INPUT_BLOCKS.iter());
+        match gateway_scope {
+            GatewayPollScope::Fast => {
+                blocks.push(&super::registers::GATEWAY_INPUT_BLOCK_1);
+                blocks.push(&super::registers::GATEWAY_INPUT_BLOCK_2);
+                blocks.push(&super::registers::GATEWAY_INPUT_BLOCK_4);
+            }
+            GatewayPollScope::Detail => {
+                blocks.extend(super::registers::GATEWAY_INPUT_BLOCKS.iter());
+            }
+        }
     }
 
     // EMS / Gateway plant-level holding registers (HR 2040-2075) — read on
     // any batteryless device (Gateway, EMS, EmsCommercial) so the
     // round-trip on the export limit (HR 2071) and other plant-level
     // config (plant enable, discharge/charge/export slots, car-charge
-    // mode/boost) actually populates the snapshot. Without this, writes
-    // to HR 2071 succeed but the next poll has nothing to read back and
-    // the snapshot shows "unconfigured" even though the inverter is
-    // honouring the new limit.
-    if device_type.is_batteryless() {
+    // mode/boost) actually populates the snapshot. Gateway reads this only
+    // on detail polls: live dashboard values come from IR 1600/1660/1780,
+    // while plant config changes slowly and repeated reads appear to stress
+    // some Gateway dongles.
+    if device_type.is_batteryless()
+        && (!device_type.needs_gateway_input_blocks()
+            || matches!(gateway_scope, GatewayPollScope::Detail))
+    {
         blocks.push(&super::registers::EMS_PLANT_HOLDING_BLOCK);
     }
 
@@ -1360,6 +1381,7 @@ impl ModbusClient {
     pub async fn read_all_with_extras(
         &mut self,
         device_type: Option<&crate::inverter::model::DeviceType>,
+        gateway_scope: GatewayPollScope,
     ) -> Result<Vec<BlockRead>, ClientError> {
         // Three-phase models read all real-time telemetry from the
         // IR(1000-1414) range, making input_0_59 and input_180_181
@@ -1380,7 +1402,7 @@ impl ModbusClient {
         let mut results = self.read_blocks_resilient(standard_blocks, 2).await?;
 
         if let Some(dt) = device_type {
-            for block in model_specific_blocks_in_poll_order(dt) {
+            for block in model_specific_blocks_in_poll_order(dt, gateway_scope) {
                 // Pause between blocks to let the dongle catch up.
                 tokio::time::sleep(self.inter_request_delay).await;
 
@@ -1692,7 +1714,8 @@ mod tests {
     fn three_phase_model_specific_poll_order_reads_dashboard_inputs_first() {
         use crate::inverter::model::DeviceType;
 
-        let blocks = model_specific_blocks_in_poll_order(&DeviceType::ThreePhase);
+        let blocks =
+            model_specific_blocks_in_poll_order(&DeviceType::ThreePhase, GatewayPollScope::Fast);
         let names: Vec<&str> = blocks.iter().map(|b| b.name).collect();
 
         assert!(names.starts_with(&[
@@ -1709,14 +1732,37 @@ mod tests {
     }
 
     #[test]
-    fn gateway_model_specific_poll_order_reads_gateway_blocks_first() {
+    fn gateway_fast_poll_order_reads_only_live_gateway_blocks() {
         use crate::inverter::model::DeviceType;
 
-        let blocks = model_specific_blocks_in_poll_order(&DeviceType::Gateway);
+        let blocks =
+            model_specific_blocks_in_poll_order(&DeviceType::Gateway, GatewayPollScope::Fast);
         let names: Vec<&str> = blocks.iter().map(|b| b.name).collect();
 
-        // The gateway aggregation blocks are dashboard-critical and should
-        // appear before optional HR config/schedule blocks.
+        // Fast Gateway polls keep the live Status/Power/Battery fields fresh:
+        // block 1 has solar/load/grid/fault/daily totals, block 2 has AIO
+        // count + aggregate battery power, and block 4 has SOC/per-AIO power.
+        assert_eq!(
+            names,
+            vec!["input_1600_1659", "input_1660_1719", "input_1780_1830"]
+        );
+        assert!(
+            !names.contains(&"holding_2040_2075"),
+            "Gateway fast polls must skip slow plant config read-back"
+        );
+    }
+
+    #[test]
+    fn gateway_detail_poll_order_reads_full_gateway_blocks_first() {
+        use crate::inverter::model::DeviceType;
+
+        let blocks =
+            model_specific_blocks_in_poll_order(&DeviceType::Gateway, GatewayPollScope::Detail);
+        let names: Vec<&str> = blocks.iter().map(|b| b.name).collect();
+
+        // Detail polls still read the full Gateway aggregation bank and plant
+        // holding block so serials, per-AIO energy detail and export-limit
+        // read-back stay populated, just not on every poll.
         assert!(names.starts_with(&[
             "input_1600_1659",
             "input_1660_1719",
@@ -1739,13 +1785,9 @@ mod tests {
             !names.contains(&"holding_1080_1124"),
             "Gateway must NOT poll the three-phase config block (HR 1080-1124)"
         );
-        // And the EMS / Gateway plant-level holding block (HR 2040-2075) so
-        // the round-trip on the export limit (HR 2071) actually populates
-        // the snapshot. Without this, writes to HR 2071 succeed but the
-        // next poll has nothing to read back and the UI shows "unconfigured".
         assert!(
             names.contains(&"holding_2040_2075"),
-            "Gateway must poll the EMS plant-level holding block (HR 2040-2075)"
+            "Gateway detail polls must read EMS/Gateway plant holding block"
         );
     }
 
@@ -1775,7 +1817,8 @@ mod tests {
     fn ac_coupled_model_specific_poll_order_still_reads_ac_config() {
         use crate::inverter::model::DeviceType;
 
-        let blocks = model_specific_blocks_in_poll_order(&DeviceType::ACCoupled);
+        let blocks =
+            model_specific_blocks_in_poll_order(&DeviceType::ACCoupled, GatewayPollScope::Fast);
         let names: Vec<&str> = blocks.iter().map(|b| b.name).collect();
 
         assert_eq!(names, vec!["holding_300_359"]);
