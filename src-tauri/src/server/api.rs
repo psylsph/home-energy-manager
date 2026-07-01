@@ -2543,6 +2543,16 @@ pub async fn get_history(
     let want_import_cost = fields
         .iter()
         .any(|f| f == crate::history::IMPORT_COST_FIELD);
+    // Import-cost breakdown: the per-kWh energy component and the fixed daily
+    // standing-charge component, split out of the same total so the History
+    // chart can show them as separate lines.
+    let want_import_energy = fields
+        .iter()
+        .any(|f| f == crate::history::IMPORT_ENERGY_COST_FIELD);
+    let want_import_standing = fields
+        .iter()
+        .any(|f| f == crate::history::IMPORT_STANDING_CHARGE_FIELD);
+    let want_any_import_cost = want_import_cost || want_import_energy || want_import_standing;
     let want_export_income = fields
         .iter()
         .any(|f| f == crate::history::EXPORT_INCOME_FIELD);
@@ -2556,7 +2566,7 @@ pub async fn get_history(
     // to a flat single-slot config built from the legacy scalar rate.
     // Issue #131: also carry the import-side Standing Charge (pence/day)
     // so the cost series includes the daily fixed component.
-    let cost_cfgs = if want_import_cost || want_export_income {
+    let cost_cfgs = if want_any_import_cost || want_export_income {
         let s = crate::settings::Settings::load();
         let import_cfg = s
             .import_tariff_config
@@ -2614,24 +2624,61 @@ pub async fn get_history(
                         import_standing_charge_p_per_day,
                     )) = &cost_cfgs
                     {
-                        if want_import_cost {
-                            let series = db.query_cost_series(
+                        if want_any_import_cost {
+                            // One walk yields both components; the total, the
+                            // per-kWh energy series and the standing-charge
+                            // series are all cut from it so `energy + standing`
+                            // matches the total exactly. Issue #131: the
+                            // import direction carries the daily standing
+                            // charge; export doesn't (UK SEG has no standing
+                            // fee on exports), so it's served separately below.
+                            let breakdown = db.query_cost_breakdown(
                                 &window,
                                 bucket_secs,
                                 "today_import_kwh",
                                 import_cfg,
                                 *flat_import,
-                                // Issue #131: include the daily standing
-                                // charge on the import cost series. Export
-                                // direction doesn't carry one (UK SEG has
-                                // no standing fee on exports), so it stays
-                                // at 0 on the export side.
                                 *import_standing_charge_p_per_day,
                             )?;
-                            data.insert(
-                                crate::history::IMPORT_COST_FIELD.to_string(),
-                                serde_json::to_value(&series).unwrap_or(Value::Null),
-                            );
+                            if want_import_cost {
+                                let series: Vec<crate::history::TimePoint> = breakdown
+                                    .iter()
+                                    .map(|c| crate::history::TimePoint {
+                                        t: c.t,
+                                        v: c.energy_gbp + c.standing_gbp,
+                                    })
+                                    .collect();
+                                data.insert(
+                                    crate::history::IMPORT_COST_FIELD.to_string(),
+                                    serde_json::to_value(&series).unwrap_or(Value::Null),
+                                );
+                            }
+                            if want_import_energy {
+                                let series: Vec<crate::history::TimePoint> = breakdown
+                                    .iter()
+                                    .map(|c| crate::history::TimePoint {
+                                        t: c.t,
+                                        v: c.energy_gbp,
+                                    })
+                                    .collect();
+                                data.insert(
+                                    crate::history::IMPORT_ENERGY_COST_FIELD.to_string(),
+                                    serde_json::to_value(&series).unwrap_or(Value::Null),
+                                );
+                            }
+                            if want_import_standing {
+                                let series: Vec<crate::history::TimePoint> = breakdown
+                                    .iter()
+                                    .map(|c| crate::history::TimePoint {
+                                        t: c.t,
+                                        v: c.standing_gbp,
+                                    })
+                                    .collect();
+                                data.insert(
+                                    crate::history::IMPORT_STANDING_CHARGE_FIELD.to_string(),
+                                    serde_json::to_value(&series).unwrap_or(Value::Null),
+                                );
+                            }
                         }
                         if want_export_income {
                             let series = db.query_cost_series(
