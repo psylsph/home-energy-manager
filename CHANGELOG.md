@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.51.1] - 2026-07-01
+
+### Changed
+
+- **Gateway polling is gentler on unstable dongles.** Gateway systems now read the live dashboard values every refresh but only fetch slower-changing detail and plant-configuration blocks periodically, reducing the sustained local Modbus load that could leave some Gateway dongles unresponsive overnight.
+
 ## [0.51.0] - 2026-06-30
 
 ### Added

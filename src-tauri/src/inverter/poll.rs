@@ -76,6 +76,7 @@ pub use crate::inverter::state_machines::{
     AutoWinterConfig, AutoWinterSaved, AutoWinterState, LoadLimiterConfig, LoadLimiterSaved,
     LoadLimiterState, PriceSlot,
 };
+use crate::modbus::client::GatewayPollScope;
 use crate::modbus::client::ModbusClient;
 use crate::modbus::registers::{HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET};
 
@@ -597,6 +598,13 @@ const FLAP_THRESHOLD_SECS: u64 = 120;
 const FLAP_ELEVATED_DELAY: Duration = Duration::from_secs(30);
 const FLAP_STANDDOWN_POLLS: u8 = 3;
 
+/// Gateway detail/config blocks change slowly and have been implicated in
+/// overnight dongle stalls. Poll live Gateway telemetry every cycle, but only
+/// refresh the slow blocks (per-AIO discharge detail, serials, plant config)
+/// every N successful Gateway polls. With the default 60 s refresh interval
+/// this is roughly every 10 minutes.
+const GATEWAY_DETAIL_POLL_EVERY: u8 = 10;
+
 /// Whether the flap gate should engage given the time (in seconds) since the
 /// last fully-delivered good snapshot.
 fn flap_should_engage(secs_since_good_data: u64) -> bool {
@@ -610,6 +618,22 @@ fn flap_backoff(engaged: bool) -> Duration {
         FLAP_ELEVATED_DELAY
     } else {
         Duration::ZERO
+    }
+}
+
+fn gateway_poll_scope(device_type: Option<DeviceType>, detail_countdown: u8) -> GatewayPollScope {
+    if device_type == Some(DeviceType::Gateway) && detail_countdown == 0 {
+        GatewayPollScope::Detail
+    } else {
+        GatewayPollScope::Fast
+    }
+}
+
+fn next_gateway_detail_countdown(current: u8) -> u8 {
+    if current == 0 {
+        GATEWAY_DETAIL_POLL_EVERY.saturating_sub(1)
+    } else {
+        current - 1
     }
 }
 
@@ -844,6 +868,12 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 
                 // Track consecutive poll failures within this connection.
                 //
+                // Gateway slow-detail poll cadence. Starts at zero so the first
+                // model-aware Gateway poll after detection reads every block and
+                // populates serial/config fields immediately; later polls use
+                // the fast live-telemetry subset until the counter rolls over.
+                let mut gateway_detail_poll_countdown: u8 = 0;
+
                 // Two independent counters drive reconnect-after-storms here:
                 //
                 // * `consecutive_suspicious` (incremented in the
@@ -1018,7 +1048,14 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     // dropped during the read cycle. No explicit flush needed.
 
                     let (poll_ok, sanitized, connection_lost) = async {
-                        match client.read_all_with_extras(known_device_type.as_ref()).await {
+                        let gateway_scope = gateway_poll_scope(
+                            known_device_type,
+                            gateway_detail_poll_countdown,
+                        );
+                        match client
+                            .read_all_with_extras(known_device_type.as_ref(), gateway_scope)
+                            .await
+                        {
                             Ok(blocks) => {
                                 let mut snapshot = decode_snapshot(&blocks);
 
@@ -1120,6 +1157,16 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     b.block.register_type == crate::modbus::registers::RegisterType::Holding
                                         && b.block.start == 2040
                                         && b.block.count == 36
+                                });
+                                let has_gateway_discharge_detail_block = blocks.iter().any(|b| {
+                                    b.block.register_type == crate::modbus::registers::RegisterType::Input
+                                        && b.block.start == 1720
+                                        && b.block.count == 60
+                                });
+                                let has_gateway_serial_block = blocks.iter().any(|b| {
+                                    b.block.register_type == crate::modbus::registers::RegisterType::Input
+                                        && b.block.start == 1831
+                                        && b.block.count == 29
                                 });
 
                                 // Cache the device type for subsequent polls.
@@ -1801,10 +1848,29 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     ) {
                                         s = true;
                                     }
+                                    if snapshot.device_type == DeviceType::Gateway {
+                                        if let Some(p) = prev.as_ref() {
+                                            if !has_gateway_discharge_detail_block {
+                                                snapshot.per_aio_discharge_today_kwh =
+                                                    p.per_aio_discharge_today_kwh;
+                                                s = true;
+                                            }
+                                            if !has_gateway_serial_block {
+                                                snapshot.per_aio_serial = p.per_aio_serial.clone();
+                                                s = true;
+                                            }
+                                        }
+                                    }
                                     let mods = prev.as_ref().map(|p| p.battery_modules.clone());
                                     (s, mods)
                                 };
                                 carry_forward_battery_modules_with(&mut snapshot, prev_modules.as_deref());
+
+                                if snapshot.device_type == DeviceType::Gateway {
+                                    gateway_detail_poll_countdown = next_gateway_detail_countdown(
+                                        gateway_detail_poll_countdown,
+                                    );
+                                }
 
                                 // Grace-period baseline hardening: capture this
                                 // reading's cumulative counters, and on the final
@@ -3272,6 +3338,40 @@ mod tests {
         assert_eq!(engaged, FLAP_ELEVATED_DELAY);
         assert!(engaged > Duration::from_secs(10));
         assert!(engaged > Duration::from_secs(5));
+    }
+
+    #[test]
+    fn gateway_poll_scope_details_only_on_gateway_countdown_zero() {
+        assert_eq!(
+            gateway_poll_scope(Some(DeviceType::Gateway), 0),
+            GatewayPollScope::Detail
+        );
+        assert_eq!(
+            gateway_poll_scope(Some(DeviceType::Gateway), 1),
+            GatewayPollScope::Fast
+        );
+        assert_eq!(
+            gateway_poll_scope(Some(DeviceType::Gen3Hybrid), 0),
+            GatewayPollScope::Fast
+        );
+        assert_eq!(gateway_poll_scope(None, 0), GatewayPollScope::Fast);
+    }
+
+    #[test]
+    fn gateway_detail_countdown_runs_every_tenth_gateway_poll() {
+        let mut countdown = 0;
+        let mut scopes = Vec::new();
+        for _ in 0..21 {
+            scopes.push(gateway_poll_scope(Some(DeviceType::Gateway), countdown));
+            countdown = next_gateway_detail_countdown(countdown);
+        }
+
+        let detail_indices: Vec<usize> = scopes
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, scope)| (*scope == GatewayPollScope::Detail).then_some(idx))
+            .collect();
+        assert_eq!(detail_indices, vec![0, 10, 20]);
     }
 
     /// The flap gate's design contract. The integer-constant checks run at
