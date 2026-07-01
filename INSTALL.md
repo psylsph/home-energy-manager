@@ -142,17 +142,15 @@ This is the same root cause — the app isn't code-signed, so some security suit
 1. Download the `.dmg` file from the [**Releases page**](https://github.com/psylsph/home-energy-manager/releases/latest)
    - **Apple Silicon** (M1/M2/M3/M4): download the file with `aarch64` in the name
    - **Intel**: download the file with `x64` in the name
-2. Open the `.dmg` and drag the app to your **Desktop** or **Home folder**
-   - ⚠️ Do **not** drag it to `/Applications` — macOS blocks unsigned apps there
-3. **Remove the quarantine flag** so macOS doesn't block the app's network server:
-   ```bash
-   xattr -d com.apple.quarantine ~/Desktop/Home\ Energy\ Manager.app
-   ```
-   *(Adjust the path if you put it somewhere else — `~/Desktop/` for Desktop, or `~/` for your Home folder)*
-4. On first launch, right-click the app → **Open** → **Open** to bypass Gatekeeper
-5. After the first launch, you can open it normally
+2. Open the `.dmg` and drag the app to your **Applications** folder
+3. On first launch, **right-click** the app → **Open** → **Open** to bypass Gatekeeper
+4. After the first launch, you can open it normally from Launchpad or Spotlight
 
-> **If the app loads but hangs / becomes unresponsive:** The most common cause is the quarantine flag wasn't removed (step 3). Run the `xattr` command and try again. If it still hangs, open **Console.app**, search for `Home Energy` in the crash logs, and [open an issue](https://github.com/psylsph/home-energy-manager/issues/new) with what you find.
+> **If the app loads but hangs / becomes unresponsive:** This is usually a macOS quarantine flag issue. Run this in Terminal and try again:
+> ```bash
+> xattr -d com.apple.quarantine /Applications/Home\ Energy\ Manager.app
+> ```
+> If it still hangs, open **Console.app**, search for `Home Energy` in the crash logs, and [open an issue](https://github.com/psylsph/home-energy-manager/issues/new) with what you find.
 
 ### Linux
 
