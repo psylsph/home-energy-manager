@@ -3561,7 +3561,17 @@ pub async fn set_cosy(
                 start_minute: s["start_minute"].as_u64().map(|v| v.min(59)).unwrap_or(0) as u8,
                 end_hour: s["end_hour"].as_u64().map(|v| v.min(23)).unwrap_or(0) as u8,
                 end_minute: s["end_minute"].as_u64().map(|v| v.min(59)).unwrap_or(0) as u8,
-                target_soc: s["target_soc"].as_u64().unwrap_or(100) as u8,
+                // Clamp on the u64 BEFORE the `as u8` truncation: a forged
+                // value like 1000 would otherwise land as 232 in the u8, then
+                // be written raw to HR_CHARGE_TARGET_SOC / HR_CHARGE_TARGET_SOC_1
+                // by `cosy_slot_register_writes` (which bypasses the encoder's
+                // validate_range). Clamping here keeps the persisted config —
+                // and the eventual register write — inside the safe [4, 100]
+                // band that protects the battery. Matches `auto_winter`.
+                target_soc: s["target_soc"]
+                    .as_u64()
+                    .unwrap_or(100)
+                    .clamp(4, 100) as u8,
             })
             .collect();
     }
@@ -10349,6 +10359,55 @@ mod tests {
 
             let s = crate::settings::Settings::load();
             assert_eq!(s.agile_scope, AgileScope::Full);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_cosy_clamps_target_soc_to_battery_safe_band() {
+        // `cosy_slot_register_writes` writes `slot.target_soc` directly to
+        // HR_CHARGE_TARGET_SOC / HR_CHARGE_TARGET_SOC_1, bypassing the
+        // encoder's validate_range. So the clamp at the POST /api/cosy
+        // boundary is the only guard keeping a forged value out of the
+        // register write. Each slot exercises one boundary case:
+        //   0   → 4   (decoder reads 0 as "no per-slot target"; clamp to floor)
+        //   3   → 4   (below floor)
+        //   60  → 60  (in range, untouched)
+        //   100 → 100 (ceiling, untouched)
+        //   150 → 100 (above ceiling)
+        //   1000 → 100 (must clamp on u64 BEFORE `as u8`, else truncates to 232)
+        //   absent → 100 (default)
+        crate::test_util::with_isolated_config_dir_async(async || {
+            let body = serde_json::json!({
+                "enabled": true,
+                "slots": [
+                    { "enabled": true, "start_hour": 4, "start_minute": 0,
+                      "end_hour": 7, "end_minute": 0, "target_soc": 0 },
+                    { "enabled": true, "start_hour": 13, "start_minute": 0,
+                      "end_hour": 16, "end_minute": 0, "target_soc": 3 },
+                    { "enabled": true, "start_hour": 22, "start_minute": 0,
+                      "end_hour": 23, "end_minute": 0, "target_soc": 60 },
+                    { "enabled": true, "start_hour": 1, "start_minute": 0,
+                      "end_hour": 2, "end_minute": 0, "target_soc": 100 },
+                    { "enabled": true, "start_hour": 2, "start_minute": 0,
+                      "end_hour": 3, "end_minute": 0, "target_soc": 150 },
+                    { "enabled": true, "start_hour": 3, "start_minute": 0,
+                      "end_hour": 4, "end_minute": 0, "target_soc": 1000 },
+                    { "enabled": false, "start_hour": 0, "start_minute": 0,
+                      "end_hour": 0, "end_minute": 0 }
+                ]
+            });
+            let (status, _) = set_cosy(State(test_state()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let s = crate::settings::Settings::load();
+            assert_eq!(s.cosy_slots.len(), 7, "all posted slots must persist");
+            let got: Vec<u8> = s.cosy_slots.iter().map(|slot| slot.target_soc).collect();
+            assert_eq!(
+                got,
+                vec![4, 4, 60, 100, 100, 100, 100],
+                "target_soc must be clamped to [4, 100] after truncation-safe coerce"
+            );
         })
         .await;
     }

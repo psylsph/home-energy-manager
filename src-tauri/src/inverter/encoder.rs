@@ -1191,6 +1191,44 @@ mod tests {
     }
 
     #[test]
+    fn set_target_soc_slot_validates_range() {
+        // Per-slot target SOC must honour the same [4, 100] battery-protection
+        // band as the global target (HR 116). The existing per-slot encode tests
+        // only covered slot-index bounds, never the SOC boundary, so a regression
+        // that dropped the validate_range call would have slipped through.
+        // Below the floor: rejected.
+        assert!(ControlCommand::SetChargeTargetSocSlot { slot: 1, soc: 0 }
+            .encode()
+            .is_err());
+        assert!(ControlCommand::SetChargeTargetSocSlot { slot: 1, soc: 3 }
+            .encode()
+            .is_err());
+        assert!(ControlCommand::SetDischargeTargetSocSlot { slot: 1, soc: 3 }
+            .encode()
+            .is_err());
+        // Boundaries inclusive: accepted.
+        assert!(ControlCommand::SetChargeTargetSocSlot { slot: 1, soc: 4 }
+            .encode()
+            .is_ok());
+        assert!(ControlCommand::SetChargeTargetSocSlot { slot: 1, soc: 100 }
+            .encode()
+            .is_ok());
+        assert!(ControlCommand::SetDischargeTargetSocSlot { slot: 1, soc: 4 }
+            .encode()
+            .is_ok());
+        assert!(ControlCommand::SetDischargeTargetSocSlot { slot: 1, soc: 100 }
+            .encode()
+            .is_ok());
+        // Above the ceiling: rejected.
+        assert!(ControlCommand::SetChargeTargetSocSlot { slot: 1, soc: 101 }
+            .encode()
+            .is_err());
+        assert!(ControlCommand::SetDischargeTargetSocSlot { slot: 1, soc: 101 }
+            .encode()
+            .is_err());
+    }
+
+    #[test]
     fn set_charge_limit_validates() {
         // New bound: 0-50
         let cmd = ControlCommand::SetChargeLimit { limit: 51 };
