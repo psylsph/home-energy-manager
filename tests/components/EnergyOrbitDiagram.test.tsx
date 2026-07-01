@@ -337,6 +337,26 @@ describe('EnergyOrbitDiagram', () => {
     expect(container.querySelector('[data-flow-track-id="charge"]')).toBeNull();
   });
 
+  it('grid_charge line and ball are red when the battery is drawing from grid', () => {
+    const { container } = render(
+      <EnergyOrbitDiagram
+        snapshot={makeSnapshot({
+          grid_power: -2000,
+          home_power: 500,
+          battery_power: -1500,
+          battery_state: 'charging',
+          soc: 80,
+        })}
+      />,
+    );
+    const gridChargeTrack = container.querySelector('[data-flow-track-id="grid_charge"]');
+    const gridChargeDot = container.querySelector('[data-flow-id="grid_charge"] circle');
+    expect(gridChargeTrack, 'grid_charge track missing').not.toBeNull();
+    expect(gridChargeTrack?.getAttribute('stroke')).toBe(FLOW_COLORS.grid);
+    expect(gridChargeDot?.getAttribute('fill')).toBe(FLOW_COLORS.grid);
+    expect(gridChargeTrack?.getAttribute('stroke')).not.toBe(BATTERY_OUTPUT_COLOR);
+  });
+
   it('renders the solar V/A sub-label under the kW value (legacy behaviour)', () => {
     // Live PV voltage + current → "350.4V/6.5A" rendered as a small grey
     // sub-label between the kW value and the optional status word.
