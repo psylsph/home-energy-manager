@@ -22,6 +22,7 @@ describe('useInverterStore — EVC state machine (issue #138)', () => {
       evcChargingState: '',
       evcCharging: false,
       evcConnected: false,
+      evcCableConnected: false,
       evcEverConnected: false,
     });
   });
@@ -171,6 +172,51 @@ describe('useInverterStore — EVC state machine (issue #138)', () => {
     expect(useInverterStore.getState().evcChargingState).toBe('Idle');
     resetEvc();
     expect(useInverterStore.getState().evcChargingState).toBe('');
+  });
+
+  // ---- issue #151: physical cable state (HR 2) is distinct from network
+  // reachability. A charger can be reachable with no cable plugged in, or
+  // briefly offline with a cable still attached. setEvcData carries both
+  // independently so the diagram can render the cable under the kW value.
+  // ----------------------------------------------------------------------
+
+  it('defaults evcCableConnected to false when setEvcData omits it', () => {
+    const { setEvcData } = useInverterStore.getState();
+    // Legacy 4-arg call (no cable) — cable stays false.
+    setEvcData(1200, true, true);
+    expect(useInverterStore.getState().evcCableConnected).toBe(false);
+  });
+
+  it('stores the cable state passed to setEvcData independently of network reachability', () => {
+    // Reachable + cable in (state=2 from the issue report).
+    const { setEvcData } = useInverterStore.getState();
+    setEvcData(0, false, true, 'Connected', true);
+    expect(useInverterStore.getState().evcConnected).toBe(true);
+    expect(useInverterStore.getState().evcCableConnected).toBe(true);
+
+    // Reachable but no cable plugged in (cable unplugged after a session).
+    setEvcData(0, false, true, 'Idle', false);
+    expect(useInverterStore.getState().evcConnected).toBe(true);
+    expect(useInverterStore.getState().evcCableConnected).toBe(false);
+  });
+
+  it('clears the cable state when the network drops (EvcDisconnected path)', () => {
+    // setEvcData(0, false, false) is what the evc_disconnected handler
+    // calls — the explicit `connected=false` must not drag a stale cable
+    // value along with it.
+    const { setEvcData } = useInverterStore.getState();
+    setEvcData(6893, true, true, 'Charging', true);
+    expect(useInverterStore.getState().evcCableConnected).toBe(true);
+    setEvcData(0, false, false);
+    expect(useInverterStore.getState().evcCableConnected).toBe(false);
+  });
+
+  it('resetEvc() clears the cable state too', () => {
+    const { setEvcData, resetEvc } = useInverterStore.getState();
+    setEvcData(0, false, true, 'Connected', true);
+    expect(useInverterStore.getState().evcCableConnected).toBe(true);
+    resetEvc();
+    expect(useInverterStore.getState().evcCableConnected).toBe(false);
   });
 
   it('label derivation honours evcChargingState="Idle" through the store (issue #139)', async () => {

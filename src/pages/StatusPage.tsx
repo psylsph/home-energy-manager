@@ -38,6 +38,7 @@ export default function StatusPage() {
     evcChargingState,
     evcCharging,
     evcConnected,
+    evcCableConnected,
     evcEverConnected,
   } = useInverterStore();
 
@@ -196,6 +197,7 @@ export default function StatusPage() {
           evcChargingState={evcChargingState}
           evcCharging={evcCharging}
           evcConnected={evcConnected}
+          evcCableConnected={evcCableConnected}
           evcEverConnected={evcEverConnected}
           showEvc={!!evcHost}
         />

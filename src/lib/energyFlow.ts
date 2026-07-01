@@ -216,6 +216,14 @@ export interface BuildEnergyFlowsOptions {
    * node falls back to "Charging" / "Idle" based on power alone.
    */
   evcLabel?: string;
+  /**
+   * EV charger cable sub-label (HR 2 `connection_status`) rendered under
+   * the kW value — "Cable In" / "No Cable". Pass `undefined` when the
+   * charger is offline / never reached so the diagram never asserts a
+   * cable state it can't actually see; only a fresh frame justifies a
+   * value here.
+   */
+  evcCableLabel?: string;
   /** Injected clock for deterministic summary / slot-window tests. */
   now?: Date;
 }
@@ -573,6 +581,7 @@ export function buildEnergyFlows(
       label: 'EV',
       value: formatVisualPower(evcPower, noise),
       unit: opts.evcLabel ?? (evcActive ? 'Charging' : 'Idle'),
+      subLabel: opts.evcCableLabel,
       color: FLOW_COLORS.ev,
       active: evcActive,
     });

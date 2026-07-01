@@ -57,6 +57,14 @@ export interface FlowNode {
   active: boolean;
   /** Optional pre-derived status word, e.g. "Importing" or "Exporting". */
   status?: string;
+  /**
+   * Optional small grey sub-label rendered under the kW value (between the
+   * value and the status word). Solar/grid populate this from `unit` (PV
+   * voltage/current, grid V/Hz); the EV node uses it for the physical cable
+   * state ("Cable In" / "No Cable"), which is independent of `unit` (the
+   * charger's operational-status word).
+   */
+  subLabel?: string;
 }
 
 /**

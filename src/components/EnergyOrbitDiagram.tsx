@@ -29,6 +29,8 @@ interface Props {
   evcCharging?: boolean;
   /** Whether the EV Charger is connected/responding. */
   evcConnected?: boolean;
+  /** EV Charger physical cable plugged in (HR 2 `connection_status`). */
+  evcCableConnected?: boolean;
   /** Latch: true once a valid EVC snapshot has ever arrived (issue #138). */
   evcEverConnected?: boolean;
   /** Whether EV Charger is configured (non-empty host). When falsy, EV node is hidden. */
@@ -506,7 +508,13 @@ function SatelliteNode({ node, x, y, r, flows, mobile, showStatusWords }: NodePr
   // inverter-centred diagram behaviour). Grid now mirrors that pattern with
   // voltage/frequency under the kW value; the status word still comes from
   // the flow direction below it.
-  const showSubLabel = (node.id === 'solar' || node.id === 'grid') && node.unit.length > 0;
+  // Solar/grid use `unit` as the sub-label (PV V/A, grid V/Hz); the EV
+  // node carries its cable state on a dedicated `subLabel` field so it
+  // doesn't collide with `unit` (the charger's operational-status word).
+  const subLabelText =
+    node.subLabel ??
+    ((node.id === 'solar' || node.id === 'grid') ? node.unit : '');
+  const showSubLabel = subLabelText.length > 0;
 
   return (
     <g aria-label={`${node.label}: ${value} ${status}`}>
@@ -573,7 +581,7 @@ function SatelliteNode({ node, x, y, r, flows, mobile, showStatusWords }: NodePr
           fontSize={mobile ? 14 : 13}
           fontFamily="var(--font-mono, monospace)"
         >
-          {node.unit}
+          {subLabelText}
         </text>
       )}
       {showStatusWords && (
@@ -602,6 +610,7 @@ function EnergyOrbitDiagramInner({
   evcChargingState = '',
   evcCharging = false,
   evcConnected = false,
+  evcCableConnected = false,
   evcEverConnected,
   showEvc = false,
 }: Props) {
@@ -618,12 +627,20 @@ function EnergyOrbitDiagramInner({
   const evcLabel = showEvc
     ? evcNodeLabel(evcCharging, evcConnected, !!evcEverConnected, evcChargingState)
     : undefined;
+  // Cable indicator under the kW value (HR 2 `connection_status`). It's
+  // only meaningful while we have a *fresh* frame — when the charger is
+  // offline or never reached we genuinely can't see the cable, so we omit
+  // the sub-label rather than assert a state. Gating on `evcConnected`
+  // (network) keeps the last good cable value from lingering after a drop.
+  const evcCableLabel =
+    showEvc && evcConnected ? (evcCableConnected ? 'Cable In' : 'No Cable') : undefined;
 
   const vm = buildEnergyFlows(snapshot, {
     noiseThresholdW: noise,
     evcPowerW: evcPower,
     showEvc,
     evcLabel,
+    evcCableLabel,
   });
 
   const positions = satellitePositions(showEvc);
