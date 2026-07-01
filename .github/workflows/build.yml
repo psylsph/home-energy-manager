@@ -17,6 +17,8 @@ jobs:
   verify-versions:
     name: Verify version sync
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v6
       - name: Check package.json / Cargo.toml / tauri.conf.json agree

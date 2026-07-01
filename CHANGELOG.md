@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Security
+
+- **Tightened release-build workflow token scope.** The `verify-versions` gate in the release workflow now runs with read-only `GITHUB_TOKEN` permissions, matching the principle of least privilege that the other workflows already follow. Closes GitHub code-scanning alert #3.
+
 ## [0.51.1] - 2026-07-01
 
 ### Changed
