@@ -15,14 +15,19 @@ function MeterCard({ meter }: { meter: MeterData }) {
 
   // Per-phase power is unavailable for the synthetic built-in CT (address 0x00)
   // — three-phase inverters have no per-phase signed grid power registers.
-  const showPerPhasePower = meter.address !== 0;
+  // A synthetic meter never represents an external clamp, so its zeroed
+  // per-phase fields must not be rendered as a "broken external meter".
+  const isSynthetic = meter.address === 0;
+  const showPerPhasePower = !isSynthetic;
 
   const phaseCols = showThreePhase ? 'grid-cols-3' : 'grid-cols-1';
 
   return (
     <div className="bg-bg-surface rounded-xl p-4 space-y-3">
       <div className="flex items-center justify-between">
-        <span className="text-text-primary font-medium">Meter 0x{meter.address.toString(16).padStart(2, '0')}</span>
+        <span className="text-text-primary font-medium">
+          {isSynthetic ? 'Built-in Grid CT' : `Meter 0x${meter.address.toString(16).padStart(2, '0')}`}
+        </span>
         <span className="text-xs text-text-secondary font-mono">{meter.frequency.toFixed(2)} Hz</span>
       </div>
 

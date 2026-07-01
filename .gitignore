@@ -51,6 +51,12 @@ test-results/
 coverage/
 coverage-records
 
+# proptest failure-seed persistence (regenerated on any property-test failure)
+src-tauri/proptest-regressions/
+
+# llvm-cov source-based coverage report
+src-tauri/coverage_report/
+
 # GitHub Pages screenshots — regenerated from .github/screenshots/ on every Pages deploy
 # (see .github/workflows/pages.yml "Copy latest screenshots into docs")
 docs/screenshots/

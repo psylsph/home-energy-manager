@@ -263,6 +263,8 @@ export interface WsConnectionMessage {
 }
 
 export interface MeterData {
+  /** Modbus device address. External CT clamps use 0x01-0x08; 0 marks the
+   * synthetic built-in grid CT (three-phase / HV models, no external meter). */
   address: number;
   v_phase_1: number;
   v_phase_2: number;

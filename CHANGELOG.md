@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.54.0] - 2026-07-01
+
+### Added
+
+- **Three-phase inverters now show their built-in grid meter.** Three-phase and HV models expose the grid CT internally rather than over the external clamp bus, so it now appears on the Meters page as "Built-in Grid CT" instead of looking like a broken external meter reporting zeros.
+
+### Fixed
+
+- **House power no longer drops to zero on some firmware reads.** When the inverter returns no reading for house load (a real home always draws something), the app now falls back to the solar + battery − grid balance so the orbit diagram and tiles stay accurate.
+
+- **Cosy charge slots keep their target SOC in the battery-safe range.** Saving a Cosy slot now bounds the target SOC between 4% and 100% before it reaches the inverter, so a malformed value can't ask the battery to over-discharge.
+
+- **More reliable register writes and reconnections.** The Modbus client now rejects duplicate in-flight requests instead of silently dropping one, and double-checks the value echoed back in write acknowledgements (the dongle can send partial acks under load).
+
+### Changed
+
+- **The dongle serial is no longer auto-discovered.** It now comes only from the value saved in Settings. If your connection had been relying on auto-discovery and stops working, enter the serial manually on the Settings page.
+
 ## [0.53.0] - 2026-07-01
 
 ### Added

@@ -39,7 +39,10 @@ pub(crate) const FUNCTION_ID_TRANSPARENT: u8 = 0x02;
 const FUNCTION_ID_HEARTBEAT: u8 = 0x01;
 
 /// Length of the data-adapter serial field (Latin-1, space-padded).
-const SERIAL_LEN: usize = 10;
+///
+/// Shared between the framer and the client so the inner-header offset of
+/// read/write responses stays in sync with the frame layout.
+pub const SERIAL_LEN: usize = 10;
 
 /// Header size: transaction ID (2) + protocol ID (2) + length (2) + unit ID (1)
 /// + function ID (1) + serial (10) + padding (8) = 26 bytes.
@@ -161,6 +164,7 @@ pub fn is_heartbeat_request(data: &[u8]) -> bool {
         && data[2] == 0x00
         && data[3] == 0x01
         && data[7] == FUNCTION_ID_HEARTBEAT
+        && u16::from_be_bytes([data[4], data[5]]) as usize == data.len() - 6
 }
 
 /// Build a heartbeat response frame by echoing the request back to the dongle.
@@ -669,6 +673,20 @@ mod tests {
             0x01, // function ID (heartbeat)
         ];
         assert!(is_heartbeat_request(&heartbeat));
+    }
+
+    #[test]
+    fn heartbeat_with_garbage_length_is_rejected() {
+        // Same MBAP header as a real heartbeat, but the length field doesn't
+        // match the actual byte count — must not be echoed back.
+        let heartbeat = vec![
+            0x59, 0x59, // transaction ID
+            0x00, 0x01, // protocol ID
+            0xFF, 0xFF, // length = 65535 (garbage — should be 2)
+            0x01,      // unit ID
+            0x01,      // function ID (heartbeat)
+        ];
+        assert!(!is_heartbeat_request(&heartbeat));
     }
 
     #[test]

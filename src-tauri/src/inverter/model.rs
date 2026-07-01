@@ -587,10 +587,20 @@ fn default_max_slots() -> u8 {
 // Structs
 // ---------------------------------------------------------------------------
 
-/// Data from one external CT clamp meter (device address 0x01-0x08).
+/// Data from one CT clamp meter.
+///
+/// External CT clamp meters report over the CT bus at Modbus device
+/// addresses 0x01-0x08. Three-phase / HV models have no external CT bus
+/// for grid flow — instead the inverter's built-in grid CT is published
+/// via the IR 1060-1119 block, which the decoder wraps into a synthetic
+/// `MeterData` entry using the reserved `address == 0x00`. The frontend
+/// (`MetersPage.tsx`) keys off `address == 0x00` to label this as the
+/// built-in grid CT and hide per-phase power (which has no signed source),
+/// so it is never mistaken for a broken external meter reporting zeros.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MeterData {
-    /// Device address (0x01-0x08).
+    /// Modbus device address. External CT clamps use 0x01-0x08; `0x00` is
+    /// reserved for the synthetic built-in grid CT (no external meter).
     pub address: u8,
     /// Phase 1-3 voltage in V.
     pub v_phase_1: f32,

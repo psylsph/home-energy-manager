@@ -2716,6 +2716,119 @@ mod tests {
     use crate::inverter::model::BatteryModule;
     use chrono::TimeZone;
 
+    // -------------------------------------------------------------------
+    // Decode → sanitize pipeline (Gap 2, Layer A).
+    //
+    // `decode_snapshot` and `sanitize_snapshot` are each well-tested in
+    // isolation; these tests exercise their *composition* — that a snapshot
+    // decoded from realistic register blocks flows through the sanitizer's
+    // delta / absolute-range checks correctly. `make_block` mirrors the
+    // helper in decoder.rs (Box::leak is acceptable in tests).
+    // -------------------------------------------------------------------
+    use crate::inverter::decoder::decode_snapshot;
+    use crate::modbus::client::BlockRead;
+    use crate::modbus::registers::{RegisterBlock, RegisterType};
+
+    fn make_block(
+        register_type: RegisterType,
+        start: u16,
+        count: u16,
+        name: &'static str,
+        data: Vec<u16>,
+    ) -> BlockRead {
+        let block = Box::leak(Box::new(RegisterBlock {
+            start,
+            count,
+            register_type,
+            name,
+        }));
+        BlockRead { block, data }
+    }
+
+    /// Build the four `STANDARD_POLL_BLOCKS` with controlled key input
+    /// registers; holding blocks are zero (decode to defaults). Only the
+    /// registers under test are set so the assertion isolates that field.
+    ///
+    /// Input-register map (start = 0, so data[i] == IR(i)):
+    ///   IR(5)=grid_voltage×10, IR(13)=freq×100, IR(17)=pv1_today (tenths),
+    ///   IR(18)=p_pv1 W, IR(30)=p_grid, IR(42)=home_power, IR(52)=p_battery,
+    ///   IR(59)=soc.
+    fn standard_blocks_with(reg_edits: &[(u16, u16)]) -> Vec<BlockRead> {
+        let mut input = vec![0u16; 60];
+        // A grid-connected baseline that survives the absolute/range checks.
+        input[5] = 2300; // 230.0 V
+        input[13] = 5000; // 50.0 Hz
+        input[59] = 50; // soc 50%
+        for &(reg, val) in reg_edits {
+            input[reg as usize] = val;
+        }
+        vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", input),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", vec![0u16; 60]),
+            make_block(RegisterType::Holding, 60, 60, "holding_60_119", vec![0u16; 60]),
+            make_block(RegisterType::Input, 180, 4, "input_180_181", vec![0u16; 4]),
+        ]
+    }
+
+    /// A decoded baseline that produces `today_solar_kwh = 5.0`
+    /// (IR(17)=50 tenths; PV2 left dark so the per-string path is used).
+    fn decoded_baseline() -> InverterSnapshot {
+        decode_snapshot(&standard_blocks_with(&[(17, 50)]))
+    }
+
+    /// Decode→sanitize composition: a register-level rate spike in
+    /// `today_solar_kwh` (IR(17): 50 → 800 tenths, i.e. 5.0 → 80.0 kWh in one
+    /// poll) must be held at the previous value by the sanitizer. Proves the
+    /// decoded snapshot is processed by the delta check end to end — today no
+    /// test connects decode output to the sanitizer's rate-limit branch.
+    #[test]
+    fn decode_then_sanitize_holds_register_level_rate_spike() {
+        let prev = decoded_baseline(); // today_solar_kwh == 5.0
+        let mut spike =
+            decode_snapshot(&standard_blocks_with(&[(17, 800)])); // == 80.0
+        assert_eq!(
+            spike.today_solar_kwh, 80.0,
+            "fixture: decode must surface the spiked register"
+        );
+
+        let sanitized = SeqSanitizer::new().run(&mut spike, Some(&prev));
+        assert!(
+            sanitized,
+            "a 5 → 80 kWh jump in one poll must be flagged by the delta check"
+        );
+        assert_eq!(
+            spike.today_solar_kwh, 5.0,
+            "the rate spike must be held at the previous (decoded) value, not propagated"
+        );
+    }
+
+    /// Decode→sanitize composition: a corrupted `battery_power` register
+    /// (int16 saturation, 0x7FFF = 32767 W — the dongle memory-leak fingerprint)
+    /// must be caught by the absolute-range / hard-corruption ceiling and NOT
+    /// propagated as a 32 kW reading. `is_block_suspicious` and the ceiling
+    /// clamp are each tested separately; this proves they compose across
+    /// `decode_snapshot`.
+    #[test]
+    fn decode_then_sanitize_clamps_corrupted_battery_power() {
+        let prev = decoded_baseline(); // battery_power == 0
+        let mut corrupt =
+            decode_snapshot(&standard_blocks_with(&[(17, 50), (52, 0x7FFF)]));
+        assert_eq!(
+            corrupt.battery_power, 32767,
+            "fixture: decode must surface the saturated register"
+        );
+
+        let sanitized = SeqSanitizer::new().run(&mut corrupt, Some(&prev));
+        assert!(
+            sanitized,
+            "int16-saturated battery_power must be flagged as hard corruption"
+        );
+        assert_eq!(
+            corrupt.battery_power, 0,
+            "corrupted battery_power must fall back to the previous reading, not propagate 32 kW"
+        );
+    }
+
     fn local_timestamp(hour: u32, minute: u32) -> i64 {
         let date = chrono::Local::now().date_naive();
         let naive = date.and_hms_opt(hour, minute, 0).unwrap();
@@ -6316,5 +6429,268 @@ mod tests {
             "median must overwrite corrupted PV1"
         );
         assert_eq!(snap.today_pv2_kwh, 3.0);
+    }
+
+    // ===============================================================
+    // Property-based tests for the delta-check edge cases.
+    //
+    // The `check_energy_delta!` macro's release counters persist ACROSS
+    // calls (the same way `run_poll_loop` threads one `DeltaCorrectionCounts`
+    // through every poll). The stateless `sanitize_for_test` above therefore
+    // cannot reach the release-after-10 branches. `SeqSanitizer` mirrors the
+    // production cross-call threading so the property tests below exercise the
+    // *sequence-dependent* behaviour: sustained-correction release, rate-ceiling
+    // holds, and jitter-tolerance boundaries — the cases the review flagged as
+    // only spot-checked.
+    //
+    // `battery_reserve` is pinned to 4 (the sanitizer's enforced floor; its
+    // Default of 0 would trip an unrelated absolute-range clamp and mask the
+    // delta check under test). `inverter_time` is pinned to a daytime value so
+    // the midnight-rollover window uses the inverter clock rather than the
+    // *host's* local time — otherwise these tests would pass/fail depending
+    // on the CI machine's timezone.
+    // ===============================================================
+
+    use crate::inverter::sanitizer::{
+        ConsecutiveSuspectCounts, DeltaCorrectionCounts, RateReleaseCounts,
+    };
+    use proptest::{prop_assert, prop_assert_eq};
+
+    /// A single-field (today_solar_kwh) snapshot at a fixed daytime clock, with
+    /// valid grid/battery baseline fields so the absolute + power-rate checks
+    /// never fire and only the cumulative-counter delta check varies.
+    fn delta_snap(timestamp: i64, today_solar_kwh: f32) -> InverterSnapshot {
+        InverterSnapshot {
+            timestamp,
+            today_solar_kwh,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            grid_online: true,
+            soc: 50,
+            battery_reserve: 4, // enforced floor (Default 0 would trip an absolute clamp)
+            // Fixed daytime inverter clock → deterministic reset-window check.
+            inverter_time: String::from("2024-06-15 12:00:00"),
+            ..Default::default()
+        }
+    }
+
+    /// Runs `sanitize_snapshot` with state that PERSISTS across calls, exactly
+    /// like `run_poll_loop`. This is the seam the release branches need.
+    struct SeqSanitizer {
+        pending_mode: Option<BatteryMode>,
+        delta_corrections: DeltaCorrectionCounts,
+        suspect_counts: ConsecutiveSuspectCounts,
+        rate_release: RateReleaseCounts,
+    }
+
+    impl SeqSanitizer {
+        fn new() -> Self {
+            Self {
+                pending_mode: None,
+                delta_corrections: DeltaCorrectionCounts::default(),
+                suspect_counts: ConsecutiveSuspectCounts::default(),
+                rate_release: RateReleaseCounts::default(),
+            }
+        }
+
+        /// Sanitize `snap` against `prev`, returning whether any field changed.
+        fn run(&mut self, snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot>) -> bool {
+            sanitize_snapshot(
+                snap,
+                prev,
+                false, // skip_delta = false → steady state (past grace period)
+                &mut self.pending_mode,
+                &mut self.delta_corrections,
+                &mut self.suspect_counts,
+                &mut self.rate_release,
+            )
+        }
+    }
+
+    /// Daily-counter rate ceiling: `max_increase = elapsed/3600 * 10 + 1` kWh.
+    const RATE_KW: f32 = 10.0;
+    const RATE_MARGIN_KWH: f32 = 1.0;
+    fn daily_rate_budget(elapsed_secs: i64) -> f32 {
+        (elapsed_secs as f32 / 3600.0) * RATE_KW + RATE_MARGIN_KWH
+    }
+
+    /// Direct-read daily fields use a 0.25 kWh jitter tolerance.
+    const SOLAR_TOLERANCE_KWH: f32 = 0.25;
+
+    proptest::proptest! {
+        // Keep the suite fast: these run on every `cargo test` / CI build.
+        #![proptest_config(proptest::test_runner::Config {
+            cases: 256,
+            ..proptest::test_runner::Config::default()
+        })]
+
+        /// P1 — Normal in-budget increase is accepted verbatim. For any prev in
+        /// the steady-state band (>= 1, well under the 200 kWh absolute ceiling)
+        /// and any increase within the elapsed-time rate budget, the sanitized
+        /// output must equal raw — no false holds on legitimate solar ramp-up.
+        #[test]
+        fn prop_normal_increase_within_budget_is_accepted(
+            prev_kwh in 1.0f32..50.0,
+            // elapsed up to an hour; budget grows with it so the increase is always in-budget
+            elapsed_secs in 1i64..3600,
+            // a fraction of the available budget (strictly less, so not a ceiling hit)
+            fraction in 0.0f32..0.9,
+        ) {
+            let budget = daily_rate_budget(elapsed_secs);
+            let increase = budget * fraction;
+            let raw = prev_kwh + increase;
+
+            let prev = delta_snap(0, prev_kwh);
+            let mut snap = delta_snap(elapsed_secs, raw);
+            let sanitized = SeqSanitizer::new().run(&mut snap, Some(&prev));
+
+            prop_assert!(!sanitized, "in-budget increase must not be flagged");
+            prop_assert_eq!(snap.today_solar_kwh, raw, "in-budget increase must pass through");
+        }
+
+        /// P2 — Rate-ceiling jump is held at prev on the first cycle. An increase
+        /// strictly above the budget (`prev + budget + extra`) must NOT pass
+        /// through; it is held at the previous value until the sustained-release
+        /// counter decides otherwise. This is the corruption-spike defence.
+        #[test]
+        fn prop_increase_above_rate_ceiling_held_at_prev_first_cycle(
+            prev_kwh in 1.0f32..50.0,
+            elapsed_secs in 1i64..3600,
+            extra in 0.01f32..20.0,
+        ) {
+            let budget = daily_rate_budget(elapsed_secs);
+            let raw = prev_kwh + budget + extra;
+
+            let prev = delta_snap(0, prev_kwh);
+            let mut snap = delta_snap(elapsed_secs, raw);
+            let sanitized = SeqSanitizer::new().run(&mut snap, Some(&prev));
+
+            prop_assert!(sanitized, "above-ceiling jump must be flagged");
+            prop_assert_eq!(
+                snap.today_solar_kwh, prev_kwh,
+                "above-ceiling jump must hold at prev on the first cycle"
+            );
+        }
+
+        /// P3 — Jitter tolerance is exact. A decrease within the tolerance is
+        /// carried forward silently (sanitized == false); a decrease just beyond
+        /// it is flagged as corruption (sanitized == true). Both yield the prev
+        /// value, but the flag distinguishes "noise" from "corruption". prev is
+        /// kept >= 10 so the decrease never looks like a midnight rollover
+        /// (which needs raw < 5).
+        #[test]
+        fn prop_jitter_tolerance_boundary_is_exact(
+            prev_kwh in 10.0f32..50.0,
+            // sweep epsilon across the tolerance boundary
+            epsilon_mult in 0.0f32..2.0,
+        ) {
+            let epsilon = SOLAR_TOLERANCE_KWH * epsilon_mult;
+            let raw = prev_kwh - epsilon;
+
+            let prev = delta_snap(0, prev_kwh);
+            let mut snap = delta_snap(60, raw);
+            let sanitized = SeqSanitizer::new().run(&mut snap, Some(&prev));
+
+            // Value always falls back to prev for a decrease (silent carry or
+            // corruption hold), so assert the boundary on the FLAG.
+            prop_assert_eq!(snap.today_solar_kwh, prev_kwh);
+            if epsilon <= SOLAR_TOLERANCE_KWH {
+                prop_assert!(
+                    !sanitized,
+                    "decrease within tolerance ({}) must be silent carry-forward",
+                    epsilon
+                );
+            } else {
+                prop_assert!(
+                    sanitized,
+                    "decrease beyond tolerance ({}) must be flagged",
+                    epsilon
+                );
+            }
+        }
+
+        /// P4 — Near-zero prev never clamps. When the previous value is below the
+        /// 1.0 kWh grace-median floor, ANY in-range raw is accepted directly —
+        /// the rate-limit check is meaningless against a ~0 denominator, and
+        /// clamping here is what froze fields at stuck-low baselines for ~30 s.
+        #[test]
+        fn prop_near_zero_prev_accepts_any_in_range_raw(
+            prev_kwh in 0.0f32..0.99,
+            raw in 0.0f32..199.0,
+            elapsed_secs in 1i64..3600,
+        ) {
+            let prev = delta_snap(0, prev_kwh);
+            let mut snap = delta_snap(elapsed_secs, raw);
+            SeqSanitizer::new().run(&mut snap, Some(&prev));
+
+            prop_assert_eq!(
+                snap.today_solar_kwh, raw,
+                "near-zero prev must accept raw verbatim regardless of rate"
+            );
+        }
+
+        /// P6 — No-op when raw equals prev (the idempotency special case).
+        /// Re-sanitizing an unchanged reading must neither alter the value nor
+        /// flag sanitization, regardless of the steady-state prev.
+        #[test]
+        fn prop_unchanged_reading_is_noop(
+            kwh in 1.0f32..50.0,
+            elapsed_secs in 1i64..3600,
+        ) {
+            let prev = delta_snap(0, kwh);
+            let mut snap = delta_snap(elapsed_secs, kwh);
+            let sanitized = SeqSanitizer::new().run(&mut snap, Some(&prev));
+
+            prop_assert!(!sanitized, "unchanged reading must not be flagged");
+            prop_assert_eq!(snap.today_solar_kwh, kwh);
+        }
+    }
+
+    /// P5 — Material-decrease release is sticky and counted (not a property
+    /// test: the release threshold is a fixed `DELTA_CORRECTION_RELEASE_THRESHOLD`
+    /// = 10, so a single deterministic sequence exercises the whole lifecycle).
+    /// A consistently-lower value is held at prev for 9 cycles, released on the
+    /// 10th, and the counter RESETS — so a *different* subsequent lower value
+    /// starts a fresh window instead of inheriting the accumulated count.
+    #[test]
+    fn material_decrease_release_is_counted_then_counter_resets() {
+        use crate::inverter::sanitizer::DELTA_CORRECTION_RELEASE_THRESHOLD;
+        let mut sz = SeqSanitizer::new();
+
+        let high = 50.0_f32;
+        let lower = 30.0_f32; // material decrease, well below jitter tolerance
+        let prev0 = delta_snap(0, high);
+        let mut last_snap = prev0.clone();
+
+        // 1 .. THRESHOLD-1 cycles: held at `high`, flagged.
+        for i in 1..DELTA_CORRECTION_RELEASE_THRESHOLD {
+            let mut snap = delta_snap(i as i64 * 60, lower);
+            let sanitized = sz.run(&mut snap, Some(&last_snap));
+            assert!(sanitized, "cycle {i} must be flagged (held at prev)");
+            assert_eq!(snap.today_solar_kwh, high, "cycle {i} must hold at high");
+        }
+
+        // THRESHOLD-th cycle: released → out == lower, NOT flagged (accepting raw).
+        let mut snap = delta_snap(DELTA_CORRECTION_RELEASE_THRESHOLD as i64 * 60, lower);
+        let released = sz.run(&mut snap, Some(&last_snap));
+        assert!(!released, "release accepts raw, so sanitized must be false");
+        assert_eq!(
+            snap.today_solar_kwh, lower,
+            "after {DELTA_CORRECTION_RELEASE_THRESHOLD} cycles the lower value must be accepted"
+        );
+        // Adopt the released value as the new baseline.
+        last_snap = delta_snap(DELTA_CORRECTION_RELEASE_THRESHOLD as i64 * 60, lower);
+
+        // Counter reset: a DIFFERENT lower value starts a fresh window — held
+        // at `lower` on its first cycle, not immediately released.
+        let even_lower = 25.0_f32;
+        let mut snap = delta_snap((DELTA_CORRECTION_RELEASE_THRESHOLD as i64 + 1) * 60, even_lower);
+        let sanitized = sz.run(&mut snap, Some(&last_snap));
+        assert!(
+            sanitized,
+            "post-release a new decrease must start a fresh window (flagged, held)"
+        );
+        assert_eq!(snap.today_solar_kwh, lower, "held at the released baseline");
     }
 }
