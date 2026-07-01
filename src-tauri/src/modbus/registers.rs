@@ -860,6 +860,25 @@ mod tests {
     }
 
     #[test]
+    fn three_phase_poll_blocks_keep_holding_clock_block() {
+        // The inverter wall-clock (HR 35-40, `system_time` in the
+        // givenergy-modbus reference) populates `InverterSnapshot::inverter_time`
+        // via `decode_holding_0_59`. The sanitizer's daily-reset window keys off
+        // that clock, so the lean three-phase / Gateway set must keep
+        // `holding_0_59`. Dropping it would silently reduce those families to
+        // the host-local fallback and re-introduce the inconsistent-clock bug
+        // (UTC-clock inverter on a CEST host) that the inverter-clock window
+        // was added to fix.
+        let clock_block = STANDARD_POLL_BLOCKS_3PH
+            .iter()
+            .find(|b| b.name == "holding_0_59")
+            .expect("STANDARD_POLL_BLOCKS_3PH must include holding_0_59 for the wall-clock registers");
+        assert_eq!(clock_block.start, 0);
+        assert_eq!(clock_block.count, 60);
+        assert_eq!(clock_block.register_type, RegisterType::Holding);
+    }
+
+    #[test]
     fn decode_hhmm_valid() {
         assert_eq!(decode_hhmm(1600), Some((16, 0)));
         assert_eq!(decode_hhmm(630), Some((6, 30)));

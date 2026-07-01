@@ -2319,6 +2319,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn holding_block_populates_inverter_time_from_system_time_registers() {
+        // Regression test: the sanitizer's daily-reset window keys off
+        // `InverterSnapshot::inverter_time` (decoded from HR 35-40, the
+        // `system_time` registers per givenergy-modbus). The holding block
+        // (`holding_0_59`) is the only place the clock is decoded, and the
+        // three-phase / Gateway lean poll set must keep reading it (see
+        // `three_phase_poll_blocks_keep_holding_clock_block` in the registers
+        // tests). This test pins down the decode end of that contract: a
+        // refactor that drops or moves the `snap.inverter_time = ...` line
+        // out of `decode_holding_0_59` would break the reset window for every
+        // device family, not just single-phase.
+        let mut holding_data = vec![0u16; 60];
+        // HR(35-40): year, month, day, hour, minute, second
+        holding_data[35] = 2026;
+        holding_data[36] = 6;
+        holding_data[37] = 30;
+        holding_data[38] = 0;
+        holding_data[39] = 5;
+        holding_data[40] = 0;
+        let holding_block = make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data);
+
+        let snap = decode_snapshot(&[holding_block]);
+        assert_eq!(
+            snap.inverter_time, "2026-06-30 00:05:00",
+            "inverter_time must be populated from HR(35-40) in holding_0_59"
+        );
+    }
+
     fn test_blocks() -> Vec<BlockRead> {
         // Input registers 0-59
         let mut input_data = vec![0u16; 60];

@@ -1351,13 +1351,43 @@ pub(crate) fn check_power_rate(
 /// corrupt decrease and carried forward.
 const DAILY_RESET_WINDOW_MINS: u32 = 65;
 
-fn is_within_daily_reset_window(timestamp_secs: i64) -> bool {
+/// Whether this reading sits in the daily-counter reset window.
+///
+/// The inverter rolls its `today_*` counters over at its own wall-clock
+/// midnight (00:00 on HR(35-40)), so that clock is the authoritative signal
+/// for when a reset happens and is preferred here when available. Keying the
+/// window off the *host's* local time only works when the inverter clock is
+/// set to the host's timezone: a UTC-clock inverter on a host more than an
+/// hour ahead (e.g. CEST, where inverter midnight lands at 02:00 host-local)
+/// falls outside a host-midnight window and its legitimate reset would be
+/// carried forward as if it were corruption.
+///
+/// Falls back to the host's local time when the inverter clock is unavailable.
+/// Three-phase and Gateway families drop the `input_0_59` block (the only
+/// place `inverter_time` is populated) after model detection, and a corrupt
+/// HR(35-40) read decodes to an empty string — in both cases the inverter
+/// clock cannot be trusted, so the historical host-local behaviour is kept.
+fn is_within_daily_reset_window(timestamp_secs: i64, inverter_time: &str) -> bool {
+    if let Some(minute_of_day) = inverter_minute_of_day(inverter_time) {
+        return minute_of_day <= DAILY_RESET_WINDOW_MINS
+            || minute_of_day >= 1440 - DAILY_RESET_WINDOW_MINS;
+    }
+
     let Some(dt) = chrono::DateTime::from_timestamp(timestamp_secs, 0) else {
         return false;
     };
     let local = dt.with_timezone(&chrono::Local);
     let minute_of_day = local.hour() * 60 + local.minute();
     minute_of_day <= DAILY_RESET_WINDOW_MINS || minute_of_day >= 1440 - DAILY_RESET_WINDOW_MINS
+}
+
+/// Parse `inverter_time` ("YYYY-MM-DD HH:MM:SS", produced by `decode_system_time`)
+/// and return its minute-of-day, or `None` when the string is empty, malformed,
+/// or carries out-of-range fields — the signal for [`is_within_daily_reset_window`]
+/// to fall back to the host clock.
+fn inverter_minute_of_day(inverter_time: &str) -> Option<u32> {
+    let dt = chrono::NaiveDateTime::parse_from_str(inverter_time, "%Y-%m-%d %H:%M:%S").ok()?;
+    Some(dt.hour() * 60 + dt.minute())
 }
 
 /// Sanitize a snapshot against physically impossible register values.
@@ -2030,7 +2060,7 @@ pub(crate) fn sanitize_snapshot(
                 else if raw < prev_val
                     && raw < 5.0
                     && prev_val > 5.0
-                    && is_within_daily_reset_window(snap.timestamp)
+                    && is_within_daily_reset_window(snap.timestamp, &snap.inverter_time)
                 {
                     // Legitimate midnight reset - accept raw as-is
                     delta_corrections.0.remove($name);
@@ -3674,11 +3704,86 @@ mod tests {
     }
 
     #[test]
-    fn daily_energy_reset_window_is_sixty_five_minutes_each_side() {
-        assert!(is_within_daily_reset_window(local_timestamp(22, 55)));
-        assert!(!is_within_daily_reset_window(local_timestamp(22, 54)));
-        assert!(is_within_daily_reset_window(local_timestamp(1, 5)));
-        assert!(!is_within_daily_reset_window(local_timestamp(1, 6)));
+    fn daily_energy_reset_uses_inverter_clock_when_host_time_disagrees() {
+        // Reproduces the inconsistent-clock scenario from the reset-window
+        // investigation: an inverter set to UTC on a CEST (UTC+2) host resets
+        // its daily counters at 00:00 inverter-time = 02:00 host-local, which
+        // is outside the ±65 min host-midnight window. The inverter's own
+        // clock (HR(35-40), surfaced as `inverter_time`) is the authoritative
+        // signal for when the counters roll, so the reset must still be
+        // accepted even though the host timestamp alone would reject it.
+        let prev = InverterSnapshot {
+            timestamp: local_timestamp(1, 59), // 01:59 host-local
+            inverter_time: "2026-06-30 23:59:00".to_string(),
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            battery_reserve: 4,
+            today_pv2_kwh: 9.5,
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            timestamp: local_timestamp(2, 0), // 02:00 host-local — outside host window
+            inverter_time: "2026-07-01 00:00:30".to_string(), // inverter just past midnight
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            battery_reserve: 4,
+            today_pv2_kwh: 0.0,
+            ..Default::default()
+        };
+        let mut pending_mode = None;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+        let mut rate_release_counts = RateReleaseCounts::default();
+
+        let sanitized = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+            &mut rate_release_counts,
+        );
+
+        assert!(
+            !sanitized,
+            "inverter-midnight reset must pass through even when host-local time disagrees"
+        );
+        assert_eq!(snap.today_pv2_kwh, 0.0);
+    }
+
+    #[test]
+    fn daily_energy_reset_window_is_sixty_five_minutes_each_side_of_host_midnight() {
+        // Fallback path: no inverter clock, so the host's local time governs.
+        assert!(is_within_daily_reset_window(local_timestamp(22, 55), ""));
+        assert!(!is_within_daily_reset_window(local_timestamp(22, 54), ""));
+        assert!(is_within_daily_reset_window(local_timestamp(1, 5), ""));
+        assert!(!is_within_daily_reset_window(local_timestamp(1, 6), ""));
+        // A garbage inverter_time string also falls back to host-local.
+        assert!(is_within_daily_reset_window(local_timestamp(23, 58), "garbage"));
+        assert!(!is_within_daily_reset_window(local_timestamp(12, 0), "garbage"));
+    }
+
+    #[test]
+    fn daily_energy_reset_window_prefers_inverter_clock_over_host_time() {
+        // The reported inconsistent-clock case: an inverter set to UTC on a
+        // CEST (UTC+2) host resets its counters at 00:00 inverter-time, which
+        // is 02:00 host-local — well outside a host-midnight window. The
+        // inverter's own clock must govern, regardless of what the host says.
+        // Inverter just past midnight (00:05) with host at noon: in-window.
+        assert!(is_within_daily_reset_window(local_timestamp(12, 0), "2026-07-01 00:05:00"));
+        // Inverter just before midnight (23:55) with host at noon: in-window.
+        assert!(is_within_daily_reset_window(local_timestamp(12, 0), "2026-07-01 23:55:00"));
+        // Inverter at midday (12:00) with host at midnight: the inverter clock
+        // takes precedence, so NOT in window even though host-local would say yes.
+        assert!(!is_within_daily_reset_window(local_timestamp(23, 59), "2026-07-01 12:00:00"));
+        // Boundary: 65 min either side of inverter midnight.
+        assert!(is_within_daily_reset_window(local_timestamp(12, 0), "2026-07-01 01:05:00"));
+        assert!(!is_within_daily_reset_window(local_timestamp(12, 0), "2026-07-01 01:06:00"));
+        assert!(is_within_daily_reset_window(local_timestamp(12, 0), "2026-07-01 22:55:00"));
+        assert!(!is_within_daily_reset_window(local_timestamp(12, 0), "2026-07-01 22:54:00"));
     }
 
     #[test]
