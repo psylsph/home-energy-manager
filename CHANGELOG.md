@@ -18,6 +18,13 @@ All notable changes to this project will be documented in this file.
   is unchanged. All three lines can be toggled from the legend and are
   included in the CSV export.
 
+### Fixed
+
+- **Grid-fed battery charging now uses the grid colour in the energy orbit.**
+  When the battery is charging from the grid, the flow line and moving dot now
+  stay red instead of using the battery-output green, so grid import for
+  charging is visually distinct from battery discharge.
+
 ## [0.52.0] - 2026-07-01
 
 ### Fixed
