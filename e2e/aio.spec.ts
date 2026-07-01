@@ -17,6 +17,17 @@
  */
 
 import { test, expect } from './fixture.js';
+import { startBackend, stopBackend } from './backend.js';
+
+// Each spec file runs against a FRESH backend instance so backend-internal
+// state (detected device type, armed slots, battery-mode state machine) can't
+// leak between spec files. See e2e/backend.ts.
+test.beforeAll(async () => {
+  await startBackend();
+});
+test.afterAll(async () => {
+  await stopBackend();
+});
 
 test.describe('AIO - API routing', () => {
   test('charge rate writes HR 111 (DC hybrid) not HR 313 (AC)', async ({ baseUrl, drainModbusWrites }) => {

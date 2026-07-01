@@ -1,20 +1,29 @@
 /**
- * Playwright global setup: starts the mock Modbus server and headless backend
- * before any tests run, and tears them down after all tests finish.
+ * Playwright global setup for the mock-E2E suite.
+ *
+ * Owns the ONE long-lived process for the whole run: the mock Modbus server.
+ * The mock is fully resettable via its admin `/reset` endpoint (restores the
+ * Gen3 default register snapshot and clears captured writes), so it's safe to
+ * share across spec files.
+ *
+ * The headless BACKEND is intentionally NOT started here. Each spec file
+ * starts/stops its own backend in `test.beforeAll`/`test.afterAll`
+ * (e2e/backend.ts) so backend-internal state with no reset surface — cached
+ * device type, armed Agile/Cosy/auto-winter slots, the battery-mode state
+ * machine — can't leak between spec files.
  */
-
-import { type FullConfig } from '@playwright/test';
-import { ChildProcess, spawn } from 'child_process';
+import type { FullConfig } from '@playwright/test';
 import * as path from 'path';
 import * as fs from 'fs';
 import { fileURLToPath } from 'url';
+import { execSync } from 'child_process';
 import { startModbusServer, stopModbusServer } from './mock-modbus.js';
-import { writeTestSettings, type TestSettingsFixture } from './test-settings.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const MODBUS_PORT = 18899;
+const ADMIN_PORT = 18900;
 const HTTP_PORT = 17337;
 const DIST_DIR = path.resolve(__dirname, '..', 'dist');
 const BINARY_PATH = path.resolve(
@@ -26,22 +35,20 @@ const BINARY_PATH = path.resolve(
   'givenergy-local',
 );
 
-let backendProcess: ChildProcess | null = null;
-let settingsFixture: TestSettingsFixture | null = null;
+export default async function globalSetup(_config: FullConfig): Promise<() => Promise<void>> {
+  console.log('[global-setup] Starting E2E infrastructure...');
 
-export default async function globalSetup(_config: FullConfig) {
-  console.log('[global-setup] Starting E2E test infrastructure...');
+  // Kill leftover processes on our ports from previous runs.
+  for (const port of [MODBUS_PORT, ADMIN_PORT, HTTP_PORT]) {
+    try {
+      execSync(`fuser -k ${port}/tcp 2>/dev/null || true`, { stdio: 'ignore' });
+    } catch {
+      /* ignore */
+    }
+  }
+  await new Promise((r) => setTimeout(r, 500));
 
-  // Kill any leftover processes on our ports from previous test runs
-  try {
-    const { execSync } = await import('child_process');
-    execSync(`fuser -k 18899/tcp 2>/dev/null || true`, { stdio: 'ignore' });
-    execSync(`fuser -k 18900/tcp 2>/dev/null || true`, { stdio: 'ignore' });
-    execSync(`fuser -k 17337/tcp 2>/dev/null || true`, { stdio: 'ignore' });
-    await new Promise((r) => setTimeout(r, 500));
-  } catch { /* ignore */ }
-
-  // Verify build artifacts
+  // Fail fast if build artifacts are missing (saves a confusing timeout later).
   if (!fs.existsSync(BINARY_PATH)) {
     throw new Error(
       `Binary not found at ${BINARY_PATH}. Run 'cd src-tauri && cargo build --release' first.`,
@@ -53,122 +60,25 @@ export default async function globalSetup(_config: FullConfig) {
     );
   }
 
-  // Start mock Modbus server
   console.log('[global-setup] Starting mock Modbus server on port', MODBUS_PORT);
   await startModbusServer(MODBUS_PORT);
+  console.log('[global-setup] Ready — backend is started per spec file');
 
-  // Write a test settings.json in a per-process temp dir. Uses the shared
-  // helper so this suite can't accidentally touch the user's real
-  // ~/.givenergy-local/settings.json. See e2e/test-settings.ts for the
-  // full isolation contract.
-  settingsFixture = await writeTestSettings({
-    tag: 'mock',
-    port: MODBUS_PORT,
-    serial: 'SA12345678',
-    httpPort: HTTP_PORT,
-    pollInterval: 5,
-  });
-
-  // Start the headless backend
-  console.log('[global-setup] Starting headless backend on port', HTTP_PORT);
-  backendProcess = spawn(
-    BINARY_PATH,
-    ['--headless', '--port', String(HTTP_PORT), '--dist', DIST_DIR],
-    {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        ...settingsFixture.env,
-        RUST_LOG: process.env.RUST_LOG || 'info',
-      },
-    },
-  );
-
-  const logLine = (prefix: string, data: Buffer) => {
-    const lines = data.toString().trim().split('\n');
-    for (const line of lines) {
-      if (line.trim()) console.log(`[${prefix}] ${line}`);
-    }
-  };
-  backendProcess.stdout?.on('data', (d: Buffer) => logLine('backend:out', d));
-  backendProcess.stderr?.on('data', (d: Buffer) => logLine('backend:err', d));
-
-  backendProcess.on('exit', (code) => {
-    console.log(`[global-setup] Backend exited with code ${code}`);
-  });
-
-  // Wait for the HTTP server to become available
-  const maxWait = 20_000;
-  const start = Date.now();
-  while (Date.now() - start < maxWait) {
-    try {
-      const resp = await fetch(`http://127.0.0.1:${HTTP_PORT}/api/status`);
-      if (resp.ok) {
-        console.log('[global-setup] Backend HTTP server ready');
-        break;
+  // Teardown: stop the mock. Each spec file's backend is stopped by its own
+  // afterAll. Returning the teardown guarantees it runs on success, failure,
+  // and globalTimeout abort.
+  return async () => {
+    console.log('[global-setup] Stopping mock Modbus server...');
+    await stopModbusServer();
+    // Safety net: free the backend/mock ports in case a spec file's afterAll
+    // didn't run (e.g. the suite was aborted mid-file).
+    for (const port of [HTTP_PORT, MODBUS_PORT]) {
+      try {
+        execSync(`fuser -k ${port}/tcp 2>/dev/null || true`, { stdio: 'ignore' });
+      } catch {
+        /* ignore */
       }
-    } catch {
-      // Not ready yet
     }
-    await new Promise((r) => setTimeout(r, 500));
-  }
-
-  if (Date.now() - start >= maxWait) {
-    await cleanup();
-    throw new Error('Backend HTTP server did not become ready in time');
-  }
-
-  // Wait for the poll loop to connect and get first readings
-  // The poll loop does: connect → 500ms → drain → 3× warmup (500ms each) → first real read
-  // Total warmup: ~2.5s + poll interval
-  console.log('[global-setup] Waiting for poll loop to complete first reading...');
-  await new Promise((r) => setTimeout(r, 8000));
-
-  // Verify we have a snapshot
-  try {
-    const resp = await fetch(`http://127.0.0.1:${HTTP_PORT}/api/snapshot`);
-    const data = await resp.json();
-    if (data.ok) {
-      console.log(`[global-setup] Snapshot confirmed: SOC=${data.data.soc}%, solar=${data.data.solar_power}W`);
-    } else {
-      console.warn('[global-setup] Warning: no snapshot yet, tests may be flaky');
-    }
-  } catch (e) {
-    console.warn('[global-setup] Warning: could not verify snapshot:', e);
-  }
-
-  console.log('[global-setup] Ready — starting tests');
-}
-
-async function cleanup() {
-  if (backendProcess) {
-    console.log('[global-setup] Stopping backend...');
-    backendProcess.kill('SIGTERM');
-    await new Promise<void>((resolve) => {
-      const timeout = setTimeout(() => {
-        backendProcess?.kill('SIGKILL');
-        resolve();
-      }, 5000);
-      backendProcess?.on('exit', () => {
-        clearTimeout(timeout);
-        resolve();
-      });
-    });
-    backendProcess = null;
-  }
-  await stopModbusServer();
-  // Small delay to let file handles close
-  await new Promise((r) => setTimeout(r, 500));
-  if (settingsFixture) {
-    await settingsFixture.cleanup();
-    settingsFixture = null;
-    console.log('[global-setup] Cleaned up temp settings dir');
-  }
-}
-
-// Playwright calls globalTeardown if exported
-export async function globalTeardown() {
-  console.log('[global-teardown] Cleaning up...');
-  await cleanup();
-  console.log('[global-teardown] Done');
+    console.log('[global-setup] Done');
+  };
 }

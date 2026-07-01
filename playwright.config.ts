@@ -18,7 +18,11 @@ export default defineConfig({
   retries: 0,
   reporter: 'list',
   globalSetup: './e2e/global-setup.ts',
-  globalTimeout: 1_200_000,
+  // The suite is fully serial against one shared backend (workers: 1) and
+  // every Modbus register write is a real ~1.5s round-trip, so the full run
+  // comfortably exceeds 20 minutes. Raise the ceiling so the global timeout
+  // never aborts in-flight tests (which then report bogus "0 writes" failures).
+  globalTimeout: 2_400_000,
   use: {
     headless: true,
     browserName: 'chromium',

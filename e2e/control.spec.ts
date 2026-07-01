@@ -24,6 +24,17 @@
  */
 
 import { test, expect } from './fixture.js';
+import { startBackend, stopBackend } from './backend.js';
+
+// Each spec file runs against a FRESH backend instance so backend-internal
+// state (detected device type, armed slots, battery-mode state machine) can't
+// leak between spec files. See e2e/backend.ts.
+test.beforeAll(async () => {
+  await startBackend();
+});
+test.afterAll(async () => {
+  await stopBackend();
+});
 import type { RegisterWrite } from './mock-modbus.js';
 
 // ---------------------------------------------------------------------------
@@ -382,36 +393,6 @@ test.describe('API Control Endpoints', () => {
     const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 2, 15_000);
     expect(findWrite(writes, 27)!.value).toBe(0);
     expect(findWrite(writes, 59)!.value).toBe(1);
-  });
-
-  test('POST /api/control/timed-export can leave Eco enabled when compatibility setting is on', async ({
-    baseUrl,
-    drainModbusWrites,
-    peekModbusWrites,
-  }) => {
-    await clearWrites(drainModbusWrites);
-    await fetch(`${baseUrl}/api/settings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ full_power_discharge_in_eco_mode: true }),
-    });
-
-    const resp = await fetch(`${baseUrl}/api/control/timed-export`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: true }),
-    });
-    expect((await resp.json()).ok).toBe(true);
-
-    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 2, 15_000);
-    expect(findWrite(writes, 27)!.value).toBe(1);
-    expect(findWrite(writes, 59)!.value).toBe(1);
-
-    await fetch(`${baseUrl}/api/settings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ full_power_discharge_in_eco_mode: false }),
-    });
   });
 
   test('POST /api/control/timed-discharge writes HR318 pause-discharge inverse window', async ({

@@ -28,6 +28,17 @@
  */
 
 import { test, expect } from './fixture.js';
+import { startBackend, stopBackend } from './backend.js';
+
+// Each spec file runs against a FRESH backend instance so backend-internal
+// state (detected device type, armed slots, battery-mode state machine) can't
+// leak between spec files. See e2e/backend.ts.
+test.beforeAll(async () => {
+  await startBackend();
+});
+test.afterAll(async () => {
+  await stopBackend();
+});
 import type { RegisterWrite } from './mock-modbus.js';
 import { createServer, type Server } from 'http';
 import type { AddressInfo } from 'net';
@@ -94,6 +105,12 @@ async function startMockOctopus(
 
 function findWrite(writes: RegisterWrite[], address: number): RegisterWrite | undefined {
   return writes.find((w) => w.address === address);
+}
+
+/** Last captured write to `address` (later writes override earlier ones). */
+function lastWrite(writes: RegisterWrite[], address: number): RegisterWrite | undefined {
+  const matches = writes.filter((w) => w.address === address);
+  return matches[matches.length - 1];
 }
 
 async function waitForWrites(
@@ -178,6 +195,9 @@ test.describe('Agile slot-based mode (register-write verification)', () => {
     drainModbusWrites,
     peekModbusWrites,
   }) => {
+    // The poll loop must fetch prices, evaluate, then write several registers
+    // (~1.5s each). Allow headroom over the default 30s test timeout.
+    test.setTimeout(60_000);
     await clearWrites(drainModbusWrites);
     mock = await startMockOctopus(5.0); // below charge threshold (10p)
 
@@ -188,21 +208,25 @@ test.describe('Agile slot-based mode (register-write verification)', () => {
       discharge_threshold: 30,
     });
 
-    // The poll loop fetches prices, evaluates, and writes AgileChargeSlot:
-    //   HR 94 (slot start), HR 95 (slot end), HR 20 = 1, HR 116 = 100, HR 96 = 1
-    // These are the NATIVE schedule registers — the refactor's whole point
-    // is that Agile no longer relies on the momentary ForceCharge flags.
+    // AgileChargeSlot writes HR 94 (slot start), HR 95 (slot end),
+    // HR 116 = 100, HR 20 = 1, HR 96 = 1. Use last-write so a stale clear
+    // from a prior poll can't fool the predicate/assertions. The slot
+    // start/end HHMM are time-of-day dependent (the window can legitimately
+    // end at midnight = 0), so we assert the arm *signals* (enable_charge =
+    // 1, charge_target = 1, target_soc = 100) and that the slot registers
+    // were written, not their numeric values.
     const writes = await waitForWrites(
       peekModbusWrites,
       drainModbusWrites,
-      (w) => findWrite(w, HR_CHARGE_SLOT_1_START) !== undefined && findWrite(w, HR_ENABLE_CHARGE)?.value === 1,
+      (w) => lastWrite(w, HR_CHARGE_SLOT_1_START) !== undefined
+        && lastWrite(w, HR_ENABLE_CHARGE)?.value === 1,
     );
 
-    expect(findWrite(writes, HR_CHARGE_SLOT_1_START)?.value, 'HR 94 charge slot start').not.toBe(0);
-    expect(findWrite(writes, HR_CHARGE_SLOT_1_END)?.value, 'HR 95 charge slot end').not.toBe(0);
-    expect(findWrite(writes, HR_ENABLE_CHARGE)?.value).toBe(1);
-    expect(findWrite(writes, HR_ENABLE_CHARGE_TARGET)?.value).toBe(1);
-    expect(findWrite(writes, HR_CHARGE_TARGET_SOC)?.value).toBe(100);
+    expect(lastWrite(writes, HR_CHARGE_SLOT_1_START)).toBeDefined();
+    expect(lastWrite(writes, HR_CHARGE_SLOT_1_END)).toBeDefined();
+    expect(lastWrite(writes, HR_ENABLE_CHARGE)?.value).toBe(1);
+    expect(lastWrite(writes, HR_ENABLE_CHARGE_TARGET)?.value).toBe(1);
+    expect(lastWrite(writes, HR_CHARGE_TARGET_SOC)?.value).toBe(100);
   });
 
   test('expensive price + Full scope writes the native discharge schedule (HR 56/57/59)', async ({
@@ -210,6 +234,9 @@ test.describe('Agile slot-based mode (register-write verification)', () => {
     drainModbusWrites,
     peekModbusWrites,
   }) => {
+    // The poll loop must fetch prices, evaluate, then write 4 registers
+    // (~1.5s each). Allow headroom over the default 30s test timeout.
+    test.setTimeout(60_000);
     await clearWrites(drainModbusWrites);
     mock = await startMockOctopus(35.0); // above discharge threshold (30p)
 
@@ -220,19 +247,25 @@ test.describe('Agile slot-based mode (register-write verification)', () => {
       discharge_threshold: 30,
     });
 
-    // AgileDischargeSlot writes:
-    //   HR 56, HR 57 (slot times), HR 59 = 1 (enable_discharge), HR 27 = 0 (export mode)
+    // AgileDischargeSlot writes HR 56, 57 (slot times), HR 59 = 1 (enable),
+    // then HR 27 = 0 (export) LAST. Use last-write so a stale clear from a
+    // prior poll (which writes 59 = 0 / 27 = 1) can't fool the predicate or
+    // the assertions. The slot start/end HHMM are time-of-day dependent —
+    // the window can legitimately end at midnight (= 0) — so we assert the
+    // arm *signals* (enable_discharge = 1, export mode = 0) and that the slot
+    // registers were written, not their numeric values.
     const writes = await waitForWrites(
       peekModbusWrites,
       drainModbusWrites,
-      (w) => findWrite(w, HR_DISCHARGE_SLOT_1_START) !== undefined && findWrite(w, HR_ENABLE_DISCHARGE)?.value === 1,
+      (w) => lastWrite(w, HR_DISCHARGE_SLOT_1_START) !== undefined
+        && lastWrite(w, HR_BATTERY_POWER_MODE)?.value === 0,
     );
 
-    expect(findWrite(writes, HR_DISCHARGE_SLOT_1_START)?.value).not.toBe(0);
-    expect(findWrite(writes, HR_DISCHARGE_SLOT_1_END)?.value).not.toBe(0);
-    expect(findWrite(writes, HR_ENABLE_DISCHARGE)?.value).toBe(1);
+    expect(lastWrite(writes, HR_DISCHARGE_SLOT_1_START)).toBeDefined();
+    expect(lastWrite(writes, HR_DISCHARGE_SLOT_1_END)).toBeDefined();
+    expect(lastWrite(writes, HR_ENABLE_DISCHARGE)?.value).toBe(1);
     // Export mode (option β) — the inverter dumps to the grid at full power.
-    expect(findWrite(writes, HR_BATTERY_POWER_MODE)?.value).toBe(0);
+    expect(lastWrite(writes, HR_BATTERY_POWER_MODE)?.value).toBe(0);
   });
 
   test('Charge Only mode does NOT write discharge registers on an expensive price', async ({
@@ -299,6 +332,10 @@ test.describe('Agile slot-based mode (register-write verification)', () => {
     drainModbusWrites,
     peekModbusWrites,
   }) => {
+    // Arms a charge slot, drains, then disarms via scope=off. The disarm
+    // alone writes 8 registers (~12s at ~1.5s/write), on top of the arm +
+    // drain + price-fetch cycles, so the default 30s test timeout is too tight.
+    test.setTimeout(90_000);
     // First arm a charge slot.
     await clearWrites(drainModbusWrites);
     mock = await startMockOctopus(5.0);
@@ -322,14 +359,20 @@ test.describe('Agile slot-based mode (register-write verification)', () => {
     const writes = await waitForWrites(
       peekModbusWrites,
       drainModbusWrites,
-      (w) => findWrite(w, HR_CHARGE_SLOT_1_START)?.value === 0 && findWrite(w, HR_BATTERY_POWER_MODE)?.value === 1,
+      (w) => lastWrite(w, HR_CHARGE_SLOT_1_START) !== undefined
+        && lastWrite(w, HR_BATTERY_POWER_MODE) !== undefined,
     );
 
-    expect(findWrite(writes, HR_CHARGE_SLOT_1_START)?.value).toBe(0);
-    expect(findWrite(writes, HR_CHARGE_SLOT_1_END)?.value).toBe(0);
-    expect(findWrite(writes, HR_ENABLE_CHARGE)?.value).toBe(0);
-    expect(findWrite(writes, HR_ENABLE_CHARGE_TARGET)?.value).toBe(0);
-    expect(findWrite(writes, HR_DISCHARGE_SLOT_1_START)?.value).toBe(0);
+    // Use lastWrite rather than findWrite: the clear is a batch of 8 writes
+    // emitted over ~12s, and an in-flight residual from a prior test (e.g. the
+    // arm's non-zero HR 94) can otherwise appear as the *first* write to a
+    // register, making findWrite return the stale value. lastWrite gives us
+    // the clear's value (0 / 1) regardless of what came before.
+    expect(lastWrite(writes, HR_CHARGE_SLOT_1_START)?.value).toBe(0);
+    expect(lastWrite(writes, HR_CHARGE_SLOT_1_END)?.value).toBe(0);
+    expect(lastWrite(writes, HR_ENABLE_CHARGE)?.value).toBe(0);
+    expect(lastWrite(writes, HR_ENABLE_CHARGE_TARGET)?.value).toBe(0);
+    expect(lastWrite(writes, HR_DISCHARGE_SLOT_1_START)?.value).toBe(0);
     expect(findWrite(writes, HR_DISCHARGE_SLOT_1_END)?.value).toBe(0);
     expect(findWrite(writes, HR_ENABLE_DISCHARGE)?.value).toBe(0);
     expect(findWrite(writes, HR_BATTERY_POWER_MODE)?.value).toBe(1); // eco restored
@@ -398,13 +441,14 @@ test.describe('Agile Charging Mode dropdown (UI)', () => {
     await page.goto('/#/control');
     await expect(page.getByText(/Charging Mode/i).first()).toBeVisible({ timeout: 15_000 });
 
-    // The three Agile options must be present as selectable <option>s.
-    // We assert each is selectable without error — the combobox
-    // throws if the value doesn't exist.
+    // The Control page renders several <select>s (slot editors, rate
+    // pickers), so scope to the Charging Mode combobox — the one owning
+    // the Agile options.
+    const dropdown = page.getByRole('combobox').filter({ hasText: 'Agile' });
     for (const value of ['agile', 'agile_charge', 'agile_discharge']) {
-      await expect(page.getByRole('combobox').selectOption(value)).resolves.toBeDefined();
+      await expect(dropdown.selectOption(value)).resolves.toBeDefined();
     }
     // Land on Standard so the afterEach disarm isn't racing an armed Agile.
-    await page.getByRole('combobox').selectOption('standard');
+    await dropdown.selectOption('standard');
   });
 });
