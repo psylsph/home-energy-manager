@@ -17,6 +17,17 @@
  */
 
 import { test, expect } from './fixture.js';
+import { startBackend, stopBackend } from './backend.js';
+
+// Each spec file runs against a FRESH backend instance so backend-internal
+// state (detected device type, armed slots, battery-mode state machine) can't
+// leak between spec files. See e2e/backend.ts.
+test.beforeAll(async () => {
+  await startBackend();
+});
+test.afterAll(async () => {
+  await stopBackend();
+});
 import type { RegisterWrite } from './mock-modbus.js';
 
 // ---------------------------------------------------------------------------
@@ -295,10 +306,16 @@ test.describe('Force Discharge → Stop (mock Modbus)', () => {
     expect(findWrite(writes, 45)!.value).toBe(0);     // slot2 end
   });
 
-  test('Stop is one-shot — second call also returns 400', async ({
+  test('Stop is restart-aware — a second call re-applies the safe stop', async ({
     baseUrl,
     drainModbusWrites,
   }) => {
+    // The force-discharge stop handler is restart-aware (84f7f78): if the
+    // in-memory revert snapshot is gone it falls back to the live snapshot.
+    // stop1 consumes the revert; stop2 then falls back. The cached snapshot
+    // lags one poll cycle and still shows discharge active, so stop2
+    // re-applies the safe eco-mode writes instead of returning 400. (This is
+    // what makes Stop work even after an app restart.)
     await clearWrites(drainModbusWrites);
     const fdResp = await fetch(`${baseUrl}/api/control/force-discharge`, {
       method: 'POST',
@@ -312,7 +329,7 @@ test.describe('Force Discharge → Stop (mock Modbus)', () => {
 
     const stop2 = await fetch(`${baseUrl}/api/control/force-discharge/stop`, { method: 'POST' });
     const data = await stop2.json();
-    expect(data.ok).toBe(false);
+    expect(data.ok).toBe(true);
   });
 });
 
@@ -408,11 +425,13 @@ test.describe('Force Discharge auto-revert (issue #129)', () => {
     // this regardless of pre-state.
     expect(lastWriteAt(27)!.value).toBe(1);
 
-    // Stop should now return 400 (revert was consumed by auto-revert).
+    // After the auto-revert, an explicit stop is a no-op-ish success rather
+    // than a 400: the revert snapshot is gone, so the restart-aware fallback
+    // (84f7f78) inspects the live snapshot. The snapshot lags one poll, so it
+    // may still show discharge and the handler re-applies the safe stop.
     const stop = await fetch(`${baseUrl}/api/control/force-discharge/stop`, { method: 'POST' });
     const data = await stop.json();
-    expect(data.ok).toBe(false);
-    expect(data.error).toMatch(/no force discharge/i);
+    expect(data.ok).toBe(true);
   });
 
   test('Start without minutes: no auto-revert (slot runs until stopped)', async ({
