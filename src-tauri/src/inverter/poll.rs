@@ -644,15 +644,11 @@ fn next_gateway_detail_countdown(current: u8) -> u8 {
 /// 1. If `settings.host` is empty, sleep 5 s and retry.
 /// 2. Attempt to connect. On success, broadcast `Connected` and enter the
 ///    inner poll loop.
-/// 3. On each tick: call `read_all_standard`, decode into an
+/// 3. On each tick: call `read_all_with_extras`, decode into an
 ///    [`InverterSnapshot`], store it, and broadcast it.
 /// 4. If a poll or I/O error occurs, break out of the inner loop,
 ///    disconnect, broadcast `Reconnecting`, and attempt reconnection
 ///    with exponential back-off (5 s → 60 s cap).
-///
-/// If `settings.serial` is empty the dongle serial is auto-discovered from
-/// the first response frame header and persisted to settings - only the host
-/// IP is required to connect.
 pub async fn run_poll_loop(state: Arc<AppState>) {
     // Start the Telegram /status command poller
     crate::alerts::spawn_telegram_poller(state.clone());
@@ -719,8 +715,9 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
         // ---- Read current settings ----
         let settings = state.settings.lock().await.clone();
 
-        // Wait until a host is configured. Serial may be empty - it will be
-        // auto-discovered from the first response.
+        // Wait until a host is configured. Serial may be empty - the dongle
+        // accepts empty-serial requests, and the client does not auto-discover
+        // it (serial provisioning comes from persisted settings).
         if settings.host.is_empty() {
             tracing::debug!("Poll loop: waiting for host setting");
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -1366,30 +1363,6 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             );
                                         }
                                     }
-                                }
-
-                                // If the dongle serial was auto-discovered from the
-                                // response, persist it to settings so it survives restarts.
-                                if client.serial_was_discovered() {
-                                    let discovered = client.serial().to_string();
-                                    tracing::info!(serial = %discovered, "Persisting auto-discovered serial");
-                                    {
-                                        let mut ps = state.settings.lock().await;
-                                        ps.serial = discovered.clone();
-                                    }
-                                    let mut persist = crate::settings::Settings::load();
-                                    persist.host = settings.host.clone();
-                                    persist.port = settings.port;
-                                    persist.serial = discovered;
-                                    persist.poll_interval = settings.interval_secs;
-                                    persist.auto_connect = true;
-                                    if let Err(e) = persist.save() {
-                                        tracing::warn!("Failed to persist discovered serial: {e}");
-                                    }
-                                } else if client.serial_is_suspect() {
-                                    tracing::warn!(
-                                        "Auto-discovered serial is suspect (truncated frame) - keeping empty serial for all requests. If the connection fails, try setting the serial manually in Settings."
-                                    );
                                 }
 
                                 // Once the model is identified, freeze the device type in the
