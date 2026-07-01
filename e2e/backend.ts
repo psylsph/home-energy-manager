@@ -49,6 +49,26 @@ function killPort(port: number): void {
   }
 }
 
+async function stopBackendProcess(): Promise<void> {
+  if (backendProcess) {
+    console.log('[backend] Stopping...');
+    backendProcess.kill('SIGTERM');
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => {
+        backendProcess?.kill('SIGKILL');
+        resolve();
+      }, 5000);
+      backendProcess?.on('exit', () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+    backendProcess = null;
+  }
+  // Safety net in case the process handle was lost.
+  killPort(BACKEND_HTTP_PORT);
+}
+
 /** Restore the mock Modbus server to its Gen3 default snapshot + clear writes. */
 async function resetMock(): Promise<void> {
   try {
@@ -98,6 +118,14 @@ export async function startBackend(): Promise<void> {
   // Start each file from the Gen3 default register snapshot.
   await resetMock();
 
+  await launchBackendProcess();
+}
+
+async function launchBackendProcess(): Promise<void> {
+  if (!settingsFixture) {
+    throw new Error('settingsFixture is not initialised');
+  }
+
   console.log('[backend] Starting headless backend on port', BACKEND_HTTP_PORT);
   backendProcess = spawn(
     BINARY_PATH,
@@ -140,30 +168,27 @@ export async function startBackend(): Promise<void> {
       return Boolean(data.ok && typeof data.data?.soc === 'number');
     },
     'Backend first snapshot',
-    15_000,
+    30_000,
   );
   console.log('[backend] Ready');
 }
 
+/**
+ * Restart the backend process while preserving this spec file's settings dir
+ * and the mock Modbus register state. Used to simulate the app crashing while
+ * the inverter still has an Agile slot armed.
+ */
+export async function restartBackendPreservingState(): Promise<void> {
+  if (!settingsFixture) {
+    throw new Error('Cannot restart before startBackend()');
+  }
+  await stopBackendProcess();
+  await launchBackendProcess();
+}
+
 /** Stop the current spec file's backend and remove its temp config dir. */
 export async function stopBackend(): Promise<void> {
-  if (backendProcess) {
-    console.log('[backend] Stopping...');
-    backendProcess.kill('SIGTERM');
-    await new Promise<void>((resolve) => {
-      const timeout = setTimeout(() => {
-        backendProcess?.kill('SIGKILL');
-        resolve();
-      }, 5000);
-      backendProcess?.on('exit', () => {
-        clearTimeout(timeout);
-        resolve();
-      });
-    });
-    backendProcess = null;
-  }
-  // Safety net in case the process handle was lost.
-  killPort(BACKEND_HTTP_PORT);
+  await stopBackendProcess();
   if (settingsFixture) {
     await settingsFixture.cleanup();
     settingsFixture = null;

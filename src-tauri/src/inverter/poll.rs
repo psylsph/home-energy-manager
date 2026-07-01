@@ -2452,9 +2452,10 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     // charge/discharge schedule on every poll cycle. Only write
                                     // AgileClearActiveSlot when the scope is actually active
                                     // (mid-band price) so the user's manual schedule survives.
-                                    let skip_writes = matches!(action, AgileSlotAction::Defer)
-                                        || (scope == crate::settings::AgileScope::Off
-                                            && matches!(action, AgileSlotAction::Idle));
+                                    let skip_writes = !crate::inverter::state_machines::should_write_agile_action(
+                                        scope,
+                                        &action,
+                                    );
                                     let cmd = match &action {
                                         AgileSlotAction::Charge {
                                             start_hhmm,

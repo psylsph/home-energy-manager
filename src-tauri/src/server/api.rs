@@ -3532,6 +3532,108 @@ pub async fn set_cosy(
 // ---------------------------------------------------------------------------
 
 /// GET /api/agile — get Agile Octopus config.
+async fn queue_cached_agile_action_for_settings(
+    state: &Arc<AppState>,
+    settings: &crate::settings::Settings,
+) {
+    use crate::inverter::state_machines::{evaluate_agile_slot, should_write_agile_action};
+
+    let scope = crate::settings::agile_scope_for_settings(settings);
+    if scope == crate::settings::AgileScope::Off {
+        return;
+    }
+
+    let now_ts = chrono::Utc::now().timestamp();
+    let cache_snapshot = state.cached_agile_prices.lock().await.clone();
+    let price = cache_snapshot
+        .iter()
+        .find(|s| now_ts >= s.valid_from && now_ts < s.valid_to)
+        .map(|s| s.pence);
+    let Some(price) = price else {
+        // No current cached price — region/API-base changes deliberately clear
+        // the cache and rely on the poll loop to fetch fresh prices.
+        return;
+    };
+
+    let cosy_active = *state.cosy_active.lock().await;
+    let auto_winter_active = state
+        .latest_snapshot
+        .lock()
+        .await
+        .as_ref()
+        .map(|s| s.auto_winter_active)
+        .unwrap_or(false);
+    let action = evaluate_agile_slot(
+        scope,
+        Some(price),
+        settings.agile_charge_threshold,
+        settings.agile_discharge_threshold,
+        &cache_snapshot,
+        now_ts,
+        cosy_active,
+        auto_winter_active,
+        &chrono::Local,
+    );
+    if !should_write_agile_action(scope, &action) {
+        return;
+    }
+
+    let use_3ph = latest_device_type(state).await.uses_three_phase_schedule_slots();
+    let cmd = match action {
+        crate::inverter::state_machines::AgileSlotAction::Charge {
+            start_hhmm,
+            end_hhmm,
+            target_soc,
+        } => {
+            if use_3ph {
+                ControlCommand::ThreePhaseAgileChargeSlot {
+                    start_hhmm,
+                    end_hhmm,
+                    target_soc,
+                }
+            } else {
+                ControlCommand::AgileChargeSlot {
+                    start_hhmm,
+                    end_hhmm,
+                    target_soc,
+                }
+            }
+        }
+        crate::inverter::state_machines::AgileSlotAction::Discharge {
+            start_hhmm,
+            end_hhmm,
+        } => {
+            if use_3ph {
+                ControlCommand::ThreePhaseAgileDischargeSlot {
+                    start_hhmm,
+                    end_hhmm,
+                }
+            } else {
+                ControlCommand::AgileDischargeSlot {
+                    start_hhmm,
+                    end_hhmm,
+                }
+            }
+        }
+        crate::inverter::state_machines::AgileSlotAction::Idle => {
+            if use_3ph {
+                ControlCommand::ThreePhaseAgileClearActiveSlot
+            } else {
+                ControlCommand::AgileClearActiveSlot
+            }
+        }
+        crate::inverter::state_machines::AgileSlotAction::Defer => return,
+    };
+
+    if let Ok(writes) = cmd.encode() {
+        tracing::info!(
+            "Agile settings save queued current-slot action ({} register writes)",
+            writes.len()
+        );
+        queue_writes(state, writes).await;
+    }
+}
+
 pub async fn get_agile(State(_state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let settings = crate::settings::Settings::load();
     let scope = crate::settings::agile_scope_for_settings(&settings);
@@ -3561,7 +3663,7 @@ pub async fn get_agile(State(_state): State<Arc<AppState>>) -> (StatusCode, Json
 /// Both shapes are accepted on the same endpoint so existing frontends
 /// keep working unchanged. New frontends should send `scope` explicitly.
 pub async fn set_agile(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
     use crate::settings::AgileScope;
@@ -3570,21 +3672,46 @@ pub async fn set_agile(
     // New explicit `scope` field wins over legacy `enabled` when both are
     // provided. This keeps the wire API additive — old frontends sending
     // only `enabled` keep working, new frontends can use `scope`.
+    //
+    // Partial-update semantics: scope only changes when the caller explicitly
+    // asks for it. The old behaviour derived scope from the legacy `enabled`
+    // flag even when the caller was sending a body that didn't include
+    // `enabled` at all — which meant a threshold-only POST (no `scope`, no
+    // `enabled`) silently flipped scope to Off, wiping the user's mode. Now:
+    //   - `scope` present  → use it (explicit intent).
+    //   - `scope` absent, `enabled` present, no other Agile fields
+    //                        → legacy `{ enabled }` toggle (back-compat).
+    //   - `scope` absent, thresholds/region/api_base_url present (with or
+    //     without `enabled`) → partial update, leave scope unchanged.
+    //   - empty body       → leave scope unchanged (defensive; was Off).
     let explicit_scope = body
         .get("scope")
         .and_then(|v| v.as_str())
         .and_then(parse_agile_scope);
+    let has_agile_partial_fields = body.get("charge_threshold").is_some()
+        || body.get("discharge_threshold").is_some()
+        || body.get("region").is_some()
+        || body.get("api_base_url").is_some();
+    let legacy_scope_toggle = explicit_scope.is_none()
+        && body.get("enabled").is_some()
+        && !has_agile_partial_fields;
+    let scope_update_requested = explicit_scope.is_some() || legacy_scope_toggle;
     let new_scope = match explicit_scope {
         Some(scope) => scope,
         None => {
-            // Legacy: derive scope from the boolean `enabled` flag.
-            // `None` (key absent) defaults to `enabled = false` to match
-            // the pre-existing behaviour in this endpoint.
-            let enabled = body["enabled"].as_bool().unwrap_or(false);
-            if enabled {
-                AgileScope::Full
+            if legacy_scope_toggle {
+                // Legacy `{ enabled }` toggle — back-compat for frontends
+                // that haven't been updated to send `scope` explicitly.
+                if body["enabled"].as_bool().unwrap_or(false) {
+                    AgileScope::Full
+                } else {
+                    AgileScope::Off
+                }
             } else {
-                AgileScope::Off
+                // Partial update (or empty body) — leave the current scope
+                // alone so updating thresholds can't accidentally toggle
+                // the mode off.
+                crate::settings::agile_scope_for_settings(&app_settings)
             }
         }
     };
@@ -3600,8 +3727,22 @@ pub async fn set_agile(
     if let Some(r) = body["region"].as_str() {
         app_settings.agile_region = r.to_string();
     }
-    app_settings.agile_charge_threshold = body["charge_threshold"].as_f64().unwrap_or(10.0);
-    app_settings.agile_discharge_threshold = body["discharge_threshold"].as_f64().unwrap_or(30.0);
+    // Only update thresholds when the field is actually present in the body.
+    // Previously these were `body["..."].as_f64().unwrap_or(<default>)`, which
+    // silently reset a saved threshold to the default whenever the caller
+    // POSTed an Agile update without including the field (e.g. the mode
+    // "Apply" button on the Control page, which only sends `scope`). That
+    // meant hitting Apply on Standard silently wiped the user's discharge
+    // threshold back to 30p — and worse, made it look like the setting had
+    // been "reset" when in fact the front-end had just been sending
+    // incomplete bodies. With partial-update semantics, every Agile field is
+    // independent: callers send only what they want to change.
+    if let Some(v) = body["charge_threshold"].as_f64() {
+        app_settings.agile_charge_threshold = v;
+    }
+    if let Some(v) = body["discharge_threshold"].as_f64() {
+        app_settings.agile_discharge_threshold = v;
+    }
     // Optional Octopus base URL override — used by tests to point at a
     // local mock server, and by self-hosters to point at a mirror.
     if let Some(u) = body["api_base_url"].as_str() {
@@ -3611,6 +3752,50 @@ pub async fn set_agile(
     if let Err(e) = app_settings.save() {
         tracing::warn!("Failed to persist agile config: {e}");
         return server_error(&format!("Failed to save: {e}"));
+    }
+
+    let price_source_changed = body.get("region").is_some() || body.get("api_base_url").is_some();
+    if price_source_changed {
+        state.cached_agile_prices.lock().await.clear();
+        tracing::info!("Agile price cache cleared after region/API-base change");
+    } else {
+        // Threshold-only changes can change the live 30-minute decision using
+        // the currently cached price. Queue that action immediately so the
+        // inverter starts/stops now, not at app restart or the next normal poll.
+        queue_cached_agile_action_for_settings(&state, &app_settings).await;
+    }
+
+    // Wake the poll loop after any Agile settings save. Region/API-base
+    // changes also bump PollSettings.version so the inner loop exits and
+    // refetches prices for the new source; threshold-only changes are actioned
+    // above via queued register writes and only need a normal wake.
+    if price_source_changed {
+        let mut poll_settings = state.settings.lock().await;
+        poll_settings.version = poll_settings.version.wrapping_add(1);
+    }
+    state.write_notify.notify_one();
+
+    // When the user switches Agile off, clear any slot Agile had armed so the
+    // inverter stops acting on Agile's behalf — e.g. stops exporting to the
+    // grid on a discharge slot. Done here, on the explicit user action, so it
+    // fires deterministically once instead of relying on the poll loop (which
+    // deliberately leaves the slot alone while scope is Off to preserve a
+    // manual schedule the user might arm afterwards). AgileClearActiveSlot is
+    // idempotent, so re-POSTing "off" just re-writes the same clear.
+    if scope_update_requested && new_scope == AgileScope::Off {
+        let device_type = latest_device_type(&state).await;
+        let cmd = if device_type.uses_three_phase_schedule_slots() {
+            ControlCommand::ThreePhaseAgileClearActiveSlot
+        } else {
+            ControlCommand::AgileClearActiveSlot
+        };
+        if let Ok(writes) = cmd.encode() {
+            tracing::info!(
+                "Agile switched off — clearing its armed slot ({} register writes)",
+                writes.len()
+            );
+            queue_writes(&state, writes).await;
+        }
     }
 
     ok_response("Agile config updated")
@@ -9788,14 +9973,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_agile_with_legacy_enabled_still_works() {
-        // Backwards compat: existing frontends that still POST
-        // `{ enabled: true, ... }` keep working unchanged.
+    async fn set_agile_scope_off_clears_agile_armed_slot() {
+        // Switching Agile off must queue AgileClearActiveSlot writes so the
+        // inverter stops acting on Agile's behalf (e.g. stops exporting to the
+        // grid on a discharge slot) — issue: scope=off previously left the
+        // armed slot in place.
         crate::test_util::with_isolated_config_dir_async(async || {
-            let body = serde_json::json!({
-                "enabled": true,
-                "region": "A",
-            });
+            let state = test_state();
+            let body = serde_json::json!({ "scope": "off" });
+            let (status, _) = set_agile(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let writes: Vec<crate::inverter::encoder::RegisterWrite> = state
+                .pending_writes
+                .lock()
+                .await
+                .clone()
+                .into_iter()
+                .flatten()
+                .collect();
+            assert!(!writes.is_empty(), "scope=off must queue clear writes");
+            let addresses: Vec<u16> = writes.iter().map(|w| w.address).collect();
+            // AgileClearActiveSlot zeroes enable_charge (HR 96) +
+            // enable_discharge (HR 59) and restores eco mode (HR 27 = 1).
+            assert!(addresses.contains(&96), "clear must disable charge (HR 96)");
+            assert!(
+                addresses.contains(&59),
+                "clear must disable discharge (HR 59)"
+            );
+            assert!(
+                addresses.contains(&27),
+                "clear must restore eco mode (HR 27)"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_agile_with_legacy_enabled_still_works() {
+        // Backwards compat: a frontend that POSTs a bare `{ enabled: true }`
+        // (no other Agile fields) is treated as a legacy mode toggle and
+        // flips the scope to Full. This is the original back-compat path;
+        // see `set_agile_hybrid_enabled_and_partial_preserves_scope` for
+        // the hybrid case where `enabled` is sent alongside other fields.
+        crate::test_util::with_isolated_config_dir_async(async || {
+            let body = serde_json::json!({ "enabled": true });
             let (status, _) = set_agile(State(test_state()), Json(body)).await;
             assert_eq!(status, StatusCode::OK);
 
@@ -9823,6 +10045,244 @@ mod tests {
             let s = crate::settings::Settings::load();
             assert_eq!(s.agile_scope, AgileScope::DischargeOnly);
             assert!(s.agile_enabled); // mirror updated to match scope
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_agile_threshold_only_does_not_reset_thresholds_to_defaults() {
+        // The original bug: the Control page's mode "Apply" button POSTs
+        // `{ scope: "off" }` (no thresholds), and the old set_agile did
+        // `body["discharge_threshold"].as_f64().unwrap_or(30.0)` which
+        // silently reset the user's saved threshold to 30p every time
+        // they hit Apply. This test pins the fix: a scope-only POST must
+        // leave the saved thresholds exactly as they were.
+        crate::test_util::with_isolated_config_dir_async(async || {
+            // Seed: scope=Full with non-default thresholds.
+            let seed = serde_json::json!({
+                "scope": "full",
+                "region": "H",
+                "charge_threshold": 8.5,
+                "discharge_threshold": 25.0,
+            });
+            let _ = set_agile(State(test_state()), Json(seed)).await;
+            let seeded = crate::settings::Settings::load();
+            assert!((seeded.agile_charge_threshold - 8.5).abs() < 1e-9);
+            assert!((seeded.agile_discharge_threshold - 25.0).abs() < 1e-9);
+
+            // Now POST a scope-only update — the mode "Apply" shape.
+            let body = serde_json::json!({ "scope": "off" });
+            let (status, _) = set_agile(State(test_state()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let s = crate::settings::Settings::load();
+            assert_eq!(s.agile_scope, AgileScope::Off);
+            // The thresholds must NOT have been reset to the defaults (10 / 30).
+            assert!(
+                (s.agile_charge_threshold - 8.5).abs() < 1e-9,
+                "charge threshold was reset to {} instead of staying at 8.5",
+                s.agile_charge_threshold
+            );
+            assert!(
+                (s.agile_discharge_threshold - 25.0).abs() < 1e-9,
+                "discharge threshold was reset to {} instead of staying at 25.0",
+                s.agile_discharge_threshold
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_agile_threshold_only_preserves_scope() {
+        // The companion fix on the front-end side: the threshold "Save"
+        // button used to POST `enabled: true`, which the backend read as
+        // a legacy mode toggle and flipped the scope back to Full even
+        // when the user was adjusting a slider from the Standard page.
+        // A threshold-only POST (no `scope`, no `enabled`) must keep the
+        // current scope exactly as it is and only update the thresholds.
+        crate::test_util::with_isolated_config_dir_async(async || {
+            // Seed: scope=Full.
+            let seed = serde_json::json!({
+                "scope": "full",
+                "charge_threshold": 10.0,
+                "discharge_threshold": 30.0,
+            });
+            let _ = set_agile(State(test_state()), Json(seed)).await;
+
+            // Threshold-only PATCH.
+            let body = serde_json::json!({
+                "charge_threshold": 12.0,
+                "discharge_threshold": 28.0,
+            });
+            let (status, _) = set_agile(State(test_state()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let s = crate::settings::Settings::load();
+            assert_eq!(s.agile_scope, AgileScope::Full, "threshold-only POST must not change scope");
+            assert!((s.agile_charge_threshold - 12.0).abs() < 1e-9);
+            assert!((s.agile_discharge_threshold - 28.0).abs() < 1e-9);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_agile_threshold_only_queues_current_slot_action() {
+        // Threshold changes can change the current 30-minute decision from
+        // charge/discharge ↔ hold. When we already have the current price in
+        // cache, set_agile should queue the new action immediately rather than
+        // waiting for a full poll/restart. This reproduces the real bug:
+        // 35p was discharging at threshold 30, then becomes hold at threshold
+        // 40, so the save must queue AgileClearActiveSlot.
+        crate::test_util::with_isolated_config_dir_async(async || {
+            let state = test_state();
+            let notify = state.write_notify.clone();
+            let notified = notify.notified();
+
+            let seed = serde_json::json!({
+                "scope": "full",
+                "charge_threshold": 10.0,
+                "discharge_threshold": 30.0,
+            });
+            let (status, _) = set_agile(State(state.clone()), Json(seed)).await;
+            assert_eq!(status, StatusCode::OK);
+            state.pending_writes.lock().await.clear();
+
+            let now = chrono::Utc::now().timestamp();
+            state.cached_agile_prices.lock().await.push(
+                crate::inverter::state_machines::PriceSlot {
+                    pence: 35.0,
+                    valid_from: now - 60,
+                    valid_to: now + 1800,
+                },
+            );
+
+            let body = serde_json::json!({
+                "charge_threshold": 10.0,
+                "discharge_threshold": 40.0,
+            });
+            let (status, _) = set_agile(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            tokio::time::timeout(std::time::Duration::from_millis(50), notified)
+                .await
+                .expect("threshold-only save should wake the poll loop");
+
+            let writes: Vec<crate::inverter::encoder::RegisterWrite> = state
+                .pending_writes
+                .lock()
+                .await
+                .clone()
+                .into_iter()
+                .flatten()
+                .collect();
+            let addresses: Vec<u16> = writes.iter().map(|w| w.address).collect();
+            assert!(addresses.contains(&59), "clear should disable discharge (HR 59)");
+            assert!(addresses.contains(&56), "clear should zero discharge slot start (HR 56)");
+            assert!(addresses.contains(&57), "clear should zero discharge slot end (HR 57)");
+            assert!(addresses.contains(&27), "clear should restore eco mode (HR 27)");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_agile_region_change_clears_cached_prices() {
+        // Region/location changes must force a refetch. The price cache is
+        // not keyed by region; if we leave the old region's current slot in
+        // place, the poll loop sees a cache hit and keeps actioning the old
+        // region until restart.
+        crate::test_util::with_isolated_config_dir_async(async || {
+            let state = test_state();
+            state.cached_agile_prices.lock().await.push(
+                crate::inverter::state_machines::PriceSlot {
+                    pence: 35.0,
+                    valid_from: 0,
+                    valid_to: 1800,
+                },
+            );
+
+            let body = serde_json::json!({ "region": "A" });
+            let (status, _) = set_agile(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(
+                state.cached_agile_prices.lock().await.is_empty(),
+                "region change must clear cached prices so the next poll refetches"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_agile_api_base_change_clears_cached_prices() {
+        crate::test_util::with_isolated_config_dir_async(async || {
+            let state = test_state();
+            state.cached_agile_prices.lock().await.push(
+                crate::inverter::state_machines::PriceSlot {
+                    pence: 35.0,
+                    valid_from: 0,
+                    valid_to: 1800,
+                },
+            );
+
+            let body = serde_json::json!({ "api_base_url": "http://127.0.0.1:12345" });
+            let (status, _) = set_agile(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(
+                state.cached_agile_prices.lock().await.is_empty(),
+                "API-base change must clear cached prices so tests/self-hosted mirrors refetch"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_agile_hybrid_enabled_and_partial_preserves_scope() {
+        // Hybrid body: `enabled` sent alongside a partial field (region).
+        // Previously the backend treated the legacy `enabled` flag as
+        // authoritative even when partial fields were present, which
+        // meant a body like `{ enabled: true, region: "A" }` would flip
+        // scope to Full. Now a hybrid body is treated as a partial
+        // update: partial fields are applied, scope is preserved, and
+        // the legacy `enabled` flag is ignored for scope purposes.
+        crate::test_util::with_isolated_config_dir_async(async || {
+            // Fresh isolated dir → scope defaults to Off.
+            let body = serde_json::json!({
+                "enabled": true,
+                "region": "A",
+            });
+            let (status, _) = set_agile(State(test_state()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let s = crate::settings::Settings::load();
+            assert_eq!(
+                s.agile_scope,
+                AgileScope::Off,
+                "hybrid enabled+partial body must not flip scope to Full"
+            );
+            assert_eq!(s.agile_region, "A", "region should still be updated");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_agile_empty_body_preserves_scope() {
+        // Defensive: an empty POST body must not silently turn Agile off.
+        // The old code derived scope from the absent `enabled` flag
+        // (defaulting to false), so `POST /api/agile {}` flipped scope
+        // to Off. Now an empty body leaves scope alone.
+        crate::test_util::with_isolated_config_dir_async(async || {
+            // Seed: scope=Full.
+            let seed = serde_json::json!({ "scope": "full" });
+            let _ = set_agile(State(test_state()), Json(seed)).await;
+
+            let body = serde_json::json!({});
+            let (status, _) = set_agile(State(test_state()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let s = crate::settings::Settings::load();
+            assert_eq!(
+                s.agile_scope,
+                AgileScope::Full,
+                "empty POST must not change scope"
+            );
         })
         .await;
     }

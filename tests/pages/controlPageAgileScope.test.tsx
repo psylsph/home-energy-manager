@@ -658,4 +658,44 @@ describe('<ControlPage/> — Agile scope UI', () => {
       );
     });
   });
+
+  it('saves Agile thresholds without forcing Agile mode on', async () => {
+    useInverterStore.setState({
+      // Render the Agile threshold controls, then assert their Save is a
+      // pure threshold PATCH. The backend tests cover the Standard/off
+      // case; this page test pins the front-end payload so it cannot
+      // reintroduce `enabled: true` (legacy Full toggle) or a stale scope
+      // field and silently re-arm Agile.
+      snapshot: makeSnapshot({ agile_scope: 'full', agile_enabled: true }),
+    });
+    const { default: ControlPage } = await import('../../src/pages/ControlPage');
+    render(<ControlPage />);
+
+    const agileRoot = screen.getByText('Charge when below').closest('div.space-y-4')!;
+    const chargeSlider = within(
+      screen.getByText('Charge when below').parentElement!.parentElement!,
+    ).getByRole('slider');
+    const dischargeSlider = within(
+      screen.getByText('Discharge when above').parentElement!.parentElement!,
+    ).getByRole('slider');
+
+    fireEvent.change(chargeSlider, { target: { value: '11' } });
+    fireEvent.change(dischargeSlider, { target: { value: '29' } });
+    fireEvent.click(within(agileRoot).getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(apiPost).toHaveBeenCalledWith(
+        '/api/agile',
+        expect.objectContaining({
+          charge_threshold: 11,
+          discharge_threshold: 29,
+        }),
+      );
+    });
+    const agileCall = vi.mocked(apiPost).mock.calls.find(([path]) => path === '/api/agile');
+    expect(agileCall).toBeDefined();
+    const payload = agileCall?.[1] as Record<string, unknown>;
+    expect(payload).not.toHaveProperty('enabled');
+    expect(payload).not.toHaveProperty('scope');
+  });
 });
