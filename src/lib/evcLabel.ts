@@ -18,6 +18,11 @@
  * string handy — those callers still get the previous four-label behaviour
  * (Charging / Connected / Disconnected / Not Found).
  *
+ * Note: `connected` here is the charger's *network* reachability (we
+ * successfully read a Modbus frame from it), NOT the physical cable state.
+ * The cable (HR 2 `connection_status`) is surfaced separately under the EV
+ * node's kW value as "Cable In" / "No Cable".
+ *
  * | charging | chargingState | connected | everConnected | label          |
  * | -------- | ------------- | --------- | ------------- | -------------- |
  * | true     | *             | *         | *             | "Charging"     |

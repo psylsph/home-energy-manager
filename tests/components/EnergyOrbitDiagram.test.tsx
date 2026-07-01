@@ -621,6 +621,57 @@ describe('EnergyOrbitDiagram', () => {
       const labels = Array.from(container.querySelectorAll('text')).map((t) => t.textContent ?? '');
       expect(labels).toContain('Not Found');
     });
+
+    // --- issue #151: physical cable state (HR 2 `connection_status`) shown
+    // under the kW value as "Cable In" / "No Cable". Independent of the
+    // operational-status word, and only shown while we have a fresh frame.
+    it('renders "Cable In" under the EV kW value when a cable is plugged in (issue #151)', () => {
+      useInverterStore.setState({ showFlowStatusWords: true });
+      const { container } = render(
+        <EnergyOrbitDiagram
+          snapshot={makeSnapshot({ home_power: 7500 })}
+          showEvc
+          evcPower={7047}
+          evcCharging
+          evcConnected
+          evcCableConnected
+        />,
+      );
+      // The status word still reflects power flow; the cable lives on its
+      // own sub-label line.
+      const labels = Array.from(container.querySelectorAll('text')).map((t) => t.textContent ?? '');
+      expect(labels).toContain('Charging');
+      const sub = container.querySelector('[data-testid="ev-sublabel"]');
+      expect(sub).not.toBeNull();
+      expect(sub?.textContent).toBe('Cable In');
+    });
+
+    it('renders "No Cable" when reachable with the cable unplugged (issue #151)', () => {
+      // state=2 (Connected), conn=0 — charger reachable but no cable.
+      useInverterStore.setState({ showFlowStatusWords: true });
+      const { container } = render(
+        <EnergyOrbitDiagram
+          snapshot={makeSnapshot()}
+          showEvc
+          evcPower={0}
+          evcConnected
+          evcCableConnected={false}
+        />,
+      );
+      const sub = container.querySelector('[data-testid="ev-sublabel"]');
+      expect(sub).not.toBeNull();
+      expect(sub?.textContent).toBe('No Cable');
+    });
+
+    it('omits the cable sub-label for an unreachable / never-reached charger (issue #151)', () => {
+      // Never reached: evcConnected=false → the diagram can't honestly see
+      // the cable, so it asserts nothing.
+      useInverterStore.setState({ showFlowStatusWords: true });
+      const { container } = render(
+        <EnergyOrbitDiagram snapshot={makeSnapshot()} showEvc evcPower={0} />,
+      );
+      expect(container.querySelector('[data-testid="ev-sublabel"]')).toBeNull();
+    });
   });
 
   it('disables spoke animation under prefers-reduced-motion', () => {

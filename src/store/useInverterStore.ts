@@ -58,6 +58,16 @@ interface InverterState {
   /** EV Charger Modbus connection/data status. */
   evcConnected: boolean;
   /**
+   * EV Charger physical cable state from HR 2 (`connection_status`).
+   * Deliberately distinct from `evcConnected` (network reachability): a
+   * charger can be reachable on the network with no cable plugged in, or
+   * briefly offline while a cable is still attached. Surfaced under the EV
+   * node's kW value as "Cable In" / "No Cable". Only authoritative while
+   * `evcConnected` is true (a fresh frame) — it goes stale the moment the
+   * host stops responding.
+   */
+  evcCableConnected: boolean;
+  /**
    * True once we've received at least one valid EVC snapshot since the
    * page loaded. Lets the UI distinguish "charger was here, now offline"
    * (rendered as 'Disconnected') from "we've never successfully reached the
@@ -117,6 +127,7 @@ interface InverterState {
     charging: boolean,
     connected?: boolean,
     chargingState?: string,
+    cableConnected?: boolean,
   ) => void;
   /**
    * Mark the EVC as "we just successfully reached the host" without
@@ -307,6 +318,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   evcChargingState: '',
   evcCharging: false,
   evcConnected: false,
+  evcCableConnected: false,
   evcEverConnected: false,
   setSnapshot: (snapshot) => set({ snapshot }),
   clearSnapshot: () => set({ snapshot: null }),
@@ -390,12 +402,13 @@ export const useInverterStore = create<InverterState>((set) => ({
   },
   setHiddenPanels: (panels) => set({ hiddenPanels: panels }),
   setEvcHost: (host) => set({ evcHost: host }),
-  setEvcData: (power, charging, connected = true, chargingState = '') =>
+  setEvcData: (power, charging, connected = true, chargingState = '', cableConnected = false) =>
     set((prev) => ({
       evcPower: power,
       evcChargingState: chargingState,
       evcCharging: charging,
       evcConnected: connected,
+      evcCableConnected: cableConnected,
       // Latch: once we've ever seen a live EVC snapshot, stay latched.
       // SettingsPage calls `resetEvc()` when the user saves a new host so
       // the flag clears cleanly at that point.
@@ -412,6 +425,7 @@ export const useInverterStore = create<InverterState>((set) => ({
       evcChargingState: '',
       evcCharging: false,
       evcConnected: false,
+      evcCableConnected: false,
       evcEverConnected: false,
     }),
 }));

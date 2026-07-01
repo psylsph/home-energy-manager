@@ -663,6 +663,32 @@ describe('buildEnergyFlows — EV charger', () => {
     const vm2 = buildEnergyFlows(snap(), { evcPowerW: 0, showEvc: true, evcLabel: 'Not Found' });
     expect(vm2.nodes.find((n) => n.id === 'ev')!.unit).toBe('Not Found');
   });
+
+  it('carries the cable sub-label onto the EV node when provided (HR 2)', () => {
+    // Cable plugged in, idle → "Cable In" under the kW value, independent
+    // of the operational-status word (`unit`).
+    const vm = buildEnergyFlows(snap(), {
+      evcPowerW: 0,
+      showEvc: true,
+      evcLabel: 'Idle',
+      evcCableLabel: 'Cable In',
+    });
+    const ev = vm.nodes.find((n) => n.id === 'ev');
+    expect(ev!.unit).toBe('Idle');
+    expect(ev!.subLabel).toBe('Cable In');
+  });
+
+  it('omits the EV cable sub-label when undefined (charger offline / never reached)', () => {
+    // The diagram only passes a cable label while it has a fresh frame;
+    // the view-model must not invent one when the opt is absent.
+    const vm = buildEnergyFlows(snap(), {
+      evcPowerW: 0,
+      showEvc: true,
+      evcLabel: 'Not Found',
+    });
+    const ev = vm.nodes.find((n) => n.id === 'ev');
+    expect(ev!.subLabel).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------

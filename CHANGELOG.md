@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.55.0] - 2026-07-01
+
+### Added
+
+- **The EV charger node now shows whether a cable is plugged in.** Under the power value on the orbit diagram, the EV node reads "Cable In" or "No Cable" whenever the charger is reachable, so you can tell at a glance whether a car is physically connected even when it's not charging. It drops out of view when the charger can't be reached, so it never reports a cable state it can't actually see.
+
+### Fixed
+
+- **The EV charger status word no longer flips to "Disconnected" when the cable is unplugged.** Charger reachability and the physical cable are now tracked separately, so a reachable-but-idle charger with no cable shows "Connected" (with a "No Cable" line) instead of looking like the network has dropped.
+
 ## [0.54.0] - 2026-07-01
 
 ### Added
