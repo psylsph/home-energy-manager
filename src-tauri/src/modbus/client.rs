@@ -21,6 +21,13 @@ use super::registers::{RegisterBlock, STANDARD_POLL_BLOCKS, STANDARD_POLL_BLOCKS
 // ---------------------------------------------------------------------------
 
 /// Maximum response frame size we are willing to accept (bytes).
+///
+/// The largest single-read frame is a 60-register response:
+/// `HEADER_SIZE (26) + slave (1) + func (1) + byte-count (1) + 60×2 (120) +
+/// CRC (2) = 151 bytes`. 4096 is ~27× that — deliberately generous to
+/// absorb any unknown GivEnergy dongle frame-buffer quirks while still
+/// rejecting bogus length fields from false 0x5959 markers. If the
+/// framer's frame size ever grows, bump this in lockstep.
 const MAX_RESPONSE_SIZE: usize = 4096;
 
 // ---------------------------------------------------------------------------
@@ -323,6 +330,23 @@ impl ModbusClient {
     /// [`liveness_probe`]: ModbusClient::liveness_probe
     pub const LIVENESS_TIMEOUT: Duration = Duration::from_secs(3);
 
+    /// Delay inserted between retry attempts after a transient failure
+    /// (timeout, stale frame, mismatched write echo, Modbus exception 67 on
+    /// reads).
+    ///
+    /// This is the single global knob for every transient-failure retry gap:
+    /// `liveness_probe`, `read_registers_raw`, `read_blocks_resilient`, and
+    /// `write_register` all share it, so tuning the dongle recovery cadence is
+    /// a one-line change rather than chasing seven scattered magic numbers.
+    ///
+    /// Note the two things this is *not*. It is not the per-request wait —
+    /// that's [`IO_TIMEOUT`] (3 s), which dominates the actual retry cadence
+    /// (a "500 ms" retry really means `3 s IO_TIMEOUT + 500 ms gap`). And it
+    /// is not the exception-67 write gap, which is deliberately 2 s inside
+    /// `write_register` because the dongle explicitly flagged itself busy.
+    /// Pacing between *successful* reads is [`INTER_REQUEST_DELAY_DEFAULT`].
+    pub const RETRY_DELAY: Duration = Duration::from_millis(500);
+
     /// Cheap single-register read used to confirm the dongle is actually
     /// answering Modbus before committing to a full multi-block poll.
     ///
@@ -347,7 +371,7 @@ impl ModbusClient {
         let mut last_err: Option<ClientError> = None;
         for attempt in 0..PROBE_ATTEMPTS {
             if attempt > 0 {
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                tokio::time::sleep(Self::RETRY_DELAY).await;
             }
             let request =
                 framer::build_read_request(&self.serial, self.slave, RegisterType::Holding, 0, 1);
@@ -1079,7 +1103,7 @@ impl ModbusClient {
                         .last_activity_age()
                         .is_some_and(|age| age < Duration::from_secs(10));
                     if recently_active && attempt < Self::MAX_STALE_RETRIES {
-                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        tokio::time::sleep(Self::RETRY_DELAY).await;
                         continue;
                     }
                     return Err(ClientError::Timeout);
@@ -1087,7 +1111,7 @@ impl ModbusClient {
                 Err(ClientError::InvalidResponse(msg))
                     if attempt < Self::MAX_STALE_RETRIES && msg.contains("code 67") =>
                 {
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    tokio::time::sleep(Self::RETRY_DELAY).await;
                     continue;
                 }
                 err @ Err(ClientError::NotConnected) | err @ Err(ClientError::SendFailed(_)) => {
@@ -1098,7 +1122,7 @@ impl ModbusClient {
                     });
                 }
                 Err(_) if attempt < Self::MAX_STALE_RETRIES => {
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    tokio::time::sleep(Self::RETRY_DELAY).await;
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -1114,8 +1138,7 @@ impl ModbusClient {
     /// read response frame.
     fn response_register_metadata(decoded: &DecodedFrame) -> Result<(u16, u16), ClientError> {
         let payload = &decoded.payload;
-        const INVERTER_SERIAL_LEN: usize = 10;
-        const MIN_INNER_LEN: usize = INVERTER_SERIAL_LEN + 4;
+        const MIN_INNER_LEN: usize = framer::SERIAL_LEN + 4;
 
         if payload.len() < MIN_INNER_LEN {
             return Err(ClientError::InvalidResponse(format!(
@@ -1125,7 +1148,7 @@ impl ModbusClient {
             )));
         }
 
-        let inner = &payload[INVERTER_SERIAL_LEN..];
+        let inner = &payload[framer::SERIAL_LEN..];
         let resp_base_register = u16::from_be_bytes([inner[0], inner[1]]);
         let resp_register_count = u16::from_be_bytes([inner[2], inner[3]]);
         Ok((resp_base_register, resp_register_count))
@@ -1138,9 +1161,8 @@ impl ModbusClient {
     ) -> Result<Vec<u16>, ClientError> {
         let payload = &decoded.payload;
         let (_, resp_register_count) = Self::response_register_metadata(decoded)?;
-        const INVERTER_SERIAL_LEN: usize = 10;
 
-        let inner = &payload[INVERTER_SERIAL_LEN..];
+        let inner = &payload[framer::SERIAL_LEN..];
         let resp_register_count = resp_register_count as usize;
 
         let reg_data = &inner[4..];
@@ -1203,7 +1225,7 @@ impl ModbusClient {
                             tracing::debug!(
                                 "Write at {register} got mismatch (reg {resp_register}, val {resp_value}), retrying"
                             );
-                            tokio::time::sleep(Duration::from_millis(500)).await;
+                            tokio::time::sleep(Self::RETRY_DELAY).await;
                             continue;
                         }
                         return Err(ClientError::InvalidResponse(format!(
@@ -1235,7 +1257,7 @@ impl ModbusClient {
                         attempt + 1,
                         max_attempts
                     );
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    tokio::time::sleep(Self::RETRY_DELAY).await;
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -1297,7 +1319,7 @@ impl ModbusClient {
                         max = max_retries + 1,
                         "Retrying block read after timeout"
                     );
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    tokio::time::sleep(Self::RETRY_DELAY).await;
                 }
 
                 let t0 = std::time::Instant::now();
@@ -1430,6 +1452,21 @@ mod tests {
     #![allow(dead_code)]
     use super::super::framer::HEADER_SIZE;
     use super::*;
+
+    /// `RETRY_DELAY` is the single knob for every transient-failure retry
+    /// gap. Pin its value so a future tweak trips this test and forces the
+    /// author to re-read the rationale on the constant itself — mirrors the
+    /// `warmup_matches_steady_state_poll_retries` pin in `poll.rs`.
+    #[test]
+    fn retry_delay_default_is_pinned() {
+        assert_eq!(
+            ModbusClient::RETRY_DELAY,
+            Duration::from_millis(500),
+            "RETRY_DELAY changed — confirm the new value is sane across all \
+             seven retry sites (liveness_probe, read_registers_raw x3, \
+             write_register x2, read_blocks_resilient) and update this pin"
+        );
+    }
 
     // -----------------------------------------------------------------------
     // Parsing register data from raw payload bytes
@@ -2100,6 +2137,140 @@ mod tests {
         client.connect().await.unwrap();
 
         (port, server_handle, client)
+    }
+
+    // -------------------------------------------------------------------
+    // End-to-end pipeline (Gap 2, Layer B): real wire-format TCP responses
+    // → read_all_with_extras → decode_snapshot → sanitize_snapshot.
+    //
+    // Every other test in this module stops at `read_blocks_resilient`
+    // returning `Vec<BlockRead>`, and the decoder tests synthesize BlockRead
+    // directly. Nothing connects the framer/MBAP/CRC transport to decode to
+    // sanitize. These do — over a scripted multi-block server sequence — and
+    // catch composition bugs (wire-format mismatch, base-register pairing,
+    // sign-convention loss) that per-layer tests cannot.
+    // -------------------------------------------------------------------
+
+    /// Build the input_0_59 (60-register) response with realistic grid-connected
+    /// baseline values plus the supplied per-string solar totals (IR(17) tenths)
+    /// and pv1 power (IR(18) W). Holding blocks are zero (decode to defaults).
+    fn input_response_0_59(pv1_today_tenths: u16, pv1_power_w: u16) -> MockResponse {
+        let mut data = vec![0u16; 60];
+        data[5] = 2300; // 230.0 V grid
+        data[13] = 5000; // 50.0 Hz
+        data[17] = pv1_today_tenths; // today_solar source (tenths)
+        data[18] = pv1_power_w; // p_pv1 (W)
+        data[59] = 50; // soc 50%
+        MockResponse::ReadResponse {
+            slave: 0x11,
+            function: 0x04,
+            base: 0,
+            data,
+        }
+    }
+
+    fn holding_response(function: u8, base: u16, count: u16) -> MockResponse {
+        MockResponse::ReadResponse {
+            slave: 0x11,
+            function,
+            base,
+            data: vec![0u16; count as usize],
+        }
+    }
+
+    /// Two full poll cycles over the wire: a baseline (today_solar 5.0 kWh)
+    /// followed by a spiked cycle (80.0 kWh). The spike must be held at the
+    /// baseline by the sanitizer, proving TCP → decode → sanitize composition.
+    #[tokio::test]
+    async fn end_to_end_wire_decode_then_sanitize_holds_rate_spike() {
+        use crate::inverter::decoder::decode_snapshot;
+        use crate::inverter::sanitizer::{
+            sanitize_snapshot, ConsecutiveSuspectCounts, DeltaCorrectionCounts,
+            RateReleaseCounts,
+        };
+
+        // Cycle 1 (baseline): today_solar 5.0 kWh, 3 kW PV.
+        let baseline = vec![
+            input_response_0_59(50, 3000), // IR(17)=50 tenths → 5.0 kWh
+            holding_response(0x03, 0, 60),
+            holding_response(0x03, 60, 60),
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 180,
+                data: vec![0u16; 4],
+            },
+        ];
+        // Cycle 2 (spike): today_solar 80.0 kWh, same PV power.
+        let spike = vec![
+            input_response_0_59(800, 3000), // IR(17)=800 tenths → 80.0 kWh
+            holding_response(0x03, 0, 60),
+            holding_response(0x03, 60, 60),
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 180,
+                data: vec![0u16; 4],
+            },
+        ];
+
+        let mut all = baseline;
+        all.extend(spike);
+        let (_port, _server, mut client) =
+            setup_client_with_server(all).await;
+
+        // --- Cycle 1: decode the baseline over the wire ---
+        let blocks1 = client
+            .read_all_with_extras(None, GatewayPollScope::Fast)
+            .await
+            .unwrap();
+        assert_eq!(blocks1.len(), 4, "all four standard blocks read");
+        let prev = decode_snapshot(&blocks1);
+        assert_eq!(prev.soc, 50, "soc decodes from IR(59) over the wire");
+        assert_eq!(
+            prev.solar_power, 3000,
+            "solar_power decodes from IR(18) over the wire"
+        );
+        assert_eq!(
+            prev.today_solar_kwh, 5.0,
+            "today_solar decodes from IR(17) over the wire"
+        );
+
+        // --- Cycle 2: decode the spike, then sanitize against cycle 1 ---
+        let blocks2 = client
+            .read_all_with_extras(None, GatewayPollScope::Fast)
+            .await
+            .unwrap();
+        let mut snap = decode_snapshot(&blocks2);
+        assert_eq!(
+            snap.today_solar_kwh, 80.0,
+            "fixture: the spiked cycle must decode to 80.0"
+        );
+
+        let mut pending_mode = None;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+        let mut rate_release = RateReleaseCounts::default();
+        let sanitized = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+            &mut rate_release,
+        );
+
+        assert!(
+            sanitized,
+            "a 5 → 80 kWh single-poll jump (read over the wire) must trip the delta check"
+        );
+        assert_eq!(
+            snap.today_solar_kwh, 5.0,
+            "the wire-decoded spike must be held at the previous value"
+        );
+        // `_server` detaches when the test ends; awaiting it would block on
+        // the mock's 5 s read-timeout after the client drops.
     }
 
     #[tokio::test]

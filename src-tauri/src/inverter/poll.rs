@@ -62,6 +62,7 @@ use crate::history::HistoryDb;
 use crate::inverter::decoder::decode_snapshot;
 use crate::inverter::encoder::{ControlCommand, RegisterWrite};
 use crate::inverter::model::{BatteryMode, DeviceType, InverterSnapshot};
+use crate::inverter::reconnect::ReconnectController;
 use crate::inverter::sanitizer::{
     carry_forward_battery_modules_with, carry_forward_optional_block_values,
     derive_battery_fields_from_bms, is_block_suspicious, sanitize_snapshot, validate_battery_bms,
@@ -545,58 +546,9 @@ fn should_probe_hv_stacks(known_device_type: Option<DeviceType>, hv_probe_done: 
 // Main poll loop
 // ---------------------------------------------------------------------------
 
-/// Reconnect delay for sessions that connected but produced no successful
-/// Modbus reads ("zombie dongle"). Escalates with consecutive dead sessions
-/// so a chronically hung dongle is given time to self-recover instead of
-/// being hammered in a tight reconnect loop. TCP `connect()` succeeds for a
-/// zombie, so the normal connect-failure back-off never kicks in — this
-/// function provides the escalation that path is missing.
-///
-/// Schedule: a small flat ramp capped low (0–1 → 5 s, 2+ → 10 s).
-///
-/// GivTCP reconnects on a dead/zombie session with a flat ~2 s pause
-/// (`read.py`: `close()` → `sleep(2)` → `connect()`) and only escalates to a
-/// full container restart after 10 *hard* connect failures (which HEM maps
-/// to auto-discovery instead). The previous schedule here (5 → 30 → 60 →
-/// 120 → 300 → 600 s) parked a self-healing dongle behind a 10-minute wall
-/// after a handful of zombie sessions — during which the dongle typically
-/// recovers on its own. A small ramp that caps low gives a genuinely-wedged
-/// dongle modest breathing room without stranding a recovering one for
-/// minutes. (The separate `backoff` exponential only bites on actual
-/// `connect()` failures, where it is appropriate to back off harder.)
-fn dead_session_backoff(consecutive_dead_sessions: u32) -> Duration {
-    match consecutive_dead_sessions {
-        0 | 1 => Duration::from_secs(5),
-        _ => Duration::from_secs(10),
-    }
-}
-
-/// Flap back-off: a third reconnect-delay gate, calibrated for a *flapping*
-/// dongle rather than a chronically-dead one.
-///
-/// Both [`dead_session_backoff`] (reset on a single successful poll) and the
-/// `backoff` exponential (reset on a successful TCP `connect()`) are easy to
-/// reset during a flap — a dongle that answers a read or two every minute or
-/// two, keeping the UI pinned to "Reconnecting" for a quarter hour while HEM
-/// storms it with reconnects every few seconds. Neither timer measures the
-/// thing that actually matters during a flap: *has the frontend received
-/// fresh data recently?*
-///
-/// This gate does. The poll loop tracks `last_good_data_at` (updated only on a
-/// fully-delivered, sanitized snapshot) and engages an elevated reconnect
-/// delay once the gap exceeds [`FLAP_THRESHOLD_SECS`]. The engaged state is
-/// **sticky**: it stands down only after [`FLAP_STANDDOWN_POLLS`] consecutive
-/// good polls, so a single isolated success mid-flap can't yo-yo the cadence
-/// back to fast. Entry is fast (one data-starved interval); exit deliberately
-/// requires proof of sustained recovery.
-///
-/// The elevated delay is deliberately above the `dead_session_backoff` cap
-/// (10 s) and the `backoff` floor (5 s) so that once engaged it actually wins
-/// the `Duration::max` selection — the other gates stay in place for the
-/// genuinely-chronic cases they handle.
-const FLAP_THRESHOLD_SECS: u64 = 120;
-const FLAP_ELEVATED_DELAY: Duration = Duration::from_secs(30);
-const FLAP_STANDDOWN_POLLS: u8 = 3;
+// Reconnect / back-off helpers (dead_session_backoff, flap_should_engage,
+// flap_backoff) and the FLAP_* constants live in `reconnect.rs` alongside
+// `ReconnectController`.
 
 /// Gateway detail/config blocks change slowly and have been implicated in
 /// overnight dongle stalls. Poll live Gateway telemetry every cycle, but only
@@ -604,22 +556,6 @@ const FLAP_STANDDOWN_POLLS: u8 = 3;
 /// every N successful Gateway polls. With the default 60 s refresh interval
 /// this is roughly every 10 minutes.
 const GATEWAY_DETAIL_POLL_EVERY: u8 = 10;
-
-/// Whether the flap gate should engage given the time (in seconds) since the
-/// last fully-delivered good snapshot.
-fn flap_should_engage(secs_since_good_data: u64) -> bool {
-    secs_since_good_data >= FLAP_THRESHOLD_SECS
-}
-
-/// Reconnect delay contributed by the flap gate. Zero when disengaged so the
-/// other back-off gates decide the delay; [`FLAP_ELEVATED_DELAY`] when engaged.
-fn flap_backoff(engaged: bool) -> Duration {
-    if engaged {
-        FLAP_ELEVATED_DELAY
-    } else {
-        Duration::ZERO
-    }
-}
 
 fn gateway_poll_scope(device_type: Option<DeviceType>, detail_countdown: u8) -> GatewayPollScope {
     if device_type == Some(DeviceType::Gateway) && detail_countdown == 0 {
@@ -653,32 +589,19 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
     // Start the Telegram /status command poller
     crate::alerts::spawn_telegram_poller(state.clone());
 
-    let mut backoff = Duration::from_secs(5);
-    // Track consecutive connection failures to trigger auto-discovery.
+    // Connect-failure counter for the auto-discovery subsystem (separate
+    // from ReconnectController, which owns the dead-session/flap gates).
     let mut consecutive_connect_failures: u32 = 0;
-    // Consecutive sessions that connected (TCP up) but produced ZERO
-    // successful Modbus reads — the "zombie dongle" signature. Each one
-    // escalates the reconnect delay via `dead_session_backoff()` so a
-    // chronically hung dongle isn't hammered every few seconds. Reset to 0
-    // the moment a session yields at least one good poll.
-    let mut consecutive_dead_sessions: u32 = 0;
-    // Flap-gate state — see `flap_backoff` / `flap_should_engage`. Declared
-    // in the outer (reconnect) scope so it spans sessions: a flap is a
-    // multi-session phenomenon, and these must not reset on a fresh TCP
-    // connect or a single good poll.
-    let mut last_good_data_at: Instant = Instant::now();
-    let mut flap_engaged: bool = false;
-    let mut consecutive_good_polls: u8 = 0;
-    // Snapshot of `state.reconnect_request` at the start of the current
-    // outer-loop iteration. Compared at the top of every iteration so a
-    // manual `POST /api/reconnect` (which increments the counter) resets
-    // the back-off state below. Without this, a user click during a long
-    // zombie-dongle back-off sleep would only trigger one extra attempt
-    // before the loop fell asleep again for another 10 minutes.
-    let mut last_seen_reconnect_request: u32 = state
-        .reconnect_request
-        .load(std::sync::atomic::Ordering::Relaxed);
-    // When we last ran LAN discovery (to avoid scanning too often).
+    // Reconnect / back-off state machine: sustained-timeout disconnect,
+    // dead-session escalation, flap gate, and the connect-failure back-off.
+    // Extracted into ReconnectController so the multi-session transitions
+    // are unit-testable as a driven state machine.
+    let mut reconnect = ReconnectController::new(
+        Instant::now(),
+        state
+            .reconnect_request
+            .load(std::sync::atomic::Ordering::Relaxed),
+    );
     let mut last_discovery_time: Option<Instant> = None;
     // After this many consecutive failures, trigger auto-discovery.
     const DISCOVERY_AFTER_FAILURES: u32 = 5;
@@ -695,22 +618,9 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
         let current_reconnect_request = state
             .reconnect_request
             .load(std::sync::atomic::Ordering::Relaxed);
-        if current_reconnect_request != last_seen_reconnect_request {
-            tracing::info!(
-                from = last_seen_reconnect_request,
-                to = current_reconnect_request,
-                "Manual reconnect requested — resetting back-off state"
-            );
-            backoff = Duration::from_secs(5);
-            consecutive_dead_sessions = 0;
-            // A manual "retry now" should actually retry fast — clear the
-            // flap gate too, and restart the data-starvation clock so we
-            // don't immediately re-engage on the next failed session.
-            flap_engaged = false;
-            consecutive_good_polls = 0;
-            last_good_data_at = Instant::now();
-            last_seen_reconnect_request = current_reconnect_request;
-        }
+        // A manual `POST /api/reconnect` bumps the counter; the controller
+        // resets every back-off gate to the fast-retry state on a change.
+        reconnect.check_manual_reconnect(current_reconnect_request, Instant::now());
 
         // ---- Read current settings ----
         let settings = state.settings.lock().await.clone();
@@ -726,11 +636,6 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 
         // ---- Create client and connect ----
         let mut client = ModbusClient::new(&settings.host, settings.port, &settings.serial);
-
-        // Tracks whether this session produced at least one successful
-        // Modbus read. Drives `consecutive_dead_sessions` (zombie-dongle
-        // back-off escalation) at disconnect time.
-        let mut session_had_successful_read = false;
 
         match client.connect().await {
             Ok(()) => {
@@ -860,8 +765,11 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     *latest = None;
                 }
 
-                // Reset back-off on successful connection.
-                backoff = Duration::from_secs(5);
+                // New session: reset the connect back-off to the floor and
+                // clear the per-session sustained-timeout streak + the
+                // productive-read flag. Dead-session and flap state persist
+                // across sessions (see ReconnectController).
+                reconnect.note_session_start();
 
                 // Track consecutive poll failures within this connection.
                 //
@@ -871,37 +779,17 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // the fast live-telemetry subset until the counter rolls over.
                 let mut gateway_detail_poll_countdown: u8 = 0;
 
-                // Two independent counters drive reconnect-after-storms here:
+                // `consecutive_suspicious` counts cycles where a block matched
+                // the dongle memory-leak fingerprint — the dongle's TCP stack
+                // is fine but its register values look like its own memory
+                // buffer. After MAX_SUSPICIOUS_CYCLES we assume the dongle's
+                // app processor is stuck and a fresh TCP session will reset it.
+                // (The sustained-timeout disconnect counter that used to live
+                // here now lives in ReconnectController.)
                 //
-                // * `consecutive_suspicious` (incremented in the
-                //   block-fingerprint check) — the dongle's TCP stack is fine
-                //   but its register values look like its own memory buffer.
-                //   After MAX_SUSPICIOUS_CYCLES we assume the dongle's app
-                //   processor is stuck in a bad state and a fresh TCP session
-                //   will reset it.
-                //
-                // * `consecutive_timeouts` (incremented on a transient
-                //   `ClientError::Timeout` from `read_all_with_extras`) — the
-                //   socket is open but the dongle never answers a single
-                //   register within the 3 s `IO_TIMEOUT`. Without this
-                //   counter the poll loop would hammer a wedged dongle for
-                //   minutes until the OS finally noticed and sent an RST
-                //   (see the 8m 21s log storm that motivated the change).
-                //   Per-block retry inside `read_blocks_resilient` already
-                //   handles *occasional* slow responses; this counter only
-                //   fires when *every* block read in a cycle fails.
-                //
-                // Both counters reset to 0 on any successful poll.
+                // Resets to 0 on any successful poll.
                 let mut consecutive_suspicious: u8 = 0;
-                let mut consecutive_timeouts: u8 = 0;
                 const MAX_SUSPICIOUS_CYCLES: u8 = 6;
-                // 3 cycles × ~12 s each (3 s × 3 attempts per block + inter-
-                // request delay + the post-poll 2 s sleep) ≈ 36 s of
-                // sustained silence before we give up and reconnect. Long
-                // enough to ride out a brief dongle hiccup, short enough
-                // to recover well before the TCP RST that would otherwise
-                // take 5–10 minutes.
-                const MAX_CONSECUTIVE_TIMEOUTS: u8 = 3;
 
                 // Grace period: for the first few reads after connect, skip
                 // delta sanitization. The dongle can return plausible-but-wrong
@@ -2905,27 +2793,12 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     match poll_ok {
                         true => {
                             consecutive_suspicious = 0;
-                            consecutive_timeouts = 0;
-                            session_had_successful_read = true;
-                            // Fresh, sanitized data reached the UI/history —
-                            // restart the flap gate's data-starvation clock.
-                            // The stand-down count only advances while a flap
-                            // is engaged, and demands a sustained run of good
-                            // polls: a single isolated success mid-flap must
-                            // not yo-yo the reconnect cadence back to fast.
-                            last_good_data_at = Instant::now();
-                            if flap_engaged {
-                                consecutive_good_polls += 1;
-                                if consecutive_good_polls >= FLAP_STANDDOWN_POLLS {
-                                    flap_engaged = false;
-                                    consecutive_good_polls = 0;
-                                    tracing::info!(
-                                        polls = FLAP_STANDDOWN_POLLS,
-                                        "Dongle recovered — standing down flap back-off, resuming normal reconnect cadence"
-                                    );
-                                }
-                            }
-
+                            // Fresh, sanitized data reached the UI/history.
+                            // Resets the sustained-timeout streak, marks the
+                            // session productive, restarts the flap
+                            // data-starvation clock, and — if a flap is
+                            // engaged — advances the stand-down count.
+                            reconnect.note_good_poll(Instant::now());
                             // Tick the meter retry cadence counter.
                             if meter_probe_done
                                 && meter_retry_count > 0
@@ -2952,28 +2825,21 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                             }
                         }
                         false => {
-                            // A failed poll breaks the sustained-recovery
-                            // streak the flap stand-down counts.
-                            consecutive_good_polls = 0;
+                            // A failed poll breaks the flap recovery streak.
+                            reconnect.note_poll_failed();
                             if connection_lost {
                                 break;
                             }
-                            // Transient error — read_blocks_resilient already
-                            // retried the failed block. Increment the
-                            // sustained-timeout counter so a wedged dongle
-                            // triggers a fresh TCP session instead of being
-                            // hammered until the OS sends an RST.
-                            consecutive_timeouts += 1;
-                            if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS {
-                                tracing::warn!(
-                                    consecutive = consecutive_timeouts,
-                                    max = MAX_CONSECUTIVE_TIMEOUTS,
-                                    "Sustained Modbus timeouts - disconnecting to force reconnect"
-                                );
+                            // Transient timeout — read_blocks_resilient already
+                            // retried the failed block. Count it and, once the
+                            // sustained-timeout threshold is reached (handled by
+                            // the controller), disconnect to force a reconnect
+                            // instead of hammering a wedged dongle until the OS
+                            // sends an RST.
+                            if reconnect.note_transient_timeout() {
                                 break;
                             }
-                            // Sleep briefly then continue to the next poll
-                            // cycle.
+                            // Sleep briefly then continue to the next poll cycle.
                             tracing::debug!(
                                 "Poll read failed (transient) — sleeping before next cycle"
                             );
@@ -3050,15 +2916,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // never produced a successful Modbus read (zombie dongle, or
                 // warmup/liveness failure) increments the counter; a productive
                 // session resets it so the next reconnect uses the default delay.
-                if session_had_successful_read {
-                    consecutive_dead_sessions = 0;
-                } else {
-                    consecutive_dead_sessions = consecutive_dead_sessions.saturating_add(1);
-                    tracing::warn!(
-                        consecutive_dead_sessions,
-                        "Session produced no successful Modbus reads - escalating reconnect back-off"
-                    );
-                }
+                reconnect.note_session_end();
 
                 // Clear the latest snapshot so the next connection starts fresh.
                 // Without this, stale/corrupted values from the old session
@@ -3176,7 +3034,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                             // Reset counters so we try the new host immediately
                             // with a fresh TCP connect, not a stale backoff.
                             consecutive_connect_failures = 0;
-                            backoff = Duration::from_secs(5);
+                            reconnect.reset_connect_backoff();
                         }
                         n => {
                             let alts: Vec<_> = candidates
@@ -3206,25 +3064,10 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
         // disengages; stand-down happens in the poll loop on a sustained run
         // of good polls). Sticky so an isolated success mid-flap doesn't
         // reset it.
-        let secs_since_good_data = last_good_data_at.elapsed().as_secs();
-        if !flap_engaged && flap_should_engage(secs_since_good_data) {
-            flap_engaged = true;
-            consecutive_good_polls = 0;
-            tracing::warn!(
-                secs_since_good_data,
-                threshold = FLAP_THRESHOLD_SECS,
-                "Dongle flap detected — no good data for {secs_since_good_data}s, slowing reconnect cadence"
-            );
-        }
-        let delay = backoff
-            .max(dead_session_backoff(consecutive_dead_sessions))
-            .max(flap_backoff(flap_engaged));
-        tracing::debug!(
-            "Retrying connection in {:?} (dead_sessions={}, flap_engaged={})",
-            delay,
-            consecutive_dead_sessions,
-            flap_engaged
-        );
+        // Recompute the flap gate and the reconnect delay (the max of the
+        // connect-failure, dead-session, and flap gates). Engages the flap
+        // (sticky) if the frontend has been data-starved past the threshold.
+        let delay = reconnect.reconnect_delay(Instant::now());
         let sleep_start = tokio::time::Instant::now();
         let sleep_deadline = sleep_start + delay;
         loop {
@@ -3248,12 +3091,12 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
             let cur_req = state
                 .reconnect_request
                 .load(std::sync::atomic::Ordering::Relaxed);
-            if cur_req != last_seen_reconnect_request {
+            if cur_req != reconnect.last_seen_reconnect_request() {
                 tracing::info!("Manual reconnect requested during back-off — waking early");
                 break;
             }
         }
-        backoff = (backoff * 2).min(Duration::from_secs(60));
+        reconnect.escalate_connect_backoff();
     }
 }
 
@@ -3273,45 +3116,6 @@ mod tests {
         assert!(s.serial.is_empty());
         assert_eq!(s.port, 8899);
         assert_eq!(s.interval_secs, 60);
-    }
-
-    #[test]
-    fn dead_session_backoff_schedule() {
-        // Flat, low cap — mirrors GivTCP's ~2 s reconnect on a zombie session
-        // (close → sleep(2) → connect). A self-healing dongle gets another
-        // shot within seconds instead of being parked behind a 10-minute wall.
-        assert_eq!(dead_session_backoff(0), Duration::from_secs(5));
-        assert_eq!(dead_session_backoff(1), Duration::from_secs(5));
-        // 2+ caps at 10 s.
-        assert_eq!(dead_session_backoff(2), Duration::from_secs(10));
-        assert_eq!(dead_session_backoff(3), Duration::from_secs(10));
-        assert_eq!(dead_session_backoff(5), Duration::from_secs(10));
-        assert_eq!(dead_session_backoff(100), Duration::from_secs(10));
-    }
-
-    #[test]
-    fn flap_should_engage_at_threshold() {
-        // Below the threshold the gate stays disengaged — normal operation,
-        // the existing back-off gates decide the delay.
-        assert!(!flap_should_engage(0));
-        assert!(!flap_should_engage(FLAP_THRESHOLD_SECS - 1));
-        // At and above the threshold it engages.
-        assert!(flap_should_engage(FLAP_THRESHOLD_SECS));
-        assert!(flap_should_engage(FLAP_THRESHOLD_SECS + 1));
-        assert!(flap_should_engage(u64::MAX));
-    }
-
-    #[test]
-    fn flap_backoff_delay_schedule() {
-        // Disengaged contributes nothing — the other gates win the `max`.
-        assert_eq!(flap_backoff(false), Duration::ZERO);
-        // Engaged contributes a delay above the dead-session cap (10 s) and
-        // the connect-failure floor (5 s) so it actually wins the `max`
-        // selection rather than being shadowed by the other gates.
-        let engaged = flap_backoff(true);
-        assert_eq!(engaged, FLAP_ELEVATED_DELAY);
-        assert!(engaged > Duration::from_secs(10));
-        assert!(engaged > Duration::from_secs(5));
     }
 
     #[test]
@@ -3348,37 +3152,6 @@ mod tests {
         assert_eq!(detail_indices, vec![0, 10, 20]);
     }
 
-    /// The flap gate's design contract. The integer-constant checks run at
-    /// compile time (mirrors `sustained_timeout_budget_is_bounded`) so a tweak
-    /// to any constant trips the build immediately; the `Duration` checks run
-    /// at runtime since `Duration` comparisons aren't const-stable across all
-    /// the operations used here. The stand-down must demand a genuine run of
-    /// success (not a single poll) to avoid yo-yoing, and the threshold must
-    /// be long enough that a healthy (if slow) poll interval never trips it.
-    #[test]
-    fn flap_gate_contract_holds() {
-        const _: () = {
-            assert!(
-                FLAP_STANDDOWN_POLLS >= 2,
-                "stand-down must require a sustained run, not a single poll",
-            );
-            assert!(
-                FLAP_THRESHOLD_SECS > 60,
-                "threshold must exceed a slow poll interval so the gate never engages on healthy operation",
-            );
-        };
-        // The elevated delay must dominate the other two gates' maximums to
-        // have any effect under `Duration::max`.
-        assert!(
-            FLAP_ELEVATED_DELAY > Duration::from_secs(10),
-            "flap delay must exceed dead-session cap"
-        );
-        assert!(
-            FLAP_ELEVATED_DELAY > Duration::from_secs(5),
-            "flap delay must exceed connect back-off floor"
-        );
-    }
-
     /// `run_poll_loop` reconnects after `MAX_CONSECUTIVE_TIMEOUTS` cycles of
     /// `ClientError::Timeout` from `read_all_with_extras` — the dongle is
     /// TCP-alive but not answering any Modbus request within the 3 s
@@ -3386,10 +3159,10 @@ mod tests {
     /// the OS noticed (typically 5–10 minutes for the TCP RST to arrive),
     /// during which the UI sees stale snapshots and the log fills with
     /// timeout warnings.
-    ///
-    /// The threshold is a local `const` inside `run_poll_loop`, so we can't
-    /// reach it from a unit test directly. Instead this test pins the
-    /// documented timing math: with the default 3 s per-read timeout,
+    /// The threshold now lives on `ReconnectController` (and is exercised
+    /// directly by `sustained_timeouts_force_disconnect_only_at_threshold` in
+    /// `reconnect.rs`). This test stays as a timing-budget pin: with the
+    /// default 3 s per-read timeout,
     /// 3 retries per block, and the post-poll 2 s sleep, each cycle burns
     /// roughly 10–12 s. `MAX_CONSECUTIVE_TIMEOUTS = 3` therefore yields a
     /// ~36 s ceiling before we give up — long enough to ride out a brief

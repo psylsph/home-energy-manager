@@ -1,6 +1,6 @@
 [package]
 name = "givenergy-local"
-version = "0.53.0"
+version = "0.54.0"
 description = "Home Energy Manager — Monitor and control GivEnergy inverters"
 authors = ["Stuart Harding"]
 edition = "2021"
@@ -67,6 +67,11 @@ parking_lot = "0.12"
 socket2 = { version = "0.6.4", features = ["all"] }
 dirs = "6"
 tokio-modbus = "0.17.0"
+
+[dev-dependencies]
+# Property-based testing for the sanitizer's delta-check edge cases
+# (near-zero prev, time-aware ceiling, jitter tolerance, release counters).
+proptest = "1"
 
 [build-dependencies]
 tauri-build = { version = "2.6.2", features = [] }

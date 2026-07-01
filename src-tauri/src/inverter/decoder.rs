@@ -312,9 +312,18 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
     //   • single-phase: IR(42) p_load_demand (decode_input_0_59)
     //   • three-phase:  IR(1089-1090) p_load_all (decode_input_1060_1119)
     //   • gateway:      IR(1618) p_load, EV-excluding (decode_gateway_1600_1659)
-    // Fall back to the derived balance identity only when no direct reading is
-    // present (the register returned 0, or its block was not polled / failed
-    // this cycle). The derived formula is:
+    // Fall back to the derived balance identity whenever the direct reading is
+    // not trustworthy. The `<= 0` guard deliberately covers both invalid cases:
+    //   • `== 0`: the register returned 0 (firmware quirk / not populated) or
+    //     its block was not polled / failed this cycle. A real house always
+    //     carries phantom load, so a literal 0 means "no data", not "0 W" —
+    //     recompute. (All three decode paths source home_power from unsigned
+    //     registers, so today only this case can occur.)
+    //   • `< 0`:  impossible for a consumption register — the home can't draw
+    //     negative power — so a negative value is garbage. Current decoders
+    //     can't produce one, but the `<=` keeps the guard defensive if a
+    //     signed decode is ever added.
+    // The derived formula is:
     //   home = solar + battery_discharge - grid_export
     //        = solar + battery_power(+discharge) - grid_power(+export)
     if snap.home_power <= 0 {
@@ -2980,6 +2989,51 @@ mod tests {
     }
 
     #[test]
+    fn three_phase_synthetic_meter_distinct_from_external_meter() {
+        // The synthetic built-in grid CT (address 0x00) and a real
+        // external clamp must never collide: a three-phase inverter that
+        // also reports a second CT meter via IR(1244-1245) produces two
+        // `MeterData` entries with distinct addresses so the frontend can
+        // tell them apart (MetersPage labels 0x00 "Built-in Grid CT").
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x4004; // Three Phase 11kW
+
+        let mut ir1060 = vec![0u16; 60];
+        ir1060[1061 - 1060] = 4150; // grid voltage L1 415.0V
+        ir1060[1062 - 1060] = 4160; // grid voltage L2 416.0V
+        ir1060[1063 - 1060] = 4140; // grid voltage L3 414.0V
+        ir1060[1064 - 1060] = 10; // current L1 1.0A
+        ir1060[1065 - 1060] = 12; // current L2 1.2A
+        ir1060[1066 - 1060] = 8; // current L3 0.8A
+        ir1060[1067 - 1060] = 5000; // grid frequency 50.00Hz
+        ir1060[1079 - 1060] = 0;
+        ir1060[1080 - 1060] = 3000; // import 300W
+        ir1060[1081 - 1060] = 0;
+        ir1060[1082 - 1060] = 9000; // export 900W => grid_power +600W
+
+        // IR(1244-1245): second CT meter reporting 750.0W (import).
+        let mut ir1240 = vec![0u16; 60];
+        ir1240[1244 - 1240] = 0;
+        ir1240[1245 - 1240] = 7500;
+
+        let blocks = vec![
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(RegisterType::Input, 1060, 60, "input_1060_1119", ir1060),
+            make_block(RegisterType::Input, 1240, 60, "input_1240_1299", ir1240),
+        ];
+        let snap = decode_snapshot(&blocks);
+
+        assert_eq!(
+            snap.meters.len(),
+            2,
+            "built-in grid CT + external CT both present"
+        );
+        // Synthetic built-in grid CT first, external clamp second.
+        assert_eq!(snap.meters[0].address, 0x00, "synthetic built-in CT");
+        assert_eq!(snap.meters[1].address, 0x09, "external CT clamp");
+    }
+
+    #[test]
     fn three_phase_uses_1000_range_limits() {
         let mut holding_data = vec![0u16; 60];
         holding_data[0] = 0x4001; // Three Phase
@@ -3993,6 +4047,42 @@ mod tests {
             "a 0xFFFF aggregate must not corroborate IR(19)"
         );
         assert!((snap.today_solar_kwh - 12.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn single_phase_pv2_corroboration_wrapping_rhs_does_not_vouch_for_pv2() {
+        // The corroboration comparison uses u16 `saturating_add` on BOTH
+        // operands:
+        //   ir44_raw.saturating_add(MARGIN) >= pv1_raw.saturating_add(pv2_raw)
+        // A plain wrapping `+` on the rhs would be unsafe: when a corrupted
+        // IR(17) pushes pv1_raw + pv2_raw past u16::MAX the sum wraps to a
+        // SMALL value (e.g. 65000 + 1000 -> 464), and a plausible IR(44)
+        // inside the `ir44_raw <= MAX_DAILY_KWH_TENTHS` guard could then
+        // satisfy `>=`, falsely vouching for stale PV2 after dark.
+        // `saturating_add` clamps the rhs to 65535 instead, so the lhs (capped
+        // at 2000 + 20 = 2020 by the guard) can never reach it and the gate
+        // correctly fails. This test pins that subtle correctness.
+        let mut snap = InverterSnapshot::default();
+        let mut data = vec![0u16; 60];
+        data[2] = 0; // pv2_voltage = 0 — no live second string
+        data[9] = 0; // pv2_current = 0
+        data[17] = 65_000; // PV1 corrupted (6500 kWh) — would wrap pv1+pv2 past u16::MAX
+        data[19] = 1_000; // IR(19) stale 100.0 kWh — must NOT survive
+        data[44] = 2_000; // IR(44) at the guard ceiling (200.0 kWh) — plausible
+        decode_input_0_59(&data, &mut snap);
+        // rhs = 65000.saturating_add(1000) = 65535 (a wrapping add would give 464);
+        // lhs = 2000.saturating_add(20) = 2020 < 65535 -> corroboration fails.
+        assert_eq!(snap.today_pv1_kwh, 0.0, "corrupted PV1 is dropped");
+        assert_eq!(
+            snap.today_pv2_kwh, 0.0,
+            "a wrapping rhs must not corroborate stale PV2"
+        );
+        // Both per-string values dropped -> total falls back to IR(44).
+        assert!(
+            (snap.today_solar_kwh - 200.0).abs() < 0.01,
+            "total must use IR(44) fallback; got {}",
+            snap.today_solar_kwh
+        );
     }
 
     #[test]
@@ -5924,6 +6014,19 @@ mod tests {
             3000, 1000, -500, 0,
         ));
         assert_eq!(snap.home_power, 4500);
+    }
+
+    #[test]
+    fn single_phase_home_power_midnight_zero_stays_zero() {
+        // A literal 0 from IR(42) is treated as "not populated" and routed
+        // through the derived identity (see the test above). At midnight with
+        // no solar, no battery flow and no grid exchange, that identity is
+        // 0 + 0 - 0 = 0, so home_power correctly reads 0 W rather than some
+        // spurious value. This pins the `<= 0` guard: when both the direct
+        // reading and the recompute agree on 0, the result stays 0 — the
+        // fallback never injects a bogus non-zero house load.
+        let snap = decode_snapshot(&single_phase_blocks_with_ir42_load_demand(0, 0, 0, 0));
+        assert_eq!(snap.home_power, 0);
     }
 
     /// Helper: three-phase blocks with configurable p_battery_charge and
