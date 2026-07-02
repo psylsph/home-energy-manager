@@ -197,3 +197,99 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, peer: std::net::
     state.connected_clients.lock().remove(client_id);
     tracing::debug!("WebSocket client disconnected: {}", peer);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, SocketAddr};
+    use std::str::FromStr;
+
+    fn peer(a: &str) -> SocketAddr {
+        SocketAddr::new(IpAddr::from_str(a).unwrap(), 12345)
+    }
+
+    #[test]
+    fn new_is_empty() {
+        let clients = ConnectedClients::new();
+        assert_eq!(clients.count(), 0);
+        assert!(clients.list().is_empty());
+    }
+
+    #[test]
+    fn default_matches_new() {
+        let clients = ConnectedClients::default();
+        assert_eq!(clients.count(), 0);
+    }
+
+    #[test]
+    fn add_assigns_monotonic_ids_starting_at_one() {
+        let mut clients = ConnectedClients::new();
+        let id1 = clients.add(peer("10.0.0.1"));
+        let id2 = clients.add(peer("10.0.0.2"));
+        let id3 = clients.add(peer("10.0.0.3"));
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+        assert_eq!(id3, 3);
+        assert_eq!(clients.count(), 3);
+    }
+
+    #[test]
+    fn add_stores_peer_address() {
+        let mut clients = ConnectedClients::new();
+        let p1 = peer("192.168.1.10");
+        let p2 = peer("192.168.1.11");
+        clients.add(p1);
+        clients.add(p2);
+        let mut list = clients.list();
+        list.sort();
+        assert_eq!(list, vec![p1, p2]);
+    }
+
+    #[test]
+    fn remove_drops_client() {
+        let mut clients = ConnectedClients::new();
+        let id1 = clients.add(peer("10.0.0.1"));
+        let id2 = clients.add(peer("10.0.0.2"));
+        clients.remove(id1);
+        assert_eq!(clients.count(), 1);
+        let mut list = clients.list();
+        list.sort();
+        assert_eq!(list, vec![peer("10.0.0.2")]);
+        // Removing the same id twice is a no-op.
+        clients.remove(id1);
+        assert_eq!(clients.count(), 1);
+        clients.remove(id2);
+        assert_eq!(clients.count(), 0);
+    }
+
+    #[test]
+    fn remove_unknown_id_is_safe() {
+        let mut clients = ConnectedClients::new();
+        clients.remove(9999);
+        assert_eq!(clients.count(), 0);
+    }
+
+    #[test]
+    fn ids_never_reused_after_removal() {
+        // The next_id counter is monotonic; even after a remove, the
+        // next add() must return a fresh id. The frontend uses the id
+        // only for tracing; this test pins the contract so a future
+        // refactor doesn't accidentally reset the counter.
+        let mut clients = ConnectedClients::new();
+        let id1 = clients.add(peer("10.0.0.1"));
+        clients.remove(id1);
+        let id2 = clients.add(peer("10.0.0.2"));
+        assert_ne!(id1, id2);
+        assert!(id2 > id1);
+    }
+
+    #[test]
+    fn many_clients_does_not_panic() {
+        let mut clients = ConnectedClients::new();
+        for i in 0..100u8 {
+            clients.add(peer(&format!("10.0.0.{i}")));
+        }
+        assert_eq!(clients.count(), 100);
+        assert_eq!(clients.list().len(), 100);
+    }
+}
