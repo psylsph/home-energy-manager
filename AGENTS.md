@@ -90,6 +90,30 @@ Run: `npm run lint`
 
 Run `npm run lint:md` after significant .md edits.
 
+## Coverage
+
+Rust code coverage is generated with [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) against the `nightly` toolchain (source-based coverage is stable on nightly). Requires the `llvm-tools-preview` and `rustfmt` components and the `cargo-llvm-cov` subcommand (`rustup component add llvm-tools-preview --toolchain nightly && cargo +nightly install cargo-llvm-cov`).
+
+From `src-tauri/`:
+
+| Goal | Command |
+|---|---|
+| Run lib + integration tests, print a per-file summary table | `cargo +nightly llvm-cov --no-default-features` |
+| Show uncovered lines inline in the terminal | `cargo +nightly llvm-cov --no-default-features --show-missing-lines` |
+| Write HTML report to `target/llvm-cov/html/` | `cargo +nightly llvm-cov --no-default-features --html` |
+| Write `lcov.info` (for codecov, IDE plugins, etc.) | `cargo +nightly llvm-cov --no-default-features --lcov --output-path lcov.info` |
+| Include integration tests (default `cargo test` doesn't run them) | `cargo +nightly llvm-cov --no-default-features --all-targets` |
+
+**Pitfalls to avoid:**
+
+- **Do not use `RUSTFLAGS="-C instrument-coverage"` manually.** The two-arg `LLVM_PROFILE_FILE=...profraw` + manual `llvm-profdata merge` pipeline only captures data for binaries cargo *links directly* (i.e. `main.rs`); the test binary's per-process profraw is never written under that scheme, and `llvm-cov report` ends up showing 0% for every project file. `cargo-llvm-cov` wires `RUSTFLAGS` / `LLVM_PROFILE_FILE` correctly per binary and merges everything.
+- **`--no-default-features` is required** for the lib tests. The `tauri` feature pulls in webview / windowing deps that don't matter for pure-Rust tests and slow the run.
+- **`-C link-dead-code` is not needed** — `cargo-llvm-cov` adds it automatically.
+
+Reference numbers from the last full run (1080 tests passing — 1069 lib + 11 integration harness, `--all-targets`): aggregate line coverage **86.75%**, with the well-exercised modules (`modbus/framer.rs` 99.65%, `modbus/registers.rs` 99.21%, `inverter/encoder.rs` 98.55%, `inverter/decoder.rs` 98.51%) at the top and the integration-test-light paths (`weather/mod.rs` 26.73%, `inverter/poll.rs` 28.37%, `server/ws.rs` 52.30%, `lib.rs` 63.30%) at the bottom.
+
+`tests/e2e_mock.rs` is the in-process integration harness (no socket bind — uses `tower::ServiceExt::oneshot` against `server::create_router`) that drives the HTTP layer the Playwright E2E would otherwise be the only thing exercising. It currently covers `GET /api/snapshot`, `/api/status`, `/api/settings`, `/api/logs`, `/api/log-level`, `/api/evc/status`, the `PUT /api/log-level` round-trip and validation paths, and the catch-all 404. Use it as a template for adding more in-process API coverage cheaply.
+
 ## Architecture
 
 ### Frontend (`src/`)

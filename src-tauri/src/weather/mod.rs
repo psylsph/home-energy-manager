@@ -651,4 +651,41 @@ mod tests {
             "https://weather.example.internal/"
         );
     }
+
+    // --- backfill_min_date ----------------------------------------------
+
+    #[test]
+    fn backfill_min_date_subtracts_thirty_days() {
+        let today = d(2025, 6, 15);
+        assert_eq!(backfill_min_date(today), d(2025, 5, 16));
+    }
+
+    #[test]
+    fn backfill_min_date_handles_month_boundary() {
+        // Subtracting 30 days from 1 April crosses into March.
+        let today = d(2025, 4, 1);
+        assert_eq!(backfill_min_date(today), d(2025, 3, 2));
+    }
+
+    #[test]
+    fn backfill_min_date_handles_year_boundary() {
+        // 1 January 2025 minus 30 days is 2 December 2024.
+        let today = d(2025, 1, 1);
+        assert_eq!(backfill_min_date(today), d(2024, 12, 2));
+    }
+
+    #[test]
+    fn backfill_min_date_at_chrono_min_does_not_panic() {
+        // chrono's NaiveDate range extends back to year -9999, so the
+        // `checked_sub_signed` fallback (`unwrap_or(today)`) is not
+        // reachable in practice. This test pins the contract: the
+        // function must not panic on the earliest representable date
+        // and must return some valid date.
+        use chrono::NaiveDate;
+        let earliest = NaiveDate::from_ymd_opt(-9999, 1, 1).unwrap();
+        let result = backfill_min_date(earliest);
+        // Whatever chrono's arithmetic produces, it must remain a
+        // valid date and not panic.
+        assert!(result < earliest);
+    }
 }

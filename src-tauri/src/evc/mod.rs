@@ -480,3 +480,286 @@ pub async fn run_evc_poll_loop(state: Arc<AppState>) {
         backoff = (backoff * 2).min(Duration::from_secs(120));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------
+    // Enum decoders
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn decode_charging_state_known_values() {
+        // Every entry in the table must round-trip.
+        let cases = [
+            (0, "Unknown"),
+            (1, "Idle"),
+            (2, "Connected"),
+            (3, "Starting"),
+            (4, "Charging"),
+            (5, "Startup Failure"),
+            (6, "End of Charging"),
+            (7, "System Failure"),
+            (8, "Scheduled"),
+            (9, "Updating"),
+            (10, "Unstable CP"),
+        ];
+        for (val, expected) in cases {
+            assert_eq!(
+                decode_charging_state(val),
+                expected,
+                "value {val} should decode to {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_charging_state_unknown_value_falls_back() {
+        // 11 is past the end of the table — must return "Unknown", not panic.
+        assert_eq!(decode_charging_state(11), "Unknown");
+        assert_eq!(decode_charging_state(255), "Unknown");
+        assert_eq!(decode_charging_state(u16::MAX), "Unknown");
+    }
+
+    #[test]
+    fn decode_connection_status_known_values() {
+        assert_eq!(decode_connection_status(0), "Not Connected");
+        assert_eq!(decode_connection_status(1), "Connected");
+    }
+
+    #[test]
+    fn decode_connection_status_unknown_falls_back() {
+        assert_eq!(decode_connection_status(2), "Unknown");
+        assert_eq!(decode_connection_status(99), "Unknown");
+    }
+
+    // -----------------------------------------------------------------
+    // EvcSnapshot::default
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn evc_snapshot_default_is_zero_and_unknown() {
+        let s = EvcSnapshot::default();
+        assert_eq!(s.charging_state, "Unknown");
+        assert_eq!(s.connection_status, "Unknown");
+        assert_eq!(s.active_power, 0);
+        assert_eq!(s.current_l1, 0.0);
+        assert_eq!(s.current_l2, 0.0);
+        assert_eq!(s.current_l3, 0.0);
+        assert_eq!(s.voltage_l1, 0.0);
+        assert_eq!(s.voltage_l2, 0.0);
+        assert_eq!(s.voltage_l3, 0.0);
+        assert_eq!(s.meter_energy_kwh, 0.0);
+        assert_eq!(s.session_energy_kwh, 0.0);
+        assert_eq!(s.session_duration_secs, 0);
+        assert_eq!(s.charge_limit_a, 0.0);
+        assert!(s.serial_number.is_empty());
+    }
+
+    #[test]
+    fn evc_snapshot_serializes_to_json() {
+        let s = EvcSnapshot::default();
+        let json = serde_json::to_string(&s).expect("serialise");
+        // The struct uses default serde field naming (snake_case).
+        // The frontend's TypeScript layer is responsible for the
+        // camelCase mapping — this test pins the wire format so
+        // a rename in the struct causes a test failure.
+        for key in [
+            "charging_state",
+            "connection_status",
+            "active_power",
+            "current_l1",
+            "voltage_l1",
+            "meter_energy_kwh",
+            "session_energy_kwh",
+            "session_duration_secs",
+            "charge_limit_a",
+            "serial_number",
+        ] {
+            assert!(json.contains(key), "missing key {key} in {json}");
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // decode_evc
+    // -----------------------------------------------------------------
+
+    /// Build a 115-register test vector with all fields zeroed.
+    fn zero_regs() -> Vec<u16> {
+        vec![0u16; 115]
+    }
+
+    #[test]
+    fn decode_evc_short_register_buffer_returns_default() {
+        // Anything < 115 must NOT panic; it must return a default snapshot
+        // (with charging_state="Unknown" since regs[0]==0).
+        let snapshot = decode_evc(&[]);
+        assert_eq!(snapshot.charging_state, "Unknown");
+        assert_eq!(snapshot.connection_status, "Unknown");
+        assert_eq!(snapshot.active_power, 0);
+
+        let snapshot = decode_evc(&[0u16; 60]);
+        assert_eq!(snapshot.charging_state, "Unknown");
+        assert_eq!(snapshot.connection_status, "Unknown");
+
+        let snapshot = decode_evc(&[0u16; 114]);
+        assert_eq!(snapshot.charging_state, "Unknown");
+        // Last valid index is 114, so voltages at 109/111/113 should be 0.
+        assert_eq!(snapshot.voltage_l1, 0.0);
+    }
+
+    #[test]
+    fn decode_evc_charging_and_connection_states() {
+        let mut regs = zero_regs();
+        regs[0] = 4; // Charging
+        regs[2] = 1; // Connected
+        let s = decode_evc(&regs);
+        assert_eq!(s.charging_state, "Charging");
+        assert_eq!(s.connection_status, "Connected");
+    }
+
+    #[test]
+    fn decode_evc_currents_divide_by_ten() {
+        let mut regs = zero_regs();
+        regs[6] = 160; // 16.0 A
+        regs[8] = 155; // 15.5 A
+        regs[10] = 32; // 3.2 A
+        let s = decode_evc(&regs);
+        assert!((s.current_l1 - 16.0).abs() < 0.01);
+        assert!((s.current_l2 - 15.5).abs() < 0.01);
+        assert!((s.current_l3 - 3.2).abs() < 0.01);
+    }
+
+    #[test]
+    fn decode_evc_voltages_divide_by_ten() {
+        let mut regs = zero_regs();
+        regs[109] = 2354; // 235.4 V
+        regs[111] = 2360; // 236.0 V
+        regs[113] = 2349; // 234.9 V
+        let s = decode_evc(&regs);
+        assert!((s.voltage_l1 - 235.4).abs() < 0.01);
+        assert!((s.voltage_l2 - 236.0).abs() < 0.01);
+        assert!((s.voltage_l3 - 234.9).abs() < 0.01);
+    }
+
+    #[test]
+    fn decode_evc_active_power_and_energy() {
+        let mut regs = zero_regs();
+        regs[13] = 7400; // 7400 W
+        regs[29] = 12345; // 1234.5 kWh meter
+        regs[72] = 567; // 56.7 kWh session
+        regs[79] = 3600; // 1 hour
+        let s = decode_evc(&regs);
+        assert_eq!(s.active_power, 7400);
+        assert!((s.meter_energy_kwh - 1234.5).abs() < 0.01);
+        assert!((s.session_energy_kwh - 56.7).abs() < 0.01);
+        assert_eq!(s.session_duration_secs, 3600);
+    }
+
+    #[test]
+    fn decode_evc_charge_limit_divide_by_ten() {
+        let mut regs = zero_regs();
+        regs[36] = 32; // 3.2 A
+        let s = decode_evc(&regs);
+        assert!((s.charge_limit_a - 3.2).abs() < 0.01);
+    }
+
+    #[test]
+    fn decode_evc_serial_number_skips_nulls() {
+        // "GEVC123" = [0x47, 0x45, 0x56, 0x43, 0x31, 0x32, 0x33] then nulls
+        let mut regs = zero_regs();
+        let serial = b"GEVC123";
+        for (i, b) in serial.iter().enumerate() {
+            regs[38 + i] = *b as u16;
+        }
+        let s = decode_evc(&regs);
+        assert_eq!(s.serial_number, "GEVC123");
+    }
+
+    #[test]
+    fn decode_evc_serial_number_full_buffer_with_trailing_nulls() {
+        // Simulate a fully populated serial at HR 38..69 (31 chars) with
+        // nulls only at the end. Loop terminates at the first null.
+        let mut regs = zero_regs();
+        let serial = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ12345";
+        for (i, b) in serial.iter().enumerate() {
+            regs[38 + i] = *b as u16;
+        }
+        let s = decode_evc(&regs);
+        assert_eq!(s.serial_number, "ABCDEFGHIJKLMNOPQRSTUVWXYZ12345");
+    }
+
+    #[test]
+    fn decode_evc_serial_number_invalid_utf16_replaced_with_question_mark() {
+        // char::from_u32 returns None for some code points; the decoder
+        // must substitute '?' rather than panic.
+        let mut regs = zero_regs();
+        regs[38] = 0xD800; // surrogate — invalid as a scalar value
+        let s = decode_evc(&regs);
+        assert_eq!(s.serial_number, "?");
+    }
+
+    // -----------------------------------------------------------------
+    // Scan: empty subnet returns empty list
+    //
+    // We can't test the real network probe without a live Modbus server
+    // or a root-raw socket, but we can verify the function signature
+    // and the empty input case for `scan_evc_multiple_subnets`.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn scan_evc_multiple_subnets_empty_input() {
+        let result = scan_evc_multiple_subnets(&[]).await;
+        assert!(result.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // run_evc_poll_loop: no-host path
+    //
+    // With evc_host unset, the loop must sleep and check again, never
+    // touching `latest_evc` or sending any message. We let it run for
+    // a short window and confirm no message was sent and no panic.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn run_evc_poll_loop_silently_sleeps_when_no_host() {
+        use crate::inverter::poll::AppState;
+
+        let state = Arc::new(AppState::new());
+        // Confirm default settings have no EVC host.
+        {
+            let s = state.settings.lock().await;
+            assert!(s.evc_host.is_empty(), "default evc_host should be empty");
+        }
+
+        let state_clone = state.clone();
+        let handle = tokio::spawn(async move {
+            // Use a timeout so the test doesn't hang forever if the
+            // loop is misbehaving. The no-host branch sleeps 15s, so
+            // a 2-second timeout is plenty.
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                run_evc_poll_loop(state_clone),
+            )
+            .await
+        });
+
+        // Give the loop time to spin through its first 15s sleep.
+        // (The timeout will fire first — that's the test passing.)
+        let result = handle.await.expect("join");
+        assert!(
+            result.is_err(),
+            "poll loop should still be sleeping at 2s when no host is configured"
+        );
+
+        // No snapshot should have been written.
+        let evc = state.latest_evc.lock().await;
+        assert!(evc.is_none(), "no EVC snapshot should be cached");
+
+        // No broadcast message should have been sent (other than the
+        // first one a fresh broadcast::channel can hold).
+        // We can't easily assert the channel is empty without a receiver,
+        // so this is implicitly covered by the snapshot check.
+    }
+}

@@ -395,4 +395,153 @@ mod tests {
         assert_eq!(lines[0], "line 1");
         assert_eq!(lines[4], "line 5");
     }
+
+    // -----------------------------------------------------------------
+    // Level string <-> u8 conversions
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn level_str_to_u8_known_strings() {
+        assert_eq!(level_str_to_u8("ERROR"), Some(0));
+        assert_eq!(level_str_to_u8("WARN"), Some(1));
+        assert_eq!(level_str_to_u8("INFO"), Some(2));
+        assert_eq!(level_str_to_u8("DEBUG"), Some(3));
+        assert_eq!(level_str_to_u8("TRACE"), Some(4));
+    }
+
+    #[test]
+    fn level_str_to_u8_unknown_returns_none() {
+        assert_eq!(level_str_to_u8(""), None);
+        assert_eq!(level_str_to_u8("info"), None); // case-sensitive
+        assert_eq!(level_str_to_u8("verbose"), None);
+        assert_eq!(level_str_to_u8("ERROR "), None); // trailing space
+    }
+
+    #[test]
+    fn level_u8_to_str_known_values() {
+        assert_eq!(level_u8_to_str(0), "ERROR");
+        assert_eq!(level_u8_to_str(1), "WARN");
+        assert_eq!(level_u8_to_str(2), "INFO");
+        assert_eq!(level_u8_to_str(3), "DEBUG");
+        assert_eq!(level_u8_to_str(4), "TRACE");
+    }
+
+    #[test]
+    fn level_u8_to_str_unknown_falls_back_to_info() {
+        // 5+ is not a defined level; the function should not panic
+        // and should fall back to a safe default.
+        assert_eq!(level_u8_to_str(5), "INFO");
+        assert_eq!(level_u8_to_str(255), "INFO");
+    }
+
+    #[test]
+    fn level_round_trip_through_strings() {
+        for code in 0..=4u8 {
+            let s = level_u8_to_str(code);
+            assert_eq!(
+                level_str_to_u8(s),
+                Some(code),
+                "round-trip for {code} via {s}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // LogRing: read_all and min_level
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn read_all_empty_buffer_is_empty_vec() {
+        let ring = LogRing::new(10);
+        let lines = ring.read_all();
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn read_all_partial_fill_returns_in_order() {
+        let ring = LogRing::new(10);
+        for i in 0..3 {
+            ring.push(&format!("line {i}"));
+        }
+        let lines = ring.read_all();
+        assert_eq!(lines, vec!["line 0", "line 1", "line 2"]);
+    }
+
+    #[test]
+    fn read_all_full_buffer_returns_in_chronological_order() {
+        // After exactly filling, then wrapping, the oldest entry is
+        // at `cursor`, not at index 0.
+        let ring = LogRing::new(3);
+        ring.push("a");
+        ring.push("b");
+        ring.push("c");
+        ring.push("d"); // wraps — cursor now points at index 0
+        let lines = ring.read_all();
+        assert_eq!(lines, vec!["b", "c", "d"]);
+    }
+
+    #[test]
+    fn read_from_empty_buffer() {
+        let ring = LogRing::new(10);
+        let (lines, next) = ring.read_from(0);
+        assert!(lines.is_empty());
+        assert_eq!(next, 0);
+        let (lines, next) = ring.read_from(99);
+        assert!(lines.is_empty());
+        assert_eq!(next, 0);
+    }
+
+    #[test]
+    fn read_from_below_oldest_returns_what_is_left() {
+        // The `after` param can be below the oldest available entry
+        // when the buffer has wrapped. The function should clamp to
+        // the oldest available index and return everything from there.
+        let ring = LogRing::new(3);
+        ring.push("a");
+        ring.push("b");
+        ring.push("c");
+        ring.push("d"); // wraps
+        // after=0 is below the oldest available index (1, since 'a'
+        // is gone). Should return b, c, d.
+        let (lines, _) = ring.read_from(0);
+        assert_eq!(lines, vec!["b", "c", "d"]);
+    }
+
+    #[test]
+    fn read_from_at_or_above_newest_returns_empty() {
+        let ring = LogRing::new(5);
+        for i in 0..3 {
+            ring.push(&format!("line {i}"));
+        }
+        // newest_idx is len-1 = 2, so after=2 must return empty.
+        let (lines, next) = ring.read_from(2);
+        assert!(lines.is_empty());
+        assert_eq!(next, 2);
+        let (lines, next) = ring.read_from(99);
+        assert!(lines.is_empty());
+        assert_eq!(next, 2);
+    }
+
+    #[test]
+    fn min_level_default_is_info() {
+        let ring = LogRing::new(10);
+        assert_eq!(
+            ring.min_level
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "default min level should be INFO (2) — see DEFAULT_CAPTURE_LEVEL doc"
+        );
+    }
+
+    #[test]
+    fn min_level_can_be_adjusted_atomic() {
+        let ring = LogRing::new(10);
+        ring.min_level
+            .store(4, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            ring.min_level
+                .load(std::sync::atomic::Ordering::Relaxed),
+            4
+        );
+    }
 }

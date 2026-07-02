@@ -389,4 +389,37 @@ mod tests {
         let subnets = collect_physical_subnets(&interfaces);
         assert!(subnets.is_empty());
     }
+
+    // --- scan_subnet / scan_multiple_subnets ---------------------------
+    //
+    // The real probe reads from a GivEnergy dongle — we can't easily
+    // exercise that without a live device or a mock Modbus server.
+    // The contract we *can* pin from a unit test is:
+    //   * a scan against a subnet with no GivEnergy device returns []
+    //   * scan_multiple_subnets is the union of all subnet results
+    //
+    // We use 127.0.0.x because nothing is listening on those ports,
+    // and connect attempts will time out fast.
+
+    #[tokio::test]
+    async fn scan_subnet_no_devices_returns_empty() {
+        // 127.0.0.x — connect attempts will fail quickly because no
+        // 8899 listener is bound. This pins the "found nothing" path.
+        let result = scan_subnet("127.0.0").await;
+        assert!(result.is_empty(), "expected no inverters, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn scan_multiple_subnets_empty_input() {
+        let result = scan_multiple_subnets(&[]).await;
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scan_multiple_subnets_unreachable_returns_empty() {
+        // All subnets are loopback-ish with no listeners. The
+        // function should aggregate (i.e. union) empty results.
+        let result = scan_multiple_subnets(&["127.0.0".to_string()]).await;
+        assert!(result.is_empty());
+    }
 }
