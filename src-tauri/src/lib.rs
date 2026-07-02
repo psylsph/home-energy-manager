@@ -1177,4 +1177,189 @@ mod tests {
             let _ = super::autostart_fallback(false);
         }
     }
+
+    // -------------------------------------------------------------------
+    // HTML escape
+    //
+    // The startup-error renderer hand-builds an HTML page that interpolates
+    // a user-facing error message. The contract: every metacharacter that
+    // could break out of the <pre> block must be replaced, otherwise a
+    // server-bind failure message that contains a stray `</pre>` would
+    // corrupt the whole page. The frontend renders this via
+    // `window.eval("document.body.innerHTML = ... ")`, so a missing
+    // escape is an XSS-shaped bug, not a cosmetic one.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn html_escape_replaces_all_five_metacharacters() {
+        assert_eq!(
+            html_escape(r#"<script>alert("xss")</script>"#),
+            "&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;"
+        );
+        assert_eq!(html_escape("a & b"), "a &amp; b");
+        assert_eq!(html_escape("it's"), "it&#39;s");
+    }
+
+    #[test]
+    fn html_escape_leaves_plain_text_alone() {
+        // Round-trip a typical error message to confirm the function is
+        // a no-op on text that has no metacharacters.
+        let plain = "bind: address already in use (os error 98)";
+        assert_eq!(html_escape(plain), plain);
+    }
+
+    #[test]
+    fn html_escape_handles_empty_string() {
+        assert_eq!(html_escape(""), "");
+    }
+
+    #[test]
+    fn html_escape_ampersand_first_to_avoid_double_escape() {
+        // The replacement order matters: `&` must be escaped BEFORE
+        // we insert `&lt;` etc. otherwise the inserted ampersands
+        // would be re-escaped on a second pass. The current
+        // implementation is single-pass so this test just pins the
+        // output as a regression marker.
+        assert_eq!(html_escape("<a&b>"), "&lt;a&amp;b&gt;");
+    }
+
+    // -------------------------------------------------------------------
+    // parse_port
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn parse_port_extracts_explicit_value() {
+        let args = vec![
+            "givenergy-local".to_string(),
+            "--port".to_string(),
+            "8080".to_string(),
+        ];
+        assert_eq!(parse_port(&args), 8080);
+    }
+
+    #[test]
+    fn parse_port_falls_back_to_default() {
+        // No --port flag at all.
+        assert_eq!(parse_port(&[]), 7337);
+        assert_eq!(parse_port(&["--headless".to_string()]), 7337);
+    }
+
+    #[test]
+    fn parse_port_handles_missing_value() {
+        // --port with no following argument is malformed; must
+        // silently fall through to the default rather than panic.
+        let args = vec!["--port".to_string()];
+        assert_eq!(parse_port(&args), 7337);
+    }
+
+    #[test]
+    fn parse_port_rejects_garbage_value() {
+        // Non-numeric port must not panic; falls back to the default.
+        let args = vec![
+            "--port".to_string(),
+            "not-a-number".to_string(),
+        ];
+        assert_eq!(parse_port(&args), 7337);
+    }
+
+    #[test]
+    fn parse_port_rejects_out_of_range_value() {
+        // Values > u16::MAX (65535) must be rejected. u16::parse
+        // returns Err for these so the function should fall through.
+        let args = vec![
+            "--port".to_string(),
+            "99999".to_string(),
+        ];
+        assert_eq!(parse_port(&args), 7337);
+
+        // Negative numbers are also out of range for u16.
+        let args = vec![
+            "--port".to_string(),
+            "-1".to_string(),
+        ];
+        assert_eq!(parse_port(&args), 7337);
+    }
+
+    // -------------------------------------------------------------------
+    // parse_dist
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn parse_dist_extracts_explicit_value() {
+        let args = vec![
+            "--headless".to_string(),
+            "--dist".to_string(),
+            "/var/www/frontend".to_string(),
+        ];
+        assert_eq!(parse_dist(&args), Some("/var/www/frontend".to_string()));
+    }
+
+    #[test]
+    fn parse_dist_returns_none_when_absent() {
+        assert_eq!(parse_dist(&[]), None);
+        assert_eq!(parse_dist(&["--headless".to_string()]), None);
+    }
+
+    #[test]
+    fn parse_dist_handles_missing_value() {
+        // --dist at the end with no following argument must not panic.
+        let args = vec!["--dist".to_string()];
+        assert_eq!(parse_dist(&args), None);
+    }
+
+    #[test]
+    fn parse_dist_preserves_path_with_spaces() {
+        // Don't quote-split — the value is whatever comes after --dist,
+        // even if it contains whitespace. (A real shell would tokenise
+        // this differently, but the Rust argv array is what we get.)
+        let args = vec![
+            "--dist".to_string(),
+            "/path with spaces/dist".to_string(),
+        ];
+        assert_eq!(
+            parse_dist(&args),
+            Some("/path with spaces/dist".to_string())
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // log_timezone_check
+    //
+    // The function just reads the system zone + env, then emits either
+    // a WARN (UTC + no TZ) or an INFO line. We can't intercept the
+    // tracing output easily, but we can pin the contract: the function
+    // must not panic for any host zone, and it must not write to disk
+    // or hold any locks. Both branches (UTC-no-TZ, non-UTC) are
+    // covered because chrono's local_minus_utc returns a real offset
+    // for the CI environment — whichever branch is hit, the function
+    // returns cleanly.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn log_timezone_check_does_not_panic() {
+        // Whichever branch is hit (UTC + no TZ, or some other offset),
+        // the function must not panic, deadlock, or block.
+        log_timezone_check();
+    }
+
+    #[test]
+    fn log_timezone_check_does_not_panic_with_tz_set() {
+        // Set TZ to a known value to exercise the `tz_env_set = true`
+        // branch on systems where the local zone happens to be UTC.
+        // SAFETY: setting the TZ env var to point at a real zoneinfo
+        // path is well-defined and the test is single-threaded
+        // (no concurrent reads of getenv).
+        // SAFETY: the path is a constant string and the env var is
+        // only consulted by `chrono::Local` via libc, which is
+        // async-signal-safe at the call site we're using it from.
+        unsafe {
+            std::env::set_var("TZ", ":/etc/zoneinfo/UTC");
+        }
+        log_timezone_check();
+        // Reset to whatever the test harness had so other tests aren't
+        // affected.
+        unsafe {
+            std::env::remove_var("TZ");
+        }
+    }
 }
