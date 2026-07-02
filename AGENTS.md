@@ -110,9 +110,11 @@ From `src-tauri/`:
 - **`--no-default-features` is required** for the lib tests. The `tauri` feature pulls in webview / windowing deps that don't matter for pure-Rust tests and slow the run.
 - **`-C link-dead-code` is not needed** — `cargo-llvm-cov` adds it automatically.
 
-Reference numbers from the last full run (1080 tests passing — 1069 lib + 11 integration harness, `--all-targets`): aggregate line coverage **86.75%**, with the well-exercised modules (`modbus/framer.rs` 99.65%, `modbus/registers.rs` 99.21%, `inverter/encoder.rs` 98.55%, `inverter/decoder.rs` 98.51%) at the top and the integration-test-light paths (`weather/mod.rs` 26.73%, `inverter/poll.rs` 28.37%, `server/ws.rs` 52.30%, `lib.rs` 63.30%) at the bottom.
+Reference numbers from the last full run (1096 tests passing — 1084 lib + 11 integration harness + 1 subprocess smoke, `--all-targets`): aggregate line coverage **86.85%**, with the well-exercised modules (`modbus/framer.rs` 99.65%, `modbus/registers.rs` 99.21%, `inverter/encoder.rs` 98.55%, `inverter/decoder.rs` 98.51%) at the top and the integration-test-light paths (`weather/mod.rs` 26.73%, `inverter/poll.rs` 28.37%, `server/ws.rs` 52.30%, `lib.rs` 69.71%) at the bottom.
 
 `tests/e2e_mock.rs` is the in-process integration harness (no socket bind — uses `tower::ServiceExt::oneshot` against `server::create_router`) that drives the HTTP layer the Playwright E2E would otherwise be the only thing exercising. It currently covers `GET /api/snapshot`, `/api/status`, `/api/settings`, `/api/logs`, `/api/log-level`, `/api/evc/status`, the `PUT /api/log-level` round-trip and validation paths, and the catch-all 404. Use it as a template for adding more in-process API coverage cheaply.
+
+`tests/headless_smoke.rs` is the non-destructive subprocess integration test for `lib.rs` wiring. It spawns the real `givenergy-local --headless` binary on an ephemeral port, polls via raw TCP until the bind succeeds, then hits four endpoints to confirm `init_tracing` + `run_headless` reached a usable state. It also covers the `resolve_dist_dir` "no dist found" branch (omits `--dist` deliberately). Skips cleanly with a printed reason if the binary hasn't been built yet, so a fresh checkout's `cargo test` never fails for this reason. The test always kills and reaps the subprocess before reporting so a port leak can't break the next run.
 
 ## Architecture
 
