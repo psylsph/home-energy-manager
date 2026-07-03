@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.55.1] - 2026-07-03
+
+### Fixed
+
+- **The inverter temperature warning banner now refreshes as soon as you change its thresholds.** The red banner at the top of the app used to stick with the temperature limits that were loaded when the app started, so if you raised the high-temperature limit in Settings to clear a warning, the banner kept showing until you reloaded the page. Saving the new limit now clears or re-raises the banner right away. (issue #183)
+
+- **Pausing the battery is now consistent across every entry point.** The pause command always enters "Eco Paused" — eco mode with discharge off and the reserve held at 100% — instead of occasionally taking a different action depending on how the pause was triggered.
+
 ## [0.55.0] - 2026-07-01
 
 ### Added

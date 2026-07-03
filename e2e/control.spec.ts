@@ -68,6 +68,34 @@ function findWrite(writes: RegisterWrite[], address: number): RegisterWrite | un
   return writes.find((w) => w.address === address);
 }
 
+/** Wait until a write to `address` with `value` has landed, then drain and
+ * return everything captured so far (including any writes that preceded it).
+ *
+ * The mode tests use this instead of `waitForWrites(minCount)` because a
+ * prior test in the suite may arm a discharge slot: when the inverter next
+ * enters a Timed mode it restores that slot (issue #137) and queues the slot
+ * writes *before* the mode writes. A fixed-count wait would grab the restore
+ * writes and miss the mode writes; waiting for the trailing SOC-reserve
+ * write (HR 110) guarantees the full set has landed. */
+async function waitForWrite(
+  peekWrites: () => Promise<RegisterWrite[]>,
+  drainWrites: () => Promise<RegisterWrite[]>,
+  address: number,
+  value: number,
+  timeoutMs = 15_000,
+): Promise<RegisterWrite[]> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const writes = await peekWrites();
+    if (writes.some((w) => w.address === address && w.value === value)) {
+      return drainWrites();
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  // Timeout — return whatever we have
+  return drainWrites();
+}
+
 /** Clear any in-flight writes from previous tests.
  *
  * Repeatedly drains writes and waits until no new writes appear for
@@ -200,12 +228,16 @@ test.describe('Quick Actions', () => {
     await page.locator('text=Control').click();
     await page.getByRole('button', { name: /Pause Battery/ }).click();
 
-    // PauseBattery = 2 writes: HR 96=0 (disable charge), HR 59=0 (disable discharge)
-    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 2, 20_000);
-    expect(writes.length).toBeGreaterThanOrEqual(2);
+    // PauseBattery = 3 writes: HR 27=1 (eco), HR 59=0 (disable discharge),
+    // HR 110=100 (SOC reserve = paused). Charge enable and schedules are
+    // deliberately left untouched.
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 3, 20_000);
+    expect(writes.length).toBeGreaterThanOrEqual(3);
 
-    expect(findWrite(writes, 96)!.value).toBe(0);  // disable charge
-    expect(findWrite(writes, 59)!.value).toBe(0);  // disable discharge
+    expect(findWrite(writes, 27)!.value).toBe(1);    // eco mode
+    expect(findWrite(writes, 59)!.value).toBe(0);    // disable discharge
+    expect(findWrite(writes, 110)!.value).toBe(100); // SOC reserve = paused
+    expect(findWrite(writes, 96)).toBeUndefined();   // charge left untouched
   });
 
   test('Sync Clock should send time registers', async ({
@@ -350,7 +382,11 @@ test.describe('API Control Endpoints', () => {
     });
     expect((await resp.json()).ok).toBe(true);
 
-    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 3, 15_000);
+    // Wait for the trailing SOC-reserve write (HR 110 = 4) rather than a
+    // fixed count: a prior test may have armed a discharge slot, and entering
+    // Timed mode restores it (issue #137), queueing slot writes before the
+    // mode writes. Asserting on the full captured set is robust to that.
+    const writes = await waitForWrite(peekModbusWrites, drainModbusWrites, 110, 4, 15_000);
     expect(findWrite(writes, 27)!.value).toBe(1);  // self-consumption
     expect(findWrite(writes, 59)!.value).toBe(1);  // enable discharge
     expect(findWrite(writes, 110)!.value).toBe(4);  // SOC reserve
@@ -573,7 +609,7 @@ test.describe('API Control Endpoints', () => {
     expect(findWrite(writes, 45)!.value).toBe(0);     // slot2 end
   });
 
-  test('POST /api/control/pause sends HR 110=100 (SOC reserve) and clears charge/discharge', async ({
+  test('POST /api/control/pause enters Eco Paused (HR 27=1, 59=0, 110=100)', async ({
     baseUrl,
     drainModbusWrites,
     peekModbusWrites,
@@ -586,14 +622,15 @@ test.describe('API Control Endpoints', () => {
     });
     expect((await resp.json()).ok).toBe(true);
 
-    // PauseBattery now writes: charge clear, discharge clear, slot clears,
-    // eco mode, and SOC reserve=100 = 8 writes (~12s at 1.5s each)
-    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 8, 25_000);
+    // PauseBattery now writes the minimal Eco Paused contract: eco mode,
+    // discharge off, SOC reserve=100 = 3 writes (~5s at 1.5s each). Charge
+    // enable and schedules are deliberately left untouched.
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 3, 25_000);
 
-    expect(findWrite(writes, 96)!.value).toBe(0);     // disable charge
-    expect(findWrite(writes, 59)!.value).toBe(0);     // disable discharge
     expect(findWrite(writes, 27)!.value).toBe(1);     // eco mode
+    expect(findWrite(writes, 59)!.value).toBe(0);     // disable discharge
     expect(findWrite(writes, 110)!.value).toBe(100);  // SOC reserve=100 to pause
+    expect(findWrite(writes, 96)).toBeUndefined();    // charge left untouched
   });
 
   test('POST /api/control/sync-clock sends time registers', async ({
@@ -752,7 +789,7 @@ test.describe('Quick Actions - extended', () => {
     expect(findWrite(writes, 116)!.value).toBe(100); // target SOC
   });
 
-  test('Pause Battery should write HR110=100 and clear charge/discharge', async ({
+  test('Pause Battery should write HR110=100 and enter Eco Paused', async ({
     page,
     drainModbusWrites,
     peekModbusWrites,
@@ -763,15 +800,15 @@ test.describe('Quick Actions - extended', () => {
     await page.locator('text=Control').click();
     await page.getByRole('button', { name: /Pause Battery/ }).click();
 
-    // Pause = charge clear + discharge clear + slot clears + eco mode + SOC reserve=100
-    // = 8 writes (~12s at 1.5s each)
-    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 8, 30_000);
-    expect(writes.length).toBeGreaterThanOrEqual(8);
+    // Pause = eco mode + discharge off + SOC reserve=100 = 3 writes (~5s).
+    // Charge enable and schedules are deliberately left untouched.
+    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 3, 30_000);
+    expect(writes.length).toBeGreaterThanOrEqual(3);
 
-    expect(findWrite(writes, 96)!.value).toBe(0);     // disable charge
-    expect(findWrite(writes, 59)!.value).toBe(0);     // disable discharge
     expect(findWrite(writes, 27)!.value).toBe(1);     // eco mode
+    expect(findWrite(writes, 59)!.value).toBe(0);     // disable discharge
     expect(findWrite(writes, 110)!.value).toBe(100);  // SOC reserve=100
+    expect(findWrite(writes, 96)).toBeUndefined();    // charge left untouched
   });
 });
 

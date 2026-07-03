@@ -370,7 +370,9 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       expect(await screen.findByText('Inverter Trip')).toBeDefined();
     });
 
-    it('posts inverter temperature bounds when saving notification settings', async () => {
+    it('posts inverter temperature bounds and mirrors them into the store when saving (issue #183)', async () => {
+      // Start from a known baseline so the store-update assertion is meaningful.
+      useInverterStore.setState({ inverterTempConfig: { inverter_temp_min: 8, inverter_temp_max: 60 } });
       mountWithAlerts({ device_type_code: '2001' });
       await screen.findByText('Temperature & SOC');
       fireEvent.change(inputAfterText('Inverter temp below °C'), { target: { value: '7.5' } });
@@ -383,6 +385,15 @@ describe('<SettingsPage/> — page shell & hydration', () => {
           inverter_temp_min: 7.5,
           inverter_temp_max: 62,
         }));
+      });
+      // The saved thresholds are mirrored into the store so the
+      // SystemAlertBanners re-render with the new values immediately instead
+      // of caching the mount-time config until a hard refresh (issue #183).
+      await waitFor(() => {
+        expect(useInverterStore.getState().inverterTempConfig).toEqual({
+          inverter_temp_min: 7.5,
+          inverter_temp_max: 62,
+        });
       });
     });
   });

@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { InverterSnapshot, ConnectionState, HistoryRange, ScheduleSlot } from '../lib/types';
 import type { GridLineWeight } from '../lib/historyRangeConfig';
+import type { InverterTemperatureAlertConfig } from '../lib/gridFault';
 
 type ThemeMode = 'dark' | 'light';
 
@@ -21,6 +22,15 @@ interface InverterState {
 
   /** Panels hidden from the bottom navigation. */
   hiddenPanels: string[];
+  /**
+   * Inverter-temperature alert thresholds (min/max °C), mirrored from the
+   * backend alert config (`GET /api/alerts`). Seeded into the store on app
+   * mount and updated by SettingsPage on save so the SystemAlertBanners
+   * reflect the current thresholds without a hard refresh (issue #183). Not
+   * persisted to localStorage — the backend (settings.json) is the source of
+   * truth; the store is a reactive cache, like hiddenPanels / evcHost.
+   */
+  inverterTempConfig: InverterTemperatureAlertConfig;
   /** Shared time range used by Power and History charts. */
   chartRange: HistoryRange;
   /** Whether the trend charts on the Battery/Solar tabs are shown. */
@@ -121,6 +131,7 @@ interface InverterState {
   setPendingDischargeSlots: (slots: Record<number, ScheduleSlot>) => void;
   clearPendingDischargeSlots: () => void;
   setHiddenPanels: (panels: string[]) => void;
+  setInverterTempConfig: (config: InverterTemperatureAlertConfig) => void;
   setEvcHost: (host: string) => void;
   setEvcData: (
     power: number,
@@ -304,6 +315,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   readOnly: loadReadOnly(),
 
   hiddenPanels: [],
+  inverterTempConfig: { inverter_temp_min: 8, inverter_temp_max: 60 },
   chartRange: loadChartRange(),
   panelGraphsEnabled: loadPanelGraphsEnabled(),
   panelGraphsScale: loadPanelGraphsScale(),
@@ -401,6 +413,7 @@ export const useInverterStore = create<InverterState>((set) => ({
     set({ pendingDischargeSlots: {} });
   },
   setHiddenPanels: (panels) => set({ hiddenPanels: panels }),
+  setInverterTempConfig: (config) => set({ inverterTempConfig: config }),
   setEvcHost: (host) => set({ evcHost: host }),
   setEvcData: (power, charging, connected = true, chargingState = '', cableConnected = false) =>
     set((prev) => ({
