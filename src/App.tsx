@@ -42,21 +42,11 @@ function ThemeToggle() {
 
 function SystemAlertBanners() {
   const snapshot = useInverterStore((state) => state.snapshot);
-  const [tempConfig, setTempConfig] = useState({ inverter_temp_min: 8, inverter_temp_max: 60 });
-
-  useEffect(() => {
-    let cancelled = false;
-    apiGet<{ ok: boolean; data: { config?: Partial<typeof tempConfig> } }>('/api/alerts')
-      .then((res) => {
-        if (cancelled) return;
-        setTempConfig((prev) => ({
-          inverter_temp_min: Number(res.data.config?.inverter_temp_min ?? prev.inverter_temp_min),
-          inverter_temp_max: Number(res.data.config?.inverter_temp_max ?? prev.inverter_temp_max),
-        }));
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, []);
+  // Thresholds live in the store (seeded from /api/alerts in <Layout/>'s mount
+  // effect and updated by SettingsPage on save) so a config change re-renders
+  // the banner immediately instead of caching the mount-time values (issue
+  // #183).
+  const tempConfig = useInverterStore((state) => state.inverterTempConfig);
 
   if (!snapshot) return null;
   const alerts = buildSystemAlerts(snapshot, tempConfig);
@@ -301,7 +291,7 @@ function Layout() {
   useWebSocket();
   useGridOutageNotifications();
   const [searchParams] = useSearchParams();
-  const { snapshot, developerMode, themeMode, hiddenPanels, readOnly, setHiddenPanels, setEvcHost, setReadOnly } = useInverterStore();
+  const { snapshot, developerMode, themeMode, hiddenPanels, readOnly, setHiddenPanels, setEvcHost, setInverterTempConfig, setReadOnly } = useInverterStore();
 
   // Load hidden panels from settings on mount
   useEffect(() => {
@@ -317,6 +307,26 @@ function Layout() {
       } catch { /* use defaults */ }
     })();
   }, [setHiddenPanels, setEvcHost]);
+
+  // Seed the inverter-temperature alert thresholds from the backend so the
+  // SystemAlertBanners render with the saved config. The store is the single
+  // source of truth for the rendered banner; SettingsPage pushes updates to
+  // it on save (issue #183) so a threshold change takes effect immediately
+  // instead of waiting for a hard refresh.
+  useEffect(() => {
+    let cancelled = false;
+    apiGet<{ ok: boolean; data: { config?: { inverter_temp_min?: number; inverter_temp_max?: number } } }>('/api/alerts')
+      .then((res) => {
+        if (cancelled || !res.ok || !res.data.config) return;
+        const c = res.data.config;
+        setInverterTempConfig({
+          inverter_temp_min: Number(c.inverter_temp_min ?? 8),
+          inverter_temp_max: Number(c.inverter_temp_max ?? 60),
+        });
+      })
+      .catch(() => { /* keep store defaults */ });
+    return () => { cancelled = true; };
+  }, [setInverterTempConfig]);
 
   // Read-only mode (?RO URL parameter, issue #114). When the URL carries
   // `?RO`, hide the Control and Settings nav icons so a household-shared

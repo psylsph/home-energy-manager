@@ -493,11 +493,17 @@ impl ControlCommand {
                 ]
             }
             ControlCommand::PauseBattery => {
-                // Per GivTCP reference: disable both charge and discharge.
-                // HR 72 → enable_charge, HR 73 → enable_discharge.
+                // Eco Paused: standard Eco / self-consumption mode with the
+                // SOC reserve pinned to 100%, so the battery neither charges
+                // from the grid nor discharges. Charge enable (HR 96) and the
+                // user's charge/discharge schedules are deliberately left
+                // untouched, so unpausing restores the prior state. Mirrors
+                // the `/api/control/pause` handler, which builds the same
+                // three writes (HR 27=1, HR 59=0, HR 110=100).
                 vec![
-                    rw(HR_ENABLE_CHARGE, 0),    // stop any force charge
-                    rw(HR_ENABLE_DISCHARGE, 0), // stop any discharge
+                    rw(HR_BATTERY_POWER_MODE, 1),    // self-consumption (eco) mode
+                    rw(HR_ENABLE_DISCHARGE, 0),      // no timed discharge
+                    rw(HR_BATTERY_SOC_RESERVE, 100), // SOC reserve = 100% pauses the battery
                 ]
             }
             ControlCommand::ForceCharge { target_soc } => {
@@ -1298,12 +1304,17 @@ mod tests {
     fn pause_battery() {
         let cmd = ControlCommand::PauseBattery;
         let writes = cmd.encode().unwrap();
-        // Per GivTCP: disable both charge and discharge
-        assert_eq!(writes.len(), 2);
-        assert_eq!(writes[0].address, HR_ENABLE_CHARGE);
-        assert_eq!(writes[0].value, 0);
+        // Eco Paused: eco mode + discharge off + SOC reserve pinned to 100%.
+        // Charge enable (HR 96) is deliberately left untouched so unpausing
+        // restores the prior state.
+        assert_eq!(writes.len(), 3);
+        assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
+        assert_eq!(writes[0].value, 1);
         assert_eq!(writes[1].address, HR_ENABLE_DISCHARGE);
         assert_eq!(writes[1].value, 0);
+        assert_eq!(writes[2].address, HR_BATTERY_SOC_RESERVE);
+        assert_eq!(writes[2].value, 100);
+        assert!(!writes.iter().any(|w| w.address == HR_ENABLE_CHARGE));
     }
 
     #[test]
@@ -2349,18 +2360,36 @@ mod tests {
     }
 
     #[test]
-    fn pause_battery_disables_charge_and_discharge() {
+    fn pause_battery_enters_eco_paused() {
+        // Eco Paused: eco mode (HR 27=1), discharge off (HR 59=0), and SOC
+        // reserve pinned to 100% (HR 110) so the battery neither charges from
+        // the grid nor discharges. Charge enable (HR 96) and the user's
+        // schedules are left untouched so unpausing restores prior state.
         let writes = ControlCommand::PauseBattery.encode().unwrap();
-        assert_eq!(writes.len(), 2);
-        let charge = writes
+        assert_eq!(writes.len(), 3);
+
+        let mode = writes
             .iter()
-            .find(|w| w.address == HR_ENABLE_CHARGE)
-            .unwrap();
-        assert_eq!(charge.value, 0);
+            .find(|w| w.address == HR_BATTERY_POWER_MODE)
+            .expect("PauseBattery must set HR_BATTERY_POWER_MODE");
+        assert_eq!(mode.value, 1);
+
         let discharge = writes
             .iter()
             .find(|w| w.address == HR_ENABLE_DISCHARGE)
-            .unwrap();
+            .expect("PauseBattery must clear HR_ENABLE_DISCHARGE");
         assert_eq!(discharge.value, 0);
+
+        let reserve = writes
+            .iter()
+            .find(|w| w.address == HR_BATTERY_SOC_RESERVE)
+            .expect("PauseBattery must set HR_BATTERY_SOC_RESERVE");
+        assert_eq!(reserve.value, 100);
+
+        // Charge enable is intentionally NOT touched.
+        assert!(
+            !writes.iter().any(|w| w.address == HR_ENABLE_CHARGE),
+            "PauseBattery must not write HR_ENABLE_CHARGE"
+        );
     }
 }

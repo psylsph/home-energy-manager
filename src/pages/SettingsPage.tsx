@@ -620,6 +620,16 @@ export default function SettingsPage() {
     try {
       const res = await apiPost('/api/alerts', saveConfig) as { message: string; ok: boolean };
       flash(res.message, res.ok);
+      // Mirror the saved inverter-temperature thresholds into the store so
+      // the SystemAlertBanners re-render with the new values immediately
+      // (issue #183) — without this the banner keeps the mount-time
+      // thresholds until a hard refresh.
+      if (res.ok) {
+        useInverterStore.getState().setInverterTempConfig({
+          inverter_temp_min: Number(saveConfig.inverter_temp_min),
+          inverter_temp_max: Number(saveConfig.inverter_temp_max),
+        });
+      }
     } catch {
       flash('Failed to save alert settings', false);
     }

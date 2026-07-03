@@ -158,13 +158,21 @@ describe('<App/> system alert banners', () => {
   beforeEach(() => {
     silenceConsoleError();
     vi.mocked(apiGet).mockResolvedValue({ ok: true, data: { config: { inverter_temp_min: 8, inverter_temp_max: 60 } } });
-    useInverterStore.setState({ readOnly: false, snapshot: null });
+    useInverterStore.setState({
+      readOnly: false,
+      snapshot: null,
+      inverterTempConfig: { inverter_temp_min: 8, inverter_temp_max: 60 },
+    });
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
     cleanup();
-    useInverterStore.setState({ readOnly: false, snapshot: null });
+    useInverterStore.setState({
+      readOnly: false,
+      snapshot: null,
+      inverterTempConfig: { inverter_temp_min: 8, inverter_temp_max: 60 },
+    });
     window.location.hash = '';
   });
 
@@ -187,6 +195,41 @@ describe('<App/> system alert banners', () => {
     expect(screen.getByText('Inverter trip detected')).toBeDefined();
     expect(screen.getByText('Battery over temperature')).toBeDefined();
     expect(screen.getByText('Inverter temperature high')).toBeDefined();
+  });
+
+  it('re-evaluates the inverter-temperature banner when the threshold changes in the store (issue #183)', async () => {
+    // Regression guard for the stale-config bug: SystemAlertBanners used to
+    // fetch /api/alerts once on mount into local state and never refresh, so
+    // a threshold change on Settings only took effect after a hard refresh.
+    // The thresholds now live in the store; a save pushes the new values and
+    // the banner re-renders immediately.
+    await navigate('/battery');
+    useInverterStore.setState({
+      readOnly: false,
+      inverterTempConfig: { inverter_temp_min: 8, inverter_temp_max: 60 },
+      snapshot: {
+        grid_loss: false,
+        grid_online: true,
+        inverter_trip: false,
+        battery_over_temp: false,
+        inverter_temperature: 61,
+        soc: 80,
+      } as never,
+    });
+
+    render(<App />);
+    // 61°C is above the 60°C max threshold → high-temperature banner shows.
+    expect(await screen.findByText('Inverter temperature high')).toBeDefined();
+
+    // Simulate the user raising the threshold on Settings and saving: the
+    // store is the reactive glue, so the banner must drop without a refresh.
+    await act(async () => {
+      useInverterStore.setState({
+        inverterTempConfig: { inverter_temp_min: 8, inverter_temp_max: 65 },
+      });
+    });
+    // 61°C is now below the 65°C threshold → banner disappears.
+    expect(screen.queryByText('Inverter temperature high')).toBeNull();
   });
 });
 
