@@ -81,9 +81,11 @@ export function deviceSupportsExportLimit(
  * The feature is implemented with the battery pause registers —
  * `battery_pause_mode` (HR 318) and `battery_pause_slot` (HR 319-320) — which
  * live in the HR 300-359 AC-config block. That block is present only on
- * AC-coupled, AC-three-phase and residential All-in-One models, exactly the
- * same set as EPS (HR 317 shares the block). On every other family (DC
- * hybrids incl. Gen1/2/4, Polar, Gen3+, pure three-phase, AIO Commercial,
+ * AC-three-phase and residential All-in-One models. Legacy AC-coupled models
+ * expose the AC-config block for EPS, but field logs show HR319/320 reject
+ * Timed Discharge slot writes with Modbus exception 1, so they are gated out
+ * until a safe write path is confirmed. On every other family (AC-coupled,
+ * DC hybrids incl. Gen1/2/4, Polar, Gen3+, pure three-phase, AIO Commercial,
  * AIO Hybrid, HV Gen3, Gateway, EMS, PV inverter) the registers don't exist:
  * the write is dropped/times out and `battery_pause_mode` never reflects an
  * enabled state, so the toggle appeared broken (the originally reported
@@ -96,8 +98,7 @@ export function deviceSupportsExportLimit(
  * the backend probes those registers out-of-band in `poll.rs`.
  *
  * Mirrors the backend's `DeviceType::supports_timed_discharge` (which takes
- * the ARM firmware version) and the givenergy-modbus reference library's
- * `_AC_CONFIG_BLOCK_MODELS = {AC, AC_3PH, ALL_IN_ONE}` for the AC/AIO set.
+ * the ARM firmware version).
  *
  * Used by `ControlPage` to hide both the Quick Action button and the Timed
  * Discharge schedule section, and kept as a dedicated predicate (rather than
@@ -113,9 +114,7 @@ export function deviceSupportsTimedDischarge(
   const code = snapshot?.device_type_code;
   if (!code) return false;
   if (
-    code === '3001'
-    || code === '3002'
-    || code.startsWith('60')
+    code.startsWith('60')
     || code.startsWith('80')
   ) {
     return true;

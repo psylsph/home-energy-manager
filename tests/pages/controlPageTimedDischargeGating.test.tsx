@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, within } from '@testing-library/react';
+import { render, screen, cleanup, within, fireEvent, waitFor } from '@testing-library/react';
 
 vi.mock('../../src/lib/api', () => ({
   apiGet: vi.fn(async (path: string) => {
@@ -55,6 +55,7 @@ vi.mock('../../src/lib/api', () => ({
 }));
 
 import ControlPage from '../../src/pages/ControlPage';
+import { apiPost } from '../../src/lib/api';
 import { useInverterStore } from '../../src/store/useInverterStore';
 import type { InverterSnapshot, ScheduleSlot } from '../../src/lib/types';
 
@@ -165,14 +166,16 @@ function makeSnapshot(overrides: Partial<InverterSnapshot> = {}): InverterSnapsh
 }
 
 describe('<ControlPage/> — Timed Discharge device gating', () => {
-  // The pause registers (HR318-320) only exist in the HR 300-359 block, which
-  // is exclusive to AC-coupled (3001/3002), AC three-phase (60xx) and
-  // residential All-in-One (80xx). On every other family both the Quick
+  // Timed Discharge slot writes are only enabled where HR318-320 are safely
+  // writable: AC three-phase (60xx), residential All-in-One (80xx), and the
+  // Gen3 targeted probe below. AC-coupled (3001/3002) exposes HR318 but field
+  // logs show HR319/320 reject writes, so it is hidden too. On every other family both the Quick
   // Action button (Battery Mode section) and the dedicated schedule section
   // (heading "Timed Discharge") must be hidden, and no /api/control/
   // timed-discharge call should be possible from the UI.
 
   beforeEach(() => {
+    vi.mocked(apiPost).mockClear();
     silenceConsoleError();
     vi.stubGlobal(
       'matchMedia',
@@ -206,6 +209,8 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
   describe('hidden on devices without the HR 300-359 block', () => {
     it.each([
       ['1001', 'Gen1 hybrid (reported case)'],
+      ['3001', 'AC-coupled (HR319/320 rejected)'],
+      ['3002', 'AC-coupled Mk2 (HR319/320 gated)'],
       ['4001', 'Three-phase'],
       ['7001', 'Gateway'],
       ['8101', 'Hybrid HV Gen3'],
@@ -236,8 +241,6 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
 
   describe('shown on devices with the HR 300-359 block', () => {
     it.each([
-      ['3001', 'AC-coupled'],
-      ['3002', 'AC-coupled Mk2'],
       ['8001', 'AIO 6kW'],
       ['80FF', 'AIO family'],
     ])('shows the button and section for %s (%s)', async (code) => {
@@ -287,6 +290,24 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
       const section = await batteryModeSection();
       expect(within(section).queryByText('Timed Discharge')).toBeNull();
       expect(screen.queryByRole('heading', { name: 'Timed Discharge' })).toBeNull();
+    });
+  });
+
+  it('shows Unpause Battery in Quick Actions when the inverter is Eco Paused', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ battery_mode: 'eco_paused', battery_reserve: 100 }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const button = await screen.findByRole('button', { name: /Unpause Battery/i });
+    expect(screen.queryByText('Pause Battery')).toBeNull();
+
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(apiPost).toHaveBeenCalledWith('/api/control/unpause', undefined);
     });
   });
 

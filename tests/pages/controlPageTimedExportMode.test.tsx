@@ -205,11 +205,11 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
   }
 
   it('shows Eco, Timed Charge, Timed Export and Timed Discharge together on a supported device', async () => {
-    // The default fixture is a Gen hybrid (2001), which does NOT expose the
-    // HR 300-359 block and so hides Timed Discharge. Render on an AC-coupled
-    // inverter (3001) so all four independent mechanisms are visible.
+    // The default fixture is a Gen hybrid (2001), which hides Timed Discharge.
+    // Render on an All-in-One (8001), where HR318-320 slot writes are supported,
+    // so all four independent mechanisms are visible.
     useInverterStore.setState({
-      snapshot: makeSnapshot({ device_type_code: '3001' }),
+      snapshot: makeSnapshot({ device_type_code: '8001' }),
       developerMode: false,
       connectionState: 'connected',
     });
@@ -244,11 +244,11 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
   });
 
   it('saves Timed Discharge as a separate pause-window mechanism', async () => {
-    // Timed Discharge requires the HR 300-359 block; render on AC-coupled
-    // (3001) where the button is visible. The default Gen-hybrid fixture
-    // (2001) hides the control.
+    // Timed Discharge requires confirmed HR318-320 slot support; render on
+    // All-in-One (8001) where the button is visible. The default Gen-hybrid
+    // fixture (2001) hides the control.
     useInverterStore.setState({
-      snapshot: makeSnapshot({ device_type_code: '3001', battery_pause_mode: 0 }),
+      snapshot: makeSnapshot({ device_type_code: '8001', battery_pause_mode: 0 }),
       developerMode: false,
       connectionState: 'connected',
     });

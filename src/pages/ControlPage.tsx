@@ -19,11 +19,13 @@ function ActionButton({
   icon,
   path,
   body,
+  active = false,
 }: {
   label: string;
   icon: string;
   path: string;
   body?: unknown;
+  active?: boolean;
 }) {
   const { loading, success, error, execute } = useAction();
 
@@ -32,7 +34,10 @@ function ActionButton({
       <button
         onClick={() => execute(path, body)}
         disabled={loading}
-        className="w-full flex flex-col items-center gap-1 sm:gap-2 p-2 sm:p-4 bg-bg-surface rounded-xl border border-transparent hover:border-battery/40 hover:bg-bg-elevated transition disabled:opacity-50"
+        className={`w-full flex flex-col items-center gap-1 sm:gap-2 p-2 sm:p-4 rounded-xl border transition disabled:opacity-50 ${active
+          ? 'bg-green-900/30 border-green-500/40 hover:bg-green-900/50'
+          : 'bg-bg-surface border-transparent hover:border-battery/40 hover:bg-bg-elevated'
+        }`}
       >
         <span className="text-xl sm:text-2xl">{icon}</span>
         <span className="text-text-primary text-xs sm:text-sm font-medium leading-tight text-center">{label}</span>
@@ -2176,10 +2181,10 @@ export default function ControlPage() {
             )}
           </div>
           <ActionButton
-            label="Pause Battery"
-            icon="⏸️"
-            path="/api/control/pause"
-            body={{ minutes: 30 }}
+            label={currentMode === 'eco_paused' ? 'Unpause Battery' : 'Pause Battery'}
+            icon={currentMode === 'eco_paused' ? '▶️' : '⏸️'}
+            path={currentMode === 'eco_paused' ? '/api/control/unpause' : '/api/control/pause'}
+            active={currentMode === 'eco_paused'}
           />
           <ActionButton
             label="Sync Clock"

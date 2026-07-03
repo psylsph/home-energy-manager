@@ -9,13 +9,13 @@ pub mod ws;
 
 use std::sync::Arc;
 
+use axum::Router;
 use axum::extract::Request;
 use axum::http::header::CACHE_CONTROL;
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use serde_json::json;
 use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
@@ -72,6 +72,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/control/export-limit", post(api::set_export_limit))
         .route("/api/control/pause", post(api::pause_battery))
+        .route("/api/control/unpause", post(api::unpause_battery))
         .route("/api/control/force-charge", post(api::force_charge))
         .route(
             "/api/control/force-charge/stop",
