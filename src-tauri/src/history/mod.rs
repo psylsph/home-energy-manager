@@ -1322,12 +1322,13 @@ impl HistoryDb {
         let mut stmt = conn
             .prepare(&sql)
             .map_err(|e| format!("Failed to prepare cost query: {e}"))?;
-        let rows = stmt
+        let rows: Vec<(i64, f64)> = stmt
             .query_map(params![start_ts, end_ts], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
             })
             .map_err(|e| format!("Cost query failed: {e}"))?
-            .filter_map(SqlResult::ok);
+            .filter_map(SqlResult::ok)
+            .collect();
 
         // bucket_start_ms -> (per-kWh energy £, standing-charge £) at that
         // bucket's last reading. BTreeMap keeps display points sorted; both
@@ -1356,7 +1357,8 @@ impl HistoryDb {
         // cover hundreds of thousands of rows on a 1y range).
         let parsed_slots = tariff.parsed_slots();
 
-        for (ts, raw) in rows {
+        for (idx, &(ts, raw)) in rows.iter().enumerate() {
+            let next_raw = rows.get(idx + 1).map(|&(_, v)| v);
             // Apply any standing-charge debits for local-midnight boundaries
             // that fall at or before this reading's timestamp and strictly
             // after the previous reading's timestamp (or start_ts for the
@@ -1392,6 +1394,13 @@ impl HistoryDb {
                         (0.0, raw)
                     } else if raw >= base {
                         (raw - base, raw) // normal same-day increase
+                    } else if is_genuine_reset(base, raw, next_raw) {
+                        // Same-day collapse to near zero: this is the inverter's
+                        // daily counter reset landing shortly after the query
+                        // window opened. Treat it as a reset rather than holding
+                        // yesterday's high baseline, otherwise all export/import
+                        // accrued today below yesterday's total is stranded at £0.
+                        (0.0, raw)
                     } else {
                         // Same-day decrease: a sensor glitch, not real negative
                         // energy. Skip it AND keep the baseline, so the later
@@ -4200,6 +4209,41 @@ mod tests {
         assert!(
             (total - 8.0).abs() < 1e-6,
             "dip recovery double-counted: got {total}"
+        );
+    }
+
+    #[test]
+    fn cost_series_treats_near_midnight_counter_collapse_as_reset() {
+        // Issue #184: if the first reading inside a Today/calendar window still
+        // carries yesterday's daily counter (the inverter reset arrives a minute
+        // or two after the UI's local-midnight window open), the cost walk used
+        // that high value as the same-day baseline. The subsequent reset to 0
+        // was treated as a glitch and the baseline stayed high, so a normal day
+        // that exported less than yesterday showed no export income even though
+        // the raw `today_export_kwh` history was correct.
+        let db = test_db();
+        let m = local_midnight_secs(0);
+        db.insert_reading(&make_snapshot_with_kwh(m + 10, 0.0, 18.0)); // stale pre-reset value
+        db.insert_reading(&make_snapshot_with_kwh(m + 70, 0.0, 0.0)); // true daily reset
+        db.insert_reading(&make_snapshot_with_kwh(m + 12 * 3600, 0.0, 4.0));
+        db.insert_reading(&make_snapshot_with_kwh(m + 15 * 3600, 0.0, 8.0));
+
+        let flat = crate::settings::TariffConfig::flat(0.20);
+        let total = series_total(
+            &db.query_cost_series(
+                &window(m, local_midnight_secs(1)),
+                300,
+                "today_export_kwh",
+                &flat,
+                0.20,
+                0.0,
+            )
+            .unwrap(),
+        );
+
+        assert!(
+            (total - 1.60).abs() < 1e-6,
+            "8 kWh exported after reset at £0.20 should be credited, got {total}"
         );
     }
 
