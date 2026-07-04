@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.55.2] - 2026-07-04
+
+### Fixed
+
+- **Export income is now counted reliably after the inverter's midnight reset.** The History Cost tab no longer gets stuck on £0 for export income when the first reading of the day still contains yesterday's total before the counter resets. Exported energy for the day is now priced normally once the reset arrives. (issue #184)
+
 ## [0.55.1] - 2026-07-03
 
 ### Fixed
