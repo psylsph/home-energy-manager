@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Glance at your system from an Apple Watch or any small screen.** A new `/mini` page renders just the live solar, battery, grid, and home numbers in a tiny layout that fits a phone or watch display, refreshing itself every few seconds. Open `http://<your-pc-ip>:7337/mini` in a browser, or copy the URL from Settings → Remote / Mobile Network Access. There's also a matching `/api/mini/status` JSON endpoint for building a custom iPhone Shortcut. Both are read-only and show only the glance fields (no serial numbers or settings).
+
+- **Support bundles now deliver to a Telegram bot, and the issue picker is a dropdown.** The "Submit a Support Bundle" form lists your open GitHub issues so you select the ticket you're reporting against rather than typing its number — and you're nudged to raise one first if you haven't. Bundles are sent to the maintainer's Telegram support bot as a file attachment, replacing the previous third-party notification relay that had become unreliable.
+
 ## [0.55.3] - 2026-07-05
 
 ### Fixed

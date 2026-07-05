@@ -327,6 +327,14 @@ export default function SettingsPage() {
   const [supportIssueNumber, setSupportIssueNumber] = useState('');
   const [supportIncludeHistory, setSupportIncludeHistory] = useState(false);
   const [supportSubmitting, setSupportSubmitting] = useState(false);
+  // Open GitHub issues for the support-form dropdown, loaded once on mount from
+  // the backend proxy (GET /api/support/github-issues, cached 5 min server-side).
+  // An empty list or `supportIssuesError` leaves the dropdown on its default
+  // "Raise a ticket first" option (the form requires an issue before submit).
+  const [supportIssues, setSupportIssues] = useState<
+    { number: number; title: string; html_url: string }[]
+  >([]);
+  const [supportIssuesError, setSupportIssuesError] = useState(false);
 
   // Weather (Open-Meteo) — local ambient temperature for the History charts.
   // `weatherState` is the full GET /api/weather payload (config + last fetch
@@ -405,6 +413,25 @@ export default function SettingsPage() {
       }
     })();
 
+    // Load open GitHub issues for the support-bundle issue dropdown. Backend
+    // caches for 5 min so repeat form opens stay under GitHub's rate limit.
+    (async () => {
+      try {
+        const res = await apiGet<{
+          ok: boolean;
+          issues: { number: number; title: string; html_url: string }[];
+        }>('/api/support/github-issues');
+        if (res.ok && Array.isArray(res.issues)) {
+          setSupportIssues(res.issues);
+        } else {
+          setSupportIssuesError(true);
+        }
+      } catch (e: unknown) {
+        console.warn('Failed to load GitHub issues for support form:', e);
+        setSupportIssuesError(true);
+      }
+    })();
+
     // Load alert config
     (async () => {
       try {
@@ -457,6 +484,11 @@ export default function SettingsPage() {
   // (issue #114). Sticky via localStorage, so the recipient only needs
   // to visit it once.
   const lanReadOnlyUrl = `${lanUrl}?RO`;
+  // Mini display GUI page — a tiny self-contained glance view sized for a
+  // phone or Apple Watch screen. It fetches /api/mini/status itself, so the
+  // user just opens this URL in a browser. See INSTALL.md → “Glance from
+  // your Apple Watch”. Tokenless + read-only by design.
+  const miniPageUrl = `${lanUrl}/mini`;
 
   // Save connection
   const handleConnect = async () => {
@@ -649,9 +681,9 @@ export default function SettingsPage() {
   };
 
   // Submit a diagnostic support bundle (logs + snapshot + settings) to the
-  // maintainer via ntfy. The backend assembles everything and posts to the
-  // shared `home-energy-manager-support` topic; we just forward the user's
-  // description, the optional GitHub issue number, and privacy toggles.
+  // maintainer via the `HomeEnergyManagerSupportBot` Telegram bot. The backend
+  // assembles everything and posts it as a document; we forward the user's
+  // description, the selected GitHub issue number, and privacy toggles.
   // See issue #125.
   const handleSubmitSupport = async () => {
     if (!supportDescription.trim()) {
@@ -1066,6 +1098,23 @@ export default function SettingsPage() {
         </div>
         <p className="text-text-secondary text-xs font-sans">
           Read-only link — hides Control and Settings in the visitor's browser (safe to share with family)
+        </p>
+
+        {/* Mini display GUI page — a tiny glance view for a phone or Apple
+            Watch browser. See INSTALL.md → “Glance from your Apple Watch”. */}
+        <div className="flex items-center gap-3 mt-2">
+          <code className="bg-bg-elevated text-flow-active rounded-lg px-4 py-2 text-sm font-mono flex-1 min-w-0 select-all overflow-hidden text-ellipsis whitespace-nowrap">
+            {miniPageUrl}
+          </code>
+          <button
+            onClick={() => copyUrl(miniPageUrl)}
+            className="bg-bg-elevated text-text-primary font-sans text-sm px-4 py-2 rounded-lg hover:bg-bg-base transition-colors shrink-0"
+          >
+            Copy
+          </button>
+        </div>
+        <p className="text-text-secondary text-xs font-sans">
+          Apple Watch / mini display — open this URL in a browser for a tiny glance view (or fetch /api/mini/status from a Shortcut; see INSTALL.md)
         </p>
 
         {clients.length > 0 && (
@@ -1721,18 +1770,41 @@ export default function SettingsPage() {
             </select>
           </label>
 
-          <label className="flex flex-col gap-1">
+          <div className="flex flex-col gap-1">
             <span className="text-text-secondary text-xs font-sans">
-              GitHub issue number (optional)
+              GitHub issue{' '}
+              <button
+                type="button"
+                onClick={() => openExternal('https://github.com/psylsph/home-energy-manager/issues')}
+                className="text-flow-active underline hover:opacity-80 align-baseline"
+              >
+                (raise one first)
+              </button>
             </span>
-            <input
-              type="text"
+            <select
               value={supportIssueNumber}
               onChange={(e) => setSupportIssueNumber(e.target.value)}
-              placeholder="e.g. 125 — links this bundle to the ticket"
-              className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-            />
-          </label>
+              aria-label="GitHub issue"
+              className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-sans border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+            >
+              <option value="">Raise a ticket first</option>
+              {supportIssues.map((issue) => (
+                <option key={issue.number} value={String(issue.number)}>
+                  #{issue.number} — {issue.title}
+                </option>
+              ))}
+            </select>
+            {supportIssuesError && (
+              <span className="text-text-secondary/70 text-xs font-sans">
+                Couldn't load the issue list (offline or rate-limited). Raise a ticket first, then pick it here.
+              </span>
+            )}
+            {!supportIssuesError && supportIssues.length === 0 && (
+              <span className="text-text-secondary/70 text-xs font-sans">
+                No open issues.
+              </span>
+            )}
+          </div>
 
           <label className="flex flex-col gap-1">
             <span className="text-text-secondary text-xs font-sans">
@@ -1767,7 +1839,7 @@ export default function SettingsPage() {
 
           <button
             onClick={handleSubmitSupport}
-            disabled={supportSubmitting || !supportDescription.trim()}
+            disabled={supportSubmitting || !supportDescription.trim() || !supportIssueNumber}
             className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-4 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 transition-opacity self-start"
           >
             {supportSubmitting ? 'Submitting…' : 'Submit Support Bundle'}

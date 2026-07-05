@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="HEM">
+<title>HEM</title>
+<style>
+  :root { color-scheme: dark light; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: #0d1117;
+    color: #f0f6fc;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 8px;
+    gap: 5px;
+    -webkit-text-size-adjust: 100%;
+    text-align: center;
+  }
+  .row {
+    width: 100%;
+    max-width: 260px;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 7px 12px;
+    background: #161b22;
+    border-radius: 14px;
+  }
+  .label { font-size: clamp(11px, 3.4vw, 13px); color: #8b949e; font-weight: 600; }
+  .big { font-size: clamp(22px, 8vw, 30px); font-weight: 700; font-variant-numeric: tabular-nums; }
+  .med { font-size: clamp(18px, 6vw, 22px); font-weight: 700; font-variant-numeric: tabular-nums; }
+  .unit { font-size: clamp(10px, 3vw, 12px); color: #8b949e; font-weight: 600; margin-left: 2px; }
+  .solar .val { color: #f7c948; }
+  .battery .val { color: #3fb950; }
+  .grid .val { color: #79c0ff; }
+  .home .val { color: #d2a8ff; }
+  #footer { font-size: clamp(10px, 3vw, 11px); color: #6e7681; margin-top: 1px; }
+  .stale { color: #d29922; }
+  #status { color: #6e7681; font-size: 14px; }
+  body.fault .battery .val { color: #ff7b72; }
+  body.fault { outline: 2px solid #ff7b72; outline-offset: -8px; border-radius: 18px; }
+</style>
+</head>
+<body>
+  <div id="status">Loading…</div>
+
+  <div id="content" hidden>
+    <div class="row solar">
+      <span class="label">&#9728; Solar</span>
+      <span><span id="solar" class="big val">&mdash;</span><span class="unit">kW</span></span>
+    </div>
+    <div class="row home">
+      <span class="label">&#127968; Home</span>
+      <span><span id="home" class="med val">&mdash;</span><span class="unit">kW</span></span>
+    </div>
+    <div class="row battery">
+      <span class="label">&#128267; Battery</span>
+      <span><span id="soc" class="big val">&mdash;</span><span class="unit">%</span></span>
+    </div>
+    <div class="row battery">
+      <span class="label" id="bstate">&mdash;</span>
+      <span><span id="bpwr" class="med val">&mdash;</span><span class="unit">kW</span></span>
+    </div>
+    <div class="row grid">
+      <span class="label" id="glabel">&#8644; Grid</span>
+      <span><span id="grid" class="med val">&mdash;</span><span class="unit">kW</span></span>
+    </div>
+    <div id="footer">
+      <span id="mode">&mdash;</span> &middot; <span id="conn">&mdash;</span> &middot; <span id="age">&mdash;</span>
+    </div>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+  var REFRESH_MS = 10000;
+  var firstRender = true;
+
+  function abs(n) { return Number(n).toFixed(1); }
+  function signed(n) {
+    var s = Number(n).toFixed(1);
+    return n > 0 ? "+" + s : s;
+  }
+  function set(id, txt) { document.getElementById(id).textContent = txt; }
+
+  function ageText(age) {
+    if (age < 60) return age + "s ago";
+    return Math.round(age / 60) + "m ago";
+  }
+
+  function render(d) {
+    document.getElementById("status").hidden = true;
+    document.getElementById("content").hidden = false;
+
+    set("solar", abs(d.solar_kw));
+    set("home", abs(d.home_kw));
+    set("soc", d.soc);
+
+    // Battery: + = discharging, - = charging.
+    var bp = d.battery_kw;
+    set("bpwr", bp === 0 ? "0.0" : signed(bp));
+    set("bstate",
+      d.battery_state === "charging" ? "Charging" :
+      d.battery_state === "discharging" ? "Discharging" : "Idle");
+
+    // Grid: + = importing, - = exporting. Show magnitude + direction arrow.
+    var gp = d.grid_kw;
+    set("grid", abs(Math.abs(gp)));
+    set("glabel", gp > 0 ? "Import" : gp < 0 ? "Export" : "Grid");
+
+    set("mode", d.battery_mode);
+    set("conn", d.conn);
+
+    var ageEl = document.getElementById("age");
+    var txt = ageText(d.age_s);
+    var stale = d.conn !== "connected" || d.age_s > 30;
+    ageEl.textContent = txt;
+    ageEl.className = stale ? "stale" : "";
+
+    document.body.classList.toggle("fault", !!d.fault);
+  }
+
+  async function tick() {
+    try {
+      var r = await fetch("/api/mini/status", { cache: "no-store" });
+      if (!r.ok) throw new Error(r.status);
+      render(await r.json());
+      firstRender = false;
+    } catch (e) {
+      if (firstRender) {
+        document.getElementById("status").textContent = "Can't reach server";
+      } else {
+        var ageEl = document.getElementById("age");
+        ageEl.textContent = "offline";
+        ageEl.className = "stale";
+      }
+    }
+  }
+
+  tick();
+  setInterval(tick, REFRESH_MS);
+})();
+</script>
+</body>
+</html>

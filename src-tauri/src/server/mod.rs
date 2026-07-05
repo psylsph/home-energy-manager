@@ -5,6 +5,7 @@
 
 pub mod api;
 pub mod logs;
+pub mod mini;
 pub mod ws;
 
 use std::sync::Arc;
@@ -41,6 +42,14 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Data endpoints
         .route("/api/snapshot", get(api::get_snapshot))
         .route("/api/status", get(api::get_status))
+        // Mini display — tokenless, read-only glance summary for an Apple
+        // Watch or any small-screen browser (INSTALL.md → “Glance from
+        // your Apple Watch”). Deliberately a separate, minimal-field surface
+        // rather than a filtered /api/snapshot; see server::mini docs.
+        .route("/api/mini/status", get(mini::mini_status))
+        // Tiny self-contained GUI page that renders the mini status. Open
+        // this URL in a phone/watch browser; it fetches /api/mini/status.
+        .route("/mini", get(mini::mini_page))
         .route(
             "/api/settings",
             get(api::get_settings).post(api::update_settings),

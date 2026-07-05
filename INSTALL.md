@@ -69,6 +69,47 @@ This puts a little app-style icon on your phone so you can open it like a regula
 
 Now you can open it with one tap, just like a normal app.
 
+### Glance from your Apple Watch (or any tiny screen)
+
+There's a built-in mini display page that shows just the live numbers — solar, battery, grid, home — sized for a small screen. It's the fastest way to check your system from a phone or an Apple Watch without loading the full dashboard.
+
+**At home on Wi-Fi (the easy option):**
+
+1. Find your PC's IP address from Step 2 above (e.g. `192.168.1.42`)
+2. On your phone or watch browser, open: `http://192.168.1.42:7337/mini`
+   - Keep the `:7337` and the `/mini` on the end
+3. That's it. The page refreshes itself every 10 seconds. Bookmark it or add it to your home screen / watch app grid for one-tap access.
+
+The mini page shows: solar generation, home consumption, battery state of charge and charge/discharge power, and whether you're importing from or exporting to the grid. A red outline appears if the inverter has tripped, the grid is down, or the battery is over temperature.
+
+> 📱 **Away from home?** The watch can't run Tailscale on its own, but if your iPhone (or the PC) is reachable over Tailscale, open the same `/mini` URL using the Tailscale IP instead of your home LAN IP — see the "Using on Your Phone Away From Home" section in the main README.
+
+<details>
+<summary><b>Power-user option: build a custom Shortcut from the raw JSON</b></summary>
+
+Prefer to format the readout yourself (different fields, your own wording, a complication that runs without opening a browser)? There's a matching JSON endpoint at `/api/mini/status` that returns a compact, flat object:
+
+```json
+{ "ok": true, "solar_kw": 4.2, "battery_kw": -1.8, "grid_kw": 0.9,
+  "home_kw": 1.5, "soc": 64, "battery_state": "discharging",
+  "battery_mode": "eco", "conn": "connected", "age_s": 4,
+  "device": "Gen3 Hybrid", "fault": false }
+```
+
+Sign convention: `battery_kw` is positive when discharging, negative when charging; `grid_kw` is positive when importing, negative when exporting.
+
+To show this on an Apple Watch:
+
+1. On your iPhone, open the **Shortcuts** app and create a new shortcut
+2. Add **Get Contents of URL** → `http://192.168.1.42:7337/api/mini/status`
+3. Add a **Text** action and build a line from the dictionary fields (e.g. `☀ {solar_kw} kW · 🔋 {soc}%`)
+4. Add **Show Result**
+5. In the shortcut's settings (**( i )**), turn on **Show in Watch** and set **Run on iPhone**
+
+Because the iPhone does the fetching (not the watch), this works on a GPS-only watch. The iPhone needs to be on and on the same Wi-Fi as the PC; away from home, join the iPhone to your Tailscale network and swap the LAN IP for the Tailscale IP.
+
+</details>
+
 ### It doesn't work — what now?
 
 **Phone says "can't connect" or "site not found":**
