@@ -562,12 +562,19 @@ pub fn deliver_bundle(
     let (Some(token), Some(chat)) = (token, chat) else {
         return Err(NOT_CONFIGURED.to_string());
     };
+    // The caption is plain text built from a user-typed description plus
+    // model/host fields, so we explicitly pass `parse_mode: None` —
+    // Telegram otherwise HTML-parses the caption and returns 400
+    // "can't parse entities" the moment it sees an unescaped `<`/`>`/`&`
+    // in the description. The /report caller (alerts) passes
+    // `Some("HTML")` because its caption uses intentional `<b>` tags.
     crate::alerts::send_telegram_document(
         token,
         chat,
         &bundle.manifest_summary,
         &bundle.filename,
         &bundle.json,
+        None,
     )
 }
 

@@ -145,6 +145,40 @@ fn model_specific_blocks_in_poll_order(
     blocks
 }
 
+/// Standard block set the runtime will use for the next poll given a confirmed
+/// (or prefilled) device type. Mirrors the selection logic inside
+/// [`ModbusClient::read_all_with_extras`] so the startup log can name the
+/// blocks a model-aware poll will read instead of just listing
+/// `extra_poll_blocks()` (which is empty for the Gateway — its IR 1600+ bank
+/// is added separately, and that omission was the source of confusing
+/// `extra_blocks=[]` log lines for Gateway users).
+pub fn preview_standard_blocks(
+    device_type: Option<&crate::inverter::model::DeviceType>,
+    prefilled_device_type: Option<&crate::inverter::model::DeviceType>,
+) -> &'static [RegisterBlock] {
+    if device_type.is_some_and(|dt| dt.needs_three_phase_input_blocks() || dt.needs_gateway_input_blocks())
+        || prefilled_device_type.is_some_and(|dt| dt.needs_three_phase_input_blocks() || dt.needs_gateway_input_blocks())
+    {
+        STANDARD_POLL_BLOCKS_3PH
+    } else {
+        STANDARD_POLL_BLOCKS
+    }
+}
+
+/// Model-specific block list the runtime will request on the next poll, in
+/// poll order. Wraps [`model_specific_blocks_in_poll_order`] so the startup
+/// log can name the same blocks the runtime will read; in particular, a
+/// freshly-detected Gateway runs its first model-aware poll with
+/// [`GatewayPollScope::Detail`] (the countdown starts at 0 and `Detail` fires
+/// on the first call), so the log line should show the full IR 1600-1859
+/// bank and the EMS plant holding block rather than the lean "fast" subset.
+pub fn preview_model_specific_blocks(
+    device_type: &crate::inverter::model::DeviceType,
+    gateway_scope: GatewayPollScope,
+) -> Vec<&'static RegisterBlock> {
+    model_specific_blocks_in_poll_order(device_type, gateway_scope)
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -1381,16 +1415,26 @@ impl ModbusClient {
     pub async fn read_all_with_extras(
         &mut self,
         device_type: Option<&crate::inverter::model::DeviceType>,
+        prefilled_device_type: Option<&crate::inverter::model::DeviceType>,
         gateway_scope: GatewayPollScope,
     ) -> Result<Vec<BlockRead>, ClientError> {
         // Three-phase models read all real-time telemetry from the
         // IR(1000-1414) range, making input_0_59 and input_180_181
         // redundant. The Gateway likewise reads all telemetry from its own
         // IR(1600-1859) aggregation bank. Both use the lean HR-only standard
-        // set to save ~300 ms per cycle and reduce timeout exposure. On the
-        // first poll (device_type is None) the full STANDARD_POLL_BLOCKS set
-        // is used so that model detection (from HR(0)) can proceed.
+        // set to save ~300 ms per cycle and reduce timeout exposure.
+        //
+        // `device_type` is the *confirmed* model (set by the decoder on the
+        // first successful poll). For a *known* Gateway startup — when the
+        // persisted serial starts with "GW" — `prefilled_device_type` lets
+        // the caller pick the lean standard set on the very first poll too,
+        // before the decoder has had a chance to confirm. Model-specific
+        // blocks are still gated on the confirmed `device_type` (not the
+        // prefill) so a reflash that changes model identity still drives a
+        // normal detection re-poll.
         let standard_blocks = if device_type.is_some_and(|dt| {
+            dt.needs_three_phase_input_blocks() || dt.needs_gateway_input_blocks()
+        }) || prefilled_device_type.is_some_and(|dt| {
             dt.needs_three_phase_input_blocks() || dt.needs_gateway_input_blocks()
         }) {
             STANDARD_POLL_BLOCKS_3PH
@@ -1828,6 +1872,196 @@ mod tests {
             || DeviceType::Gateway.needs_gateway_input_blocks();
         assert!(condition_gw);
     }
+
+    /// `preview_standard_blocks` is the function the startup-log line uses to
+    /// name the standard blocks the runtime will read on the next cycle. The
+    /// lean-set selection must respect *either* the confirmed device type
+    /// (post-detection) *or* the prefilled device type (pre-detection, when
+    /// the serial prefix identifies the device as a Gateway) — otherwise the
+    /// "Device model identified" log line for a freshly-detected Gateway
+    /// would show the full IR 0-59 / IR 180-183 set even though the runtime
+    /// would actually use the lean HR-only set on the very next cycle.
+    #[test]
+    fn preview_standard_blocks_uses_prefill_when_device_type_unconfirmed() {
+        use crate::inverter::model::DeviceType;
+        use crate::modbus::registers::{RegisterType, STANDARD_POLL_BLOCKS, STANDARD_POLL_BLOCKS_3PH};
+
+        // Compare two static slices by their block names + register type.
+        // `RegisterBlock` doesn't derive `PartialEq` and the fat-pointer
+        // addresses can differ between function-return and const-reference
+        // views of the same underlying data, so a content-based comparison
+        // is the reliable check.
+        fn summarise(blocks: &[RegisterBlock]) -> Vec<(&'static str, &'static str)> {
+            blocks
+                .iter()
+                .map(|b| (b.name, register_type_name(b.register_type)))
+                .collect()
+        }
+        fn register_type_name(rt: RegisterType) -> &'static str {
+            match rt {
+                RegisterType::Input => "Input",
+                RegisterType::Holding => "Holding",
+            }
+        }
+        fn eq_set(
+            a: &[RegisterBlock],
+            b: &[RegisterBlock],
+        ) -> bool {
+            summarise(a) == summarise(b)
+        }
+
+        // No device type, no prefill → full single-phase set.
+        assert!(eq_set(
+            preview_standard_blocks(None, None),
+            STANDARD_POLL_BLOCKS
+        ));
+
+        // Confirmed device type is enough on its own to trigger lean.
+        assert!(eq_set(
+            preview_standard_blocks(Some(&DeviceType::Gateway), None),
+            STANDARD_POLL_BLOCKS_3PH
+        ));
+        assert!(eq_set(
+            preview_standard_blocks(Some(&DeviceType::ThreePhase), None),
+            STANDARD_POLL_BLOCKS_3PH
+        ));
+        // A single-phase model (e.g. Gen2) keeps the full set even when
+        // confirmed.
+        assert!(eq_set(
+            preview_standard_blocks(Some(&DeviceType::Gen2Hybrid), None),
+            STANDARD_POLL_BLOCKS
+        ));
+
+        // The prefill-only case is the new behaviour: a known-Gateway serial
+        // lets the runtime skip the wide IR 0-59 / IR 180-183 standard blocks
+        // on the very first poll, before the decoder has confirmed anything.
+        assert!(eq_set(
+            preview_standard_blocks(None, Some(&DeviceType::Gateway)),
+            STANDARD_POLL_BLOCKS_3PH
+        ));
+        // The lean-set trigger is the *union* of confirmed and prefilled
+        // (whichever says "this is a Gateway or 3PH" wins). A reflash that
+        // changes the confirmed type to a single-phase model still keeps
+        // the lean set as long as the serial prefix still says Gateway —
+        // both confirmed and prefill can independently drive the
+        // standard-set selection. The trade-off: a non-Gateway firmware on
+        // a Gateway serial would skip IR 0-59 reads and lose those
+        // registers; the decoder still has `holding_0_59` for model
+        // detection, so it's a graceful degradation rather than a failure.
+        assert!(eq_set(
+            preview_standard_blocks(Some(&DeviceType::Gen2Hybrid), Some(&DeviceType::Gateway)),
+            STANDARD_POLL_BLOCKS_3PH
+        ));
+        // A non-Gateway, non-3PH prefill keeps the full set. (Doesn't
+        // currently happen via the serial prefix, but pins the contract.)
+        assert!(eq_set(
+            preview_standard_blocks(None, Some(&DeviceType::Gen2Hybrid)),
+            STANDARD_POLL_BLOCKS
+        ));
+
+        // Belt-and-braces: the lean set must not request any input registers.
+        for dt in [
+            DeviceType::Gateway,
+            DeviceType::ThreePhase,
+            DeviceType::ACThreePhase,
+            DeviceType::AioCommercial,
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOneHybrid,
+        ] {
+            let lean = preview_standard_blocks(Some(&dt), None);
+            assert!(
+                lean.iter().all(|b| b.register_type != RegisterType::Input),
+                "{dt:?} should use the lean HR-only standard set, got {lean:?}"
+            );
+        }
+    }
+
+    /// `preview_model_specific_blocks` drives the new
+    /// `model_specific_blocks = ?…` field in the "Device model identified" log
+    /// line. For a freshly-detected Gateway the runtime runs its first
+    /// model-aware poll with `Detail` scope (the `gateway_detail_poll_countdown`
+    /// starts at 0, which maps to `Detail`), so the log must show the full
+    /// IR 1600-1859 bank plus the EMS plant holding block — not the lean "fast"
+    /// subset. The old log line emitted `extra_blocks=[]` for the Gateway
+    /// because `extra_poll_blocks()` is empty; this test pins the fix.
+    #[test]
+    fn preview_model_specific_blocks_for_gateway_logs_full_detail_set() {
+        use crate::inverter::model::DeviceType;
+        use crate::modbus::registers::RegisterType;
+
+        let names: Vec<&str> = preview_model_specific_blocks(&DeviceType::Gateway, GatewayPollScope::Detail)
+            .iter()
+            .map(|b| b.name)
+            .collect();
+
+        // The full IR 1600-1859 bank, in ascending order.
+        assert!(
+            names.contains(&"input_1600_1659"),
+            "first model-aware Gateway poll should read the live input_1600_1659 block; got {names:?}"
+        );
+        assert!(names.contains(&"input_1660_1719"));
+        assert!(names.contains(&"input_1720_1779"));
+        assert!(names.contains(&"input_1780_1830"));
+        assert!(names.contains(&"input_1831_1859"));
+        // Plant config block is part of the detail scope.
+        assert!(
+            names.contains(&"holding_2040_2075"),
+            "Gateway detail polls must read the EMS plant holding block; got {names:?}"
+        );
+        // No three-phase or Gen3 extras for a Gateway.
+        assert!(!names.contains(&"holding_1080_1124"));
+        assert!(!names.contains(&"holding_240_299"));
+        assert!(!names.contains(&"holding_300_359"));
+
+        // Belt-and-braces: every block should be a register type the runtime
+        // can actually request.
+        for b in preview_model_specific_blocks(&DeviceType::Gateway, GatewayPollScope::Detail) {
+            assert!(
+                matches!(b.register_type, RegisterType::Input | RegisterType::Holding),
+                "unexpected register type on Gateway model-specific block {b:?}"
+            );
+        }
+    }
+
+    /// The fast (non-detail) Gateway scope intentionally drops two of the
+    /// five IR 1600-1859 blocks and skips the EMS plant holding block, to
+    /// reduce steady-state dongle load (the slow fields are carried forward
+    /// from the last detail poll). The startup log uses `Detail` scope
+    /// because that's the very first model-aware poll's actual scope, but
+    /// `preview_model_specific_blocks` should still produce the correct
+    /// fast set for callers that ask.
+    #[test]
+    fn preview_model_specific_blocks_for_gateway_fast_scope_omits_slow_blocks() {
+        use crate::inverter::model::DeviceType;
+
+        let names: Vec<&str> = preview_model_specific_blocks(&DeviceType::Gateway, GatewayPollScope::Fast)
+            .iter()
+            .map(|b| b.name)
+            .collect();
+
+        // Fast scope keeps only the three live IR blocks.
+        assert!(names.contains(&"input_1600_1659"));
+        assert!(names.contains(&"input_1660_1719"));
+        assert!(names.contains(&"input_1780_1830"));
+        // Slow detail blocks are NOT in the fast set.
+        assert!(!names.contains(&"input_1720_1779"), "fast scope must skip per-AIO discharge detail");
+        assert!(!names.contains(&"input_1831_1859"), "fast scope must skip per-AIO serials");
+        assert!(!names.contains(&"holding_2040_2075"), "fast scope must skip EMS plant holding");
+    }
+
+    /// For non-Gateway models the model-specific block list comes from
+    /// `extra_poll_blocks()`. The helper should surface those unchanged.
+    #[test]
+    fn preview_model_specific_blocks_for_gen3_returns_extended_slots() {
+        use crate::inverter::model::DeviceType;
+
+        let names: Vec<&str> = preview_model_specific_blocks(&DeviceType::Gen3Hybrid, GatewayPollScope::Fast)
+            .iter()
+            .map(|b| b.name)
+            .collect();
+
+        assert_eq!(names, vec!["holding_240_299"]);
+    }
     #[test]
     fn ac_coupled_model_specific_poll_order_still_reads_ac_config() {
         use crate::inverter::model::DeviceType;
@@ -2221,7 +2455,7 @@ mod tests {
 
         // --- Cycle 1: decode the baseline over the wire ---
         let blocks1 = client
-            .read_all_with_extras(None, GatewayPollScope::Fast)
+            .read_all_with_extras(None, None, GatewayPollScope::Fast)
             .await
             .unwrap();
         assert_eq!(blocks1.len(), 4, "all four standard blocks read");
@@ -2238,7 +2472,7 @@ mod tests {
 
         // --- Cycle 2: decode the spike, then sanitize against cycle 1 ---
         let blocks2 = client
-            .read_all_with_extras(None, GatewayPollScope::Fast)
+            .read_all_with_extras(None, None, GatewayPollScope::Fast)
             .await
             .unwrap();
         let mut snap = decode_snapshot(&blocks2);

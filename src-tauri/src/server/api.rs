@@ -3407,13 +3407,37 @@ pub async fn submit_support_bundle(
     let message = if any_ok {
         format!("Bundle {bundle_id} submitted.")
     } else {
-        "Bundle was assembled but could not be delivered. Check your internet connection and try again."
-            .to_string()
+        // Surface the first channel's error in the top-level `message` and
+        // `error` fields so the frontend's `apiPost` (which throws on non-2xx
+        // and extracts a top-level `error` string) shows the real Telegram
+        // reason — e.g. "Telegram API 400 (sendDocument): Bad Request: chat
+        // not found" — instead of a generic "API error: 500".
+        let first_error = sent_to
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|r| r.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("delivery failed");
+        format!("Bundle {bundle_id} was assembled but could not be delivered: {first_error}")
     };
     let status = if any_ok {
         StatusCode::OK
     } else {
-        StatusCode::INTERNAL_SERVER_ERROR
+        // 502 Bad Gateway: the bundle was assembled on our side, but the
+        // upstream (Telegram) rejected the upload. More accurate than 500
+        // and pairs with the top-level `error` field that `apiPost` reads
+        // out of non-2xx response bodies to populate the popup.
+        StatusCode::BAD_GATEWAY
+    };
+    let top_error = if any_ok {
+        None
+    } else {
+        sent_to
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|r| r.get("error"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
     };
     (
         status,
@@ -3423,6 +3447,7 @@ pub async fn submit_support_bundle(
             "size_bytes": size_bytes,
             "sent_to": sent_to,
             "message": message,
+            "error": top_error,
         })),
     )
 }
