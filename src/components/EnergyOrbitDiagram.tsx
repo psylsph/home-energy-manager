@@ -759,10 +759,10 @@ function EnergyOrbitDiagramInner({
                   against the pill border on AC-coupled inverters whose
                   battery mode appended "(Discharging)". */}
               <rect
-                x={CX - 84}
-                y={385}
-                width={168}
-                height={48}
+                x={CX - (mobile ? 82 : 84)}
+                y={mobile ? 381 : 385}
+                width={mobile ? 164 : 168}
+                height={mobile ? 56 : 48}
                 rx={10}
                 fill="var(--app-bg-surface, #161B22)"
                 fillOpacity={0.82}
@@ -771,33 +771,33 @@ function EnergyOrbitDiagramInner({
               />
               <text
                 x={CX}
-                y={399}
+                y={mobile ? 398 : 399}
                 textAnchor="middle"
-                fill="var(--app-text-primary, #F0F6FC)"
-                fontSize={13}
-                fontWeight={600}
+                fill="var(--app-text-secondary, #8B949E)"
+                fontSize={mobile ? 15 : 13}
+                fontWeight={500}
                 fontFamily="var(--font-sans, sans-serif)"
               >
                 {inverter.value}
               </text>
               <text
                 x={CX}
-                y={415}
+                y={mobile ? 417 : 415}
                 textAnchor="middle"
-                fill="var(--app-text-secondary, #8B949E)"
-                fontSize={11}
-                fontWeight={600}
+                fill="var(--app-text-primary, #F0F6FC)"
+                fontSize={mobile ? 13 : 11}
+                fontWeight={700}
                 fontFamily="var(--font-sans, sans-serif)"
               >
                 {inverter.unit}
               </text>
               <text
                 x={CX}
-                y={429}
+                y={mobile ? 433 : 429}
                 textAnchor="middle"
-                fill="var(--app-text-secondary, #8B949E)"
-                fontSize={11}
-                fontWeight={600}
+                fill="var(--app-text-primary, #F0F6FC)"
+                fontSize={mobile ? 13 : 11}
+                fontWeight={700}
                 fontFamily="var(--font-sans, sans-serif)"
               >
                 {batteryMode}

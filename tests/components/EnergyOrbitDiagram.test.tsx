@@ -92,8 +92,30 @@ describe('EnergyOrbitDiagram', () => {
     const card = container.querySelector('[data-testid="inverter-mini-card"]');
     expect(card).not.toBeNull();
     expect(card?.getAttribute('aria-label')).toBe('Inverter: Gen 3 Hybrid, 30.0°C, Eco');
-    const rows = Array.from(card!.querySelectorAll('text')).map((t) => t.textContent ?? '');
+    const rowEls = Array.from(card!.querySelectorAll('text'));
+    const rows = rowEls.map((t) => t.textContent ?? '');
     expect(rows).toEqual(['Gen 3 Hybrid', '30.0°C', 'Eco']);
+    expect(rowEls.map((t) => t.getAttribute('fill'))).toEqual([
+      'var(--app-text-secondary, #8B949E)',
+      'var(--app-text-primary, #F0F6FC)',
+      'var(--app-text-primary, #F0F6FC)',
+    ]);
+    expect(rowEls.map((t) => t.getAttribute('font-weight'))).toEqual(['500', '700', '700']);
+  });
+
+  it('uses larger inverter mini-card text on mobile so model, temperature, and mode stay readable', () => {
+    mockMatchMedia({ '(max-width: 767px)': true });
+
+    const { container } = render(<EnergyOrbitDiagram snapshot={makeSnapshot()} />);
+    const card = container.querySelector('[data-testid="inverter-mini-card"]');
+    expect(card).not.toBeNull();
+
+    const rows = Array.from(card!.querySelectorAll('text'));
+    expect(rows.map((t) => t.getAttribute('font-size'))).toEqual(['15', '13', '13']);
+
+    const pill = card!.querySelector('rect');
+    expect(pill?.getAttribute('width')).toBe('164');
+    expect(pill?.getAttribute('height')).toBe('56');
   });
 
   it('widens the inverter mini-card pill so the longest battery-mode label fits (issue: AC coupled + Timed Demand Discharging)', () => {

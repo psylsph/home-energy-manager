@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.55.3] - 2026-07-05
+
+### Fixed
+
+- **Inverter temperature alerts no longer fire from one bad dongle reading.** Sudden impossible temperature jumps are now smoothed out before they reach the alert system, while genuinely sustained temperature changes still come through after a few readings. (issue #185)
+
+- **The inverter details under the energy diagram are easier to read on phones.** The inverter model, temperature, and mode text now scales up on mobile so the status page remains legible on smaller screens.
+
 ## [0.55.2] - 2026-07-04
 
 ### Fixed
