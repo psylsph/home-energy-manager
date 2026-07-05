@@ -114,6 +114,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/alerts/test", post(api::test_alerts))
         // Support bundle submission (issue #125)
         .route("/api/support/submit", post(api::submit_support_bundle))
+        .route(
+            "/api/support/github-issues",
+            get(api::get_support_github_issues),
+        )
         // Weather (Open-Meteo integration)
         .route("/api/weather", get(api::get_weather).post(api::set_weather))
         .route("/api/weather/backfill", post(api::backfill_weather))

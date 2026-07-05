@@ -4,7 +4,8 @@
 //! their developer log ring and the inverter's service-info dump. This module
 //! packages both — plus useful context (manifest, sanitised settings, a recent
 //! history tail) — into a single JSON bundle and ships it to the maintainer
-//! via the shared ntfy topic [`SUPPORT_NTFY_TOPIC`].
+//! via the `HomeEnergyManagerSupportBot` Telegram bot (credentials are injected
+//! at build time — see `support_bot_token` / `support_chat_id`).
 //!
 //! ## Bundle format
 //!
@@ -12,8 +13,7 @@
 //! compression crate dependency and keeps the output human-readable: a
 //! maintainer can `jq` straight into any section without unpacking anything.
 //! The document is at most a few hundred KB (bounded by the 2000-entry log
-//! ring and a capped history tail), well under ntfy's 512 KB message cap and
-//! Telegram's 50 MB document limit.
+//! ring and a capped history tail), well under Telegram's 50 MB document limit.
 //!
 //! ## Privacy
 //!
@@ -29,30 +29,40 @@
 //! [`generate_bundle_id`]: the same serial always yields the same
 //! fingerprint, but the raw serial itself never leaves the device.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::alerts::report::ReadingRow;
 use crate::inverter::model::InverterSnapshot;
 use crate::settings::AlertsConfig;
 
-/// The shared ntfy topic that support bundles are published to.
-///
-/// Hard-coded (per issue #125) rather than per-user: the maintainer subscribes
-/// to this single topic and receives every submission. Each bundle is
-/// disambiguated back to its originating user by its [`generate_bundle_id`],
-/// whose user segment is a non-reversible [`fingerprint`] of the inverter
-/// serial (not the serial itself — GDPR) so prior tickets from the same user
-/// can be cross-referenced without exposing identifying data. Always
-/// publishes to the public `ntfy.sh` server regardless of the user's own
-/// `ntfy_server` setting, because that is where the maintainer listens — a
-/// self-hosted user's private server would swallow the submission silently.
-pub const SUPPORT_NTFY_TOPIC: &str = "home-energy-manager-support";
+/// The maintainer's Telegram support-bot token, injected at compile time by
+/// `build.rs` (real env for CI, `src-tauri/support-secrets.local` for local
+/// dev). `None` in a build that didn't set it — see [`support_configured`].
+/// This is a real secret, so it is NEVER in the public source tree; only the
+/// release binaries (built in CI from repo secrets) and a developer's local
+/// `support-secrets.local` carry it. The token is the full `123456:ABCdef...`
+/// string from BotFather, not just the numeric bot id.
+pub fn support_bot_token() -> Option<&'static str> {
+    option_env!("SUPPORT_BOT_TOKEN")
+}
 
-/// Public ntfy server that support bundles are delivered to. See
-/// [`SUPPORT_NTFY_TOPIC`] for why this is hard-coded rather than reusing the
-/// user's configured `ntfy_server`.
-pub const SUPPORT_NTFY_SERVER: &str = "https://ntfy.sh";
+/// The destination chat_id the support bot posts each bundle to (the
+/// maintainer's personal chat, a private channel, or a group). Injected at
+/// compile time alongside [`support_bot_token`].
+pub fn support_chat_id() -> Option<&'static str> {
+    option_env!("SUPPORT_CHAT_ID")
+}
+
+/// Whether this build can deliver support bundles. Both the bot token and the
+/// chat_id must be present and non-empty; otherwise the Submit Support Bundle
+/// button returns a clear "not configured" error instead of silently dropping
+/// the bundle. Returning a bool (rather than panicking) keeps the API handler
+/// branch trivial and unit-testable without live credentials.
+pub fn support_configured() -> bool {
+    support_bot_token().is_some_and(|t| !t.is_empty())
+        && support_chat_id().is_some_and(|c| !c.is_empty())
+}
 
 /// Minimum gap between two successful submissions from one process.
 ///
@@ -147,8 +157,10 @@ pub fn validate_request(req: &SupportRequest) -> Result<(), String> {
 }
 
 /// The GitHub repository that support bundles and their issues belong to.
-/// Used to build the deep-link `Click` URL on the ntfy notification when the
-/// user supplies an issue number.
+/// The GitHub repository that support bundles and their issues belong to.
+/// Used both to record the issue deep-link in the bundle manifest (and surface
+/// it in the Telegram caption) and to derive the repo path for the open-issues
+/// lookup that feeds the support-form dropdown.
 pub const GITHUB_REPO_URL: &str = "https://github.com/psylsph/home-energy-manager";
 
 /// Normalise a user-entered issue number to a bare integer.
@@ -209,20 +221,20 @@ pub struct BundleInputs {
 pub struct BuiltBundle {
     /// Stable identifier, e.g. `hem-9f3a1c0b2e7d4051-20260623T1432Z` (the user
     /// segment is a non-reversible serial [`crate::support::fingerprint`],
-    /// never the serial itself — GDPR). Surfaced to the
-    /// maintainer in the ntfy title, the filename and the manifest so a reply
-    /// can reference it.
+    /// never the serial itself — GDPR). Surfaced to the maintainer in the
+    /// Telegram caption, the filename and the manifest so a reply can
+    /// reference it.
     pub id: String,
-    /// Filename used for the attachment (and the Telegram document).
+    /// Filename used for the Telegram document attachment.
     pub filename: String,
-    /// The pretty-printed JSON body, ready to upload.
+    /// The pretty-printed JSON body, ready to upload as the Telegram document.
     pub json: Vec<u8>,
-    /// Short human-readable summary used as the ntfy/Telegram message body.
+    /// Short human-readable summary used as the Telegram document caption.
     pub manifest_summary: String,
-    /// Normalised GitHub issue number if the user supplied one, for building
-    /// the ntfy `Click` deep-link. `None` when the user had no ticket yet.
+    /// Normalised GitHub issue number if the user supplied one, recorded in the
+    /// manifest and the caption. `None` when the user had no ticket yet.
     pub issue_number: Option<u64>,
-    /// GitHub issue URL for the ntfy `Click` header, derived from
+    /// GitHub issue URL recorded in the manifest, derived from
     /// [`BuiltBundle::issue_number`]. `None` when no issue number was given.
     pub issue_url: Option<String>,
 }
@@ -391,7 +403,7 @@ pub fn cap_history_rows(mut rows: Vec<ReadingRow>) -> Vec<ReadingRow> {
 ///
 /// Pure: takes owned [`BundleInputs`], returns a [`BuiltBundle`]. No I/O, no
 /// network — that makes the whole assembly path unit-testable without an
-/// HTTP server or a live ntfy endpoint.
+/// HTTP server or a live Telegram endpoint.
 pub fn build_bundle(inputs: BundleInputs) -> Result<BuiltBundle, String> {
     // Validate the request up front so a malformed input can't produce a
     // half-built bundle.
@@ -473,7 +485,7 @@ pub fn build_bundle(inputs: BundleInputs) -> Result<BuiltBundle, String> {
     let json = serde_json::to_vec_pretty(&bundle)
         .map_err(|e| format!("Failed to serialise bundle: {e}"))?;
 
-    // Short summary used as the ntfy/Telegram message body. Keeps the
+    // Short summary used as the Telegram document caption. Keeps the
     // maintainer's notification card scannable without opening the attachment.
     // Summary device line: model name only — never the serial (GDPR). The
     // per-user fingerprint already lives in the bundle id for correlation.
@@ -521,6 +533,174 @@ pub fn build_bundle(inputs: BundleInputs) -> Result<BuiltBundle, String> {
         issue_number,
         issue_url: issue_url_value,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Delivery + GitHub issue lookup
+// ---------------------------------------------------------------------------
+
+/// Deliver an assembled bundle to the maintainer's Telegram support bot as a
+/// document attachment: the JSON body is the document, the manifest summary is
+/// the caption. Extracted from the API handler so the "credentials missing"
+/// guard and the wire call are separately testable — the guard is unit-tested
+/// here; the wire call follows the alerts convention of not hitting the real
+/// Telegram API under `cargo test`.
+///
+/// Returns `Ok(())` on a successful upload, or `Err` with a human-readable
+/// message (surfaced directly in the API response). Call from `spawn_blocking`
+/// — `send_telegram_document` uses synchronous `ureq`.
+pub fn deliver_bundle(
+    bundle: &BuiltBundle,
+    bot_token: Option<&str>,
+    chat_id: Option<&str>,
+) -> Result<(), String> {
+    const NOT_CONFIGURED: &str =
+        "Support delivery is not configured in this build. Set SUPPORT_BOT_TOKEN and \
+         SUPPORT_CHAT_ID (CI env or src-tauri/support-secrets.local) and rebuild.";
+    let token = bot_token.filter(|t| !t.is_empty());
+    let chat = chat_id.filter(|c| !c.is_empty());
+    let (Some(token), Some(chat)) = (token, chat) else {
+        return Err(NOT_CONFIGURED.to_string());
+    };
+    crate::alerts::send_telegram_document(
+        token,
+        chat,
+        &bundle.manifest_summary,
+        &bundle.filename,
+        &bundle.json,
+    )
+}
+
+/// One open issue in the project's GitHub repo, for the support-bundle issue
+/// dropdown. Surfaced by [`fetch_open_issues`] and serialised straight into the
+/// `GET /api/support/github-issues` response.
+#[derive(Debug, Clone, Serialize)]
+pub struct GithubIssue {
+    /// Bare issue number, e.g. `125`. Sent as the `issue_number` field when the
+    /// user picks this option in the dropdown.
+    pub number: u64,
+    /// Issue title (used only for display — never sent to the inverter).
+    pub title: String,
+    /// Full `https://github.com/.../issues/125` URL, in case the UI links out.
+    pub html_url: String,
+}
+
+/// Parse GitHub's `GET /repos/{owner}/{repo}/issues` JSON into the slim shape
+/// the frontend dropdown needs. Pure (no I/O) so the parsing + PR-filtering
+/// logic is unit-testable. Pull requests are excluded — the issues endpoint
+/// returns both issues and PRs, distinguished only by the presence of a
+/// `pull_request` field.
+pub fn parse_github_issues(body: &str) -> Result<Vec<GithubIssue>, String> {
+    let v: Value =
+        serde_json::from_str(body).map_err(|e| format!("Invalid JSON from GitHub: {e}"))?;
+    let arr = v
+        .as_array()
+        .ok_or_else(|| "GitHub issues response was not an array.".to_string())?;
+    let mut out = Vec::new();
+    for item in arr {
+        if item.get("pull_request").is_some() {
+            continue;
+        }
+        let number = item
+            .get("number")
+            .and_then(|n| n.as_u64())
+            .ok_or_else(|| "GitHub issue entry missing a numeric `number`.".to_string())?;
+        let title = item
+            .get("title")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
+        let html_url = item
+            .get("html_url")
+            .and_then(|u| u.as_str())
+            .unwrap_or("")
+            .to_string();
+        out.push(GithubIssue {
+            number,
+            title,
+            html_url,
+        });
+    }
+    Ok(out)
+}
+
+/// How long [`fetch_open_issues`] caches a successful result before re-querying
+/// GitHub. Tuned to stay well under GitHub's 60 req/hour unauthenticated limit
+/// even if the user opens the support form repeatedly while composing a
+/// report. Five minutes is recent enough that a just-filed ticket appears on
+/// the next form open without a manual refresh.
+pub const ISSUES_CACHE_TTL_SECS: u64 = 300;
+
+#[derive(Default)]
+struct IssuesCache {
+    fetched_at: Option<std::time::Instant>,
+    issues: Vec<GithubIssue>,
+}
+
+static ISSUES_CACHE: std::sync::OnceLock<std::sync::Mutex<IssuesCache>> =
+    std::sync::OnceLock::new();
+
+fn issues_cache() -> &'static std::sync::Mutex<IssuesCache> {
+    ISSUES_CACHE.get_or_init(|| std::sync::Mutex::new(IssuesCache::default()))
+}
+
+/// Fetch the project's open GitHub issues for the support dropdown, using a
+/// process-wide [`ISSUES_CACHE_TTL_SECS`]-TTL cache to stay well under GitHub's
+/// 60 req/hour unauthenticated rate limit. Filters pull requests via
+/// [`parse_github_issues`]. The repo is derived from [`GITHUB_REPO_URL`] so
+/// there is one source of truth. Call from `spawn_blocking` — synchronous
+/// `ureq`. Returns `Err` on any HTTP/parse failure; the caller shapes the
+/// response (the UI falls back to "Raise a ticket first").
+pub fn fetch_open_issues() -> Result<Vec<GithubIssue>, String> {
+    // Serve from cache if fresh.
+    {
+        let cache = issues_cache()
+            .lock()
+            .expect("support issues cache mutex poisoned");
+        if let Some(at) = cache.fetched_at {
+            if at.elapsed().as_secs() < ISSUES_CACHE_TTL_SECS {
+                return Ok(cache.issues.clone());
+            }
+        }
+    }
+
+    // Derive "owner/repo" from the canonical URL — one source of truth, no
+    // second constant to keep in sync.
+    let repo = GITHUB_REPO_URL
+        .strip_prefix("https://github.com/")
+        .unwrap_or(GITHUB_REPO_URL);
+    let url = format!(
+        "https://api.github.com/repos/{repo}/issues?state=open&sort=created&direction=desc&per_page=100"
+    );
+
+    let resp = match ureq::get(&url)
+        .header(
+            "User-Agent",
+            &format!("hem-support/{}", env!("CARGO_PKG_VERSION")),
+        )
+        .header("Accept", "application/vnd.github+json")
+        .call()
+    {
+        Ok(r) => r,
+        Err(ureq::Error::StatusCode(code)) => {
+            return Err(format!(
+                "GitHub API {code} (rate-limited or repo unavailable)"
+            ));
+        }
+        Err(e) => return Err(format!("HTTP transport error to GitHub: {e}")),
+    };
+    let body = resp
+        .into_body()
+        .read_to_string()
+        .map_err(|e| format!("GitHub read error: {e}"))?;
+    let issues = parse_github_issues(&body)?;
+
+    let mut cache = issues_cache()
+        .lock()
+        .expect("support issues cache mutex poisoned");
+    cache.fetched_at = Some(std::time::Instant::now());
+    cache.issues = issues.clone();
+    Ok(issues)
 }
 
 // ---------------------------------------------------------------------------
@@ -819,5 +999,65 @@ mod tests {
         assert_eq!(bundle.issue_number, None);
         assert_eq!(bundle.issue_url, None);
         assert!(bundle.manifest_summary.contains("Issue: (none)"));
+    }
+
+    // --- GitHub issue lookup (parse_github_issues) ---
+
+    #[test]
+    fn parse_github_issues_filters_prs_and_maps_fields() {
+        let body = r#"[
+            {"number": 125, "title": "Battery drift", "html_url": "https://github.com/psylsph/home-energy-manager/issues/125"},
+            {"number": 126, "title": "PR: fix thing", "html_url": "https://github.com/psylsph/home-energy-manager/pull/126", "pull_request": {"url": "x"}},
+            {"number": 127, "title": "Schedule bug", "html_url": "https://github.com/psylsph/home-energy-manager/issues/127"}
+        ]"#;
+        let issues = parse_github_issues(body).unwrap();
+        assert_eq!(issues.len(), 2, "PR should be filtered out");
+        assert_eq!(issues[0].number, 125);
+        assert_eq!(issues[0].title, "Battery drift");
+        assert!(issues[0].html_url.ends_with("/issues/125"));
+        assert_eq!(issues[1].number, 127);
+    }
+
+    #[test]
+    fn parse_github_issues_handles_empty_array() {
+        assert!(parse_github_issues("[]").unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_github_issues_rejects_non_array() {
+        // GitHub returns a JSON object (not an array) on error / rate-limit.
+        let err = parse_github_issues(r#"{"message": "rate limited"}"#).unwrap_err();
+        assert!(err.contains("not an array"), "got {err}");
+    }
+
+    #[test]
+    fn parse_github_issues_rejects_invalid_json() {
+        let err = parse_github_issues("not json").unwrap_err();
+        assert!(err.contains("Invalid JSON"), "got {err}");
+    }
+
+    // --- delivery guard (deliver_bundle) ---
+
+    #[test]
+    fn deliver_bundle_rejects_missing_token() {
+        let bundle = build_bundle(sample_inputs(true)).unwrap();
+        let err = deliver_bundle(&bundle, None, Some("999")).unwrap_err();
+        assert!(err.contains("not configured"), "got {err}");
+    }
+
+    #[test]
+    fn deliver_bundle_rejects_missing_chat_id() {
+        let bundle = build_bundle(sample_inputs(true)).unwrap();
+        let err = deliver_bundle(&bundle, Some("token"), None).unwrap_err();
+        assert!(err.contains("not configured"), "got {err}");
+    }
+
+    #[test]
+    fn deliver_bundle_rejects_empty_credentials() {
+        // Empty strings are treated the same as absent — neither must reach the
+        // wire call (which would hit the real Telegram API under test).
+        let bundle = build_bundle(sample_inputs(true)).unwrap();
+        let err = deliver_bundle(&bundle, Some(""), Some("")).unwrap_err();
+        assert!(err.contains("not configured"), "got {err}");
     }
 }

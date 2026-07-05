@@ -104,6 +104,12 @@ jobs:
         if: matrix.platform == 'macos-latest'
         env:
           TAURI_BUNDLER_DMG_IGNORE_CI: false
+          # Support-bundle delivery bot credentials (issue #125). Injected at
+          # compile time by build.rs; absent/empty secrets → feature compiles
+          # disabled (Submit returns a "not configured" error). Add both as
+          # repository secrets to activate delivery in release builds.
+          SUPPORT_BOT_TOKEN: ${{ secrets.SUPPORT_BOT_TOKEN }}
+          SUPPORT_CHAT_ID: ${{ secrets.SUPPORT_CHAT_ID }}
         # Retry the whole build: cargo's own CARGO_NET_RETRY covers within-
         # attempt download retries, but a sustained crates.io connectivity
         # blip (e.g. "Connection reset by peer") can still sink a single
@@ -120,6 +126,9 @@ jobs:
       - name: Build Tauri app (Windows)
         if: matrix.platform == 'windows-latest'
         shell: bash
+        env:
+          SUPPORT_BOT_TOKEN: ${{ secrets.SUPPORT_BOT_TOKEN }}
+          SUPPORT_CHAT_ID: ${{ secrets.SUPPORT_CHAT_ID }}
         run: |
           for attempt in 1 2 3; do
             if cargo tauri build --target ${{ matrix.target }} --bundles msi; then exit 0; fi
@@ -131,6 +140,9 @@ jobs:
 
       - name: Build Tauri app (Linux)
         if: matrix.platform == 'ubuntu-22.04' || matrix.platform == 'ubuntu-24.04-arm'
+        env:
+          SUPPORT_BOT_TOKEN: ${{ secrets.SUPPORT_BOT_TOKEN }}
+          SUPPORT_CHAT_ID: ${{ secrets.SUPPORT_CHAT_ID }}
         run: |
           for attempt in 1 2 3; do
             if cargo tauri build --target ${{ matrix.target }} --bundles deb,rpm; then exit 0; fi

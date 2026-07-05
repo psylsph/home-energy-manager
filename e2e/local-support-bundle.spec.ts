@@ -2,16 +2,35 @@
  * E2E tests for the "Submit a Support Bundle" feature (issue #125).
  *
  * Covers the Settings page UI (section rendering, form interactions) and the
- * backend validation path. The full ntfy delivery is deliberately NOT exercised
- * here — it depends on live `ntfy.sh` availability and would make the suite
- * flaky. Instead the submission flow is verified against a mocked endpoint
- * response, and the real endpoint is hit only for the validation branch that
- * returns *before* any network call.
+ * backend validation path. The full Telegram delivery is deliberately NOT
+ * exercised here — it depends on live `api.telegram.org` availability and a
+ * configured support bot, and would make the suite flaky. Instead the
+ * submission flow is verified against a mocked endpoint response, and the real
+ * endpoint is hit only for the validation branch that returns *before* any
+ * network call.
  */
 
 import { test, expect } from './local-fixture.js';
 
 test.describe('Settings Page - Support Bundle', () => {
+  // The issue dropdown fetches /api/support/github-issues on mount. Mock it so
+  // the UI tests don't depend on live GitHub availability / rate limits.
+  test.beforeEach(async ({ page }) => {
+    await page.route('**/api/support/github-issues', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ok: true,
+          issues: [
+            { number: 125, title: 'Battery drift', html_url: 'https://github.com/psylsph/home-energy-manager/issues/125' },
+            { number: 130, title: 'Schedule clears itself', html_url: 'https://github.com/psylsph/home-energy-manager/issues/130' },
+          ],
+        }),
+      });
+    });
+  });
+
   test('should show the Submit Support Bundle section', async ({ page }) => {
     await page.goto('/#/settings');
     await expect(
@@ -31,11 +50,13 @@ test.describe('Settings Page - Support Bundle', () => {
     for (const cat of ['Connection', 'Battery', 'Other']) {
       await expect(categorySelect.locator(`option`)).toContainText([cat]);
     }
-    // Optional GitHub issue number box.
-    await expect(page.getByPlaceholder(/e.g. 125/)).toBeVisible();
+    // GitHub issue dropdown (required-by-default; lists open issues).
+    const issueSelect = supportSection.getByRole('combobox', { name: 'GitHub issue' });
+    await expect(issueSelect).toBeVisible();
+    await expect(issueSelect.locator('option')).toContainText(['Raise a ticket first', '#125']);
   });
 
-  test('should disable the submit button until a description is entered', async ({ page }) => {
+  test('should disable submit until a description AND an issue are provided', async ({ page }) => {
     await page.goto('/#/settings');
     const button = page.getByRole('button', { name: 'Submit Support Bundle' });
     await expect(button).toBeVisible({ timeout: 10_000 });
@@ -43,15 +64,19 @@ test.describe('Settings Page - Support Bundle', () => {
 
     const textarea = page.getByPlaceholder(/What were you trying to do/);
     await textarea.fill('Battery stops charging at 60% in slot 1.');
+    // Description alone is no longer enough — an issue is required too.
+    await expect(button).toBeDisabled();
+
+    await page.getByRole('combobox', { name: 'GitHub issue' }).selectOption('125');
     await expect(button).toBeEnabled();
   });
 
   test('should submit the bundle and show a confirmation', async ({ page }) => {
     await page.goto('/#/settings');
 
-    // Mock the submission endpoint so the test doesn't depend on live ntfy.sh.
-    // Assert the request body carries the user's description, category, and
-    // privacy toggles through to the backend.
+    // Mock the submission endpoint so the test doesn't depend on the live
+    // Telegram bot. Assert the request body carries the user's description,
+    // category, and privacy toggles through to the backend.
     let capturedBody: Record<string, unknown> | null = null;
     await page.route('**/api/support/submit', async (route) => {
       const request = route.request();
@@ -63,7 +88,7 @@ test.describe('Settings Page - Support Bundle', () => {
           ok: true,
           bundle_id: 'hem-TEST123-20260623T1432Z',
           size_bytes: 4096,
-          sent_to: [{ channel: 'ntfy', ok: true }],
+          sent_to: [{ channel: 'telegram', ok: true }],
           message: 'Bundle hem-TEST123-20260623T1432Z submitted.',
         }),
       });
@@ -72,8 +97,9 @@ test.describe('Settings Page - Support Bundle', () => {
     const textarea = page.getByPlaceholder(/What were you trying to do/);
     await textarea.fill('Inverter reboots every hour.');
 
-    // Enter a GitHub issue number so we can assert it travels through too.
-    await page.getByPlaceholder(/e.g. 125/).fill('125');
+    // Select an open issue so the bundle is linked to it (the form now
+    // requires one before submit).
+    await page.getByRole('combobox', { name: 'GitHub issue' }).selectOption('125');
 
     // History is opt-in (default off) — toggle it on to exercise the path.
     const historyCheckbox = page.getByLabel(/Include last 24 h of history/);
