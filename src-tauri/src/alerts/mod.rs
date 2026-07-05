@@ -506,6 +506,14 @@ fn telegram_agent() -> &'static ureq::Agent {
             // pooled socket.
             .max_idle_connections(0)
             .max_idle_connections_per_host(0)
+            // Translate 4xx/5xx to `Err(ureq::Error::StatusCode(code))` —
+            // **disabled** so the callers can read Telegram's descriptive
+            // error body (e.g. "Bad Request: chat not found", "Bad Request:
+            // can't parse entities"). With the default `true`, ureq 3 throws
+            // away the response on non-2xx and only the bare code survives,
+            // which made every Telegram failure show up in the log as
+            // "Telegram API 400" with no clue what actually went wrong.
+            .http_status_as_error(false)
             .build();
         ureq::Agent::new_with_config(config)
     })
@@ -531,9 +539,6 @@ pub fn send_telegram_message(bot_token: &str, chat_id: &str, text: &str) -> Resu
         .send(&body)
     {
         Ok(r) => r,
-        Err(ureq::Error::StatusCode(code)) => {
-            return Err(format!("Telegram API {} (check token and chat ID)", code));
-        }
         Err(e) => return Err(format!("HTTP transport error: {e}")),
     };
 
@@ -541,17 +546,27 @@ pub fn send_telegram_message(bot_token: &str, chat_id: &str, text: &str) -> Resu
     if status.is_success() {
         Ok(())
     } else {
-        let text = resp
+        // The shared `telegram_agent` is built with
+        // `http_status_as_error(false)`, so non-2xx lands here and we can
+        // read Telegram's descriptive error body (e.g. "Bad Request: chat
+        // not found") instead of the bare code.
+        let err_body = resp
             .into_body()
             .read_to_string()
             .unwrap_or_else(|_| "<read error>".to_string());
-        Err(format!("Telegram API {}: {}", status, text))
+        Err(format!("Telegram API {status} (sendMessage): {err_body}"))
     }
 }
 
 /// Send a file (HTML report) as a document via the Telegram Bot API.
 ///
-/// The `caption` is sent as the message text below the document.
+/// `caption` is sent as the message text below the document.
+/// `parse_mode`: pass `Some("HTML")` when the caption contains intentional
+/// Telegram-HTML tags (e.g. `<b>`, `<i>`); pass `None` for plain text. A
+/// plain-text caption MUST NOT be sent with a parse_mode — Telegram
+/// otherwise tries to HTML-parse the caption and returns 400
+/// "can't parse entities" the moment it sees an unescaped `<`, `>`, or
+/// `&` in user-supplied content (e.g. a support-bundle description).
 /// Uses `sendDocument` with `multipart/form-data`.
 pub fn send_telegram_document(
     bot_token: &str,
@@ -559,6 +574,7 @@ pub fn send_telegram_document(
     caption: &str,
     filename: &str,
     file_body: &[u8],
+    parse_mode: Option<&str>,
 ) -> Result<(), String> {
     let url = format!("https://api.telegram.org/bot{bot_token}/sendDocument");
 
@@ -586,7 +602,7 @@ pub fn send_telegram_document(
         format!("Content-Disposition: form-data; name=\"document\"; filename=\"{filename}\"{crlf}")
             .as_bytes(),
     );
-    body.extend(format!("Content-Type: text/html{crlf}").as_bytes());
+    body.extend(format!("Content-Type: application/json{crlf}").as_bytes());
     body.extend(crlf.as_bytes());
     body.extend(file_body);
     body.extend(crlf.as_bytes());
@@ -598,37 +614,47 @@ pub fn send_telegram_document(
     body.extend(caption.as_bytes());
     body.extend(crlf.as_bytes());
 
-    // parse_mode
-    body.extend(format!("--{boundary}{crlf}").as_bytes());
-    body.extend(format!("Content-Disposition: form-data; name=\"parse_mode\"{crlf}").as_bytes());
-    body.extend(crlf.as_bytes());
-    body.extend(b"HTML");
-    body.extend(crlf.as_bytes());
+    // parse_mode (only emitted when the caller asks for HTML formatting).
+    // Omitting the field for plain-text captions prevents Telegram from
+    // HTML-parsing user input and returning 400 on the first stray `<`/`&`.
+    if let Some(mode) = parse_mode {
+        body.extend(format!("--{boundary}{crlf}").as_bytes());
+        body.extend(format!(
+            "Content-Disposition: form-data; name=\"parse_mode\"{crlf}"
+        )
+        .as_bytes());
+        body.extend(crlf.as_bytes());
+        body.extend(mode.as_bytes());
+        body.extend(crlf.as_bytes());
+    }
 
     // end
     body.extend(format!("--{boundary}--{crlf}").as_bytes());
 
-    let resp = match telegram_agent()
+    // The shared `telegram_agent` is built with `http_status_as_error(false)`
+    // so `send` returns `Ok(response)` for any status and we can read
+    // Telegram's descriptive error body on failure (e.g. "Bad Request: chat
+    // not found", "Bad Request: can't parse entities"). Without that, ureq 3
+    // would discard the response on non-2xx and the log would only show
+    // "Telegram API 400" with no way to tell *why*.
+    let resp = telegram_agent()
         .post(&url)
         .content_type(&format!("multipart/form-data; boundary={boundary}"))
         .send(body)
-    {
-        Ok(r) => r,
-        Err(ureq::Error::StatusCode(code)) => {
-            return Err(format!("Telegram API {} (document upload)", code));
-        }
-        Err(e) => return Err(format!("HTTP transport error: {e}")),
-    };
+        .map_err(|e| format!("HTTP transport error: {e}"))?;
 
     let status = resp.status();
     if status.is_success() {
         Ok(())
     } else {
-        let text = resp
+        let err_body = resp
             .into_body()
             .read_to_string()
             .unwrap_or_else(|_| "<read error>".to_string());
-        Err(format!("Telegram API {}: {}", status, text))
+        Err(format!(
+            "Telegram API {} (sendDocument): {err_body}",
+            status
+        ))
     }
 }
 
@@ -1310,6 +1336,7 @@ pub fn spawn_telegram_poller(state: std::sync::Arc<crate::inverter::poll::AppSta
                                         &caption,
                                         &filename,
                                         html_body.as_bytes(),
+                                        Some("HTML"),
                                     ) {
                                         tracing::warn!("Telegram /report failed: {e}");
                                     }
@@ -2071,6 +2098,23 @@ mod tests {
             cfg.max_idle_connections_per_host(),
             0,
             "per-host pool must be disabled"
+        );
+    }
+
+    #[test]
+    fn test_telegram_agent_disables_http_status_as_error() {
+        // Without `http_status_as_error(false)`, ureq 3 translates 4xx/5xx
+        // to `Err(ureq::Error::StatusCode(u16))` and **discards the response
+        // body** — so Telegram errors like "Bad Request: chat not found"
+        // or "Bad Request: can't parse entities" never reach our error
+        // string, and every failure shows up in the log as a bare
+        // "Telegram API 400" with no clue why. Pin the config to false so
+        // `send` returns `Ok(response)` for any status and callers can read
+        // the descriptive body.
+        let cfg = telegram_agent().config();
+        assert!(
+            !cfg.http_status_as_error(),
+            "http_status_as_error must be disabled so non-2xx response bodies are readable"
         );
     }
 

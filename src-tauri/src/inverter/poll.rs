@@ -475,6 +475,33 @@ fn should_repoll_after_model_detection(device_type: DeviceType, current_slave: u
         || device_type.needs_gateway_input_blocks()
 }
 
+/// Whether the persisted serial looks like a GivEnergy Gateway.
+///
+/// Gateway serials start with the "GW" prefix (e.g. `GW2529A127`). When the
+/// user has saved a Gateway serial, we know the device is a Gateway before
+/// the first poll — the model is encoded in the hardware identifier, not
+/// just in the firmware registers. Letting the runtime know up front lets
+/// it skip the wide-scan `STANDARD_POLL_BLOCKS` (IR 0-59 + IR 180-183 are
+/// unmapped on the Gateway) and use the lean HR-only set from cycle 1,
+/// saving ~300 ms and one round of timeout exposure on every Gateway
+/// startup.
+fn device_type_from_serial(serial: &str) -> Option<DeviceType> {
+    let trimmed = serial.trim();
+    if trimmed.len() >= 2 && trimmed[..2].eq_ignore_ascii_case("GW") {
+        Some(DeviceType::Gateway)
+    } else {
+        None
+    }
+}
+
+/// Standard block set to use for the warmup read after a fresh TCP connect.
+/// Falls back to the full `STANDARD_POLL_BLOCKS` when no prefill is
+/// available (empty serial, or a serial that doesn't match a known prefix).
+fn warmup_blocks_for(prefilled: Option<&DeviceType>) -> &'static [crate::modbus::registers::RegisterBlock] {
+    use crate::modbus::client::preview_standard_blocks;
+    preview_standard_blocks(None, prefilled)
+}
+
 /// Whether to probe for external CT clamp meters on this cycle.
 ///
 /// The discovery policy is:
@@ -738,12 +765,17 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // block via `read_blocks_resilient`). The warmup is no
                 // stricter than the inner poll loop, so a slow-but-healthy
                 // dongle that recovers mid-cycle is allowed to recover.
+                //
+                // If the persisted serial identifies the device as a Gateway
+                // (GW prefix), skip the wide IR 0-59 / IR 180-183 blocks —
+                // they're unmapped on Gateway hardware and would just burn
+                // timeout budget. A known-Gateway startup reads the lean
+                // HR-only set for the warmup too.
                 const WARMUP_MAX_RETRIES: u8 = 2;
+                let warmup_blocks =
+                    warmup_blocks_for(device_type_from_serial(&settings.serial).as_ref());
                 match client
-                    .read_blocks_resilient(
-                        crate::modbus::registers::STANDARD_POLL_BLOCKS,
-                        WARMUP_MAX_RETRIES,
-                    )
+                    .read_blocks_resilient(warmup_blocks, WARMUP_MAX_RETRIES)
                     .await
                 {
                     Ok(blocks) => {
@@ -937,8 +969,26 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                             known_device_type,
                             gateway_detail_poll_countdown,
                         );
+                        // Prefill the device type from the persisted serial on
+                        // the first poll (when the decoder hasn't yet
+                        // confirmed a model) so a known-Gateway startup can
+                        // skip the wide IR 0-59 / IR 180-183 standard blocks.
+                        // Model-specific blocks are still gated on the
+                        // confirmed `known_device_type` (set on the cycle
+                        // after detection), so the decoder always gets a
+                        // clean chance to confirm or override the prefill.
+                        let prefilled_device_type: Option<DeviceType> =
+                            if known_device_type.is_none() {
+                                device_type_from_serial(&settings.serial)
+                            } else {
+                                None
+                            };
                         match client
-                            .read_all_with_extras(known_device_type.as_ref(), gateway_scope)
+                            .read_all_with_extras(
+                                known_device_type.as_ref(),
+                                prefilled_device_type.as_ref(),
+                                gateway_scope,
+                            )
                             .await
                         {
                             Ok(blocks) => {
@@ -1060,9 +1110,36 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 let is_new_model = known_device_type.is_none()
                                     && !matches!(snapshot.device_type, crate::inverter::model::DeviceType::Unknown(_));
                                 if is_new_model {
+                                    // Name the actual blocks the model-aware poll
+                                    // will read on the next cycle. For a Gateway
+                                    // this is the lean HR-only standard set + the
+                                    // full IR 1600-1859 bank + EMS plant holding;
+                                    // `extra_poll_blocks()` is empty for Gateway
+                                    // (its blocks are added in
+                                    // `model_specific_blocks_in_poll_order`), so
+                                    // the old `extra_blocks=[]` log line misled
+                                    // users into thinking detection hadn't changed
+                                    // the poll plan.
+                                    let standard_blocks_next: Vec<&'static str> =
+                                        crate::modbus::client::preview_standard_blocks(
+                                            Some(&snapshot.device_type),
+                                            None,
+                                        )
+                                        .iter()
+                                        .map(|b| b.name)
+                                        .collect();
+                                    let model_specific_blocks_next: Vec<&'static str> =
+                                        crate::modbus::client::preview_model_specific_blocks(
+                                            &snapshot.device_type,
+                                            GatewayPollScope::Detail,
+                                        )
+                                        .iter()
+                                        .map(|b| b.name)
+                                        .collect();
                                     tracing::info!(
                                         device_type = ?snapshot.device_type,
-                                        extra_blocks = ?snapshot.device_type.extra_poll_blocks().iter().map(|b| b.name).collect::<Vec<_>>(),
+                                        standard_blocks = ?standard_blocks_next,
+                                        model_specific_blocks = ?model_specific_blocks_next,
                                         "Device model identified - enabling model-aware polling"
                                     );
                                     let preferred_slave = snapshot.device_type.preferred_read_slave_address();
@@ -1093,18 +1170,22 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         );
                                     }
 
-                                    let has_extra_blocks = !snapshot.device_type.extra_poll_blocks().is_empty();
+                                    let has_model_specific_blocks = !crate::modbus::client::preview_model_specific_blocks(
+                                        &snapshot.device_type,
+                                        GatewayPollScope::Fast,
+                                    )
+                                    .is_empty();
                                     known_device_type = Some(snapshot.device_type);
 
                                     // The first detection poll is intentionally minimal: it discovers
                                     // the model, then immediately re-polls with the model-specific
-                                    // slave address and optional blocks (AC HR300-359, Gen3 HR240-299).
-                                    // Without this, AC-coupled HR313/314 limits can take a full poll
-                                    // interval to appear after startup.
+                                    // slave address and optional blocks (AC HR300-359, Gen3 HR240-299,
+                                    // Gateway IR 1600-1859). Without this, model-specific registers
+                                    // can lag a full poll interval behind detection.
                                     if should_repoll {
                                         tracing::info!(
                                             slave_changed,
-                                            has_extra_blocks,
+                                            has_model_specific_blocks,
                                             "Model-specific poll enabled - re-reading immediately"
                                         );
                                         return (true, true, false);
@@ -2690,12 +2771,17 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                                 );
                                                                 let body = report_body.clone();
                                                                 tokio::task::spawn_blocking(move || {
+                                                                    // Caption uses intentional <b>/<i> tags from
+                                                                    // generate_daily_summary_text, so we keep HTML
+                                                                    // parse_mode here (unlike the support-bundle
+                                                                    // caption, which is plain text).
                                                                     match crate::alerts::send_telegram_document(
                                                                         &token,
                                                                         &chat_id,
                                                                         &caption,
                                                                         &filename,
                                                                         body.as_bytes(),
+                                                                        Some("HTML"),
                                                                     ) {
                                                                         Ok(()) => tracing::warn!(
                                                                             "Daily report sent"
@@ -3152,6 +3238,77 @@ mod tests {
         assert_eq!(detail_indices, vec![0, 10, 20]);
     }
 
+    /// Persisted Gateway serials start with the "GW" prefix (e.g. `GW2529A127`).
+    /// The runtime uses the prefix to prefill the device type on the first
+    /// poll so a known-Gateway startup can skip the wide IR 0-59 / IR 180-183
+    /// standard blocks (which are unmapped on the Gateway and would just
+    /// burn timeout budget). Pinned here so a future tweak to the prefix
+    /// can't silently disable the lean-first-poll optimisation.
+    #[test]
+    fn device_type_from_serial_recognises_gateway_prefix() {
+        assert_eq!(
+            device_type_from_serial("GW2529A127"),
+            Some(DeviceType::Gateway)
+        );
+        assert_eq!(
+            device_type_from_serial("gw2529a127"),
+            Some(DeviceType::Gateway),
+            "lowercase prefix must still match (users sometimes retype the serial)"
+        );
+        assert_eq!(
+            device_type_from_serial("GWABC"),
+            Some(DeviceType::Gateway)
+        );
+        // Anything that isn't a GW prefix is left to the decoder.
+        assert_eq!(device_type_from_serial("SN-12345"), None);
+        assert_eq!(device_type_from_serial(""), None);
+        assert_eq!(device_type_from_serial("G"), None, "single-letter prefix is too short");
+        assert_eq!(device_type_from_serial("  "), None, "whitespace-only is not a serial");
+        // Leading/trailing whitespace from copy-paste should not break the match.
+        assert_eq!(device_type_from_serial("  GW2529A127\n"), Some(DeviceType::Gateway));
+    }
+
+    /// The warmup read after a fresh TCP connect should mirror the standard
+    /// block selection `read_all_with_extras` would use on the first poll.
+    /// For a known-Gateway serial the warmup reads the lean HR-only set;
+    /// for everything else (empty serial, non-GW serial) it falls back to
+    /// the full single-phase set.
+    #[test]
+    fn warmup_blocks_reflect_serial_prefill() {
+        use crate::modbus::registers::{RegisterBlock, RegisterType, STANDARD_POLL_BLOCKS, STANDARD_POLL_BLOCKS_3PH};
+
+        // Content-based comparison: `RegisterBlock` doesn't derive `PartialEq`
+        // and fat-pointer addresses can differ between function-return and
+        // const-reference views of the same data.
+        fn eq_set(a: &[RegisterBlock], b: &[RegisterBlock]) -> bool {
+            a.len() == b.len()
+                && a.iter().zip(b.iter()).all(|(x, y)| {
+                    x.name == y.name
+                        && std::mem::discriminant(&x.register_type)
+                            == std::mem::discriminant(&y.register_type)
+                })
+        }
+
+        // Known Gateway → lean HR-only set (no IR 0-59 / IR 180-183).
+        let gw = warmup_blocks_for(Some(&DeviceType::Gateway));
+        assert!(eq_set(gw, STANDARD_POLL_BLOCKS_3PH));
+        assert!(
+            gw.iter().all(|b| b.register_type == RegisterType::Holding),
+            "Gateway warmup must not request any input registers"
+        );
+
+        // Empty / unknown serial → full single-phase set.
+        let unknown = warmup_blocks_for(None);
+        assert!(eq_set(unknown, STANDARD_POLL_BLOCKS));
+        assert!(unknown.iter().any(|b| b.register_type == RegisterType::Input));
+
+        // Sanity: a non-Gateway prefilled type with the same gate condition
+        // (e.g. three-phase) also picks the lean set. (Doesn't currently
+        // happen via the serial prefix, but pins the contract.)
+        let three_phase = warmup_blocks_for(Some(&DeviceType::ThreePhase));
+        assert!(eq_set(three_phase, STANDARD_POLL_BLOCKS_3PH));
+    }
+
     /// `run_poll_loop` reconnects after `MAX_CONSECUTIVE_TIMEOUTS` cycles of
     /// `ClientError::Timeout` from `read_all_with_extras` — the dongle is
     /// TCP-alive but not answering any Modbus request within the 3 s
@@ -3346,8 +3503,8 @@ mod tests {
             DeviceType::ThreePhase,
             0x11
         ));
-        // Gateway needs an immediate re-poll to request the IR 1600+ blocks
-        // and the HR1080-1124 three-phase config block.
+        // Gateway needs an immediate re-poll to request the IR 1600+ aggregation
+        // bank (and, on every 10th poll, the EMS plant holding block at HR 2040+).
         assert!(should_repoll_after_model_detection(
             DeviceType::Gateway,
             0x11
