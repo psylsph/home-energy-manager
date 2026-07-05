@@ -739,7 +739,7 @@ pub(crate) fn check_power_field(
 }
 
 // ===========================================================================
-// Rate-based power smoothing
+// Rate-based smoothing
 // ===========================================================================
 
 /// Maximum poll interval (seconds) within which the rate-smoother is active.
@@ -811,6 +811,12 @@ const POWER_BALANCE_RESIDUAL_W: i32 = 2_000;
 /// [`cross_validate_power_balance`]. A field that hasn't moved this cycle
 /// can't be the source of a new imbalance, so we don't bother considering it.
 const POWER_BALANCE_CANDIDATE_MIN_DELTA_W: i32 = 1_000;
+
+/// Maximum one-poll inverter-temperature movement (°C) accepted as physically
+/// plausible. The inverter heatsink has enough thermal mass that a jump such
+/// as 28°C → 62°C inside the normal 3-second poll interval is register
+/// corruption, even though both values are within the absolute safety range.
+const INVERTER_TEMP_MAX_DELTA_C: f32 = 10.0;
 
 /// Per-field snapshot of the rate-smoother's inputs and outputs for one of
 /// the four AC power fields. Pairs the *raw* decoder value (before
@@ -1340,6 +1346,71 @@ pub(crate) fn check_power_rate(
     }
 }
 
+/// Apply rate-based smoothing to inverter temperature.
+///
+/// This catches plausible-but-wrong register spikes that pass the absolute
+/// `-20..=100°C` range check but move faster than the inverter heatsink can
+/// physically change. Persistent high/low readings are released after the
+/// normal rate-release window so a genuine sustained temperature change is not
+/// held forever.
+fn check_inverter_temperature_rate(
+    raw: f32,
+    prev: Option<f32>,
+    elapsed_secs: f32,
+    release_counts: &mut RateReleaseCounts,
+) -> (f32, bool) {
+    const LABEL: &str = "inverter_temperature";
+
+    let Some(prev_val) = prev else {
+        return (raw, false);
+    };
+    if !raw.is_finite() || !prev_val.is_finite() || elapsed_secs > RATE_SMOOTH_MAX_WINDOW_SECS {
+        release_counts.0.remove(LABEL);
+        return (raw, false);
+    }
+
+    let delta = (raw - prev_val).abs();
+    if delta <= INVERTER_TEMP_MAX_DELTA_C {
+        release_counts.0.remove(LABEL);
+        return (raw, false);
+    }
+
+    let count = release_counts.0.entry(LABEL).or_insert(0);
+    *count += 1;
+    if *count >= RATE_RELEASE_THRESHOLD {
+        tracing::info!(
+            raw,
+            prev = prev_val,
+            elapsed_secs,
+            delta_c = delta,
+            rejected_cycles = *count,
+            "inverter temperature sustained at new value across consecutive polls - accepting raw"
+        );
+        release_counts.0.remove(LABEL);
+        (raw, false)
+    } else if *count >= 2 {
+        tracing::debug!(
+            raw,
+            prev = prev_val,
+            elapsed_secs,
+            delta_c = delta,
+            rejected_cycles = *count,
+            "inverter temperature rate-rejected for consecutive polls"
+        );
+        (prev_val, true)
+    } else {
+        tracing::info!(
+            raw,
+            prev = prev_val,
+            elapsed_secs,
+            delta_c = delta,
+            threshold_delta_c = INVERTER_TEMP_MAX_DELTA_C,
+            "inverter temperature jumped too far in one poll - using previous"
+        );
+        (prev_val, true)
+    }
+}
+
 // ===========================================================================
 // Main sanitization entry point
 // ===========================================================================
@@ -1730,9 +1801,11 @@ pub(crate) fn sanitize_snapshot(
         }
     }
 
-    // Inverter temperature: reject physically impossible values.
-    // A heatsink >100°C means hardware damage is imminent; anything above
-    // 80°C is unusual. Raw register corruption can produce values like 239°C.
+    // Inverter temperature: reject physically impossible values and implausible
+    // one-poll jumps. A heatsink >100°C means hardware damage is imminent;
+    // anything above 80°C is unusual. Raw register corruption can produce
+    // values like 239°C, or plausible-looking alert-triggering spikes such as
+    // 28°C → 62°C in one 3-second poll.
     if snap.inverter_temperature > 100.0 || snap.inverter_temperature < -20.0 {
         if let Some(p) = prev {
             tracing::warn!(
@@ -1745,6 +1818,15 @@ pub(crate) fn sanitize_snapshot(
             snap.inverter_temperature = 0.0;
         }
         sanitized = true;
+    } else {
+        let (val, was_sanitized) = check_inverter_temperature_rate(
+            snap.inverter_temperature,
+            prev.map(|p| p.inverter_temperature),
+            elapsed_secs,
+            rate_release_counts,
+        );
+        snap.inverter_temperature = val;
+        sanitized |= was_sanitized;
     }
 
     // Battery temperature: reject physically impossible values.
@@ -5537,6 +5619,95 @@ mod tests {
         let sanitized = sanitize_for_test(&mut snap, None);
         assert!(!sanitized);
         assert_eq!(snap.operating_hours, 0);
+    }
+
+    // -------------------------------------------------------------------
+    // Inverter temperature sanitization
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn sanitize_rejects_inverter_temperature_rate_spike_within_absolute_range() {
+        // 28°C → 62°C in 3 seconds is physically implausible for the inverter
+        // heatsink, but both values are inside the absolute -20..100°C range.
+        let mut prev = base_grid_connected_snap();
+        prev.inverter_temperature = 28.0;
+        prev.timestamp = 100;
+
+        let mut snap = prev.clone();
+        snap.inverter_temperature = 62.0;
+        snap.timestamp = 103;
+
+        let sanitized = sanitize_for_test(&mut snap, Some(&prev));
+        assert!(sanitized, "temperature rate spike must be flagged");
+        assert_eq!(
+            snap.inverter_temperature, 28.0,
+            "temperature spike must hold at previous"
+        );
+    }
+
+    #[test]
+    fn sanitize_accepts_normal_inverter_temperature_change() {
+        let mut prev = base_grid_connected_snap();
+        prev.inverter_temperature = 28.0;
+        prev.timestamp = 100;
+
+        let mut snap = prev.clone();
+        snap.inverter_temperature = 34.0;
+        snap.timestamp = 103;
+
+        let sanitized = sanitize_for_test(&mut snap, Some(&prev));
+        assert!(!sanitized, "normal temperature movement must pass through");
+        assert_eq!(snap.inverter_temperature, 34.0);
+    }
+
+    #[test]
+    fn sanitize_accepts_inverter_temperature_jump_after_long_gap() {
+        let mut prev = base_grid_connected_snap();
+        prev.inverter_temperature = 28.0;
+        prev.timestamp = 100;
+
+        let mut snap = prev.clone();
+        snap.inverter_temperature = 62.0;
+        snap.timestamp = 200; // > RATE_SMOOTH_MAX_WINDOW_SECS
+
+        let sanitized = sanitize_for_test(&mut snap, Some(&prev));
+        assert!(!sanitized, "long-gap temperature jump must be accepted");
+        assert_eq!(snap.inverter_temperature, 62.0);
+    }
+
+    #[test]
+    fn sanitize_releases_sustained_inverter_temperature_change() {
+        let mut pending_mode = None;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+        let mut rate_release_counts = RateReleaseCounts::default();
+
+        let mut prev = base_grid_connected_snap();
+        prev.inverter_temperature = 28.0;
+        prev.timestamp = 100;
+
+        for (idx, expected) in [(1, 28.0), (2, 28.0), (3, 62.0)] {
+            let mut snap = prev.clone();
+            snap.inverter_temperature = 62.0;
+            snap.timestamp = 100 + idx * 3;
+
+            let sanitized = sanitize_snapshot(
+                &mut snap,
+                Some(&prev),
+                false,
+                &mut pending_mode,
+                &mut delta_corrections,
+                &mut suspect_counts,
+                &mut rate_release_counts,
+            );
+
+            assert_eq!(snap.inverter_temperature, expected);
+            if idx < 3 {
+                assert!(sanitized, "held-back cycles should be marked sanitized");
+            } else {
+                assert!(!sanitized, "released cycle should not be marked sanitized");
+            }
+        }
     }
 
     // -------------------------------------------------------------------
