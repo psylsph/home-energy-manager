@@ -82,7 +82,25 @@ There's a built-in mini display page that shows just the live numbers — solar,
 
 The mini page shows: solar generation, home consumption, battery state of charge and charge/discharge power, and whether you're importing from or exporting to the grid. A red outline appears if the inverter has tripped, the grid is down, or the battery is over temperature.
 
-> 📱 **Away from home?** The watch can't run Tailscale on its own, but if your iPhone (or the PC) is reachable over Tailscale, open the same `/mini` URL using the Tailscale IP instead of your home LAN IP — see the "Using on Your Phone Away From Home" section in the main README.
+**Away from home (over Tailscale):**
+
+The Apple Watch itself can't run Tailscale, but your iPhone can — and the watch asks the iPhone to open the URL, so the iPhone is the bridge. You'll need Tailscale set up on the PC running Home Energy Manager and on the iPhone; once both are on the same tailnet, the same `/mini` URL works from anywhere with end-to-end encryption (no port forwarding, no cloud).
+
+1. On the PC, install Tailscale and join your tailnet:
+
+   ```bash
+   curl -fsSL https://tailscale.com/install.sh | sh
+   sudo tailscale up
+   # Note the Tailscale IP it prints (e.g. 100.x.y.z), or get it later with:
+   tailscale ip -4
+   ```
+
+2. On the iPhone, install **Tailscale** from the App Store, sign in to the same account, and make sure the toggle is on
+3. On either device, open `http://<tailscale-ip>:7337/mini` in Safari — e.g. `http://100.64.1.2:7337/mini`
+4. Bookmark it on the iPhone, then in the Watch app on the iPhone add the bookmark to the watch's Safari (or just type the URL on the watch)
+5. The iPhone needs to be on and connected to Tailscale for the watch to fetch a fresh reading. If the iPhone is on home Wi-Fi, the plain LAN IP also works — use whichever is closer
+
+This is exactly the same setup as the main README's **"📱 Using on Your Phone Away From Home"** section, just with `/mini` on the end of the URL. The full Tailscale walk-through (Funnel, ACLs, etc.) lives there.
 
 <details>
 <summary><b>Power-user option: build a custom Shortcut from the raw JSON</b></summary>
@@ -106,7 +124,7 @@ To show this on an Apple Watch:
 4. Add **Show Result**
 5. In the shortcut's settings (**( i )**), turn on **Show in Watch** and set **Run on iPhone**
 
-Because the iPhone does the fetching (not the watch), this works on a GPS-only watch. The iPhone needs to be on and on the same Wi-Fi as the PC; away from home, join the iPhone to your Tailscale network and swap the LAN IP for the Tailscale IP.
+Because the iPhone does the fetching (not the watch), this works on a GPS-only watch. The iPhone needs to be on and able to reach the PC — same Wi-Fi at home, or Tailscale on the go. To make the same Shortcut work from anywhere, install Tailscale on the PC and on the iPhone (see the **"Away from home (over Tailscale)"** section above), then swap the LAN IP in the Shortcut's URL for the PC's Tailscale IP.
 
 </details>
 
