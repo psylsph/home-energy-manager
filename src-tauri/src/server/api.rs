@@ -3220,20 +3220,23 @@ pub async fn test_alerts(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
 // Support bundle submission (issue #125)
 // ---------------------------------------------------------------------------
 
-/// POST /api/support/submit — assemble a support bundle and deliver it via
-/// ntfy to the shared [`crate::support::SUPPORT_NTFY_TOPIC`] topic.
+/// POST /api/support/submit — assemble a support bundle and deliver it to the
+/// maintainer's Telegram support bot (`HomeEnergyManagerSupportBot`) as a
+/// document attachment.
 ///
 /// Gathers the current snapshot, the developer log ring, a sanitised view of
 /// the alert/notification settings (secrets redacted), and an optional recent
-/// history tail, packs them into a single JSON bundle, and uploads it to the
-/// hard-coded public ntfy.sh server. The maintainer subscribes to that one
-/// topic and receives every submission; each bundle is disambiguated by its
+/// history tail, packs them into a single JSON bundle, and uploads it via
+/// [`crate::alerts::send_telegram_document`]. The bot token and destination
+/// chat_id are injected at build time (see [`crate::support::support_bot_token`]);
+/// a build without them returns a "not configured" error here rather than
+/// silently dropping the bundle. Each bundle is disambiguated by its
 /// serial-derived ID (see [`crate::support::generate_bundle_id`]). When the
-/// user supplies a GitHub issue number, an ntfy `Click` header deep-links the
-/// notification straight to that issue.
+/// user supplies a GitHub issue number, it is recorded in the manifest and the
+/// caption (see [`crate::support::issue_url`]).
 ///
 /// Rate-limited to one submission per [`crate::support::SUBMIT_COOLDOWN_SECS`]
-/// to stop double-clicks or a stuck UI from flooding the shared topic.
+/// to stop double-clicks or a stuck UI from flooding the bot.
 pub async fn submit_support_bundle(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -3266,6 +3269,17 @@ pub async fn submit_support_bundle(
                 if wait == 1 { "" } else { "s" }
             ));
         }
+    }
+
+    // Fail fast when this build can't deliver at all (no bot credentials
+    // compiled in) — before gathering inputs or building the bundle. Placed
+    // AFTER the rate-limit guard so the rate-limit unit test still sees its
+    // cooldown message regardless of whether the build has credentials.
+    if !crate::support::support_configured() {
+        return error_response(
+            "Support delivery is not configured in this build. Set SUPPORT_BOT_TOKEN and \
+             SUPPORT_CHAT_ID (CI env or src-tauri/support-secrets.local) and rebuild.",
+        );
     }
 
     // Gather inputs under short-lived locks, cloning what we need so the
@@ -3338,57 +3352,44 @@ pub async fn submit_support_bundle(
 
     let size_bytes = bundle.json.len();
     let bundle_id = bundle.id.clone();
-    let title = format!("HEM Support: {}", bundle.id);
-    let click = bundle.issue_url.clone();
 
     tracing::info!(
         bundle_id = %bundle_id,
         size_bytes,
         issue_number = ?bundle.issue_number,
-        "Submitting support bundle to ntfy"
+        "Submitting support bundle to Telegram"
     );
 
-    // Deliver on a blocking thread — ureq is synchronous. ntfy always wins
-    // (the topic is hard-coded, independent of the user's alert config) so
-    // every user can submit regardless of whether they have set up alerts.
-    let manifest_summary = bundle.manifest_summary.clone();
-    let filename = bundle.filename.clone();
-    let json_body = bundle.json.clone();
-    let click_for_task = click.clone();
-    let ntfy_result = tokio::task::spawn_blocking(move || {
-        crate::alerts::send_ntfy_attachment(
-            crate::support::SUPPORT_NTFY_TOPIC,
-            crate::support::SUPPORT_NTFY_SERVER,
-            &filename,
-            "application/json",
-            &crate::alerts::NtfyMessage {
-                title: &title,
-                message: &manifest_summary,
-                tags: "package,support",
-                click: click_for_task.as_deref(),
-            },
-            &json_body,
+    // Deliver on a blocking thread — `send_telegram_document` uses synchronous
+    // `ureq`. The bundle is moved into the task (no clone of the JSON body);
+    // everything the response needs (`bundle_id`, `size_bytes`) was captured
+    // above.
+    let deliver_result = tokio::task::spawn_blocking(move || {
+        crate::support::deliver_bundle(
+            &bundle,
+            crate::support::support_bot_token(),
+            crate::support::support_chat_id(),
         )
     })
     .await;
 
-    let sent_to = match ntfy_result {
+    let sent_to = match deliver_result {
         Ok(Ok(())) => {
             // Only stamp the rate-limit timestamp on a successful delivery.
             state.last_support_submit_ms.store(
                 chrono::Local::now().timestamp_millis(),
                 std::sync::atomic::Ordering::Relaxed,
             );
-            serde_json::json!([{ "channel": "ntfy", "ok": true }])
+            serde_json::json!([{ "channel": "telegram", "ok": true }])
         }
         Ok(Err(e)) => {
-            tracing::warn!("Support bundle ntfy delivery failed: {e}");
-            serde_json::json!([{ "channel": "ntfy", "ok": false, "error": e }])
+            tracing::warn!("Support bundle Telegram delivery failed: {e}");
+            serde_json::json!([{ "channel": "telegram", "ok": false, "error": e }])
         }
         Err(join_err) => {
             tracing::warn!("Support bundle delivery task failed: {join_err}");
             serde_json::json!([{
-                "channel": "ntfy",
+                "channel": "telegram",
                 "ok": false,
                 "error": format!("internal error: {join_err}")
             }])
@@ -3424,6 +3425,62 @@ pub async fn submit_support_bundle(
             "message": message,
         })),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Support: GitHub issue lookup (feeds the support-form dropdown)
+// ---------------------------------------------------------------------------
+
+/// Shape the result of a [`crate::support::fetch_open_issues`] call into the
+/// `GET /api/support/github-issues` JSON body. Pure (no I/O) so the
+/// success/failure response contract is unit-testable without hitting GitHub.
+/// Always returns HTTP 200 — the `ok` flag carries success/failure so the
+/// frontend can render the dropdown with a graceful "Raise a ticket first"
+/// fallback rather than tripping a 5xx error path on a rate-limit blip.
+fn shape_issues_response(
+    result: Result<Vec<crate::support::GithubIssue>, String>,
+) -> (StatusCode, Json<Value>) {
+    match result {
+        Ok(issues) => {
+            let issues_json = serde_json::to_value(&issues).unwrap_or_else(|_| json!([]));
+            (StatusCode::OK, Json(json!({ "ok": true, "issues": issues_json })))
+        }
+        Err(e) => {
+            tracing::warn!("GitHub issues fetch failed: {e}");
+            (
+                StatusCode::OK,
+                Json(json!({ "ok": false, "issues": [], "error": e })),
+            )
+        }
+    }
+}
+
+/// GET /api/support/github-issues — return the project's open GitHub issues for
+/// the support-bundle issue dropdown. Proxied through the backend (the frontend
+/// never calls external services directly) and cached for
+/// [`crate::support::ISSUES_CACHE_TTL_SECS`] so repeated form opens stay well
+/// under GitHub's 60 req/hour unauthenticated limit. Pull requests are filtered
+/// out. Returns `{ok, issues:[{number,title,html_url}]}` on success, or
+/// `{ok:false, issues:[], error}` on any failure — the UI falls back to
+/// "Raise a ticket first" in that case rather than blocking submission.
+pub async fn get_support_github_issues(
+    State(_state): State<Arc<AppState>>,
+) -> (StatusCode, Json<Value>) {
+    let result = tokio::task::spawn_blocking(crate::support::fetch_open_issues).await;
+    match result {
+        Ok(inner) => shape_issues_response(inner),
+        Err(join_err) => {
+            tracing::warn!("GitHub issues fetch task failed: {join_err}");
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": false,
+                    "issues": [],
+                    "error": format!("internal error: {join_err}")
+                })),
+            )
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -8633,8 +8690,9 @@ mod tests {
     // Support bundle submission (#125).
     //
     // Only the validation and rate-limit paths are exercised here because they
-    // return *before* the ntfy delivery call — the success path hits the live
-    // public ntfy.sh server and is covered by the Playwright E2E test.
+    // return *before* the Telegram delivery call — the success path hits the
+    // live support bot (needs build-time credentials) and is covered by the
+    // Playwright E2E test with a mocked endpoint.
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -8699,7 +8757,7 @@ mod tests {
 
     /// A submission made within the cooldown window must be rejected *before*
     /// any network delivery. Pre-seeding `last_support_submit_ms` simulates a
-    /// successful prior submission without having to hit ntfy.sh.
+    /// successful prior submission without having to hit Telegram.
     #[tokio::test]
     async fn support_submit_rate_limits_within_cooldown() {
         with_isolated_config_dir_async(|| async {
@@ -8718,6 +8776,33 @@ mod tests {
             assert!(err.contains("wait"), "expected cooldown message, got {err}");
         })
         .await;
+    }
+
+    #[test]
+    fn shape_issues_response_success_returns_issues() {
+        let issues = vec![crate::support::GithubIssue {
+            number: 125,
+            title: "Battery drift".to_string(),
+            html_url:
+                "https://github.com/psylsph/home-energy-manager/issues/125".to_string(),
+        }];
+        let (status, res) = shape_issues_response(Ok(issues));
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(res["ok"], true);
+        assert_eq!(res["issues"][0]["number"], 125);
+        assert_eq!(res["issues"][0]["title"], "Battery drift");
+    }
+
+    #[test]
+    fn shape_issues_response_failure_stays_200_with_empty_issues() {
+        // Must stay HTTP 200 with ok:false so the UI can fall back to
+        // "Raise a ticket first" rather than hitting a 5xx error path.
+        let (status, res) =
+            shape_issues_response(Err("GitHub API 403 (rate-limited)".to_string()));
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(res["ok"], false);
+        assert!(res["issues"].as_array().unwrap().is_empty());
+        assert_eq!(res["error"], "GitHub API 403 (rate-limited)");
     }
 
     // ======================================================================
