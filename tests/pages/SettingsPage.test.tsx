@@ -116,6 +116,16 @@ function mountApiMocks(settingsOverrides: SettingsShape = {}) {
     if (path === '/api/evc/discover') {
       return { ok: true, subnets: [], chargers: [] };
     }
+    if (path === '/api/support/github-issues') {
+      // Sample open issues for the support-form dropdown.
+      return {
+        ok: true,
+        issues: [
+          { number: 125, title: 'Battery drift', html_url: 'https://github.com/psylsph/home-energy-manager/issues/125' },
+          { number: 130, title: 'Schedule clears itself', html_url: 'https://github.com/psylsph/home-energy-manager/issues/130' },
+        ],
+      };
+    }
     return { ok: true, data: {} };
   });
   apiPostMock.mockResolvedValue({ ok: true });
@@ -237,6 +247,72 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       ]) {
         expect(await screen.findByText(heading)).toBeDefined();
       }
+    });
+
+    it('shows the Apple Watch / mini display GUI URL', async () => {
+      // The mini page is a tiny self-contained glance view the user opens
+      // in a browser (phone/watch). It must be copyable and point at /mini.
+      mountApiMocks();
+      render(<SettingsPage />);
+      // /api/status is mocked to return lan_ip 192.168.1.50, so lanUrl
+      // builds from that rather than the getApiBase() fallback.
+      const miniUrl = await screen.findByText(
+        'http://192.168.1.50:7337/mini',
+      );
+      expect(miniUrl).toBeDefined();
+      // The helper line names the use case so a user can find it.
+      expect(
+        await screen.findByText(/mini display/),
+      ).toBeDefined();
+    });
+  });
+
+  describe('support bundle issue dropdown', () => {
+    it('populates the issue dropdown from /api/support/github-issues', async () => {
+      mountApiMocks();
+      render(<SettingsPage />);
+      const heading = await screen.findByRole('heading', { name: 'Submit a Support Bundle' });
+      const section = heading.closest('section')!;
+      // The default "raise a ticket first" option is always present.
+      expect(within(section).getByRole('option', { name: 'Raise a ticket first' })).toBeDefined();
+      // Fetched open issues appear as options once the mount fetch resolves.
+      expect(await within(section).findByRole('option', { name: /#125/ })).toBeDefined();
+      expect(await within(section).findByRole('option', { name: /#130/ })).toBeDefined();
+    });
+
+    it('requires an issue before submit is enabled (required-by-default)', async () => {
+      mountApiMocks();
+      render(<SettingsPage />);
+      const heading = await screen.findByRole('heading', { name: 'Submit a Support Bundle' });
+      const section = heading.closest('section')!;
+      const submit = within(section).getByRole('button', { name: 'Submit Support Bundle' }) as HTMLButtonElement;
+      const description = within(section).getByPlaceholderText(/What were you trying to do/);
+      const issueSelect = within(section).getByRole('combobox', { name: 'GitHub issue' }) as HTMLSelectElement;
+
+      // No description and no issue → disabled.
+      expect(submit.disabled).toBe(true);
+      // Description filled but no issue selected → still disabled.
+      fireEvent.change(description, { target: { value: 'battery drifts overnight' } });
+      expect(submit.disabled).toBe(true);
+      // Wait for the issue options to load, then pick one → submit enables.
+      await within(section).findByRole('option', { name: /#125/ });
+      fireEvent.change(issueSelect, { target: { value: '125' } });
+      expect(submit.disabled).toBe(false);
+    });
+
+    it('shows a fallback note when the issue list fails to load', async () => {
+      apiGetMock.mockImplementation(async (path: string) => {
+        if (path === '/api/settings') return { ok: true, data: defaultSettings() };
+        if (path === '/api/alerts') return { ok: true, data: { config: alertConfig() } };
+        if (path === '/api/weather') return { ok: true, data: { config: {} } };
+        if (path === '/api/status') return { ok: true, lan_ip: '192.168.1.50', clients: [] };
+        if (path === '/api/support/github-issues') return { ok: false, issues: [], error: 'rate-limited' };
+        return { ok: true, data: {} };
+      });
+      render(<SettingsPage />);
+      const heading = await screen.findByRole('heading', { name: 'Submit a Support Bundle' });
+      const section = heading.closest('section')!;
+      expect(await within(section).findByText(/Couldn't load the issue list/)).toBeDefined();
     });
   });
 

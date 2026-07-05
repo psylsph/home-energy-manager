@@ -17,6 +17,7 @@
 //!   * `GET /api/logs`      — empty, then after push, then incremental
 //!   * `GET /api/log-level` / `PUT /api/log-level` — round-trip + invalid
 //!   * `GET /api/evc/status` — empty when no EVC is configured
+//!   * `GET /api/mini/status` — tokenless glance summary (empty + seeded)
 //!   * `GET /api/{unknown}` — returns 404, not 200
 //!
 //! Things deliberately NOT covered here:
@@ -322,6 +323,116 @@ async fn evc_status_empty_when_not_configured() {
     // and the frontend will render "Not Found" via the evcEverConnected
     // latch remaining false (issue #138).
     assert_eq!(body["reachable"], Value::Bool(false));
+}
+
+// ====================================================================
+// GET /api/mini/status
+// ====================================================================
+
+#[tokio::test]
+async fn mini_status_empty_state_returns_defaults() {
+    let router = fresh_router();
+    let (status, body) = get_json(&router, "/api/mini/status").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], Value::Bool(false));
+    assert_eq!(body["conn"], Value::String("disconnected".into()));
+    assert_eq!(body["device"], Value::String("".into()));
+    assert_eq!(body["soc"], serde_json::json!(0));
+    assert_eq!(body["fault"], Value::Bool(false));
+    // Every field is present even with no snapshot (no Option leaks for the
+    // Shortcut to nil-check).
+    for key in [
+        "ok",
+        "ts",
+        "age_s",
+        "conn",
+        "device",
+        "solar_kw",
+        "battery_kw",
+        "grid_kw",
+        "home_kw",
+        "soc",
+        "battery_state",
+        "battery_mode",
+        "fault",
+    ] {
+        assert!(body.get(key).is_some(), "mini missing key {key}");
+    }
+}
+
+#[tokio::test]
+async fn mini_status_seeded_snapshot_round_trips_and_is_no_store() {
+    use givenergy_local::inverter::model::{BatteryMode, BatteryState, InverterSnapshot};
+
+    let state = Arc::new(AppState::new());
+    *state.latest_snapshot.lock().await = Some(InverterSnapshot {
+        timestamp: 1_700_000_000,
+        solar_power: 4213,
+        battery_power: -1798,
+        grid_power: 930,
+        home_power: 1485,
+        soc: 64,
+        battery_state: BatteryState::Discharging,
+        battery_mode: BatteryMode::Eco,
+        grid_loss: false,
+        inverter_trip: false,
+        battery_over_temp: false,
+        device_type_display: String::from("Gen3 Hybrid"),
+        ..Default::default()
+    });
+    let router = create_router(state);
+
+    let resp = router
+        .clone()
+        .oneshot(Request::builder().uri("/api/mini/status").body(Body::empty()).unwrap())
+        .await
+        .expect("router call");
+    assert_eq!(resp.status(), StatusCode::OK);
+    // Fresh-data directive is set so a Shortcut tap never sees a cached body.
+    assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
+
+    let bytes = to_bytes(resp.into_body(), BODY_LIMIT).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["ok"], Value::Bool(true));
+    assert_eq!(body["device"], Value::String("Gen3 Hybrid".into()));
+    assert_eq!(body["soc"], serde_json::json!(64));
+    assert_eq!(body["battery_state"], Value::String("discharging".into()));
+    assert_eq!(body["battery_mode"], Value::String("eco".into()));
+    assert!((body["solar_kw"].as_f64().unwrap() - 4.2).abs() < 1e-6);
+    assert!((body["battery_kw"].as_f64().unwrap() - (-1.8)).abs() < 1e-6);
+    assert!((body["grid_kw"].as_f64().unwrap() - 0.9).abs() < 1e-6);
+    assert!((body["home_kw"].as_f64().unwrap() - 1.5).abs() < 1e-6);
+}
+
+// ====================================================================
+// GET /mini (tiny GUI page)
+// ====================================================================
+
+#[tokio::test]
+async fn mini_page_serves_self_contained_html() {
+    let router = fresh_router();
+    let resp = router
+        .clone()
+        .oneshot(Request::builder().uri("/mini").body(Body::empty()).unwrap())
+        .await
+        .expect("router call");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("content-type").unwrap(),
+        "text/html; charset=utf-8"
+    );
+    let bytes = to_bytes(resp.into_body(), BODY_LIMIT).await.unwrap();
+    let html = std::str::from_utf8(&bytes).unwrap();
+    // The page must fetch the JSON data source (same origin).
+    assert!(html.contains("/api/mini/status"), "page must reference the JSON endpoint");
+    // And render the four KPIs.
+    for label in ["Solar", "Home", "Battery", "Grid"] {
+        assert!(html.contains(label), "page must label {label}");
+    }
+    // Self-contained: inline CSS + JS, no external assets to fetch.
+    assert!(html.contains("<style>") && html.contains("<script>"));
+    // Under the 16KB budget a tiny watch WebView prefers.
+    assert!(bytes.len() < 16 * 1024, "mini page too large: {} bytes", bytes.len());
 }
 
 // ====================================================================
