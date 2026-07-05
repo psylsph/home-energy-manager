@@ -5,7 +5,6 @@ pub mod inverter;
 pub mod modbus;
 pub mod server;
 pub mod settings;
-pub mod support;
 #[cfg(test)]
 mod test_util;
 pub mod weather;
@@ -52,8 +51,8 @@ fn html_escape(input: &str) -> String {
 /// * `fmt` to a **daily-rotated file** under `<config_dir>/logs/` (default
 ///   level **INFO**), and
 /// * `LogCaptureLayer` feeding the in-memory ring buffer behind the developer
-///   console (LogsPage) and the automated support bundle (#125). Defaults to
-///   INFO — see [`crate::server::logs::DEFAULT_CAPTURE_LEVEL`].
+///   console (LogsPage). Defaults to INFO — see
+///   [`crate::server::logs::DEFAULT_CAPTURE_LEVEL`].
 ///
 /// Daily rotation bounds each file to one day of output; [`prune_old_logs`]
 /// then caps how many days accumulate so total disk usage stays bounded.

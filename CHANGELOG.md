@@ -4,17 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.57.0] - 2026-07-05
+
+### Removed
+
+- **The "Submit a Support Bundle" form is gone.** Bundles were useful in theory, but in practice the technical users who actually raise issues can copy logs themselves, and the rest never used the button. The Telegram support bot, the in-app bundle assembly, the GitHub-issues dropdown, and the build-time `SUPPORT_BOT_TOKEN` / `SUPPORT_CHAT_ID` secret wiring are all removed. If you need to share diagnostics, raise an issue on GitHub and attach the relevant pieces — the developer log ring is still reachable at `GET /api/logs` in developer mode.
+
 ## [0.56.0] - 2026-07-05
 
 ### Added
 
 - **Glance at your system from an Apple Watch or any small screen.** A new `/mini` page renders just the live solar, battery, grid, and home numbers in a tiny layout that fits a phone or watch display, refreshing itself every few seconds. Open `http://<your-pc-ip>:7337/mini` in a browser, or copy the URL from Settings → Remote / Mobile Network Access. There's also a matching `/api/mini/status` JSON endpoint for building a custom iPhone Shortcut. Both are read-only and show only the glance fields (no serial numbers or settings).
 
-- **Support bundles now deliver to a Telegram bot, and the issue picker is a dropdown.** The "Submit a Support Bundle" form lists your open GitHub issues so you select the ticket you're reporting against rather than typing its number — and you're nudged to raise one first if you haven't. Bundles are sent to the maintainer's Telegram support bot as a file attachment, replacing the previous third-party notification relay that had become unreliable.
-
 ### Fixed
-
-- **Support bundle submissions no longer fail with a 400 just because you typed a `<` or `&`.** The Telegram caption is now sent as plain text, so a description like "battery < 60% & won't charge" reaches the maintainer instead of being rejected as malformed HTML. The pop-up now also reports the actual Telegram reason (for example, "chat not found") instead of a generic "API error: 500".
 
 - **Gateway startup is faster and the log line now tells you what's actually about to be polled.** The startup read on a Gateway with a persisted `GW…` serial no longer asks the dongle for register ranges that are unmapped on Gateway hardware, so detection completes sooner. The "Device model identified" line now lists the actual blocks the next model-aware poll will read, so it's obvious from the log when a freshly-detected Gateway is about to fetch the live telemetry bank instead of the lean single-phase set.
 
