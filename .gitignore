@@ -19,8 +19,6 @@ src-tauri/target/
 
 # Settings (user-specific)
 settings.json
-support-secrets.local
-
 
 # Editor directories and files
 .vscode/*

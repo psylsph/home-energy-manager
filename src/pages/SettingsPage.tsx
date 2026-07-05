@@ -319,23 +319,6 @@ export default function SettingsPage() {
   const [alertsSaving, setAlertsSaving] = useState(false);
   const [alertsTesting, setAlertsTesting] = useState(false);
 
-  // Support bundle submission (issue #125). The category list mirrors the
-  // backend's `valid_categories()` exactly; keeping them in sync by hand is
-  // the price of not coupling the frontend to the Rust enum.
-  const [supportCategory, setSupportCategory] = useState('connection');
-  const [supportDescription, setSupportDescription] = useState('');
-  const [supportIssueNumber, setSupportIssueNumber] = useState('');
-  const [supportIncludeHistory, setSupportIncludeHistory] = useState(false);
-  const [supportSubmitting, setSupportSubmitting] = useState(false);
-  // Open GitHub issues for the support-form dropdown, loaded once on mount from
-  // the backend proxy (GET /api/support/github-issues, cached 5 min server-side).
-  // An empty list or `supportIssuesError` leaves the dropdown on its default
-  // "Raise a ticket first" option (the form requires an issue before submit).
-  const [supportIssues, setSupportIssues] = useState<
-    { number: number; title: string; html_url: string }[]
-  >([]);
-  const [supportIssuesError, setSupportIssuesError] = useState(false);
-
   // Weather (Open-Meteo) — local ambient temperature for the History charts.
   // `weatherState` is the full GET /api/weather payload (config + last fetch
   // result + backfill progress). Individual form fields below are local
@@ -410,25 +393,6 @@ export default function SettingsPage() {
       } catch (e: unknown) {
         console.warn('Failed to load settings:', e);
         setSettingsLoaded(true);
-      }
-    })();
-
-    // Load open GitHub issues for the support-bundle issue dropdown. Backend
-    // caches for 5 min so repeat form opens stay under GitHub's rate limit.
-    (async () => {
-      try {
-        const res = await apiGet<{
-          ok: boolean;
-          issues: { number: number; title: string; html_url: string }[];
-        }>('/api/support/github-issues');
-        if (res.ok && Array.isArray(res.issues)) {
-          setSupportIssues(res.issues);
-        } else {
-          setSupportIssuesError(true);
-        }
-      } catch (e: unknown) {
-        console.warn('Failed to load GitHub issues for support form:', e);
-        setSupportIssuesError(true);
       }
     })();
 
@@ -678,36 +642,6 @@ export default function SettingsPage() {
       flash('Failed to Send Message — check API key and settings', false);
     }
     setAlertsTesting(false);
-  };
-
-  // Submit a diagnostic support bundle (logs + snapshot + settings) to the
-  // maintainer via the `HomeEnergyManagerSupportBot` Telegram bot. The backend
-  // assembles everything and posts it as a document; we forward the user's
-  // description, the selected GitHub issue number, and privacy toggles.
-  // See issue #125.
-  const handleSubmitSupport = async () => {
-    if (!supportDescription.trim()) {
-      flash('Please describe the issue first.', false);
-      return;
-    }
-    setSupportSubmitting(true);
-    try {
-      const res = await apiPost<{
-        ok: boolean;
-        bundle_id?: string;
-        message: string;
-      }>('/api/support/submit', {
-        description: supportDescription,
-        category: supportCategory,
-        issue_number: supportIssueNumber,
-        include_history: supportIncludeHistory,
-      });
-      flash(res.message, res.ok);
-      if (res.ok) setSupportDescription('');
-    } catch (e) {
-      flash(e instanceof Error ? e.message : 'Failed to submit support bundle', false);
-    }
-    setSupportSubmitting(false);
   };
 
   // Save weather config. Sends postcode + manual coords (if any); the
@@ -1740,109 +1674,6 @@ export default function SettingsPage() {
             className="bg-bg-elevated text-text-primary font-sans font-semibold text-sm px-4 py-2 rounded-lg hover:opacity-80 disabled:opacity-40 transition-opacity border border-white/5 sm:w-auto"
           >
             {alertsTesting ? 'Sending…' : 'Send Test Notification'}
-          </button>
-        </div>
-      </section>
-
-      {/* ─── Section 6b: Support ─── */}
-      <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
-        <h2 className="text-text-primary text-lg font-semibold font-sans">Submit a Support Bundle</h2>
-        <p className="text-text-secondary text-xs font-sans">
-          Bundles your current inverter data, developer logs, and sanitised settings (secrets
-          stripped) into a single file and sends it to the maintainer. Describe what's wrong and
-          click submit — no need to copy logs by hand.
-        </p>
-
-        <div className="flex flex-col gap-3">
-          <label className="flex flex-col gap-1">
-            <span className="text-text-secondary text-xs font-sans">What's the issue?</span>
-            <select
-              value={supportCategory}
-              onChange={(e) => setSupportCategory(e.target.value)}
-              className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-sans border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-            >
-              <option value="connection">Connection</option>
-              <option value="schedule">Charge / discharge schedule</option>
-              <option value="battery">Battery</option>
-              <option value="control">Control</option>
-              <option value="alerts">Notifications / alerts</option>
-              <option value="other">Other</option>
-            </select>
-          </label>
-
-          <div className="flex flex-col gap-1">
-            <span className="text-text-secondary text-xs font-sans">
-              GitHub issue{' '}
-              <button
-                type="button"
-                onClick={() => openExternal('https://github.com/psylsph/home-energy-manager/issues')}
-                className="text-flow-active underline hover:opacity-80 align-baseline"
-              >
-                (raise one first)
-              </button>
-            </span>
-            <select
-              value={supportIssueNumber}
-              onChange={(e) => setSupportIssueNumber(e.target.value)}
-              aria-label="GitHub issue"
-              className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-sans border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-            >
-              <option value="">Raise a ticket first</option>
-              {supportIssues.map((issue) => (
-                <option key={issue.number} value={String(issue.number)}>
-                  #{issue.number} — {issue.title}
-                </option>
-              ))}
-            </select>
-            {supportIssuesError && (
-              <span className="text-text-secondary/70 text-xs font-sans">
-                Couldn't load the issue list (offline or rate-limited). Raise a ticket first, then pick it here.
-              </span>
-            )}
-            {!supportIssuesError && supportIssues.length === 0 && (
-              <span className="text-text-secondary/70 text-xs font-sans">
-                No open issues.
-              </span>
-            )}
-          </div>
-
-          <label className="flex flex-col gap-1">
-            <span className="text-text-secondary text-xs font-sans">
-              Describe the problem{' '}
-              <span className="text-text-secondary/60">
-                ({supportDescription.length}/2000)
-              </span>
-            </span>
-            <textarea
-              value={supportDescription}
-              maxLength={2000}
-              onChange={(e) => setSupportDescription(e.target.value)}
-              placeholder="What were you trying to do? What did you expect? What happened instead?"
-              rows={4}
-              className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-sans border border-bg-elevated focus:border-flow-active outline-none transition-colors resize-y"
-            />
-          </label>
-
-          <div className="flex flex-col gap-2">
-            <label className="flex items-center gap-2 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={supportIncludeHistory}
-                onChange={(e) => setSupportIncludeHistory(e.target.checked)}
-                className="accent-flow-active"
-              />
-              <span className="text-text-secondary text-xs font-sans">
-                Include last 24 h of history readings
-              </span>
-            </label>
-          </div>
-
-          <button
-            onClick={handleSubmitSupport}
-            disabled={supportSubmitting || !supportDescription.trim() || !supportIssueNumber}
-            className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-4 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 transition-opacity self-start"
-          >
-            {supportSubmitting ? 'Submitting…' : 'Submit Support Bundle'}
           </button>
         </div>
       </section>
