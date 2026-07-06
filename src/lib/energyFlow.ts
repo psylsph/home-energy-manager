@@ -366,6 +366,14 @@ export function buildEnergyFlows(
     ? Math.max(0, absBattery - solarChargeWatts)
     : 0;
   const gridPortionToBattery = Math.min(gridChargeWatts, absGrid);
+  // Issue #188: the home node is the only place the EV draw is
+  // surfaced in the home-centred topology — the import spoke and the
+  // EV spoke are both drawn at their full wattages, and the home
+  // node's sub-label carries the gross consumption (net + EV draw)
+  // so the user can reconcile the spokes against the total. The
+  // import is NOT reduced by the EV portion, and no separate
+  // grid → ev spoke is emitted: the energy still flows through the
+  // home bus the same way solar and battery spokes do.
 
   // Battery-discharge source attribution. When discharging, the battery
   // powers the home first and any surplus flows battery → grid. The
@@ -395,9 +403,14 @@ export function buildEnergyFlows(
       `${formatPower(s.solar_power)} from solar`);
   }
   if (isImporting) {
-    // The import spoke carries the home-direct grid portion; the
-    // grid-charge spoke (emitted below when grid feeds the battery) carries
-    // the rest.
+    // The import spoke carries the full grid inflow (issue #188: the
+    // energy is drawn routing through the home bus, so the import
+    // spoke is the gross grid current, not reduced by the EV draw
+    // — the home node's sub-label reveals the gross consumption
+    // including the EV). The grid-charge spoke (emitted below
+    // when grid feeds the battery) is a sub-spoke of the import
+    // for source-attribution purposes; the home-direct portion is
+    // import - grid_charge.
     const importDisplayW = Math.max(0, absGrid - gridPortionToBattery);
     if (importDisplayW > noise) {
       push('import', 'grid', 'home', importDisplayW, 'import',
@@ -500,6 +513,12 @@ export function buildEnergyFlows(
   // No self-flow for home: it is the hub, not a spoke. Its consumption is
   // shown as the hub node's value, not as a directed flow.
   if (evcActive) {
+    // Issue #188: the EV spoke is drawn `home → ev` (energy routed
+    // through the home bus, same as solar and battery spokes) at
+    // the full `evcPower`. The import spoke above is NOT reduced by
+    // the EV draw; the gross consumption (net + EV) is surfaced on
+    // the home node's sub-label so the user can reconcile the
+    // spokes against the total.
     push('ev', 'home', 'ev', evcPower, 'consume',
       `${formatPower(evcPower)} to EV`);
   }
@@ -547,8 +566,22 @@ export function buildEnergyFlows(
     {
       id: 'home',
       label: 'Home',
+      // Issue #188: the inverter's busbar sensor (IR(42) p_load_demand)
+      // reports the house load *excluding* the EV charger. The Home
+      // node's primary kW value therefore reflects the net house
+      // consumption — the part the inverter can actually sense on the
+      // house bus. When an EV is configured and drawing, we also
+      // surface the gross consumption (net + EV draw) on a sub-label
+      // so the user can reconcile the spokes (import + grid_charge)
+      // against what's actually leaving the home for the EV. Without
+      // the gross, a 12.3 kW import with a 7.1 kW EV and a 5.2 kW
+      // net read as 12.3 in, 7.1 out, 5.2 at the hub — the net
+      // value, while correct, doesn't make the gross obvious.
       value: formatVisualPower(s.home_power, noise),
-      unit: 'Consumption',
+      unit: 'Net',
+      subLabel: (opts.showEvc && evcPower > noise && s.home_power > noise)
+        ? `Gross ${formatVisualPower(s.home_power + evcPower, noise)}`
+        : undefined,
       color: FLOW_COLORS.home,
       active: homeActive,
     },

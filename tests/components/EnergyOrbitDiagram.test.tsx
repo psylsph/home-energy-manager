@@ -704,4 +704,71 @@ describe('EnergyOrbitDiagram', () => {
     // The animateMotion element is conditionally omitted for reduced-motion users.
     expect(container.querySelectorAll('animateMotion').length).toBe(0);
   });
+
+  // -------------------------------------------------------------------------
+  // Issue #188: the home hub optionally carries a `subLabel` (e.g.
+  // "Gross 12.3kW" when an EV is configured), rendered as a small
+  // line under the kW value, mirroring the sub-label pattern on the
+  // satellite nodes. The home node's kW value is the busbar-sensed
+  // net (which already excludes the EV); no separate "Net" label is
+  // rendered between the kW value and the subLabel — the user
+  // reconciles the spokes against the gross subLabel when present.
+  // -------------------------------------------------------------------------
+  describe('home node Gross sub-label (issue #188)', () => {
+    it('renders the kW value and "Gross X kW" sub-label when EV is drawing', () => {
+      // 1 kW busbar + 2.2 kW EV = 3.2 kW gross, 3.2 kW import.
+      const { container } = render(
+        <EnergyOrbitDiagram
+          snapshot={makeSnapshot({ grid_power: -3200, home_power: 1000 })}
+          showEvc
+          evcPower={2200}
+          evcConnected
+          evcEverConnected
+        />,
+      );
+      const home = container.querySelector('g[aria-label*="Home"]');
+      expect(home).not.toBeNull();
+      const texts = Array.from(home!.querySelectorAll('text')).map((t) => ({
+        content: t.textContent ?? '',
+        testid: t.getAttribute('data-testid'),
+      }));
+      // The kW value is the busbar-sensed net (1.0 kW).
+      expect(texts[0]).toEqual({ content: '1.0kW', testid: null });
+      // Gross sub-label = net + EV draw = 1.0 + 2.2 = 3.2 kW.
+      expect(texts[1]).toEqual({ content: 'Gross 3.2kW', testid: 'home-sublabel' });
+    });
+
+    it('renders only the kW value (no gross, no unit label) when no EV is configured', () => {
+      const { container } = render(
+        <EnergyOrbitDiagram snapshot={makeSnapshot({ home_power: 1000 })} />,
+      );
+      const home = container.querySelector('g[aria-label*="Home"]');
+      const texts = Array.from(home!.querySelectorAll('text')).map((t) => ({
+        content: t.textContent ?? '',
+        testid: t.getAttribute('data-testid'),
+      }));
+      // Just the kW value — no Net label, no Gross subLabel.
+      expect(texts).toEqual([{ content: '1.0kW', testid: null }]);
+    });
+
+    it('suppresses the gross sub-label when the busbar is below the noise threshold', () => {
+      // Busbar at 5 W (below the 20 W default) is sub-noise; the kW
+      // value shows "0W" via formatVisualPower. The gross sub-label
+      // is suppressed because 5 W + 100 W wouldn't be a meaningful
+      // figure (the busbar reading is too noisy to anchor a total).
+      const { container } = render(
+        <EnergyOrbitDiagram
+          snapshot={makeSnapshot({ home_power: 5, grid_power: -100 })}
+          showEvc
+          evcPower={100}
+          evcConnected
+          evcEverConnected
+        />,
+      );
+      const home = container.querySelector('g[aria-label*="Home"]');
+      expect(home).not.toBeNull();
+      const subLabel = home!.querySelector('[data-testid="home-sublabel"]');
+      expect(subLabel).toBeNull();
+    });
+  });
 });
