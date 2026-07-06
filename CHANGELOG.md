@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.58.0] - 2026-07-06
+
+### Added
+
+- **The EV charger node on the energy diagram now shows a running total of kWh for the current charging session.** The figure counts up in real time while the car charges, then stays on screen after the session ends so you can read the final total. It clears automatically the next time the cable is unplugged and plugged back in, ready for the next session. (issue #189)
+
 ## [0.57.2] - 2026-07-06
 
 ### Fixed
