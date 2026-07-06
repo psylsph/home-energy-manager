@@ -31,6 +31,13 @@ interface Props {
   evcConnected?: boolean;
   /** EV Charger physical cable plugged in (HR 2 `connection_status`). */
   evcCableConnected?: boolean;
+  /**
+   * EV Charger session energy (kWh) for the current/most-recent charge
+   * session (issue #189). Counts up live while charging, then latches at
+   * the final total after the session ends. Passed through to
+   * `buildEnergyFlows` to render as part of the EV node sub-label.
+   */
+  evcSessionEnergyKwh?: number;
   /** Latch: true once a valid EVC snapshot has ever arrived (issue #138). */
   evcEverConnected?: boolean;
   /** Whether EV Charger is configured (non-empty host). When falsy, EV node is hidden. */
@@ -565,7 +572,7 @@ function SatelliteNode({ node, x, y, r, flows, mobile, showStatusWords }: NodePr
         y={y + r + 32}
         textAnchor="middle"
         fill="var(--app-text-primary, #F0F6FC)"
-        fontSize={mobile ? 20 : 19}
+        fontSize={isEv ? (mobile ? 16 : 15) : (mobile ? 20 : 19)}
         fontWeight={700}
         fontFamily="var(--font-mono, monospace)"
       >
@@ -611,6 +618,7 @@ function EnergyOrbitDiagramInner({
   evcCharging = false,
   evcConnected = false,
   evcCableConnected = false,
+  evcSessionEnergyKwh = 0,
   evcEverConnected,
   showEvc = false,
 }: Props) {
@@ -641,6 +649,7 @@ function EnergyOrbitDiagramInner({
     showEvc,
     evcLabel,
     evcCableLabel,
+    evcSessionEnergyKwh,
   });
 
   const positions = satellitePositions(showEvc);

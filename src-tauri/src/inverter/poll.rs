@@ -329,6 +329,11 @@ pub struct AppState {
     pub cached_agile_prices: Arc<Mutex<Vec<PriceSlot>>>,
     /// Most recently decoded EV charger snapshot.
     pub latest_evc: Arc<Mutex<Option<crate::evc::EvcSnapshot>>>,
+    /// EV charger session-energy latch (issue #189). Holds the last
+    /// non-zero `Charge_Session_Energy` so the completed session's kWh
+    /// stays visible on the diagram after HR 72 zeroes, and resets on the
+    /// "No Cable" → "Cable In" transition. See `crate::evc::SessionLatch`.
+    pub evc_session_latch: Arc<Mutex<crate::evc::SessionLatch>>,
     /// Email alert configuration.
     pub alert_config: Arc<Mutex<crate::settings::AlertsConfig>>,
     /// Email alert debounce tracker (in-memory only).
@@ -388,6 +393,7 @@ impl AppState {
             alert_debounce: Arc::new(Mutex::new(crate::alerts::AlertDebounce::new())),
             last_report_date: Arc::new(Mutex::new(None)),
             latest_evc: Arc::new(Mutex::new(None)),
+            evc_session_latch: Arc::new(Mutex::new(crate::evc::SessionLatch::default())),
             connected_since: Arc::new(std::sync::Mutex::new(None)),
             connect_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             reconnect_request: Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -437,6 +443,7 @@ impl AppState {
             alert_debounce: Arc::new(Mutex::new(crate::alerts::AlertDebounce::new())),
             last_report_date: Arc::new(Mutex::new(None)),
             latest_evc: Arc::new(Mutex::new(None)),
+            evc_session_latch: Arc::new(Mutex::new(crate::evc::SessionLatch::default())),
             connected_since: Arc::new(std::sync::Mutex::new(None)),
             connect_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             reconnect_request: Arc::new(std::sync::atomic::AtomicU32::new(0)),

@@ -17,6 +17,33 @@ export function formatEnergy(kwh: number): string {
 }
 
 /**
+ * Format the EV charger's running session energy for inline display next to
+ * the live power (e.g. `7.7kW(23kWh)`).
+ *
+ * One decimal place while the session is small enough that the fraction
+ * matters (`0.1kWh`, `9.9kWh`), then plain integers once it crosses 10 kWh
+ * — by that point the tenths are noise and the inline value stays compact
+ * (`23kWh`, `11kWh`). NaN / null renders an em-dash like the other
+ * formatters.
+ *
+ * @example
+ *   formatSessionEnergy(0.1)   // "0.1kWh"
+ *   formatSessionEnergy(9.9)   // "9.9kWh"
+ *   formatSessionEnergy(10)    // "10kWh"
+ *   formatSessionEnergy(23)    // "23kWh"
+ *   formatSessionEnergy(NaN)   // "—"
+ */
+export function formatSessionEnergy(kwh: number): string {
+  if (!Number.isFinite(kwh)) {
+    return '—';
+  }
+  if (kwh >= 10) {
+    return `${Math.round(kwh)}kWh`;
+  }
+  return `${kwh.toFixed(1)}kWh`;
+}
+
+/**
  * Absolute value that preserves non-finite / null values as NaN.
  *
  * Use this instead of `Math.abs(v)` when the result is fed into a format

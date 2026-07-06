@@ -302,6 +302,91 @@ async fn probe_evc_host(ip: String) -> Option<DiscoveredEvc> {
 }
 
 // ---------------------------------------------------------------------------
+// Session-energy latch (issue #189)
+// ---------------------------------------------------------------------------
+
+/// In-memory latch for the EV charger session-energy display.
+///
+/// HR 72 (`Charge_Session_Energy`) drops to 0 the moment a charging session
+/// ends, so a naive display would flash "0.0 kWh" the instant the charge
+/// stops and stay there until the next session. To keep the completed
+/// session's total visible on the diagram, we hold the last non-zero
+/// reading and only clear it when the physical cable transitions
+/// "No Cable" → "Cable In" — i.e. a genuinely new session has started.
+///
+/// The rule (confirmed with the project owner):
+///  - While charging (`Charging` / `Starting`): trust the live register,
+///    even if it briefly reads 0 (dongle jitter / very start of a session).
+///  - Otherwise: show the latched peak, or 0.0 if no session has delivered
+///    energy since the last cable plug-in.
+///  - On the "No Cable" → "Cable In" transition: clear the latch so the new
+///    session starts from a clean 0. A "Cable In" → "No Cable" unplug does
+///    *not* clear it — the last session's total stays visible until the
+///    cable is plugged back in.
+///  - Any non-zero reading refreshes the latch, so the peak survives the
+///    end-of-session zeroing of HR 72 (and the brief window where the EVC
+///    reports the final value under a non-charging state before zeroing).
+///
+/// Mirrors the intent of GivTCP's `evc.py` "hold the previous charge
+/// session energy" cache (`evc.py:231`), but ties the reset to the cable
+/// transition rather than leaving the value pinned indefinitely.
+///
+/// Volatile: not persisted to disk. On backend restart the latch starts
+/// empty and repopulates from the next charging session — matching the
+/// behaviour of the rest of the EVC state on `AppState` (`latest_evc`).
+#[derive(Debug, Clone, Default)]
+pub struct SessionLatch {
+    /// Whether the cable was connected on the previous poll. `None` before
+    /// the first observation, so we don't mistake the initial reading for a
+    /// plug-in transition.
+    prev_cable: Option<bool>,
+    /// The last non-zero session energy seen, in kWh. Cleared on the
+    /// "No Cable" → "Cable In" transition.
+    latched_kwh: Option<f32>,
+}
+
+impl SessionLatch {
+    /// Apply the latch rule to a freshly decoded snapshot and return the
+    /// effective session energy (in kWh) the frontend should display.
+    ///
+    /// Call this with the **raw** decoded `session_energy_kwh` (before any
+    /// override), then write the returned value back into the snapshot so
+    /// the broadcast, the `latest_evc` cache, and `GET /api/evc/status` all
+    /// carry the display value.
+    pub fn observe(&mut self, snapshot: &EvcSnapshot) -> f32 {
+        let curr_cable = snapshot.connection_status == "Connected";
+        let curr_kwh = snapshot.session_energy_kwh;
+        let charging = matches!(snapshot.charging_state.as_str(), "Charging" | "Starting");
+
+        // Detect the cable plug-in transition. Skip on the very first
+        // observation (prev_cable is None) so an already-plugged-in cable
+        // at startup doesn't clobber a latch captured from a prior session.
+        if matches!(self.prev_cable, Some(false)) && curr_cable {
+            self.latched_kwh = None;
+        }
+
+        // Any non-zero reading refreshes the latch (covers the live ramp-up
+        // during charging AND the brief post-session frame where the EVC
+        // reports the final value before zeroing HR 72).
+        if curr_kwh > 0.0 {
+            self.latched_kwh = Some(curr_kwh);
+        }
+
+        self.prev_cable = Some(curr_cable);
+
+        if charging {
+            // Trust the live register while charging — even a 0 read (dongle
+            // jitter, or the very first sub-0.05 kWh poll that rounds to 0).
+            curr_kwh
+        } else {
+            // Session over (or never started): hold the peak, or 0.0 if no
+            // energy has been delivered since the last cable plug-in.
+            self.latched_kwh.unwrap_or(0.0)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Poll loop
 // ---------------------------------------------------------------------------
 
@@ -446,7 +531,18 @@ pub async fn run_evc_poll_loop(state: Arc<AppState>) {
             let mut regs = regs1;
             regs.extend_from_slice(&regs2);
 
-            let snapshot = decode_evc(&regs);
+            let mut snapshot = decode_evc(&regs);
+
+            // Apply the session-energy latch (issue #189). `observe` reads
+            // the raw HR 72 value; we overwrite the snapshot field with the
+            // effective (live or latched) value so the broadcast, the
+            // `latest_evc` cache, and `GET /api/evc/status` all agree on
+            // what the frontend should display.
+            let effective_kwh = {
+                let mut latch = state.evc_session_latch.lock().await;
+                latch.observe(&snapshot)
+            };
+            snapshot.session_energy_kwh = effective_kwh;
 
             tracing::debug!(
                 power = snapshot.active_power,
@@ -698,6 +794,134 @@ mod tests {
         regs[38] = 0xD800; // surrogate — invalid as a scalar value
         let s = decode_evc(&regs);
         assert_eq!(s.serial_number, "?");
+    }
+
+    // -----------------------------------------------------------------
+    // SessionLatch (issue #189)
+    //
+    // The latch keeps a completed session's kWh on the diagram after HR 72
+    // zeroes, and resets only on the physical cable "No Cable" → "Cable In"
+    // transition. These tests walk every documented branch of the rule.
+    // -----------------------------------------------------------------
+
+    /// Build a snapshot with just the fields `SessionLatch::observe` reads.
+    fn snap(charging_state: &str, connection_status: &str, session_kwh: f32) -> EvcSnapshot {
+        EvcSnapshot {
+            charging_state: charging_state.into(),
+            connection_status: connection_status.into(),
+            session_energy_kwh: session_kwh,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn latch_shows_zero_before_any_session() {
+        // Fresh latch, charger idle, no cable, no energy. The diagram
+        // should read 0.0 kWh, not NaN or a stale value.
+        let mut latch = SessionLatch::default();
+        let eff = latch.observe(&snap("Idle", "Not Connected", 0.0));
+        assert!((eff - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn latch_tracks_live_energy_while_charging() {
+        // Three successive polls during a charge: 0 → 0.5 → 1.2 kWh.
+        // The effective value always equals the live register while
+        // charging (even the initial 0).
+        let mut latch = SessionLatch::default();
+        let a = latch.observe(&snap("Charging", "Connected", 0.0));
+        let b = latch.observe(&snap("Charging", "Connected", 0.5));
+        let c = latch.observe(&snap("Charging", "Connected", 1.2));
+        assert!((a - 0.0).abs() < f32::EPSILON);
+        assert!((b - 0.5).abs() < 0.001);
+        assert!((c - 1.2).abs() < 0.001);
+    }
+
+    #[test]
+    fn latch_holds_peak_after_session_ends_and_hr72_zeroes() {
+        // Charge to 10.0 kWh, then HR 72 zeroes as the EVC declares the
+        // session over (state flips to Idle). The display must keep
+        // showing 10.0 kWh — that's the whole point of the latch.
+        let mut latch = SessionLatch::default();
+        latch.observe(&snap("Charging", "Connected", 10.0));
+        let eff = latch.observe(&snap("Idle", "Connected", 0.0));
+        assert!((eff - 10.0).abs() < 0.001, "should hold peak, got {eff}");
+    }
+
+    #[test]
+    fn latch_holds_peak_across_unplug_while_idle() {
+        // "Cable In" → "No Cable" must NOT reset the latch. The user can
+        // unplug the car and the last session's total stays visible until
+        // they plug in again.
+        let mut latch = SessionLatch::default();
+        latch.observe(&snap("Charging", "Connected", 7.5));
+        latch.observe(&snap("Idle", "Connected", 0.0));
+        let eff = latch.observe(&snap("Idle", "Not Connected", 0.0));
+        assert!((eff - 7.5).abs() < 0.001, "unplug must not reset, got {eff}");
+    }
+
+    #[test]
+    fn latch_resets_on_cable_plug_in_transition() {
+        // Full cycle: charge → end → unplug → plug back in. The plug-in
+        // transition clears the latch, so the new session starts from 0
+        // (not the previous session's 7.5 kWh).
+        let mut latch = SessionLatch::default();
+        latch.observe(&snap("Charging", "Connected", 7.5));
+        latch.observe(&snap("Idle", "Connected", 0.0));
+        latch.observe(&snap("Idle", "Not Connected", 0.0));
+        let eff = latch.observe(&snap("Idle", "Connected", 0.0));
+        assert!((eff - 0.0).abs() < f32::EPSILON, "plug-in should reset, got {eff}");
+    }
+
+    #[test]
+    fn latch_does_not_reset_on_first_observation_with_cable_in() {
+        // App started mid-session (cable already in, charging). The first
+        // observation must NOT be treated as a plug-in transition, so the
+        // live value is captured and the latch is primed for after the
+        // session ends.
+        let mut latch = SessionLatch::default();
+        let eff = latch.observe(&snap("Charging", "Connected", 5.0));
+        assert!((eff - 5.0).abs() < 0.001);
+        // Session ends → latch should hold the 5.0 captured above.
+        let held = latch.observe(&snap("Idle", "Connected", 0.0));
+        assert!((held - 5.0).abs() < 0.001, "first-obs capture should persist, got {held}");
+    }
+
+    #[test]
+    fn latch_trusts_live_zero_during_charging_jitter() {
+        // Dongle jitter: a 0 read arrives while still Charging. We show
+        // the live 0 (not the latched peak) because the user's spec says
+        // the live register wins while charging — even a spurious 0.
+        let mut latch = SessionLatch::default();
+        latch.observe(&snap("Charging", "Connected", 5.0));
+        let eff = latch.observe(&snap("Charging", "Connected", 0.0));
+        assert!((eff - 0.0).abs() < f32::EPSILON, "charging should trust live register, got {eff}");
+        // But the latch itself is untouched, so once the jitter clears the
+        // peak is still recoverable after the session.
+        let held = latch.observe(&snap("Idle", "Connected", 0.0));
+        assert!((held - 5.0).abs() < 0.001, "latch should survive jitter, got {held}");
+    }
+
+    #[test]
+    fn latch_captures_final_value_reported_under_non_charging_state() {
+        // Some EVCs report the final kWh for one poll under a non-charging
+        // state (e.g. "End of Charging") before zeroing HR 72. That reading
+        // should refresh the latch so it's the value we hold afterwards.
+        let mut latch = SessionLatch::default();
+        latch.observe(&snap("Charging", "Connected", 9.8));
+        let eff = latch.observe(&snap("End of Charging", "Connected", 9.9));
+        assert!((eff - 9.9).abs() < 0.001);
+        let held = latch.observe(&snap("Idle", "Connected", 0.0));
+        assert!((held - 9.9).abs() < 0.001, "should hold the refreshed peak, got {held}");
+    }
+
+    #[test]
+    fn latch_treats_starting_as_charging() {
+        // `Starting` (state=3) is the brief pre-charge ramp-up. It should
+        // follow the live register like `Charging`, not latch-and-hold.
+        let mut latch = SessionLatch::default();
+        let eff = latch.observe(&snap("Starting", "Connected", 0.0));
+        assert!((eff - 0.0).abs() < f32::EPSILON);
     }
 
     // -----------------------------------------------------------------

@@ -88,7 +88,7 @@ export function useWebSocket() {
         const cableConnected = snap.connection_status === 'Connected';
         // Carry the raw charging_state string through so the diagram can
         // render the EVC's own "Idle" label when state=1 (issue #139).
-        setEvcData(snap.active_power, charging, true, snap.charging_state, cableConnected);
+        setEvcData(snap.active_power, charging, true, snap.charging_state, cableConnected, snap.session_energy_kwh);
       } else if (res.evc_host) {
         // EVC is configured but the backend has never seen a snapshot
         // since startup. Latch `evcEverConnected` based on the live WS
@@ -154,7 +154,7 @@ export function useWebSocket() {
           // Carry the raw charging_state string through so the diagram
           // can render the EVC's own "Idle" label when state=1
           // (issue #139).
-          setEvcData(evc.active_power, charging, true, evc.charging_state, cableConnected);
+          setEvcData(evc.active_power, charging, true, evc.charging_state, cableConnected, evc.session_energy_kwh);
         } else if (data.type === 'evc_connected') {
           // Backend just established the TCP/Modbus connection to the
           // configured EVC host (issue #138). Latch `evcEverConnected`

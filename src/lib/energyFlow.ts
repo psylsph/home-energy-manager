@@ -41,6 +41,7 @@ import {
   formatFrequency,
   formatCurrent,
   formatTemp,
+  formatSessionEnergy,
 } from './format';
 
 /** True when a flow with the given id is present in the list. */
@@ -224,6 +225,15 @@ export interface BuildEnergyFlowsOptions {
    * value here.
    */
   evcCableLabel?: string;
+  /**
+   * EV charger session energy (kWh) for the current/most-recent charge
+   * session (issue #189). Counts up live while charging, then latches at
+   * the final total after the session ends. Rendered as part of the EV
+   * node's sub-label ("Cable In · 12.4 kWh" or just "12.4 kWh"). Only
+   * shown when > 0 — a brand-new session with no energy delivered yet
+   * stays quiet rather than flashing "0.0 kWh".
+   */
+  evcSessionEnergyKwh?: number;
   /** Injected clock for deterministic summary / slot-window tests. */
   now?: Date;
 }
@@ -595,10 +605,20 @@ export function buildEnergyFlows(
     },
   ];
   if (opts.showEvc) {
+    // Render the session energy inline with the power as `7.7kW(23kWh)`
+    // (issue #189). The kWh only appears when > 0 — a brand-new session
+    // with no energy delivered yet stays as a bare power reading rather
+    // than flashing `7.7kW(0.0kWh)`. The cable state keeps its own
+    // sub-label line below the value.
+    const evcKwh = opts.evcSessionEnergyKwh ?? 0;
+    const powerStr = formatVisualPower(evcPower, noise);
+    const evcValue = evcKwh > 0
+      ? `${powerStr}(${formatSessionEnergy(evcKwh)})`
+      : powerStr;
     nodes.push({
       id: 'ev',
       label: 'EV',
-      value: formatVisualPower(evcPower, noise),
+      value: evcValue,
       unit: opts.evcLabel ?? (evcActive ? 'Charging' : 'Idle'),
       subLabel: opts.evcCableLabel,
       color: FLOW_COLORS.ev,
