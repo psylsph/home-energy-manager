@@ -566,22 +566,8 @@ export function buildEnergyFlows(
     {
       id: 'home',
       label: 'Home',
-      // Issue #188: the inverter's busbar sensor (IR(42) p_load_demand)
-      // reports the house load *excluding* the EV charger. The Home
-      // node's primary kW value therefore reflects the net house
-      // consumption — the part the inverter can actually sense on the
-      // house bus. When an EV is configured and drawing, we also
-      // surface the gross consumption (net + EV draw) on a sub-label
-      // so the user can reconcile the spokes (import + grid_charge)
-      // against what's actually leaving the home for the EV. Without
-      // the gross, a 12.3 kW import with a 7.1 kW EV and a 5.2 kW
-      // net read as 12.3 in, 7.1 out, 5.2 at the hub — the net
-      // value, while correct, doesn't make the gross obvious.
       value: formatVisualPower(s.home_power, noise),
-      unit: 'Net',
-      subLabel: (opts.showEvc && evcPower > noise && s.home_power > noise)
-        ? `Gross ${formatVisualPower(s.home_power + evcPower, noise)}`
-        : undefined,
+      unit: 'Consumption',
       color: FLOW_COLORS.home,
       active: homeActive,
     },
