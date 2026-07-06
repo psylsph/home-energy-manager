@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.57.1] - 2026-07-06
+
+### Fixed
+
+- **The energy diagram's home node now shows both net and gross consumption when an EV is configured.** Previously, a 12.3 kW import with a 7.1 kW EV and a 5.2 kW house load drew the import spoke at the full 12.3 kW going to the home and the EV spoke leaving the home, with the home node showing 5.2 kW — which the eye read as 12.3 in, 7.1 out, 5.2 unaccounted. The home node's primary kW value is the busbar-sensed net (what the inverter actually reads), and a new sub-label now carries the gross (net + EV draw) so the user can reconcile the spokes against the total consumption. The home unit is "Net use" instead of "Consumption" to make the net-vs-gross distinction explicit. (issue #188)
+
 ## [0.57.0] - 2026-07-05
 
 ### Removed
