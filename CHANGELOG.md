@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.57.2] - 2026-07-06
+
+### Fixed
+
+- **The home node no longer carries a "Net" label or a "Gross" sub-label added in v0.57.1.** The v0.57.1 release introduced a unit label ("Net") and an optional "Gross X kW" sub-label on the home node, intended to disambiguate the busbar-sensed net reading from the total consumption when an EV is drawing. In practice the labels added visual noise to a node the user reads at a glance: the kW value is the busbar reading (which already excludes the EV), and the "Gross" was redundant. The home node reverts to its v0.57.0 layout — a single kW value, nothing else. (issue #188)
+
 ## [0.57.1] - 2026-07-06
 
 ### Fixed
