@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { formatOperatingHours, formatBatteryMode, formatVisualPower, formatTimestamp, finiteAbs, formatCurrent, formatPower } from '../../src/lib/format';
+import { formatOperatingHours, formatBatteryMode, formatVisualPower, formatTimestamp, finiteAbs, formatCurrent, formatPower, formatSessionEnergy } from '../../src/lib/format';
 
 /**
  * Tests for `formatOperatingHours` — the helper that turns a raw
@@ -359,5 +359,30 @@ describe('finiteAbs', () => {
       // Same trap for battery_power if it ever arrives null.
       expect(formatPower(finiteAbs(null))).toBe('—');
     });
+  });
+});
+
+/**
+ * Tests for `formatSessionEnergy` — the EV charger session-energy formatter
+ * used inline next to the live power (`7.7kW(23kWh)`). One decimal place
+ * below 10 kWh (where the fraction matters), plain integers from 10 up.
+ */
+describe('formatSessionEnergy', () => {
+  it('uses one decimal place below 10 kWh', () => {
+    expect(formatSessionEnergy(0.1)).toBe('0.1kWh');
+    expect(formatSessionEnergy(5)).toBe('5.0kWh');
+    expect(formatSessionEnergy(9.9)).toBe('9.9kWh');
+  });
+
+  it('switches to a plain integer at 10 kWh and above', () => {
+    expect(formatSessionEnergy(10)).toBe('10kWh');
+    expect(formatSessionEnergy(11)).toBe('11kWh');
+    expect(formatSessionEnergy(23)).toBe('23kWh');
+    expect(formatSessionEnergy(99.6)).toBe('100kWh');
+  });
+
+  it('renders an em-dash for non-finite input', () => {
+    expect(formatSessionEnergy(NaN)).toBe('—');
+    expect(formatSessionEnergy(Infinity)).toBe('—');
   });
 });

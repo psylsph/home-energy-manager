@@ -78,6 +78,15 @@ interface InverterState {
    */
   evcCableConnected: boolean;
   /**
+   * EV Charger session energy (kWh) for the current/most-recent charge
+   * session. Counts up live while charging, then latches at the final
+   * total after the session ends so the completed charge stays visible
+   * on the diagram until the cable is unplugged and re-plugged. Driven
+   * by the backend `SessionLatch` (issue #189) — the frontend just
+   * renders whatever value arrives; the latch/reset logic is in Rust.
+   */
+  evcSessionEnergyKwh: number;
+  /**
    * True once we've received at least one valid EVC snapshot since the
    * page loaded. Lets the UI distinguish "charger was here, now offline"
    * (rendered as 'Disconnected') from "we've never successfully reached the
@@ -139,6 +148,7 @@ interface InverterState {
     connected?: boolean,
     chargingState?: string,
     cableConnected?: boolean,
+    sessionEnergyKwh?: number,
   ) => void;
   /**
    * Mark the EVC as "we just successfully reached the host" without
@@ -331,6 +341,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   evcCharging: false,
   evcConnected: false,
   evcCableConnected: false,
+  evcSessionEnergyKwh: 0,
   evcEverConnected: false,
   setSnapshot: (snapshot) => set({ snapshot }),
   clearSnapshot: () => set({ snapshot: null }),
@@ -415,13 +426,14 @@ export const useInverterStore = create<InverterState>((set) => ({
   setHiddenPanels: (panels) => set({ hiddenPanels: panels }),
   setInverterTempConfig: (config) => set({ inverterTempConfig: config }),
   setEvcHost: (host) => set({ evcHost: host }),
-  setEvcData: (power, charging, connected = true, chargingState = '', cableConnected = false) =>
+  setEvcData: (power, charging, connected = true, chargingState = '', cableConnected = false, sessionEnergyKwh = 0) =>
     set((prev) => ({
       evcPower: power,
       evcChargingState: chargingState,
       evcCharging: charging,
       evcConnected: connected,
       evcCableConnected: cableConnected,
+      evcSessionEnergyKwh: sessionEnergyKwh,
       // Latch: once we've ever seen a live EVC snapshot, stay latched.
       // SettingsPage calls `resetEvc()` when the user saves a new host so
       // the flag clears cleanly at that point.
@@ -439,6 +451,7 @@ export const useInverterStore = create<InverterState>((set) => ({
       evcCharging: false,
       evcConnected: false,
       evcCableConnected: false,
+      evcSessionEnergyKwh: 0,
       evcEverConnected: false,
     }),
 }));

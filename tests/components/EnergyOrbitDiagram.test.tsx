@@ -694,6 +694,92 @@ describe('EnergyOrbitDiagram', () => {
       );
       expect(container.querySelector('[data-testid="ev-sublabel"]')).toBeNull();
     });
+
+    // --- issue #189: session energy (kWh) inline with power ---
+    // The kWh running total renders inline with the live power as
+    // `7.7kW(23kWh)`. The backend SessionLatch keeps the value visible
+    // after a session ends; these tests pin the rendering.
+    it('renders the session kWh inline with the power while charging (issue #189)', () => {
+      useInverterStore.setState({ showFlowStatusWords: true });
+      const { container } = render(
+        <EnergyOrbitDiagram
+          snapshot={makeSnapshot({ home_power: 7500 })}
+          showEvc
+          evcPower={7000}
+          evcCharging
+          evcConnected
+          evcCableConnected
+          evcSessionEnergyKwh={23}
+        />,
+      );
+      const labels = Array.from(container.querySelectorAll('text')).map((t) => t.textContent ?? '');
+      // Power + energy inline (23 kWh crosses the integer threshold);
+      // cable state stays on its own sub-label line.
+      expect(labels).toContain('7.0kW(23kWh)');
+      expect(container.querySelector('[data-testid="ev-sublabel"]')?.textContent).toBe('Cable In');
+    });
+
+    it('renders the latched session kWh after the session ends, even at 0 W (issue #189)', () => {
+      // Charger idle, cable still in, but the backend latch is holding the
+      // completed session's total. The kWh stays inline: `0W(7.5kWh)`.
+      useInverterStore.setState({ showFlowStatusWords: true });
+      const { container } = render(
+        <EnergyOrbitDiagram
+          snapshot={makeSnapshot()}
+          showEvc
+          evcPower={0}
+          evcConnected
+          evcCableConnected
+          evcSessionEnergyKwh={7.5}
+        />,
+      );
+      const labels = Array.from(container.querySelectorAll('text')).map((t) => t.textContent ?? '');
+      expect(labels).toContain('0W(7.5kWh)');
+    });
+
+    it('uses a smaller value font for the EV node so the longer `kW(kWh)` string fits', () => {
+      // The EV value (`7.0kW(23kWh)`) is much longer than the other nodes'
+      // bare kW readings, so it renders at a reduced font size to avoid
+      // crowding the satellite. Pin the size so a future tweak doesn't
+      // accidentally restore the full-size value and overflow the node.
+      useInverterStore.setState({ showFlowStatusWords: true });
+      const { container } = render(
+        <EnergyOrbitDiagram
+          snapshot={makeSnapshot({ home_power: 7500 })}
+          showEvc
+          evcPower={7000}
+          evcCharging
+          evcConnected
+          evcCableConnected
+          evcSessionEnergyKwh={23}
+        />,
+      );
+      const evValue = Array.from(container.querySelectorAll('text')).find(
+        (t) => (t.textContent ?? '') === '7.0kW(23kWh)',
+      );
+      expect(evValue).toBeDefined();
+      expect(evValue!.getAttribute('font-size')).toBe('15');
+    });
+
+    it('omits the kWh suffix when the session total is zero (no energy delivered yet)', () => {
+      // Brand-new session or never charged: kWh reads 0 → bare power value,
+      // no `(0.0kWh)` suffix.
+      useInverterStore.setState({ showFlowStatusWords: true });
+      const { container } = render(
+        <EnergyOrbitDiagram
+          snapshot={makeSnapshot()}
+          showEvc
+          evcPower={0}
+          evcConnected
+          evcCableConnected
+          evcSessionEnergyKwh={0}
+        />,
+      );
+      const labels = Array.from(container.querySelectorAll('text')).map((t) => t.textContent ?? '');
+      expect(labels).toContain('0W');
+      expect(labels).not.toContain('0W(0.0kWh)');
+      expect(container.querySelector('[data-testid="ev-sublabel"]')?.textContent).toBe('Cable In');
+    });
   });
 
   it('disables spoke animation under prefers-reduced-motion', () => {

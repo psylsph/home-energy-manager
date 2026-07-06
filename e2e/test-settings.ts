@@ -46,6 +46,15 @@ export interface TestSettingsOverrides {
   pollInterval?: number;
   /** Optional override tag appended to the temp dir name (helps debugging). */
   tag?: string;
+  /**
+   * EV charger Modbus host. When set (non-empty), the backend's EVC poll
+   * loop connects to it — used by the EVC session-energy E2E suite which
+   * starts a simulator wallbox alongside the inverter (issue #189).
+   * Default: empty (EVC disabled).
+   */
+  evcHost?: string;
+  /** EV charger Modbus port (default: 502 — standard GivEVC hardware). */
+  evcPort?: number;
 }
 
 export interface TestSettingsFixture {
@@ -163,9 +172,9 @@ export async function writeTestSettings(
     ],
     cosy_active_persisted: false,
 
-    // -- EV charger (off; tests that need it set their own host) --
-    evc_host: '',
-    evc_port: 502,
+    // -- EV charger (off by default; EVC tests pass evcHost/evcPort) --
+    evc_host: overrides.evcHost ?? '',
+    evc_port: overrides.evcPort ?? 502,
 
     // -- Telemetry: alerts OFF so no real Telegram/ntfy/Pushover sends --
     alerts_config: {

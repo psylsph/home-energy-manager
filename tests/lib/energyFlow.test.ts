@@ -689,6 +689,85 @@ describe('buildEnergyFlows — EV charger', () => {
     const ev = vm.nodes.find((n) => n.id === 'ev');
     expect(ev!.subLabel).toBeUndefined();
   });
+
+  // --- issue #189: session energy (kWh) inline with power ---
+  // The session total renders inline with the live power as `7.7kW(23kWh)`.
+  // It counts up while charging, then latches at the final value after the
+  // session ends (the backend SessionLatch handles latch/reset; the frontend
+  // just renders the value it receives). The kWh is only shown when > 0.
+  it('renders the session kWh inline with the power while charging (issue #189)', () => {
+    const vm = buildEnergyFlows(snap({ home_power: 7500 }), {
+      evcPowerW: 7000,
+      showEvc: true,
+      evcLabel: 'Charging',
+      evcCableLabel: 'Cable In',
+      evcSessionEnergyKwh: 8.3,
+    });
+    const ev = vm.nodes.find((n) => n.id === 'ev');
+    expect(ev!.value).toBe('7.0kW(8.3kWh)');
+    // Cable state stays on its own sub-label line.
+    expect(ev!.subLabel).toBe('Cable In');
+  });
+
+  it('switches the energy to a plain integer once it crosses 10 kWh', () => {
+    // Below 10 kWh: one decimal place. At/above 10 kWh: integer, no dp.
+    const low = buildEnergyFlows(snap({ home_power: 7500 }), {
+      evcPowerW: 7000, showEvc: true, evcSessionEnergyKwh: 9.9,
+    });
+    expect(low.nodes.find((n) => n.id === 'ev')!.value).toBe('7.0kW(9.9kWh)');
+
+    const atTen = buildEnergyFlows(snap({ home_power: 7500 }), {
+      evcPowerW: 7000, showEvc: true, evcSessionEnergyKwh: 10,
+    });
+    expect(atTen.nodes.find((n) => n.id === 'ev')!.value).toBe('7.0kW(10kWh)');
+
+    const high = buildEnergyFlows(snap({ home_power: 7500 }), {
+      evcPowerW: 7000, showEvc: true, evcSessionEnergyKwh: 23,
+    });
+    expect(high.nodes.find((n) => n.id === 'ev')!.value).toBe('7.0kW(23kWh)');
+  });
+
+  it('shows the latched session kWh after the session ends, even at 0 W', () => {
+    // Post-session latched value: charger idle, power 0, but the kWh total
+    // is still meaningful. Reads `0W(7.5kWh)`.
+    const vm = buildEnergyFlows(snap(), {
+      evcPowerW: 0,
+      showEvc: true,
+      evcLabel: 'Idle',
+      evcSessionEnergyKwh: 7.5,
+    });
+    const ev = vm.nodes.find((n) => n.id === 'ev');
+    expect(ev!.value).toBe('0W(7.5kWh)');
+  });
+
+  it('omits the kWh when the session total is zero (no energy delivered yet)', () => {
+    // Start of a session or no session at all: kWh reads 0 → bare power,
+    // no `(0.0kWh)` suffix.
+    const vm = buildEnergyFlows(snap(), {
+      evcPowerW: 0,
+      showEvc: true,
+      evcLabel: 'Idle',
+      evcCableLabel: 'Cable In',
+      evcSessionEnergyKwh: 0,
+    });
+    const ev = vm.nodes.find((n) => n.id === 'ev');
+    expect(ev!.value).toBe('0W');
+    expect(ev!.subLabel).toBe('Cable In');
+  });
+
+  it('omits the kWh entirely when no session energy is passed', () => {
+    // Backends / callers that predate issue #189 don't send the field —
+    // the value degrades to the bare power reading.
+    const vm = buildEnergyFlows(snap(), {
+      evcPowerW: 0,
+      showEvc: true,
+      evcLabel: 'Idle',
+      evcCableLabel: 'No Cable',
+    });
+    const ev = vm.nodes.find((n) => n.id === 'ev');
+    expect(ev!.value).toBe('0W');
+    expect(ev!.subLabel).toBe('No Cable');
+  });
 });
 
 // ---------------------------------------------------------------------------
