@@ -479,17 +479,6 @@ function BatteryGlyph({ node, x, y }: { node: FlowNode; x: number; y: number }) 
 }
 
 function HubNode({ node, x, y, r, mobile }: NodeProps) {
-  // Issue #188: the home hub now optionally carries a `subLabel`
-  // (e.g. "Gross 12.3kW" when an EV is configured), rendered as a
-  // small line under the kW value, mirroring the sub-label pattern
-  // on the satellite nodes. The home node's kW value is the
-  // busbar-sensed net (which already excludes the EV), so the user
-  // can reconcile the spokes against the total via the gross
-  // sub-label. No unit label is rendered between the kW value and
-  // the subLabel — the kW value is the only number, and the gross
-  // subLabel is the only context line.
-  const subLabelText = node.subLabel ?? '';
-  const showSubLabel = subLabelText.length > 0;
   return (
     <g aria-label={`${node.label}: ${node.value} ${node.unit}`}>
       {node.active && <circle cx={x} cy={y} r={r + 9} fill={node.color} opacity={0.10} />}
@@ -506,19 +495,6 @@ function HubNode({ node, x, y, r, mobile }: NodeProps) {
       >
         {displayValue(node)}
       </text>
-      {showSubLabel && (
-        <text
-          data-testid={`${node.id}-sublabel`}
-          x={x}
-          y={y + r + 55}
-          textAnchor="middle"
-          fill="var(--app-text-primary, #F0F6FC)"
-          fontSize={mobile ? 14 : 13}
-          fontFamily="var(--font-mono, monospace)"
-        >
-          {subLabelText}
-        </text>
-      )}
     </g>
   );
 }
