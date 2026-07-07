@@ -2,7 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.59.0] - 2026-07-07
+
+### Added
+
+- **Solar arrays now show their output as a percentage of rated peak capacity (kWp) on the Solar page.** When you enter a PV1 or PV2 nameplate rating in Settings, the Solar page surfaces a "Solar Arrays" card showing each string's live power, today's energy, and a progress bar to its rated maximum. A CT-meter labelled array (AC-coupled) appears the same way with its live power and rated kWp — no per-day counter is shown since CT clamps only expose cumulative totals. The section appears only when at least one array has a rated capacity configured. (issue #110)
+
+- **PV1 and PV2 % of rated are stored in the history database.** Every poll cycle now stamps `pv1_pct` and `pv2_pct` — computed as `power_w / (rated_kw × 1000) × 100` — into the readings table alongside the existing energy counters. A "PV % of Rated (kWp)" chart tab on the History → Solar tab makes the data explorable over time. (issue #110)
+
+- **Settings now stores rated kWp for PV1, PV2, and any number of external CT-meter arrays.** The PV1/PV2 kWp fields accept 0–100 kWp and clamp negative input to 0 on save. CT-meter arrays are added with a named label, a Modbus address (0x01–0x08), and a rated kWp. All values persist across restarts via the existing settings JSON. (issue #110)
 
 ## [0.58.0] - 2026-07-06
 

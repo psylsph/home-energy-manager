@@ -61,7 +61,9 @@ use crate::alerts::AlertType;
 use crate::history::HistoryDb;
 use crate::inverter::decoder::decode_snapshot;
 use crate::inverter::encoder::{ControlCommand, RegisterWrite};
-use crate::inverter::model::{BatteryMode, DeviceType, InverterSnapshot};
+use crate::inverter::model::{
+    BatteryMode, DeviceType, InverterSnapshot, SolarArraySource, SolarArraySummary,
+};
 use crate::inverter::reconnect::ReconnectController;
 use crate::inverter::sanitizer::{
     carry_forward_battery_modules_with, carry_forward_optional_block_values,
@@ -1926,6 +1928,27 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     }
                                 }
 
+                                // ---- Solar arrays (issue #110) ----
+                                // Stamp the per-array "% of max" summary from
+                                // settings so every page that reads the
+                                // snapshot (Solar / Power / Summary) can show
+                                // output as a percentage of rated kWp without
+                                // each component re-fetching settings.
+                                snapshot.solar_arrays =
+                                    compute_solar_arrays(&snapshot, &poll_settings);
+                                snapshot.pv1_pct = if poll_settings.pv1_rated_kw > 0.0 {
+                                    Some((snapshot.pv1_power.max(0) as f64 * 100.0)
+                                        / (poll_settings.pv1_rated_kw * 1000.0))
+                                } else {
+                                    None
+                                };
+                                snapshot.pv2_pct = if poll_settings.pv2_rated_kw > 0.0 {
+                                    Some((snapshot.pv2_power.max(0) as f64 * 100.0)
+                                        / (poll_settings.pv2_rated_kw * 1000.0))
+                                } else {
+                                    None
+                                };
+
                                 // ---- Load discharge limiter ----
                                 {
                                     let config = state.load_limiter_config.lock().await;
@@ -3187,10 +3210,256 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Build the per-array solar summary for "% of max" display (issue #110).
+///
+/// Combines:
+/// - DC strings PV1/PV2, when the user has entered a rated kWp
+///   (`settings.pv1_rated_kw` / `pv2_rated_kw`). Power comes from the
+///   inverter's IR registers (already decoded into `snapshot.pv1_power` /
+///   `pv2_power`); today's energy from the per-string counters.
+/// - External CT meters the user has labelled as solar
+///   (`settings.solar_arrays`), typical for AC-coupled systems whose
+///   panels feed a separate inverter measured by a GivEnergy CT clamp.
+///   Power is the meter's total active power (unsigned, so a reversed
+///   clamp still reads as generation); today's energy is unknown (CT
+///   meters only expose cumulative totals) and stays `None`.
+///
+/// DC strings with no rated config are omitted entirely, so a default
+/// hybrid install sees no change until the user opts in. Meter entries
+/// with `rated_kw == 0` are still surfaced (power-only); the FE hides
+/// the % when the rating is zero.
+pub(crate) fn compute_solar_arrays(
+    snapshot: &InverterSnapshot,
+    settings: &crate::settings::Settings,
+) -> Vec<SolarArraySummary> {
+    let mut out = Vec::new();
+
+    // PV1 / PV2 DC strings (hybrid / DC-coupled). Only surface a string
+    // once the user has given it a rated capacity — otherwise the existing
+    // Solar page already shows raw kW and there's nothing to add.
+    if settings.pv1_rated_kw > 0.0 {
+        out.push(SolarArraySummary {
+            source: SolarArraySource::Pv1,
+            name: String::new(),
+            power_w: snapshot.pv1_power.max(0) as u32,
+            rated_kw: settings.pv1_rated_kw,
+            today_kwh: Some(snapshot.today_pv1_kwh as f64),
+            meter_address: None,
+        });
+    }
+    if settings.pv2_rated_kw > 0.0 {
+        out.push(SolarArraySummary {
+            source: SolarArraySource::Pv2,
+            name: String::new(),
+            power_w: snapshot.pv2_power.max(0) as u32,
+            rated_kw: settings.pv2_rated_kw,
+            today_kwh: Some(snapshot.today_pv2_kwh as f64),
+            meter_address: None,
+        });
+    }
+
+    // External CT meters labelled as solar (AC-coupled / separate inverters).
+    for arr in &settings.solar_arrays {
+        // Only 1-8 are real external CT clamp addresses; 0x00 is the
+        // synthetic built-in grid CT and must never be treated as a solar
+        // array (its power is grid import/export, not generation).
+        if !(1..=8).contains(&arr.meter_address) {
+            continue;
+        }
+        if let Some(meter) = snapshot.meters.iter().find(|m| m.address == arr.meter_address) {
+            out.push(SolarArraySummary {
+                source: SolarArraySource::Meter,
+                name: arr.name.clone(),
+                // A CT on a solar inverter's AC output reads generation
+                // flowing out to the bus; take the absolute value so a
+                // physically reversed clamp still shows as positive output.
+                power_w: meter.p_active_total.unsigned_abs(),
+                rated_kw: arr.rated_kw,
+                today_kwh: None,
+                meter_address: Some(arr.meter_address),
+            });
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inverter::model::DeviceType;
+    use crate::inverter::model::{DeviceType, MeterData};
+    use crate::settings::{Settings, SolarArrayConfig};
+
+    /// Build a `MeterData` with only the fields `compute_solar_arrays`
+    /// inspects set; the rest are zeroed. `MeterData` doesn't derive
+    /// `Default` (it has no sensible per-field defaults), so tests build it
+    /// via this helper instead of `..Default::default()`.
+    fn meter(address: u8, p_active_total: i32) -> MeterData {
+        MeterData {
+            address,
+            v_phase_1: 240.0,
+            v_phase_2: 0.0,
+            v_phase_3: 0.0,
+            i_phase_1: 0.0,
+            i_phase_2: 0.0,
+            i_phase_3: 0.0,
+            i_ln: 0.0,
+            i_total: 0.0,
+            p_active_phase_1: p_active_total,
+            p_active_phase_2: 0,
+            p_active_phase_3: 0,
+            p_active_total,
+            p_reactive_total: 0,
+            p_apparent_total: 0,
+            pf_total: 0.0,
+            frequency: 50.0,
+            e_import_active_kwh: 0.0,
+            e_export_active_kwh: 0.0,
+        }
+    }
+
+    // -- compute_solar_arrays (issue #110) -----------------------------------
+
+    #[test]
+    fn solar_arrays_empty_when_nothing_configured() {
+        let snap = InverterSnapshot { pv1_power: 3000, ..Default::default() };
+        let settings = Settings::default();
+        // No rated capacities configured → nothing surfaced. A default
+        // install is unaffected until the user opts in via Settings.
+        assert!(compute_solar_arrays(&snap, &settings).is_empty());
+    }
+
+    #[test]
+    fn solar_arrays_dc_strings_surfaced_with_today_energy() {
+        let snap = InverterSnapshot {
+            pv1_power: 4200,
+            pv2_power: 1800,
+            today_pv1_kwh: 18.5,
+            today_pv2_kwh: 7.5,
+            ..Default::default()
+        };
+        let settings = Settings {
+            pv1_rated_kw: 6.0,
+            pv2_rated_kw: 4.2,
+            ..Default::default()
+        };
+        let arrays = compute_solar_arrays(&snap, &settings);
+        assert_eq!(arrays.len(), 2);
+        assert_eq!(arrays[0].source, SolarArraySource::Pv1);
+        assert_eq!(arrays[0].power_w, 4200);
+        assert_eq!(arrays[0].rated_kw, 6.0);
+        assert_eq!(arrays[0].today_kwh, Some(18.5));
+        assert_eq!(arrays[0].meter_address, None);
+        assert_eq!(arrays[1].source, SolarArraySource::Pv2);
+        assert_eq!(arrays[1].power_w, 1800);
+        assert_eq!(arrays[1].today_kwh, Some(7.5));
+    }
+
+    #[test]
+    fn solar_arrays_dc_power_clamped_at_zero() {
+        // A negative DC power (shouldn't happen for generation, but the
+        // dongle can glitch) must not surface as a huge unsigned value via
+        // `as u32` wraparound. Clamp at 0.
+        let snap = InverterSnapshot { pv1_power: -50, ..Default::default() };
+        let settings = Settings { pv1_rated_kw: 6.0, ..Default::default() };
+        let arrays = compute_solar_arrays(&snap, &settings);
+        assert_eq!(arrays.len(), 1);
+        assert_eq!(arrays[0].power_w, 0);
+    }
+
+    #[test]
+    fn solar_arrays_ac_coupled_ct_meter_surfaced_unsigned() {
+        // AC-coupled: panels feed a separate inverter measured by a CT
+        // clamp at meter address 0x01. A physically reversed clamp reads
+        // negative, but generation is unsigned.
+        let snap = InverterSnapshot {
+            meters: vec![meter(1, -4800), meter(2, 2600)],
+            ..Default::default()
+        };
+        let settings = Settings {
+            solar_arrays: vec![
+                SolarArrayConfig { meter_address: 1, name: "East roof".into(), rated_kw: 6.0 },
+                SolarArrayConfig { meter_address: 2, name: String::new(), rated_kw: 4.2 },
+            ],
+            ..Default::default()
+        };
+        let arrays = compute_solar_arrays(&snap, &settings);
+        assert_eq!(arrays.len(), 2);
+        assert_eq!(arrays[0].source, SolarArraySource::Meter);
+        assert_eq!(arrays[0].name, "East roof");
+        assert_eq!(arrays[0].power_w, 4800); // |-4800|
+        assert_eq!(arrays[0].rated_kw, 6.0);
+        assert_eq!(arrays[0].today_kwh, None); // CT meters have no per-day counter
+        assert_eq!(arrays[0].meter_address, Some(1));
+        assert_eq!(arrays[1].power_w, 2600);
+        assert_eq!(arrays[1].meter_address, Some(2));
+        assert!(arrays[1].name.is_empty());
+    }
+
+    #[test]
+    fn solar_arrays_ignores_synthetic_grid_ct_and_out_of_range() {
+        let snap = InverterSnapshot {
+            meters: vec![meter(0, 5000), meter(9, 1000)],
+            ..Default::default()
+        };
+        let settings = Settings {
+            solar_arrays: vec![
+                // 0x00 is the synthetic built-in grid CT — never a solar array.
+                SolarArrayConfig { meter_address: 0, name: "grid".into(), rated_kw: 5.0 },
+                // 9 is outside the 1-8 clamp range.
+                SolarArrayConfig { meter_address: 9, name: "bogus".into(), rated_kw: 5.0 },
+            ],
+            ..Default::default()
+        };
+        // Both invalid entries dropped; no meter matched a valid address.
+        assert!(compute_solar_arrays(&snap, &settings).is_empty());
+    }
+
+    #[test]
+    fn solar_arrays_skips_meter_not_present_in_snapshot() {
+        // A configured meter address that the dongle didn't report (clamp
+        // offline) is skipped rather than surfaced with a phantom zero.
+        let snap = InverterSnapshot::default();
+        let settings = Settings {
+            solar_arrays: vec![SolarArrayConfig {
+                meter_address: 3,
+                name: "Garage".into(),
+                rated_kw: 3.68,
+            }],
+            ..Default::default()
+        };
+        assert!(compute_solar_arrays(&snap, &settings).is_empty());
+    }
+
+    #[test]
+    fn solar_arrays_mixes_dc_strings_and_ct_meters() {
+        // A hybrid with DC strings PLUS a separately-metered array (e.g. a
+        // garage inverter on a CT) surfaces all three in one list.
+        let snap = InverterSnapshot {
+            pv1_power: 2000,
+            pv2_power: 1500,
+            today_pv1_kwh: 10.0,
+            today_pv2_kwh: 6.0,
+            meters: vec![meter(4, 3200)],
+            ..Default::default()
+        };
+        let settings = Settings {
+            pv1_rated_kw: 3.0,
+            pv2_rated_kw: 2.5,
+            solar_arrays: vec![SolarArrayConfig {
+                meter_address: 4,
+                name: "Garage".into(),
+                rated_kw: 4.0,
+            }],
+            ..Default::default()
+        };
+        let arrays = compute_solar_arrays(&snap, &settings);
+        assert_eq!(arrays.len(), 3);
+        assert_eq!(arrays[0].source, SolarArraySource::Pv1);
+        assert_eq!(arrays[1].source, SolarArraySource::Pv2);
+        assert_eq!(arrays[2].source, SolarArraySource::Meter);
+        assert_eq!(arrays[2].meter_address, Some(4));
+    }
 
     #[test]
     fn poll_settings_default() {

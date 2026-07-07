@@ -150,6 +150,18 @@ function getCharts(tab: MetricTab, hasStandingCharge: boolean): ChartDef[] {
             { field: 'today_solar_kwh', color: '#22C55E', label: 'Total' },
           ],
         },
+        // PV output as % of rated peak (issue #110). Only returns data when
+        // the user has entered a rated kWp in Settings; pv1_pct / pv2_pct are
+        // null otherwise.
+        {
+          key: 'pv-pct',
+          title: 'PV % of Rated (kWp)',
+          unit: '%',
+          fields: [
+            { field: 'pv1_pct', color: '#F59E0B', label: 'PV1' },
+            { field: 'pv2_pct', color: '#3B82F6', label: 'PV2' },
+          ],
+        },
       ];
     case 'grid':
       return [

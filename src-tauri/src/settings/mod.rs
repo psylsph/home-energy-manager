@@ -688,6 +688,33 @@ impl AgileScope {
     }
 }
 
+/// An external solar array tracked via a GivEnergy CT clamp (issue #110).
+///
+/// For AC-coupled systems whose panels feed a separate third-party PV
+/// inverter (not a GivEnergy hybrid), the inverter's DC-input registers
+/// (IR 18/20) read zero — there is no per-string solar data on the
+/// GivEnergy box itself. The array's production is instead measured by a
+/// CT clamp on the solar inverter's AC output, which the GivEnergy dongle
+/// already polls as an external meter at device address 0x01–0x08. The
+/// user labels that meter as a solar array here and enters the array's
+/// rated peak capacity (kWp) so the UI can show output as a percentage of
+/// its maximum, alongside the kW value.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SolarArrayConfig {
+    /// CT meter device address this array is wired to (1–8). Addresses
+    /// outside this range are ignored at compute time — 0x00 is the
+    /// synthetic built-in grid CT, not a real clamp.
+    pub meter_address: u8,
+    /// Display name (e.g. "East roof", "Garage"). Empty → the UI falls
+    /// back to a default label derived from the meter address.
+    #[serde(default)]
+    pub name: String,
+    /// Rated peak capacity in kW (kWp). 0 hides the % display for this
+    /// array (power is still shown).
+    #[serde(default)]
+    pub rated_kw: f64,
+}
+
 /// Application settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -897,6 +924,24 @@ pub struct Settings {
     /// explicitly posting a new schedule. See issue #137.
     #[serde(default)]
     pub discharge_slots_backup: Option<Vec<DischargeSlotBackup>>,
+
+    // -- Solar array capacities (issue #110) --
+    /// Rated peak capacity (kWp) of the PV1 DC string on a hybrid /
+    /// DC-coupled inverter. 0 (default) = not configured, in which case
+    /// PV1 is omitted from the per-array "% of max" display and behaves
+    /// exactly as before. Hybrid users with multiple aspects set this
+    /// (and `pv2_rated_kw`) to see each string's output as a percentage.
+    #[serde(default)]
+    pub pv1_rated_kw: f64,
+    /// Rated peak capacity (kWp) of the PV2 DC string. See `pv1_rated_kw`.
+    #[serde(default)]
+    pub pv2_rated_kw: f64,
+    /// External solar arrays measured by GivEnergy CT clamps (AC-coupled /
+    /// separate inverters). Each entry labels an existing external meter
+    /// (0x01–0x08) as a solar array with a rated kWp. See
+    /// [`SolarArrayConfig`]. Empty by default.
+    #[serde(default)]
+    pub solar_arrays: Vec<SolarArrayConfig>,
 }
 
 fn default_http_port() -> u16 {
@@ -1156,6 +1201,12 @@ impl Default for Settings {
             api_key: String::new(),
             api_port: 7338,
             discharge_slots_backup: None,
+            // Issue #110: solar array capacities default to unset so a
+            // fresh install (and every existing install on upgrade) sees
+            // no behaviour change until the user opts in via Settings.
+            pv1_rated_kw: 0.0,
+            pv2_rated_kw: 0.0,
+            solar_arrays: Vec::new(),
         }
     }
 }
@@ -1307,6 +1358,11 @@ mod tests {
         // to restore until the user enters Eco / Pause / Export Paused at
         // least once with a configured discharge schedule.
         assert_eq!(s.discharge_slots_backup, None);
+        // Issue #110: solar array capacities default to unset so an existing
+        // install sees no behaviour change until the user opts in.
+        assert_eq!(s.pv1_rated_kw, 0.0);
+        assert_eq!(s.pv2_rated_kw, 0.0);
+        assert!(s.solar_arrays.is_empty());
     }
 
     #[test]
@@ -1385,7 +1441,22 @@ mod tests {
                     target_soc: 4,
                 },
             ]),
-        };
+        // Issue #110: solar array capacities must round-trip exactly.
+        pv1_rated_kw: 6.0,
+        pv2_rated_kw: 4.2,
+        solar_arrays: vec![
+            SolarArrayConfig {
+                meter_address: 1,
+                name: "East roof".to_string(),
+                rated_kw: 6.0,
+            },
+            SolarArrayConfig {
+                meter_address: 2,
+                name: String::new(),
+                rated_kw: 4.2,
+            },
+        ],
+    };
         let json = serde_json::to_string(&s).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.host, "10.0.0.50");
@@ -1434,6 +1505,16 @@ mod tests {
         assert_eq!(backup[0].target_soc, 4);
         assert_eq!(backup[1].start_hour, 21);
         assert_eq!(backup[1].end_hour, 23);
+        // Issue #110: solar array capacities round-trip with names + ratings.
+        assert_eq!(decoded.pv1_rated_kw, 6.0);
+        assert_eq!(decoded.pv2_rated_kw, 4.2);
+        assert_eq!(decoded.solar_arrays.len(), 2);
+        assert_eq!(decoded.solar_arrays[0].meter_address, 1);
+        assert_eq!(decoded.solar_arrays[0].name, "East roof");
+        assert_eq!(decoded.solar_arrays[0].rated_kw, 6.0);
+        assert_eq!(decoded.solar_arrays[1].meter_address, 2);
+        assert!(decoded.solar_arrays[1].name.is_empty());
+        assert_eq!(decoded.solar_arrays[1].rated_kw, 4.2);
     }
 
     /// AlertsConfig pushover fields must survive a full JSON round-trip and
@@ -1574,6 +1655,50 @@ mod tests {
         assert_eq!(decoded, original);
     }
 
+    /// `SolarArrayConfig` survives a full JSON round-trip independently of
+    /// the surrounding `Settings` struct. Pins the on-disk shape so a later
+    /// rename or field reorder can't break a stored array entry (issue #110).
+    #[test]
+    fn solar_array_config_roundtrip() {
+        let original = SolarArrayConfig {
+            meter_address: 3,
+            name: "Garage roof".to_string(),
+            rated_kw: 3.68,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: SolarArrayConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    /// A `settings.json` written before issue #110 shipped (no solar array
+    /// fields) must load without error, defaulting the new fields to unset
+    /// values. Mirrors the legacy forward-compat tests above.
+    #[test]
+    fn legacy_settings_without_solar_array_fields_loads() {
+        let legacy = r#"{
+            "host": "192.168.1.50",
+            "port": 8899,
+            "serial": "",
+            "poll_interval": 60,
+            "auto_connect": true,
+            "import_tariff": 0.285,
+            "export_tariff": 0.15,
+            "hidden_panels": [],
+            "evc_host": "",
+            "disable_auto_discovery": true
+        }"#;
+        let decoded: Settings = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            decoded.pv1_rated_kw, 0.0,
+            "missing field must default to 0.0, not fail to parse"
+        );
+        assert_eq!(decoded.pv2_rated_kw, 0.0);
+        assert!(
+            decoded.solar_arrays.is_empty(),
+            "missing field must default to empty, not fail to parse"
+        );
+    }
+
     /// WeatherConfig JSON missing the optional `open_meteo_base_url` field
     /// defaults to the non-commercial endpoint. Mirrors the same
     /// forward-compat pattern as the alert-config test above.
@@ -1678,6 +1803,9 @@ mod tests {
             api_key: String::new(),
             api_port: 0,
             discharge_slots_backup: None,
+            pv1_rated_kw: 0.0,
+            pv2_rated_kw: 0.0,
+            solar_arrays: Vec::new(),
         };
 
         // We can't easily override the settings path for testing,
