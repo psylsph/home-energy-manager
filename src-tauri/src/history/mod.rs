@@ -78,6 +78,10 @@ const ALLOWED_FIELDS: &[&str] = &[
     "discharge_rate",
     "battery_reserve",
     "target_soc",
+    // PV1 / PV2 output as a percentage of their rated kWp (issue #110).
+    // Instantaneous gauge — AVG is the correct bucket aggregation.
+    "pv1_pct",
+    "pv2_pct",
     // Weather observations live in the separate `weather_observations`
     // table — see `is_weather_field`. Listed here so the standard SQL-
     // injection whitelist accepts the field name on the history endpoint.
@@ -562,6 +566,11 @@ impl HistoryDb {
         let _ = conn.execute_batch("ALTER TABLE readings ADD COLUMN today_pv1_kwh REAL");
         let _ = conn.execute_batch("ALTER TABLE readings ADD COLUMN today_pv2_kwh REAL");
 
+        // Migration: add pv1_pct / pv2_pct columns if missing (issue #110 —
+        // PV output as % of rated peak, stored for history charting).
+        let _ = conn.execute_batch("ALTER TABLE readings ADD COLUMN pv1_pct REAL");
+        let _ = conn.execute_batch("ALTER TABLE readings ADD COLUMN pv2_pct REAL");
+
         // One-time backfill: populate home_energy_today_kwh for historic rows
         // recorded before this column existed. Commit 5e1da32 renamed the
         // History "Load Energy Today" chart from today_consumption_kwh to
@@ -1024,8 +1033,9 @@ impl HistoryDb {
                 today_import_kwh, today_export_kwh,
                 today_charge_kwh, today_discharge_kwh, today_consumption_kwh,
                 today_ac_charge_kwh, home_energy_today_kwh,
-                charge_rate, discharge_rate, battery_reserve, target_soc
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33)",
+                charge_rate, discharge_rate, battery_reserve, target_soc,
+                pv1_pct, pv2_pct
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35)",
             params![
                 snap.timestamp,
                 snap.solar_power,
@@ -1060,6 +1070,8 @@ impl HistoryDb {
                 snap.discharge_rate,
                 snap.battery_reserve,
                 snap.target_soc,
+                snap.pv1_pct,
+                snap.pv2_pct,
             ],
         );
 
@@ -2019,6 +2031,13 @@ mod tests {
         for field in ALLOWED_FIELDS {
             assert!(is_allowed_field(field));
         }
+    }
+
+    #[test]
+    fn pv1_pct_and_pv2_pct_are_allowed_fields() {
+        // issue #110: PV % fields must be in the SQL-injection whitelist.
+        assert!(is_allowed_field("pv1_pct"));
+        assert!(is_allowed_field("pv2_pct"));
     }
 
     #[test]
@@ -3920,6 +3939,44 @@ mod tests {
             assert!(
                 pv2.map(|v| (v - 2.0).abs() < 1e-6).unwrap_or(false),
                 "got {pv2:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn existing_db_migrates_pv_pct_columns() {
+        // issue #110: an existing DB opened with the new schema must ALTER
+        // in the pv1_pct / pv2_pct columns and inserts must succeed.
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("givenergy-history-test-pct-mig-{id}"));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("legacy_pct.db");
+        let _ = std::fs::remove_file(&path);
+
+        // Open with current schema (includes the pv_pct ALTER migration).
+        {
+            let db = HistoryDb::open(&path).unwrap();
+            let mut snap = make_snapshot(2_000, 50, 0);
+            snap.pv1_pct = Some(76.76);
+            snap.pv2_pct = Some(44.85);
+            db.insert_reading(&snap);
+        }
+        {
+            let db = HistoryDb::open(&path).unwrap();
+            let conn = db.conn.lock().unwrap();
+            let pv1: Option<f64> = conn
+                .query_row("SELECT pv1_pct FROM readings WHERE timestamp = 2000", [], |row| row.get(0))
+                .unwrap();
+            let pv2: Option<f64> = conn
+                .query_row("SELECT pv2_pct FROM readings WHERE timestamp = 2000", [], |row| row.get(0))
+                .unwrap();
+            assert!(
+                pv1.map(|v| (v - 76.76).abs() < 1e-3).unwrap_or(false),
+                "got pv1_pct = {pv1:?}"
+            );
+            assert!(
+                pv2.map(|v| (v - 44.85).abs() < 1e-3).unwrap_or(false),
+                "got pv2_pct = {pv2:?}"
             );
         }
     }

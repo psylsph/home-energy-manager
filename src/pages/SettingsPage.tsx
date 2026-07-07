@@ -289,6 +289,16 @@ export default function SettingsPage() {
   // string is the uninitialised state; we coerce to 0 on save so the backend
   // gets a clean number and a blank input means "no Standing Charge".
   const [importStandingCharge, setImportStandingCharge] = useState<string>('');
+  // Issue #110: solar array capacities for the per-array "% of max" view.
+  // Hybrid / DC-coupled users enter PV1/PV2 kWp. AC-coupled users label
+  // the CT meter(s) on their separate solar inverter(s) and enter the
+  // array's kWp. Empty CT-array list = no AC-coupled labelling configured.
+  const [pv1RatedKw, setPv1RatedKw] = useState<string>('');
+  const [pv2RatedKw, setPv2RatedKw] = useState<string>('');
+  const [solarCtArrays, setSolarCtArrays] = useState<
+    { meter_address: number; name: string; rated_kw: string }[]
+  >([]);
+  const [solarSaving, setSolarSaving] = useState(false);
 
   // General
   const [saving, setSaving] = useState(false);
@@ -380,6 +390,22 @@ export default function SettingsPage() {
             ? String(s.import_standing_charge_p_per_day)
             : '',
         );
+        // Issue #110: hydrate the solar-array inputs.
+        setPv1RatedKw(
+          s.pv1_rated_kw != null && s.pv1_rated_kw > 0 ? String(s.pv1_rated_kw) : '',
+        );
+        setPv2RatedKw(
+          s.pv2_rated_kw != null && s.pv2_rated_kw > 0 ? String(s.pv2_rated_kw) : '',
+        );
+        if (s.solar_arrays) {
+          setSolarCtArrays(
+            s.solar_arrays.map((a) => ({
+              meter_address: a.meter_address,
+              name: a.name ?? '',
+              rated_kw: a.rated_kw > 0 ? String(a.rated_kw) : '',
+            })),
+          );
+        }
         if (s.hidden_panels) {
           setHiddenPanels(s.hidden_panels);
         }
@@ -591,6 +617,53 @@ export default function SettingsPage() {
       flash(msg || 'Failed to save tariffs', false);
     }
     setSaving(false);
+  };
+
+  // Issue #110: save the solar-array configuration. The two DC-string
+  // ratings are simple non-negative numbers; the CT-meter list is
+  // validated and dropped if its meter address is outside 1-8 (the
+  // GivEnergy dongle only polls those external clamp addresses — 0x00
+  // is the synthetic built-in grid CT and must never be treated as solar).
+  const handleSolarArraysSave = async () => {
+    const numOrZero = (raw: string): number => {
+      const n = Number(raw);
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    };
+    const cleanedArrays = solarCtArrays
+      .map((a) => ({
+        meter_address: Number(a.meter_address),
+        name: a.name.trim(),
+        rated_kw: numOrZero(a.rated_kw),
+      }))
+      .filter(
+        (a) =>
+          Number.isInteger(a.meter_address) &&
+          a.meter_address >= 1 &&
+          a.meter_address <= 8,
+      );
+    setSolarSaving(true);
+    try {
+      await apiPost('/api/settings', {
+        pv1_rated_kw: numOrZero(pv1RatedKw),
+        pv2_rated_kw: numOrZero(pv2RatedKw),
+        solar_arrays: cleanedArrays,
+      });
+      // Keep local CT-array state in sync with what was persisted (the
+      // server may have normalised a row's address / dropped invalid
+      // ones), so the Save button is idempotent.
+      setSolarCtArrays(
+        cleanedArrays.map((a) => ({
+          meter_address: a.meter_address,
+          name: a.name,
+          rated_kw: a.rated_kw > 0 ? String(a.rated_kw) : '',
+        })),
+      );
+      flash('Solar arrays saved', true);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      flash(msg || 'Failed to save solar arrays', false);
+    }
+    setSolarSaving(false);
   };
 
   // Save panel visibility
@@ -1209,7 +1282,177 @@ export default function SettingsPage() {
         </button>
       </section>
 
-      {/* ─── Section 5: Local Weather (Open-Meteo) ─── */}
+      {/* ─── Section 5: Solar Arrays (issue #110: "% of max" display) ─── */}
+      <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
+        <h2 className="text-text-primary text-lg font-semibold font-sans">Solar Arrays</h2>
+        <p className="text-text-secondary text-xs font-sans">
+          Enter each solar array's rated peak capacity (kWp) so the Solar page can show output as a percentage of maximum. For hybrid / DC-coupled inverters, enter the kWp of each PV string below. For AC-coupled systems whose panels feed a separate inverter, label the CT clamp that measures that inverter (meter addresses 0x01–0x08 appear on the Meters page) and enter its array's kWp.
+        </p>
+
+        {/* PV1 / PV2 DC string ratings (hybrid). */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="pv1-rated-kw" className="text-text-primary text-sm font-sans font-medium">
+              PV1 rated capacity (kWp)
+            </label>
+            <div className="flex items-center gap-2">
+              <input
+                id="pv1-rated-kw"
+                type="number"
+                min={0}
+                max={100}
+                step={0.01}
+                value={pv1RatedKw}
+                onChange={(e) => setPv1RatedKw(e.target.value)}
+                placeholder="e.g. 6"
+                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-transparent focus:outline-none focus:border-accent"
+                data-testid="pv1-rated-kw-input"
+              />
+              <span className="text-text-secondary text-xs font-sans">kWp</span>
+            </div>
+            <span className="text-text-secondary text-xs font-sans">
+              Leave blank to hide PV1 from the % display.
+            </span>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="pv2-rated-kw" className="text-text-primary text-sm font-sans font-medium">
+              PV2 rated capacity (kWp)
+            </label>
+            <div className="flex items-center gap-2">
+              <input
+                id="pv2-rated-kw"
+                type="number"
+                min={0}
+                max={100}
+                step={0.01}
+                value={pv2RatedKw}
+                onChange={(e) => setPv2RatedKw(e.target.value)}
+                placeholder="e.g. 4.2"
+                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-transparent focus:outline-none focus:border-accent"
+                data-testid="pv2-rated-kw-input"
+              />
+              <span className="text-text-secondary text-xs font-sans">kWp</span>
+            </div>
+            <span className="text-text-secondary text-xs font-sans">
+              Leave blank to hide PV2 from the % display.
+            </span>
+          </div>
+        </div>
+
+        {/* External CT meter arrays (AC-coupled / separate inverters). */}
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between">
+            <span className="text-text-primary text-sm font-sans font-medium">External CT meter arrays</span>
+            <button
+              type="button"
+              onClick={() => {
+                // Pick the lowest unused address 1-8 as the default for a
+                // new row, so a user adding multiple arrays doesn't
+                // collide on the first one.
+                const used = new Set(solarCtArrays.map((a) => a.meter_address));
+                const next = [1, 2, 3, 4, 5, 6, 7, 8].find((n) => !used.has(n)) ?? 1;
+                setSolarCtArrays((rows) => [
+                  ...rows,
+                  { meter_address: next, name: '', rated_kw: '' },
+                ]);
+              }}
+              className="bg-bg-elevated text-text-primary text-xs font-sans px-3 py-1.5 rounded-lg hover:bg-bg-elevated/80 transition-colors"
+              data-testid="solar-array-add"
+            >
+              + Add array
+            </button>
+          </div>
+          {solarCtArrays.length === 0 ? (
+            <p className="text-text-secondary/70 text-xs font-sans italic">
+              No external CT meter arrays configured. Add one if a separate solar inverter is wired via a CT clamp.
+            </p>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {solarCtArrays.map((row, idx) => (
+                <div
+                  key={idx}
+                  className="grid grid-cols-1 sm:grid-cols-[auto,1fr,1fr,auto] gap-2 items-end bg-bg-elevated rounded-lg p-3"
+                  data-testid="solar-array-row"
+                >
+                  <div className="flex flex-col gap-1">
+                    <label className="text-text-secondary text-[10px] font-sans uppercase tracking-wide">Meter</label>
+                    <select
+                      value={row.meter_address}
+                      onChange={(e) => {
+                        const v = Number(e.target.value);
+                        setSolarCtArrays((rows) =>
+                          rows.map((r, i) => (i === idx ? { ...r, meter_address: v } : r)),
+                        );
+                      }}
+                      className="bg-bg-base text-text-primary rounded-lg px-2 py-2 text-sm font-mono border border-transparent focus:outline-none focus:border-accent"
+                      data-testid="solar-array-address"
+                    >
+                      {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
+                        <option key={n} value={n}>0x{n.toString(16).padStart(2, '0')}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-text-secondary text-[10px] font-sans uppercase tracking-wide">Name</label>
+                    <input
+                      type="text"
+                      value={row.name}
+                      onChange={(e) => {
+                        setSolarCtArrays((rows) =>
+                          rows.map((r, i) => (i === idx ? { ...r, name: e.target.value } : r)),
+                        );
+                      }}
+                      placeholder="e.g. East roof"
+                      className="bg-bg-base text-text-primary rounded-lg px-3 py-2 text-sm font-sans border border-transparent focus:outline-none focus:border-accent"
+                      data-testid="solar-array-name"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-text-secondary text-[10px] font-sans uppercase tracking-wide">kWp</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step={0.01}
+                      value={row.rated_kw}
+                      onChange={(e) => {
+                        setSolarCtArrays((rows) =>
+                          rows.map((r, i) => (i === idx ? { ...r, rated_kw: e.target.value } : r)),
+                        );
+                      }}
+                      placeholder="e.g. 6"
+                      className="bg-bg-base text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-transparent focus:outline-none focus:border-accent"
+                      data-testid="solar-array-kwp"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSolarCtArrays((rows) => rows.filter((_, i) => i !== idx));
+                    }}
+                    className="text-text-secondary hover:text-red-400 text-xs font-sans px-2 py-2 rounded-lg hover:bg-bg-base transition-colors"
+                    aria-label="Remove array"
+                    data-testid="solar-array-remove"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <button
+          onClick={handleSolarArraysSave}
+          className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity disabled:opacity-30 self-start"
+          disabled={solarSaving}
+          data-testid="solar-arrays-save"
+        >
+          {solarSaving ? 'Saving…' : 'Save Solar Arrays'}
+        </button>
+      </section>
+
+      {/* ─── Section 6: Local Weather (Open-Meteo) ─── */}
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
         <div className="flex items-center justify-between">
           <h2 className="text-text-primary text-lg font-semibold font-sans">Local Weather</h2>

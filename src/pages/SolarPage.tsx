@@ -1,7 +1,9 @@
 import { useInverterStore } from '../store/useInverterStore';
 import { formatPower, formatEnergy, formatVoltage, formatCurrent } from '../lib/format';
+import { percentOfRated, arrayLabel, formatPercent } from '../lib/solarArrays';
 import SolarPowerChart from '../components/SolarPowerChart';
 import AwaitingConnection from '../components/AwaitingConnection';
+import type { SolarArraySummary } from '../lib/types';
 
 function pvColor(pv: number): string {
   return pv === 1 ? '#F59E0B' : '#3B82F6';
@@ -35,6 +37,25 @@ export default function SolarPage() {
           )}
         </p>
       </section>
+
+      {/* Solar Arrays — "% of max" per array (issue #110). Surfaced only
+          when the user has configured rated capacities in Settings (hybrid
+          DC strings with a kWp, or AC-coupled CT meters labelled as solar).
+          Empty by default so nothing changes for users who haven't opted
+          in. Built server-side into `snapshot.solar_arrays`. */}
+      {snapshot.solar_arrays && snapshot.solar_arrays.length > 0 && (
+        <section className="bg-bg-surface rounded-2xl p-5" data-testid="solar-arrays">
+          <h2 className="text-text-primary font-semibold text-lg mb-1">Solar Arrays</h2>
+          <p className="text-text-secondary text-xs mb-3">
+            Output as a percentage of each array's rated peak capacity (kWp)
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {snapshot.solar_arrays.map((arr, i) => (
+              <SolarArrayCard key={`${arr.source}-${arr.meter_address ?? i}`} arr={arr} />
+            ))}
+          </div>
+        </section>
+      )}
 
 
       {/* Detail cards */}
@@ -83,6 +104,48 @@ export default function SolarPage() {
           user disables the "Panel Graphs" toggle in Settings. */}
       {panelGraphsEnabled && <SolarPowerChart />}
 
+    </div>
+  );
+}
+
+/** One solar array card in the "% of max" grid (issue #110). Shows the
+ *  array's live output in kW plus a progress bar to its rated peak (kWp)
+ *  when a rating is configured. The bar caps at 100% for visual sanity —
+ *  a bright edge-of-cloud day can momentarily exceed nameplate, but a
+ *  bar drawn past its track reads as a glitch. */
+function SolarArrayCard({ arr }: { arr: SolarArraySummary }) {
+  const pct = percentOfRated(arr.power_w, arr.rated_kw);
+  const hasRating = arr.rated_kw > 0;
+  // Clamp the bar fill at 100% for display; the numeric % (which can
+  // exceed 100) is shown alongside so the real figure is never hidden.
+  const barPct = pct == null ? 0 : Math.min(100, Math.max(0, pct));
+  return (
+    <div className="bg-bg-elevated rounded-xl p-4 flex flex-col gap-2">
+      <div className="flex items-center justify-between">
+        <span className="text-text-primary font-semibold text-sm">{arrayLabel(arr)}</span>
+        {hasRating && (
+          <span className="text-text-secondary text-xs font-mono">{arr.rated_kw} kWp</span>
+        )}
+      </div>
+      <div className="flex items-baseline gap-2">
+        <span className="text-2xl font-bold font-mono text-amber-400">{formatPower(arr.power_w)}</span>
+        {pct != null && (
+          <span className="text-sm text-text-secondary">{formatPercent(pct)} of max</span>
+        )}
+      </div>
+      {hasRating && (
+        <div className="w-full h-2 rounded-full bg-white/10 overflow-hidden" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct == null ? 0 : Math.round(pct)}>
+          <div
+            className="h-full rounded-full bg-amber-400 transition-[width] duration-500"
+            style={{ width: `${barPct}%` }}
+          />
+        </div>
+      )}
+      {arr.today_kwh != null && (
+        <div className="text-text-secondary text-xs font-mono">
+          Today: {formatEnergy(arr.today_kwh)}
+        </div>
+      )}
     </div>
   );
 }

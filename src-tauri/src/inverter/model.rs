@@ -752,6 +752,58 @@ impl Default for ScheduleSlot {
     }
 }
 
+/// Where a surfaced solar array's power reading comes from (issue #110).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SolarArraySource {
+    /// PV1 DC string on a hybrid / DC-coupled inverter (IR 18).
+    #[default]
+    Pv1,
+    /// PV2 DC string (IR 20).
+    Pv2,
+    /// External CT clamp at device address 1-8 (AC-coupled / separate
+    /// inverter). `meter_address` carries the address.
+    Meter,
+}
+
+/// One solar array surfaced for "% of max" display (issue #110).
+///
+/// Built each poll from the user's configured arrays:
+/// - DC strings PV1/PV2 when the user has entered a rated kWp
+///   (`settings.pv1_rated_kw` / `pv2_rated_kw`). Power comes from the
+///   inverter's IR registers; today's energy from the per-string counters.
+/// - External CT meters the user has labelled as solar
+///   (`settings.solar_arrays`), typical for AC-coupled systems whose
+///   panels feed a separate inverter measured by a GivEnergy CT clamp.
+///   Power is the meter's total active power (unsigned); today's energy is
+///   unknown (CT meters only expose cumulative totals), so it stays `None`.
+///
+/// Empty when no rated capacities are configured, so a default install is
+/// unaffected until the user opts in via Settings.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+pub struct SolarArraySummary {
+    /// Where this array's power reading comes from.
+    pub source: SolarArraySource,
+    /// Display name (e.g. "East roof"). Empty → the UI falls back to a
+    /// label derived from `source` (PV1 / PV2 / the meter address).
+    #[serde(default)]
+    pub name: String,
+    /// Live AC power output in watts (unsigned).
+    pub power_w: u32,
+    /// Rated peak capacity in kW (kWp). 0 = not configured (the UI hides
+    /// the % and shows power only).
+    #[serde(default)]
+    pub rated_kw: f64,
+    /// Energy produced today in kWh, when known. DC strings carry this
+    /// directly; meter-backed arrays leave it `None`.
+    #[serde(default)]
+    pub today_kwh: Option<f64>,
+    /// CT meter device address for `Meter`-source arrays (1-8). `None` for
+    /// DC strings. Lets the UI cross-link to the Meters page.
+    #[serde(default)]
+    pub meter_address: Option<u8>,
+}
+
 /// Complete snapshot of inverter state.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct InverterSnapshot {
@@ -1084,6 +1136,27 @@ pub struct InverterSnapshot {
     /// BatteryMaintenance enum). 0 on non-3ph models.
     #[serde(default)]
     pub battery_maintenance_mode: u8,
+
+    // -- Solar arrays (issue #110: "% of max" display) --
+    /// Configured solar arrays with rated capacity, for the per-array
+    /// "% of max" display. Combines DC strings (PV1/PV2, when a rated kWp
+    /// is configured) and external CT meters the user has labelled as
+    /// solar (AC-coupled / separate inverters). Empty until the user opts
+    /// in via Settings. See [`SolarArraySummary`].
+    #[serde(default)]
+    pub solar_arrays: Vec<SolarArraySummary>,
+
+    /// PV1 output as a percentage of its rated peak capacity (kWp).
+    /// Computed each poll from `pv1_power / (pv1_rated_kw * 1000) * 100`
+    /// when `pv1_rated_kw > 0`; otherwise `None`. Stored in history so
+    /// the History → Solar page can chart PV1 % over time. See issue #110.
+    #[serde(default)]
+    pub pv1_pct: Option<f64>,
+
+    /// PV2 output as a percentage of its rated peak capacity (kWp).
+    /// See `pv1_pct`. See issue #110.
+    #[serde(default)]
+    pub pv2_pct: Option<f64>,
 }
 
 // ===========================================================================

@@ -138,6 +138,18 @@ export interface InverterSnapshot {
   gateway_work_mode?: number;
   gateway_fault_codes?: string[];
   first_inverter_serial?: string;
+
+  // -- Solar arrays (issue #110: "% of max" display) --
+  /** Configured solar arrays with rated capacity (kWp), built server-side
+   *  from the user's Settings. Combines DC strings (PV1/PV2) and external
+   *  CT meters labelled as solar (AC-coupled / separate inverters). Empty
+   *  until the user opts in. See `SolarArraySummary`. */
+  solar_arrays?: SolarArraySummary[];
+  /** PV1 output as a percentage of its rated peak capacity (kWp). Null when
+   *  no rated capacity is configured. Stored in history for charting. */
+  pv1_pct?: number | null;
+  /** PV2 output as a percentage of its rated peak capacity (kWp). */
+  pv2_pct?: number | null;
 }
 
 export interface BatteryModule {
@@ -158,6 +170,43 @@ export interface BatteryModule {
   bms_status_registers?: number[];
   bms_status?: number[];
   bms_warnings?: number[];
+}
+
+/** Where a surfaced solar array's power reading comes from (issue #110).
+ *  - `pv1` / `pv2`: DC strings on a hybrid / DC-coupled inverter.
+ *  - `meter`: external CT clamp at device address 1-8 (AC-coupled /
+ *    separate inverter); `meter_address` carries the address. */
+export type SolarArraySource = 'pv1' | 'pv2' | 'meter';
+
+/** One solar array surfaced for "% of max" display (issue #110). Built each
+ *  poll from the user's configured arrays (DC strings with a rated kWp, or
+ *  external CT meters labelled as solar). */
+export interface SolarArraySummary {
+  source: SolarArraySource;
+  /** Display name. Empty → the UI falls back to a label derived from
+   *  `source` (PV1 / PV2 / the meter address). */
+  name: string;
+  /** Live AC power output in watts (unsigned). */
+  power_w: number;
+  /** Rated peak capacity in kW (kWp). 0 = not configured (hide the %). */
+  rated_kw: number;
+  /** Energy produced today in kWh, when known. `null` for meter-backed
+   *  arrays (CT meters only expose cumulative totals). */
+  today_kwh: number | null;
+  /** CT meter device address for `meter`-source arrays (1-8). `null` for
+   *  DC strings. */
+  meter_address: number | null;
+}
+
+/** A user-configured external solar array measured by a GivEnergy CT clamp
+ *  (issue #110). Stored in Settings and POSTed to `/api/settings`. */
+export interface SolarArrayConfig {
+  /** CT meter device address this array is wired to (1-8). */
+  meter_address: number;
+  /** Display name (e.g. "East roof"). */
+  name: string;
+  /** Rated peak capacity in kW (kWp). 0 hides the % display. */
+  rated_kw: number;
 }
 
 export interface ScheduleSlot {
@@ -224,6 +273,13 @@ export interface PollSettings {
   api_key: string;
   /** Port for the read-only external API server (0 = disabled). */
   api_port: number;
+  // -- Solar array capacities (issue #110) --
+  /** Rated peak capacity (kWp) of the PV1 DC string (hybrid). 0 = unset. */
+  pv1_rated_kw?: number;
+  /** Rated peak capacity (kWp) of the PV2 DC string. 0 = unset. */
+  pv2_rated_kw?: number;
+  /** External solar arrays measured by CT clamps (AC-coupled). */
+  solar_arrays?: SolarArrayConfig[];
 }
 
 export interface DiscoveredInverter {

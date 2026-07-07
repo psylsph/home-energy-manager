@@ -875,6 +875,11 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             // `None` on first install / before any capture; otherwise the
             // 10-element Vec captured on the most recent Eco/Pause entry.
             "discharge_slots_backup": settings.discharge_slots_backup,
+            // Issue #110: solar array capacities for "% of max" display.
+            // DC-string ratings (hybrid) + CT-meter labels (AC-coupled).
+            "pv1_rated_kw": settings.pv1_rated_kw,
+            "pv2_rated_kw": settings.pv2_rated_kw,
+            "solar_arrays": settings.solar_arrays,
         }
         })),
     )
@@ -1006,6 +1011,24 @@ pub async fn update_settings(
     }
     if let Some(p) = body.get("api_port").and_then(|v| v.as_u64()) {
         persist.api_port = p.min(u16::MAX as u64) as u16;
+    }
+    // Issue #110: solar array capacities for "% of max" display. Negative
+    // ratings are clamped to 0 (a negative array size is nonsensical and
+    // would invert the % display). Meter addresses are validated at
+    // compute time (only 1-8 are honoured), so we accept any u8 here and
+    // let the poll loop drop bogus entries.
+    if let Some(kw) = body.get("pv1_rated_kw").and_then(|v| v.as_f64()) {
+        persist.pv1_rated_kw = kw.max(0.0);
+    }
+    if let Some(kw) = body.get("pv2_rated_kw").and_then(|v| v.as_f64()) {
+        persist.pv2_rated_kw = kw.max(0.0);
+    }
+    if let Some(arrays) = body.get("solar_arrays").and_then(|v| v.as_array()) {
+        let parsed: Vec<crate::settings::SolarArrayConfig> = arrays
+            .iter()
+            .filter_map(|v| serde_json::from_value::<crate::settings::SolarArrayConfig>(v.clone()).ok())
+            .collect();
+        persist.solar_arrays = parsed;
     }
     if let Err(e) = persist.save() {
         tracing::warn!("Failed to persist settings: {}", e);

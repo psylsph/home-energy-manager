@@ -36,6 +36,10 @@ export const SPIKE_THRESHOLDS: Record<string, number> = {
   today_discharge_kwh: 5,
   today_consumption_kwh: 5,
   home_energy_today_kwh: 5,
+  // PV output as % of rated peak (issue #110). Instantaneous gauge, AVG is
+  // correct. 20% spike threshold tolerates typical half-hour variation.
+  pv1_pct: 20,
+  pv2_pct: 20,
 };
 
 /**
