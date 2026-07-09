@@ -1254,10 +1254,7 @@ mod tests {
     #[test]
     fn parse_port_rejects_garbage_value() {
         // Non-numeric port must not panic; falls back to the default.
-        let args = vec![
-            "--port".to_string(),
-            "not-a-number".to_string(),
-        ];
+        let args = vec!["--port".to_string(), "not-a-number".to_string()];
         assert_eq!(parse_port(&args), 7337);
     }
 
@@ -1265,17 +1262,11 @@ mod tests {
     fn parse_port_rejects_out_of_range_value() {
         // Values > u16::MAX (65535) must be rejected. u16::parse
         // returns Err for these so the function should fall through.
-        let args = vec![
-            "--port".to_string(),
-            "99999".to_string(),
-        ];
+        let args = vec!["--port".to_string(), "99999".to_string()];
         assert_eq!(parse_port(&args), 7337);
 
         // Negative numbers are also out of range for u16.
-        let args = vec![
-            "--port".to_string(),
-            "-1".to_string(),
-        ];
+        let args = vec!["--port".to_string(), "-1".to_string()];
         assert_eq!(parse_port(&args), 7337);
     }
 
@@ -1311,10 +1302,7 @@ mod tests {
         // Don't quote-split — the value is whatever comes after --dist,
         // even if it contains whitespace. (A real shell would tokenise
         // this differently, but the Rust argv array is what we get.)
-        let args = vec![
-            "--dist".to_string(),
-            "/path with spaces/dist".to_string(),
-        ];
+        let args = vec!["--dist".to_string(), "/path with spaces/dist".to_string()];
         assert_eq!(
             parse_dist(&args),
             Some("/path with spaces/dist".to_string())

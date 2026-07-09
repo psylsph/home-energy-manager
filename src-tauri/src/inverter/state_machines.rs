@@ -23,11 +23,10 @@ use crate::inverter::encoder::RegisterWrite;
 use crate::inverter::model::{BatteryMode, DeviceType, InverterSnapshot};
 use crate::modbus::client::ModbusClient;
 use crate::modbus::registers::{
-    HR_3PH_FORCE_CHARGE_ENABLE, HR_3PH_FORCE_DISCHARGE_ENABLE, HR_BATTERY_POWER_MODE,
+    encode_hhmm, HR_3PH_FORCE_CHARGE_ENABLE, HR_3PH_FORCE_DISCHARGE_ENABLE, HR_BATTERY_POWER_MODE,
     HR_BATTERY_SOC_RESERVE, HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC,
     HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END,
     HR_DISCHARGE_SLOT_2_START, HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
-    encode_hhmm,
 };
 
 // ===========================================================================
@@ -1262,16 +1261,12 @@ mod tests {
             })
         );
         // Writes enable charge target + set target SOC.
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_ENABLE_CHARGE_TARGET && w.value == 1)
-        );
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_CHARGE_TARGET_SOC && w.value == 90)
-        );
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_CHARGE_TARGET && w.value == 1));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_CHARGE_TARGET_SOC && w.value == 90));
     }
 
     #[test]
@@ -1300,16 +1295,12 @@ mod tests {
         assert_eq!(state, AutoWinterState::Idle);
         assert!(saved.is_none(), "saved consumed on restore");
         // Restores the saved target SOC (77) + enable (1).
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_CHARGE_TARGET_SOC && w.value == 77)
-        );
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_ENABLE_CHARGE_TARGET && w.value == 1)
-        );
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_CHARGE_TARGET_SOC && w.value == 77));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_CHARGE_TARGET && w.value == 1));
     }
 
     #[test]
@@ -1374,21 +1365,15 @@ mod tests {
 
         assert_eq!(state, LoadLimiterState::Idle);
         assert!(saved.is_none(), "saved reserve is consumed on restore");
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1)
-        );
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0)
-        );
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 20)
-        );
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 20));
     }
 
     #[test]
@@ -1461,16 +1446,12 @@ mod tests {
         assert_eq!(state, LoadLimiterState::Paused);
         // Should have saved the original reserve (20) before pausing.
         assert_eq!(saved, Some(LoadLimiterSaved { reserve: 20 }));
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 100)
-        );
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0)
-        );
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 100));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0));
     }
 
     #[test]
@@ -1497,16 +1478,12 @@ mod tests {
         assert_eq!(state, LoadLimiterState::Idle);
         // Saved should be consumed (taken) on restore.
         assert!(saved.is_none(), "saved must be consumed on restore");
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 20)
-        );
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1)
-        );
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 20));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1));
     }
 
     #[test]
@@ -1549,21 +1526,15 @@ mod tests {
             "must stay in PausedFromRestart until writes are confirmed"
         );
         // Should restore the saved reserve (20), not hardcoded 4.
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 20)
-        );
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1)
-        );
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0)
-        );
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 20));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0));
 
         // Simulate next poll: writes succeeded, battery now in Eco mode.
         let restored = InverterSnapshot {
@@ -1614,11 +1585,9 @@ mod tests {
             LoadLimiterState::PausedFromRestart,
             "must stay in PausedFromRestart until writes confirmed"
         );
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 4)
-        );
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 4));
     }
 
     #[test]
@@ -1643,11 +1612,9 @@ mod tests {
         let writes = check_load_limiter(&low, &config, &mut state, 60, &mut saved)
             .expect("restores with fallback 4");
         assert_eq!(state, LoadLimiterState::Idle);
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 4)
-        );
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 4));
     }
 
     #[test]
@@ -1751,11 +1718,9 @@ mod tests {
         let writes = check_load_limiter(&snap, &config, &mut state, 60, &mut saved)
             .expect("restore writes returned");
         assert_eq!(state, LoadLimiterState::Idle);
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 20)
-        );
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 20));
         assert!(saved.is_none(), "saved must be consumed on restore");
     }
 
@@ -2091,53 +2056,37 @@ mod tests {
         .expect("auto-revert should fire when slot expired");
 
         // enable_discharge restored to 0 (pre-force value).
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0)
-        );
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0));
         // enable_charge restored to 1 (pre-force value).
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_ENABLE_CHARGE && w.value == 1)
-        );
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_CHARGE && w.value == 1));
         // enable_charge_target follows enable_charge.
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_ENABLE_CHARGE_TARGET && w.value == 1)
-        );
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_CHARGE_TARGET && w.value == 1));
         // Slot 1 restored to 17:00.
         let s1 = encode_hhmm(17, 0);
         let e1 = encode_hhmm(19, 0);
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_DISCHARGE_SLOT_1_START && w.value == s1)
-        );
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_DISCHARGE_SLOT_1_END && w.value == e1)
-        );
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_DISCHARGE_SLOT_1_START && w.value == s1));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_DISCHARGE_SLOT_1_END && w.value == e1));
         // Slot 2 cleared to 00:00–00:00 (no prior slot).
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_DISCHARGE_SLOT_2_START && w.value == 0)
-        );
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_DISCHARGE_SLOT_2_END && w.value == 0)
-        );
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_DISCHARGE_SLOT_2_START && w.value == 0));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_DISCHARGE_SLOT_2_END && w.value == 0));
         // Battery power mode restored to eco (1).
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1)
-        );
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1));
     }
 
     #[test]
@@ -2161,26 +2110,18 @@ mod tests {
         .expect("auto-revert should fire");
 
         // All flags cleared, slots cleared, mode = eco.
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0)
-        );
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_ENABLE_CHARGE && w.value == 0)
-        );
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_ENABLE_CHARGE_TARGET && w.value == 0)
-        );
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1)
-        );
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_CHARGE && w.value == 0));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_CHARGE_TARGET && w.value == 0));
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1));
     }
 
     #[test]
@@ -2202,11 +2143,9 @@ mod tests {
         // Gen3Hybrid is not three-phase — should use single-phase path.
         assert!(writes.is_some());
         let writes = writes.unwrap();
-        assert!(
-            writes
-                .iter()
-                .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0)
-        );
+        assert!(writes
+            .iter()
+            .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0));
     }
 
     #[test]

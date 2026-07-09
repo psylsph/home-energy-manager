@@ -464,7 +464,7 @@ mod tests {
         assert!(!rc.note_transient_timeout()); // 1
         rc.note_poll_failed();
         assert!(!rc.note_transient_timeout()); // 2
-        // A good poll breaks the streak.
+                                               // A good poll breaks the streak.
         rc.note_good_poll(t0 + Duration::from_secs(1));
         // Now two more timeouts — still only 2 in a row, must not trip.
         rc.note_poll_failed();
@@ -501,7 +501,8 @@ mod tests {
         rc.note_session_end(); // had_good_read → reset to 0
         let after_good = rc.reconnect_delay(t0); // dead_session_backoff(0) = 5s
         assert_eq!(
-            after_good, Duration::from_secs(5),
+            after_good,
+            Duration::from_secs(5),
             "productive session must reset the dead-session escalation"
         );
     }
@@ -529,7 +530,10 @@ mod tests {
 
         // Two more good polls complete the stand-down (total = STANDDOWN_POLLS).
         rc.note_good_poll(starved + Duration::from_secs(2));
-        assert!(rc.is_flap_engaged(), "two good polls is still short of stand-down");
+        assert!(
+            rc.is_flap_engaged(),
+            "two good polls is still short of stand-down"
+        );
         rc.note_good_poll(starved + Duration::from_secs(3));
         assert!(
             !rc.is_flap_engaged(),
@@ -617,8 +621,7 @@ mod tests {
 
         let delay = rc.reconnect_delay(t0 + Duration::from_secs(FLAP_THRESHOLD_SECS + 1));
         assert_eq!(
-            delay,
-            FLAP_ELEVATED_DELAY,
+            delay, FLAP_ELEVATED_DELAY,
             "flap (30s) must dominate dead-session cap (10s) and backoff floor (5s)"
         );
     }

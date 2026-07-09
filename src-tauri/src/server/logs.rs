@@ -501,8 +501,8 @@ mod tests {
         ring.push("b");
         ring.push("c");
         ring.push("d"); // wraps
-        // after=0 is below the oldest available index (1, since 'a'
-        // is gone). Should return b, c, d.
+                        // after=0 is below the oldest available index (1, since 'a'
+                        // is gone). Should return b, c, d.
         let (lines, _) = ring.read_from(0);
         assert_eq!(lines, vec!["b", "c", "d"]);
     }
@@ -526,8 +526,7 @@ mod tests {
     fn min_level_default_is_info() {
         let ring = LogRing::new(10);
         assert_eq!(
-            ring.min_level
-                .load(std::sync::atomic::Ordering::Relaxed),
+            ring.min_level.load(std::sync::atomic::Ordering::Relaxed),
             2,
             "default min level should be INFO (2) — see DEFAULT_CAPTURE_LEVEL doc"
         );
@@ -538,10 +537,6 @@ mod tests {
         let ring = LogRing::new(10);
         ring.min_level
             .store(4, std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(
-            ring.min_level
-                .load(std::sync::atomic::Ordering::Relaxed),
-            4
-        );
+        assert_eq!(ring.min_level.load(std::sync::atomic::Ordering::Relaxed), 4);
     }
 }

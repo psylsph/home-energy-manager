@@ -683,8 +683,8 @@ mod tests {
             0x59, 0x59, // transaction ID
             0x00, 0x01, // protocol ID
             0xFF, 0xFF, // length = 65535 (garbage — should be 2)
-            0x01,      // unit ID
-            0x01,      // function ID (heartbeat)
+            0x01, // unit ID
+            0x01, // function ID (heartbeat)
         ];
         assert!(!is_heartbeat_request(&heartbeat));
     }

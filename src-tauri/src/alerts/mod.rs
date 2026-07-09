@@ -619,10 +619,9 @@ pub fn send_telegram_document(
     // HTML-parsing user input and returning 400 on the first stray `<`/`&`.
     if let Some(mode) = parse_mode {
         body.extend(format!("--{boundary}{crlf}").as_bytes());
-        body.extend(format!(
-            "Content-Disposition: form-data; name=\"parse_mode\"{crlf}"
-        )
-        .as_bytes());
+        body.extend(
+            format!("Content-Disposition: form-data; name=\"parse_mode\"{crlf}").as_bytes(),
+        );
         body.extend(crlf.as_bytes());
         body.extend(mode.as_bytes());
         body.extend(crlf.as_bytes());

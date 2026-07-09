@@ -31,7 +31,7 @@ use axum::response::{Html, IntoResponse, Json, Response};
 use chrono::Local;
 use serde::Serialize;
 
-use crate::inverter::model::{InverterSnapshot};
+use crate::inverter::model::InverterSnapshot;
 use crate::inverter::poll::{AppState, ConnectionState};
 
 /// Round a watt reading to a one-decimal-place kilowatt value.
@@ -254,11 +254,25 @@ mod tests {
         let mut got: Vec<&str> = v.as_object().unwrap().keys().map(|s| s.as_str()).collect();
         got.sort_unstable();
         let mut want = [
-            "age_s", "battery_kw", "battery_mode", "battery_state", "conn", "device", "fault",
-            "grid_kw", "home_kw", "ok", "soc", "solar_kw", "ts",
+            "age_s",
+            "battery_kw",
+            "battery_mode",
+            "battery_state",
+            "conn",
+            "device",
+            "fault",
+            "grid_kw",
+            "home_kw",
+            "ok",
+            "soc",
+            "solar_kw",
+            "ts",
         ];
         want.sort_unstable();
-        assert_eq!(got, want, "mini response key set must be exactly the allowlist");
+        assert_eq!(
+            got, want,
+            "mini response key set must be exactly the allowlist"
+        );
 
         // And the sensitive values really are absent (belt-and-braces: the
         // key-set check above already proves this, but pin the names so a

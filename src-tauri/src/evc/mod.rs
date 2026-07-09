@@ -857,7 +857,10 @@ mod tests {
         latch.observe(&snap("Charging", "Connected", 7.5));
         latch.observe(&snap("Idle", "Connected", 0.0));
         let eff = latch.observe(&snap("Idle", "Not Connected", 0.0));
-        assert!((eff - 7.5).abs() < 0.001, "unplug must not reset, got {eff}");
+        assert!(
+            (eff - 7.5).abs() < 0.001,
+            "unplug must not reset, got {eff}"
+        );
     }
 
     #[test]
@@ -870,7 +873,10 @@ mod tests {
         latch.observe(&snap("Idle", "Connected", 0.0));
         latch.observe(&snap("Idle", "Not Connected", 0.0));
         let eff = latch.observe(&snap("Idle", "Connected", 0.0));
-        assert!((eff - 0.0).abs() < f32::EPSILON, "plug-in should reset, got {eff}");
+        assert!(
+            (eff - 0.0).abs() < f32::EPSILON,
+            "plug-in should reset, got {eff}"
+        );
     }
 
     #[test]
@@ -884,7 +890,10 @@ mod tests {
         assert!((eff - 5.0).abs() < 0.001);
         // Session ends → latch should hold the 5.0 captured above.
         let held = latch.observe(&snap("Idle", "Connected", 0.0));
-        assert!((held - 5.0).abs() < 0.001, "first-obs capture should persist, got {held}");
+        assert!(
+            (held - 5.0).abs() < 0.001,
+            "first-obs capture should persist, got {held}"
+        );
     }
 
     #[test]
@@ -895,11 +904,17 @@ mod tests {
         let mut latch = SessionLatch::default();
         latch.observe(&snap("Charging", "Connected", 5.0));
         let eff = latch.observe(&snap("Charging", "Connected", 0.0));
-        assert!((eff - 0.0).abs() < f32::EPSILON, "charging should trust live register, got {eff}");
+        assert!(
+            (eff - 0.0).abs() < f32::EPSILON,
+            "charging should trust live register, got {eff}"
+        );
         // But the latch itself is untouched, so once the jitter clears the
         // peak is still recoverable after the session.
         let held = latch.observe(&snap("Idle", "Connected", 0.0));
-        assert!((held - 5.0).abs() < 0.001, "latch should survive jitter, got {held}");
+        assert!(
+            (held - 5.0).abs() < 0.001,
+            "latch should survive jitter, got {held}"
+        );
     }
 
     #[test]
@@ -912,7 +927,10 @@ mod tests {
         let eff = latch.observe(&snap("End of Charging", "Connected", 9.9));
         assert!((eff - 9.9).abs() < 0.001);
         let held = latch.observe(&snap("Idle", "Connected", 0.0));
-        assert!((held - 9.9).abs() < 0.001, "should hold the refreshed peak, got {held}");
+        assert!(
+            (held - 9.9).abs() < 0.001,
+            "should hold the refreshed peak, got {held}"
+        );
     }
 
     #[test]

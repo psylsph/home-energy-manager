@@ -1759,12 +1759,10 @@ mod tests {
         // Gen3 Hybrid is the regression guard for removing the AC config
         // block from its poll set: it must neither poll HR 300-359 nor claim
         // EPS / Timed Discharge support.
-        assert!(
-            !DeviceType::Gen3Hybrid
-                .extra_poll_blocks()
-                .iter()
-                .any(|b| b.start == 300)
-        );
+        assert!(!DeviceType::Gen3Hybrid
+            .extra_poll_blocks()
+            .iter()
+            .any(|b| b.start == 300));
         assert!(!DeviceType::Gen3Hybrid.supports_eps());
     }
 
@@ -1841,18 +1839,14 @@ mod tests {
 
     #[test]
     fn supports_timed_discharge_gates_ac_coupled_despite_ac_config_poll() {
-        assert!(
-            DeviceType::ACCoupled
-                .extra_poll_blocks()
-                .iter()
-                .any(|b| b.start == 300)
-        );
-        assert!(
-            DeviceType::ACCoupledMk2
-                .extra_poll_blocks()
-                .iter()
-                .any(|b| b.start == 300)
-        );
+        assert!(DeviceType::ACCoupled
+            .extra_poll_blocks()
+            .iter()
+            .any(|b| b.start == 300));
+        assert!(DeviceType::ACCoupledMk2
+            .extra_poll_blocks()
+            .iter()
+            .any(|b| b.start == 300));
         assert!(!DeviceType::ACCoupled.supports_timed_discharge(0));
         assert!(!DeviceType::ACCoupledMk2.supports_timed_discharge(0));
     }

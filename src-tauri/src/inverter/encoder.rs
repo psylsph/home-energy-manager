@@ -1209,9 +1209,11 @@ mod tests {
         assert!(ControlCommand::SetChargeTargetSocSlot { slot: 1, soc: 3 }
             .encode()
             .is_err());
-        assert!(ControlCommand::SetDischargeTargetSocSlot { slot: 1, soc: 3 }
-            .encode()
-            .is_err());
+        assert!(
+            ControlCommand::SetDischargeTargetSocSlot { slot: 1, soc: 3 }
+                .encode()
+                .is_err()
+        );
         // Boundaries inclusive: accepted.
         assert!(ControlCommand::SetChargeTargetSocSlot { slot: 1, soc: 4 }
             .encode()
@@ -1219,19 +1221,25 @@ mod tests {
         assert!(ControlCommand::SetChargeTargetSocSlot { slot: 1, soc: 100 }
             .encode()
             .is_ok());
-        assert!(ControlCommand::SetDischargeTargetSocSlot { slot: 1, soc: 4 }
-            .encode()
-            .is_ok());
-        assert!(ControlCommand::SetDischargeTargetSocSlot { slot: 1, soc: 100 }
-            .encode()
-            .is_ok());
+        assert!(
+            ControlCommand::SetDischargeTargetSocSlot { slot: 1, soc: 4 }
+                .encode()
+                .is_ok()
+        );
+        assert!(
+            ControlCommand::SetDischargeTargetSocSlot { slot: 1, soc: 100 }
+                .encode()
+                .is_ok()
+        );
         // Above the ceiling: rejected.
         assert!(ControlCommand::SetChargeTargetSocSlot { slot: 1, soc: 101 }
             .encode()
             .is_err());
-        assert!(ControlCommand::SetDischargeTargetSocSlot { slot: 1, soc: 101 }
-            .encode()
-            .is_err());
+        assert!(
+            ControlCommand::SetDischargeTargetSocSlot { slot: 1, soc: 101 }
+                .encode()
+                .is_err()
+        );
     }
 
     #[test]
