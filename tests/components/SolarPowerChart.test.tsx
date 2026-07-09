@@ -22,6 +22,7 @@ vi.mock('../../src/lib/api', () => ({
 
 import SolarPowerChart from '../../src/components/SolarPowerChart';
 import { useInverterStore } from '../../src/store/useInverterStore';
+import type { InverterSnapshot, SolarArraySummary } from '../../src/lib/types';
 
 function silenceConsoleError() {
   return vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -36,6 +37,7 @@ describe('<SolarPowerChart/>', () => {
       gridLineWeight: 'normal',
       panelGraphsYLock: false,
       panelGraphsYLockMax: 0,
+      snapshot: null,
     });
   });
 
@@ -145,6 +147,39 @@ describe('<SolarPowerChart/>', () => {
       expect(useInverterStore.getState().panelGraphsYLockMax).toBe(10000);
     });
     // Restore to avoid leaking across tests.
+    setPanelGraphsYLockMax(0);
+  });
+
+  it('uses the DC-string nameplate as a static Y-axis ceiling when configured (issue #192)', async () => {
+    // PV1 6 kWp + PV2 4 kWp → ceiling is the higher string (6000 W), not the
+    // sum (10000 W). The data-driven Y-Lock sharing is bypassed entirely
+    // (panelGraphsYLockMax stays 0) because the nameplate ceiling takes
+    // precedence — proving the static branch ran instead of the Y-Lock path.
+    const solarArrays: SolarArraySummary[] = [
+      { source: 'pv1', name: '', power_w: 0, rated_kw: 6, today_kwh: null, meter_address: null },
+      { source: 'pv2', name: '', power_w: 0, rated_kw: 4, today_kwh: null, meter_address: null },
+    ];
+    useInverterStore.setState({
+      panelGraphsYLock: true,
+      panelGraphsYLockMax: 0,
+      snapshot: { solar_arrays: solarArrays } as InverterSnapshot,
+    });
+    fetchHistoryMock.mockResolvedValue({
+      // 7000 W sample — under the data-driven Y-Lock this would round up to
+      // 10000 and be recorded on the store. Under the nameplate ceiling it
+      // must NOT touch the store.
+      pv1_power: [{ t: 1000, v: 7000 }],
+      pv2_power: [],
+    });
+    const { setPanelGraphsYLockMax } = useInverterStore.getState();
+    const { container } = render(<SolarPowerChart />);
+    await waitFor(() => {
+      // The chart branch is taken (data resolved), not a spinner/empty/error.
+      expect(container.querySelector('.animate-spin')).toBeNull();
+      expect(container.textContent).not.toContain('No solar history yet today');
+    });
+    // Nameplate branch ran → the Y-Lock store sharing never happened.
+    expect(useInverterStore.getState().panelGraphsYLockMax).toBe(0);
     setPanelGraphsYLockMax(0);
   });
 });

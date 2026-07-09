@@ -232,4 +232,28 @@ describe('SolarPage — solar arrays "% of max" section (issue #110)', () => {
     // CT meters have no per-day counter, so no "Today:" label.
     expect(within(section).queryByText(/Today:/)).toBeNull();
   });
+
+  it('colours each array card to match the PV Power graph (PV1 amber, PV2 blue) (issue #192)', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({
+        solar_arrays: [
+          { source: 'pv1', name: '', power_w: 4200, rated_kw: 6, today_kwh: 18.5, meter_address: null },
+          { source: 'pv2', name: '', power_w: 3000, rated_kw: 1.3, today_kwh: 23, meter_address: null },
+        ],
+      }),
+      connectionState: 'connected',
+    });
+    render(<SolarPage />);
+    const section = screen.getByTestId('solar-arrays');
+    // Power text colours match the graph series: PV1 amber, PV2 blue.
+    const pv1Power = within(section).getByText('4.2kW') as HTMLElement;
+    expect(pv1Power.style.color).toBe('rgb(245, 158, 11)'); // #F59E0B
+    const pv2Power = within(section).getByText('3.0kW') as HTMLElement;
+    expect(pv2Power.style.color).toBe('rgb(59, 130, 246)'); // #3B82F6
+    // The progress-bar fills share the same per-string colour.
+    const bars = within(section).getAllByRole('progressbar');
+    expect(bars).toHaveLength(2);
+    expect((bars[0].firstElementChild as HTMLElement).style.backgroundColor).toBe('rgb(245, 158, 11)');
+    expect((bars[1].firstElementChild as HTMLElement).style.backgroundColor).toBe('rgb(59, 130, 246)');
+  });
 });
