@@ -1,6 +1,45 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 
+// jsdom 29 (under vitest 4 + node 25) ships `localStorage` as a bare object
+// stub — it has the right identity but `getItem` / `setItem` / `removeItem`
+// aren't functions. Anything in this file that touches the real `localStorage`
+// blows up with `localStorage.removeItem is not a function`, which masks the
+// actual test signal. Replace the stub with a working in-memory implementation
+// so the existing persistence tests can run, and so we can assert on the
+// gridMeterAddress key without the env bug firing first.
+//
+// IMPORTANT: only stub `localStorage`. Replacing `window` itself detaches the
+// testing-library container and `waitFor` then dies with "Expected container
+// to be an Element... but got undefined".
+const memStorage = (() => {
+  let store = new Map<string, string>();
+  return {
+    getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+    setItem: (k: string, v: string) => { store.set(k, String(v)); },
+    removeItem: (k: string) => { store.delete(k); },
+    clear: () => { store = new Map(); },
+    key: (i: number) => Array.from(store.keys())[i] ?? null,
+    get length() { return store.size; },
+  };
+})();
+vi.stubGlobal('localStorage', memStorage);
+// Also patch the same object onto the live `window` so any code path that
+// reads `window.localStorage` (rather than the bare `localStorage` global)
+// also sees the working implementation. We mutate rather than replace the
+// whole window object — see the IMPORTANT note above.
+if (typeof window !== 'undefined') {
+  try {
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      get: () => memStorage,
+    });
+  } catch {
+    // Best-effort: some jsdom versions freeze window.localStorage. The bare
+    // global stub above is enough for the tests below.
+  }
+}
+
 vi.mock('../../src/lib/api', () => ({
   apiGet: vi.fn(async (path: string) => {
     if (path === '/api/settings') {
@@ -110,5 +149,47 @@ describe('<SettingsPage/> — Grid CT meter picker (issue #192)', () => {
       expect(useInverterStore.getState().gridMeterAddress).toBe(1);
       expect(localStorage.getItem('gridMeterAddress')).toBe('1');
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // Mobile layout. The long description ("Which CT clamp measures your grid
+  // point. "Auto" uses the built-in grid CT when present, otherwise meter
+  // 0x01. Used to show grid amps instead of frequency on the energy wheel.")
+  // used to live in a fixed-width left column next to the select, which on a
+  // phone compressed it to a single-word-per-line unreadable sliver. The fix
+  // stacks label + select vertically on mobile (`flex-col`) and goes
+  // side-by-side on `sm+`. jsdom doesn't compute flexbox layout, so we assert
+  // on the responsive class structure — same approach as
+  // connectionIndicatorMobile.test.tsx.
+  // -------------------------------------------------------------------------
+  it('stacks the label and the select vertically on mobile (flex-col)', async () => {
+    useInverterStore.setState({ snapshot: snapshotWith([meter(0x01)]) });
+    render(<SettingsPage />);
+    const select = await screen.findByTestId('grid-ct-meter-select');
+    // The outer row must collapse to a column on narrow screens so the
+    // long description text isn't crammed into a 1/3-width gutter.
+    const row = select.parentElement!;
+    expect(row.className).toContain('flex-col');
+    expect(row.className).toContain('sm:flex-row');
+  });
+
+  it('makes the select full-width on mobile and intrinsic on sm+', async () => {
+    useInverterStore.setState({ snapshot: snapshotWith([meter(0x01)]) });
+    render(<SettingsPage />);
+    const select = await screen.findByTestId('grid-ct-meter-select');
+    // `w-full` so it spans the available row width on mobile; `sm:w-auto`
+    // releases it back to its content width on wider screens.
+    expect(select.className).toContain('w-full');
+    expect(select.className).toContain('sm:w-auto');
+  });
+
+  it('caps the description column at 60% width on sm+ so it does not crowd the select', async () => {
+    useInverterStore.setState({ snapshot: snapshotWith([meter(0x01)]) });
+    render(<SettingsPage />);
+    const select = await screen.findByTestId('grid-ct-meter-select');
+    // The label/description column (sibling of the select inside the row).
+    const labelCol = select.previousElementSibling as HTMLElement | null;
+    expect(labelCol).not.toBeNull();
+    expect(labelCol!.className).toContain('sm:max-w-[60%]');
   });
 });
