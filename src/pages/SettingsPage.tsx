@@ -2122,8 +2122,8 @@ export default function SettingsPage() {
               common installs. Shown only when external CTs exist, so a system
               with just the built-in grid CT never sees this. */}
           {externalMeters.length > 0 && (
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex flex-col gap-0.5">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+              <div className="flex flex-col gap-0.5 sm:max-w-[60%]">
                 <span className="text-text-primary text-sm font-sans">Grid CT meter</span>
                 <span className="text-text-secondary text-xs font-sans">
                   Which CT clamp measures your grid point. “Auto” uses the built-in grid CT when present, otherwise meter 0x01. Used to show grid amps instead of frequency on the energy wheel.
@@ -2134,7 +2134,7 @@ export default function SettingsPage() {
                 onChange={(e) => setGridMeterAddress(Number(e.target.value))}
                 aria-label="Grid CT meter"
                 data-testid="grid-ct-meter-select"
-                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors w-full sm:w-auto"
               >
                 <option value={0}>Auto (recommended)</option>
                 {externalMeters.map((m) => (
