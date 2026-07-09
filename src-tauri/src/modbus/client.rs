@@ -156,8 +156,11 @@ pub fn preview_standard_blocks(
     device_type: Option<&crate::inverter::model::DeviceType>,
     prefilled_device_type: Option<&crate::inverter::model::DeviceType>,
 ) -> &'static [RegisterBlock] {
-    if device_type.is_some_and(|dt| dt.needs_three_phase_input_blocks() || dt.needs_gateway_input_blocks())
-        || prefilled_device_type.is_some_and(|dt| dt.needs_three_phase_input_blocks() || dt.needs_gateway_input_blocks())
+    if device_type
+        .is_some_and(|dt| dt.needs_three_phase_input_blocks() || dt.needs_gateway_input_blocks())
+        || prefilled_device_type.is_some_and(|dt| {
+            dt.needs_three_phase_input_blocks() || dt.needs_gateway_input_blocks()
+        })
     {
         STANDARD_POLL_BLOCKS_3PH
     } else {
@@ -1884,7 +1887,9 @@ mod tests {
     #[test]
     fn preview_standard_blocks_uses_prefill_when_device_type_unconfirmed() {
         use crate::inverter::model::DeviceType;
-        use crate::modbus::registers::{RegisterType, STANDARD_POLL_BLOCKS, STANDARD_POLL_BLOCKS_3PH};
+        use crate::modbus::registers::{
+            RegisterType, STANDARD_POLL_BLOCKS, STANDARD_POLL_BLOCKS_3PH,
+        };
 
         // Compare two static slices by their block names + register type.
         // `RegisterBlock` doesn't derive `PartialEq` and the fat-pointer
@@ -1903,10 +1908,7 @@ mod tests {
                 RegisterType::Holding => "Holding",
             }
         }
-        fn eq_set(
-            a: &[RegisterBlock],
-            b: &[RegisterBlock],
-        ) -> bool {
+        fn eq_set(a: &[RegisterBlock], b: &[RegisterBlock]) -> bool {
             summarise(a) == summarise(b)
         }
 
@@ -1989,10 +1991,11 @@ mod tests {
         use crate::inverter::model::DeviceType;
         use crate::modbus::registers::RegisterType;
 
-        let names: Vec<&str> = preview_model_specific_blocks(&DeviceType::Gateway, GatewayPollScope::Detail)
-            .iter()
-            .map(|b| b.name)
-            .collect();
+        let names: Vec<&str> =
+            preview_model_specific_blocks(&DeviceType::Gateway, GatewayPollScope::Detail)
+                .iter()
+                .map(|b| b.name)
+                .collect();
 
         // The full IR 1600-1859 bank, in ascending order.
         assert!(
@@ -2034,19 +2037,29 @@ mod tests {
     fn preview_model_specific_blocks_for_gateway_fast_scope_omits_slow_blocks() {
         use crate::inverter::model::DeviceType;
 
-        let names: Vec<&str> = preview_model_specific_blocks(&DeviceType::Gateway, GatewayPollScope::Fast)
-            .iter()
-            .map(|b| b.name)
-            .collect();
+        let names: Vec<&str> =
+            preview_model_specific_blocks(&DeviceType::Gateway, GatewayPollScope::Fast)
+                .iter()
+                .map(|b| b.name)
+                .collect();
 
         // Fast scope keeps only the three live IR blocks.
         assert!(names.contains(&"input_1600_1659"));
         assert!(names.contains(&"input_1660_1719"));
         assert!(names.contains(&"input_1780_1830"));
         // Slow detail blocks are NOT in the fast set.
-        assert!(!names.contains(&"input_1720_1779"), "fast scope must skip per-AIO discharge detail");
-        assert!(!names.contains(&"input_1831_1859"), "fast scope must skip per-AIO serials");
-        assert!(!names.contains(&"holding_2040_2075"), "fast scope must skip EMS plant holding");
+        assert!(
+            !names.contains(&"input_1720_1779"),
+            "fast scope must skip per-AIO discharge detail"
+        );
+        assert!(
+            !names.contains(&"input_1831_1859"),
+            "fast scope must skip per-AIO serials"
+        );
+        assert!(
+            !names.contains(&"holding_2040_2075"),
+            "fast scope must skip EMS plant holding"
+        );
     }
 
     /// For non-Gateway models the model-specific block list comes from
@@ -2055,10 +2068,11 @@ mod tests {
     fn preview_model_specific_blocks_for_gen3_returns_extended_slots() {
         use crate::inverter::model::DeviceType;
 
-        let names: Vec<&str> = preview_model_specific_blocks(&DeviceType::Gen3Hybrid, GatewayPollScope::Fast)
-            .iter()
-            .map(|b| b.name)
-            .collect();
+        let names: Vec<&str> =
+            preview_model_specific_blocks(&DeviceType::Gen3Hybrid, GatewayPollScope::Fast)
+                .iter()
+                .map(|b| b.name)
+                .collect();
 
         assert_eq!(names, vec!["holding_240_299"]);
     }
@@ -2419,8 +2433,7 @@ mod tests {
     async fn end_to_end_wire_decode_then_sanitize_holds_rate_spike() {
         use crate::inverter::decoder::decode_snapshot;
         use crate::inverter::sanitizer::{
-            sanitize_snapshot, ConsecutiveSuspectCounts, DeltaCorrectionCounts,
-            RateReleaseCounts,
+            sanitize_snapshot, ConsecutiveSuspectCounts, DeltaCorrectionCounts, RateReleaseCounts,
         };
 
         // Cycle 1 (baseline): today_solar 5.0 kWh, 3 kW PV.
@@ -2450,8 +2463,7 @@ mod tests {
 
         let mut all = baseline;
         all.extend(spike);
-        let (_port, _server, mut client) =
-            setup_client_with_server(all).await;
+        let (_port, _server, mut client) = setup_client_with_server(all).await;
 
         // --- Cycle 1: decode the baseline over the wire ---
         let blocks1 = client
@@ -2871,12 +2883,8 @@ mod tests {
         // Use the production ResponseKey (the local one in this test module
         // has different method names — it pre-dates the refactor that added
         // the production type at the top of the file).
-        let key = super::ResponseKey::from_request(
-            0x11,
-            RegisterType::Input.function_code(),
-            0,
-            20,
-        );
+        let key =
+            super::ResponseKey::from_request(0x11, RegisterType::Input.function_code(), 0, 20);
 
         // Manually occupy the pending map with a sender under the key we
         // will use. This simulates an in-flight request from a concurrent
@@ -2886,13 +2894,7 @@ mod tests {
 
         // A second send_and_await_response for the same key must be rejected
         // with a clear "duplicate in-flight" error.
-        let frame = framer::build_read_request(
-            "TEST123456",
-            0x11,
-            RegisterType::Input,
-            0,
-            20,
-        );
+        let frame = framer::build_read_request("TEST123456", 0x11, RegisterType::Input, 0, 20);
         let result = client.send_and_await_response(frame, key.clone()).await;
         match result {
             Err(ClientError::InvalidResponse(msg)) => {
@@ -2908,13 +2910,7 @@ mod tests {
         // request resolving or timing out), a fresh send_and_await_response
         // for the same key must succeed normally.
         client.pending.lock().await.remove(&key);
-        let frame2 = framer::build_read_request(
-            "TEST123456",
-            0x11,
-            RegisterType::Input,
-            0,
-            20,
-        );
+        let frame2 = framer::build_read_request("TEST123456", 0x11, RegisterType::Input, 0, 20);
         let result2 = client.send_and_await_response(frame2, key).await;
         assert!(
             result2.is_ok(),
@@ -3236,12 +3232,19 @@ mod tests {
         correct.extend_from_slice(&[0x00u8, 0x01]); // value 1 (correct)
         let correct_resp = crate::modbus::framer::encode_frame("TEST123456", 0x11, 0x06, &correct);
 
-        let responses = vec![MockResponse::Raw(wrong_resp), MockResponse::Raw(correct_resp)];
+        let responses = vec![
+            MockResponse::Raw(wrong_resp),
+            MockResponse::Raw(correct_resp),
+        ];
 
         let (_port, server, mut client) = setup_client_with_server(responses).await;
 
         let result = client.write_register(27, 1).await;
-        assert!(result.is_ok(), "Write should succeed after retry, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Write should succeed after retry, got: {:?}",
+            result
+        );
 
         server.await.unwrap();
     }

@@ -872,7 +872,9 @@ mod tests {
         let clock_block = STANDARD_POLL_BLOCKS_3PH
             .iter()
             .find(|b| b.name == "holding_0_59")
-            .expect("STANDARD_POLL_BLOCKS_3PH must include holding_0_59 for the wall-clock registers");
+            .expect(
+                "STANDARD_POLL_BLOCKS_3PH must include holding_0_59 for the wall-clock registers",
+            );
         assert_eq!(clock_block.start, 0);
         assert_eq!(clock_block.count, 60);
         assert_eq!(clock_block.register_type, RegisterType::Holding);

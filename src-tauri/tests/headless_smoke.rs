@@ -50,8 +50,7 @@ fn binary_path() -> Option<PathBuf> {
 /// succeed. We bind 127.0.0.1 only to avoid leaking the chosen
 /// port to the network.
 fn pick_ephemeral_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral port");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     let port = listener
         .local_addr()
         .expect("local_addr on just-bound socket")
@@ -147,7 +146,12 @@ fn headless_init_tracing_and_run_headless_reach_a_responsive_http_server() {
         // alive (initial Disconnected state is what /api/status
         // reports before the first poll), and the EVC subsystem
         // didn't crash (its status endpoint is always available).
-        for path in ["/api/status", "/api/logs", "/api/log-level", "/api/evc/status"] {
+        for path in [
+            "/api/status",
+            "/api/logs",
+            "/api/log-level",
+            "/api/evc/status",
+        ] {
             let resp = ureq::get(&format!("{base_url}{path}"))
                 .call()
                 .map_err(|e| format!("GET {path}: {e}"))?;

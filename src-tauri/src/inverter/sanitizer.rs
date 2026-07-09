@@ -2847,7 +2847,13 @@ mod tests {
         vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", input),
             make_block(RegisterType::Holding, 0, 60, "holding_0_59", vec![0u16; 60]),
-            make_block(RegisterType::Holding, 60, 60, "holding_60_119", vec![0u16; 60]),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                vec![0u16; 60],
+            ),
             make_block(RegisterType::Input, 180, 4, "input_180_181", vec![0u16; 4]),
         ]
     }
@@ -2866,8 +2872,7 @@ mod tests {
     #[test]
     fn decode_then_sanitize_holds_register_level_rate_spike() {
         let prev = decoded_baseline(); // today_solar_kwh == 5.0
-        let mut spike =
-            decode_snapshot(&standard_blocks_with(&[(17, 800)])); // == 80.0
+        let mut spike = decode_snapshot(&standard_blocks_with(&[(17, 800)])); // == 80.0
         assert_eq!(
             spike.today_solar_kwh, 80.0,
             "fixture: decode must surface the spiked register"
@@ -2893,8 +2898,7 @@ mod tests {
     #[test]
     fn decode_then_sanitize_clamps_corrupted_battery_power() {
         let prev = decoded_baseline(); // battery_power == 0
-        let mut corrupt =
-            decode_snapshot(&standard_blocks_with(&[(17, 50), (52, 0x7FFF)]));
+        let mut corrupt = decode_snapshot(&standard_blocks_with(&[(17, 50), (52, 0x7FFF)]));
         assert_eq!(
             corrupt.battery_power, 32767,
             "fixture: decode must surface the saturated register"
@@ -3957,8 +3961,14 @@ mod tests {
         assert!(is_within_daily_reset_window(local_timestamp(1, 5), ""));
         assert!(!is_within_daily_reset_window(local_timestamp(1, 6), ""));
         // A garbage inverter_time string also falls back to host-local.
-        assert!(is_within_daily_reset_window(local_timestamp(23, 58), "garbage"));
-        assert!(!is_within_daily_reset_window(local_timestamp(12, 0), "garbage"));
+        assert!(is_within_daily_reset_window(
+            local_timestamp(23, 58),
+            "garbage"
+        ));
+        assert!(!is_within_daily_reset_window(
+            local_timestamp(12, 0),
+            "garbage"
+        ));
     }
 
     #[test]
@@ -3968,17 +3978,38 @@ mod tests {
         // is 02:00 host-local — well outside a host-midnight window. The
         // inverter's own clock must govern, regardless of what the host says.
         // Inverter just past midnight (00:05) with host at noon: in-window.
-        assert!(is_within_daily_reset_window(local_timestamp(12, 0), "2026-07-01 00:05:00"));
+        assert!(is_within_daily_reset_window(
+            local_timestamp(12, 0),
+            "2026-07-01 00:05:00"
+        ));
         // Inverter just before midnight (23:55) with host at noon: in-window.
-        assert!(is_within_daily_reset_window(local_timestamp(12, 0), "2026-07-01 23:55:00"));
+        assert!(is_within_daily_reset_window(
+            local_timestamp(12, 0),
+            "2026-07-01 23:55:00"
+        ));
         // Inverter at midday (12:00) with host at midnight: the inverter clock
         // takes precedence, so NOT in window even though host-local would say yes.
-        assert!(!is_within_daily_reset_window(local_timestamp(23, 59), "2026-07-01 12:00:00"));
+        assert!(!is_within_daily_reset_window(
+            local_timestamp(23, 59),
+            "2026-07-01 12:00:00"
+        ));
         // Boundary: 65 min either side of inverter midnight.
-        assert!(is_within_daily_reset_window(local_timestamp(12, 0), "2026-07-01 01:05:00"));
-        assert!(!is_within_daily_reset_window(local_timestamp(12, 0), "2026-07-01 01:06:00"));
-        assert!(is_within_daily_reset_window(local_timestamp(12, 0), "2026-07-01 22:55:00"));
-        assert!(!is_within_daily_reset_window(local_timestamp(12, 0), "2026-07-01 22:54:00"));
+        assert!(is_within_daily_reset_window(
+            local_timestamp(12, 0),
+            "2026-07-01 01:05:00"
+        ));
+        assert!(!is_within_daily_reset_window(
+            local_timestamp(12, 0),
+            "2026-07-01 01:06:00"
+        ));
+        assert!(is_within_daily_reset_window(
+            local_timestamp(12, 0),
+            "2026-07-01 22:55:00"
+        ));
+        assert!(!is_within_daily_reset_window(
+            local_timestamp(12, 0),
+            "2026-07-01 22:54:00"
+        ));
     }
 
     #[test]
@@ -6856,7 +6887,10 @@ mod tests {
         // Counter reset: a DIFFERENT lower value starts a fresh window — held
         // at `lower` on its first cycle, not immediately released.
         let even_lower = 25.0_f32;
-        let mut snap = delta_snap((DELTA_CORRECTION_RELEASE_THRESHOLD as i64 + 1) * 60, even_lower);
+        let mut snap = delta_snap(
+            (DELTA_CORRECTION_RELEASE_THRESHOLD as i64 + 1) * 60,
+            even_lower,
+        );
         let sanitized = sz.run(&mut snap, Some(&last_snap));
         assert!(
             sanitized,

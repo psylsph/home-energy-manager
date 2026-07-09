@@ -3965,10 +3965,18 @@ mod tests {
             let db = HistoryDb::open(&path).unwrap();
             let conn = db.conn.lock().unwrap();
             let pv1: Option<f64> = conn
-                .query_row("SELECT pv1_pct FROM readings WHERE timestamp = 2000", [], |row| row.get(0))
+                .query_row(
+                    "SELECT pv1_pct FROM readings WHERE timestamp = 2000",
+                    [],
+                    |row| row.get(0),
+                )
                 .unwrap();
             let pv2: Option<f64> = conn
-                .query_row("SELECT pv2_pct FROM readings WHERE timestamp = 2000", [], |row| row.get(0))
+                .query_row(
+                    "SELECT pv2_pct FROM readings WHERE timestamp = 2000",
+                    [],
+                    |row| row.get(0),
+                )
                 .unwrap();
             assert!(
                 pv1.map(|v| (v - 76.76).abs() < 1e-3).unwrap_or(false),
@@ -4855,7 +4863,14 @@ mod tests {
         let end = local_midnight_secs(1);
         let flat = crate::settings::TariffConfig::flat(0.25);
         let breakdown = db
-            .query_cost_breakdown(&window(start, end), 3600, "today_import_kwh", &flat, 0.25, 0.0)
+            .query_cost_breakdown(
+                &window(start, end),
+                3600,
+                "today_import_kwh",
+                &flat,
+                0.25,
+                0.0,
+            )
             .unwrap();
         assert!(
             breakdown.iter().all(|c| c.standing_gbp == 0.0),
@@ -4888,7 +4903,14 @@ mod tests {
         let end = local_midnight_secs(4);
         let flat = crate::settings::TariffConfig::flat(0.25);
         let breakdown = db
-            .query_cost_breakdown(&window(start, end), 3600, "today_import_kwh", &flat, 0.25, 54.86)
+            .query_cost_breakdown(
+                &window(start, end),
+                3600,
+                "today_import_kwh",
+                &flat,
+                0.25,
+                54.86,
+            )
             .unwrap();
         // Energy: 3 days × 10 kWh × £0.25 = £7.50 (NOT inflated by the SC).
         assert!(

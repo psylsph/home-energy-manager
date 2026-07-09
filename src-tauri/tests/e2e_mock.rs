@@ -69,11 +69,7 @@ async fn get_json(router: &axum::Router, uri: &str) -> (StatusCode, Value) {
 
 /// Issue a JSON POST and return (status, parsed JSON body).
 #[allow(dead_code)]
-async fn post_json(
-    router: &axum::Router,
-    uri: &str,
-    body: &Value,
-) -> (StatusCode, Value) {
+async fn post_json(router: &axum::Router, uri: &str, body: &Value) -> (StatusCode, Value) {
     let body_bytes = serde_json::to_vec(body).expect("serialise body");
     let resp = router
         .clone()
@@ -100,11 +96,7 @@ async fn post_json(
 }
 
 /// Issue a PUT with a JSON body.
-async fn put_json(
-    router: &axum::Router,
-    uri: &str,
-    body: &Value,
-) -> (StatusCode, Value) {
+async fn put_json(router: &axum::Router, uri: &str, body: &Value) -> (StatusCode, Value) {
     let body_bytes = serde_json::to_vec(body).expect("serialise body");
     let resp = router
         .clone()
@@ -384,7 +376,12 @@ async fn mini_status_seeded_snapshot_round_trips_and_is_no_store() {
 
     let resp = router
         .clone()
-        .oneshot(Request::builder().uri("/api/mini/status").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/api/mini/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .expect("router call");
     assert_eq!(resp.status(), StatusCode::OK);
@@ -424,7 +421,10 @@ async fn mini_page_serves_self_contained_html() {
     let bytes = to_bytes(resp.into_body(), BODY_LIMIT).await.unwrap();
     let html = std::str::from_utf8(&bytes).unwrap();
     // The page must fetch the JSON data source (same origin).
-    assert!(html.contains("/api/mini/status"), "page must reference the JSON endpoint");
+    assert!(
+        html.contains("/api/mini/status"),
+        "page must reference the JSON endpoint"
+    );
     // And render the four KPIs.
     for label in ["Solar", "Home", "Battery", "Grid"] {
         assert!(html.contains(label), "page must label {label}");
@@ -432,7 +432,11 @@ async fn mini_page_serves_self_contained_html() {
     // Self-contained: inline CSS + JS, no external assets to fetch.
     assert!(html.contains("<style>") && html.contains("<script>"));
     // Under the 16KB budget a tiny watch WebView prefers.
-    assert!(bytes.len() < 16 * 1024, "mini page too large: {} bytes", bytes.len());
+    assert!(
+        bytes.len() < 16 * 1024,
+        "mini page too large: {} bytes",
+        bytes.len()
+    );
 }
 
 // ====================================================================
