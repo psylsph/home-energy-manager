@@ -18,9 +18,15 @@ import {
 import { useInverterStore } from '../store/useInverterStore';
 import { isValidIpv4Host } from '../lib/validators';
 
-function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+function Toggle({ checked, onChange, ariaLabel }: { checked: boolean; onChange: (v: boolean) => void; ariaLabel?: string }) {
   return (
-    <div className="relative cursor-pointer" onClick={() => onChange(!checked)}>
+    <div
+      className="relative cursor-pointer"
+      role={ariaLabel ? 'switch' : undefined}
+      aria-label={ariaLabel}
+      aria-checked={ariaLabel ? checked : undefined}
+      onClick={() => onChange(!checked)}
+    >
       <div className={`w-10 h-5 rounded-full transition-colors ${checked ? 'bg-flow-active/40' : 'bg-bg-elevated'}`} />
       <div className={`absolute left-0.5 top-0.5 w-4 h-4 rounded-full transition-all ${checked ? 'translate-x-5 bg-flow-active' : 'bg-text-secondary'}`} />
     </div>
@@ -411,7 +417,7 @@ export default function SettingsPage() {
         }
         setEvcHost(s.evc_host ?? '');
         setEvcPort(s.evc_port ?? 502);
-        setDisableAutoDiscovery(s.disable_auto_discovery ?? false);
+        setDisableAutoDiscovery(s.disable_auto_discovery ?? true);
         setAutostartEnabled(s.autostart_enabled ?? false);
         setApiKey(s.api_key ?? '');
         setApiPort(s.api_port ?? 7338);
@@ -1054,6 +1060,7 @@ export default function SettingsPage() {
           </div>
           <Toggle
             checked={!disableAutoDiscovery}
+            ariaLabel="Enable Auto-Discovery"
             onChange={(v) => {
               setDisableAutoDiscovery(!v);
               apiPost('/api/settings', { disable_auto_discovery: !v })

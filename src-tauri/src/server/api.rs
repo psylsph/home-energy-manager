@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use axum::response::Json;
 use chrono::{Datelike, Duration as ChronoDuration, Local, TimeZone, Timelike};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::inverter::encoder::{ControlCommand, RegisterWrite};
 use crate::inverter::model::{DeviceType, InverterSnapshot};
@@ -1026,7 +1026,9 @@ pub async fn update_settings(
     if let Some(arrays) = body.get("solar_arrays").and_then(|v| v.as_array()) {
         let parsed: Vec<crate::settings::SolarArrayConfig> = arrays
             .iter()
-            .filter_map(|v| serde_json::from_value::<crate::settings::SolarArrayConfig>(v.clone()).ok())
+            .filter_map(|v| {
+                serde_json::from_value::<crate::settings::SolarArrayConfig>(v.clone()).ok()
+            })
             .collect();
         persist.solar_arrays = parsed;
     }
@@ -3386,12 +3388,17 @@ pub async fn get_cosy(State(state): State<Arc<AppState>>) -> (StatusCode, Json<V
 
 /// POST /api/cosy — update cosy charging config.
 pub async fn set_cosy(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
     let enabled = body["enabled"].as_bool().unwrap_or(false);
     let mut app_settings = crate::settings::Settings::load();
+    let previous_agile_scope = crate::settings::agile_scope_for_settings(&app_settings);
     app_settings.cosy_enabled = enabled;
+    if enabled {
+        app_settings.agile_scope = crate::settings::AgileScope::Off;
+        app_settings.agile_enabled = false;
+    }
 
     if let Some(slots) = body["slots"].as_array() {
         app_settings.cosy_slots = slots
@@ -3419,6 +3426,23 @@ pub async fn set_cosy(
         return server_error(&format!("Failed to save: {e}"));
     }
 
+    if enabled && previous_agile_scope != crate::settings::AgileScope::Off {
+        let device_type = latest_device_type(&state).await;
+        let cmd = if device_type.uses_three_phase_schedule_slots() {
+            ControlCommand::ThreePhaseAgileClearActiveSlot
+        } else {
+            ControlCommand::AgileClearActiveSlot
+        };
+        if let Ok(writes) = cmd.encode() {
+            tracing::info!(
+                "Cosy switched on — disabling Agile and clearing its armed slot ({} register writes)",
+                writes.len()
+            );
+            queue_writes(&state, writes).await;
+            state.write_notify.notify_one();
+        }
+    }
+
     ok_response("Cosy config updated")
 }
 
@@ -3433,6 +3457,9 @@ async fn queue_cached_agile_action_for_settings(
 ) {
     use crate::inverter::state_machines::{evaluate_agile_slot, should_write_agile_action};
 
+    if settings.cosy_enabled {
+        return;
+    }
     let scope = crate::settings::agile_scope_for_settings(settings);
     if scope == crate::settings::AgileScope::Off {
         return;
@@ -3533,7 +3560,11 @@ async fn queue_cached_agile_action_for_settings(
 
 pub async fn get_agile(State(_state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let settings = crate::settings::Settings::load();
-    let scope = crate::settings::agile_scope_for_settings(&settings);
+    let scope = if settings.cosy_enabled {
+        crate::settings::AgileScope::Off
+    } else {
+        crate::settings::agile_scope_for_settings(&settings)
+    };
     (
         StatusCode::OK,
         Json(json!({
@@ -3619,6 +3650,10 @@ pub async fn set_agile(
     // scope when both fields disagree.
     app_settings.agile_scope = new_scope;
     app_settings.agile_enabled = new_scope != AgileScope::Off;
+    if scope_update_requested && new_scope != AgileScope::Off {
+        app_settings.cosy_enabled = false;
+        app_settings.cosy_active_persisted = false;
+    }
 
     if let Some(r) = body["region"].as_str() {
         app_settings.agile_region = r.to_string();
@@ -5474,32 +5509,22 @@ mod tests {
                 3,
                 "pause should only toggle Eco Paused registers"
             );
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1)
-            );
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0)
-            );
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 100)
-            );
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1));
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0));
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 100));
             assert!(!writes.iter().any(|w| w.address == HR_ENABLE_CHARGE));
-            assert!(
-                !writes
-                    .iter()
-                    .any(|w| w.address == HR_DISCHARGE_SLOT_1_START)
-            );
-            assert!(
-                !writes
-                    .iter()
-                    .any(|w| w.address == HR_DISCHARGE_SLOT_2_START)
-            );
+            assert!(!writes
+                .iter()
+                .any(|w| w.address == HR_DISCHARGE_SLOT_1_START));
+            assert!(!writes
+                .iter()
+                .any(|w| w.address == HR_DISCHARGE_SLOT_2_START));
         })
         .await;
     }
@@ -5529,11 +5554,9 @@ mod tests {
 
             let _ = unpause_battery(State(state.clone())).await;
             let writes = drain_pending_writes(&state).await;
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 27)
-            );
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 27));
         })
         .await;
     }
@@ -5558,21 +5581,15 @@ mod tests {
                 LoadLimiterState::Idle
             );
             assert!(state.load_limiter_saved.lock().await.is_none());
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1)
-            );
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0)
-            );
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 23)
-            );
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1));
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0));
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 23));
         })
         .await;
     }
@@ -5586,11 +5603,9 @@ mod tests {
             let _ = unpause_battery(State(state.clone())).await;
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 4)
-            );
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 4));
         })
         .await;
     }
@@ -5612,36 +5627,24 @@ mod tests {
                 3,
                 "pause should not clear schedules or force flags"
             );
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1)
-            );
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0)
-            );
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_3PH_BATTERY_SOC_RESERVE && w.value == 100)
-            );
-            assert!(
-                !writes
-                    .iter()
-                    .any(|w| w.address == HR_3PH_DISCHARGE_SLOT_1_START)
-            );
-            assert!(
-                !writes
-                    .iter()
-                    .any(|w| w.address == HR_3PH_FORCE_CHARGE_ENABLE)
-            );
-            assert!(
-                !writes
-                    .iter()
-                    .any(|w| w.address == HR_3PH_FORCE_DISCHARGE_ENABLE)
-            );
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1));
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0));
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_3PH_BATTERY_SOC_RESERVE && w.value == 100));
+            assert!(!writes
+                .iter()
+                .any(|w| w.address == HR_3PH_DISCHARGE_SLOT_1_START));
+            assert!(!writes
+                .iter()
+                .any(|w| w.address == HR_3PH_FORCE_CHARGE_ENABLE));
+            assert!(!writes
+                .iter()
+                .any(|w| w.address == HR_3PH_FORCE_DISCHARGE_ENABLE));
             assert!(!writes.iter().any(|w| w.address == HR_3PH_AC_CHARGE_ENABLE));
         })
         .await;
@@ -5900,17 +5903,13 @@ mod tests {
             let writes = drain_pending_writes(&state).await;
 
             // Configured slots 1-2 must be written.
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_DISCHARGE_SLOT_1_START)
-            );
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_DISCHARGE_SLOT_1_START));
             assert!(writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_1_END));
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_DISCHARGE_SLOT_2_START)
-            );
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_DISCHARGE_SLOT_2_START));
             assert!(writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_2_END));
 
             // Unconfigured slots must NOT be written — they would
@@ -6501,37 +6500,27 @@ mod tests {
             let _ = pause_battery(State(state.clone())).await;
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 100)
-            );
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1)
-            );
-            assert!(
-                !writes
-                    .iter()
-                    .any(|w| w.address == HR_DISCHARGE_SLOT_1_START)
-            );
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 100));
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1));
+            assert!(!writes
+                .iter()
+                .any(|w| w.address == HR_DISCHARGE_SLOT_1_START));
 
             let state = make_state_with_device(DeviceType::ThreePhase).await;
             let _ = pause_battery(State(state.clone())).await;
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_3PH_BATTERY_SOC_RESERVE && w.value == 100)
-            );
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_3PH_BATTERY_SOC_RESERVE && w.value == 100));
             assert!(!writes.iter().any(|w| w.address == HR_BATTERY_SOC_RESERVE));
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1)
-            );
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1));
         })
         .await;
     }
@@ -6552,26 +6541,18 @@ mod tests {
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
             assert_eq!(writes.len(), 3);
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1)
-            );
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0)
-            );
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 100)
-            );
-            assert!(
-                !writes
-                    .iter()
-                    .any(|w| w.address == HR_DISCHARGE_SLOT_1_START)
-            );
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1));
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0));
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 100));
+            assert!(!writes
+                .iter()
+                .any(|w| w.address == HR_DISCHARGE_SLOT_1_START));
         })
         .await;
     }
@@ -6588,26 +6569,18 @@ mod tests {
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
             assert_eq!(writes.len(), 3);
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1)
-            );
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0)
-            );
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 100)
-            );
-            assert!(
-                !writes
-                    .iter()
-                    .any(|w| w.address == HR_DISCHARGE_SLOT_1_START)
-            );
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1));
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_ENABLE_DISCHARGE && w.value == 0));
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 100));
+            assert!(!writes
+                .iter()
+                .any(|w| w.address == HR_DISCHARGE_SLOT_1_START));
         })
         .await;
     }
@@ -9842,6 +9815,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_agile_reports_off_when_cosy_is_enabled() {
+        crate::test_util::with_isolated_config_dir_async(async || {
+            let mut s = crate::settings::Settings::load();
+            s.cosy_enabled = true;
+            s.agile_scope = AgileScope::Full;
+            s.agile_enabled = true;
+            s.save().unwrap();
+
+            let (_status, Json(body)) = get_agile(State(test_state())).await;
+            assert_eq!(body["enabled"], serde_json::json!(false));
+            assert_eq!(body["scope"], serde_json::json!("off"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_cosy_enabled_disables_agile_and_queues_clear() {
+        crate::test_util::with_isolated_config_dir_async(async || {
+            let mut s = crate::settings::Settings::load();
+            s.agile_scope = AgileScope::Full;
+            s.agile_enabled = true;
+            s.save().unwrap();
+
+            let state = test_state();
+            let body = serde_json::json!({ "enabled": true, "slots": [] });
+            let (status, _) = set_cosy(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let s = crate::settings::Settings::load();
+            assert!(s.cosy_enabled);
+            assert_eq!(s.agile_scope, AgileScope::Off);
+            assert!(!s.agile_enabled);
+
+            let writes: Vec<crate::inverter::encoder::RegisterWrite> = state
+                .pending_writes
+                .lock()
+                .await
+                .clone()
+                .into_iter()
+                .flatten()
+                .collect();
+            let addresses: Vec<u16> = writes.iter().map(|w| w.address).collect();
+            assert!(addresses.contains(&96), "clear must disable charge (HR 96)");
+            assert!(addresses.contains(&59), "clear must disable discharge (HR 59)");
+            assert!(addresses.contains(&27), "clear must restore eco mode (HR 27)");
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn set_agile_with_explicit_scope_persists() {
         crate::test_util::with_isolated_config_dir_async(async || {
             // Send the new explicit shape; verify it lands in settings.
@@ -9860,6 +9883,27 @@ mod tests {
             assert_eq!(s.agile_region, "C");
             assert!((s.agile_charge_threshold - 8.5).abs() < 1e-9);
             assert!((s.agile_discharge_threshold - 25.0).abs() < 1e-9);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_agile_enabled_disables_cosy() {
+        crate::test_util::with_isolated_config_dir_async(async || {
+            let mut s = crate::settings::Settings::load();
+            s.cosy_enabled = true;
+            s.cosy_active_persisted = true;
+            s.save().unwrap();
+
+            let body = serde_json::json!({ "scope": "full" });
+            let (status, _) = set_agile(State(test_state()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let s = crate::settings::Settings::load();
+            assert!(!s.cosy_enabled);
+            assert!(!s.cosy_active_persisted);
+            assert_eq!(s.agile_scope, AgileScope::Full);
+            assert!(s.agile_enabled);
         })
         .await;
     }

@@ -1716,7 +1716,7 @@ export default function ControlPage() {
           enabled?: boolean;
           scope?: 'off' | 'full' | 'charge_only' | 'discharge_only';
         }>('/api/agile');
-        if (res.ok) {
+        if (res.ok && !snapshotCosyEnabled) {
           if (res.scope === 'charge_only') {
             setLocalChargeOverride('agile_charge');
           } else if (res.scope === 'discharge_only') {

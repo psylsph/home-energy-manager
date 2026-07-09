@@ -870,7 +870,7 @@ pub struct Settings {
     pub evc_port: u16,
 
     /// When true, skip auto-discovery of the dongle on persistent connection failure.
-    #[serde(default)]
+    #[serde(default = "default_disable_auto_discovery")]
     pub disable_auto_discovery: bool,
 
     /// Full import tariff config with peak/off-peak rates and times.
@@ -987,6 +987,10 @@ fn default_agile_region() -> String {
 
 fn default_api_port() -> u16 {
     7338
+}
+
+fn default_disable_auto_discovery() -> bool {
+    true
 }
 
 fn default_agile_charge_threshold() -> f64 {
@@ -1441,22 +1445,22 @@ mod tests {
                     target_soc: 4,
                 },
             ]),
-        // Issue #110: solar array capacities must round-trip exactly.
-        pv1_rated_kw: 6.0,
-        pv2_rated_kw: 4.2,
-        solar_arrays: vec![
-            SolarArrayConfig {
-                meter_address: 1,
-                name: "East roof".to_string(),
-                rated_kw: 6.0,
-            },
-            SolarArrayConfig {
-                meter_address: 2,
-                name: String::new(),
-                rated_kw: 4.2,
-            },
-        ],
-    };
+            // Issue #110: solar array capacities must round-trip exactly.
+            pv1_rated_kw: 6.0,
+            pv2_rated_kw: 4.2,
+            solar_arrays: vec![
+                SolarArrayConfig {
+                    meter_address: 1,
+                    name: "East roof".to_string(),
+                    rated_kw: 6.0,
+                },
+                SolarArrayConfig {
+                    meter_address: 2,
+                    name: String::new(),
+                    rated_kw: 4.2,
+                },
+            ],
+        };
         let json = serde_json::to_string(&s).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.host, "10.0.0.50");
@@ -1609,6 +1613,30 @@ mod tests {
         // upgrade path is silent — see the dedicated
         // `legacy_settings_without_discharge_slots_backup_loads` test.
         assert_eq!(decoded.discharge_slots_backup, None);
+    }
+
+    /// `settings.json` written before auto-discovery became opt-in must
+    /// load with auto-discovery disabled. This prevents upgraded installs
+    /// with older settings files from unexpectedly scanning the LAN and
+    /// switching dongle IPs after repeated connection failures.
+    #[test]
+    fn legacy_settings_without_auto_discovery_flag_defaults_disabled() {
+        let legacy = r#"{
+            "host": "192.168.1.50",
+            "port": 8899,
+            "serial": "",
+            "poll_interval": 60,
+            "auto_connect": true,
+            "import_tariff": 0.285,
+            "export_tariff": 0.15,
+            "hidden_panels": [],
+            "evc_host": ""
+        }"#;
+        let decoded: Settings = serde_json::from_str(legacy).unwrap();
+        assert!(
+            decoded.disable_auto_discovery,
+            "missing disable_auto_discovery must default to true (auto-discovery off)"
+        );
     }
 
     /// `settings.json` written before the discharge-slot backup feature
