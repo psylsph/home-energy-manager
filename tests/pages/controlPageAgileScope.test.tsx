@@ -441,6 +441,32 @@ describe('<ControlPage/> — Agile scope UI', () => {
     expect(select.value).toBe('agile');
   });
 
+  it('keeps Cosy selected when stale Agile settings are also enabled', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ cosy_enabled: true, agile_scope: 'full', agile_enabled: true }),
+    });
+    vi.mocked(apiGet).mockImplementation(async (path: string) => {
+      if (path === '/api/agile')
+        return { ok: true, enabled: true, scope: 'full', region: 'A', charge_threshold: 10, discharge_threshold: 30 };
+      if (path === '/api/cosy')
+        return {
+          ok: true,
+          enabled: true,
+          slots: Array.from({ length: 3 }, () => emptySlot()),
+        };
+      return { ok: true };
+    });
+
+    const { default: ControlPage } = await import('../../src/pages/ControlPage');
+    render(<ControlPage />);
+
+    const allCombos = await screen.findAllByRole('combobox');
+    const select = allCombos[0] as HTMLSelectElement;
+    await waitFor(() => {
+      expect(select.value).toBe('cosy');
+    });
+  });
+
   it('bootstraps chargeMode to standard when snapshot.agile_scope is off', async () => {
     useInverterStore.setState({ snapshot: makeSnapshot() });
     const { default: ControlPage } = await import('../../src/pages/ControlPage');

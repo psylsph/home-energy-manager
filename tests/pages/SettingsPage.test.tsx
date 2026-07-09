@@ -39,7 +39,7 @@ function defaultSettings(overrides: SettingsShape = {}): SettingsShape {
     http_port: 7337,
     evc_host: '',
     evc_port: 502,
-    disable_auto_discovery: false,
+    disable_auto_discovery: true,
     autostart_enabled: false,
     api_key: '',
     api_port: 7338,
@@ -199,6 +199,24 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       render(<SettingsPage />);
       const input = await screen.findByPlaceholderText('e.g. 54.86') as HTMLInputElement;
       expect(input.value).toBe('54.86');
+    });
+
+    it('defaults auto-discovery to off when older settings omit the flag', async () => {
+      mountApiMocks();
+      apiGetMock.mockImplementation(async (path: string) => {
+        if (path === '/api/settings') {
+          const settings = defaultSettings();
+          delete settings.disable_auto_discovery;
+          return { ok: true, data: settings };
+        }
+        if (path === '/api/alerts') return { ok: true, data: { config: alertConfig() } };
+        if (path === '/api/weather') return { ok: true, data: { config: {} } };
+        if (path === '/api/status') return { ok: true, lan_ip: null, clients: [] };
+        return { ok: true, data: {} };
+      });
+      render(<SettingsPage />);
+      const toggle = await screen.findByRole('switch', { name: 'Enable Auto-Discovery' });
+      expect(toggle.getAttribute('aria-checked')).toBe('false');
     });
   });
 

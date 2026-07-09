@@ -496,7 +496,9 @@ fn device_type_from_serial(serial: &str) -> Option<DeviceType> {
 /// Standard block set to use for the warmup read after a fresh TCP connect.
 /// Falls back to the full `STANDARD_POLL_BLOCKS` when no prefill is
 /// available (empty serial, or a serial that doesn't match a known prefix).
-fn warmup_blocks_for(prefilled: Option<&DeviceType>) -> &'static [crate::modbus::registers::RegisterBlock] {
+fn warmup_blocks_for(
+    prefilled: Option<&DeviceType>,
+) -> &'static [crate::modbus::registers::RegisterBlock] {
     use crate::modbus::client::preview_standard_blocks;
     preview_standard_blocks(None, prefilled)
 }
@@ -2282,7 +2284,12 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 // native schedule mechanism run the rest.
                                 {
                                     let settings = &poll_settings;
-                                    let scope = crate::settings::agile_scope_for_settings(settings);
+                                    let configured_scope = crate::settings::agile_scope_for_settings(settings);
+                                    let scope = if settings.cosy_enabled {
+                                        crate::settings::AgileScope::Off
+                                    } else {
+                                        configured_scope
+                                    };
                                     let action = if scope == crate::settings::AgileScope::Off {
                                         // Scope off — disarm any preloaded slot.
                                         AgileSlotAction::Idle
@@ -3266,7 +3273,11 @@ pub(crate) fn compute_solar_arrays(
         if !(1..=8).contains(&arr.meter_address) {
             continue;
         }
-        if let Some(meter) = snapshot.meters.iter().find(|m| m.address == arr.meter_address) {
+        if let Some(meter) = snapshot
+            .meters
+            .iter()
+            .find(|m| m.address == arr.meter_address)
+        {
             out.push(SolarArraySummary {
                 source: SolarArraySource::Meter,
                 name: arr.name.clone(),
@@ -3322,7 +3333,10 @@ mod tests {
 
     #[test]
     fn solar_arrays_empty_when_nothing_configured() {
-        let snap = InverterSnapshot { pv1_power: 3000, ..Default::default() };
+        let snap = InverterSnapshot {
+            pv1_power: 3000,
+            ..Default::default()
+        };
         let settings = Settings::default();
         // No rated capacities configured → nothing surfaced. A default
         // install is unaffected until the user opts in via Settings.
@@ -3360,8 +3374,14 @@ mod tests {
         // A negative DC power (shouldn't happen for generation, but the
         // dongle can glitch) must not surface as a huge unsigned value via
         // `as u32` wraparound. Clamp at 0.
-        let snap = InverterSnapshot { pv1_power: -50, ..Default::default() };
-        let settings = Settings { pv1_rated_kw: 6.0, ..Default::default() };
+        let snap = InverterSnapshot {
+            pv1_power: -50,
+            ..Default::default()
+        };
+        let settings = Settings {
+            pv1_rated_kw: 6.0,
+            ..Default::default()
+        };
         let arrays = compute_solar_arrays(&snap, &settings);
         assert_eq!(arrays.len(), 1);
         assert_eq!(arrays[0].power_w, 0);
@@ -3378,8 +3398,16 @@ mod tests {
         };
         let settings = Settings {
             solar_arrays: vec![
-                SolarArrayConfig { meter_address: 1, name: "East roof".into(), rated_kw: 6.0 },
-                SolarArrayConfig { meter_address: 2, name: String::new(), rated_kw: 4.2 },
+                SolarArrayConfig {
+                    meter_address: 1,
+                    name: "East roof".into(),
+                    rated_kw: 6.0,
+                },
+                SolarArrayConfig {
+                    meter_address: 2,
+                    name: String::new(),
+                    rated_kw: 4.2,
+                },
             ],
             ..Default::default()
         };
@@ -3405,9 +3433,17 @@ mod tests {
         let settings = Settings {
             solar_arrays: vec![
                 // 0x00 is the synthetic built-in grid CT — never a solar array.
-                SolarArrayConfig { meter_address: 0, name: "grid".into(), rated_kw: 5.0 },
+                SolarArrayConfig {
+                    meter_address: 0,
+                    name: "grid".into(),
+                    rated_kw: 5.0,
+                },
                 // 9 is outside the 1-8 clamp range.
-                SolarArrayConfig { meter_address: 9, name: "bogus".into(), rated_kw: 5.0 },
+                SolarArrayConfig {
+                    meter_address: 9,
+                    name: "bogus".into(),
+                    rated_kw: 5.0,
+                },
             ],
             ..Default::default()
         };
@@ -3521,17 +3557,25 @@ mod tests {
             Some(DeviceType::Gateway),
             "lowercase prefix must still match (users sometimes retype the serial)"
         );
-        assert_eq!(
-            device_type_from_serial("GWABC"),
-            Some(DeviceType::Gateway)
-        );
+        assert_eq!(device_type_from_serial("GWABC"), Some(DeviceType::Gateway));
         // Anything that isn't a GW prefix is left to the decoder.
         assert_eq!(device_type_from_serial("SN-12345"), None);
         assert_eq!(device_type_from_serial(""), None);
-        assert_eq!(device_type_from_serial("G"), None, "single-letter prefix is too short");
-        assert_eq!(device_type_from_serial("  "), None, "whitespace-only is not a serial");
+        assert_eq!(
+            device_type_from_serial("G"),
+            None,
+            "single-letter prefix is too short"
+        );
+        assert_eq!(
+            device_type_from_serial("  "),
+            None,
+            "whitespace-only is not a serial"
+        );
         // Leading/trailing whitespace from copy-paste should not break the match.
-        assert_eq!(device_type_from_serial("  GW2529A127\n"), Some(DeviceType::Gateway));
+        assert_eq!(
+            device_type_from_serial("  GW2529A127\n"),
+            Some(DeviceType::Gateway)
+        );
     }
 
     /// The warmup read after a fresh TCP connect should mirror the standard
@@ -3541,7 +3585,9 @@ mod tests {
     /// the full single-phase set.
     #[test]
     fn warmup_blocks_reflect_serial_prefill() {
-        use crate::modbus::registers::{RegisterBlock, RegisterType, STANDARD_POLL_BLOCKS, STANDARD_POLL_BLOCKS_3PH};
+        use crate::modbus::registers::{
+            RegisterBlock, RegisterType, STANDARD_POLL_BLOCKS, STANDARD_POLL_BLOCKS_3PH,
+        };
 
         // Content-based comparison: `RegisterBlock` doesn't derive `PartialEq`
         // and fat-pointer addresses can differ between function-return and
@@ -3566,7 +3612,9 @@ mod tests {
         // Empty / unknown serial → full single-phase set.
         let unknown = warmup_blocks_for(None);
         assert!(eq_set(unknown, STANDARD_POLL_BLOCKS));
-        assert!(unknown.iter().any(|b| b.register_type == RegisterType::Input));
+        assert!(unknown
+            .iter()
+            .any(|b| b.register_type == RegisterType::Input));
 
         // Sanity: a non-Gateway prefilled type with the same gate condition
         // (e.g. three-phase) also picks the lean set. (Doesn't currently

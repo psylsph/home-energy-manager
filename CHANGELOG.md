@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.59.1] - 2026-07-09
+
+### Fixed
+
+- **Auto-Discovery now starts disabled unless you explicitly turn it on.** Fresh installs and older settings files no longer opt into LAN scanning after repeated connection failures, avoiding surprise network scans or accidental dongle IP switching while the remaining connection-drop report is investigated. (issue #191)
+
+- **Cosy and Agile charging modes no longer fight each other on startup.** Choosing Cosy now clears any stale Agile mode, and Agile will not overwrite Cosy charge slots on Gen2 Hybrid and other single-phase inverters, so the app should stop flipping the Charging Mode selector back to Agile and leaving charging disabled. (issue #191)
+
 ## [0.59.0] - 2026-07-07
 
 ### Added
