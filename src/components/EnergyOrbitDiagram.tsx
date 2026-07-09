@@ -626,6 +626,7 @@ function EnergyOrbitDiagramInner({
   const orbitMaskId = useId().replace(/:/g, '');
   const showFlowStatusWords = useInverterStore((st) => st.showFlowStatusWords);
   const noise = useInverterStore((st) => st.visualNoiseThreshold);
+  const gridMeterAddress = useInverterStore((st) => st.gridMeterAddress);
   // Reduced-motion users get static flow dots (no SMIL animation).
   const reduced =
     typeof window !== 'undefined' &&
@@ -650,6 +651,7 @@ function EnergyOrbitDiagramInner({
     evcLabel,
     evcCableLabel,
     evcSessionEnergyKwh,
+    gridMeterAddress,
   });
 
   const positions = satellitePositions(showEvc);

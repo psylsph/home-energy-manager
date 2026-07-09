@@ -10,6 +10,7 @@ import {
 } from 'recharts';
 import { fetchHistory } from '../lib/api';
 import { removeSpikes } from '../lib/chartSeries';
+import { solarChartNameplateCeilingFromArrays, SOLAR_PV1_COLOR as PV1_COLOR, SOLAR_PV2_COLOR as PV2_COLOR } from '../lib/solarArrays';
 import {
   getHistoryChartGridProps,
   formatHistoryXAxisTick,
@@ -30,8 +31,6 @@ import type { TimePoint } from '../lib/types';
 // renders only when the solar history has any non-zero pv2_power sample,
 // matching the page's live auto-detect.
 
-const PV1_COLOR = '#F59E0B';
-const PV2_COLOR = '#3B82F6';
 const PV1_FIELD = 'pv1_power';
 const PV2_FIELD = 'pv2_power';
 
@@ -78,6 +77,10 @@ export default function SolarPowerChart() {
   const yLock = useInverterStore((state) => state.panelGraphsYLock);
   const yLockMax = useInverterStore((state) => state.panelGraphsYLockMax);
   const setYLockMax = useInverterStore((state) => state.setPanelGraphsYLockMax);
+  // DC-string nameplate capacities (issue #192): drive a static Y-axis
+  // ceiling so the chart is scaled to "how full are the panels", not to
+  // whatever the largest sample happens to be.
+  const solarArrays = useInverterStore((state) => state.snapshot?.solar_arrays);
   const range = scale;
   const rolling = isRollingHistoryRange(range);
   const now = useNow();
@@ -127,10 +130,24 @@ export default function SolarPowerChart() {
   const domain = getHistoryRangeDomain(range, 0, now);
   const ticks = getHistoryXAxisTicks(range, domain);
   const hasData = rows.length > 0;
-  // Locked Y-axis ceiling: compute from data, share via store so all range
-  // switches use the highest ceiling seen this session.
+
+  // Static Y-axis ceiling from the configured DC-string nameplate (issue
+  // #192): the higher of the two PV string sizes (not their sum), so each
+  // string is read against a single string's peak. Takes precedence over the
+  // data-driven Y-Lock below — the ceiling no longer depends on observed
+  // samples, so it's stable across Today/24h range switches by construction.
+  // `null` when no DC-string capacity is configured → fall back to Y-Lock.
+  const nameplateCeilingW = useMemo(
+    () => solarChartNameplateCeilingFromArrays(solarArrays),
+    [solarArrays],
+  );
+
+  // Y-axis domain: nameplate ceiling first (issue #192), else the shared
+  // data-driven Y-Lock ceiling when the user has it enabled.
   let yDomain: [number, number] | undefined;
-  if (yLock && rows.length > 0) {
+  if (nameplateCeilingW != null && rows.length > 0) {
+    yDomain = [0, nameplateCeilingW];
+  } else if (yLock && rows.length > 0) {
     const ceiling = computeYMax(rows, hasPv2);
     const shared = Math.max(yLockMax, ceiling);
     if (shared > yLockMax) setYLockMax(shared);

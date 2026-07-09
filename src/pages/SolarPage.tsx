@@ -1,12 +1,12 @@
 import { useInverterStore } from '../store/useInverterStore';
 import { formatPower, formatEnergy, formatVoltage, formatCurrent } from '../lib/format';
-import { percentOfRated, arrayLabel, formatPercent } from '../lib/solarArrays';
+import { percentOfRated, arrayLabel, formatPercent, solarArrayColor, SOLAR_PV1_COLOR, SOLAR_PV2_COLOR } from '../lib/solarArrays';
 import SolarPowerChart from '../components/SolarPowerChart';
 import AwaitingConnection from '../components/AwaitingConnection';
 import type { SolarArraySummary } from '../lib/types';
 
 function pvColor(pv: number): string {
-  return pv === 1 ? '#F59E0B' : '#3B82F6';
+  return pv === 1 ? SOLAR_PV1_COLOR : SOLAR_PV2_COLOR;
 }
 
 export default function SolarPage() {
@@ -119,6 +119,9 @@ function SolarArrayCard({ arr }: { arr: SolarArraySummary }) {
   // Clamp the bar fill at 100% for display; the numeric % (which can
   // exceed 100) is shown alongside so the real figure is never hidden.
   const barPct = pct == null ? 0 : Math.min(100, Math.max(0, pct));
+  // Colour matches the PV Power graph (PV1 amber, PV2 blue) so a string
+  // reads the same in the card and the trend chart (issue #192).
+  const color = solarArrayColor(arr.source);
   return (
     <div className="bg-bg-elevated rounded-xl p-4 flex flex-col gap-2">
       <div className="flex items-center justify-between">
@@ -128,7 +131,7 @@ function SolarArrayCard({ arr }: { arr: SolarArraySummary }) {
         )}
       </div>
       <div className="flex items-baseline gap-2">
-        <span className="text-2xl font-bold font-mono text-amber-400">{formatPower(arr.power_w)}</span>
+        <span className="text-2xl font-bold font-mono" style={{ color }}>{formatPower(arr.power_w)}</span>
         {pct != null && (
           <span className="text-sm text-text-secondary">{formatPercent(pct)} of max</span>
         )}
@@ -136,8 +139,8 @@ function SolarArrayCard({ arr }: { arr: SolarArraySummary }) {
       {hasRating && (
         <div className="w-full h-2 rounded-full bg-white/10 overflow-hidden" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct == null ? 0 : Math.round(pct)}>
           <div
-            className="h-full rounded-full bg-amber-400 transition-[width] duration-500"
-            style={{ width: `${barPct}%` }}
+            className="h-full rounded-full transition-[width] duration-500"
+            style={{ width: `${barPct}%`, backgroundColor: color }}
           />
         </div>
       )}

@@ -168,6 +168,33 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
     expect(flowById(imp, 'export')).toBeUndefined();
   });
 
+  it('draws the grid→home import spoke while the battery is discharging (issue #192)', () => {
+    // Reported scenario: solar 500W, battery discharging 4.6kW, home 6kW,
+    // grid importing 910W. The import spoke must still appear — the
+    // battery is discharging, so none of the grid inflow is feeding the
+    // battery. Regression: charge-attribution used absBattery ungated,
+    // so a discharging battery's 4.6kW was mistaken for charge wattage
+    // and `gridPortionToBattery` swallowed the entire 910W import,
+    // hiding the red grid→home line.
+    const vm = buildEnergyFlows(snap({
+      solar_power: 500,
+      battery_state: 'discharging',
+      battery_power: 4600,
+      home_power: 6000,
+      grid_power: -910,
+    }));
+    const imp = flowById(vm, 'import');
+    expect(imp).toBeDefined();
+    expect(imp!.from).toBe('grid');
+    expect(imp!.to).toBe('home');
+    expect(imp!.watts).toBe(910);
+    expect(imp!.color).toBe(FLOW_COLORS.grid); // red
+    // The battery is discharging to the home, not charging from the grid,
+    // so there must be no grid→battery charge spoke.
+    expect(flowById(vm, 'grid_charge')).toBeUndefined();
+    expect(flowById(vm, 'discharge')).toBeDefined();
+  });
+
   it('uses battery_state (not sign alone) to pick charge vs discharge direction', () => {
     // battery_state drives direction; battery_power magnitude is the watts.
     // charging → home→battery (charge). Node value is the plain magnitude;
@@ -355,6 +382,100 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Simultaneous discharge + import — the seam between the #155 (discharge)
+// and #170 (charge attribution) lanes. Each lane was tested in isolation;
+// their overlap (a discharging battery while the grid imports) was the blind
+// spot that hid the import spoke. These pin the interaction space.
+// ---------------------------------------------------------------------------
+describe('buildEnergyFlows — simultaneous discharge + import (issue #192 seam)', () => {
+  /** Sum of wattage on spokes ending at home — the energy actually delivered
+   *  to the house. For discharging scenarios (no charge spokes) this must
+   *  reconcile with home_power. */
+  const wattsIntoHome = (vm: ReturnType<typeof buildEnergyFlows>): number =>
+    vm.flows.filter((f) => f.to === 'home').reduce((s, f) => s + f.watts, 0);
+
+  it('shows solar + battery + grid all feeding home, balanced', () => {
+    // Solar 1kW, battery discharging 2kW, home 4kW, grid importing 1kW.
+    // All three sources contribute; no charge spokes (battery is discharging).
+    const vm = buildEnergyFlows(snap({
+      solar_power: 1000,
+      battery_state: 'discharging',
+      battery_power: 2000,
+      home_power: 4000,
+      grid_power: -1000,
+    }));
+    expect(flowById(vm, 'solar')!.watts).toBe(1000);
+    expect(flowById(vm, 'discharge')!.watts).toBe(2000);
+    const imp = flowById(vm, 'import');
+    expect(imp).toBeDefined();
+    expect(imp!.watts).toBe(1000);
+    expect(imp!.color).toBe(FLOW_COLORS.grid);
+    // No charge spokes — the battery is discharging, not charging.
+    expect(flowById(vm, 'grid_charge')).toBeUndefined();
+    expect(flowById(vm, 'solar_charge')).toBeUndefined();
+    expect(flowById(vm, 'discharge_to_grid')).toBeUndefined();
+    // Energy delivered to home reconciles with consumption.
+    expect(wattsIntoHome(vm)).toBe(4000);
+  });
+
+  it('shows the full import when the battery discharge is small (no understatement)', () => {
+    // Battery discharging only 500W while the grid imports 3kW to cover a
+    // 3.5kW load. Before the fix the 500W discharge magnitude was mistaken
+    // for charge wattage and clipped 500W off the import spoke (showing
+    // 2.5kW instead of 3kW). The import must now read its full wattage.
+    const vm = buildEnergyFlows(snap({
+      battery_state: 'discharging',
+      battery_power: 500,
+      home_power: 3500,
+      grid_power: -3000,
+    }));
+    expect(flowById(vm, 'discharge')!.watts).toBe(500);
+    expect(flowById(vm, 'import')!.watts).toBe(3000);
+    expect(flowById(vm, 'grid_charge')).toBeUndefined();
+    expect(wattsIntoHome(vm)).toBe(3500);
+  });
+
+  it('shows full import with no solar, just battery + grid (two sources)', () => {
+    // Overnight / overcast: no solar, battery 2kW discharge, grid imports
+    // 1kW to make up a 3kW load. Minimal two-source case.
+    const vm = buildEnergyFlows(snap({
+      battery_state: 'discharging',
+      battery_power: 2000,
+      home_power: 3000,
+      grid_power: -1000,
+    }));
+    expect(flowById(vm, 'solar')).toBeUndefined();
+    expect(flowById(vm, 'discharge')!.watts).toBe(2000);
+    expect(flowById(vm, 'import')!.watts).toBe(1000);
+    expect(flowById(vm, 'grid_charge')).toBeUndefined();
+    expect(wattsIntoHome(vm)).toBe(3000);
+  });
+
+  it('still splits charge attribution correctly when the battery IS charging (gate does not over-correct)', () => {
+    // Counterpart: a genuinely charging battery while importing must keep
+    // the #170 source-attribution split — grid_charge carries the battery
+    // portion, the import spoke carries only the home-direct remainder.
+    // solar 1kW, battery charging 2.5kW, home 0.5kW, grid importing 2kW.
+    const vm = buildEnergyFlows(snap({
+      solar_power: 1000,
+      battery_state: 'charging',
+      battery_power: -2500,
+      home_power: 500,
+      grid_power: -2000,
+    }));
+    expect(flowById(vm, 'solar_charge')!.watts).toBe(1000);
+    expect(flowById(vm, 'grid_charge')!.watts).toBe(1500);
+    // Import spoke = grid inflow minus the grid-fed charge portion.
+    expect(flowById(vm, 'import')!.watts).toBe(500);
+    // Everything leaving the grid reconciles with the metered inflow.
+    const leavingGrid = vm.flows
+      .filter((f) => f.from === 'grid')
+      .reduce((s, f) => s + f.watts, 0);
+    expect(leavingGrid).toBe(2000);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Noise threshold gating
 // ---------------------------------------------------------------------------
 
@@ -385,6 +506,61 @@ describe('buildEnergyFlows — noise threshold', () => {
   it('clamps sub-threshold node values to "0W"', () => {
     const vm = buildEnergyFlows(snap({ solar_power: 5 }));
     expect(vm.nodes.find((n) => n.id === 'solar')!.value).toBe('0W');
+  });
+
+  it('appends the overall solar % next to the Solar kW value when DC capacity is configured (issue #192)', () => {
+    const vm = buildEnergyFlows(snap({
+      solar_power: 6000,
+      solar_arrays: [
+        { source: 'pv1', name: '', power_w: 3000, rated_kw: 4, today_kwh: null, meter_address: null },
+        { source: 'pv2', name: '', power_w: 3000, rated_kw: 4, today_kwh: null, meter_address: null },
+      ],
+    }));
+    // 6 kW from 8 kWp total → 75%.
+    expect(vm.nodes.find((n) => n.id === 'solar')!.value).toBe('6.0kW (75%)');
+  });
+
+  it('omits the solar % when no DC-string capacity is configured', () => {
+    const vm = buildEnergyFlows(snap({ solar_power: 6000 }));
+    expect(vm.nodes.find((n) => n.id === 'solar')!.value).toBe('6.0kW');
+  });
+
+  it('shows measured grid amps instead of frequency when a grid CT meter exists (issue #192)', () => {
+    const vm = buildEnergyFlows(snap({
+      grid_voltage: 241,
+      meters: [{
+        address: 0x00, v_phase_1: 241, v_phase_2: 0, v_phase_3: 0,
+        i_phase_1: 0, i_phase_2: 0, i_phase_3: 0, i_total: 28.3,
+        p_active_phase_1: 0, p_active_phase_2: 0, p_active_phase_3: 0,
+        p_active_total: 0, p_reactive_total: 0, p_apparent_total: 0,
+        pf_total: 0, frequency: 50, e_import_active_kwh: 0, e_export_active_kwh: 0,
+      }],
+    }));
+    expect(vm.nodes.find((n) => n.id === 'grid')!.unit).toBe('241.0V/28.3A');
+  });
+
+  it('keeps grid frequency when no grid CT meter is present (single-phase)', () => {
+    const vm = buildEnergyFlows(snap({ grid_voltage: 241, grid_frequency: 50 }));
+    expect(vm.nodes.find((n) => n.id === 'grid')!.unit).toBe('241.0V/50.00Hz');
+  });
+
+  it('reads grid amps from a designated external CT meter (AC-coupled, issue #192)', () => {
+    // AC-coupled: no 0x00 built-in meter, so the user designates their grid
+    // CT address (here 0x01) via Settings. The wheel reads that meter's amps.
+    const vm = buildEnergyFlows(
+      snap({
+        grid_voltage: 241,
+        meters: [{
+          address: 0x01, v_phase_1: 241, v_phase_2: 0, v_phase_3: 0,
+          i_phase_1: 0, i_phase_2: 0, i_phase_3: 0, i_total: 41.2,
+          p_active_phase_1: 0, p_active_phase_2: 0, p_active_phase_3: 0,
+          p_active_total: 0, p_reactive_total: 0, p_apparent_total: 0,
+          pf_total: 0, frequency: 50, e_import_active_kwh: 0, e_export_active_kwh: 0,
+        }],
+      }),
+      { gridMeterAddress: 0x01 },
+    );
+    expect(vm.nodes.find((n) => n.id === 'grid')!.unit).toBe('241.0V/41.2A');
   });
 
   it('exposes battery SOC as a node ring percentage for the radial diagram', () => {

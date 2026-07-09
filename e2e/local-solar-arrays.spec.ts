@@ -176,7 +176,7 @@ test.describe('Settings - Solar Arrays (issue #110)', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Solar page — % of max (issue #110)', () => {
-  test.configure({ mode: 'serial' });
+  test.describe.configure({ mode: 'serial' });
 
   test.beforeAll(async ({ baseUrl }) => {
     // Set a rated kWp so pv1_pct / pv2_pct are populated.
@@ -236,7 +236,7 @@ test.describe('Solar page — % of max (issue #110)', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('History → Solar — PV % of Rated chart (issue #110)', () => {
-  test.configure({ mode: 'serial' });
+  test.describe.configure({ mode: 'serial' });
 
   test.beforeAll(async ({ baseUrl }) => {
     await patchSettings(baseUrl, { pv1_rated_kw: 5, pv2_rated_kw: 3 });
@@ -271,7 +271,7 @@ test.describe('History → Solar — PV % of Rated chart (issue #110)', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('API — pv1_pct / pv2_pct in snapshot (issue #110)', () => {
-  test.configure({ mode: 'serial' });
+  test.describe.configure({ mode: 'serial' });
 
   test.beforeAll(async ({ baseUrl }) => {
     await patchSettings(baseUrl, { pv1_rated_kw: 5, pv2_rated_kw: 3 });

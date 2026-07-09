@@ -122,6 +122,14 @@ interface InverterState {
    * value rounds to "0W". Default: 20W.
    */
   visualNoiseThreshold: number;
+  /**
+   * Which CT meter to read grid current (amps) from on the energy wheel
+   * (issue #192). `0` = the inverter's built-in grid CT (the synthetic 0x00
+   * meter on three-phase / HV models); `1`-`9` = an external CT clamp
+   * address for AC-coupled systems whose grid is measured by an external
+   * CT. Persisted to localStorage so the choice survives reloads.
+   */
+  gridMeterAddress: number;
   setSnapshot: (snapshot: InverterSnapshot) => void;
   clearSnapshot: () => void;
   setConnection: (state: ConnectionState, host?: string, connectedSince?: number | null) => void;
@@ -170,6 +178,7 @@ interface InverterState {
   resetEvc: () => void;
   setShowFlowStatusWords: (enabled: boolean) => void;
   setVisualNoiseThreshold: (threshold: number) => void;
+  setGridMeterAddress: (address: number) => void;
 }
 
 function loadDeveloperMode(): boolean {
@@ -281,6 +290,20 @@ function loadVisualNoiseThreshold(): number {
   return 20;
 }
 
+function loadGridMeterAddress(): number {
+  try {
+    const stored = localStorage.getItem('gridMeterAddress');
+    if (stored !== null) {
+      const n = Number(stored);
+      // Any non-negative address is accepted — an address with no matching
+      // meter simply yields no amps (the lookup returns null), so a stale
+      // or garbage value can't break the diagram.
+      if (Number.isFinite(n) && n >= 0) return n;
+    }
+  } catch { /* ignore */ }
+  return 0; // auto: built-in grid CT (0x00) on three-phase / HV, else lowest external clamp
+}
+
 function loadGridLineWeight(): GridLineWeight {
   try {
     const stored = localStorage.getItem('gridLineWeight');
@@ -333,6 +356,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   panelGraphsYLockMax: 0,
   showFlowStatusWords: loadShowFlowStatusWords(),
   visualNoiseThreshold: loadVisualNoiseThreshold(),
+  gridMeterAddress: loadGridMeterAddress(),
   gridLineWeight: loadGridLineWeight(),
   pendingDischargeSlots: loadPendingDischargeSlots(),
   evcHost: '',
@@ -406,6 +430,12 @@ export const useInverterStore = create<InverterState>((set) => ({
       localStorage.setItem('visualNoiseThreshold', String(threshold));
     } catch { /* ignore */ }
     set({ visualNoiseThreshold: threshold });
+  },
+  setGridMeterAddress: (address) => {
+    try {
+      localStorage.setItem('gridMeterAddress', String(address));
+    } catch { /* ignore */ }
+    set({ gridMeterAddress: address });
   },
   setGridLineWeight: (weight) => {
     // Defensive: the setter takes a `GridLineWeight`, so the type system

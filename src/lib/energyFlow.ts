@@ -43,6 +43,8 @@ import {
   formatTemp,
   formatSessionEnergy,
 } from './format';
+import { solarOverallPercent } from './solarArrays';
+import { gridMeterCurrentA, GRID_CT_AUTO } from './meters';
 
 /** True when a flow with the given id is present in the list. */
 export function hasFlow(flows: EnergyFlow[], id: string): boolean {
@@ -236,6 +238,12 @@ export interface BuildEnergyFlowsOptions {
   evcSessionEnergyKwh?: number;
   /** Injected clock for deterministic summary / slot-window tests. */
   now?: Date;
+  /**
+   * Which CT meter to read grid amps from (issue #192). Defaults to the
+   * built-in grid CT (`0x00`, three-phase / HV); AC-coupled systems pass
+   * their external grid CT address (1-9) from the user's Settings choice.
+   */
+  gridMeterAddress?: number;
 }
 
 /**
@@ -371,8 +379,17 @@ export function buildEnergyFlows(
   // user sees solar feeding home, and solar feeding battery, and grid
   // covering whatever remains. The maths balances because solar and
   // grid together must cover home + charge + export.
-  const solarChargeWatts = solarActive ? Math.min(s.solar_power, absBattery) : 0;
-  const gridChargeWatts = isImporting
+  // Charge-source attribution only applies while the battery is actually
+  // charging. `absBattery` is the magnitude of charge OR discharge, so
+  // without this gate a *discharging* battery's output is mistaken for
+  // charge wattage — which then swallows the grid import via
+  // `gridPortionToBattery` and hides the red grid→home line (reported
+  // against issue #192: solar 500 W, battery discharging 4.6 kW, home
+  // 6 kW, grid importing 910 W → the import spoke vanished).
+  const solarChargeWatts = isCharging && solarActive
+    ? Math.min(s.solar_power, absBattery)
+    : 0;
+  const gridChargeWatts = isCharging && isImporting
     ? Math.max(0, absBattery - solarChargeWatts)
     : 0;
   const gridPortionToBattery = Math.min(gridChargeWatts, absGrid);
@@ -543,12 +560,29 @@ export function buildEnergyFlows(
     f.color = spokeColor(v.from, v.to);
   }
 
+  // Overall solar production as % of configured DC-string capacity (issue
+  // #192): appended next to the Solar kW value so the user can see "how much
+  // more is possible". Omitted (plain value) when no DC-string kWp is set.
+  const solarOverallPct = solarOverallPercent(s.solar_power, s.solar_arrays);
+  const solarValue = solarOverallPct == null
+    ? formatVisualPower(s.solar_power, noise)
+    : `${formatVisualPower(s.solar_power, noise)} (${formatPercent(solarOverallPct)})`;
+
+  // Grid current from the built-in grid CT meter when one is available
+  // (issue #192): three-phase / HV expose it as a synthetic meter at address
+  // 0x00, and real measured amps are more useful than frequency. Single-phase
+  // has no grid meter, so it falls back to the grid frequency (V/Hz).
+  const gridAmps = gridMeterCurrentA(s.meters, opts.gridMeterAddress ?? GRID_CT_AUTO);
+  const gridUnit = gridAmps != null
+    ? `${formatVoltage(s.grid_voltage)}/${formatCurrent(gridAmps)}`
+    : `${formatVoltage(s.grid_voltage)}/${formatFrequency(s.grid_frequency)}`;
+
   // --- Nodes (pre-formatted strings; renderer is dumb) ---
   const nodes: FlowNode[] = [
     {
       id: 'solar',
       label: 'Solar',
-      value: formatVisualPower(s.solar_power, noise),
+      value: solarValue,
       // PV1 voltage drives the volts label; when the dongle reports a real
       // voltage we show "V/A" (matches the legacy inverter-centred diagram).
       // PV strings without voltage telemetry (some gateways) fall back to
@@ -568,7 +602,7 @@ export function buildEnergyFlows(
       // here. The old `+` / `-` prefix on the value was redundant with the
       // badge and read as "negative discharge" to non-technical users.
       value: formatVisualPower(absGrid, noise),
-      unit: `${formatVoltage(s.grid_voltage)}/${formatFrequency(s.grid_frequency)}`,
+      unit: gridUnit,
       color: FLOW_COLORS.grid,
       active: isImporting || isExporting,
       status: isImporting ? 'Importing' : isExporting ? 'Exporting' : 'Idle',
