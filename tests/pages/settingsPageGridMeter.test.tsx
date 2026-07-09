@@ -1,44 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 
-// jsdom 29 (under vitest 4 + node 25) ships `localStorage` as a bare object
-// stub — it has the right identity but `getItem` / `setItem` / `removeItem`
-// aren't functions. Anything in this file that touches the real `localStorage`
-// blows up with `localStorage.removeItem is not a function`, which masks the
-// actual test signal. Replace the stub with a working in-memory implementation
-// so the existing persistence tests can run, and so we can assert on the
-// gridMeterAddress key without the env bug firing first.
-//
-// IMPORTANT: only stub `localStorage`. Replacing `window` itself detaches the
-// testing-library container and `waitFor` then dies with "Expected container
-// to be an Element... but got undefined".
-const memStorage = (() => {
-  let store = new Map<string, string>();
-  return {
-    getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
-    setItem: (k: string, v: string) => { store.set(k, String(v)); },
-    removeItem: (k: string) => { store.delete(k); },
-    clear: () => { store = new Map(); },
-    key: (i: number) => Array.from(store.keys())[i] ?? null,
-    get length() { return store.size; },
-  };
-})();
-vi.stubGlobal('localStorage', memStorage);
-// Also patch the same object onto the live `window` so any code path that
-// reads `window.localStorage` (rather than the bare `localStorage` global)
-// also sees the working implementation. We mutate rather than replace the
-// whole window object — see the IMPORTANT note above.
-if (typeof window !== 'undefined') {
-  try {
-    Object.defineProperty(window, 'localStorage', {
-      configurable: true,
-      get: () => memStorage,
-    });
-  } catch {
-    // Best-effort: some jsdom versions freeze window.localStorage. The bare
-    // global stub above is enough for the tests below.
-  }
-}
+// `localStorage` is polyfilled by tests/setup.ts (jsdom 29 ships a stub that
+// lacks the actual storage methods). We can therefore use it directly here.
 
 vi.mock('../../src/lib/api', () => ({
   apiGet: vi.fn(async (path: string) => {

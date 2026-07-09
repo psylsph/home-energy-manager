@@ -18,6 +18,12 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    // Global setup file. Replaces jsdom 29's stub `localStorage` /
+    // `sessionStorage` (which lack the actual storage methods) with working
+    // in-memory implementations, so persistence tests can run without
+    // `localStorage.X is not a function` errors. See tests/setup.ts for the
+    // full rationale.
+    setupFiles: ['./tests/setup.ts'],
     include: ['tests/**/*.test.{ts,tsx}'],
     exclude: ['node_modules', 'dist', 'e2e', 'src-tauri'],
   },
