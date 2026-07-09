@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.60.0] - 2026-07-09
+
+### Added
+
+- **The Solar Power Today chart now holds a steady top scale based on your panel capacity.** The graph tops out at your larger PV array's rated watts, so the line no longer rescales and jumps around as generation rises and falls through the day. Enter a rated kWp for your PV strings in Settings to enable it. (issue #192)
+
+- **The energy wheel shows solar as a percentage of capacity, and the PV2 card finally matches its graph.** A live percentage now sits next to the solar kW figure so you can see how close you are to peak output, and the PV2 array card uses the same blue as its chart line instead of a hard-coded amber. (issue #192)
+
+- **The energy wheel shows grid amps instead of grid frequency.** The grid node now reads volts and amps (for example 241V/12A) rather than volts and hertz, so you can see how close you are to your fuse limit at a glance. It finds your grid CT automatically — three-phase systems use the built-in grid CT, and AC-coupled systems use your first external clamp — with a Settings option to point it elsewhere if your wiring differs. (issue #192)
+
+### Fixed
+
+- **Fixed the grid line vanishing or reading low while the battery discharges.** When the battery was powering the house and the grid was also importing to top it up, the red grid-to-home line could disappear entirely or under-report the import. It now always reflects the real grid draw. (issue #192)
+
 ## [0.59.1] - 2026-07-09
 
 ### Fixed
