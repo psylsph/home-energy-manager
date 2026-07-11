@@ -100,7 +100,7 @@ describe('computeTempDifferential', () => {
 
 /**
  * Tests for `computeBatteryExternalDifferential` — the pure-data helper
- * that powers the "Battery − Ambient (°C)" chart on the History page's
+ * that powers the "Battery − Outdoor (Δ°C)" chart on the History page's
  * Temperature tab.
  *
  * Adds a `_batt_ext_diff` field equal to `battery_temperature -

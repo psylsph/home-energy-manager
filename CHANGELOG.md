@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.60.1] - 2026-07-11
+
+### Fixed
+
+- **The History temperature chart now makes outdoor comparisons clearer.** The former “Battery − Ambient” chart is now labelled “Battery − Outdoor (Δ°C)” and explains that a 0°C value means the battery and Open-Meteo outdoor temperatures matched, not that either sensor recorded freezing. (issue #198)
+
 ## [0.60.0] - 2026-07-09
 
 ### Added

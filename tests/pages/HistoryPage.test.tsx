@@ -6,15 +6,22 @@ import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/re
 // Battery/Grid directional-field wiring. This file adds coverage for the
 // remaining tabs (Solar / Home / Temperature / Cost), range switching,
 // offset navigation (Older/Newer), the empty state, the CSV export button,
-// and the temperature-tab ambient credit footer.
+// and the temperature-tab outdoor-temperature credit footer.
 // ---------------------------------------------------------------------------
 
 type FetchHistoryCall = { range: string; fields: string[]; offset: number; rolling: boolean };
 
 const fetchHistoryCalls: FetchHistoryCall[] = [];
 const fetchHistoryMock = vi.fn(async (...args: unknown[]) => {
-  const [range, , offset, rolling] = args as [string, string[], number, boolean];
-  fetchHistoryCalls.push({ range, fields: [], offset, rolling });
+  const [range, fields, offset, rolling] = args as [string, string[], number, boolean];
+  fetchHistoryCalls.push({ range, fields, offset, rolling });
+  if (fields.includes('external_temperature')) {
+    return {
+      battery_temperature: [{ t: 1_720_000_000_000, v: 22 }],
+      inverter_temperature: [{ t: 1_720_000_000_000, v: 35 }],
+      external_temperature: [{ t: 1_720_000_000_000, v: 22 }],
+    };
+  }
   return {};
 });
 
@@ -121,12 +128,16 @@ describe('<HistoryPage/> — tabs, ranges, navigation, empty state', () => {
     });
 
     it('renders the Open-Meteo credit footer on the Temperature tab', async () => {
-      const { container } = render(<HistoryPage />);
+      render(<HistoryPage />);
       await clickTab('Temperature');
-      // Footer only renders when there is data; with empty data the chart
-      // area shows the empty-state instead. We assert the tab is active by
-      // checking the empty-state message renders (proves tab switch worked).
-      expect(container.textContent).toContain('No data available for this period');
+      expect(await screen.findByText(/Outdoor temperature data by/)).toBeDefined();
+    });
+
+    it('explains that Battery − Outdoor is a temperature difference, not a zero-degree reading', async () => {
+      render(<HistoryPage />);
+      await clickTab('Temperature');
+      expect(await screen.findByText('Battery − Outdoor (Δ°C)')).toBeDefined();
+      expect(screen.getByText(/0°C means they were equal, not that either temperature was zero/)).toBeDefined();
     });
   });
 
