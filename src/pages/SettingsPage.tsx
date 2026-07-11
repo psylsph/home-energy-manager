@@ -341,7 +341,7 @@ export default function SettingsPage() {
   const [alertsSaving, setAlertsSaving] = useState(false);
   const [alertsTesting, setAlertsTesting] = useState(false);
 
-  // Weather (Open-Meteo) — local ambient temperature for the History charts.
+  // Weather (Open-Meteo) — local outdoor temperature for the History charts.
   // `weatherState` is the full GET /api/weather payload (config + last fetch
   // result + backfill progress). Individual form fields below are local
   // state so the user can type before hitting Save; they're synced from
@@ -1477,7 +1477,7 @@ export default function SettingsPage() {
           </button>
         </div>
         <p className="text-text-secondary text-xs font-sans">
-          Fetch the local ambient temperature from the free Open-Meteo API and overlay it on the History page temperature charts. No API key required. Enter your postcode to resolve your location automatically, or enter latitude/longitude manually (useful outside the UK or for self-hosted Open-Meteo instances).
+          Fetch the local outdoor temperature from the free Open-Meteo API and overlay it on the History page temperature charts. No API key required. Enter your postcode to resolve your location automatically, or enter latitude/longitude manually (useful outside the UK or for self-hosted Open-Meteo instances).
         </p>
 
         <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">

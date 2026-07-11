@@ -63,6 +63,7 @@ interface ChartDef {
     strokeDasharray?: string;
   }[];
   unit: string;
+  description?: string;
   yDomain?: [number, number];
   /**
    * When set, the y-axis snaps to the recorded data range ± this padding
@@ -209,7 +210,7 @@ function getCharts(tab: MetricTab, hasStandingCharge: boolean): ChartDef[] {
           fields: [
             { field: 'battery_temperature', color: '#22C55E', label: 'Battery' },
             { field: 'inverter_temperature', color: '#F59E0B', label: 'Inverter' },
-            { field: 'external_temperature', color: '#38BDF8', label: 'Ambient' },
+            { field: 'external_temperature', color: '#38BDF8', label: 'Outdoor' },
           ],
         },
         {
@@ -222,8 +223,9 @@ function getCharts(tab: MetricTab, hasStandingCharge: boolean): ChartDef[] {
         },
         {
           key: 'batt-ext-differential',
-          title: 'Battery − Ambient (°C)',
+          title: 'Battery − Outdoor (Δ°C)',
           unit: '°C',
+          description: 'Battery temperature minus Open-Meteo outdoor temperature. 0°C means they were equal, not that either temperature was zero.',
           fields: [{ field: '_batt_ext_diff', color: '#F472B6' }],
           requires: ['battery_temperature', 'external_temperature'],
           preprocess: (merged) => computeBatteryExternalDifferential(merged),
@@ -406,7 +408,12 @@ function ChartCard({ chart, data, range, domain, ticks, gridLineWeight }: {
   return (
     <div className="bg-bg-elevated rounded-xl p-4 relative">
       <div className="flex items-center justify-between mb-3 gap-2">
-        <h3 className="text-text-primary text-sm font-sans font-bold">{chart.title}</h3>
+        <div>
+          <h3 className="text-text-primary text-sm font-sans font-bold">{chart.title}</h3>
+          {chart.description && (
+            <p className="mt-1 text-text-secondary/70 text-[11px] leading-snug font-sans">{chart.description}</p>
+          )}
+        </div>
         {chart.fields.length > 1 && (
           <SeriesLegend items={legendItems} muted={mutedSeries} onToggle={toggleSeries} />
         )}
@@ -853,7 +860,7 @@ export default function HistoryPage() {
           ))}
           {tab === 'temperature' && (
             <p className="text-text-secondary/60 text-[11px] font-sans">
-              Ambient temperature data by{' '}
+              Outdoor temperature data by{' '}
               <button
                 onClick={() => openExternal('https://open-meteo.com/')}
                 className="text-flow-active underline hover:opacity-80 inline"
