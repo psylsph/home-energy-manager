@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.60.2] - 2026-07-11
+
+### Changed
+
+- **Updated build tooling.** Two development/build dependencies (the ESLint React-Refresh plugin and the macOS ARM Rolldown native binding) were bumped to their latest patch releases. No user-facing behaviour changes.
+
 ## [0.60.1] - 2026-07-11
 
 ### Fixed
