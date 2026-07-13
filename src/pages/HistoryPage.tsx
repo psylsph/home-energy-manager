@@ -270,6 +270,14 @@ function getCharts(tab: MetricTab, hasStandingCharge: boolean): ChartDef[] {
   }
 }
 
+// Issue #199: Combined export CSV — concatenate every tab's chart list so
+// a single CSV carries every series visible on the page (Battery, Solar,
+// Grid, Home, Temperature, Cost). Field collisions are deduplicated by the
+// existing Set logic in exportCSV.
+function getAllCharts(hasStandingCharge: boolean): ChartDef[] {
+  return TABS.flatMap((t) => getCharts(t.key, hasStandingCharge));
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -537,7 +545,14 @@ async function downloadWithPrompt(csvContent: string, fileName: string, onExport
   }
 }
 
-function exportCSV(charts: ChartDef[], data: Record<string, TimePoint[]>, range: HistoryRange, offset: number, onExported: () => void) {
+function exportCSV(
+  charts: ChartDef[],
+  data: Record<string, TimePoint[]>,
+  range: HistoryRange,
+  offset: number,
+  onExported: () => void,
+  fileLabel?: string,
+) {
   // Collect all unique field names across all charts
   const allFields = [...new Set(charts.flatMap((c) => [
     ...c.fields.map((f) => f.field),
@@ -586,7 +601,9 @@ function exportCSV(charts: ChartDef[], data: Record<string, TimePoint[]>, range:
 
   const csvContent = [header.join(','), ...rows.map((r) => r.join(','))].join('\n');
 
-  const label = charts[0]?.key ?? 'export';
+  // Caller-supplied label (e.g. 'history' for the combined export) wins over
+  // the default per-tab label of the first chart's key.
+  const label = fileLabel ?? charts[0]?.key ?? 'export';
   const windowLabel = formatWindowLabel(range, offset).replace(/[^\w-]+/g, '_');
   const fileName = `givenergy_${label}_${windowLabel}.csv`;
 
@@ -701,6 +718,9 @@ export default function HistoryPage() {
   const charts = getCharts(tab, hasStandingCharge);
   const hasData = Object.values(data).some((pts) => pts.length > 0);
   const [csvToast, setCsvToast] = useState<string | null>(null);
+  // True while the combined-export fetch is in flight. Disables both export
+  // buttons so the user can't queue two fetches against the same offset.
+  const [exportingAll, setExportingAll] = useState(false);
 
   useEffect(() => {
     if (csvToast) {
@@ -708,6 +728,40 @@ export default function HistoryPage() {
       return () => clearTimeout(id);
     }
   }, [csvToast]);
+
+  // Issue #199: combined export handler. The data dict the page keeps only
+  // contains the active tab's series — for "Export all" we issue a one-shot
+  // fetch covering every tab's fields, then call exportCSV with that result.
+  // The fetch uses the same range/offset/rolling the user is looking at, so
+  // the CSV matches the visible window.
+  const handleExportAll = async () => {
+    if (exportingAll) return;
+    setExportingAll(true);
+    try {
+      const allCharts = getAllCharts(hasStandingCharge);
+      const allFields = [
+        ...new Set([
+          ...allCharts.flatMap((c) => c.fields.map((f) => f.field)),
+          ...allCharts.flatMap((c) => c.requires ?? []),
+        ]),
+      ];
+      const result = await fetchHistory(range, allFields, offset, rolling);
+      const cleaned: Record<string, TimePoint[]> = {};
+      for (const [field, pts] of Object.entries(result)) {
+        cleaned[field] = removeSpikes(pts, field);
+      }
+      exportCSV(
+        allCharts,
+        cleaned,
+        range,
+        offset,
+        () => setCsvToast('Combined CSV downloaded — ' + formatWindowLabel(range, offset)),
+        'history',
+      );
+    } finally {
+      setExportingAll(false);
+    }
+  };
 
   return (
     <div className="flex flex-col gap-4 max-w-4xl mx-auto">
@@ -817,13 +871,28 @@ export default function HistoryPage() {
         <span className="w-px h-4 bg-white/10 mx-1" />
         <button
           onClick={() => exportCSV(charts, data, range, offset, () => setCsvToast('CSV downloaded to your Downloads folder — ' + formatWindowLabel(range, offset)))}
-          disabled={!hasData}
+          disabled={!hasData || exportingAll}
           className="shrink-0 text-text-secondary hover:text-text-primary text-xs font-sans px-2 py-1 rounded-lg hover:bg-bg-elevated transition-colors disabled:opacity-30 flex items-center gap-1"
         >
           <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
           </svg>
           CSV
+        </button>
+        {/* Issue #199: "Export all" pulls every tab's series into a single
+            file (Battery, Solar, Grid, Home, Temperature, Cost) instead of
+            the per-tab CSV the per-tab button above produces. Disabled while
+            the combined fetch is in flight to prevent stacking requests. */}
+        <button
+          onClick={handleExportAll}
+          disabled={!hasData || exportingAll}
+          aria-label="Export all tabs as a single combined CSV"
+          className="shrink-0 text-text-secondary hover:text-text-primary text-xs font-sans px-2 py-1 rounded-lg hover:bg-bg-elevated transition-colors disabled:opacity-30 flex items-center gap-1"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+          </svg>
+          {exportingAll ? 'Preparing…' : 'Export all'}
         </button>
       </div>
 

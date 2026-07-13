@@ -14,7 +14,7 @@ type FetchHistoryCall = { range: string; fields: string[]; offset: number; rolli
 const fetchHistoryCalls: FetchHistoryCall[] = [];
 const fetchHistoryMock = vi.fn(async (...args: unknown[]) => {
   const [range, fields, offset, rolling] = args as [string, string[], number, boolean];
-  fetchHistoryCalls.push({ range, fields, offset, rolling });
+  fetchHistoryCalls.push({ range, fields: [...fields], offset, rolling });
   if (fields.includes('external_temperature')) {
     return {
       battery_temperature: [{ t: 1_720_000_000_000, v: 22 }],
@@ -237,6 +237,139 @@ describe('<HistoryPage/> — tabs, ranges, navigation, empty state', () => {
       });
       const csvBtn = screen.getByText('CSV').closest('button');
       expect(csvBtn!.hasAttribute('disabled')).toBe(true);
+    });
+  });
+
+  // Issue #199: combined export — "Export all" button pulls every tab's
+  // series into a single CSV rather than per-tab files. The per-tab CSV
+  // button above remains for users who only need one section.
+  describe('combined export (Export all)', () => {
+    it('renders the Export all button', async () => {
+      render(<HistoryPage />);
+      await waitFor(() => {
+        expect(fetchHistoryCalls.length).toBeGreaterThan(0);
+      });
+      const exportAllBtn = screen.getByRole('button', {
+        name: 'Export all tabs as a single combined CSV',
+      });
+      expect(exportAllBtn).toBeDefined();
+    });
+
+    it('Export all button is disabled when there is no data', async () => {
+      render(<HistoryPage />);
+      await waitFor(() => {
+        expect(fetchHistoryCalls.length).toBeGreaterThan(0);
+      });
+      const exportAllBtn = screen.getByRole('button', {
+        name: 'Export all tabs as a single combined CSV',
+      });
+      expect(exportAllBtn.hasAttribute('disabled')).toBe(true);
+    });
+
+    it('Export all button is also disabled when the per-tab CSV button is', async () => {
+      render(<HistoryPage />);
+      await waitFor(() => {
+        expect(fetchHistoryCalls.length).toBeGreaterThan(0);
+      });
+      const exportAllBtn = screen.getByRole('button', {
+        name: 'Export all tabs as a single combined CSV',
+      });
+      const csvBtn = screen.getByText('CSV').closest('button');
+      // Both share the same data gate. If the per-tab one is disabled, so is
+      // the combined one — they're both "no data → no export".
+      expect(csvBtn!.hasAttribute('disabled')).toBe(true);
+      expect(exportAllBtn.hasAttribute('disabled')).toBe(true);
+    });
+
+    it('clicking Export all fetches the union of all six tabs\' fields', async () => {
+      // Populate a synthetic response so the button is enabled. The shape
+      // mirrors what the real backend returns: { field: [{t, v}, ...] }.
+      const samplePoint = { t: 1700000000000, v: 1 };
+      fetchHistoryMock.mockImplementationOnce(async (...args: unknown[]) => {
+        const [range, fields, offset, rolling] = args as [string, string[], number, boolean];
+        fetchHistoryCalls.push({ range, fields: [...fields], offset, rolling });
+        const result: Record<string, typeof samplePoint[]> = {};
+        for (const f of fields) result[f] = [samplePoint];
+        return result;
+      });
+
+      render(<HistoryPage />);
+      await waitFor(() => {
+        expect(fetchHistoryCalls.length).toBeGreaterThan(0);
+      });
+
+      // Initial Battery tab fetch is the per-tab one. Capture its field count
+      // so we can assert the combined fetch is wider.
+      const perTabFieldCount = fetchHistoryCalls[0]!.fields.length;
+
+      const exportAllBtn = screen.getByRole('button', {
+        name: 'Export all tabs as a single combined CSV',
+      });
+      fireEvent.click(exportAllBtn);
+
+      await waitFor(() => {
+        // Two fetches total now: initial mount + combined export.
+        expect(fetchHistoryCalls.length).toBe(2);
+      });
+      const combined = fetchHistoryCalls[1]!;
+      // The combined call should ask for more fields than the active tab's
+      // per-tab fetch — every series from every tab, deduplicated.
+      expect(combined.fields.length).toBeGreaterThan(perTabFieldCount);
+      // Sanity: a few canonical fields from non-Battery tabs must be present
+      // so we know it actually pulled from the full union, not just the
+      // active tab's series.
+      expect(combined.fields).toContain('pv1_power');
+      expect(combined.fields).toContain('grid_voltage');
+      expect(combined.fields).toContain('home_power');
+      expect(combined.fields).toContain('battery_temperature');
+      expect(combined.fields).toContain('_import_cost');
+    });
+
+    it('combined export uses "history" as the file label (issue #199)', async () => {
+      // Intercept the download link's `download` attribute (the only place
+      // the filename flows through in jsdom — there's no real file system).
+      const downloads: string[] = [];
+      const originalCreate = URL.createObjectURL;
+      URL.createObjectURL = vi.fn(() => {
+        const blobUrl = 'blob:test';
+        return blobUrl;
+      });
+      const clickSpy = vi
+        .spyOn(HTMLAnchorElement.prototype, 'click')
+        .mockImplementation(function mockClick(this: HTMLAnchorElement) {
+          downloads.push(this.download);
+        });
+
+      const samplePoint = { t: 1700000000000, v: 1 };
+      fetchHistoryMock.mockImplementationOnce(async (...args: unknown[]) => {
+        const [range, fields, offset, rolling] = args as [string, string[], number, boolean];
+        fetchHistoryCalls.push({ range, fields: [...fields], offset, rolling });
+        const result: Record<string, typeof samplePoint[]> = {};
+        for (const f of fields) result[f] = [samplePoint];
+        return result;
+      });
+
+      try {
+        render(<HistoryPage />);
+        await waitFor(() => {
+          expect(fetchHistoryCalls.length).toBeGreaterThan(0);
+        });
+
+        const exportAllBtn = screen.getByRole('button', {
+          name: 'Export all tabs as a single combined CSV',
+        });
+        fireEvent.click(exportAllBtn);
+
+        await waitFor(() => {
+          expect(downloads.length).toBeGreaterThan(0);
+        });
+        // The combined filename starts with `givenergy_history_` so it's
+        // distinct from the per-tab files (e.g. `givenergy_soc_…`).
+        expect(downloads[0]).toMatch(/^givenergy_history_/);
+      } finally {
+        clickSpy.mockRestore();
+        URL.createObjectURL = originalCreate;
+      }
     });
   });
 
