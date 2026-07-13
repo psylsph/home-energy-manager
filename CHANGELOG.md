@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.61.0] - 2026-07-13
+
+### Added
+
+- **The History page now offers a single "Export all" button that downloads one combined CSV across every tab.** The previous per-tab export buttons are kept for users who only want one section's columns. (issue #199)
+
+### Fixed
+
+- **The History page header no longer overflows on phones.** The page-back, older / date / newer paging, and CSV / Export all buttons now stack cleanly into rows on narrow viewports instead of clipping off the right edge. (issue #199)
+
 ## [0.60.2] - 2026-07-11
 
 ### Changed
