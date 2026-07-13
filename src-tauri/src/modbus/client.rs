@@ -1207,8 +1207,11 @@ impl ModbusClient {
         let actual_count = resp_register_count.min(max_values).min(reg_data.len() / 2);
 
         let mut values = Vec::with_capacity(actual_count);
-        for chunk in reg_data.chunks_exact(2).take(actual_count) {
-            values.push(u16::from_be_bytes([chunk[0], chunk[1]]));
+        // as_chunks requires a length that is a multiple of N; truncating to
+        // the exact byte range we need sidesteps the panic on odd lengths
+        // (chunks_exact previously just dropped the trailing byte).
+        for chunk in reg_data[..actual_count * 2].as_chunks::<2>().0 {
+            values.push(u16::from_be_bytes(*chunk));
         }
 
         Ok(values)
@@ -1549,8 +1552,8 @@ mod tests {
 
         let data_bytes = &payload[1..=expected_bytes];
         let mut values = Vec::with_capacity(expected_count as usize);
-        for chunk in data_bytes.chunks_exact(2) {
-            values.push(u16::from_be_bytes([chunk[0], chunk[1]]));
+        for chunk in data_bytes.as_chunks::<2>().0 {
+            values.push(u16::from_be_bytes(*chunk));
         }
 
         Ok(values)
