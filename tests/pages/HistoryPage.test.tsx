@@ -211,6 +211,73 @@ describe('<HistoryPage/> — tabs, ranges, navigation, empty state', () => {
     });
   });
 
+  // Issue #199 follow-up: on phones the nav row's two export buttons would
+  // push past the right edge. The fix is a flex-col container with the
+  // paging and export groups stacked vertically on mobile, side-by-side on
+  // sm+. These tests pin the responsive class list so a future refactor
+  // doesn't silently regress to a single overflowing row.
+  describe('nav row mobile layout', () => {
+    it('outer nav container has flex-col on mobile, flex-row on sm+', async () => {
+      render(<HistoryPage />);
+      await waitFor(() => {
+        expect(fetchHistoryCalls.length).toBeGreaterThan(0);
+      });
+      // The nav row is the <div> that contains an "Older" button. Walk up
+      // from there to the nearest <div> with a bg-bg-surface class — that's
+      // the outer nav row.
+      const olderBtn = await screen.findByRole('button', { name: /Older/i });
+      let nav = olderBtn.parentElement;
+      while (
+        nav &&
+        !(nav.classList.contains('bg-bg-surface') && nav.classList.contains('flex'))
+      ) {
+        nav = nav.parentElement;
+      }
+      expect(nav).toBeTruthy();
+      // Mobile: stacked column. Desktop: single row.
+      expect(nav!.className).toContain('flex-col');
+      expect(nav!.className).toContain('sm:flex-row');
+      // The vertical separator is only visible on sm+ — it has the hidden
+      // class on mobile.
+      const separator = nav!.querySelector('span.bg-white\\/10');
+      expect(separator).toBeTruthy();
+      expect(separator!.className).toContain('hidden');
+      expect(separator!.className).toContain('sm:inline-block');
+    });
+
+    it('paging controls and export buttons are grouped into sibling sub-rows', async () => {
+      render(<HistoryPage />);
+      await waitFor(() => {
+        expect(fetchHistoryCalls.length).toBeGreaterThan(0);
+      });
+      // Find the outer nav row, then check it has exactly two immediate
+      // <div> children that group the controls. (The <span> separator
+      // sits between them but is hidden on mobile.)
+      const olderBtn = await screen.findByRole('button', { name: /Older/i });
+      let nav = olderBtn.parentElement;
+      while (
+        nav &&
+        !(nav.classList.contains('bg-bg-surface') && nav.classList.contains('flex'))
+      ) {
+        nav = nav.parentElement;
+      }
+      const subGroups = Array.from(nav!.children).filter(
+        (el) => el.tagName === 'DIV',
+      );
+      expect(subGroups.length).toBe(2);
+      // First sub-group: Older, then either an <input> (date) or <span> (label), then Newer.
+      const pagingGroup = subGroups[0]!;
+      expect(pagingGroup.querySelector('button:nth-of-type(1)')!.textContent).toContain('Older');
+      expect(pagingGroup.querySelector('button:nth-of-type(2)')!.textContent).toContain('Newer');
+      // Second sub-group: CSV button, then Export all button.
+      const exportGroup = subGroups[1]!;
+      const exportButtons = exportGroup.querySelectorAll('button');
+      expect(exportButtons.length).toBe(2);
+      expect(exportButtons[0]!.textContent).toContain('CSV');
+      expect(exportButtons[1]!.textContent).toContain('Export all');
+    });
+  });
+
   describe('empty state', () => {
     it('shows the empty-state message when no data is returned', async () => {
       const { container } = render(<HistoryPage />);

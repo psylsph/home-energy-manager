@@ -825,75 +825,90 @@ export default function HistoryPage() {
         </div>
       </div>
 
-      {/* Navigation */}
-      <div className="flex items-center justify-center gap-1 bg-bg-surface rounded-xl p-1.5">
-        <button
-          onClick={() => setOffset((o) => o + 1)}
-          className="shrink-0 text-text-secondary hover:text-text-primary text-sm font-sans px-2.5 py-1.5 rounded-lg hover:bg-bg-elevated transition-colors"
-        >
-          ◀ Older
-        </button>
-        {supportsHistoryDate(range) ? (
-          <input
-            type={historyPickerInputType(range)}
-            value={getHistoryPickerValue(range, offset)}
-            max={getHistoryPickerMax(range)}
-            onChange={(e) => {
-              const newVal = e.target.value;
-              const oldVal = lastDateRef.current;
-              lastDateRef.current = newVal;
-              setOffset(historyPickerValueToOffset(range, newVal));
-              // Only blur on an actual day change — not when the user is
-              // browsing months/years in the native picker (which can fire
-              // onChange on some platforms). Month-type inputs have no day
-              // component so any change is a deliberate selection.
-              const isDate = newVal.split('-').length === 3;
-              const dayChanged = !isDate || newVal.split('-')[2] !== oldVal.split('-')[2];
-              if (dayChanged) {
-                e.target.blur();
-              }
-            }}
-            aria-label="Select period date"
-            className="bg-transparent text-text-primary text-sm font-sans text-center px-1 py-0.5 rounded-md outline-none cursor-pointer hover:bg-bg-elevated transition-colors"
-          />
-        ) : (
-          <span className="text-text-secondary text-sm font-sans text-center truncate px-1">
-            {formatWindowLabel(range, offset)}
-          </span>
-        )}
-        <button
-          onClick={() => setOffset((o) => Math.max(0, o - 1))}
-          disabled={offset === 0}
-          className="shrink-0 text-text-secondary hover:text-text-primary text-sm font-sans px-2.5 py-1.5 rounded-lg hover:bg-bg-elevated transition-colors disabled:opacity-30"
-        >
-          Newer ▶
-        </button>
-        <span className="w-px h-4 bg-white/10 mx-1" />
-        <button
-          onClick={() => exportCSV(charts, data, range, offset, () => setCsvToast('CSV downloaded to your Downloads folder — ' + formatWindowLabel(range, offset)))}
-          disabled={!hasData || exportingAll}
-          className="shrink-0 text-text-secondary hover:text-text-primary text-xs font-sans px-2 py-1 rounded-lg hover:bg-bg-elevated transition-colors disabled:opacity-30 flex items-center gap-1"
-        >
-          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-          </svg>
-          CSV
-        </button>
-        {/* Issue #199: "Export all" pulls every tab's series into a single
-            file (Battery, Solar, Grid, Home, Temperature, Cost) instead of
-            the per-tab CSV the per-tab button above produces. Disabled while
-            the combined fetch is in flight to prevent stacking requests. */}
-        <button
-          onClick={handleExportAll}
-          disabled={!hasData || exportingAll}
-          aria-label="Export all tabs as a single combined CSV"
-          className="shrink-0 text-text-secondary hover:text-text-primary text-xs font-sans px-2 py-1 rounded-lg hover:bg-bg-elevated transition-colors disabled:opacity-30 flex items-center gap-1"
-        >
-          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-          </svg>
-          {exportingAll ? 'Preparing…' : 'Export all'}
-        </button>
+      {/* Navigation. The paging buttons (Older / date / Newer) are the
+          primary mobile action, so on phones the export pair drops to a
+          second row to avoid horizontal overflow (issue #199 follow-up).
+          On sm+ everything sits in one centered row, matching the original
+          layout. */}
+      <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-center sm:gap-1 bg-bg-surface rounded-xl p-1.5">
+        {/* Paging group: Older / date-or-label / Newer. Wrapped in its own
+            flex container so the three controls stay side-by-side on
+            mobile (one sub-row) when the parent is flex-col. */}
+        <div className="flex items-center justify-center gap-1">
+          <button
+            onClick={() => setOffset((o) => o + 1)}
+            className="shrink-0 text-text-secondary hover:text-text-primary text-sm font-sans px-2.5 py-1.5 rounded-lg hover:bg-bg-elevated transition-colors"
+          >
+            ◀ Older
+          </button>
+          {supportsHistoryDate(range) ? (
+            <input
+              type={historyPickerInputType(range)}
+              value={getHistoryPickerValue(range, offset)}
+              max={getHistoryPickerMax(range)}
+              onChange={(e) => {
+                const newVal = e.target.value;
+                const oldVal = lastDateRef.current;
+                lastDateRef.current = newVal;
+                setOffset(historyPickerValueToOffset(range, newVal));
+                // Only blur on an actual day change — not when the user is
+                // browsing months/years in the native picker (which can fire
+                // onChange on some platforms). Month-type inputs have no day
+                // component so any change is a deliberate selection.
+                const isDate = newVal.split('-').length === 3;
+                const dayChanged = !isDate || newVal.split('-')[2] !== oldVal.split('-')[2];
+                if (dayChanged) {
+                  e.target.blur();
+                }
+              }}
+              aria-label="Select period date"
+              className="bg-transparent text-text-primary text-sm font-sans text-center px-1 py-0.5 rounded-md outline-none cursor-pointer hover:bg-bg-elevated transition-colors"
+            />
+          ) : (
+            <span className="text-text-secondary text-sm font-sans text-center truncate px-1">
+              {formatWindowLabel(range, offset)}
+            </span>
+          )}
+          <button
+            onClick={() => setOffset((o) => Math.max(0, o - 1))}
+            disabled={offset === 0}
+            className="shrink-0 text-text-secondary hover:text-text-primary text-sm font-sans px-2.5 py-1.5 rounded-lg hover:bg-bg-elevated transition-colors disabled:opacity-30"
+          >
+            Newer ▶
+          </button>
+        </div>
+        <span className="hidden sm:inline-block w-px h-4 bg-white/10 mx-1" />
+        {/* Export pair sits in its own group so on mobile (sm-) it stacks
+            below the paging controls instead of overflowing the row. The
+            inner container takes the same `items-center gap-1` styling
+            desktop and mobile, so the buttons themselves don't change. */}
+        <div className="flex items-center justify-center gap-1">
+          <button
+            onClick={() => exportCSV(charts, data, range, offset, () => setCsvToast('CSV downloaded to your Downloads folder — ' + formatWindowLabel(range, offset)))}
+            disabled={!hasData || exportingAll}
+            className="shrink-0 text-text-secondary hover:text-text-primary text-xs font-sans px-2 py-1 rounded-lg hover:bg-bg-elevated transition-colors disabled:opacity-30 flex items-center gap-1"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            CSV
+          </button>
+          {/* Issue #199: "Export all" pulls every tab's series into a single
+              file (Battery, Solar, Grid, Home, Temperature, Cost) instead of
+              the per-tab CSV the per-tab button above produces. Disabled while
+              the combined fetch is in flight to prevent stacking requests. */}
+          <button
+            onClick={handleExportAll}
+            disabled={!hasData || exportingAll}
+            aria-label="Export all tabs as a single combined CSV"
+            className="shrink-0 text-text-secondary hover:text-text-primary text-xs font-sans px-2 py-1 rounded-lg hover:bg-bg-elevated transition-colors disabled:opacity-30 flex items-center gap-1"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            {exportingAll ? 'Preparing…' : 'Export all'}
+          </button>
+        </div>
       </div>
 
       {/* CSV export toast */}
