@@ -339,7 +339,7 @@ pub fn generate_daily_summary_text(
         for (ws, we, rate, kwh) in &window_kwh {
             if *kwh > 0.0 {
                 msg.push_str(&format!(
-                    "   ↳ {}–{} @ {:.1}p: {:.1} kWh\n",
+                    "   ↳ {}–{} @ {:.3}p: {:.1} kWh\n",
                     minutes_to_hhmm(*ws),
                     minutes_to_hhmm(*we),
                     rate * 100.0,
@@ -354,7 +354,7 @@ pub fn generate_daily_summary_text(
     // and into the "Net cost" total below.
     if standing_charge_gbp > 0.0 {
         msg.push_str(&format!(
-            "   ↳ Standing Charge: <b>£{:.2}</b> ({}p/day)\n",
+            "   ↳ Standing Charge: <b>£{:.2}</b> ({:.3}p/day)\n",
             standing_charge_gbp, settings.import_standing_charge_p_per_day
         ));
     }
@@ -1286,10 +1286,10 @@ mod tests {
             "footnote should show the Standing Charge rounded to 2dp; got: {msg}"
         );
         // And the originating p/day figure so the user can verify the
-        // setting they entered.
+        // setting they entered (rendered to 3dp).
         assert!(
-            msg.contains("54.86p/day"),
-            "footnote should show the configured p/day figure; got: {msg}"
+            msg.contains("54.860p/day"),
+            "footnote should show the configured p/day figure at 3dp; got: {msg}"
         );
     }
 
@@ -1309,6 +1309,62 @@ mod tests {
         assert!(
             msg.contains("Net cost: <b>£0.25</b>"),
             "net cost should equal the per-kWh component only (got: {msg})"
+        );
+    }
+
+    #[test]
+    fn test_daily_report_per_window_rate_renders_to_3dp() {
+        // The per-window breakdown line shows each band's £/kWh rate in
+        // pence. It must render to 3 decimal places (e.g. 12.345p), not
+        // the earlier 1dp (12.3p), so sub-penny tariff rates aren't lost.
+        //
+        // Two hourly import buckets at unix-hour 0 and unix-hour 12 (each
+        // 1 kWh at +1000 W). The 11-hour gap between them is dropped by
+        // the median-interval plausibility filter, leaving exactly two
+        // hourly buckets — one per tariff window.
+        let rows = vec![
+            dummy_reading(0, 0, 0, 1000, 1000, 50.0),
+            dummy_reading(3600, 0, 0, 1000, 1000, 50.0),
+            dummy_reading(12 * 3600, 0, 0, 1000, 1000, 50.0),
+            dummy_reading(13 * 3600, 0, 0, 1000, 1000, 50.0),
+        ];
+        // The bucket→window mapping is local-timezone dependent, so place
+        // the split between the two buckets' actual local minutes.
+        let m0 = timestamp_to_local_minutes(0);
+        let m12 = timestamp_to_local_minutes(12 * 3600);
+        let (lo, hi) = if m0 <= m12 { (m0, m12) } else { (m12, m0) };
+        let mid = (lo + hi) / 2;
+        let boundary = minutes_to_hhmm(mid);
+        let cfg = crate::settings::TariffConfig {
+            slots: vec![
+                crate::settings::TariffSlot {
+                    start: "00:00".to_string(),
+                    end: boundary.clone(),
+                    // 0.12345 £/kWh = 12.345p — needs 3dp.
+                    rate: 0.12345,
+                },
+                crate::settings::TariffSlot {
+                    start: boundary,
+                    end: "23:59".to_string(),
+                    // 0.23456 £/kWh = 23.456p — needs 3dp.
+                    rate: 0.23456,
+                },
+            ],
+        };
+        let s = crate::settings::Settings {
+            import_tariff: 0.12345,
+            import_tariff_config: Some(cfg),
+            ..crate::settings::Settings::default()
+        };
+        let msg =
+            generate_daily_summary_text(&rows, "2026-06-27", &s).expect("enough data");
+        assert!(
+            msg.contains("@ 12.345p"),
+            "per-window rate must render to 3dp; got: {msg}"
+        );
+        assert!(
+            msg.contains("@ 23.456p"),
+            "per-window rate must render to 3dp; got: {msg}"
         );
     }
 }

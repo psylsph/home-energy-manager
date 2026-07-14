@@ -82,6 +82,20 @@ export interface PowerReportSummary {
   daysInRange: number;
 }
 
+/**
+ * Render the per-day standing-charge subtitle shown on the standing-charge
+ * card, e.g. ` (54.860p/day × 7d)`. The p/day figure is a pence amount and
+ * renders to 3 decimal places, matching the app-wide 3dp standard for
+ * pence-denominated tariff figures (the £ amount on the same card stays at
+ * 2dp). Returns the empty string when no Standing Charge is configured or
+ * the days count is 0.
+ */
+export function standingChargeSubtitle(summary: PowerReportSummary): string {
+  if (summary.standingChargePPerDay <= 0 || summary.daysInRange <= 0) return '';
+  const daysSuffix = summary.daysInRange === 1 ? '1d' : `${summary.daysInRange}d`;
+  return ` <span style="font-size:11px;color:#64748b">(${summary.standingChargePPerDay.toFixed(3)}p/day × ${daysSuffix})</span>`;
+}
+
 export interface PowerReport {
   summary: PowerReportSummary;
   buckets: PowerBucket[];

@@ -38,10 +38,10 @@ import { useInverterStore } from '../store/useInverterStore';
 import {
   bucketSocAvg,
   calculatePowerReport,
+  standingChargeSubtitle,
   type PowerRow,
   type PowerBucket,
   type PowerReport,
-  type PowerReportSummary,
 } from './powerReport';
 
 type PowerSeriesKey =
@@ -236,15 +236,6 @@ function formatGbp(value: number, hideZero: boolean = false): string {
   return `£${value.toFixed(2)}`;
 }
 
-/** Render the per-day standing-charge subtitle shown on the standing
- * charge card, e.g. " (54.86p/day × 7d)". Returns the empty string when
- * no Standing Charge is configured or the days count is 0 / 1. */
-function standingChargeSubtitle(summary: PowerReportSummary): string {
-  if (summary.standingChargePPerDay <= 0 || summary.daysInRange <= 0) return '';
-  const daysSuffix = summary.daysInRange === 1 ? '1d' : `${summary.daysInRange}d`;
-  return ` <span style="font-size:11px;color:#64748b">(${summary.standingChargePPerDay.toFixed(2)}p/day × ${daysSuffix})</span>`;
-}
-
 function formatLocalDateTime(ts: number): string {
   return new Date(ts).toLocaleString();
 }
@@ -340,7 +331,7 @@ function exportPowerCSV(report: PowerReport, rows: PowerRow[]) {
     ['Total Export Income GBP', s.exportIncomeGbp.toFixed(2)],
     ['Total Net Cost GBP', s.netCostGbp.toFixed(2)],
     ['Standing Charge GBP', s.standingChargeGbp.toFixed(2)],
-    ['Standing Charge p/day', s.standingChargePPerDay.toFixed(2)],
+    ['Standing Charge p/day', s.standingChargePPerDay.toFixed(3)],
     ['Days in Range', s.daysInRange.toString()],
     ['Peak Solar W', Math.round(s.peakSolarW).toString()],
     ['Peak Home Load W', Math.round(s.peakHomeW).toString()],
