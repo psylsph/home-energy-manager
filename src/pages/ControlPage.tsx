@@ -805,23 +805,23 @@ function PriceSummary({ prices, decisionForPrice }: {
           {idleSlots.length} hold
         </span>
         <span className="text-text-secondary/50">·</span>
-        <span>Min {minPrice.toFixed(1)}p</span>
+        <span>Min {minPrice.toFixed(3)}p</span>
         <span className="text-text-secondary/50">·</span>
-        <span>Max {maxPrice.toFixed(1)}p</span>
+        <span>Max {maxPrice.toFixed(3)}p</span>
       </div>
       {chargeSlots.length > 0 && (
         <div className="text-xs text-text-secondary">
-          Avg charge price: <span className="font-mono text-battery">{avgChargePrice.toFixed(1)}p</span>
+          Avg charge price: <span className="font-mono text-battery">{avgChargePrice.toFixed(3)}p</span>
           {avgChargePrice < importTariff * 100 && (
-            <> — saves <span className="font-mono text-battery">{(importTariff * 100 - avgChargePrice).toFixed(1)}p</span>/kWh vs standard rate</>
+            <> — saves <span className="font-mono text-battery">{(importTariff * 100 - avgChargePrice).toFixed(3)}p</span>/kWh vs standard rate</>
           )}
         </div>
       )}
       {dischargeSlots.length > 0 && (
         <div className="text-xs text-text-secondary">
-          Avg discharge price: <span className="font-mono text-orange-400">{avgDischargePrice.toFixed(1)}p</span>
+          Avg discharge price: <span className="font-mono text-orange-400">{avgDischargePrice.toFixed(3)}p</span>
           {avgDischargePrice > exportTariff * 100 && (
-            <> — earns <span className="font-mono text-orange-400">{(avgDischargePrice - exportTariff * 100).toFixed(1)}p</span>/kWh vs standard export</>
+            <> — earns <span className="font-mono text-orange-400">{(avgDischargePrice - exportTariff * 100).toFixed(3)}p</span>/kWh vs standard export</>
           )}
         </div>
       )}
@@ -830,7 +830,7 @@ function PriceSummary({ prices, decisionForPrice }: {
           Estimated daily saving:{' '}
           <span className="font-mono text-battery">£{totalSaving.toFixed(2)}</span>
           {battKwh > 0 && (
-            <span className="text-text-secondary"> ({(battKwh).toFixed(1)}kWh battery, {(importTariff * 100).toFixed(1)}p import)</span>
+            <span className="text-text-secondary"> ({(battKwh).toFixed(1)}kWh battery, {(importTariff * 100).toFixed(3)}p import)</span>
           )}
         </div>
       )}
@@ -1232,9 +1232,9 @@ function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_o
                       <div
                         key={col}
                         className={`flex flex-col items-center rounded-sm py-0.5 ${barColor} ${isNow ? 'border-2 border-red-500 animate-pulse' : ''} ${isPast ? 'opacity-30' : ''}`}
-                        title={`${slot.validFrom.toLocaleTimeString()} - ${slot.validTo.toLocaleTimeString()}: ${slot.pence.toFixed(1)}p — ${isPast ? 'past' : decision}`}
+                        title={`${slot.validFrom.toLocaleTimeString()} - ${slot.validTo.toLocaleTimeString()}: ${slot.pence.toFixed(3)}p — ${isPast ? 'past' : decision}`}
                       >
-                        <span className="text-[9px] leading-none font-mono">{slot.pence.toFixed(1)}</span>
+                        <span className="text-[9px] leading-none font-mono">{slot.pence.toFixed(3)}</span>
                         <span className="text-[7px] leading-none text-text-secondary mt-px">:{mins}</span>
                       </div>
                     );
