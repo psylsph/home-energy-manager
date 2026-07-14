@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.61.1] - 2026-07-14
+
+### Fixed
+
+- **Tariff prices now show to three decimal places so sub-penny rates aren't rounded away.** Half-hourly Octopus Agile prices, the daily report's per-window and standing-charge lines, the Power page standing-charge readout, and the Settings rate fields previously displayed to one or two decimals, so a rate like 12.345p showed up as 12.3p. Pound amounts still round to two decimals as before.
+
 ## [0.61.0] - 2026-07-13
 
 ### Added
