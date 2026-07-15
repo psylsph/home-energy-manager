@@ -2923,18 +2923,46 @@ pub async fn get_report(
             // input for it).
             0.0,
         )?;
-        let import_cost_gbp = import_series
+        let days_in_range = crate::history::days_in_local_window(start_ts, end_ts);
+        let standing_charge_gbp = days_in_range as f64 * standing_charge_p_per_day / 100.0;
+        let counter_import_cost_gbp = import_series
             .last()
             .map(|p| p.v)
             .unwrap_or(standing_charge_p_per_day / 100.0);
-        let export_income_gbp = export_series.last().map(|p| p.v).unwrap_or(0.0);
+        let counter_export_income_gbp = export_series.last().map(|p| p.v).unwrap_or(0.0);
+
+        // Some inverter/firmware combinations leave the daily import/export
+        // counters at zero even though `grid_power` is present. The Power page
+        // report's kWh totals are integrated from signed power samples, so a
+        // counter-only cost query would show £0.00 beside non-zero import/export
+        // energy. Fall back per direction to the same grid-power integration
+        // when the counter-derived per-kWh component is effectively empty.
+        let grid_fallback = db.query_grid_power_cost_totals(
+            &window,
+            &import_tariff,
+            &export_tariff,
+            flat_import,
+            flat_export,
+        )?;
+        let counter_import_energy_gbp = (counter_import_cost_gbp - standing_charge_gbp).max(0.0);
+        let import_energy_gbp =
+            if counter_import_energy_gbp <= 0.000_001 && grid_fallback.import_kwh > 0.001 {
+                grid_fallback.import_cost_gbp
+            } else {
+                counter_import_energy_gbp
+            };
+        let export_income_gbp =
+            if counter_export_income_gbp <= 0.000_001 && grid_fallback.export_kwh > 0.001 {
+                grid_fallback.export_income_gbp
+            } else {
+                counter_export_income_gbp
+            };
         // The standing-charge component of the import total is the
         // number of distinct local days the window covers × per-day
         // amount. The per-kWh component is the rest. We surface both
         // separately so the frontend can show a clear "kWh + standing
         // charge = total" breakdown in the report footnote.
-        let days_in_range = crate::history::days_in_local_window(start_ts, end_ts);
-        let standing_charge_gbp = days_in_range as f64 * standing_charge_p_per_day / 100.0;
+        let import_cost_gbp = import_energy_gbp + standing_charge_gbp;
         let net_cost_gbp = import_cost_gbp - export_income_gbp;
         Ok::<_, String>(serde_json::json!({
             "ok": true,
@@ -8803,6 +8831,20 @@ mod tests {
         }
     }
 
+    fn seed_grid_power_readings(db: &crate::history::HistoryDb, start_ts: i64, grid_power_w: i32) {
+        for step in 0..=2i64 {
+            db.insert_reading(&crate::inverter::model::InverterSnapshot {
+                timestamp: start_ts + step * 3600,
+                grid_power: grid_power_w,
+                // Reproduce firmware that reports live grid power but leaves
+                // the daily import/export counters at zero.
+                today_import_kwh: 0.0,
+                today_export_kwh: 0.0,
+                ..Default::default()
+            });
+        }
+    }
+
     #[tokio::test]
     async fn get_report_returns_zero_costs_for_window_with_no_readings() {
         // Empty history → import_cost == Standing Charge (the seeded "no
@@ -8900,6 +8942,95 @@ mod tests {
                 "import cost must not be wildly inflated; got {import_cost}"
             );
 
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_report_falls_back_to_grid_power_when_import_counter_is_zero() {
+        // Some devices expose live grid power but never populate the daily
+        // import counter. The Consumption Report should still price the same
+        // import energy it shows in the kWh tiles instead of reporting £0.00.
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.25, 0.15, 0.0);
+            let start = chrono::Local
+                .from_local_datetime(
+                    &chrono::Local::now()
+                        .date_naive()
+                        .and_hms_opt(10, 0, 0)
+                        .unwrap(),
+                )
+                .earliest()
+                .unwrap()
+                .timestamp();
+            seed_grid_power_readings(
+                state.history.lock().await.as_ref().unwrap().as_ref(),
+                start,
+                1000,
+            );
+
+            let (status, json) = get_report(
+                State(state.clone()),
+                Query(HistoryQuery {
+                    range: Some("24h".to_string()),
+                    fields: None,
+                    offset: Some(0),
+                    rolling: Some(false),
+                    start_ms: Some(start * 1000),
+                    end_ms: Some((start + 2 * 3600 + 1) * 1000),
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let import_cost = json["import_cost_gbp"].as_f64().unwrap();
+            assert!(
+                (import_cost - 0.50).abs() < 0.001,
+                "2h at 1kW and £0.25/kWh should cost £0.50; got {import_cost} ({json:?})"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_report_falls_back_to_grid_power_when_export_counter_is_zero() {
+        // Same fallback for export income: negative grid power should be
+        // priced even when today_export_kwh remains stuck at zero.
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.25, 0.15, 0.0);
+            let start = chrono::Local
+                .from_local_datetime(
+                    &chrono::Local::now()
+                        .date_naive()
+                        .and_hms_opt(12, 0, 0)
+                        .unwrap(),
+                )
+                .earliest()
+                .unwrap()
+                .timestamp();
+            seed_grid_power_readings(
+                state.history.lock().await.as_ref().unwrap().as_ref(),
+                start,
+                -1000,
+            );
+
+            let (status, json) = get_report(
+                State(state.clone()),
+                Query(HistoryQuery {
+                    range: Some("24h".to_string()),
+                    fields: None,
+                    offset: Some(0),
+                    rolling: Some(false),
+                    start_ms: Some(start * 1000),
+                    end_ms: Some((start + 2 * 3600 + 1) * 1000),
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let export_income = json["export_income_gbp"].as_f64().unwrap();
+            assert!(
+                (export_income - 0.30).abs() < 0.001,
+                "2h at 1kW export and £0.15/kWh should earn £0.30; got {export_income} ({json:?})"
+            );
         })
         .await;
     }
@@ -9858,8 +9989,14 @@ mod tests {
                 .collect();
             let addresses: Vec<u16> = writes.iter().map(|w| w.address).collect();
             assert!(addresses.contains(&96), "clear must disable charge (HR 96)");
-            assert!(addresses.contains(&59), "clear must disable discharge (HR 59)");
-            assert!(addresses.contains(&27), "clear must restore eco mode (HR 27)");
+            assert!(
+                addresses.contains(&59),
+                "clear must disable discharge (HR 59)"
+            );
+            assert!(
+                addresses.contains(&27),
+                "clear must restore eco mode (HR 27)"
+            );
         })
         .await;
     }

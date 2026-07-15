@@ -41,6 +41,16 @@ pub struct CostComponentPoint {
     pub standing_gbp: f64,
 }
 
+/// Cost fallback totals integrated from raw signed grid power when the
+/// inverter does not expose usable daily import/export counters.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GridPowerCostTotals {
+    pub import_kwh: f64,
+    pub export_kwh: f64,
+    pub import_cost_gbp: f64,
+    pub export_income_gbp: f64,
+}
+
 // ---------------------------------------------------------------------------
 // Allowed field whitelist (prevents SQL injection)
 // ---------------------------------------------------------------------------
@@ -1510,6 +1520,86 @@ impl HistoryDb {
                 standing_gbp,
             })
             .collect())
+    }
+
+    /// Fallback cost/income totals from raw `grid_power` samples, used when
+    /// an inverter/firmware does not populate the `today_import_kwh` /
+    /// `today_export_kwh` cumulative counters. Positive grid power is import;
+    /// negative grid power is export. The integration mirrors the Power page's
+    /// consumption report: trapezoid integration over neighbouring samples,
+    /// priced at the tariff slot covering the interval start.
+    pub fn query_grid_power_cost_totals(
+        &self,
+        window: &HistoryWindow,
+        import_tariff: &crate::settings::TariffConfig,
+        export_tariff: &crate::settings::TariffConfig,
+        flat_import_fallback: f64,
+        flat_export_fallback: f64,
+    ) -> Result<GridPowerCostTotals, String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+        let (start_ts, end_ts) = window.resolve();
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp, grid_power \
+                 FROM readings \
+                 WHERE timestamp >= ?1 AND timestamp < ?2 AND grid_power IS NOT NULL \
+                 ORDER BY timestamp",
+            )
+            .map_err(|e| format!("Failed to prepare grid-power cost query: {e}"))?;
+        let rows: Vec<(i64, f64)> = stmt
+            .query_map(params![start_ts, end_ts], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
+            })
+            .map_err(|e| format!("Grid-power cost query failed: {e}"))?
+            .filter_map(SqlResult::ok)
+            .collect();
+
+        if rows.len() < 2 {
+            return Ok(GridPowerCostTotals::default());
+        }
+
+        let mut intervals: Vec<f64> = rows
+            .windows(2)
+            .map(|w| (w[1].0 - w[0].0) as f64)
+            .filter(|dt| *dt > 0.0)
+            .collect();
+        if intervals.is_empty() {
+            return Ok(GridPowerCostTotals::default());
+        }
+        intervals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let max_gap_secs = intervals[intervals.len() / 2] * 3.5;
+
+        let import_slots = import_tariff.parsed_slots();
+        let export_slots = export_tariff.parsed_slots();
+        let mut totals = GridPowerCostTotals::default();
+
+        for pair in rows.windows(2) {
+            let (ts_a, grid_a) = pair[0];
+            let (ts_b, grid_b) = pair[1];
+            let dt_secs = (ts_b - ts_a) as f64;
+            if dt_secs <= 0.0 || dt_secs > max_gap_secs {
+                continue;
+            }
+            let hours = dt_secs / 3600.0;
+            let import_kwh = (grid_a.max(0.0) + grid_b.max(0.0)) / 2.0 * hours / 1000.0;
+            let export_kwh = ((-grid_a).max(0.0) + (-grid_b).max(0.0)) / 2.0 * hours / 1000.0;
+            let minute = local_minutes_of_day(ts_a);
+            let import_rate = crate::settings::rate_for_parsed_minutes(&import_slots, minute)
+                .unwrap_or(flat_import_fallback);
+            let export_rate = crate::settings::rate_for_parsed_minutes(&export_slots, minute)
+                .unwrap_or(flat_export_fallback);
+
+            totals.import_kwh += import_kwh;
+            totals.export_kwh += export_kwh;
+            totals.import_cost_gbp += import_kwh * import_rate;
+            totals.export_income_gbp += export_kwh * export_rate;
+        }
+
+        Ok(totals)
     }
 
     /// Insert one weather observation.
