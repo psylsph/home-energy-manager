@@ -438,7 +438,38 @@ If the wrapper doesn't help, the underlying issue is the WebKitGTK GPU path on t
 
 ### Option 2: Docker
 
-The quickest way to get started with Docker:
+The easiest way to run Home Energy Manager in Docker is to use the prebuilt Docker Hub image:
+
+```bash
+docker pull psylsph/home-energy-manager:latest
+```
+
+Then start it:
+
+```bash
+docker run -d --name home-energy-manager --restart unless-stopped -p 7337:7337 -v home-energy-manager-data:/root/.givenergy-local psylsph/home-energy-manager:latest
+```
+
+Open `http://localhost:7337` on the Docker host, or `http://<server-ip>:7337` from another device on your network.
+
+Check the container logs with:
+
+```bash
+docker logs -f home-energy-manager
+```
+
+To update later:
+
+```bash
+docker pull psylsph/home-energy-manager:latest
+docker stop home-energy-manager
+docker rm home-energy-manager
+docker run -d --name home-energy-manager --restart unless-stopped -p 7337:7337 -v home-energy-manager-data:/root/.givenergy-local psylsph/home-energy-manager:latest
+```
+
+Your settings and history are stored in the `home-energy-manager-data` Docker volume and survive container restarts and image updates.
+
+If you prefer to build the image yourself from a checkout, use Docker Compose instead:
 
 ```bash
 # Build and start
@@ -448,7 +479,7 @@ docker compose up -d
 docker compose build && docker compose up -d
 ```
 
-Your settings and history are stored in `~/.givenergy-local` on the host machine and survive container restarts.
+When using the Compose file from the repository, settings and history are stored in `~/.givenergy-local` on the host machine.
 
 ### Option 3: unRAID
 
