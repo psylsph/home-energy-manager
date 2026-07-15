@@ -56,18 +56,32 @@ export function resolveGridMeter(
  *
  * `address` selects which meter is the grid CT — `0` (auto, the default)
  * resolves to the built-in `0x00` grid CT or the lowest external clamp; an
- * explicit address pins a specific clamp. Its `i_total` is the average of the
- * three phase currents on three-phase models (per-phase detail stays on the
- * Meters page).
+ * explicit address pins a specific clamp.
+ *
+ * Most meters populate `i_total`, but some single-phase EM115 installs report
+ * `i_total = 0` while `i_phase_1` contains the real current. Treat a non-zero
+ * total as authoritative, otherwise fall back to the sum of populated phase
+ * currents before accepting a genuine all-zero idle reading.
  *
  * Returns `null` when no meter matches (so the caller keeps its frequency
- * display) and for a non-finite `i_total` (a decode glitch).
+ * display) and when neither total nor phase currents are finite.
  */
 export function gridMeterCurrentA(
   meters: MeterData[] | undefined | null,
   address: number = GRID_CT_AUTO,
 ): number | null {
   const grid = resolveGridMeter(meters, address);
-  if (!grid || !Number.isFinite(grid.i_total)) return null;
-  return grid.i_total;
+  if (!grid) return null;
+
+  if (Number.isFinite(grid.i_total) && grid.i_total !== 0) {
+    return Math.abs(grid.i_total);
+  }
+
+  const phaseTotal = [grid.i_phase_1, grid.i_phase_2, grid.i_phase_3]
+    .filter((amps) => Number.isFinite(amps) && amps !== 0)
+    .reduce((sum, amps) => sum + Math.abs(amps), 0);
+  if (phaseTotal > 0) return phaseTotal;
+
+  if (Number.isFinite(grid.i_total)) return Math.abs(grid.i_total);
+  return null;
 }
