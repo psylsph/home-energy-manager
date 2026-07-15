@@ -87,8 +87,19 @@ describe('gridMeterCurrentA', () => {
     expect(gridMeterCurrentA(null)).toBeNull();
   });
 
-  it('is null when the grid meter i_total is non-finite (decode glitch)', () => {
-    expect(gridMeterCurrentA([meter(0x00, { i_total: NaN })])).toBeNull();
+  it('falls back to phase current when an EM115 reports zero total current (issue #201)', () => {
+    // BrianUK6's AC-coupled snapshot showed Meter 0x01 with i_total=0 but
+    // i_phase_1=5.75A while importing. The energy wheel must use the real
+    // single-phase current rather than displaying 0.0A.
+    expect(gridMeterCurrentA([meter(0x01, { i_total: 0, i_phase_1: 5.75 })], 0x01)).toBe(5.75);
+  });
+
+  it('sums populated phase currents when total current is missing', () => {
+    expect(gridMeterCurrentA([meter(0x01, { i_total: 0, i_phase_1: 5, i_phase_2: 6, i_phase_3: 7 })], 0x01)).toBe(18);
+  });
+
+  it('is null when the grid meter has no finite current fields (decode glitch)', () => {
+    expect(gridMeterCurrentA([meter(0x00, { i_total: NaN, i_phase_1: NaN, i_phase_2: NaN, i_phase_3: NaN })])).toBeNull();
   });
 
   it('returns 0 (a real reading) rather than hiding a genuinely idle grid', () => {
