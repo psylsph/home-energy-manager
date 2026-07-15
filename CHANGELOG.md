@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.61.3] - 2026-07-15
+
+### Fixed
+
+- **Grid amps now line up with the grid watts shown on the energy diagram.** When a grid CT meter is selected, the diagram derives amps from the displayed grid power and voltage so low-power or reactive-current meter quirks no longer show impossible combinations like a few watts beside more than an amp. (issue #201)
+
 ## [0.61.2] - 2026-07-15
 
 ### Fixed
