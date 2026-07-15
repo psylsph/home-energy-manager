@@ -91,11 +91,21 @@ describe('gridMeterCurrentA', () => {
     // BrianUK6's AC-coupled snapshot showed Meter 0x01 with i_total=0 but
     // i_phase_1=5.75A while importing. The energy wheel must use the real
     // single-phase current rather than displaying 0.0A.
-    expect(gridMeterCurrentA([meter(0x01, { i_total: 0, i_phase_1: 5.75 })], 0x01)).toBe(5.75);
+    expect(gridMeterCurrentA([meter(0x01, { i_total: 0, i_phase_1: 5.75, p_active_phase_1: 834 })], 0x01)).toBe(5.75);
   });
 
-  it('sums populated phase currents when total current is missing', () => {
-    expect(gridMeterCurrentA([meter(0x01, { i_total: 0, i_phase_1: 5, i_phase_2: 6, i_phase_3: 7 })], 0x01)).toBe(18);
+  it('sums populated phase currents when total current is missing and active power confirms flow', () => {
+    expect(gridMeterCurrentA([meter(0x01, {
+      i_total: 0,
+      i_phase_1: 5,
+      i_phase_2: 6,
+      i_phase_3: 7,
+      p_active_total: 4200,
+    })], 0x01)).toBe(18);
+  });
+
+  it('does not show stale phase current beside an idle zero-watt meter reading', () => {
+    expect(gridMeterCurrentA([meter(0x01, { i_total: 0, i_phase_1: 4.64 })], 0x01)).toBe(0);
   });
 
   it('is null when the grid meter has no finite current fields (decode glitch)', () => {
