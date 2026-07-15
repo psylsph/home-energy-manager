@@ -88,7 +88,13 @@ export function gridMeterCurrentA(
   const grid = resolveGridMeter(meters, address);
   if (!grid) return null;
 
-  if (Number.isFinite(activePowerW) && Number.isFinite(voltage) && Math.abs(voltage) > 10) {
+  if (
+    typeof activePowerW === 'number' &&
+    typeof voltage === 'number' &&
+    Number.isFinite(activePowerW) &&
+    Number.isFinite(voltage) &&
+    Math.abs(voltage) > 10
+  ) {
     return Math.abs(activePowerW) / Math.abs(voltage);
   }
 
