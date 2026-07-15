@@ -25,6 +25,14 @@ export const BUILTIN_GRID_CT_ADDRESS = 0x00;
 export const GRID_CT_AUTO = 0;
 
 /**
+ * Minimum real-power reading needed before trusting EM115 phase-current fallback.
+ * The energy wheel treats smaller grid-power values as idle too, and EM115s can
+ * briefly leave a stale phase-current value beside a near-zero active-power
+ * reading.
+ */
+const PHASE_CURRENT_FALLBACK_MIN_ACTIVE_POWER_W = 20;
+
+/**
  * Resolve which meter represents the grid import/export point.
  *
  * - `address` 0 (auto, the default): the built-in `0x00` grid CT if present,
@@ -61,8 +69,9 @@ export function resolveGridMeter(
  * Most meters populate `i_total`, but some single-phase EM115 installs report
  * `i_total = 0` while `i_phase_1` contains the real current. Treat a non-zero
  * total as authoritative. Otherwise, only fall back to populated phase currents
- * when the meter's active-power fields also show flow; that avoids displaying a
- * stale phase-current sample beside an idle `0W` grid reading.
+ * when the meter's active-power fields show meaningful flow; that avoids
+ * displaying a stale phase-current sample beside an idle / near-idle grid
+ * reading.
  *
  * Returns `null` when no meter matches (so the caller keeps its frequency
  * display) and when neither total nor phase currents are finite.
@@ -84,7 +93,9 @@ export function gridMeterCurrentA(
     grid.p_active_phase_2,
     grid.p_active_phase_3,
   ];
-  const hasActivePower = activePowerFields.some((watts) => Number.isFinite(watts) && watts !== 0);
+  const hasActivePower = activePowerFields.some(
+    (watts) => Number.isFinite(watts) && Math.abs(watts) > PHASE_CURRENT_FALLBACK_MIN_ACTIVE_POWER_W,
+  );
   if (hasActivePower) {
     const phaseTotal = [grid.i_phase_1, grid.i_phase_2, grid.i_phase_3]
       .filter((amps) => Number.isFinite(amps) && amps !== 0)

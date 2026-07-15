@@ -580,15 +580,15 @@ describe('buildEnergyFlows — noise threshold', () => {
     expect(vm.nodes.find((n) => n.id === 'grid')!.unit).toBe('241.5V/5.8A');
   });
 
-  it('suppresses stale phase-current fallback when the external CT reports zero active power', () => {
+  it('suppresses stale phase-current fallback when the external CT reports near-zero active power', () => {
     const vm = buildEnergyFlows(
       snap({
         grid_voltage: 240,
-        grid_power: 0,
+        grid_power: 2,
         meters: [{
           address: 0x01, v_phase_1: 240, v_phase_2: 0, v_phase_3: 0,
           i_phase_1: 4.64, i_phase_2: 0, i_phase_3: 0, i_total: 0,
-          p_active_phase_1: 0, p_active_phase_2: 0, p_active_phase_3: 0,
+          p_active_phase_1: 2, p_active_phase_2: 0, p_active_phase_3: 0,
           p_active_total: 0, p_reactive_total: 0, p_apparent_total: 0,
           pf_total: 0, frequency: 49.96, e_import_active_kwh: 3518.5, e_export_active_kwh: 321.7,
         }],
