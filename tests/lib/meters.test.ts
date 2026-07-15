@@ -108,6 +108,14 @@ describe('gridMeterCurrentA', () => {
     expect(gridMeterCurrentA([meter(0x01, { i_total: 0, i_phase_1: 4.64 })], 0x01)).toBe(0);
   });
 
+  it('does not show stale phase current beside a near-idle active-power blip', () => {
+    expect(gridMeterCurrentA([meter(0x01, {
+      i_total: 0,
+      i_phase_1: 4.7,
+      p_active_phase_1: 2,
+    })], 0x01)).toBe(0);
+  });
+
   it('is null when the grid meter has no finite current fields (decode glitch)', () => {
     expect(gridMeterCurrentA([meter(0x00, { i_total: NaN, i_phase_1: NaN, i_phase_2: NaN, i_phase_3: NaN })])).toBeNull();
   });
