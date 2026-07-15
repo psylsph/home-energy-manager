@@ -60,8 +60,9 @@ export function resolveGridMeter(
  *
  * Most meters populate `i_total`, but some single-phase EM115 installs report
  * `i_total = 0` while `i_phase_1` contains the real current. Treat a non-zero
- * total as authoritative, otherwise fall back to the sum of populated phase
- * currents before accepting a genuine all-zero idle reading.
+ * total as authoritative. Otherwise, only fall back to populated phase currents
+ * when the meter's active-power fields also show flow; that avoids displaying a
+ * stale phase-current sample beside an idle `0W` grid reading.
  *
  * Returns `null` when no meter matches (so the caller keeps its frequency
  * display) and when neither total nor phase currents are finite.
@@ -77,10 +78,19 @@ export function gridMeterCurrentA(
     return Math.abs(grid.i_total);
   }
 
-  const phaseTotal = [grid.i_phase_1, grid.i_phase_2, grid.i_phase_3]
-    .filter((amps) => Number.isFinite(amps) && amps !== 0)
-    .reduce((sum, amps) => sum + Math.abs(amps), 0);
-  if (phaseTotal > 0) return phaseTotal;
+  const activePowerFields = [
+    grid.p_active_total,
+    grid.p_active_phase_1,
+    grid.p_active_phase_2,
+    grid.p_active_phase_3,
+  ];
+  const hasActivePower = activePowerFields.some((watts) => Number.isFinite(watts) && watts !== 0);
+  if (hasActivePower) {
+    const phaseTotal = [grid.i_phase_1, grid.i_phase_2, grid.i_phase_3]
+      .filter((amps) => Number.isFinite(amps) && amps !== 0)
+      .reduce((sum, amps) => sum + Math.abs(amps), 0);
+    if (phaseTotal > 0) return phaseTotal;
+  }
 
   if (Number.isFinite(grid.i_total)) return Math.abs(grid.i_total);
   return null;
