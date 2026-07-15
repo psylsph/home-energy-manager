@@ -572,7 +572,12 @@ export function buildEnergyFlows(
   // (issue #192): three-phase / HV expose it as a synthetic meter at address
   // 0x00, and real measured amps are more useful than frequency. Single-phase
   // has no grid meter, so it falls back to the grid frequency (V/Hz).
-  const gridAmps = gridMeterCurrentA(s.meters, opts.gridMeterAddress ?? GRID_CT_AUTO);
+  const gridAmps = gridMeterCurrentA(
+    s.meters,
+    opts.gridMeterAddress ?? GRID_CT_AUTO,
+    absGrid > noise ? absGrid : 0,
+    s.grid_voltage,
+  );
   const gridUnit = gridAmps != null
     ? `${formatVoltage(s.grid_voltage)}/${formatCurrent(gridAmps)}`
     : `${formatVoltage(s.grid_voltage)}/${formatFrequency(s.grid_frequency)}`;

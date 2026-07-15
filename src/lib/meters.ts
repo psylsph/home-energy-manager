@@ -73,15 +73,24 @@ export function resolveGridMeter(
  * displaying a stale phase-current sample beside an idle / near-idle grid
  * reading.
  *
+ * If `activePowerW` and `voltage` are supplied, the returned current is derived
+ * from W/V so it stays consistent with the grid watts displayed beside it.
+ *
  * Returns `null` when no meter matches (so the caller keeps its frequency
  * display) and when neither total nor phase currents are finite.
  */
 export function gridMeterCurrentA(
   meters: MeterData[] | undefined | null,
   address: number = GRID_CT_AUTO,
+  activePowerW?: number,
+  voltage?: number,
 ): number | null {
   const grid = resolveGridMeter(meters, address);
   if (!grid) return null;
+
+  if (Number.isFinite(activePowerW) && Number.isFinite(voltage) && Math.abs(voltage) > 10) {
+    return Math.abs(activePowerW) / Math.abs(voltage);
+  }
 
   if (Number.isFinite(grid.i_total) && grid.i_total !== 0) {
     return Math.abs(grid.i_total);

@@ -525,9 +525,10 @@ describe('buildEnergyFlows — noise threshold', () => {
     expect(vm.nodes.find((n) => n.id === 'solar')!.value).toBe('6.0kW');
   });
 
-  it('shows measured grid amps instead of frequency when a grid CT meter exists (issue #192)', () => {
+  it('shows grid amps instead of frequency when a grid CT meter exists (issue #192)', () => {
     const vm = buildEnergyFlows(snap({
       grid_voltage: 241,
+      grid_power: -6820,
       meters: [{
         address: 0x00, v_phase_1: 241, v_phase_2: 0, v_phase_3: 0,
         i_phase_1: 0, i_phase_2: 0, i_phase_3: 0, i_total: 28.3,
@@ -536,6 +537,7 @@ describe('buildEnergyFlows — noise threshold', () => {
         pf_total: 0, frequency: 50, e_import_active_kwh: 0, e_export_active_kwh: 0,
       }],
     }));
+    // Amps are derived from the displayed grid W/V so the two figures agree.
     expect(vm.nodes.find((n) => n.id === 'grid')!.unit).toBe('241.0V/28.3A');
   });
 
@@ -550,6 +552,7 @@ describe('buildEnergyFlows — noise threshold', () => {
     const vm = buildEnergyFlows(
       snap({
         grid_voltage: 241,
+        grid_power: -9929,
         meters: [{
           address: 0x01, v_phase_1: 241, v_phase_2: 0, v_phase_3: 0,
           i_phase_1: 0, i_phase_2: 0, i_phase_3: 0, i_total: 41.2,
@@ -563,10 +566,11 @@ describe('buildEnergyFlows — noise threshold', () => {
     expect(vm.nodes.find((n) => n.id === 'grid')!.unit).toBe('241.0V/41.2A');
   });
 
-  it('falls back to external CT phase current when total current is zero (issue #201)', () => {
+  it('derives external CT amps from displayed grid watts and voltage (issue #201)', () => {
     const vm = buildEnergyFlows(
       snap({
         grid_voltage: 241.5,
+        grid_power: -910,
         meters: [{
           address: 0x01, v_phase_1: 240.8, v_phase_2: 0, v_phase_3: 0,
           i_phase_1: 5.75, i_phase_2: 0, i_phase_3: 0, i_total: 0,
@@ -577,7 +581,7 @@ describe('buildEnergyFlows — noise threshold', () => {
       }),
       { gridMeterAddress: 0x01 },
     );
-    expect(vm.nodes.find((n) => n.id === 'grid')!.unit).toBe('241.5V/5.8A');
+    expect(vm.nodes.find((n) => n.id === 'grid')!.unit).toBe('241.5V/3.8A');
   });
 
   it('suppresses stale phase-current fallback when the external CT reports near-zero active power', () => {
@@ -597,6 +601,25 @@ describe('buildEnergyFlows — noise threshold', () => {
     );
     expect(vm.nodes.find((n) => n.id === 'grid')!.value).toBe('0W');
     expect(vm.nodes.find((n) => n.id === 'grid')!.unit).toBe('240.0V/0.0A');
+  });
+
+  it('keeps displayed grid W and A mathematically consistent', () => {
+    const vm = buildEnergyFlows(
+      snap({
+        grid_voltage: 240,
+        grid_power: -650,
+        meters: [{
+          address: 0x01, v_phase_1: 240, v_phase_2: 0, v_phase_3: 0,
+          i_phase_1: 4.8, i_phase_2: 0, i_phase_3: 0, i_total: 4.8,
+          p_active_phase_1: 650, p_active_phase_2: 0, p_active_phase_3: 0,
+          p_active_total: 650, p_reactive_total: 0, p_apparent_total: 0,
+          pf_total: 0, frequency: 49.96, e_import_active_kwh: 3518.5, e_export_active_kwh: 321.7,
+        }],
+      }),
+      { gridMeterAddress: 0x01 },
+    );
+    expect(vm.nodes.find((n) => n.id === 'grid')!.value).toBe('650W');
+    expect(vm.nodes.find((n) => n.id === 'grid')!.unit).toBe('240.0V/2.7A');
   });
 
   it('exposes battery SOC as a node ring percentage for the radial diagram', () => {
