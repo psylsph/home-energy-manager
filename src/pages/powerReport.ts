@@ -11,7 +11,8 @@
 // (which would let charge and discharge cancel inside a wide bucket).
 // ---------------------------------------------------------------------------
 
-import type { HistoryRange } from '../lib/types';
+import { rateForTimestamp } from '../lib/tariff';
+import type { HistoryRange, TariffConfig } from '../lib/types';
 
 export interface PowerRow {
   t: number;
@@ -99,6 +100,26 @@ export function standingChargeSubtitle(summary: PowerReportSummary): string {
 export interface PowerReport {
   summary: PowerReportSummary;
   buckets: PowerBucket[];
+}
+
+export interface PowerCostFallbackConfig {
+  importTariff: number;
+  exportTariff: number;
+  importTariffConfig: TariffConfig | null;
+  exportTariffConfig: TariffConfig | null;
+  standingChargePPerDay: number;
+  daysInRange?: number;
+}
+
+export interface PowerCostFallback {
+  importCostGbp: number;
+  exportIncomeGbp: number;
+  netCostGbp: number;
+  standingChargeGbp: number;
+  standingChargePPerDay: number;
+  daysInRange: number;
+  importKwh: number;
+  exportKwh: number;
 }
 
 /** Median of positive dt across `rows` (already-sorted by `t` not assumed). */
@@ -194,6 +215,95 @@ function addSoc(bucket: PowerBucket, soc: number | null) {
 /** Average SOC over the bucket's readings, or null if none. */
 export function bucketSocAvg(bucket: PowerBucket): number | null {
   return bucket.socCount > 0 ? bucket.socSum / bucket.socCount : null;
+}
+
+function localDayKey(ts: number): string {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+function countLocalDaysTouched(domain: [number, number]): number {
+  const [start, end] = domain;
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) return 0;
+  const days = new Set<string>();
+  const cursor = new Date(start);
+  cursor.setHours(0, 0, 0, 0);
+  const final = new Date(end);
+  final.setHours(0, 0, 0, 0);
+  while (cursor.getTime() <= final.getTime()) {
+    days.add(localDayKey(cursor.getTime()));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return days.size;
+}
+
+function tariffRateAt(
+  cfg: TariffConfig | null,
+  flatFallback: number,
+  ts: number,
+): number {
+  if (cfg) {
+    const rate = rateForTimestamp(cfg, ts);
+    if (rate != null && Number.isFinite(rate)) return rate;
+  }
+  return Number.isFinite(flatFallback) ? flatFallback : 0;
+}
+
+/**
+ * Frontend-side cost fallback for the Consumption Report. `/api/report` is
+ * authoritative when it returns non-zero totals, but older backends and some
+ * inverter firmwares can report £0.00 from stuck daily import/export counters
+ * while the Power samples clearly contain grid import/export energy. This
+ * prices the same directional grid samples that the PDF's kWh tiles use, so
+ * Generate PDF never shows permanently-zero costings beside non-zero energy.
+ */
+export function calculatePowerCostFallback(
+  rows: PowerRow[],
+  domain: [number, number],
+  cfg: PowerCostFallbackConfig,
+): PowerCostFallback {
+  const sortedRows = rows.filter((row) => row.t >= domain[0] && row.t <= domain[1]).sort((a, b) => a.t - b.t);
+  const medianMs = medianIntervalMs(sortedRows);
+  const maxGapMs = medianMs == null ? Infinity : medianMs * 3.5;
+
+  let importKwh = 0;
+  let exportKwh = 0;
+  let importCostGbp = 0;
+  let exportIncomeGbp = 0;
+
+  for (let i = 0; i < sortedRows.length - 1; i++) {
+    const a = sortedRows[i];
+    const b = sortedRows[i + 1];
+    const rawDt = b.t - a.t;
+    if (rawDt <= 0 || rawDt > maxGapMs) continue;
+    const start = Math.max(a.t, domain[0]);
+    const end = Math.min(b.t, domain[1]);
+    const hours = (end - start) / 3600000;
+    if (hours <= 0) continue;
+
+    const pairImportKwh = integratePair(a.gridImportPower, b.gridImportPower, hours, positivePart);
+    const pairExportKwh = integratePair(a.gridExportPower, b.gridExportPower, hours, positivePart);
+    importKwh += pairImportKwh;
+    exportKwh += pairExportKwh;
+    importCostGbp += pairImportKwh * tariffRateAt(cfg.importTariffConfig, cfg.importTariff, start);
+    exportIncomeGbp += pairExportKwh * tariffRateAt(cfg.exportTariffConfig, cfg.exportTariff, start);
+  }
+
+  const daysInRange = cfg.daysInRange ?? countLocalDaysTouched(domain);
+  const standingChargePPerDay = Math.max(0, cfg.standingChargePPerDay || 0);
+  const standingChargeGbp = daysInRange * standingChargePPerDay / 100;
+  const totalImportCostGbp = importCostGbp + standingChargeGbp;
+
+  return {
+    importCostGbp: totalImportCostGbp,
+    exportIncomeGbp,
+    netCostGbp: totalImportCostGbp - exportIncomeGbp,
+    standingChargeGbp,
+    standingChargePPerDay,
+    daysInRange,
+    importKwh,
+    exportKwh,
+  };
 }
 
 /**
