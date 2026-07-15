@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.61.2] - 2026-07-15
+
+### Fixed
+
+- **Consumption Reports now carry their cost totals into the exported report.** The report window and CSV now use the same cost-aware data shown on the Power page, including the fallback pricing used when an inverter leaves its import/export counters at zero. (issue #200)
+
+- **Consumption Report charts print more reliably from Firefox.** The circular summary charts are now drawn as print-friendly SVG instead of CSS background gradients, and opening the report no longer immediately launches print preview; use the new “Print / save as PDF” button when you’re ready. (issue #200)
+
+- **Grid amps are steadier on EM115 and near-idle meter setups.** The energy diagram no longer falls back to stale phase-current readings when the configured grid meter is reporting little or no real power, so the grid node avoids misleading current values. (issue #201)
+
+### Changed
+
+- **Release builds now publish a Docker image as well as desktop installers.** Tagged releases push the container image automatically, making headless installs easier to track by version.
+
 ## [0.61.1] - 2026-07-14
 
 ### Fixed

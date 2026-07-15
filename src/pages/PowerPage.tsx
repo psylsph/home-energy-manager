@@ -520,18 +520,23 @@ function renderCombinedPowerChart(rows: PowerRow[]): string {
 
 function renderDonut(title: string, items: { label: string; value: number; color: string }[]): string {
   const total = items.reduce((acc, item) => acc + Math.max(item.value, 0), 0);
-  let cursor = 0;
-  const stops = total > 0 ? items.map((item) => {
-    const start = cursor;
-    const degrees = Math.max(item.value, 0) / total * 360;
-    cursor += degrees;
-    return `${item.color} ${start.toFixed(1)}deg ${cursor.toFixed(1)}deg`;
-  }).join(', ') : '#30363d 0deg 360deg';
+  const radius = 52;
+  const circumference = 2 * Math.PI * radius;
+  let offset = 0;
+  const segments = total > 0
+    ? items.map((item) => {
+        const value = Math.max(item.value, 0);
+        const length = value / total * circumference;
+        const segment = `<circle cx="66" cy="66" r="${radius}" fill="none" stroke="${item.color}" stroke-width="24" stroke-dasharray="${length.toFixed(2)} ${circumference.toFixed(2)}" stroke-dashoffset="${(-offset).toFixed(2)}" transform="rotate(-90 66 66)" />`;
+        offset += length;
+        return segment;
+      }).join('')
+    : `<circle cx="66" cy="66" r="${radius}" fill="none" stroke="#30363d" stroke-width="24" />`;
   const legend = items.map((item) => (
     `<div class="donut-legend-row"><span class="swatch" style="background:${item.color}"></span>`
     + `<span>${escapeHtml(item.label)}</span><strong>${formatKwh(item.value)}</strong></div>`
   )).join('');
-  return `<section class="donut-card"><h2>${escapeHtml(title)}</h2><div class="donut-wrap"><div class="donut" style="background: conic-gradient(${stops});"><span>${formatKwh(total)}</span></div><div class="donut-legend">${legend}</div></div></section>`;
+  return `<section class="donut-card"><h2>${escapeHtml(title)}</h2><div class="donut-wrap"><svg class="donut-svg" width="132" height="132" viewBox="0 0 132 132" role="img" aria-label="${escapeHtml(title)} total ${escapeHtml(formatKwh(total))}">${segments}<circle cx="66" cy="66" r="38" fill="white" /><text x="66" y="62" text-anchor="middle" class="donut-total">${escapeHtml(formatKwh(total))}</text></svg><div class="donut-legend">${legend}</div></div></section>`;
 }
 
 function bucketHighlight(buckets: PowerBucket[], field: keyof PowerBucket, label: string): string {
@@ -577,9 +582,8 @@ function exportPowerPDF(report: PowerReport, rows: PowerRow[]): 'opened' | 'down
   .chart-card, .donut-card, .table-card { padding: 18px; margin-bottom: 16px; page-break-inside: avoid; }
   .charts-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
   .donut-wrap { display: flex; align-items: center; gap: 18px; }
-  .donut { width: 132px; height: 132px; border-radius: 50%; display: grid; place-items: center; position: relative; flex: 0 0 auto; }
-  .donut::after { content: ''; position: absolute; inset: 26px; background: white; border-radius: 50%; }
-  .donut span { position: relative; z-index: 1; font-size: 13px; font-weight: 800; text-align: center; }
+  .donut-svg { width: 132px; height: 132px; flex: 0 0 auto; overflow: visible; }
+  .donut-total { fill: #0f172a; font-size: 13px; font-weight: 800; dominant-baseline: middle; }
   .donut-legend { flex: 1; display: flex; flex-direction: column; gap: 7px; font-size: 12px; }
   .donut-legend-row { display: grid; grid-template-columns: 12px 1fr auto; align-items: center; gap: 8px; }
   .swatch { width: 10px; height: 10px; border-radius: 3px; }
@@ -605,7 +609,7 @@ function exportPowerPDF(report: PowerReport, rows: PowerRow[]): 'opened' | 'down
       <div class="muted">Home Energy Manager · ${escapeHtml(s.periodLabel)} · Generated ${escapeHtml(s.generatedAt.toLocaleString())}</div>
       <div class="muted">Energy totals are estimated from the currently displayed Power samples.</div>
     </div>
-    <div class="actions"><button onclick="window.print()">Save as PDF</button></div>
+    <div class="actions"><button onclick="window.print()">Print / save as PDF</button></div>
   </header>
 
   <section class="grid-cards">
@@ -690,7 +694,6 @@ function exportPowerPDF(report: PowerReport, rows: PowerRow[]): 'opened' | 'down
     </table>
   </section>
 </div>
-<script>setTimeout(() => window.print(), 500);</script>
 </body>
 </html>`;
 
@@ -1042,10 +1045,7 @@ export default function PowerPage() {
           <button
             type="button"
             onClick={() => {
-              exportPowerCSV(
-                calculatePowerReport(rows, range, displayDomain, powerWindowLabel(range, offset)),
-                rows,
-              );
+              exportPowerCSV(report, rows);
               setExportToast('CSV downloaded to your Downloads folder — ' + report.summary.periodLabel);
             }}
             disabled={loading || !hasData || Boolean(error)}
@@ -1056,14 +1056,11 @@ export default function PowerPage() {
           <button
             type="button"
             onClick={() => {
-              const result = exportPowerPDF(
-                calculatePowerReport(rows, range, displayDomain, powerWindowLabel(range, offset)),
-                rows,
-              );
+              const result = exportPowerPDF(report, rows);
               setExportToast(
                 result === 'downloaded'
                   ? 'Consumption report downloaded to your Downloads folder — ' + report.summary.periodLabel
-                  : 'Consumption report opened in a new window — ' + report.summary.periodLabel,
+                  : 'Consumption report opened in a new window — use Print / save as PDF — ' + report.summary.periodLabel,
               );
             }}
             disabled={loading || !hasData || Boolean(error)}
