@@ -48,12 +48,33 @@ function silenceConsoleError() {
   return vi.spyOn(console, 'error').mockImplementation(() => {});
 }
 
+function powerHistoryFixture(base = Date.now() - 60 * 60 * 1000) {
+  const t0 = base;
+  const t1 = base + 5 * 60 * 1000;
+  return {
+    solar_power: [{ t: t0, v: 1800 }, { t: t1, v: 2200 }],
+    battery_power: [{ t: t0, v: -500 }, { t: t1, v: 600 }],
+    grid_power: [{ t: t0, v: -900 }, { t: t1, v: 300 }],
+    home_power: [{ t: t0, v: 1200 }, { t: t1, v: 1400 }],
+    soc: [{ t: t0, v: 55 }, { t: t1, v: 56 }],
+    _charge_power: [{ t: t0, v: 500 }, { t: t1, v: 0 }],
+    _discharge_power: [{ t: t0, v: 0 }, { t: t1, v: 600 }],
+    _grid_import_power: [{ t: t0, v: 900 }, { t: t1, v: 0 }],
+    _grid_export_power: [{ t: t0, v: 0 }, { t: t1, v: 300 }],
+  };
+}
+
 describe('<PowerPage/> — Consumption Report cost integration (issue #131)', () => {
   beforeEach(() => {
     silenceConsoleError();
     apiGetCalls.length = 0;
     apiGetMock.mockClear();
     fetchHistoryMock.mockClear();
+    vi.stubGlobal('ResizeObserver', class ResizeObserver {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    });
     // Reset the persisted chart range so each test starts on a known default.
     useInverterStore.setState({
       snapshot: null,
@@ -63,6 +84,7 @@ describe('<PowerPage/> — Consumption Report cost integration (issue #131)', ()
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     cleanup();
   });
 
@@ -145,6 +167,44 @@ describe('<PowerPage/> — Consumption Report cost integration (issue #131)', ()
       render(<PowerPage />);
       const btn = await screen.findByRole('button', { name: /Consumption Report/i });
       expect(btn).toBeDefined();
+    });
+
+    it('exports the fetched costs and print-safe SVG donuts in the opened report', async () => {
+      fetchHistoryMock.mockResolvedValueOnce(powerHistoryFixture());
+      const written: string[] = [];
+      const openedWindow = {
+        document: {
+          open: vi.fn(),
+          write: vi.fn((html: string) => written.push(html)),
+          close: vi.fn(),
+        },
+        focus: vi.fn(),
+      };
+      vi.spyOn(window, 'open').mockReturnValue(openedWindow as unknown as Window);
+
+      render(<PowerPage />);
+
+      await waitFor(() => {
+        expect(apiGetCalls.some((c) => c.path.startsWith('/api/report'))).toBe(true);
+      });
+      const btn = await screen.findByRole('button', { name: /Consumption Report/i });
+      await waitFor(() => {
+        expect(btn.getAttribute('disabled')).toBeNull();
+      });
+
+      fireEvent.click(btn);
+
+      await waitFor(() => {
+        expect(written.length).toBe(1);
+      });
+      const html = written[0];
+      expect(html).toContain('Import cost</span><strong style="color:#dc2626">£5.42</strong>');
+      expect(html).toContain('Export income</span><strong style="color:#0284c7">£1.13</strong>');
+      expect(html).toContain('Net cost</span><strong>£4.29</strong>');
+      expect(html).toContain('class="donut-svg"');
+      expect(html).not.toContain('conic-gradient');
+      expect(html).toContain('Print / save as PDF');
+      expect(html).not.toContain('setTimeout(() => window.print()');
     });
   });
 });
