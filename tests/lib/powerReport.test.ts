@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  calculatePowerCostFallback,
   calculatePowerReport,
   integratePair,
   positivePart,
@@ -186,6 +187,36 @@ describe('powerReport — directional charge / discharge integration (PR #166)',
     // The sum across the 3 close pairs ≈ 3 × 0.0333 ≈ 0.1 kWh.
     const perPairKwh = 2000 * (minute / 3_600_000) / 1000;
     expect(report.summary.batteryChargeKwh).toBeCloseTo(perPairKwh * 3, 6);
+  });
+});
+
+describe('powerReport — cost fallback', () => {
+  it('prices import/export from directional grid samples when API report costs are zero', () => {
+    const t0 = new Date(2026, 6, 15, 10, 0, 0).getTime();
+    const rows: PowerRow[] = [
+      row(t0, { gridImportPower: 1000, gridExportPower: 0 }),
+      row(t0 + 3_600_000, { gridImportPower: 1000, gridExportPower: 0 }),
+      row(t0 + 10 * 3_600_000, { gridImportPower: 0, gridExportPower: 1000 }),
+      row(t0 + 11 * 3_600_000, { gridImportPower: 0, gridExportPower: 1000 }),
+    ];
+
+    const cost = calculatePowerCostFallback(rows, [t0 - 1, t0 + 11 * 3_600_000 + 1], {
+      importTariff: 0.25,
+      exportTariff: 0.15,
+      importTariffConfig: null,
+      exportTariffConfig: null,
+      standingChargePPerDay: 50,
+      daysInRange: 1,
+    });
+
+    // There is a max-gap skipped transition between the import cluster and
+    // export cluster, leaving 1h import and 1h export priced from the same
+    // directional kWh samples shown in the PDF's energy tiles.
+    expect(cost.importKwh).toBeCloseTo(1.0, 6);
+    expect(cost.exportKwh).toBeCloseTo(1.0, 6);
+    expect(cost.importCostGbp).toBeCloseTo(0.75, 6); // £0.25 energy + £0.50 standing
+    expect(cost.exportIncomeGbp).toBeCloseTo(0.15, 6);
+    expect(cost.netCostGbp).toBeCloseTo(0.60, 6);
   });
 });
 

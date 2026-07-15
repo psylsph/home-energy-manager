@@ -33,15 +33,17 @@ import { formatPower } from '../lib/format';
 import { getSeriesOpacity } from '../lib/chartSeries';
 import { SeriesLegend } from '../components/SeriesLegend';
 import type { SeriesLegendItem } from '../components/SeriesLegend';
-import type { HistoryRange, TimePoint } from '../lib/types';
+import type { HistoryRange, PollSettings, TimePoint } from '../lib/types';
 import { useInverterStore } from '../store/useInverterStore';
 import {
   bucketSocAvg,
+  calculatePowerCostFallback,
   calculatePowerReport,
   standingChargeSubtitle,
   type PowerRow,
   type PowerBucket,
   type PowerReport,
+  type PowerCostFallbackConfig,
 } from './powerReport';
 
 type PowerSeriesKey =
@@ -746,6 +748,29 @@ export default function PowerPage() {
     standingChargePPerDay: 0,
     daysInRange: 0,
   });
+  const [costFallbackConfig, setCostFallbackConfig] = useState<PowerCostFallbackConfig | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiGet<{ ok: boolean; data: PollSettings }>('/api/settings')
+      .then((res) => {
+        if (cancelled || !res.ok) return;
+        const settings = res.data;
+        setCostFallbackConfig({
+          importTariff: settings.import_tariff ?? 0,
+          exportTariff: settings.export_tariff ?? 0,
+          importTariffConfig: settings.import_tariff_config ?? null,
+          exportTariffConfig: settings.export_tariff_config ?? null,
+          standingChargePPerDay: settings.import_standing_charge_p_per_day ?? 0,
+        });
+      })
+      .catch(() => {
+        // Cost fallback is best-effort; /api/report remains authoritative when available.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Re-fetch cost whenever the user changes range / offset. We pass the
   // same query params as the History page's graph fetcher so the totals
@@ -839,19 +864,41 @@ export default function PowerPage() {
     // page's cost graph exactly). Until /api/report returns, the cost
     // fields stay at their default of 0 and the report tiles render as
     // "—" — see the exportPowerPDF fallback for that.
+    const fallback = costFallbackConfig
+      ? calculatePowerCostFallback(rows, displayDomain, {
+          ...costFallbackConfig,
+          daysInRange: cost.daysInRange > 0 ? cost.daysInRange : undefined,
+        })
+      : null;
+    const apiImportEnergyGbp = Math.max(0, cost.importCostGbp - cost.standingChargeGbp);
+    const fallbackImportEnergyGbp = fallback
+      ? Math.max(0, fallback.importCostGbp - fallback.standingChargeGbp)
+      : 0;
+    const standingChargeGbp = cost.standingChargeGbp > 0
+      ? cost.standingChargeGbp
+      : fallback?.standingChargeGbp ?? 0;
+    const importEnergyGbp = apiImportEnergyGbp > 0.000_001 || !fallback || fallback.importKwh <= 0.001
+      ? apiImportEnergyGbp
+      : fallbackImportEnergyGbp;
+    const exportIncomeGbp = cost.exportIncomeGbp > 0.000_001 || !fallback || fallback.exportKwh <= 0.001
+      ? cost.exportIncomeGbp
+      : fallback.exportIncomeGbp;
+    const importCostGbp = importEnergyGbp + standingChargeGbp;
     return {
       ...r,
       summary: {
         ...r.summary,
-        importCostGbp: cost.importCostGbp,
-        exportIncomeGbp: cost.exportIncomeGbp,
-        netCostGbp: cost.netCostGbp,
-        standingChargeGbp: cost.standingChargeGbp,
-        standingChargePPerDay: cost.standingChargePPerDay,
-        daysInRange: cost.daysInRange,
+        importCostGbp,
+        exportIncomeGbp,
+        netCostGbp: importCostGbp - exportIncomeGbp,
+        standingChargeGbp,
+        standingChargePPerDay: cost.standingChargePPerDay > 0
+          ? cost.standingChargePPerDay
+          : fallback?.standingChargePPerDay ?? 0,
+        daysInRange: cost.daysInRange > 0 ? cost.daysInRange : fallback?.daysInRange ?? 0,
       },
     };
-  }, [rows, range, displayDomain, offset, cost]);
+  }, [rows, range, displayDomain, offset, cost, costFallbackConfig]);
   const hasData = rows.length > 0;
   const waitingForLiveData = snapshot == null;
   const toggleSeries = (key: PowerChartKey) => {
