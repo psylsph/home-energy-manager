@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.61.4] - 2026-07-16
+
+### Changed
+
+- **Updated desktop logging and build tooling.** The Tauri logging plugin, macOS Intel Tailwind CSS compiler, and TypeScript ESLint tooling now use their latest compatible releases.
+
 ## [0.61.3] - 2026-07-15
 
 ### Fixed
