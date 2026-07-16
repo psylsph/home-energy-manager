@@ -5,6 +5,11 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # Current typescript-eslint releases only support TypeScript versions below 6.1.
+      - dependency-name: typescript
+        versions:
+          - ">=7.0.0 <8.0.0"
 
   - package-ecosystem: cargo
     directory: /src-tauri
