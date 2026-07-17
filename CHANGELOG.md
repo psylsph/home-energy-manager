@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+## [0.63.0] - 2026-07-17
+
+### Added
+
+- **Octopus history now estimates supplier costs from the tariff that was active at the time.** The Octopus dashboard includes VAT-inclusive import costs, export income, standing charges, and monthly/yearly summaries. Gas costs are only calculated when the user confirms that Octopus returns kWh; cubic-metre readings remain usage-only rather than producing a misleading estimate. (issue #212)
+
+- **The Octopus dashboard now compares supplier import/export totals with HEM and highlights missing supplier intervals.** Daily differences make it easier to audit inverter readings against settlement data, while completeness cards and per-day gaps distinguish delayed or absent half-hour readings from genuine energy differences. (issue #212)
+
+### Changed
+
+- **Quick Action durations are easier to set across short and long periods.** The duration slider now uses a logarithmic scale with five-minute increments, providing finer control for short actions while still reaching 24 hours; its default is now one hour.
+
+### Fixed
+
+- **Historical Economy 7 tariffs now use their correct Octopus day and night prices.** E-2R tariffs are matched using an editable night-rate window in Settings, defaulting to 00:30–07:30 Europe/London, instead of being reported as unsupported. (issue #212)
+
 ## [0.62.0] - 2026-07-17
 
 ### Added

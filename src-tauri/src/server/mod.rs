@@ -108,6 +108,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/octopus/status", get(crate::octopus::get_status))
         .route("/api/octopus/sync", post(crate::octopus::start_sync))
         .route("/api/octopus/history", get(crate::octopus::get_history))
+        .route("/api/octopus/summary", get(crate::octopus::get_summary))
+        .route(
+            "/api/octopus/comparison",
+            get(crate::octopus::get_comparison),
+        )
         // Load discharge limiter
         .route(
             "/api/load-limiter",

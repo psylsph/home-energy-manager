@@ -17,7 +17,7 @@ use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::history::{HistoryDb, OctopusConsumptionRow};
+use crate::history::{HistoryDb, OctopusConsumptionRow, OctopusTariffPriceRow};
 use crate::inverter::poll::AppState;
 use crate::settings::Settings;
 
@@ -36,6 +36,8 @@ pub struct OctopusState {
     pub backfill_complete: bool,
     pub discovered_streams: usize,
     pub imported_intervals: u64,
+    pub tariff_prices: usize,
+    pub last_tariff_error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,17 +81,20 @@ struct Meter {
     serial_number: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct Agreement {
+    tariff_code: String,
     valid_from: String,
+    valid_to: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 struct Stream {
     kind: String,
     meter_point: String,
     serial: String,
     earliest: i64,
+    agreements: Vec<Agreement>,
 }
 
 impl Stream {
@@ -126,6 +131,21 @@ struct ConsumptionResult {
     consumption: f64,
     interval_start: String,
     interval_end: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PricePage {
+    next: Option<String>,
+    #[serde(default)]
+    results: Vec<PriceResult>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PriceResult {
+    value_inc_vat: f64,
+    valid_from: String,
+    valid_to: Option<String>,
+    payment_method: Option<String>,
 }
 
 fn encode(value: &str) -> String {
@@ -183,6 +203,7 @@ fn discover_streams(account: AccountResponse, now: i64) -> Vec<Stream> {
                     meter_point: point.mpan.clone(),
                     serial: meter.serial_number,
                     earliest,
+                    agreements: point.agreements.clone(),
                 });
             }
         }
@@ -199,6 +220,7 @@ fn discover_streams(account: AccountResponse, now: i64) -> Vec<Stream> {
                     meter_point: point.mprn.clone(),
                     serial: meter.serial_number,
                     earliest,
+                    agreements: point.agreements.clone(),
                 });
             }
         }
@@ -299,6 +321,195 @@ async fn fetch_window(
     Ok(rows)
 }
 
+fn tariff_product_code(tariff_code: &str) -> Result<&str, String> {
+    let rest = ["E-1R-", "E-2R-", "G-1R-"]
+        .iter()
+        .find_map(|prefix| tariff_code.strip_prefix(prefix))
+        .ok_or_else(|| format!("unsupported Octopus tariff code '{tariff_code}'"))?;
+    rest.rsplit_once('-')
+        .map(|(product, _region)| product)
+        .filter(|product| !product.is_empty())
+        .ok_or_else(|| format!("invalid Octopus tariff code '{tariff_code}'"))
+}
+
+fn hhmm_minutes(value: &str) -> Option<u16> {
+    let (hour, minute) = value.split_once(':')?;
+    let hour = hour.parse::<u16>().ok()?;
+    let minute = minute.parse::<u16>().ok()?;
+    (hour < 24 && minute < 60).then_some(hour * 60 + minute)
+}
+
+fn tariff_rate_types(tariff_code: &str) -> &'static [&'static str] {
+    if tariff_code.starts_with("E-2R-") {
+        &["day", "night", "standing"]
+    } else {
+        &["standard", "standing"]
+    }
+}
+
+fn payment_priority(method: Option<&str>) -> u8 {
+    match method {
+        Some("DIRECT_DEBIT") => 3,
+        None => 2,
+        _ => 1,
+    }
+}
+
+async fn fetch_tariff_prices(
+    settings: &Settings,
+    stream: &Stream,
+    agreement: &Agreement,
+    rate_type: &str,
+    now: i64,
+    refresh_from: Option<i64>,
+) -> Result<Vec<OctopusTariffPriceRow>, String> {
+    let agreement_start = parse_timestamp(&agreement.valid_from)?;
+    let agreement_end = agreement
+        .valid_to
+        .as_deref()
+        .map(parse_timestamp)
+        .transpose()?;
+    let request_end = agreement_end.unwrap_or(now + 86400);
+    let request_start = refresh_from
+        .map(|from| from.max(agreement_start))
+        .unwrap_or(agreement_start);
+    if request_end <= request_start {
+        return Ok(Vec::new());
+    }
+    let product = tariff_product_code(&agreement.tariff_code)?;
+    let tariff_family = if stream.kind == "gas" {
+        "gas-tariffs"
+    } else {
+        "electricity-tariffs"
+    };
+    let endpoint = match rate_type {
+        "standard" => "standard-unit-rates",
+        "day" => "day-unit-rates",
+        "night" => "night-unit-rates",
+        "standing" => "standing-charges",
+        _ => return Err(format!("unsupported Octopus rate type '{rate_type}'")),
+    };
+    let api_base = base_url(settings);
+    let allowed_page_prefix = format!("{api_base}/");
+    let from = DateTime::<Utc>::from_timestamp(request_start, 0)
+        .ok_or("invalid tariff agreement start")?;
+    let to =
+        DateTime::<Utc>::from_timestamp(request_end, 0).ok_or("invalid tariff agreement end")?;
+    let mut url = format!(
+        "{api_base}/v1/products/{}/{}/{}/{}/?period_from={}&period_to={}&page_size=1500",
+        encode(product),
+        tariff_family,
+        encode(&agreement.tariff_code),
+        endpoint,
+        encode(&from.to_rfc3339()),
+        encode(&to.to_rfc3339()),
+    );
+    let mut selected: std::collections::HashMap<(i64, Option<i64>), (u8, PriceResult)> =
+        std::collections::HashMap::new();
+    loop {
+        let page: PricePage =
+            serde_json::from_value(get_json(url, settings.octopus_api_key.clone()).await?)
+                .map_err(|e| format!("invalid Octopus tariff response: {e}"))?;
+        for price in page.results {
+            // Agile rates can legitimately be negative; reject only non-finite
+            // corruption, not a real paid-to-consume interval.
+            if !price.value_inc_vat.is_finite() {
+                continue;
+            }
+            let from = parse_timestamp(&price.valid_from)?;
+            let to = price.valid_to.as_deref().map(parse_timestamp).transpose()?;
+            let priority = payment_priority(price.payment_method.as_deref());
+            let key = (from, to);
+            if selected
+                .get(&key)
+                .is_none_or(|(current, _)| priority > *current)
+            {
+                selected.insert(key, (priority, price));
+            }
+        }
+        match validated_next_url(page.next, &allowed_page_prefix)? {
+            Some(next) => url = next,
+            None => break,
+        }
+    }
+
+    let mut rows = Vec::new();
+    for ((price_start, price_end), (_, price)) in selected {
+        let valid_from = price_start.max(agreement_start);
+        let valid_to = match (price_end, agreement_end) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        if valid_to.is_some_and(|end| end <= valid_from) {
+            continue;
+        }
+        rows.push(OctopusTariffPriceRow {
+            meter_kind: stream.kind.clone(),
+            meter_point: stream.meter_point.clone(),
+            tariff_code: agreement.tariff_code.clone(),
+            valid_from,
+            valid_to,
+            value_inc_vat: price.value_inc_vat,
+            rate_type: rate_type.to_string(),
+        });
+    }
+    Ok(rows)
+}
+
+async fn sync_tariffs(
+    settings: &Settings,
+    db: &HistoryDb,
+    streams: &[Stream],
+    now: i64,
+) -> (usize, Option<String>) {
+    let mut seen = std::collections::HashSet::new();
+    let mut stored = 0usize;
+    let mut errors = Vec::new();
+    for stream in streams {
+        for agreement in &stream.agreements {
+            let key = format!(
+                "{}:{}:{}:{}",
+                stream.kind, stream.meter_point, agreement.tariff_code, agreement.valid_from
+            );
+            if !seen.insert(key) {
+                continue;
+            }
+            for rate_type in tariff_rate_types(&agreement.tariff_code) {
+                let already_imported = db.has_octopus_tariff_prices(
+                    &stream.kind,
+                    &stream.meter_point,
+                    &agreement.tariff_code,
+                    rate_type,
+                );
+                let refresh_from = already_imported.then_some(now - RECENT_REFRESH_DAYS * 86400);
+                match fetch_tariff_prices(settings, stream, agreement, rate_type, now, refresh_from)
+                    .await
+                {
+                    Ok(rows) => match db.upsert_octopus_tariff_prices(&rows) {
+                        Ok(count) => stored += count,
+                        Err(error) => errors.push(error),
+                    },
+                    Err(error) => errors.push(format!("{}: {error}", agreement.tariff_code)),
+                }
+            }
+        }
+    }
+    let error = if errors.is_empty() {
+        None
+    } else {
+        let total = errors.len();
+        let preview = errors.into_iter().take(3).collect::<Vec<_>>().join("; ");
+        Some(if total > 3 {
+            format!("{preview}; and {} more tariff error(s)", total - 3)
+        } else {
+            preview
+        })
+    };
+    (stored, error)
+}
+
 async fn sync_recent(
     settings: &Settings,
     db: &HistoryDb,
@@ -375,25 +586,34 @@ async fn run_sync(state: Arc<AppState>) -> Result<(), String> {
         for stream in &streams {
             imported += sync_recent(&settings, &db, stream, now).await?;
         }
+        let (tariff_prices, tariff_error) = sync_tariffs(&settings, &db, &streams, now).await;
         let mut all_complete = true;
         for stream in &streams {
             let (count, complete) = backfill_stream(&settings, &db, stream).await?;
             imported += count;
             all_complete &= complete;
         }
-        Ok::<_, String>((streams.len(), imported, all_complete))
+        Ok::<_, String>((
+            streams.len(),
+            imported,
+            all_complete,
+            tariff_prices,
+            tariff_error,
+        ))
     }
     .await;
 
     let mut status = state.octopus.lock().await;
     status.syncing = false;
     match result {
-        Ok((streams, imported, complete)) => {
+        Ok((streams, imported, complete, tariff_prices, tariff_error)) => {
             status.last_sync_at = Some(Utc::now());
             status.last_error = None;
             status.discovered_streams = streams;
             status.imported_intervals = status.imported_intervals.saturating_add(imported);
             status.backfill_complete = complete;
+            status.tariff_prices = tariff_prices;
+            status.last_tariff_error = tariff_error;
             Ok(())
         }
         Err(error) => {
@@ -526,15 +746,139 @@ pub async fn get_history(
     }
 }
 
+pub async fn get_comparison(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<HistoryQuery>,
+) -> (StatusCode, Json<Value>) {
+    if !configured(&Settings::load()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"ok": false, "error": "Octopus integration is not configured"})),
+        );
+    }
+    let now = Utc::now().timestamp();
+    let offset = query.offset.unwrap_or(0).max(0);
+    let bounds = state
+        .history
+        .lock()
+        .await
+        .clone()
+        .and_then(|db| db.octopus_bounds());
+    let span = match query.range.as_deref().unwrap_or("30d") {
+        "7d" => 7 * 86400,
+        "30d" => 30 * 86400,
+        "6m" => 180 * 86400,
+        "1y" => 365 * 86400,
+        "all" => now - bounds.map(|b| b.0).unwrap_or(now - 365 * 86400),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "error": "Invalid range. Use 7d, 30d, 6m, 1y, or all"})),
+            )
+        }
+    };
+    let end = now - offset * span;
+    let start = end - span;
+    let db = state.history.lock().await.clone();
+    let Some(db) = db else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "error": "History database is unavailable"})),
+        );
+    };
+    match tokio::task::spawn_blocking(move || db.query_octopus_comparison(start, end)).await {
+        Ok(Ok(report)) => (StatusCode::OK, Json(json!({"ok": true, "data": report}))),
+        Ok(Err(error)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "error": error})),
+        ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "error": error.to_string()})),
+        ),
+    }
+}
+
+pub async fn get_summary(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<HistoryQuery>,
+) -> (StatusCode, Json<Value>) {
+    let settings = Settings::load();
+    if !configured(&settings) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"ok": false, "error": "Octopus integration is not configured"})),
+        );
+    }
+    let now = Utc::now().timestamp();
+    let offset = query.offset.unwrap_or(0).max(0);
+    let bounds = state
+        .history
+        .lock()
+        .await
+        .clone()
+        .and_then(|db| db.octopus_bounds());
+    let span = match query.range.as_deref().unwrap_or("30d") {
+        "7d" => 7 * 86400,
+        "30d" => 30 * 86400,
+        "6m" => 180 * 86400,
+        "1y" => 365 * 86400,
+        "all" => now - bounds.map(|b| b.0).unwrap_or(now - 365 * 86400),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "error": "Invalid range. Use 7d, 30d, 6m, 1y, or all"})),
+            )
+        }
+    };
+    let end = now - offset * span;
+    let start = end - span;
+    let gas_is_kwh = settings.octopus_gas_unit == "kwh";
+    let economy7_start = hhmm_minutes(&settings.octopus_economy7_start).unwrap_or(30);
+    let economy7_end = hhmm_minutes(&settings.octopus_economy7_end).unwrap_or(450);
+    let db = state.history.lock().await.clone();
+    let Some(db) = db else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "error": "History database is unavailable"})),
+        );
+    };
+    match tokio::task::spawn_blocking(move || {
+        db.query_octopus_billing(start, end, gas_is_kwh, economy7_start, economy7_end)
+    })
+    .await
+    {
+        Ok(Ok(report)) => (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "data": report,
+                "gas_unit": settings.octopus_gas_unit,
+                "estimated": true
+            })),
+        ),
+        Ok(Err(error)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "error": error})),
+        ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "error": error.to_string()})),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn configured_requires_opt_in_and_both_credentials() {
-        let mut settings = Settings::default();
-        settings.octopus_enabled = true;
-        settings.octopus_api_key = "sk_live".into();
+        let mut settings = Settings {
+            octopus_enabled: true,
+            octopus_api_key: "sk_live".into(),
+            ..Settings::default()
+        };
         assert!(!configured(&settings));
         settings.octopus_account_number = "A-1234".into();
         assert!(configured(&settings));
@@ -570,6 +914,87 @@ mod tests {
     #[test]
     fn basic_auth_uses_key_as_username_and_blank_password() {
         assert_eq!(auth_header("abc"), "Basic YWJjOg==");
+    }
+
+    #[test]
+    fn tariff_product_is_derived_from_import_export_and_gas_codes() {
+        assert_eq!(
+            tariff_product_code("E-1R-AGILE-24-10-01-A").unwrap(),
+            "AGILE-24-10-01"
+        );
+        assert_eq!(
+            tariff_product_code("G-1R-VAR-22-11-01-N").unwrap(),
+            "VAR-22-11-01"
+        );
+        assert_eq!(
+            tariff_product_code("E-2R-GO-VAR-22-10-14-C").unwrap(),
+            "GO-VAR-22-10-14"
+        );
+        assert!(tariff_product_code("not-a-tariff").is_err());
+    }
+
+    #[test]
+    fn economy7_tariffs_request_separate_day_and_night_feeds() {
+        assert_eq!(
+            tariff_rate_types("E-2R-VAR-22-11-01-H"),
+            &["day", "night", "standing"]
+        );
+        assert_eq!(
+            tariff_rate_types("E-1R-AGILE-24-10-01-H"),
+            &["standard", "standing"]
+        );
+    }
+
+    #[test]
+    fn parses_economy7_clock_times() {
+        assert_eq!(hhmm_minutes("00:30"), Some(30));
+        assert_eq!(hhmm_minutes("07:30"), Some(450));
+        assert_eq!(hhmm_minutes("24:00"), None);
+        assert_eq!(hhmm_minutes("bad"), None);
+    }
+
+    #[test]
+    fn direct_debit_price_has_priority_over_other_payment_methods() {
+        assert!(payment_priority(Some("DIRECT_DEBIT")) > payment_priority(None));
+        assert!(payment_priority(None) > payment_priority(Some("NON_DIRECT_DEBIT")));
+    }
+
+    #[tokio::test]
+    async fn comparison_endpoint_returns_report_when_configured() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let settings = Settings {
+                octopus_enabled: true,
+                octopus_api_key: "sk_test".to_string(),
+                octopus_account_number: "A-TEST".to_string(),
+                ..Settings::default()
+            };
+            settings.save().unwrap();
+            let state = Arc::new(AppState::new());
+            let path = std::env::temp_dir().join(format!(
+                "givenergy-octopus-comparison-{}.db",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&path);
+            let db = Arc::new(HistoryDb::open(&path).unwrap());
+            *state.history.lock().await = Some(db);
+
+            let (status, body) = get_comparison(
+                State(state),
+                Query(HistoryQuery {
+                    range: Some("7d".to_string()),
+                    offset: None,
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["ok"], true);
+            assert!(matches!(
+                body["data"]["days"].as_array().unwrap().len(),
+                7 | 8
+            ));
+            assert_eq!(body["data"]["import_stream_available"], false);
+        })
+        .await;
     }
 
     #[test]

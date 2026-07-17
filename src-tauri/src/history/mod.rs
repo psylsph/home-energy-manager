@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use chrono::{TimeZone, Timelike};
+use chrono::{Datelike, TimeZone, Timelike};
 use rusqlite::{params, Connection, Result as SqlResult};
 use serde::Serialize;
 
@@ -33,6 +33,100 @@ pub struct OctopusConsumptionRow {
     pub interval_start: i64,
     pub interval_end: i64,
     pub consumption: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OctopusTariffPriceRow {
+    pub meter_kind: String,
+    pub meter_point: String,
+    pub tariff_code: String,
+    pub valid_from: i64,
+    pub valid_to: Option<i64>,
+    /// Pence per kWh, or pence per day for standing charges.
+    pub value_inc_vat: f64,
+    /// `standard`, `day`, `night`, or `standing`.
+    pub rate_type: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize, PartialEq)]
+pub struct OctopusBillingSummary {
+    pub electricity_import_kwh: f64,
+    pub electricity_export_kwh: f64,
+    pub gas_usage: f64,
+    pub electricity_energy_cost_gbp: f64,
+    pub electricity_standing_cost_gbp: f64,
+    pub electricity_total_cost_gbp: f64,
+    pub export_income_gbp: f64,
+    pub gas_energy_cost_gbp: Option<f64>,
+    pub gas_standing_cost_gbp: f64,
+    pub gas_total_cost_gbp: Option<f64>,
+    pub net_cost_gbp: Option<f64>,
+    pub pricing_complete: bool,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
+pub struct OctopusBillingPeriod {
+    pub period: String,
+    #[serde(flatten)]
+    pub summary: OctopusBillingSummary,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
+pub struct OctopusBillingReport {
+    pub totals: OctopusBillingSummary,
+    pub monthly: Vec<OctopusBillingPeriod>,
+    pub yearly: Vec<OctopusBillingPeriod>,
+    pub gas_cost_available: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize, PartialEq)]
+pub struct OctopusComparisonTotals {
+    pub octopus_import_kwh: f64,
+    pub hem_import_kwh: f64,
+    pub import_difference_kwh: f64,
+    pub octopus_export_kwh: f64,
+    pub hem_export_kwh: f64,
+    pub export_difference_kwh: f64,
+    pub expected_import_intervals: u32,
+    pub import_intervals: u32,
+    pub missing_import_intervals: u32,
+    pub expected_export_intervals: u32,
+    pub export_intervals: u32,
+    pub missing_export_intervals: u32,
+    pub expected_gas_intervals: u32,
+    pub gas_intervals: u32,
+    pub missing_gas_intervals: u32,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
+pub struct OctopusComparisonDay {
+    pub date: String,
+    pub octopus_import_kwh: Option<f64>,
+    pub hem_import_kwh: Option<f64>,
+    pub import_difference_kwh: Option<f64>,
+    pub import_difference_percent: Option<f64>,
+    pub octopus_export_kwh: Option<f64>,
+    pub hem_export_kwh: Option<f64>,
+    pub export_difference_kwh: Option<f64>,
+    pub export_difference_percent: Option<f64>,
+    pub expected_import_intervals: u32,
+    pub import_intervals: u32,
+    pub missing_import_intervals: u32,
+    pub expected_export_intervals: u32,
+    pub export_intervals: u32,
+    pub missing_export_intervals: u32,
+    pub expected_gas_intervals: u32,
+    pub gas_intervals: u32,
+    pub missing_gas_intervals: u32,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
+pub struct OctopusComparisonReport {
+    pub totals: OctopusComparisonTotals,
+    pub days: Vec<OctopusComparisonDay>,
+    pub import_stream_available: bool,
+    pub export_stream_available: bool,
+    pub gas_stream_available: bool,
 }
 
 /// One display bucket of a cost/income series, split into its per-kWh energy
@@ -568,6 +662,16 @@ CREATE TABLE IF NOT EXISTS octopus_sync_cursors (
     backfill_before INTEGER NOT NULL,
     complete        INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS octopus_tariff_prices (
+    meter_kind    TEXT NOT NULL,
+    meter_point   TEXT NOT NULL,
+    tariff_code   TEXT NOT NULL,
+    valid_from    INTEGER NOT NULL,
+    valid_to      INTEGER,
+    value_inc_vat REAL NOT NULL,
+    rate_type     TEXT NOT NULL,
+    PRIMARY KEY (meter_kind, meter_point, tariff_code, valid_from, rate_type)
+);
 ";
 
 // ---------------------------------------------------------------------------
@@ -592,6 +696,52 @@ impl HistoryDb {
 
         conn.execute_batch(SCHEMA_SQL)
             .map_err(|e| format!("Failed to create schema: {e}"))?;
+
+        // Stage 2 development builds stored only a standing/not-standing flag.
+        // Migrate those local databases before adding the lookup index so
+        // E-2R day and night prices can coexist at the same validity boundary.
+        let tariff_has_rate_type = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(octopus_tariff_prices)")
+                .map_err(|e| format!("Failed to inspect Octopus tariff schema: {e}"))?;
+            let has_rate_type = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|e| format!("Failed to inspect Octopus tariff columns: {e}"))?
+                .filter_map(Result::ok)
+                .any(|column| column == "rate_type");
+            has_rate_type
+        };
+        if !tariff_has_rate_type {
+            conn.execute_batch(
+                "BEGIN IMMEDIATE;
+                 DROP INDEX IF EXISTS idx_octopus_tariff_lookup;
+                 ALTER TABLE octopus_tariff_prices RENAME TO octopus_tariff_prices_legacy;
+                 CREATE TABLE octopus_tariff_prices (
+                     meter_kind TEXT NOT NULL,
+                     meter_point TEXT NOT NULL,
+                     tariff_code TEXT NOT NULL,
+                     valid_from INTEGER NOT NULL,
+                     valid_to INTEGER,
+                     value_inc_vat REAL NOT NULL,
+                     rate_type TEXT NOT NULL,
+                     PRIMARY KEY (meter_kind, meter_point, tariff_code, valid_from, rate_type)
+                 );
+                 INSERT INTO octopus_tariff_prices
+                     (meter_kind, meter_point, tariff_code, valid_from, valid_to, value_inc_vat, rate_type)
+                 SELECT meter_kind, meter_point, tariff_code, valid_from, valid_to, value_inc_vat,
+                        CASE WHEN is_standing = 1 THEN 'standing' ELSE 'standard' END
+                 FROM octopus_tariff_prices_legacy;
+                 DROP TABLE octopus_tariff_prices_legacy;
+                 COMMIT;",
+            )
+            .map_err(|e| format!("Failed to migrate Octopus tariff schema: {e}"))?;
+        }
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_octopus_tariff_lookup
+             ON octopus_tariff_prices
+                (meter_kind, meter_point, rate_type, valid_from, valid_to);",
+        )
+        .map_err(|e| format!("Failed to index Octopus tariff prices: {e}"))?;
 
         // Migration: add today_ac_charge_kwh column if missing (added in v0.9.34)
         let _ = conn.execute_batch("ALTER TABLE readings ADD COLUMN today_ac_charge_kwh REAL");
@@ -1726,6 +1876,551 @@ impl HistoryDb {
         Ok(rows.len())
     }
 
+    pub fn upsert_octopus_tariff_prices(
+        &self,
+        rows: &[OctopusTariffPriceRow],
+    ) -> Result<usize, String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO octopus_tariff_prices
+                 (meter_kind, meter_point, tariff_code, valid_from, valid_to, value_inc_vat, rate_type)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(meter_kind, meter_point, tariff_code, valid_from, rate_type)
+                 DO UPDATE SET valid_to=excluded.valid_to, value_inc_vat=excluded.value_inc_vat",
+            ).map_err(|e| e.to_string())?;
+            for row in rows {
+                stmt.execute(params![
+                    row.meter_kind,
+                    row.meter_point,
+                    row.tariff_code,
+                    row.valid_from,
+                    row.valid_to,
+                    row.value_inc_vat,
+                    row.rate_type,
+                ])
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(rows.len())
+    }
+
+    pub fn has_octopus_tariff_prices(
+        &self,
+        meter_kind: &str,
+        meter_point: &str,
+        tariff_code: &str,
+        rate_type: &str,
+    ) -> bool {
+        let Ok(conn) = self.conn.lock() else {
+            return false;
+        };
+        conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM octopus_tariff_prices
+                WHERE meter_kind=?1 AND meter_point=?2 AND tariff_code=?3 AND rate_type=?4
+             )",
+            params![meter_kind, meter_point, tariff_code, rate_type],
+            |row| row.get(0),
+        )
+        .unwrap_or(false)
+    }
+
+    /// Build tariff-aware supplier totals and calendar summaries. Electricity
+    /// and kWh gas interval values are multiplied by the VAT-inclusive rate
+    /// active at the interval start. Standing charges are applied once per
+    /// active meter point per Europe/London calendar day.
+    pub fn query_octopus_billing(
+        &self,
+        start_ts: i64,
+        end_ts: i64,
+        gas_is_kwh: bool,
+        economy7_start_minutes: u16,
+        economy7_end_minutes: u16,
+    ) -> Result<OctopusBillingReport, String> {
+        use chrono_tz::Europe::London;
+        use std::collections::{BTreeMap, HashMap};
+
+        if start_ts >= end_ts {
+            return Err("invalid Octopus billing window".to_string());
+        }
+
+        fn fresh(gas_is_kwh: bool) -> OctopusBillingSummary {
+            OctopusBillingSummary {
+                gas_energy_cost_gbp: gas_is_kwh.then_some(0.0),
+                gas_total_cost_gbp: gas_is_kwh.then_some(0.0),
+                net_cost_gbp: gas_is_kwh.then_some(0.0),
+                pricing_complete: true,
+                ..Default::default()
+            }
+        }
+        fn period_keys(ts: i64) -> Result<(String, String), String> {
+            let utc = chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
+                .ok_or_else(|| "invalid Octopus billing timestamp".to_string())?;
+            let local = utc.with_timezone(&chrono_tz::Europe::London);
+            Ok((
+                format!("{:04}-{:02}", local.year(), local.month()),
+                format!("{:04}", local.year()),
+            ))
+        }
+        fn billable_kwh(usage: f64) -> f64 {
+            // Octopus bills each interval after rounding kWh to 2dp using
+            // round-half-to-even (0.025 -> 0.02, 0.015 -> 0.02).
+            (usage * 100.0).round_ties_even() / 100.0
+        }
+        fn finalize(summary: &mut OctopusBillingSummary, gas_is_kwh: bool) {
+            summary.electricity_total_cost_gbp =
+                summary.electricity_energy_cost_gbp + summary.electricity_standing_cost_gbp;
+            if gas_is_kwh {
+                let gas =
+                    summary.gas_energy_cost_gbp.unwrap_or(0.0) + summary.gas_standing_cost_gbp;
+                summary.gas_total_cost_gbp = Some(gas);
+                summary.net_cost_gbp =
+                    Some(summary.electricity_total_cost_gbp + gas - summary.export_income_gbp);
+            }
+        }
+
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut totals = fresh(gas_is_kwh);
+        let mut monthly: BTreeMap<String, OctopusBillingSummary> = BTreeMap::new();
+        let mut yearly: BTreeMap<String, OctopusBillingSummary> = BTreeMap::new();
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.meter_kind, c.interval_start, c.consumption,
+                    (SELECT p.value_inc_vat FROM octopus_tariff_prices p
+                     WHERE p.meter_kind=c.meter_kind AND p.meter_point=c.meter_point
+                       AND p.rate_type='standard' AND p.valid_from <= c.interval_start
+                       AND (p.valid_to IS NULL OR p.valid_to > c.interval_start)
+                     ORDER BY p.valid_from DESC LIMIT 1) AS standard_rate,
+                    (SELECT p.value_inc_vat FROM octopus_tariff_prices p
+                     WHERE p.meter_kind=c.meter_kind AND p.meter_point=c.meter_point
+                       AND p.rate_type='day' AND p.valid_from <= c.interval_start
+                       AND (p.valid_to IS NULL OR p.valid_to > c.interval_start)
+                     ORDER BY p.valid_from DESC LIMIT 1) AS day_rate,
+                    (SELECT p.value_inc_vat FROM octopus_tariff_prices p
+                     WHERE p.meter_kind=c.meter_kind AND p.meter_point=c.meter_point
+                       AND p.rate_type='night' AND p.valid_from <= c.interval_start
+                       AND (p.valid_to IS NULL OR p.valid_to > c.interval_start)
+                     ORDER BY p.valid_from DESC LIMIT 1) AS night_rate
+             FROM octopus_consumption c
+             WHERE c.interval_start >= ?1 AND c.interval_start < ?2
+             ORDER BY c.interval_start",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![start_ts, end_ts], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, Option<f64>>(3)?,
+                    row.get::<_, Option<f64>>(4)?,
+                    row.get::<_, Option<f64>>(5)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+
+        for row in rows {
+            let (kind, ts, usage, standard_rate, day_rate, night_rate) =
+                row.map_err(|e| e.to_string())?;
+            let utc = chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
+                .ok_or_else(|| "invalid Octopus interval timestamp".to_string())?;
+            let local = utc.with_timezone(&London);
+            let minute = (local.hour() * 60 + local.minute()) as u16;
+            let in_night_window = if economy7_start_minutes < economy7_end_minutes {
+                minute >= economy7_start_minutes && minute < economy7_end_minutes
+            } else {
+                minute >= economy7_start_minutes || minute < economy7_end_minutes
+            };
+            let rate = standard_rate.or(if in_night_window {
+                night_rate
+            } else {
+                day_rate
+            });
+            let (month, year) = period_keys(ts)?;
+            for summary in [
+                &mut totals,
+                monthly.entry(month).or_insert_with(|| fresh(gas_is_kwh)),
+                yearly.entry(year).or_insert_with(|| fresh(gas_is_kwh)),
+            ] {
+                match kind.as_str() {
+                    "electricity_import" => {
+                        summary.electricity_import_kwh += usage;
+                        if let Some(rate) = rate {
+                            summary.electricity_energy_cost_gbp +=
+                                billable_kwh(usage) * rate / 100.0;
+                        } else if usage > 0.0 {
+                            summary.pricing_complete = false;
+                        }
+                    }
+                    "electricity_export" => {
+                        summary.electricity_export_kwh += usage;
+                        if let Some(rate) = rate {
+                            summary.export_income_gbp += billable_kwh(usage) * rate / 100.0;
+                        } else if usage > 0.0 {
+                            summary.pricing_complete = false;
+                        }
+                    }
+                    "gas" => {
+                        summary.gas_usage += usage;
+                        if gas_is_kwh {
+                            if let Some(rate) = rate {
+                                *summary.gas_energy_cost_gbp.get_or_insert(0.0) +=
+                                    billable_kwh(usage) * rate / 100.0;
+                            } else if usage > 0.0 {
+                                summary.pricing_complete = false;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Load standing-charge periods once, then choose the newest active
+        // period per meter point for each UK-local day. This avoids double
+        // charging where adjacent tariff records overlap at a boundary.
+        let mut standing_stmt = conn
+            .prepare(
+                "SELECT meter_kind, meter_point, valid_from, valid_to, value_inc_vat
+             FROM octopus_tariff_prices
+             WHERE rate_type='standing' AND valid_from < ?2
+               AND (valid_to IS NULL OR valid_to > ?1)",
+            )
+            .map_err(|e| e.to_string())?;
+        let standing_rows: Vec<(String, String, i64, Option<i64>, f64)> = standing_stmt
+            .query_map(params![start_ts, end_ts], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+
+        let start_utc = chrono::DateTime::<chrono::Utc>::from_timestamp(start_ts, 0)
+            .ok_or_else(|| "invalid billing start".to_string())?;
+        let end_utc = chrono::DateTime::<chrono::Utc>::from_timestamp(end_ts - 1, 0)
+            .ok_or_else(|| "invalid billing end".to_string())?;
+        let mut date = start_utc.with_timezone(&London).date_naive();
+        let end_date = end_utc.with_timezone(&London).date_naive();
+        while date <= end_date {
+            let noon = London
+                .from_local_datetime(&date.and_hms_opt(12, 0, 0).unwrap())
+                .single()
+                .ok_or_else(|| "invalid UK billing date".to_string())?
+                .timestamp();
+            if noon >= start_ts && noon < end_ts {
+                let mut active: HashMap<(String, String), (i64, f64)> = HashMap::new();
+                for (kind, point, valid_from, valid_to, value) in &standing_rows {
+                    if *valid_from <= noon && valid_to.is_none_or(|to| to > noon) {
+                        let key = (kind.clone(), point.clone());
+                        let replace = active
+                            .get(&key)
+                            .is_none_or(|(current_from, _)| *valid_from > *current_from);
+                        if replace {
+                            active.insert(key, (*valid_from, *value));
+                        }
+                    }
+                }
+                let (month, year) = period_keys(noon)?;
+                for ((kind, _), (_, pence)) in active {
+                    for summary in [
+                        &mut totals,
+                        monthly
+                            .entry(month.clone())
+                            .or_insert_with(|| fresh(gas_is_kwh)),
+                        yearly
+                            .entry(year.clone())
+                            .or_insert_with(|| fresh(gas_is_kwh)),
+                    ] {
+                        match kind.as_str() {
+                            "electricity_import" => {
+                                summary.electricity_standing_cost_gbp += pence / 100.0;
+                            }
+                            "gas" => summary.gas_standing_cost_gbp += pence / 100.0,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            date = date
+                .succ_opt()
+                .ok_or_else(|| "billing date overflow".to_string())?;
+        }
+
+        finalize(&mut totals, gas_is_kwh);
+        for summary in monthly.values_mut() {
+            finalize(summary, gas_is_kwh);
+        }
+        for summary in yearly.values_mut() {
+            finalize(summary, gas_is_kwh);
+        }
+
+        Ok(OctopusBillingReport {
+            totals,
+            monthly: monthly
+                .into_iter()
+                .map(|(period, summary)| OctopusBillingPeriod { period, summary })
+                .collect(),
+            yearly: yearly
+                .into_iter()
+                .map(|(period, summary)| OctopusBillingPeriod { period, summary })
+                .collect(),
+            gas_cost_available: gas_is_kwh,
+        })
+    }
+
+    /// Compare supplier half-hour totals with the inverter's daily import and
+    /// export counters, while also reporting missing supplier intervals.
+    pub fn query_octopus_comparison(
+        &self,
+        start_ts: i64,
+        end_ts: i64,
+    ) -> Result<OctopusComparisonReport, String> {
+        use chrono_tz::Europe::London;
+        use std::collections::{BTreeMap, HashMap, HashSet};
+
+        if start_ts >= end_ts {
+            return Err("invalid Octopus comparison window".to_string());
+        }
+
+        #[derive(Default)]
+        struct DayData {
+            import_kwh: Option<f64>,
+            export_kwh: Option<f64>,
+            import_intervals: HashSet<i64>,
+            export_intervals: HashSet<i64>,
+            gas_intervals: HashSet<i64>,
+            hem_import_kwh: Option<f64>,
+            hem_export_kwh: Option<f64>,
+        }
+
+        fn local_date(ts: i64) -> Result<chrono::NaiveDate, String> {
+            chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
+                .map(|dt| dt.with_timezone(&London).date_naive())
+                .ok_or_else(|| "invalid comparison timestamp".to_string())
+        }
+
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut days: BTreeMap<chrono::NaiveDate, DayData> = BTreeMap::new();
+        let mut date = local_date(start_ts)?;
+        let end_date = local_date(end_ts - 1)?;
+        while date <= end_date {
+            days.insert(date, DayData::default());
+            date = date
+                .succ_opt()
+                .ok_or_else(|| "comparison date overflow".to_string())?;
+        }
+
+        let mut supplier_stmt = conn
+            .prepare(
+                "SELECT meter_kind, interval_start, consumption
+                 FROM octopus_consumption
+                 WHERE interval_start >= ?1 AND interval_start < ?2
+                 ORDER BY interval_start",
+            )
+            .map_err(|e| e.to_string())?;
+        let supplier_rows = supplier_stmt
+            .query_map(params![start_ts, end_ts], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in supplier_rows {
+            let (kind, ts, consumption) = row.map_err(|e| e.to_string())?;
+            let day = days.entry(local_date(ts)?).or_default();
+            match kind.as_str() {
+                "electricity_import" => {
+                    *day.import_kwh.get_or_insert(0.0) += consumption;
+                    day.import_intervals.insert(ts);
+                }
+                "electricity_export" => {
+                    *day.export_kwh.get_or_insert(0.0) += consumption;
+                    day.export_intervals.insert(ts);
+                }
+                "gas" => {
+                    day.gas_intervals.insert(ts);
+                }
+                _ => {}
+            }
+        }
+
+        let mut hem_stmt = conn
+            .prepare(
+                "SELECT timestamp, today_import_kwh, today_export_kwh
+                 FROM readings
+                 WHERE timestamp >= ?1 AND timestamp < ?2
+                 ORDER BY timestamp",
+            )
+            .map_err(|e| e.to_string())?;
+        let hem_rows = hem_stmt
+            .query_map(params![start_ts, end_ts], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<f64>>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in hem_rows {
+            let (ts, import, export) = row.map_err(|e| e.to_string())?;
+            let day = days.entry(local_date(ts)?).or_default();
+            if let Some(value) = import.filter(|v| v.is_finite() && *v >= 0.0) {
+                day.hem_import_kwh = Some(day.hem_import_kwh.unwrap_or(0.0).max(value));
+            }
+            if let Some(value) = export.filter(|v| v.is_finite() && *v >= 0.0) {
+                day.hem_export_kwh = Some(day.hem_export_kwh.unwrap_or(0.0).max(value));
+            }
+        }
+
+        // A sync cursor marks the earliest instant currently imported for a
+        // stream. Do not call not-yet-backfilled history "missing".
+        let mut stream_start: HashMap<String, i64> = HashMap::new();
+        let mut cursor_stmt = conn
+            .prepare("SELECT stream_key, backfill_before FROM octopus_sync_cursors")
+            .map_err(|e| e.to_string())?;
+        let cursors = cursor_stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in cursors {
+            let (key, earliest) = row.map_err(|e| e.to_string())?;
+            if let Some((kind, _)) = key.split_once(':') {
+                stream_start
+                    .entry(kind.to_string())
+                    .and_modify(|current| *current = (*current).min(earliest))
+                    .or_insert(earliest);
+            }
+        }
+
+        let day_bounds = |date: chrono::NaiveDate| -> Result<(i64, i64), String> {
+            let start = London
+                .from_local_datetime(&date.and_hms_opt(0, 0, 0).unwrap())
+                .earliest()
+                .ok_or_else(|| "invalid comparison day start".to_string())?
+                .timestamp();
+            let next = London
+                .from_local_datetime(
+                    &date
+                        .succ_opt()
+                        .ok_or_else(|| "comparison date overflow".to_string())?
+                        .and_hms_opt(0, 0, 0)
+                        .unwrap(),
+                )
+                .earliest()
+                .ok_or_else(|| "invalid comparison day end".to_string())?
+                .timestamp();
+            Ok((start, next))
+        };
+        let expected_for_day = |date: chrono::NaiveDate, kind: &str| -> Result<u32, String> {
+            let Some(active_from) = stream_start.get(kind).copied() else {
+                return Ok(0);
+            };
+            let (start, next) = day_bounds(date)?;
+            let covered_start = start.max(start_ts).max(active_from);
+            let covered_end = next.min(end_ts);
+            Ok(((covered_end - covered_start).max(0) / 1800) as u32)
+        };
+
+        let mut totals = OctopusComparisonTotals::default();
+        let mut output = Vec::with_capacity(days.len());
+        for (date, data) in days {
+            let expected_import = expected_for_day(date, "electricity_import")?;
+            let expected_export = expected_for_day(date, "electricity_export")?;
+            let expected_gas = expected_for_day(date, "gas")?;
+            let import_intervals = data.import_intervals.len() as u32;
+            let export_intervals = data.export_intervals.len() as u32;
+            let gas_intervals = data.gas_intervals.len() as u32;
+            // A daily cumulative inverter counter cannot be compared with a
+            // clipped supplier day: its value already includes energy before
+            // the query boundary. Only expose HEM values for complete UK days.
+            let (day_start, day_end) = day_bounds(date)?;
+            let full_day = day_start >= start_ts && day_end <= end_ts;
+            let hem_import_kwh = full_day.then_some(data.hem_import_kwh).flatten();
+            let hem_export_kwh = full_day.then_some(data.hem_export_kwh).flatten();
+            let import_difference = data
+                .import_kwh
+                .zip(hem_import_kwh)
+                .map(|(octopus, hem)| hem - octopus);
+            let export_difference = data
+                .export_kwh
+                .zip(hem_export_kwh)
+                .map(|(octopus, hem)| hem - octopus);
+            let percent = |difference: Option<f64>, octopus: Option<f64>| {
+                difference.zip(octopus).and_then(|(difference, octopus)| {
+                    (octopus.abs() > f64::EPSILON).then_some(difference / octopus * 100.0)
+                })
+            };
+
+            if let (Some(octopus), Some(hem)) = (data.import_kwh, hem_import_kwh) {
+                totals.octopus_import_kwh += octopus;
+                totals.hem_import_kwh += hem;
+            }
+            if let (Some(octopus), Some(hem)) = (data.export_kwh, hem_export_kwh) {
+                totals.octopus_export_kwh += octopus;
+                totals.hem_export_kwh += hem;
+            }
+            totals.expected_import_intervals += expected_import;
+            totals.import_intervals += import_intervals;
+            totals.expected_export_intervals += expected_export;
+            totals.export_intervals += export_intervals;
+            totals.expected_gas_intervals += expected_gas;
+            totals.gas_intervals += gas_intervals;
+
+            output.push(OctopusComparisonDay {
+                date: date.format("%Y-%m-%d").to_string(),
+                octopus_import_kwh: data.import_kwh,
+                hem_import_kwh,
+                import_difference_kwh: import_difference,
+                import_difference_percent: percent(import_difference, data.import_kwh),
+                octopus_export_kwh: data.export_kwh,
+                hem_export_kwh,
+                export_difference_kwh: export_difference,
+                export_difference_percent: percent(export_difference, data.export_kwh),
+                expected_import_intervals: expected_import,
+                import_intervals,
+                missing_import_intervals: expected_import.saturating_sub(import_intervals),
+                expected_export_intervals: expected_export,
+                export_intervals,
+                missing_export_intervals: expected_export.saturating_sub(export_intervals),
+                expected_gas_intervals: expected_gas,
+                gas_intervals,
+                missing_gas_intervals: expected_gas.saturating_sub(gas_intervals),
+            });
+        }
+        totals.import_difference_kwh = totals.hem_import_kwh - totals.octopus_import_kwh;
+        totals.export_difference_kwh = totals.hem_export_kwh - totals.octopus_export_kwh;
+        totals.missing_import_intervals = totals
+            .expected_import_intervals
+            .saturating_sub(totals.import_intervals);
+        totals.missing_export_intervals = totals
+            .expected_export_intervals
+            .saturating_sub(totals.export_intervals);
+        totals.missing_gas_intervals = totals
+            .expected_gas_intervals
+            .saturating_sub(totals.gas_intervals);
+
+        Ok(OctopusComparisonReport {
+            totals,
+            days: output,
+            import_stream_available: stream_start.contains_key("electricity_import"),
+            export_stream_available: stream_start.contains_key("electricity_export"),
+            gas_stream_available: stream_start.contains_key("gas"),
+        })
+    }
+
     pub fn octopus_sync_cursor(&self, stream_key: &str) -> Option<(i64, bool)> {
         let conn = self.conn.lock().ok()?;
         conn.query_row(
@@ -1928,6 +2623,290 @@ mod tests {
         assert_eq!(db.octopus_sync_cursor("stream"), None);
         db.set_octopus_sync_cursor("stream", 1234, true).unwrap();
         assert_eq!(db.octopus_sync_cursor("stream"), Some((1234, true)));
+    }
+
+    #[test]
+    fn migrates_development_tariff_schema_to_day_night_rate_types() {
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("givenergy-history-test-{id}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("legacy-octopus.db");
+        let _ = std::fs::remove_file(&path);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE octopus_tariff_prices (
+                meter_kind TEXT NOT NULL, meter_point TEXT NOT NULL,
+                tariff_code TEXT NOT NULL, valid_from INTEGER NOT NULL,
+                valid_to INTEGER, value_inc_vat REAL NOT NULL,
+                is_standing INTEGER NOT NULL,
+                PRIMARY KEY (meter_kind, meter_point, tariff_code, valid_from, is_standing)
+             );
+             INSERT INTO octopus_tariff_prices VALUES
+                ('electricity_import','point','E-2R-VAR-22-11-01-H',100,NULL,30.0,0);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let db = HistoryDb::open(&path).unwrap();
+        assert!(db.has_octopus_tariff_prices(
+            "electricity_import",
+            "point",
+            "E-2R-VAR-22-11-01-H",
+            "standard"
+        ));
+        db.upsert_octopus_tariff_prices(&[
+            OctopusTariffPriceRow {
+                meter_kind: "electricity_import".to_string(),
+                meter_point: "point".to_string(),
+                tariff_code: "E-2R-VAR-22-11-01-H".to_string(),
+                valid_from: 100,
+                valid_to: None,
+                value_inc_vat: 10.0,
+                rate_type: "night".to_string(),
+            },
+            OctopusTariffPriceRow {
+                meter_kind: "electricity_import".to_string(),
+                meter_point: "point".to_string(),
+                tariff_code: "E-2R-VAR-22-11-01-H".to_string(),
+                valid_from: 100,
+                valid_to: None,
+                value_inc_vat: 30.0,
+                rate_type: "day".to_string(),
+            },
+        ])
+        .unwrap();
+        assert!(db.has_octopus_tariff_prices(
+            "electricity_import",
+            "point",
+            "E-2R-VAR-22-11-01-H",
+            "day"
+        ));
+        assert!(db.has_octopus_tariff_prices(
+            "electricity_import",
+            "point",
+            "E-2R-VAR-22-11-01-H",
+            "night"
+        ));
+    }
+
+    #[test]
+    fn octopus_billing_applies_historical_rates_and_daily_standing_charges() {
+        let db = test_db();
+        let start = chrono::DateTime::parse_from_rfc3339("2025-01-15T00:00:00Z")
+            .unwrap()
+            .timestamp();
+        let end = start + 86400;
+        let consumption = |kind: &str, point: &str, value: f64| OctopusConsumptionRow {
+            meter_kind: kind.to_string(),
+            meter_point: point.to_string(),
+            meter_serial: format!("{point}-serial"),
+            interval_start: start + 1800,
+            interval_end: start + 3600,
+            consumption: value,
+        };
+        db.upsert_octopus_consumption(
+            &[
+                consumption("electricity_import", "import", 10.0),
+                consumption("electricity_export", "export", 2.0),
+                consumption("gas", "gas", 5.0),
+            ],
+            end,
+        )
+        .unwrap();
+        let tariff = |kind: &str, point: &str, value: f64, rate_type: &str| OctopusTariffPriceRow {
+            meter_kind: kind.to_string(),
+            meter_point: point.to_string(),
+            tariff_code: format!("tariff-{kind}"),
+            valid_from: start - 86400,
+            valid_to: Some(end + 86400),
+            value_inc_vat: value,
+            rate_type: rate_type.to_string(),
+        };
+        db.upsert_octopus_tariff_prices(&[
+            tariff("electricity_import", "import", 20.0, "standard"),
+            tariff("electricity_import", "import", 50.0, "standing"),
+            tariff("electricity_export", "export", 15.0, "standard"),
+            tariff("gas", "gas", 10.0, "standard"),
+            tariff("gas", "gas", 30.0, "standing"),
+        ])
+        .unwrap();
+
+        let report = db.query_octopus_billing(start, end, true, 30, 450).unwrap();
+        assert_eq!(report.monthly.len(), 1);
+        assert_eq!(report.yearly.len(), 1);
+        assert!((report.totals.electricity_energy_cost_gbp - 2.0).abs() < 1e-9);
+        assert!((report.totals.electricity_standing_cost_gbp - 0.5).abs() < 1e-9);
+        assert!((report.totals.electricity_total_cost_gbp - 2.5).abs() < 1e-9);
+        assert!((report.totals.export_income_gbp - 0.3).abs() < 1e-9);
+        assert!((report.totals.gas_total_cost_gbp.unwrap() - 0.8).abs() < 1e-9);
+        assert!((report.totals.net_cost_gbp.unwrap() - 3.0).abs() < 1e-9);
+        assert!(report.totals.pricing_complete);
+
+        let cubic_metres = db
+            .query_octopus_billing(start, end, false, 30, 450)
+            .unwrap();
+        assert!(!cubic_metres.gas_cost_available);
+        assert_eq!(cubic_metres.totals.gas_total_cost_gbp, None);
+        assert_eq!(cubic_metres.totals.net_cost_gbp, None);
+        assert!((cubic_metres.totals.gas_standing_cost_gbp - 0.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn octopus_billing_applies_economy7_day_and_night_rates() {
+        let db = test_db();
+        let start = chrono::DateTime::parse_from_rfc3339("2025-01-15T00:00:00Z")
+            .unwrap()
+            .timestamp();
+        let consumption = |offset: i64, value: f64| OctopusConsumptionRow {
+            meter_kind: "electricity_import".to_string(),
+            meter_point: "import".to_string(),
+            meter_serial: "serial".to_string(),
+            interval_start: start + offset,
+            interval_end: start + offset + 1800,
+            consumption: value,
+        };
+        db.upsert_octopus_consumption(
+            &[consumption(3600, 2.0), consumption(12 * 3600, 3.0)],
+            start + 86400,
+        )
+        .unwrap();
+        let price = |rate_type: &str, value: f64| OctopusTariffPriceRow {
+            meter_kind: "electricity_import".to_string(),
+            meter_point: "import".to_string(),
+            tariff_code: "E-2R-VAR-22-11-01-H".to_string(),
+            valid_from: start - 1,
+            valid_to: Some(start + 86400),
+            value_inc_vat: value,
+            rate_type: rate_type.to_string(),
+        };
+        db.upsert_octopus_tariff_prices(&[price("day", 30.0), price("night", 10.0)])
+            .unwrap();
+
+        let report = db
+            .query_octopus_billing(start, start + 86400, true, 30, 450)
+            .unwrap();
+        assert!((report.totals.electricity_energy_cost_gbp - 1.1).abs() < 1e-9);
+        assert!(report.totals.pricing_complete);
+    }
+
+    #[test]
+    fn octopus_comparison_reports_daily_differences_and_missing_intervals() {
+        let db = test_db();
+        let start = chrono::DateTime::parse_from_rfc3339("2025-01-15T00:00:00Z")
+            .unwrap()
+            .timestamp();
+        let interval = |kind: &str, offset: i64, value: f64| OctopusConsumptionRow {
+            meter_kind: kind.to_string(),
+            meter_point: kind.to_string(),
+            meter_serial: "serial".to_string(),
+            interval_start: start + offset,
+            interval_end: start + offset + 1800,
+            consumption: value,
+        };
+        db.upsert_octopus_consumption(
+            &[
+                interval("electricity_import", 0, 1.0),
+                interval("electricity_import", 1800, 2.0),
+                interval("electricity_export", 0, 0.5),
+            ],
+            start + 86400,
+        )
+        .unwrap();
+        db.set_octopus_sync_cursor("electricity_import:point:serial", start, true)
+            .unwrap();
+        db.set_octopus_sync_cursor("electricity_export:point:serial", start, true)
+            .unwrap();
+        db.insert_reading(&make_snapshot_with_kwh(start + 3600, 3.2, 0.4));
+
+        let report = db.query_octopus_comparison(start, start + 86400).unwrap();
+        assert_eq!(report.days.len(), 1);
+        assert_eq!(report.days[0].import_intervals, 2);
+        assert_eq!(report.days[0].missing_import_intervals, 46);
+        assert_eq!(report.days[0].missing_export_intervals, 47);
+        assert!((report.days[0].import_difference_kwh.unwrap() - 0.2).abs() < 1e-6);
+        assert!((report.days[0].export_difference_kwh.unwrap() + 0.1).abs() < 1e-6);
+        assert!(!report.gas_stream_available);
+    }
+
+    #[test]
+    fn octopus_missing_interval_expectations_follow_uk_dst_days() {
+        let db = test_db();
+        db.set_octopus_sync_cursor("electricity_import:point:serial", 0, true)
+            .unwrap();
+        let spring_start = chrono::DateTime::parse_from_rfc3339("2025-03-30T00:00:00Z")
+            .unwrap()
+            .timestamp();
+        let spring_end = chrono::DateTime::parse_from_rfc3339("2025-03-30T23:00:00Z")
+            .unwrap()
+            .timestamp();
+        let spring = db
+            .query_octopus_comparison(spring_start, spring_end)
+            .unwrap();
+        assert_eq!(spring.days[0].expected_import_intervals, 46);
+
+        let autumn_start = chrono::DateTime::parse_from_rfc3339("2025-10-25T23:00:00Z")
+            .unwrap()
+            .timestamp();
+        let autumn_end = chrono::DateTime::parse_from_rfc3339("2025-10-27T00:00:00Z")
+            .unwrap()
+            .timestamp();
+        let autumn = db
+            .query_octopus_comparison(autumn_start, autumn_end)
+            .unwrap();
+        assert_eq!(autumn.days[0].expected_import_intervals, 50);
+    }
+
+    #[test]
+    fn octopus_billing_uses_supplier_half_even_interval_rounding() {
+        let db = test_db();
+        let start = 1_700_000_000;
+        let make = |serial: &str, offset: i64, usage: f64| OctopusConsumptionRow {
+            meter_kind: "electricity_import".to_string(),
+            meter_point: "import".to_string(),
+            meter_serial: serial.to_string(),
+            interval_start: start + offset,
+            interval_end: start + offset + 1800,
+            consumption: usage,
+        };
+        db.upsert_octopus_consumption(&[make("a", 0, 0.015), make("b", 1800, 0.025)], start + 4000)
+            .unwrap();
+        db.upsert_octopus_tariff_prices(&[OctopusTariffPriceRow {
+            meter_kind: "electricity_import".to_string(),
+            meter_point: "import".to_string(),
+            tariff_code: "tariff".to_string(),
+            valid_from: start - 1,
+            valid_to: Some(start + 4000),
+            value_inc_vat: 100.0,
+            rate_type: "standard".to_string(),
+        }])
+        .unwrap();
+        let report = db
+            .query_octopus_billing(start, start + 4000, true, 30, 450)
+            .unwrap();
+        // Both intervals bill as 0.02 kWh at £1/kWh.
+        assert!((report.totals.electricity_energy_cost_gbp - 0.04).abs() < 1e-9);
+    }
+
+    #[test]
+    fn octopus_billing_marks_missing_interval_prices_incomplete() {
+        let db = test_db();
+        db.upsert_octopus_consumption(
+            &[OctopusConsumptionRow {
+                meter_kind: "electricity_import".to_string(),
+                meter_point: "import".to_string(),
+                meter_serial: "serial".to_string(),
+                interval_start: 1_700_000_000,
+                interval_end: 1_700_001_800,
+                consumption: 1.0,
+            }],
+            1_700_002_000,
+        )
+        .unwrap();
+        let report = db
+            .query_octopus_billing(1_699_999_000, 1_700_003_000, true, 30, 450)
+            .unwrap();
+        assert!(!report.totals.pricing_complete);
+        assert_eq!(report.totals.electricity_total_cost_gbp, 0.0);
     }
 
     fn make_snapshot(ts: i64, soc: u8, solar: i32) -> InverterSnapshot {

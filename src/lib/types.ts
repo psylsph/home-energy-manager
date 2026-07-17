@@ -265,6 +265,9 @@ export interface PollSettings {
   octopus_account_number?: string;
   /** The secret itself is never returned by GET /api/settings. */
   octopus_api_key_configured?: boolean;
+  octopus_gas_unit?: 'unknown' | 'kwh' | 'm3';
+  octopus_economy7_start?: string;
+  octopus_economy7_end?: string;
   hidden_panels: string[];
   evc_host: string;
   evc_port: number;
