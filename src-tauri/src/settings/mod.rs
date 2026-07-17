@@ -905,6 +905,17 @@ pub struct Settings {
     /// Override for tests/self-hosted mirrors. Empty uses the official API.
     #[serde(default)]
     pub octopus_api_base_url: String,
+    /// Unit returned by the gas consumption endpoint: "kwh", "m3", or
+    /// "unknown". Octopus does not label this in the REST response, so gas
+    /// costs are only calculated when the user explicitly selects kWh.
+    #[serde(default = "default_octopus_gas_unit")]
+    pub octopus_gas_unit: String,
+    /// Economy 7 night-rate window used to allocate aggregate half-hourly
+    /// consumption between E-2R day and night prices. Europe/London clock.
+    #[serde(default = "default_octopus_economy7_start")]
+    pub octopus_economy7_start: String,
+    #[serde(default = "default_octopus_economy7_end")]
+    pub octopus_economy7_end: String,
 
     /// Whether the user opted in to launching the app automatically when
     /// they log in (Windows: HKCU\…\Run, macOS: LaunchAgent,
@@ -1001,6 +1012,18 @@ fn default_agile_region() -> String {
 
 fn default_api_port() -> u16 {
     7338
+}
+
+fn default_octopus_gas_unit() -> String {
+    "unknown".to_string()
+}
+
+fn default_octopus_economy7_start() -> String {
+    "00:30".to_string()
+}
+
+fn default_octopus_economy7_end() -> String {
+    "07:30".to_string()
 }
 
 fn default_disable_auto_discovery() -> bool {
@@ -1218,6 +1241,9 @@ impl Default for Settings {
             octopus_api_key: String::new(),
             octopus_account_number: String::new(),
             octopus_api_base_url: String::new(),
+            octopus_gas_unit: default_octopus_gas_unit(),
+            octopus_economy7_start: default_octopus_economy7_start(),
+            octopus_economy7_end: default_octopus_economy7_end(),
             disable_auto_discovery: true,
             autostart_enabled: false,
             api_key: String::new(),
@@ -1389,6 +1415,9 @@ mod tests {
         assert!(!s.octopus_enabled);
         assert!(s.octopus_api_key.is_empty());
         assert!(s.octopus_account_number.is_empty());
+        assert_eq!(s.octopus_gas_unit, "unknown");
+        assert_eq!(s.octopus_economy7_start, "00:30");
+        assert_eq!(s.octopus_economy7_end, "07:30");
     }
 
     #[test]
@@ -1449,6 +1478,9 @@ mod tests {
             octopus_api_key: "sk_test".to_string(),
             octopus_account_number: "A-1234ABCD".to_string(),
             octopus_api_base_url: String::new(),
+            octopus_gas_unit: "kwh".to_string(),
+            octopus_economy7_start: "00:30".to_string(),
+            octopus_economy7_end: "07:30".to_string(),
             disable_auto_discovery: true,
             autostart_enabled: true,
             api_key: String::new(),
@@ -1856,6 +1888,9 @@ mod tests {
             octopus_api_key: String::new(),
             octopus_account_number: String::new(),
             octopus_api_base_url: String::new(),
+            octopus_gas_unit: "unknown".to_string(),
+            octopus_economy7_start: "00:30".to_string(),
+            octopus_economy7_end: "07:30".to_string(),
             disable_auto_discovery: true,
             autostart_enabled: false,
             api_key: String::new(),

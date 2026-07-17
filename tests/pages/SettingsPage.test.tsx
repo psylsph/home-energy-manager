@@ -49,6 +49,12 @@ function defaultSettings(overrides: SettingsShape = {}): SettingsShape {
     import_tariff: null,
     export_tariff: null,
     import_standing_charge_p_per_day: null,
+    octopus_enabled: false,
+    octopus_account_number: '',
+    octopus_api_key_configured: false,
+    octopus_gas_unit: 'unknown',
+    octopus_economy7_start: '00:30',
+    octopus_economy7_end: '07:30',
     ...overrides,
   };
 }
@@ -345,6 +351,37 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       await waitFor(() => {
         expect(apiPostMock).toHaveBeenCalledWith('/api/settings', expect.objectContaining({ host: '192.168.1.20' }));
       });
+    });
+  });
+
+  describe('Octopus gas unit', () => {
+    it('hydrates and saves the explicit gas unit without requiring the key again', async () => {
+      mountApiMocks({
+        octopus_enabled: true,
+        octopus_account_number: 'A-1234ABCD',
+        octopus_api_key_configured: true,
+        octopus_gas_unit: 'm3',
+        octopus_economy7_start: '01:00',
+        octopus_economy7_end: '08:00',
+      });
+      render(<SettingsPage />);
+      const select = await screen.findByRole('combobox', { name: /Gas API unit/ }) as HTMLSelectElement;
+      expect(select.value).toBe('m3');
+      expect((screen.getByLabelText(/Economy 7 night rate starts/) as HTMLInputElement).value).toBe('01:00');
+      expect((screen.getByLabelText(/Economy 7 night rate ends/) as HTMLInputElement).value).toBe('08:00');
+      fireEvent.change(select, { target: { value: 'kwh' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save Octopus Settings' }));
+
+      await waitFor(() => {
+        expect(apiPostMock).toHaveBeenCalledWith('/api/settings', expect.objectContaining({
+          octopus_enabled: true,
+          octopus_account_number: 'A-1234ABCD',
+          octopus_gas_unit: 'kwh',
+          octopus_economy7_start: '01:00',
+          octopus_economy7_end: '08:00',
+        }));
+      });
+      expect(apiPostMock).toHaveBeenCalledWith('/api/octopus/sync');
     });
   });
 

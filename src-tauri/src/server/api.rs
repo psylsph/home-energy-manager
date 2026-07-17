@@ -866,6 +866,9 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "octopus_enabled": settings.octopus_enabled,
             "octopus_account_number": settings.octopus_account_number,
             "octopus_api_key_configured": !settings.octopus_api_key.is_empty(),
+            "octopus_gas_unit": settings.octopus_gas_unit,
+            "octopus_economy7_start": settings.octopus_economy7_start,
+            "octopus_economy7_end": settings.octopus_economy7_end,
             // The Octopus API key is intentionally never returned.
             "hidden_panels": settings.hidden_panels,
             "evc_host": settings.evc_host,
@@ -991,6 +994,35 @@ pub async fn update_settings(
     }
     if let Some(key) = body.get("octopus_api_key").and_then(|v| v.as_str()) {
         persist.octopus_api_key = key.trim().to_string();
+    }
+    if let Some(unit) = body.get("octopus_gas_unit").and_then(|v| v.as_str()) {
+        if !matches!(unit, "unknown" | "kwh" | "m3") {
+            return error_response("octopus_gas_unit must be unknown, kwh, or m3");
+        }
+        persist.octopus_gas_unit = unit.to_string();
+    }
+    let valid_hhmm = |value: &str| {
+        value.split_once(':').is_some_and(|(hour, minute)| {
+            hour.len() == 2
+                && minute.len() == 2
+                && hour.parse::<u8>().is_ok_and(|h| h < 24)
+                && minute.parse::<u8>().is_ok_and(|m| m < 60)
+        })
+    };
+    if let Some(value) = body.get("octopus_economy7_start").and_then(|v| v.as_str()) {
+        if !valid_hhmm(value) {
+            return error_response("octopus_economy7_start must be a valid HH:MM time");
+        }
+        persist.octopus_economy7_start = value.to_string();
+    }
+    if let Some(value) = body.get("octopus_economy7_end").and_then(|v| v.as_str()) {
+        if !valid_hhmm(value) {
+            return error_response("octopus_economy7_end must be a valid HH:MM time");
+        }
+        persist.octopus_economy7_end = value.to_string();
+    }
+    if persist.octopus_economy7_start == persist.octopus_economy7_end {
+        return error_response("Octopus Economy 7 start and end times must differ");
     }
     if let Some(hp) = body.get("hidden_panels").and_then(|v| v.as_array()) {
         let panels: Vec<String> = hp
@@ -1194,6 +1226,15 @@ fn settings_log_fields(
                 persist.octopus_api_key.len()
             )
         });
+    }
+    if is_present("octopus_gas_unit") {
+        out.push(format!("octopus_gas_unit={}", persist.octopus_gas_unit));
+    }
+    if is_present("octopus_economy7_start") || is_present("octopus_economy7_end") {
+        out.push(format!(
+            "octopus_economy7_window={}-{}",
+            persist.octopus_economy7_start, persist.octopus_economy7_end
+        ));
     }
     if is_present("hidden_panels") {
         out.push(format!(
@@ -8547,6 +8588,9 @@ mod tests {
                 "octopus_enabled": true,
                 "octopus_account_number": " A-1234ABCD ",
                 "octopus_api_key": " sk_secret_value ",
+                "octopus_gas_unit": "kwh",
+                "octopus_economy7_start": "01:00",
+                "octopus_economy7_end": "08:00",
             });
             let (status, _) = update_settings(State(state.clone()), Json(body)).await;
             assert_eq!(status, StatusCode::OK);
@@ -8555,11 +8599,58 @@ mod tests {
             assert!(saved.octopus_enabled);
             assert_eq!(saved.octopus_account_number, "A-1234ABCD");
             assert_eq!(saved.octopus_api_key, "sk_secret_value");
+            assert_eq!(saved.octopus_gas_unit, "kwh");
+            assert_eq!(saved.octopus_economy7_start, "01:00");
+            assert_eq!(saved.octopus_economy7_end, "08:00");
 
             let (_, response) = get_settings(State(state)).await;
             assert_eq!(response["data"]["octopus_enabled"], true);
             assert_eq!(response["data"]["octopus_api_key_configured"], true);
+            assert_eq!(response["data"]["octopus_gas_unit"], "kwh");
+            assert_eq!(response["data"]["octopus_economy7_start"], "01:00");
+            assert_eq!(response["data"]["octopus_economy7_end"], "08:00");
             assert!(response["data"].get("octopus_api_key").is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn octopus_settings_reject_unknown_gas_unit() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let (status, body) = update_settings(
+                State(state),
+                Json(serde_json::json!({"octopus_gas_unit": "therms"})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(body["error"].as_str().unwrap().contains("octopus_gas_unit"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn octopus_settings_reject_invalid_or_empty_economy7_windows() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let (status, body) = update_settings(
+                State(state.clone()),
+                Json(serde_json::json!({"octopus_economy7_start": "24:00"})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(body["error"].as_str().unwrap().contains("valid HH:MM"));
+
+            let (status, body) = update_settings(
+                State(state),
+                Json(serde_json::json!({
+                    "octopus_economy7_start": "07:30",
+                    "octopus_economy7_end": "07:30"
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(body["error"].as_str().unwrap().contains("must differ"));
         })
         .await;
     }

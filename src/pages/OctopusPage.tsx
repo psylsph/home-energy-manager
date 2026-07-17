@@ -26,6 +26,8 @@ interface OctopusStatus {
   backfill_complete: boolean;
   discovered_streams: number;
   imported_intervals: number;
+  tariff_prices?: number;
+  last_tariff_error?: string | null;
 }
 
 interface StatusResponse {
@@ -39,6 +41,83 @@ interface StatusResponse {
 interface HistoryResponse {
   ok: boolean;
   data: Record<string, OctopusPoint[]>;
+}
+
+interface BillingSummary {
+  electricity_import_kwh: number;
+  electricity_export_kwh: number;
+  gas_usage: number;
+  electricity_energy_cost_gbp: number;
+  electricity_standing_cost_gbp: number;
+  electricity_total_cost_gbp: number;
+  export_income_gbp: number;
+  gas_energy_cost_gbp: number | null;
+  gas_standing_cost_gbp: number;
+  gas_total_cost_gbp: number | null;
+  net_cost_gbp: number | null;
+  pricing_complete: boolean;
+}
+
+interface BillingPeriod extends BillingSummary { period: string }
+
+interface SummaryResponse {
+  ok: boolean;
+  data: {
+    totals: BillingSummary;
+    monthly: BillingPeriod[];
+    yearly: BillingPeriod[];
+    gas_cost_available: boolean;
+  };
+  gas_unit: 'unknown' | 'kwh' | 'm3';
+  estimated: boolean;
+}
+
+interface ComparisonDay {
+  date: string;
+  octopus_import_kwh: number | null;
+  hem_import_kwh: number | null;
+  import_difference_kwh: number | null;
+  import_difference_percent: number | null;
+  octopus_export_kwh: number | null;
+  hem_export_kwh: number | null;
+  export_difference_kwh: number | null;
+  export_difference_percent: number | null;
+  expected_import_intervals: number;
+  import_intervals: number;
+  missing_import_intervals: number;
+  expected_export_intervals: number;
+  export_intervals: number;
+  missing_export_intervals: number;
+  expected_gas_intervals: number;
+  gas_intervals: number;
+  missing_gas_intervals: number;
+}
+
+interface ComparisonResponse {
+  ok: boolean;
+  data: {
+    totals: {
+      octopus_import_kwh: number;
+      hem_import_kwh: number;
+      import_difference_kwh: number;
+      octopus_export_kwh: number;
+      hem_export_kwh: number;
+      export_difference_kwh: number;
+      expected_import_intervals: number;
+      import_intervals: number;
+      missing_import_intervals: number;
+      expected_export_intervals: number;
+      export_intervals: number;
+      missing_export_intervals: number;
+      expected_gas_intervals: number;
+      gas_intervals: number;
+      missing_gas_intervals: number;
+    };
+    days: ComparisonDay[];
+    import_stream_available: boolean;
+    export_stream_available: boolean;
+    gas_stream_available: boolean;
+  };
 }
 
 const RANGES: { key: OctopusRange; label: string }[] = [
@@ -58,6 +137,19 @@ function formatTick(value: number, range: OctopusRange) {
     return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
   }
   return date.toLocaleDateString([], { month: 'short', year: '2-digit' });
+}
+
+function formatComparison(value: number | null, suffix = ' kWh'): string {
+  return value == null ? '—' : `${value.toFixed(3)}${suffix}`;
+}
+
+function formatMoney(value: number | null): string {
+  return value == null ? 'Unavailable' : value.toLocaleString([], {
+    style: 'currency',
+    currency: 'GBP',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
 function ConsumptionTooltip({ active, payload, label }: {
@@ -82,17 +174,23 @@ export default function OctopusPage() {
   const [range, setRange] = useState<OctopusRange>('30d');
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [series, setSeries] = useState<Record<string, OctopusPoint[]>>({});
+  const [billing, setBilling] = useState<SummaryResponse | null>(null);
+  const [comparison, setComparison] = useState<ComparisonResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [nextStatus, history] = await Promise.all([
+      const [nextStatus, history, summary, nextComparison] = await Promise.all([
         apiGet<StatusResponse>('/api/octopus/status'),
         apiGet<HistoryResponse>(`/api/octopus/history?range=${range}`),
+        apiGet<SummaryResponse>(`/api/octopus/summary?range=${range}`),
+        apiGet<ComparisonResponse>(`/api/octopus/comparison?range=${range}`),
       ]);
       setStatus(nextStatus);
       setSeries(history.data ?? {});
+      setBilling(summary);
+      setComparison(nextComparison);
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Unable to load Octopus data');
@@ -213,6 +311,247 @@ export default function OctopusPage() {
           <div className="text-xs text-text-secondary">Octopus-reported units</div>
         </div>
       </section>
+
+      {billing && (
+        <section className="rounded-xl bg-bg-surface p-4">
+          <div>
+            <h3 className="font-medium text-text-primary">Estimated supplier costs</h3>
+            <p className="mt-1 text-xs text-text-secondary">
+              VAT-inclusive historical Octopus rates and standing charges matched to each supplier reading. These are estimates rather than an Octopus bill.
+            </p>
+          </div>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="rounded-lg bg-bg-elevated p-3">
+              <div className="text-xs text-text-secondary">Electricity import</div>
+              <div className="mt-1 text-xl font-semibold text-red-400">{formatMoney(billing.data.totals.electricity_total_cost_gbp)}</div>
+              <div className="text-xs text-text-secondary">
+                {formatMoney(billing.data.totals.electricity_energy_cost_gbp)} energy + {formatMoney(billing.data.totals.electricity_standing_cost_gbp)} standing
+              </div>
+            </div>
+            <div className="rounded-lg bg-bg-elevated p-3">
+              <div className="text-xs text-text-secondary">Electricity export income</div>
+              <div className="mt-1 text-xl font-semibold text-green-400">{formatMoney(billing.data.totals.export_income_gbp)}</div>
+            </div>
+            <div className="rounded-lg bg-bg-elevated p-3">
+              <div className="text-xs text-text-secondary">Gas cost</div>
+              <div className="mt-1 text-xl font-semibold text-amber-400">{formatMoney(billing.data.totals.gas_total_cost_gbp)}</div>
+              {!billing.data.gas_cost_available && (
+                <div className="text-xs text-text-secondary">Choose kWh in Settings to calculate</div>
+              )}
+            </div>
+            <div className="rounded-lg bg-bg-elevated p-3">
+              <div className="text-xs text-text-secondary">
+                {billing.data.gas_cost_available ? 'Net supplier cost' : 'Net electricity cost'}
+              </div>
+              <div className="mt-1 text-xl font-semibold text-text-primary">
+                {formatMoney(
+                  billing.data.totals.net_cost_gbp
+                  ?? billing.data.totals.electricity_total_cost_gbp - billing.data.totals.export_income_gbp,
+                )}
+              </div>
+            </div>
+          </div>
+          {(!billing.data.totals.pricing_complete || status?.data.last_tariff_error) && (
+            <div className="mt-3 rounded-lg border border-yellow-500/30 bg-yellow-950/20 px-3 py-2 text-xs text-yellow-300">
+              Some historical tariff prices could not be matched, so the estimate may be incomplete.
+              {status?.data.last_tariff_error ? ` ${status.data.last_tariff_error}` : ''}
+            </div>
+          )}
+
+          {billing.data.monthly.length > 0 && (
+            <div className="mt-5 overflow-x-auto">
+              <h4 className="mb-2 text-sm font-medium text-text-primary">Monthly summary</h4>
+              <table className="w-full min-w-[1080px] text-left text-xs">
+                <thead className="text-text-secondary">
+                  <tr className="border-b border-white/10">
+                    <th className="px-2 py-2">Month</th>
+                    <th className="px-2 py-2">Import</th>
+                    <th className="px-2 py-2">Energy cost</th>
+                    <th className="px-2 py-2">Elec. standing</th>
+                    <th className="px-2 py-2">Import total</th>
+                    <th className="px-2 py-2">Export</th>
+                    <th className="px-2 py-2">Income</th>
+                    <th className="px-2 py-2">Gas</th>
+                    <th className="px-2 py-2">Gas energy</th>
+                    <th className="px-2 py-2">Gas standing</th>
+                    <th className="px-2 py-2">Gas total</th>
+                    <th className="px-2 py-2">Net</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...billing.data.monthly].reverse().map((row) => (
+                    <tr key={row.period} className="border-b border-white/5 text-text-primary">
+                      <td className="px-2 py-2 font-medium">{row.period}</td>
+                      <td className="px-2 py-2">{row.electricity_import_kwh.toFixed(3)} kWh</td>
+                      <td className="px-2 py-2">{formatMoney(row.electricity_energy_cost_gbp)}</td>
+                      <td className="px-2 py-2">{formatMoney(row.electricity_standing_cost_gbp)}</td>
+                      <td className="px-2 py-2">{formatMoney(row.electricity_total_cost_gbp)}</td>
+                      <td className="px-2 py-2">{row.electricity_export_kwh.toFixed(3)} kWh</td>
+                      <td className="px-2 py-2">{formatMoney(row.export_income_gbp)}</td>
+                      <td className="px-2 py-2">{row.gas_usage.toFixed(3)}</td>
+                      <td className="px-2 py-2">{formatMoney(row.gas_energy_cost_gbp)}</td>
+                      <td className="px-2 py-2">{formatMoney(row.gas_standing_cost_gbp)}</td>
+                      <td className="px-2 py-2">{formatMoney(row.gas_total_cost_gbp)}</td>
+                      <td className="px-2 py-2">{formatMoney(row.net_cost_gbp ?? row.electricity_total_cost_gbp - row.export_income_gbp)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {billing.data.yearly.length > 0 && (
+            <div className="mt-5 overflow-x-auto">
+              <h4 className="mb-2 text-sm font-medium text-text-primary">Yearly summary</h4>
+              <table className="w-full min-w-[620px] text-left text-xs">
+                <thead className="text-text-secondary">
+                  <tr className="border-b border-white/10">
+                    <th className="px-2 py-2">Year</th>
+                    <th className="px-2 py-2">Imported</th>
+                    <th className="px-2 py-2">Import cost</th>
+                    <th className="px-2 py-2">Exported</th>
+                    <th className="px-2 py-2">Export income</th>
+                    <th className="px-2 py-2">Gas</th>
+                    <th className="px-2 py-2">Net</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...billing.data.yearly].reverse().map((row) => (
+                    <tr key={row.period} className="border-b border-white/5 text-text-primary">
+                      <td className="px-2 py-2 font-medium">{row.period}</td>
+                      <td className="px-2 py-2">{row.electricity_import_kwh.toFixed(3)} kWh</td>
+                      <td className="px-2 py-2">{formatMoney(row.electricity_total_cost_gbp)}</td>
+                      <td className="px-2 py-2">{row.electricity_export_kwh.toFixed(3)} kWh</td>
+                      <td className="px-2 py-2">{formatMoney(row.export_income_gbp)}</td>
+                      <td className="px-2 py-2">{row.gas_usage.toFixed(3)}</td>
+                      <td className="px-2 py-2">{formatMoney(row.net_cost_gbp ?? row.electricity_total_cost_gbp - row.export_income_gbp)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
+
+      {comparison && (
+        <section className="rounded-xl bg-bg-surface p-4">
+          <h3 className="font-medium text-text-primary">Octopus versus HEM</h3>
+          <p className="mt-1 text-xs text-text-secondary">
+            Daily supplier totals compared with the inverter’s daily counters. Difference is HEM minus Octopus; only days containing both readings contribute to the totals.
+          </p>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            <div className="rounded-lg bg-bg-elevated p-3">
+              <div className="text-xs text-text-secondary">Import difference</div>
+              <div className="mt-1 text-xl font-semibold text-text-primary">
+                {formatComparison(comparison.data.totals.import_difference_kwh)}
+              </div>
+              <div className="text-xs text-text-secondary">
+                Octopus {comparison.data.totals.octopus_import_kwh.toFixed(3)} · HEM {comparison.data.totals.hem_import_kwh.toFixed(3)} kWh
+              </div>
+            </div>
+            <div className="rounded-lg bg-bg-elevated p-3">
+              <div className="text-xs text-text-secondary">Export difference</div>
+              <div className="mt-1 text-xl font-semibold text-text-primary">
+                {formatComparison(comparison.data.totals.export_difference_kwh)}
+              </div>
+              <div className="text-xs text-text-secondary">
+                Octopus {comparison.data.totals.octopus_export_kwh.toFixed(3)} · HEM {comparison.data.totals.hem_export_kwh.toFixed(3)} kWh
+              </div>
+            </div>
+          </div>
+          <div className="mt-4 max-h-96 overflow-auto">
+            <table className="w-full min-w-[940px] text-left text-xs">
+              <thead className="sticky top-0 bg-bg-surface text-text-secondary">
+                <tr className="border-b border-white/10">
+                  <th className="px-2 py-2">Date</th>
+                  <th className="px-2 py-2">Octopus import</th>
+                  <th className="px-2 py-2">HEM import</th>
+                  <th className="px-2 py-2">Difference</th>
+                  <th className="px-2 py-2">Octopus export</th>
+                  <th className="px-2 py-2">HEM export</th>
+                  <th className="px-2 py-2">Difference</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...comparison.data.days].reverse().map((day) => (
+                  <tr key={day.date} className="border-b border-white/5 text-text-primary">
+                    <td className="px-2 py-2 font-medium">{day.date}</td>
+                    <td className="px-2 py-2">{formatComparison(day.octopus_import_kwh)}</td>
+                    <td className="px-2 py-2">{formatComparison(day.hem_import_kwh)}</td>
+                    <td className="px-2 py-2">
+                      {formatComparison(day.import_difference_kwh)}
+                      {day.import_difference_percent != null ? ` (${day.import_difference_percent.toFixed(1)}%)` : ''}
+                    </td>
+                    <td className="px-2 py-2">{formatComparison(day.octopus_export_kwh)}</td>
+                    <td className="px-2 py-2">{formatComparison(day.hem_export_kwh)}</td>
+                    <td className="px-2 py-2">
+                      {formatComparison(day.export_difference_kwh)}
+                      {day.export_difference_percent != null ? ` (${day.export_difference_percent.toFixed(1)}%)` : ''}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {comparison && (
+        <section className="rounded-xl bg-bg-surface p-4">
+          <h3 className="font-medium text-text-primary">Supplier data completeness</h3>
+          <p className="mt-1 text-xs text-text-secondary">
+            Expected half-hour slots are adjusted for the selected partial day, imported history, and UK daylight-saving transitions. Recent Octopus readings commonly arrive late.
+          </p>
+          <div className="mt-4 grid gap-3 sm:grid-cols-3">
+            {([
+              ['Electricity import', comparison.data.import_stream_available, comparison.data.totals.import_intervals, comparison.data.totals.expected_import_intervals, comparison.data.totals.missing_import_intervals],
+              ['Electricity export', comparison.data.export_stream_available, comparison.data.totals.export_intervals, comparison.data.totals.expected_export_intervals, comparison.data.totals.missing_export_intervals],
+              ['Gas', comparison.data.gas_stream_available, comparison.data.totals.gas_intervals, comparison.data.totals.expected_gas_intervals, comparison.data.totals.missing_gas_intervals],
+            ] as const).map(([label, available, actual, expected, missing]) => (
+              <div key={label} className="rounded-lg bg-bg-elevated p-3">
+                <div className="text-xs text-text-secondary">{label}</div>
+                {!available ? (
+                  <div className="mt-1 text-lg font-semibold text-text-secondary">Not configured</div>
+                ) : (
+                  <>
+                    <div className={`mt-1 text-xl font-semibold ${missing > 0 ? 'text-yellow-300' : 'text-green-400'}`}>
+                      {expected > 0 ? `${Math.min(100, actual / expected * 100).toFixed(1)}%` : '100%'}
+                    </div>
+                    <div className="text-xs text-text-secondary">
+                      {actual} of {expected} intervals · {missing} missing
+                    </div>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+          {comparison.data.days.some((day) => day.missing_import_intervals + day.missing_export_intervals + day.missing_gas_intervals > 0) && (
+            <div className="mt-4 max-h-64 overflow-auto">
+              <table className="w-full min-w-[560px] text-left text-xs">
+                <thead className="sticky top-0 bg-bg-surface text-text-secondary">
+                  <tr className="border-b border-white/10">
+                    <th className="px-2 py-2">Date</th>
+                    <th className="px-2 py-2">Import missing</th>
+                    <th className="px-2 py-2">Export missing</th>
+                    <th className="px-2 py-2">Gas missing</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...comparison.data.days].reverse().filter((day) => day.missing_import_intervals + day.missing_export_intervals + day.missing_gas_intervals > 0).map((day) => (
+                    <tr key={day.date} className="border-b border-white/5 text-text-primary">
+                      <td className="px-2 py-2 font-medium">{day.date}</td>
+                      <td className="px-2 py-2">{day.missing_import_intervals} / {day.expected_import_intervals}</td>
+                      <td className="px-2 py-2">{day.missing_export_intervals} / {day.expected_export_intervals}</td>
+                      <td className="px-2 py-2">{day.missing_gas_intervals} / {day.expected_gas_intervals}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
 
       <section className="rounded-xl bg-bg-surface p-4">
         <h3 className="mb-3 font-medium text-text-primary">Electricity consumption</h3>

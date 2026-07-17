@@ -1,6 +1,6 @@
 [package]
 name = "givenergy-local"
-version = "0.62.0"
+version = "0.63.0"
 description = "Home Energy Manager — Monitor and control GivEnergy inverters"
 authors = ["Stuart Harding"]
 edition = "2021"
@@ -37,6 +37,7 @@ crc = "3"
 
 # Chrono for timestamps
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 
 # HTTP client for Octopus API
 ureq = { version = "3", features = ["json"] }

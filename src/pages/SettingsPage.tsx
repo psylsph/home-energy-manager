@@ -307,6 +307,9 @@ export default function SettingsPage() {
   const [octopusAccount, setOctopusAccount] = useState('');
   const [octopusApiKey, setOctopusApiKey] = useState('');
   const [octopusKeyConfigured, setOctopusKeyConfigured] = useState(false);
+  const [octopusGasUnit, setOctopusGasUnit] = useState<'unknown' | 'kwh' | 'm3'>('unknown');
+  const [octopusEconomy7Start, setOctopusEconomy7Start] = useState('00:30');
+  const [octopusEconomy7End, setOctopusEconomy7End] = useState('07:30');
   const [octopusSaving, setOctopusSaving] = useState(false);
   // Issue #110: solar array capacities for the per-array "% of max" view.
   // Hybrid / DC-coupled users enter PV1/PV2 kWp. AC-coupled users label
@@ -412,6 +415,9 @@ export default function SettingsPage() {
         setOctopusEnabled(Boolean(s.octopus_enabled));
         setOctopusAccount(s.octopus_account_number ?? '');
         setOctopusKeyConfigured(Boolean(s.octopus_api_key_configured));
+        setOctopusGasUnit(s.octopus_gas_unit ?? 'unknown');
+        setOctopusEconomy7Start(s.octopus_economy7_start ?? '00:30');
+        setOctopusEconomy7End(s.octopus_economy7_end ?? '07:30');
         // Issue #110: hydrate the solar-array inputs.
         setPv1RatedKw(
           s.pv1_rated_kw != null && s.pv1_rated_kw > 0 ? String(s.pv1_rated_kw) : '',
@@ -618,6 +624,9 @@ export default function SettingsPage() {
       const body: Record<string, unknown> = {
         octopus_enabled: octopusEnabled,
         octopus_account_number: account,
+        octopus_gas_unit: octopusGasUnit,
+        octopus_economy7_start: octopusEconomy7Start,
+        octopus_economy7_end: octopusEconomy7End,
       };
       if (octopusApiKey.trim()) body.octopus_api_key = octopusApiKey.trim();
       await apiPost('/api/settings', body);
@@ -1299,6 +1308,37 @@ export default function SettingsPage() {
             <span className="mb-1 block text-xs font-medium text-text-secondary">API key</span>
             <input type="password" value={octopusApiKey} onChange={(e) => setOctopusApiKey(e.target.value)} placeholder={octopusKeyConfigured ? 'Saved — enter a new key to replace' : 'sk_live_…'} autoComplete="new-password" className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-flow-active" />
           </label>
+        </div>
+        <label className="block max-w-sm">
+          <span className="mb-1 block text-xs font-medium text-text-secondary">Gas API unit</span>
+          <select
+            value={octopusGasUnit}
+            onChange={(e) => setOctopusGasUnit(e.target.value as 'unknown' | 'kwh' | 'm3')}
+            className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-flow-active"
+          >
+            <option value="unknown">Unknown — do not calculate gas cost</option>
+            <option value="kwh">kWh — calculate gas cost</option>
+            <option value="m3">m³ — usage only</option>
+          </select>
+          <span className="mt-1 block text-xs text-text-secondary">
+            Octopus does not label gas units in this API. Only choose kWh if your downloaded readings are already converted; m³ needs billing conversion data that the API does not provide.
+          </span>
+        </label>
+        <div className="max-w-sm">
+          <span className="mb-1 block text-xs font-medium text-text-secondary">Economy 7 night-rate window</span>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block">
+              <span className="sr-only">Economy 7 night rate starts</span>
+              <input type="time" value={octopusEconomy7Start} onChange={(e) => setOctopusEconomy7Start(e.target.value)} aria-label="Economy 7 night rate starts" className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-flow-active" />
+            </label>
+            <label className="block">
+              <span className="sr-only">Economy 7 night rate ends</span>
+              <input type="time" value={octopusEconomy7End} onChange={(e) => setOctopusEconomy7End(e.target.value)} aria-label="Economy 7 night rate ends" className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-flow-active" />
+            </label>
+          </div>
+          <span className="mt-1 block text-xs text-text-secondary">
+            Used only for historical E-2R tariffs. Times follow the Europe/London clock; check your meter or bill because Economy 7 hours can vary.
+          </span>
         </div>
         <p className="text-xs text-text-secondary">
           Find these in your Octopus dashboard. The key is stored locally, never displayed again, and never written to logs.
