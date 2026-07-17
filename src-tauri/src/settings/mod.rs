@@ -892,6 +892,20 @@ pub struct Settings {
     #[serde(default)]
     pub weather_config: WeatherConfig,
 
+    // -- Octopus Energy customer consumption (issue #212) --
+    /// Opt-in gate for authenticated Octopus account consumption sync.
+    #[serde(default)]
+    pub octopus_enabled: bool,
+    /// Octopus customer API key. Never returned by the settings API or logged.
+    #[serde(default)]
+    pub octopus_api_key: String,
+    /// Octopus account number, e.g. A-1234ABCD.
+    #[serde(default)]
+    pub octopus_account_number: String,
+    /// Override for tests/self-hosted mirrors. Empty uses the official API.
+    #[serde(default)]
+    pub octopus_api_base_url: String,
+
     /// Whether the user opted in to launching the app automatically when
     /// they log in (Windows: HKCU\…\Run, macOS: LaunchAgent,
     /// Linux: ~/.config/autostart/*.desktop). Persisted so the in-app
@@ -1200,6 +1214,10 @@ impl Default for Settings {
             hidden_panels: Vec::new(),
             alerts_config: AlertsConfig::default(),
             weather_config: WeatherConfig::default(),
+            octopus_enabled: false,
+            octopus_api_key: String::new(),
+            octopus_account_number: String::new(),
+            octopus_api_base_url: String::new(),
             disable_auto_discovery: true,
             autostart_enabled: false,
             api_key: String::new(),
@@ -1367,6 +1385,10 @@ mod tests {
         assert_eq!(s.pv1_rated_kw, 0.0);
         assert_eq!(s.pv2_rated_kw, 0.0);
         assert!(s.solar_arrays.is_empty());
+        // Issue #212 is strictly opt-in and starts with no supplier credentials.
+        assert!(!s.octopus_enabled);
+        assert!(s.octopus_api_key.is_empty());
+        assert!(s.octopus_account_number.is_empty());
     }
 
     #[test]
@@ -1423,6 +1445,10 @@ mod tests {
                 ),
                 open_meteo_base_url: "https://api.open-meteo.com".to_string(),
             },
+            octopus_enabled: true,
+            octopus_api_key: "sk_test".to_string(),
+            octopus_account_number: "A-1234ABCD".to_string(),
+            octopus_api_base_url: String::new(),
             disable_auto_discovery: true,
             autostart_enabled: true,
             api_key: String::new(),
@@ -1826,6 +1852,10 @@ mod tests {
             hidden_panels: Vec::new(),
             alerts_config: AlertsConfig::default(),
             weather_config: WeatherConfig::default(),
+            octopus_enabled: false,
+            octopus_api_key: String::new(),
+            octopus_account_number: String::new(),
+            octopus_api_base_url: String::new(),
             disable_auto_discovery: true,
             autostart_enabled: false,
             api_key: String::new(),

@@ -16,6 +16,7 @@ import BatteryPage from './pages/BatteryPage';
 import ControlPage from './pages/ControlPage';
 import SettingsPage from './pages/SettingsPage';
 import HistoryPage from './pages/HistoryPage';
+import OctopusPage from './pages/OctopusPage';
 import LogsPage from './pages/LogsPage';
 import SolarPage from './pages/SolarPage';
 import InverterPage from './pages/InverterPage';
@@ -175,6 +176,7 @@ const NAV_ITEMS = [
   { to: '/inverter', label: 'Inverter', icon: InverterIcon, accent: FLOW_COLORS.inverter },
   { to: '/meters', label: 'Meters', icon: MeterIcon, accent: FLOW_COLORS.grid },
   { to: '/history', label: 'History', icon: HistoryIcon, accent: undefined },
+  { to: '/octopus', label: 'Octopus', icon: OctopusIcon, accent: '#ec4899' },
   { to: '/control', label: 'Control', icon: ControlIcon, accent: undefined },
   { to: '/settings', label: 'Settings', icon: SettingsIcon, accent: undefined },
 ] as const;
@@ -195,6 +197,14 @@ function HistoryIcon() {
   return (
     <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+    </svg>
+  );
+}
+
+function OctopusIcon() {
+  return (
+    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 12c-4.5 0-7-2.5-7-5.5A5.5 5.5 0 0110.5 1h3A5.5 5.5 0 0119 6.5c0 3-2.5 5.5-7 5.5zM7 11c-2 2-3 4-2 6m5-5c-1 3-1 6 1 8m6-9c2 2 3 4 2 6m-5-5c1 3 1 6-1 8" />
     </svg>
   );
 }
@@ -292,10 +302,12 @@ function Layout() {
   useGridOutageNotifications();
   const [searchParams] = useSearchParams();
   const { snapshot, developerMode, themeMode, hiddenPanels, readOnly, setHiddenPanels, setEvcHost, setInverterTempConfig, setReadOnly } = useInverterStore();
+  const [octopusConfigured, setOctopusConfigured] = useState(false);
 
-  // Load hidden panels from settings on mount
+  // Load navigation-affecting settings on mount. The Octopus page is opt-in:
+  // no tab or route is exposed until enabled with both credentials present.
   useEffect(() => {
-    (async () => {
+    const load = async () => {
       try {
         const res = await apiGet<{ ok: boolean; data: PollSettings }>('/api/settings');
         if (res.ok && res.data.hidden_panels) {
@@ -304,8 +316,17 @@ function Layout() {
         if (res.ok && res.data.evc_host) {
           setEvcHost(res.data.evc_host);
         }
+        setOctopusConfigured(Boolean(
+          res.ok
+          && res.data.octopus_enabled
+          && res.data.octopus_account_number
+          && res.data.octopus_api_key_configured,
+        ));
       } catch { /* use defaults */ }
-    })();
+    };
+    void load();
+    window.addEventListener('octopus-settings-changed', load);
+    return () => window.removeEventListener('octopus-settings-changed', load);
   }, [setHiddenPanels, setEvcHost]);
 
   // Seed the inverter-temperature alert thresholds from the backend so the
@@ -363,6 +384,7 @@ function Layout() {
   const visibleItems = NAV_ITEMS.filter(item => {
     const key = item.to.replace(/^\//, '');
     if (isReadOnly && (key === 'control' || key === 'settings')) return false;
+    if (key === 'octopus' && !octopusConfigured) return false;
     return !key || !hiddenPanels.includes(key);
   });
 
@@ -408,6 +430,9 @@ function Layout() {
           {page('/power', <PowerPage />, true)}
           {page('/battery', <BatteryPage />, true)}
           {page('/history', <HistoryPage />, true)}
+          {octopusConfigured
+            ? page('/octopus', <OctopusPage />)
+            : <Route path="/octopus" element={<Navigate to="/" replace />} />}
           {page('/control', <ControlPage />, true)}
           {page('/settings', <SettingsPage />)}
           {page('/solar', <SolarPage />, true)}

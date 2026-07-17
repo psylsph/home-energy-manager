@@ -863,6 +863,10 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "import_standing_charge_p_per_day": settings.import_standing_charge_p_per_day,
             "import_tariff_config": settings.import_tariff_config,
             "export_tariff_config": settings.export_tariff_config,
+            "octopus_enabled": settings.octopus_enabled,
+            "octopus_account_number": settings.octopus_account_number,
+            "octopus_api_key_configured": !settings.octopus_api_key.is_empty(),
+            // The Octopus API key is intentionally never returned.
             "hidden_panels": settings.hidden_panels,
             "evc_host": settings.evc_host,
             "evc_port": settings.evc_port,
@@ -978,6 +982,15 @@ pub async fn update_settings(
     }
     if let Some(hp) = body.get("http_port").and_then(|v| v.as_u64()) {
         persist.http_port = hp.min(u16::MAX as u64) as u16;
+    }
+    if let Some(enabled) = body.get("octopus_enabled").and_then(|v| v.as_bool()) {
+        persist.octopus_enabled = enabled;
+    }
+    if let Some(account) = body.get("octopus_account_number").and_then(|v| v.as_str()) {
+        persist.octopus_account_number = account.trim().to_string();
+    }
+    if let Some(key) = body.get("octopus_api_key").and_then(|v| v.as_str()) {
+        persist.octopus_api_key = key.trim().to_string();
     }
     if let Some(hp) = body.get("hidden_panels").and_then(|v| v.as_array()) {
         let panels: Vec<String> = hp
@@ -1162,6 +1175,25 @@ fn settings_log_fields(
     }
     if is_present("http_port") {
         out.push(format!("http_port={}", persist.http_port));
+    }
+    if is_present("octopus_enabled") {
+        out.push(format!("octopus_enabled={}", persist.octopus_enabled));
+    }
+    if is_present("octopus_account_number") {
+        out.push(format!(
+            "octopus_account={}",
+            persist.octopus_account_number
+        ));
+    }
+    if is_present("octopus_api_key") {
+        out.push(if persist.octopus_api_key.is_empty() {
+            "octopus_api_key=cleared".to_string()
+        } else {
+            format!(
+                "octopus_api_key=set ({} chars)",
+                persist.octopus_api_key.len()
+            )
+        });
     }
     if is_present("hidden_panels") {
         out.push(format!(
@@ -8503,6 +8535,31 @@ mod tests {
             let (_, get_body) = get_settings(State(state)).await;
             assert_eq!(get_body["data"]["api_key"], "my-api-key");
             assert_eq!(get_body["data"]["api_port"], 8443);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn octopus_settings_persist_but_secret_is_never_returned() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "octopus_enabled": true,
+                "octopus_account_number": " A-1234ABCD ",
+                "octopus_api_key": " sk_secret_value ",
+            });
+            let (status, _) = update_settings(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let saved = crate::settings::Settings::load();
+            assert!(saved.octopus_enabled);
+            assert_eq!(saved.octopus_account_number, "A-1234ABCD");
+            assert_eq!(saved.octopus_api_key, "sk_secret_value");
+
+            let (_, response) = get_settings(State(state)).await;
+            assert_eq!(response["data"]["octopus_enabled"], true);
+            assert_eq!(response["data"]["octopus_api_key_configured"], true);
+            assert!(response["data"].get("octopus_api_key").is_none());
         })
         .await;
     }

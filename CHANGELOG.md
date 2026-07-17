@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.62.0] - 2026-07-17
+
+### Added
+
+- **Octopus Energy smart-meter data now has its own optional dashboard.** Add your Octopus account number and API key in Settings to see supplier-recorded electricity imports, electricity exports, and gas usage from the last seven days through to your full available history, including selected-period totals and separate cumulative graphs. Recent readings appear first while older data fills in safely in the background, and the Octopus tab stays hidden until the integration is fully configured. (issue #212)
+
 ## [0.61.4] - 2026-07-16
 
 ### Changed

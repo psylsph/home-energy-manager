@@ -301,6 +301,13 @@ export default function SettingsPage() {
   // string is the uninitialised state; we coerce to 0 on save so the backend
   // gets a clean number and a blank input means "no Standing Charge".
   const [importStandingCharge, setImportStandingCharge] = useState<string>('');
+  // Authenticated Octopus consumption integration (issue #212). The secret
+  // is write-only: GET /api/settings returns only whether a key exists.
+  const [octopusEnabled, setOctopusEnabled] = useState(false);
+  const [octopusAccount, setOctopusAccount] = useState('');
+  const [octopusApiKey, setOctopusApiKey] = useState('');
+  const [octopusKeyConfigured, setOctopusKeyConfigured] = useState(false);
+  const [octopusSaving, setOctopusSaving] = useState(false);
   // Issue #110: solar array capacities for the per-array "% of max" view.
   // Hybrid / DC-coupled users enter PV1/PV2 kWp. AC-coupled users label
   // the CT meter(s) on their separate solar inverter(s) and enter the
@@ -402,6 +409,9 @@ export default function SettingsPage() {
             ? String(s.import_standing_charge_p_per_day)
             : '',
         );
+        setOctopusEnabled(Boolean(s.octopus_enabled));
+        setOctopusAccount(s.octopus_account_number ?? '');
+        setOctopusKeyConfigured(Boolean(s.octopus_api_key_configured));
         // Issue #110: hydrate the solar-array inputs.
         setPv1RatedKw(
           s.pv1_rated_kw != null && s.pv1_rated_kw > 0 ? String(s.pv1_rated_kw) : '',
@@ -596,6 +606,37 @@ export default function SettingsPage() {
   };
 
   // Save tariffs
+  const handleOctopusSave = async () => {
+    const account = octopusAccount.trim();
+    const keyAvailable = octopusApiKey.trim().length > 0 || octopusKeyConfigured;
+    if (octopusEnabled && (!account || !keyAvailable)) {
+      flash('Enter both the Octopus account number and API key before enabling', false);
+      return;
+    }
+    setOctopusSaving(true);
+    try {
+      const body: Record<string, unknown> = {
+        octopus_enabled: octopusEnabled,
+        octopus_account_number: account,
+      };
+      if (octopusApiKey.trim()) body.octopus_api_key = octopusApiKey.trim();
+      await apiPost('/api/settings', body);
+      if (octopusApiKey.trim()) setOctopusKeyConfigured(true);
+      setOctopusApiKey('');
+      window.dispatchEvent(new Event('octopus-settings-changed'));
+      if (octopusEnabled) {
+        await apiPost('/api/octopus/sync');
+        flash('Octopus integration saved — consumption sync started', true);
+      } else {
+        flash('Octopus integration disabled', true);
+      }
+    } catch (e) {
+      flash(e instanceof Error ? e.message : 'Failed to save Octopus settings', false);
+    } finally {
+      setOctopusSaving(false);
+    }
+  };
+
   const handleTariffSave = async () => {
     // Re-check validity client-side as a defence-in-depth before posting —
     // the Save button is also disabled when invalid, but a programmatic
@@ -1232,6 +1273,39 @@ export default function SettingsPage() {
             />
           </div>
         )}
+      </section>
+
+      {/* ─── Octopus customer consumption (issue #212) ─── */}
+      <section className="bg-bg-surface rounded-xl p-5 space-y-4">
+        <div>
+          <h2 className="text-text-primary text-lg font-semibold font-sans">Octopus Energy Data</h2>
+          <p className="text-text-secondary text-sm mt-1">
+            Import Octopus smart-meter electricity and gas readings. Once fully configured, a separate Octopus tab appears in the navigation.
+          </p>
+        </div>
+        <label className="flex items-center justify-between gap-4 rounded-lg bg-bg-elevated px-4 py-3">
+          <span>
+            <span className="block text-sm font-medium text-text-primary">Enable Octopus data</span>
+            <span className="block text-xs text-text-secondary">Recent readings load first; older history continues in the background.</span>
+          </span>
+          <input type="checkbox" checked={octopusEnabled} onChange={(e) => setOctopusEnabled(e.target.checked)} className="h-5 w-5 accent-flow-active" />
+        </label>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium text-text-secondary">Account number</span>
+            <input value={octopusAccount} onChange={(e) => setOctopusAccount(e.target.value)} placeholder="A-1234ABCD" autoComplete="off" className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-flow-active" />
+          </label>
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium text-text-secondary">API key</span>
+            <input type="password" value={octopusApiKey} onChange={(e) => setOctopusApiKey(e.target.value)} placeholder={octopusKeyConfigured ? 'Saved — enter a new key to replace' : 'sk_live_…'} autoComplete="new-password" className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-flow-active" />
+          </label>
+        </div>
+        <p className="text-xs text-text-secondary">
+          Find these in your Octopus dashboard. The key is stored locally, never displayed again, and never written to logs.
+        </p>
+        <button type="button" onClick={handleOctopusSave} disabled={octopusSaving} className="rounded-lg bg-flow-active px-4 py-2 text-sm font-medium text-bg-base disabled:opacity-50">
+          {octopusSaving ? 'Saving…' : 'Save Octopus Settings'}
+        </button>
       </section>
 
       {/* ─── Section 4: Energy Tariffs ─── */}

@@ -3,6 +3,7 @@ pub mod evc;
 pub mod history;
 pub mod inverter;
 pub mod modbus;
+pub mod octopus;
 pub mod server;
 pub mod settings;
 #[cfg(test)]
@@ -496,6 +497,12 @@ pub fn run() {
                 weather::run_weather_loop(weather_state).await;
             });
 
+            // Spawn the opt-in Octopus customer-consumption synchronizer.
+            let octopus_state = state.clone();
+            tauri::async_runtime::spawn(async move {
+                octopus::run_octopus_loop(octopus_state).await;
+            });
+
             // Start the read-only API server if configured.
             let ro_state = state.clone();
             if !api_key.is_empty() && api_port > 0 {
@@ -719,6 +726,12 @@ pub fn run_headless(args: &[String]) {
         let weather_state = state.clone();
         tokio::spawn(async move {
             weather::run_weather_loop(weather_state).await;
+        });
+
+        // Spawn the opt-in Octopus customer-consumption synchronizer.
+        let octopus_state = state.clone();
+        tokio::spawn(async move {
+            octopus::run_octopus_loop(octopus_state).await;
         });
 
         // Start the read-only API server if configured.

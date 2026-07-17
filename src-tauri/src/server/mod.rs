@@ -102,8 +102,12 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         // Cosy charging
         .route("/api/cosy", get(api::get_cosy).post(api::set_cosy))
-        // Agile Octopus
+        // Agile Octopus battery automation
         .route("/api/agile", get(api::get_agile).post(api::set_agile))
+        // Authenticated Octopus customer consumption (issue #212)
+        .route("/api/octopus/status", get(crate::octopus::get_status))
+        .route("/api/octopus/sync", post(crate::octopus::start_sync))
+        .route("/api/octopus/history", get(crate::octopus::get_history))
         // Load discharge limiter
         .route(
             "/api/load-limiter",

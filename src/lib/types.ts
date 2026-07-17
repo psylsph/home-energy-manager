@@ -260,6 +260,11 @@ export interface PollSettings {
   import_standing_charge_p_per_day?: number;
   import_tariff_config: TariffConfig | null;
   export_tariff_config: TariffConfig | null;
+  /** Authenticated Octopus customer-consumption integration (issue #212). */
+  octopus_enabled?: boolean;
+  octopus_account_number?: string;
+  /** The secret itself is never returned by GET /api/settings. */
+  octopus_api_key_configured?: boolean;
   hidden_panels: string[];
   evc_host: string;
   evc_port: number;

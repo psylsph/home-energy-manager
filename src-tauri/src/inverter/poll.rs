@@ -347,6 +347,8 @@ pub struct AppState {
     /// layer doesn't have to special-case "weather not yet initialised".
     /// Mirror of `Settings::weather_config` lives inside the struct.
     pub weather: Arc<Mutex<crate::weather::WeatherState>>,
+    /// Octopus customer-consumption synchronization status.
+    pub octopus: Arc<Mutex<crate::octopus::OctopusState>>,
     /// Wall-clock time when the current connection was established (None if disconnected).
     pub connected_since: Arc<std::sync::Mutex<Option<std::time::SystemTime>>>,
     /// How many consecutive TCP connect attempts have failed since the last success.
@@ -403,6 +405,7 @@ impl AppState {
                 config: crate::settings::Settings::load().weather_config,
                 ..Default::default()
             })),
+            octopus: Arc::new(Mutex::new(crate::octopus::OctopusState::default())),
         }
     }
 }
@@ -453,6 +456,7 @@ impl AppState {
                 config: crate::settings::Settings::load().weather_config,
                 ..Default::default()
             })),
+            octopus: Arc::new(Mutex::new(crate::octopus::OctopusState::default())),
         }
     }
 }
