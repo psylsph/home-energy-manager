@@ -5,6 +5,18 @@ import { apiPost, apiGet } from '../lib/api';
 import { deviceSupportsEps, deviceSupportsTimedDischarge } from '../lib/deviceCapabilities';
 import type { ScheduleSlot } from '../lib/types';
 import AwaitingConnection from '../components/AwaitingConnection';
+import {
+  FORCE_DURATION_MAX,
+  FORCE_DURATION_MIN,
+  FORCE_DURATION_SLIDER_MAX,
+  FORCE_DURATION_STEP,
+  FORCE_DURATION_STORAGE_KEY,
+  clampDurationMinutes,
+  durationToSliderPosition,
+  formatDurationLabel,
+  readPersistedDuration,
+  sliderPositionToDuration,
+} from './forceDuration';
 
 /**
  * Front-end charging-mode dropdown values. Maps 1:1 to the backend
@@ -1891,16 +1903,13 @@ export default function ControlPage() {
   const [dischargeRateSaving, setDischargeRateSaving] = useState(false);
   const [activePowerSaving, setActivePowerSaving] = useState(false);
   // Duration (in minutes) for Force Charge and Force Discharge quick actions.
-  // Backend clamps to 1..=1439; 1440 means "until stopped" (writes a
-  // full-day slot) and is the upper bound of the slider for symmetry with
-  // the existing 1..=1440 cooldown clamp on alerts. Persisted to
-  // localStorage so the choice survives page reloads.
-  const [forceDurationMinutes, setForceDurationMinutes] = useState<number>(() => {
-    if (typeof window === 'undefined') return 30;
-    const raw = window.localStorage.getItem('forceDurationMinutes');
-    const parsed = raw == null ? NaN : Number.parseInt(raw, 10);
-    return Number.isFinite(parsed) && parsed >= 1 && parsed <= 1440 ? parsed : 30;
-  });
+  // The UI offers five-minute increments from 5m to 24h on a logarithmic
+  // track. The backend clamps the submitted 1440-minute endpoint to 1439
+  // when it writes the full-day slot. Persisted to localStorage so the
+  // choice survives page reloads.
+  const [forceDurationMinutes, setForceDurationMinutes] = useState<number>(() =>
+    readPersistedDuration(typeof window === 'undefined' ? null : window.localStorage),
+  );
   const [forceDurationSaving, setForceDurationSaving] = useState(false);
 
   // Limit slots shown to what the inverter model supports
@@ -2498,28 +2507,42 @@ export default function ControlPage() {
           <div className="space-y-1">
             <div className="flex items-center justify-between">
               <div>
-                <span className="text-text-secondary text-sm">Quick Action Duration</span>
+                <label
+                  htmlFor="quick-action-duration"
+                  className="text-text-secondary text-sm"
+                >
+                  Quick Action Duration
+                </label>
                 <p className="text-text-secondary text-xs mt-0.5">
                   How long the Quick Action force-charge / force-discharge slot
                   should run. Applies to both Quick Action buttons.
                 </p>
               </div>
               <span className="font-mono text-text-primary text-sm">
-                {forceDurationMinutes >= 1440
-                  ? '24h'
-                  : forceDurationMinutes >= 60
-                    ? `${Math.floor(forceDurationMinutes / 60)}h ${forceDurationMinutes % 60 ? `${forceDurationMinutes % 60}m` : ''}`.trim()
-                    : `${forceDurationMinutes}m`}
+                {formatDurationLabel(forceDurationMinutes)}
               </span>
             </div>
             <div className="flex items-center gap-3">
               <input
+                id="quick-action-duration"
                 type="range"
-                min={1}
-                max={1440}
+                min={0}
+                max={FORCE_DURATION_SLIDER_MAX}
                 step={1}
-                value={forceDurationMinutes}
-                onChange={(e) => setForceDurationMinutes(Math.max(1, Math.min(1440, Number(e.target.value))))}
+                value={durationToSliderPosition(forceDurationMinutes)}
+                aria-valuemin={FORCE_DURATION_MIN}
+                aria-valuemax={FORCE_DURATION_MAX}
+                aria-valuenow={forceDurationMinutes}
+                aria-valuetext={formatDurationLabel(forceDurationMinutes)}
+                onChange={(e) => setForceDurationMinutes(sliderPositionToDuration(Number(e.target.value)))}
+                onKeyDown={(e) => {
+                  if (!['ArrowLeft', 'ArrowDown', 'ArrowRight', 'ArrowUp'].includes(e.key)) return;
+                  e.preventDefault();
+                  const direction = e.key === 'ArrowLeft' || e.key === 'ArrowDown' ? -1 : 1;
+                  setForceDurationMinutes((minutes) =>
+                    clampDurationMinutes(minutes + direction * FORCE_DURATION_STEP),
+                  );
+                }}
                 className="flex-1"
               />
               <button
@@ -2527,7 +2550,7 @@ export default function ControlPage() {
                   setForceDurationSaving(true);
                   try {
                     // Persist so the choice survives page reloads.
-                    localStorage.setItem('forceDurationMinutes', String(forceDurationMinutes));
+                    localStorage.setItem(FORCE_DURATION_STORAGE_KEY, String(forceDurationMinutes));
                   } finally {
                     setForceDurationSaving(false);
                   }

@@ -1,7 +1,7 @@
 /**
  * Format a duration in minutes as a human-readable label for the UI.
  *
- *   1–59 min   → "30m"
+ *   5–59 min   → "30m"
  *   60–1439    → "1h 30m" / "2h" (no trailing zero minutes)
  *   ≥ 1440     → "24h"   (the slider's upper bound; we don't display larger values)
  *
@@ -22,17 +22,49 @@ export function formatDurationLabel(minutes: number): string {
   return `${whole}m`;
 }
 
-/** Clamp a value to the slider's valid range (1..=1440 minutes). */
-export function clampDurationMinutes(value: number): number {
-  if (!Number.isFinite(value)) return 30;
-  return Math.max(1, Math.min(1440, Math.round(value)));
-}
+/** Smallest, largest, and selectable increment exposed by the control. */
+export const FORCE_DURATION_MIN = 5;
+export const FORCE_DURATION_MAX = 1440;
+export const FORCE_DURATION_STEP = 5;
+
+/**
+ * The range input represents a logarithmic track position, not minutes.
+ * A reasonably fine integer domain keeps mouse/touch interaction smooth
+ * while preserving useful keyboard increments.
+ */
+export const FORCE_DURATION_SLIDER_MAX = 1000;
 
 /** Storage key for the persisted duration value. */
 export const FORCE_DURATION_STORAGE_KEY = 'forceDurationMinutes';
 
 /** Default duration if nothing is persisted. */
-export const FORCE_DURATION_DEFAULT = 30;
+export const FORCE_DURATION_DEFAULT = 60;
+
+/** Clamp and snap a value to the control's five-minute increments. */
+export function clampDurationMinutes(value: number): number {
+  if (!Number.isFinite(value)) return FORCE_DURATION_DEFAULT;
+  const rounded = Math.round(value / FORCE_DURATION_STEP) * FORCE_DURATION_STEP;
+  return Math.max(FORCE_DURATION_MIN, Math.min(FORCE_DURATION_MAX, rounded));
+}
+
+/** Convert minutes to a position on the logarithmic slider track. */
+export function durationToSliderPosition(minutes: number): number {
+  const duration = clampDurationMinutes(minutes);
+  const range = Math.log(FORCE_DURATION_MAX / FORCE_DURATION_MIN);
+  return Math.round(
+    (Math.log(duration / FORCE_DURATION_MIN) / range) * FORCE_DURATION_SLIDER_MAX,
+  );
+}
+
+/** Convert a logarithmic slider position back to a duration in minutes. */
+export function sliderPositionToDuration(position: number): number {
+  if (!Number.isFinite(position)) return FORCE_DURATION_DEFAULT;
+  const boundedPosition = Math.max(0, Math.min(FORCE_DURATION_SLIDER_MAX, position));
+  const progress = boundedPosition / FORCE_DURATION_SLIDER_MAX;
+  const duration = FORCE_DURATION_MIN
+    * Math.exp(Math.log(FORCE_DURATION_MAX / FORCE_DURATION_MIN) * progress);
+  return clampDurationMinutes(duration);
+}
 
 /**
  * Read the persisted duration from localStorage, falling back to the
