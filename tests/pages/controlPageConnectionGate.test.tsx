@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, within } from '@testing-library/react';
 
 vi.mock('../../src/lib/api', () => ({
   apiGet: vi.fn(async (path: string) => {
@@ -58,6 +58,11 @@ import ControlPage from '../../src/pages/ControlPage';
 import { useInverterStore } from '../../src/store/useInverterStore';
 import type { InverterSnapshot } from '../../src/lib/types';
 import { apiPost } from '../../src/lib/api';
+import {
+  FORCE_DURATION_SLIDER_MAX,
+  FORCE_DURATION_STORAGE_KEY,
+  durationToSliderPosition,
+} from '../../src/pages/forceDuration';
 
 // ---------------------------------------------------------------------------
 // ControlPage used to render the full set of controls even when the
@@ -197,6 +202,7 @@ describe('<ControlPage/> — connection-state gate', () => {
     // jsdom's fetch returns undefined by default. Stub it so the Retry
     // button's POST to /api/reconnect resolves cleanly.
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }));
+    window.localStorage.clear();
   });
 
   afterEach(() => {
@@ -307,6 +313,40 @@ describe('<ControlPage/> — connection-state gate', () => {
     expect(
       await screen.findByRole('heading', { name: 'Battery Mode', exact: true }),
     ).toBeDefined();
+  });
+
+  it('uses a logarithmic five-minute duration slider defaulting to one hour', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot(),
+      developerMode: false,
+      connectionState: 'connected',
+      connectedHost: '192.168.1.36:8899',
+    });
+    render(<ControlPage />);
+
+    const slider = await screen.findByRole('slider', { name: 'Quick Action Duration' });
+    const oneHourPosition = durationToSliderPosition(60);
+    expect(slider.getAttribute('min')).toBe('0');
+    expect(slider.getAttribute('max')).toBe(String(FORCE_DURATION_SLIDER_MAX));
+    expect(Number(slider.getAttribute('value'))).toBe(oneHourPosition);
+    expect(slider.getAttribute('aria-valuetext')).toBe('1h');
+    expect(oneHourPosition).toBeGreaterThan(FORCE_DURATION_SLIDER_MAX * 0.4);
+
+    const durationControls = slider.parentElement;
+    expect(durationControls).not.toBeNull();
+    fireEvent.click(within(durationControls!).getByRole('button', { name: 'Save' }));
+    expect(window.localStorage.getItem(FORCE_DURATION_STORAGE_KEY)).toBe('60');
+
+    const apiPostMock = vi.mocked(apiPost);
+    apiPostMock.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: /Force Charge/i }));
+    await vi.waitFor(() => {
+      expect(apiPostMock).toHaveBeenCalledWith('/api/control/force-charge', { minutes: 60 });
+    });
+
+    fireEvent.keyDown(slider, { key: 'ArrowRight' });
+    expect(slider.getAttribute('aria-valuenow')).toBe('65');
+    expect(slider.getAttribute('aria-valuetext')).toBe('1h 5m');
   });
 
   it('POSTs to /api/reconnect when the Retry button is clicked', async () => {
