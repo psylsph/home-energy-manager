@@ -33,6 +33,9 @@ vi.mock('../src/pages/MetersPage', () => ({
 vi.mock('../src/pages/HistoryPage', () => ({
   default: () => <div data-testid="mock-History">History</div>,
 }));
+vi.mock('../src/pages/OctopusPage', () => ({
+  default: () => <div data-testid="mock-Octopus">Octopus</div>,
+}));
 vi.mock('../src/pages/ControlPage', () => ({
   default: () => <div data-testid="mock-Control">Control</div>,
 }));
@@ -142,6 +145,36 @@ describe('<App/> route-level ErrorBoundary coverage (issue 3.4)', () => {
     await navigate(route);
     render(<App />);
     expect(screen.getByTestId(testId)).toBeDefined();
+  });
+});
+
+describe('<App/> Octopus navigation (issue #212)', () => {
+  beforeEach(() => {
+    silenceConsoleError();
+    window.location.hash = '#/battery';
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    cleanup();
+    window.location.hash = '';
+  });
+
+  it('does not show the tab when the integration is incomplete', async () => {
+    vi.mocked(apiGet).mockImplementation(async (path: string) => path === '/api/settings'
+      ? { ok: true, data: { octopus_enabled: true, octopus_account_number: 'A-123', octopus_api_key_configured: false } }
+      : { ok: true, data: {} });
+    render(<App />);
+    await act(async () => {});
+    expect(screen.queryByRole('link', { name: 'Octopus' })).toBeNull();
+  });
+
+  it('shows the dedicated tab only when enabled with account and key configured', async () => {
+    vi.mocked(apiGet).mockImplementation(async (path: string) => path === '/api/settings'
+      ? { ok: true, data: { octopus_enabled: true, octopus_account_number: 'A-123', octopus_api_key_configured: true } }
+      : { ok: true, data: {} });
+    render(<App />);
+    expect(await screen.findByRole('link', { name: 'Octopus' })).toBeDefined();
   });
 });
 

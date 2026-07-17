@@ -1553,10 +1553,11 @@ dependencies = [
 
 [[package]]
 name = "givenergy-local"
-version = "0.61.4"
+version = "0.62.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "crc",
  "dirs 6.0.0",

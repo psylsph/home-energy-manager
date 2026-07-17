@@ -24,6 +24,17 @@ pub struct TimePoint {
     pub v: f64,
 }
 
+/// One supplier interval fetched from the Octopus customer API.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OctopusConsumptionRow {
+    pub meter_kind: String,
+    pub meter_point: String,
+    pub meter_serial: String,
+    pub interval_start: i64,
+    pub interval_end: i64,
+    pub consumption: f64,
+}
+
 /// One display bucket of a cost/income series, split into its per-kWh energy
 /// component and its fixed daily standing-charge component (both cumulative £
 /// over the query window). The two always sum to the total value
@@ -537,6 +548,25 @@ CREATE TABLE IF NOT EXISTS weather_observations (
     latitude      REAL,
     longitude     REAL,
     fetched_at    INTEGER NOT NULL
+);
+-- Supplier readings are independent from inverter polling: Octopus values
+-- arrive late, can be corrected, and are naturally half-hour intervals.
+CREATE TABLE IF NOT EXISTS octopus_consumption (
+    meter_kind    TEXT NOT NULL,
+    meter_point   TEXT NOT NULL,
+    meter_serial  TEXT NOT NULL,
+    interval_start INTEGER NOT NULL,
+    interval_end   INTEGER NOT NULL,
+    consumption    REAL NOT NULL,
+    fetched_at     INTEGER NOT NULL,
+    PRIMARY KEY (meter_kind, meter_point, meter_serial, interval_start)
+);
+CREATE INDEX IF NOT EXISTS idx_octopus_kind_time
+    ON octopus_consumption (meter_kind, interval_start);
+CREATE TABLE IF NOT EXISTS octopus_sync_cursors (
+    stream_key      TEXT PRIMARY KEY,
+    backfill_before INTEGER NOT NULL,
+    complete        INTEGER NOT NULL DEFAULT 0
 );
 ";
 
@@ -1657,6 +1687,126 @@ impl HistoryDb {
         .ok()
     }
 
+    /// Upsert an Octopus response page atomically. Re-fetching a recent
+    /// overlap replaces late corrections without duplicating intervals.
+    pub fn upsert_octopus_consumption(
+        &self,
+        rows: &[OctopusConsumptionRow],
+        fetched_at: i64,
+    ) -> Result<usize, String> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO octopus_consumption
+                 (meter_kind, meter_point, meter_serial, interval_start, interval_end, consumption, fetched_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(meter_kind, meter_point, meter_serial, interval_start)
+                 DO UPDATE SET interval_end=excluded.interval_end,
+                               consumption=excluded.consumption,
+                               fetched_at=excluded.fetched_at",
+            ).map_err(|e| e.to_string())?;
+            for row in rows {
+                stmt.execute(params![
+                    row.meter_kind,
+                    row.meter_point,
+                    row.meter_serial,
+                    row.interval_start,
+                    row.interval_end,
+                    row.consumption,
+                    fetched_at,
+                ])
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(rows.len())
+    }
+
+    pub fn octopus_sync_cursor(&self, stream_key: &str) -> Option<(i64, bool)> {
+        let conn = self.conn.lock().ok()?;
+        conn.query_row(
+            "SELECT backfill_before, complete FROM octopus_sync_cursors WHERE stream_key=?1",
+            [stream_key],
+            |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
+        )
+        .ok()
+    }
+
+    pub fn set_octopus_sync_cursor(
+        &self,
+        stream_key: &str,
+        backfill_before: i64,
+        complete: bool,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO octopus_sync_cursors (stream_key, backfill_before, complete)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(stream_key) DO UPDATE SET
+                 backfill_before=excluded.backfill_before, complete=excluded.complete",
+            params![stream_key, backfill_before, i64::from(complete)],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Sum supplier intervals into fixed display buckets. Values are kept in
+    /// the units reported by Octopus; gas may therefore be kWh or m³.
+    pub fn query_octopus_consumption(
+        &self,
+        start_ts: i64,
+        end_ts: i64,
+        bucket_secs: i64,
+    ) -> Result<std::collections::HashMap<String, Vec<TimePoint>>, String> {
+        if bucket_secs <= 0 || start_ts >= end_ts {
+            return Err("invalid Octopus history window".to_string());
+        }
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT meter_kind,
+                    (?1 + ((interval_start - ?1) / ?3) * ?3) AS bucket,
+                    SUM(consumption)
+             FROM octopus_consumption
+             WHERE interval_start >= ?1 AND interval_start < ?2
+             GROUP BY meter_kind, bucket
+             ORDER BY bucket ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![start_ts, end_ts, bucket_secs], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (kind, timestamp, value) = row.map_err(|e| e.to_string())?;
+            out.entry(kind).or_insert_with(Vec::new).push(TimePoint {
+                t: timestamp * 1000,
+                v: value,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn octopus_bounds(&self) -> Option<(i64, i64)> {
+        let conn = self.conn.lock().ok()?;
+        conn.query_row(
+            "SELECT MIN(interval_start), MAX(interval_end) FROM octopus_consumption",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok()
+    }
+
     /// Fetch all readings for a given local date (midnight-to-midnight).
     /// Returns rows ordered by timestamp ascending.
     pub fn get_readings_for_date(
@@ -1742,6 +1892,42 @@ mod tests {
         let path = dir.join("test_history.db");
         let _ = std::fs::remove_file(&path);
         HistoryDb::open(&path).unwrap()
+    }
+
+    #[test]
+    fn octopus_consumption_upserts_and_aggregates_separate_streams() {
+        let db = test_db();
+        let row = |kind: &str, start: i64, value: f64| OctopusConsumptionRow {
+            meter_kind: kind.to_string(),
+            meter_point: "point".to_string(),
+            meter_serial: "serial".to_string(),
+            interval_start: start,
+            interval_end: start + 1800,
+            consumption: value,
+        };
+        db.upsert_octopus_consumption(
+            &[
+                row("electricity_import", 1000, 1.0),
+                row("electricity_import", 2800, 2.0),
+                row("electricity_export", 1000, 0.5),
+                row("gas", 1000, 3.0),
+            ],
+            5000,
+        )
+        .unwrap();
+        // A late supplier correction replaces the original interval.
+        db.upsert_octopus_consumption(&[row("electricity_import", 1000, 1.5)], 6000)
+            .unwrap();
+
+        let result = db.query_octopus_consumption(1000, 5000, 3600).unwrap();
+        assert_eq!(result["electricity_import"][0].v, 3.5);
+        assert_eq!(result["electricity_export"][0].v, 0.5);
+        assert_eq!(result["gas"][0].v, 3.0);
+        assert_eq!(db.octopus_bounds(), Some((1000, 4600)));
+
+        assert_eq!(db.octopus_sync_cursor("stream"), None);
+        db.set_octopus_sync_cursor("stream", 1234, true).unwrap();
+        assert_eq!(db.octopus_sync_cursor("stream"), Some((1234, true)));
     }
 
     fn make_snapshot(ts: i64, soc: u8, solar: i32) -> InverterSnapshot {
