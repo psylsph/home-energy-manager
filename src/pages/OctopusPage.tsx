@@ -4,6 +4,8 @@ import {
   AreaChart,
   CartesianGrid,
   Legend,
+  Line,
+  LineChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -16,6 +18,12 @@ import {
   octopusSeriesTotal,
 } from '../lib/octopusSeries';
 import type { OctopusPoint } from '../lib/octopusSeries';
+import {
+  buildOctopusCostSeries,
+  buildOctopusSummaryCsv,
+  type OctopusExportData,
+} from '../lib/octopusExport';
+import { downloadOctopusSummaryPdf } from '../lib/octopusPdfDownload';
 
 type OctopusRange = '7d' | '30d' | '6m' | '1y' | 'all';
 
@@ -64,6 +72,7 @@ interface SummaryResponse {
   ok: boolean;
   data: {
     totals: BillingSummary;
+    daily: BillingPeriod[];
     monthly: BillingPeriod[];
     yearly: BillingPeriod[];
     gas_cost_available: boolean;
@@ -178,6 +187,7 @@ export default function OctopusPage() {
   const [comparison, setComparison] = useState<ComparisonResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [exportMessage, setExportMessage] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -225,6 +235,57 @@ export default function OctopusPage() {
   const importTotal = octopusSeriesTotal(series.electricity_import);
   const exportTotal = octopusSeriesTotal(series.electricity_export);
   const gasTotal = octopusSeriesTotal(series.gas);
+  const costSeries = useMemo(
+    () => buildOctopusCostSeries(
+      billing
+        ? (range === '7d' || range === '30d' ? billing.data.daily : billing.data.monthly)
+        : [],
+    ),
+    [billing, range],
+  );
+
+  const exportData = (): OctopusExportData | null => {
+    if (!billing || !comparison) return null;
+    return {
+      rangeLabel: RANGES.find((item) => item.key === range)?.label ?? range,
+      generatedAt: new Date(),
+      gasUnit: billing.gas_unit,
+      costPeriods: range === '7d' || range === '30d'
+        ? billing.data.daily
+        : billing.data.monthly,
+      billing: billing.data,
+      comparison: comparison.data,
+    };
+  };
+
+  const exportCsv = () => {
+    const data = exportData();
+    if (!data) return;
+    const csv = buildOctopusSummaryCsv(data);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `givenergy_octopus_summary_${range}_${data.generatedAt.toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    setExportMessage('Octopus summary CSV downloaded');
+  };
+
+  const exportPdf = async () => {
+    const data = exportData();
+    if (!data) return;
+    const fileName = `givenergy_octopus_summary_${range}_${data.generatedAt.toISOString().slice(0, 10)}.pdf`;
+    try {
+      await downloadOctopusSummaryPdf(data, fileName);
+      setExportMessage('Octopus summary PDF downloaded');
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Unable to create Octopus summary PDF');
+    }
+  };
 
   const syncNow = async () => {
     try {
@@ -253,14 +314,32 @@ export default function OctopusPage() {
               Supplier smart-meter readings. These can arrive later than inverter data and may be corrected by Octopus.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={syncNow}
-            disabled={status?.data.syncing}
-            className="rounded-lg bg-flow-active px-3 py-2 text-sm font-medium text-bg-base disabled:opacity-50"
-          >
-            {status?.data.syncing ? 'Syncing…' : 'Sync now'}
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={exportCsv}
+              disabled={!billing || !comparison}
+              className="rounded-lg bg-bg-elevated px-3 py-2 text-sm font-medium text-text-primary disabled:opacity-50"
+            >
+              CSV
+            </button>
+            <button
+              type="button"
+              onClick={exportPdf}
+              disabled={!billing || !comparison}
+              className="rounded-lg bg-bg-elevated px-3 py-2 text-sm font-medium text-text-primary disabled:opacity-50"
+            >
+              PDF report
+            </button>
+            <button
+              type="button"
+              onClick={syncNow}
+              disabled={status?.data.syncing}
+              className="rounded-lg bg-flow-active px-3 py-2 text-sm font-medium text-bg-base disabled:opacity-50"
+            >
+              {status?.data.syncing ? 'Syncing…' : 'Sync now'}
+            </button>
+          </div>
         </div>
         <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-text-secondary">
           <span>{status?.data.discovered_streams ?? 0} meter stream(s)</span>
@@ -274,6 +353,11 @@ export default function OctopusPage() {
         {(error || status?.data.last_error) && (
           <div role="alert" className="mt-3 rounded-lg border border-red-500/30 bg-red-950/30 px-3 py-2 text-sm text-red-300">
             {error ?? status?.data.last_error}
+          </div>
+        )}
+        {exportMessage && (
+          <div role="status" className="mt-3 rounded-lg border border-green-500/30 bg-green-950/20 px-3 py-2 text-sm text-green-300">
+            {exportMessage}
           </div>
         )}
       </section>
@@ -358,79 +442,6 @@ export default function OctopusPage() {
             </div>
           )}
 
-          {billing.data.monthly.length > 0 && (
-            <div className="mt-5 overflow-x-auto">
-              <h4 className="mb-2 text-sm font-medium text-text-primary">Monthly summary</h4>
-              <table className="w-full min-w-[1080px] text-left text-xs">
-                <thead className="text-text-secondary">
-                  <tr className="border-b border-white/10">
-                    <th className="px-2 py-2">Month</th>
-                    <th className="px-2 py-2">Import</th>
-                    <th className="px-2 py-2">Energy cost</th>
-                    <th className="px-2 py-2">Elec. standing</th>
-                    <th className="px-2 py-2">Import total</th>
-                    <th className="px-2 py-2">Export</th>
-                    <th className="px-2 py-2">Income</th>
-                    <th className="px-2 py-2">Gas</th>
-                    <th className="px-2 py-2">Gas energy</th>
-                    <th className="px-2 py-2">Gas standing</th>
-                    <th className="px-2 py-2">Gas total</th>
-                    <th className="px-2 py-2">Net</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {[...billing.data.monthly].reverse().map((row) => (
-                    <tr key={row.period} className="border-b border-white/5 text-text-primary">
-                      <td className="px-2 py-2 font-medium">{row.period}</td>
-                      <td className="px-2 py-2">{row.electricity_import_kwh.toFixed(3)} kWh</td>
-                      <td className="px-2 py-2">{formatMoney(row.electricity_energy_cost_gbp)}</td>
-                      <td className="px-2 py-2">{formatMoney(row.electricity_standing_cost_gbp)}</td>
-                      <td className="px-2 py-2">{formatMoney(row.electricity_total_cost_gbp)}</td>
-                      <td className="px-2 py-2">{row.electricity_export_kwh.toFixed(3)} kWh</td>
-                      <td className="px-2 py-2">{formatMoney(row.export_income_gbp)}</td>
-                      <td className="px-2 py-2">{row.gas_usage.toFixed(3)}</td>
-                      <td className="px-2 py-2">{formatMoney(row.gas_energy_cost_gbp)}</td>
-                      <td className="px-2 py-2">{formatMoney(row.gas_standing_cost_gbp)}</td>
-                      <td className="px-2 py-2">{formatMoney(row.gas_total_cost_gbp)}</td>
-                      <td className="px-2 py-2">{formatMoney(row.net_cost_gbp ?? row.electricity_total_cost_gbp - row.export_income_gbp)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          {billing.data.yearly.length > 0 && (
-            <div className="mt-5 overflow-x-auto">
-              <h4 className="mb-2 text-sm font-medium text-text-primary">Yearly summary</h4>
-              <table className="w-full min-w-[620px] text-left text-xs">
-                <thead className="text-text-secondary">
-                  <tr className="border-b border-white/10">
-                    <th className="px-2 py-2">Year</th>
-                    <th className="px-2 py-2">Imported</th>
-                    <th className="px-2 py-2">Import cost</th>
-                    <th className="px-2 py-2">Exported</th>
-                    <th className="px-2 py-2">Export income</th>
-                    <th className="px-2 py-2">Gas</th>
-                    <th className="px-2 py-2">Net</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {[...billing.data.yearly].reverse().map((row) => (
-                    <tr key={row.period} className="border-b border-white/5 text-text-primary">
-                      <td className="px-2 py-2 font-medium">{row.period}</td>
-                      <td className="px-2 py-2">{row.electricity_import_kwh.toFixed(3)} kWh</td>
-                      <td className="px-2 py-2">{formatMoney(row.electricity_total_cost_gbp)}</td>
-                      <td className="px-2 py-2">{row.electricity_export_kwh.toFixed(3)} kWh</td>
-                      <td className="px-2 py-2">{formatMoney(row.export_income_gbp)}</td>
-                      <td className="px-2 py-2">{row.gas_usage.toFixed(3)}</td>
-                      <td className="px-2 py-2">{formatMoney(row.net_cost_gbp ?? row.electricity_total_cost_gbp - row.export_income_gbp)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
         </section>
       )}
 
@@ -459,40 +470,6 @@ export default function OctopusPage() {
                 Octopus {comparison.data.totals.octopus_export_kwh.toFixed(3)} · HEM {comparison.data.totals.hem_export_kwh.toFixed(3)} kWh
               </div>
             </div>
-          </div>
-          <div className="mt-4 max-h-96 overflow-auto">
-            <table className="w-full min-w-[940px] text-left text-xs">
-              <thead className="sticky top-0 bg-bg-surface text-text-secondary">
-                <tr className="border-b border-white/10">
-                  <th className="px-2 py-2">Date</th>
-                  <th className="px-2 py-2">Octopus import</th>
-                  <th className="px-2 py-2">HEM import</th>
-                  <th className="px-2 py-2">Difference</th>
-                  <th className="px-2 py-2">Octopus export</th>
-                  <th className="px-2 py-2">HEM export</th>
-                  <th className="px-2 py-2">Difference</th>
-                </tr>
-              </thead>
-              <tbody>
-                {[...comparison.data.days].reverse().map((day) => (
-                  <tr key={day.date} className="border-b border-white/5 text-text-primary">
-                    <td className="px-2 py-2 font-medium">{day.date}</td>
-                    <td className="px-2 py-2">{formatComparison(day.octopus_import_kwh)}</td>
-                    <td className="px-2 py-2">{formatComparison(day.hem_import_kwh)}</td>
-                    <td className="px-2 py-2">
-                      {formatComparison(day.import_difference_kwh)}
-                      {day.import_difference_percent != null ? ` (${day.import_difference_percent.toFixed(1)}%)` : ''}
-                    </td>
-                    <td className="px-2 py-2">{formatComparison(day.octopus_export_kwh)}</td>
-                    <td className="px-2 py-2">{formatComparison(day.hem_export_kwh)}</td>
-                    <td className="px-2 py-2">
-                      {formatComparison(day.export_difference_kwh)}
-                      {day.export_difference_percent != null ? ` (${day.export_difference_percent.toFixed(1)}%)` : ''}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
           </div>
         </section>
       )}
@@ -526,32 +503,55 @@ export default function OctopusPage() {
               </div>
             ))}
           </div>
-          {comparison.data.days.some((day) => day.missing_import_intervals + day.missing_export_intervals + day.missing_gas_intervals > 0) && (
-            <div className="mt-4 max-h-64 overflow-auto">
-              <table className="w-full min-w-[560px] text-left text-xs">
-                <thead className="sticky top-0 bg-bg-surface text-text-secondary">
-                  <tr className="border-b border-white/10">
-                    <th className="px-2 py-2">Date</th>
-                    <th className="px-2 py-2">Import missing</th>
-                    <th className="px-2 py-2">Export missing</th>
-                    <th className="px-2 py-2">Gas missing</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {[...comparison.data.days].reverse().filter((day) => day.missing_import_intervals + day.missing_export_intervals + day.missing_gas_intervals > 0).map((day) => (
-                    <tr key={day.date} className="border-b border-white/5 text-text-primary">
-                      <td className="px-2 py-2 font-medium">{day.date}</td>
-                      <td className="px-2 py-2">{day.missing_import_intervals} / {day.expected_import_intervals}</td>
-                      <td className="px-2 py-2">{day.missing_export_intervals} / {day.expected_export_intervals}</td>
-                      <td className="px-2 py-2">{day.missing_gas_intervals} / {day.expected_gas_intervals}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
         </section>
       )}
+
+      <section className="rounded-xl bg-bg-surface p-4">
+        <h3 className="font-medium text-text-primary">Supplier costs</h3>
+        <p className="mb-3 mt-1 text-xs text-text-secondary">
+          {range === '7d' || range === '30d' ? 'Daily' : 'Monthly'} VAT-inclusive estimated costs for the selected period.
+        </p>
+        {costSeries.length === 0 ? (
+          <div className="py-16 text-center text-sm text-text-secondary">No cost data available yet.</div>
+        ) : (
+          <div className="h-72">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={costSeries}>
+                <CartesianGrid stroke="var(--color-grid-stroke-subtle)" strokeDasharray="3 4" />
+                <XAxis dataKey="period" minTickGap={24} tickFormatter={(value) => range === '7d' || range === '30d' ? String(value).slice(5) : String(value)} tick={{ fontSize: 11 }} />
+                <YAxis tick={{ fontSize: 11 }} tickFormatter={(value) => `£${Number(value).toFixed(0)}`} />
+                <Tooltip formatter={(value) => formatMoney(Number(value))} />
+                <Legend />
+                <Line type="monotone" dataKey="electricity_import_cost" name="Electricity import" stroke="#ef4444" strokeWidth={2} dot={costSeries.length < 40} connectNulls />
+                <Line type="monotone" dataKey="gas_cost" name="Gas" stroke="#f59e0b" strokeWidth={2} dot={costSeries.length < 40} connectNulls />
+                <Line type="monotone" dataKey="net_cost" name="Net cost" stroke="#3b82f6" strokeWidth={2} dot={costSeries.length < 40} connectNulls />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-xl bg-bg-surface p-4">
+        <h3 className="font-medium text-text-primary">Export income</h3>
+        <p className="mb-3 mt-1 text-xs text-text-secondary">
+          {range === '7d' || range === '30d' ? 'Daily' : 'Monthly'} estimated electricity export earnings.
+        </p>
+        {costSeries.length === 0 ? (
+          <div className="py-16 text-center text-sm text-text-secondary">No export income data available yet.</div>
+        ) : (
+          <div className="h-64">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={costSeries}>
+                <CartesianGrid stroke="var(--color-grid-stroke-subtle)" strokeDasharray="3 4" />
+                <XAxis dataKey="period" minTickGap={24} tickFormatter={(value) => range === '7d' || range === '30d' ? String(value).slice(5) : String(value)} tick={{ fontSize: 11 }} />
+                <YAxis tick={{ fontSize: 11 }} tickFormatter={(value) => `£${Number(value).toFixed(0)}`} />
+                <Tooltip formatter={(value) => formatMoney(Number(value))} />
+                <Line type="monotone" dataKey="export_income" name="Export income" stroke="#22c55e" strokeWidth={2} dot={costSeries.length < 40} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </section>
 
       <section className="rounded-xl bg-bg-surface p-4">
         <h3 className="mb-3 font-medium text-text-primary">Electricity consumption</h3>
@@ -636,6 +636,77 @@ export default function OctopusPage() {
           </div>
         )}
       </section>
+
+      {billing && (billing.data.monthly.length > 0 || billing.data.yearly.length > 0) && (
+        <section className="rounded-xl bg-bg-surface p-4">
+          <h3 className="font-medium text-text-primary">Billing summary tables</h3>
+          <p className="mt-1 text-xs text-text-secondary">Detailed estimated totals are placed after the dashboard graphs for easier review.</p>
+          {billing.data.monthly.length > 0 && (
+            <div className="mt-4 overflow-x-auto">
+              <h4 className="mb-2 text-sm font-medium text-text-primary">Monthly summary</h4>
+              <table className="w-full min-w-[1080px] text-left text-xs">
+                <thead className="text-text-secondary">
+                  <tr className="border-b border-white/10">
+                    <th className="px-2 py-2">Month</th><th className="px-2 py-2">Import</th><th className="px-2 py-2">Energy cost</th><th className="px-2 py-2">Elec. standing</th><th className="px-2 py-2">Import total</th><th className="px-2 py-2">Export</th><th className="px-2 py-2">Income</th><th className="px-2 py-2">Gas</th><th className="px-2 py-2">Gas energy</th><th className="px-2 py-2">Gas standing</th><th className="px-2 py-2">Gas total</th><th className="px-2 py-2">Net</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...billing.data.monthly].reverse().map((row) => (
+                    <tr key={row.period} className="border-b border-white/5 text-text-primary">
+                      <td className="px-2 py-2 font-medium">{row.period}</td><td className="px-2 py-2">{row.electricity_import_kwh.toFixed(3)} kWh</td><td className="px-2 py-2">{formatMoney(row.electricity_energy_cost_gbp)}</td><td className="px-2 py-2">{formatMoney(row.electricity_standing_cost_gbp)}</td><td className="px-2 py-2">{formatMoney(row.electricity_total_cost_gbp)}</td><td className="px-2 py-2">{row.electricity_export_kwh.toFixed(3)} kWh</td><td className="px-2 py-2">{formatMoney(row.export_income_gbp)}</td><td className="px-2 py-2">{row.gas_usage.toFixed(3)}</td><td className="px-2 py-2">{formatMoney(row.gas_energy_cost_gbp)}</td><td className="px-2 py-2">{formatMoney(row.gas_standing_cost_gbp)}</td><td className="px-2 py-2">{formatMoney(row.gas_total_cost_gbp)}</td><td className="px-2 py-2">{formatMoney(row.net_cost_gbp ?? row.electricity_total_cost_gbp - row.export_income_gbp)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {billing.data.yearly.length > 0 && (
+            <div className="mt-5 overflow-x-auto">
+              <h4 className="mb-2 text-sm font-medium text-text-primary">Yearly summary</h4>
+              <table className="w-full min-w-[620px] text-left text-xs">
+                <thead className="text-text-secondary"><tr className="border-b border-white/10"><th className="px-2 py-2">Year</th><th className="px-2 py-2">Imported</th><th className="px-2 py-2">Import cost</th><th className="px-2 py-2">Exported</th><th className="px-2 py-2">Export income</th><th className="px-2 py-2">Gas</th><th className="px-2 py-2">Net</th></tr></thead>
+                <tbody>
+                  {[...billing.data.yearly].reverse().map((row) => (
+                    <tr key={row.period} className="border-b border-white/5 text-text-primary"><td className="px-2 py-2 font-medium">{row.period}</td><td className="px-2 py-2">{row.electricity_import_kwh.toFixed(3)} kWh</td><td className="px-2 py-2">{formatMoney(row.electricity_total_cost_gbp)}</td><td className="px-2 py-2">{row.electricity_export_kwh.toFixed(3)} kWh</td><td className="px-2 py-2">{formatMoney(row.export_income_gbp)}</td><td className="px-2 py-2">{row.gas_usage.toFixed(3)}</td><td className="px-2 py-2">{formatMoney(row.net_cost_gbp ?? row.electricity_total_cost_gbp - row.export_income_gbp)}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
+
+      {comparison && (
+        <section className="rounded-xl bg-bg-surface p-4">
+          <h3 className="font-medium text-text-primary">Daily HEM comparison</h3>
+          <div className="mt-4 max-h-96 overflow-auto">
+            <table className="w-full min-w-[940px] text-left text-xs">
+              <thead className="sticky top-0 bg-bg-surface text-text-secondary"><tr className="border-b border-white/10"><th className="px-2 py-2">Date</th><th className="px-2 py-2">Octopus import</th><th className="px-2 py-2">HEM import</th><th className="px-2 py-2">Difference</th><th className="px-2 py-2">Octopus export</th><th className="px-2 py-2">HEM export</th><th className="px-2 py-2">Difference</th></tr></thead>
+              <tbody>
+                {[...comparison.data.days].reverse().map((day) => (
+                  <tr key={day.date} className="border-b border-white/5 text-text-primary"><td className="px-2 py-2 font-medium">{day.date}</td><td className="px-2 py-2">{formatComparison(day.octopus_import_kwh)}</td><td className="px-2 py-2">{formatComparison(day.hem_import_kwh)}</td><td className="px-2 py-2">{formatComparison(day.import_difference_kwh)}{day.import_difference_percent != null ? ` (${day.import_difference_percent.toFixed(1)}%)` : ''}</td><td className="px-2 py-2">{formatComparison(day.octopus_export_kwh)}</td><td className="px-2 py-2">{formatComparison(day.hem_export_kwh)}</td><td className="px-2 py-2">{formatComparison(day.export_difference_kwh)}{day.export_difference_percent != null ? ` (${day.export_difference_percent.toFixed(1)}%)` : ''}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {comparison && comparison.data.days.some((day) => day.missing_import_intervals + day.missing_export_intervals + day.missing_gas_intervals > 0) && (
+        <section className="rounded-xl bg-bg-surface p-4">
+          <h3 className="font-medium text-text-primary">Missing supplier intervals</h3>
+          <div className="mt-4 max-h-64 overflow-auto">
+            <table className="w-full min-w-[560px] text-left text-xs">
+              <thead className="sticky top-0 bg-bg-surface text-text-secondary"><tr className="border-b border-white/10"><th className="px-2 py-2">Date</th><th className="px-2 py-2">Import missing</th><th className="px-2 py-2">Export missing</th><th className="px-2 py-2">Gas missing</th></tr></thead>
+              <tbody>
+                {[...comparison.data.days].reverse().filter((day) => day.missing_import_intervals + day.missing_export_intervals + day.missing_gas_intervals > 0).map((day) => (
+                  <tr key={day.date} className="border-b border-white/5 text-text-primary"><td className="px-2 py-2 font-medium">{day.date}</td><td className="px-2 py-2">{day.missing_import_intervals} / {day.expected_import_intervals}</td><td className="px-2 py-2">{day.missing_export_intervals} / {day.expected_export_intervals}</td><td className="px-2 py-2">{day.missing_gas_intervals} / {day.expected_gas_intervals}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
     </div>
   );
 }
