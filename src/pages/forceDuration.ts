@@ -1,3 +1,9 @@
+import {
+  LOGARITHMIC_RANGE_MAX,
+  logarithmicPositionToValue,
+  logarithmicValueToPosition,
+} from '../lib/logarithmicRange';
+
 /**
  * Format a duration in minutes as a human-readable label for the UI.
  *
@@ -32,7 +38,7 @@ export const FORCE_DURATION_STEP = 5;
  * A reasonably fine integer domain keeps mouse/touch interaction smooth
  * while preserving useful keyboard increments.
  */
-export const FORCE_DURATION_SLIDER_MAX = 1000;
+export const FORCE_DURATION_SLIDER_MAX = LOGARITHMIC_RANGE_MAX;
 
 /** Storage key for the persisted duration value. */
 export const FORCE_DURATION_STORAGE_KEY = 'forceDurationMinutes';
@@ -49,21 +55,24 @@ export function clampDurationMinutes(value: number): number {
 
 /** Convert minutes to a position on the logarithmic slider track. */
 export function durationToSliderPosition(minutes: number): number {
-  const duration = clampDurationMinutes(minutes);
-  const range = Math.log(FORCE_DURATION_MAX / FORCE_DURATION_MIN);
-  return Math.round(
-    (Math.log(duration / FORCE_DURATION_MIN) / range) * FORCE_DURATION_SLIDER_MAX,
+  return logarithmicValueToPosition(
+    clampDurationMinutes(minutes),
+    FORCE_DURATION_MIN,
+    FORCE_DURATION_MAX,
+    FORCE_DURATION_SLIDER_MAX,
   );
 }
 
 /** Convert a logarithmic slider position back to a duration in minutes. */
 export function sliderPositionToDuration(position: number): number {
   if (!Number.isFinite(position)) return FORCE_DURATION_DEFAULT;
-  const boundedPosition = Math.max(0, Math.min(FORCE_DURATION_SLIDER_MAX, position));
-  const progress = boundedPosition / FORCE_DURATION_SLIDER_MAX;
-  const duration = FORCE_DURATION_MIN
-    * Math.exp(Math.log(FORCE_DURATION_MAX / FORCE_DURATION_MIN) * progress);
-  return clampDurationMinutes(duration);
+  return logarithmicPositionToValue(
+    position,
+    FORCE_DURATION_MIN,
+    FORCE_DURATION_MAX,
+    FORCE_DURATION_STEP,
+    FORCE_DURATION_SLIDER_MAX,
+  );
 }
 
 /**

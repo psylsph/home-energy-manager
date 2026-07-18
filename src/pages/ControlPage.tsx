@@ -6,6 +6,11 @@ import { deviceSupportsEps, deviceSupportsTimedDischarge } from '../lib/deviceCa
 import type { ScheduleSlot } from '../lib/types';
 import AwaitingConnection from '../components/AwaitingConnection';
 import {
+  LOGARITHMIC_RANGE_MAX,
+  logarithmicPositionToValue,
+  logarithmicValueToPosition,
+} from '../lib/logarithmicRange';
+import {
   FORCE_DURATION_MAX,
   FORCE_DURATION_MIN,
   FORCE_DURATION_SLIDER_MAX,
@@ -25,6 +30,10 @@ import {
  * the backend models as `cosy_enabled = true` regardless of scope).
  */
 type ChargeMode = 'standard' | 'cosy' | 'agile' | 'agile_charge' | 'agile_discharge';
+
+const RESERVE_SOC_MIN = 4;
+const RESERVE_SOC_MAX = 100;
+const RESERVE_SOC_STEP = 1;
 
 function ActionButton({
   label,
@@ -1755,8 +1764,8 @@ export default function ControlPage() {
   // Default to null (no data) until the first snapshot arrives to avoid showing
   // misleading 100% values that then jump to real values.
   const reserveSoc = (draftReserve != null && snapshot?.battery_reserve !== draftReserve)
-    ? Math.max(4, Math.min(100, draftReserve))
-    : Math.max(4, Math.min(100, snapshot?.battery_reserve ?? 4));
+    ? Math.max(RESERVE_SOC_MIN, Math.min(RESERVE_SOC_MAX, draftReserve))
+    : Math.max(RESERVE_SOC_MIN, Math.min(RESERVE_SOC_MAX, snapshot?.battery_reserve ?? RESERVE_SOC_MIN));
   const isAcCoupled = snapshot?.device_type_code === '3001' || snapshot?.device_type_code === '3002';
 
   // Whether this inverter exposes the Emergency Power Supply enable register
@@ -2565,17 +2574,38 @@ export default function ControlPage() {
           {/* Reserve SOC */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <span className="text-text-secondary text-sm">Minimum SOC</span>
+              <label htmlFor="minimum-soc" className="text-text-secondary text-sm">
+                Minimum SOC
+              </label>
               <span className="font-mono text-text-primary text-sm">{reserveSoc}%</span>
             </div>
             <div className="flex items-center gap-3">
               <input
+                id="minimum-soc"
                 type="range"
-                min={4}
-                max={100}
+                min={0}
+                max={LOGARITHMIC_RANGE_MAX}
                 step={1}
-                value={reserveSoc}
-                onChange={(e) => setDraftReserve(Math.max(4, Number(e.target.value)))}
+                value={logarithmicValueToPosition(reserveSoc, RESERVE_SOC_MIN, RESERVE_SOC_MAX)}
+                aria-valuemin={RESERVE_SOC_MIN}
+                aria-valuemax={RESERVE_SOC_MAX}
+                aria-valuenow={reserveSoc}
+                aria-valuetext={`${reserveSoc}%`}
+                onChange={(e) => setDraftReserve(logarithmicPositionToValue(
+                  Number(e.target.value),
+                  RESERVE_SOC_MIN,
+                  RESERVE_SOC_MAX,
+                  RESERVE_SOC_STEP,
+                ))}
+                onKeyDown={(e) => {
+                  if (!['ArrowLeft', 'ArrowDown', 'ArrowRight', 'ArrowUp'].includes(e.key)) return;
+                  e.preventDefault();
+                  const direction = e.key === 'ArrowLeft' || e.key === 'ArrowDown' ? -1 : 1;
+                  setDraftReserve(Math.max(
+                    RESERVE_SOC_MIN,
+                    Math.min(RESERVE_SOC_MAX, reserveSoc + direction * RESERVE_SOC_STEP),
+                  ));
+                }}
                 className="flex-1"
               />
               <button

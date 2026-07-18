@@ -63,6 +63,10 @@ import {
   FORCE_DURATION_STORAGE_KEY,
   durationToSliderPosition,
 } from '../../src/pages/forceDuration';
+import {
+  LOGARITHMIC_RANGE_MAX,
+  logarithmicValueToPosition,
+} from '../../src/lib/logarithmicRange';
 
 // ---------------------------------------------------------------------------
 // ControlPage used to render the full set of controls even when the
@@ -347,6 +351,36 @@ describe('<ControlPage/> — connection-state gate', () => {
     fireEvent.keyDown(slider, { key: 'ArrowRight' });
     expect(slider.getAttribute('aria-valuenow')).toBe('65');
     expect(slider.getAttribute('aria-valuetext')).toBe('1h 5m');
+  });
+
+  it('uses a logarithmic Minimum SOC slider with one-percent keyboard steps', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ battery_reserve: 20 }),
+      developerMode: false,
+      connectionState: 'connected',
+      connectedHost: '192.168.1.36:8899',
+    });
+    render(<ControlPage />);
+
+    const slider = await screen.findByRole('slider', { name: 'Minimum SOC' });
+    const twentyPercentPosition = logarithmicValueToPosition(20, 4, 100);
+    expect(Number(slider.getAttribute('value'))).toBe(twentyPercentPosition);
+    expect(twentyPercentPosition).toBeGreaterThan(LOGARITHMIC_RANGE_MAX * 0.45);
+    expect(slider.getAttribute('aria-valuenow')).toBe('20');
+    expect(slider.getAttribute('aria-valuetext')).toBe('20%');
+
+    fireEvent.keyDown(slider, { key: 'ArrowRight' });
+    expect(slider.getAttribute('aria-valuenow')).toBe('21');
+    expect(slider.getAttribute('aria-valuetext')).toBe('21%');
+
+    const reserveControls = slider.parentElement;
+    expect(reserveControls).not.toBeNull();
+    const apiPostMock = vi.mocked(apiPost);
+    apiPostMock.mockClear();
+    fireEvent.click(within(reserveControls!).getByRole('button', { name: 'Save' }));
+    await vi.waitFor(() => {
+      expect(apiPostMock).toHaveBeenCalledWith('/api/control/reserve', { soc: 21 });
+    });
   });
 
   it('POSTs to /api/reconnect when the Retry button is clicked', async () => {
