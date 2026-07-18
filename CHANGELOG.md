@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.64.1] - 2026-07-18
+
+### Changed
+
+- **Minimum battery reserve is easier to fine-tune at lower levels.** The Minimum SOC control now uses a logarithmic scale, giving commonly used low reserve percentages more room on the slider while retaining the full 4–100% range. (issue #213)
+
 ## [0.64.0] - 2026-07-18
 
 ### Added
