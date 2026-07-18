@@ -253,6 +253,7 @@ export default function OctopusPage() {
       costPeriods: range === '7d' || range === '30d'
         ? billing.data.daily
         : billing.data.monthly,
+      historySeries: series,
       billing: billing.data,
       comparison: comparison.data,
     };

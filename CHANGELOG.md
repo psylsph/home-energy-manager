@@ -4,9 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.64.0] - 2026-07-18
+
 ### Added
 
-- **Octopus summaries can now be exported for sharing and auditing.** Download the selected period directly as CSV or PDF with billing, cost graphs, HEM comparison, and missing-interval details. The dashboard also adds daily/monthly cost and export-income graphs, with detailed tables moved below the charts. (issue #212)
+- **Octopus summaries can now be exported for sharing and auditing.** Download the selected period directly as CSV or PDF with billing, every dashboard graph, HEM comparison, and missing-interval details. The dashboard also adds daily/monthly cost and export-income graphs, with detailed tables moved below the charts. (issue #212)
 
 ## [0.63.0] - 2026-07-17
 

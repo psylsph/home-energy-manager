@@ -58,11 +58,17 @@ export interface OctopusExportComparisonTotals {
   missing_gas_intervals: number;
 }
 
+export interface OctopusExportHistoryPoint {
+  t: number;
+  v: number;
+}
+
 export interface OctopusExportData {
   rangeLabel: string;
   generatedAt: Date;
   gasUnit: 'unknown' | 'kwh' | 'm3';
   costPeriods: OctopusExportBillingPeriod[];
+  historySeries: Record<string, OctopusExportHistoryPoint[]>;
   billing: {
     totals: OctopusExportBillingSummary;
     daily: OctopusExportBillingPeriod[];
@@ -224,13 +230,61 @@ function kwh(value: number | null): string {
   return value == null ? '-' : `${value.toFixed(3)} kWh`;
 }
 
-function drawCostGraph(doc: jsPDF, points: OctopusCostPoint[], y: number): number {
+export interface OctopusPdfGraphPoint {
+  t: number;
+  label: string;
+  values: Record<string, number | null>;
+}
+
+export function buildOctopusHistoryGraphSeries(
+  historySeries: Record<string, OctopusExportHistoryPoint[]>,
+  keys: string[],
+  cumulative: boolean,
+): OctopusPdfGraphPoint[] {
+  const byKey = new Map<string, Map<number, number>>();
+  const timestamps = new Set<number>();
+  for (const key of keys) {
+    let running = 0;
+    const values = new Map<number, number>();
+    for (const point of [...(historySeries[key] ?? [])].sort((a, b) => a.t - b.t)) {
+      running = cumulative ? running + point.v : point.v;
+      values.set(point.t, running);
+      timestamps.add(point.t);
+    }
+    byKey.set(key, values);
+  }
+  return [...timestamps].sort((a, b) => a - b).map((timestamp) => ({
+    t: timestamp,
+    label: new Date(timestamp).toLocaleString([], {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }),
+    values: Object.fromEntries(keys.map((key) => [key, byKey.get(key)?.get(timestamp) ?? null])),
+  }));
+}
+
+interface PdfGraphSeries {
+  key: string;
+  label: string;
+  color: readonly [number, number, number];
+}
+
+function drawLineGraph(
+  doc: jsPDF,
+  title: string,
+  points: OctopusPdfGraphPoint[],
+  series: PdfGraphSeries[],
+  y: number,
+  unit: 'GBP' | 'kWh' | 'units',
+): number {
   doc.setFontSize(14);
-  doc.text('Costs and export income', 14, y);
+  doc.text(title, 14, y);
   y += 7;
   if (points.length === 0) {
     doc.setFontSize(9);
-    doc.text('No cost periods are available for this selection.', 14, y + 5);
+    doc.text('No data are available for this chart.', 14, y + 5);
     return y + 14;
   }
 
@@ -238,12 +292,9 @@ function drawCostGraph(doc: jsPDF, points: OctopusCostPoint[], y: number): numbe
   const top = y + 4;
   const width = 174;
   const height = 54;
-  const values = points.flatMap((point) => [
-    point.electricity_import_cost,
-    point.gas_cost ?? 0,
-    point.net_cost,
-    point.export_income,
-  ]);
+  const values = points.flatMap((point) => series
+    .map((item) => point.values[item.key])
+    .filter((value): value is number => value != null));
   const minValue = Math.min(0, ...values);
   const maxValue = Math.max(1, ...values);
   const valueRange = Math.max(1, maxValue - minValue);
@@ -257,41 +308,36 @@ function drawCostGraph(doc: jsPDF, points: OctopusCostPoint[], y: number): numbe
     doc.line(left, lineY, left + width, lineY);
   }
 
-  const series = [
-    { key: 'electricity_import_cost' as const, label: 'Electricity import', color: [239, 68, 68] as const },
-    { key: 'gas_cost' as const, label: 'Gas', color: [245, 158, 11] as const },
-    { key: 'net_cost' as const, label: 'Net cost', color: [59, 130, 246] as const },
-    { key: 'export_income' as const, label: 'Export income', color: [34, 197, 94] as const },
-  ];
   for (const item of series) {
     doc.setDrawColor(item.color[0], item.color[1], item.color[2]);
+    doc.setFillColor(item.color[0], item.color[1], item.color[2]);
     doc.setLineWidth(0.7);
     let previous: [number, number] | null = null;
     points.forEach((point, index) => {
-      const raw = point[item.key];
+      const raw = point.values[item.key];
       if (raw == null) {
         previous = null;
         return;
       }
       const current: [number, number] = [xFor(index), yFor(raw)];
       if (previous) doc.line(previous[0], previous[1], current[0], current[1]);
-      doc.circle(current[0], current[1], 0.7, 'F');
+      if (points.length < 50) doc.circle(current[0], current[1], 0.55, 'F');
       previous = current;
     });
   }
 
   doc.setFontSize(7);
   doc.setTextColor(80, 90, 105);
-  doc.text(`GBP ${maxValue.toFixed(2)}`, 14, top + 2, { align: 'right' });
-  doc.text(`GBP ${minValue.toFixed(2)}`, 14, top + height, { align: 'right' });
-  const labelEvery = Math.max(1, Math.ceil(points.length / 8));
+  doc.text(`${unit} ${maxValue.toFixed(2)}`, 14, top + 2, { align: 'right' });
+  doc.text(`${unit} ${minValue.toFixed(2)}`, 14, top + height, { align: 'right' });
+  const labelEvery = Math.max(1, Math.ceil(points.length / 6));
   points.forEach((point, index) => {
     if (index % labelEvery === 0 || index === points.length - 1) {
-      doc.text(point.period, xFor(index), top + height + 4, { align: 'center' });
+      doc.text(point.label, xFor(index), top + height + 4, { align: 'center' });
     }
   });
   series.forEach((item, index) => {
-    const legendX = left + index * 42;
+    const legendX = left + index * (168 / Math.max(1, series.length));
     doc.setFillColor(item.color[0], item.color[1], item.color[2]);
     doc.rect(legendX, top - 4, 3, 2, 'F');
     doc.setTextColor(60, 70, 85);
@@ -299,6 +345,19 @@ function drawCostGraph(doc: jsPDF, points: OctopusCostPoint[], y: number): numbe
   });
   doc.setTextColor(0, 0, 0);
   return top + height + 11;
+}
+
+function costGraphPoints(points: OctopusCostPoint[]): OctopusPdfGraphPoint[] {
+  return points.map((point, index) => ({
+    t: index,
+    label: point.period,
+    values: {
+      electricity_import_cost: point.electricity_import_cost,
+      gas_cost: point.gas_cost,
+      net_cost: point.net_cost,
+      export_income: point.export_income,
+    },
+  }));
 }
 
 function drawTable(
@@ -406,7 +465,61 @@ export async function buildOctopusSummaryPdf(data: OctopusExportData): Promise<j
     doc.setTextColor(0, 0, 0);
   }
 
-  let y = drawCostGraph(doc, buildOctopusCostSeries(data.costPeriods), 67);
+  const costPoints = costGraphPoints(buildOctopusCostSeries(data.costPeriods));
+  let y = drawLineGraph(doc, 'Supplier costs', costPoints, [
+    { key: 'electricity_import_cost', label: 'Electricity import', color: [239, 68, 68] },
+    { key: 'gas_cost', label: 'Gas', color: [245, 158, 11] },
+    { key: 'net_cost', label: 'Net cost', color: [59, 130, 246] },
+  ], 67, 'GBP');
+  drawLineGraph(doc, 'Export income', costPoints, [
+    { key: 'export_income', label: 'Export income', color: [34, 197, 94] },
+  ], y + 3, 'GBP');
+
+  const electricityKeys = ['electricity_import', 'electricity_export'];
+  doc.addPage();
+  y = drawLineGraph(
+    doc,
+    'Electricity consumption',
+    buildOctopusHistoryGraphSeries(data.historySeries, electricityKeys, false),
+    [
+      { key: 'electricity_import', label: 'Import', color: [239, 68, 68] },
+      { key: 'electricity_export', label: 'Export', color: [34, 197, 94] },
+    ],
+    14,
+    'kWh',
+  );
+  drawLineGraph(
+    doc,
+    'Cumulative electricity',
+    buildOctopusHistoryGraphSeries(data.historySeries, electricityKeys, true),
+    [
+      { key: 'electricity_import', label: 'Cumulative import', color: [239, 68, 68] },
+      { key: 'electricity_export', label: 'Cumulative export', color: [34, 197, 94] },
+    ],
+    y + 3,
+    'kWh',
+  );
+
+  doc.addPage();
+  y = drawLineGraph(
+    doc,
+    'Gas consumption',
+    buildOctopusHistoryGraphSeries(data.historySeries, ['gas'], false),
+    [{ key: 'gas', label: 'Gas', color: [245, 158, 11] }],
+    14,
+    'units',
+  );
+  drawLineGraph(
+    doc,
+    'Cumulative gas',
+    buildOctopusHistoryGraphSeries(data.historySeries, ['gas'], true),
+    [{ key: 'gas', label: 'Cumulative gas', color: [245, 158, 11] }],
+    y + 3,
+    'units',
+  );
+
+  doc.addPage();
+  y = 14;
   const monthlyRows = [...data.billing.monthly].reverse().map((period) => [
     period.period,
     kwh(period.electricity_import_kwh),

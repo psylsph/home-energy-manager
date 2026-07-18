@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildOctopusCostSeries,
+  buildOctopusHistoryGraphSeries,
   buildOctopusSummaryCsv,
   buildOctopusSummaryPdf,
   type OctopusExportData,
@@ -26,6 +27,11 @@ function fixture(): OctopusExportData {
     generatedAt: new Date('2026-07-17T12:00:00Z'),
     gasUnit: 'kwh',
     costPeriods: [{ ...summary, period: '2026-07-17' }],
+    historySeries: {
+      electricity_import: [{ t: 1_721_174_400_000, v: 1.5 }, { t: 1_721_176_200_000, v: 2.0 }],
+      electricity_export: [{ t: 1_721_174_400_000, v: 0.5 }, { t: 1_721_176_200_000, v: 0.75 }],
+      gas: [{ t: 1_721_174_400_000, v: 3.0 }, { t: 1_721_176_200_000, v: 2.5 }],
+    },
     billing: {
       totals: summary,
       daily: [{ ...summary, period: '2026-07-17' }],
@@ -101,8 +107,26 @@ describe('Octopus summary exports', () => {
 
   it('builds a real PDF document without needing a popup', async () => {
     const pdf = await buildOctopusSummaryPdf(fixture());
-    expect(pdf.getNumberOfPages()).toBeGreaterThan(0);
+    // Summary/cost charts, electricity charts, gas charts, then tables.
+    expect(pdf.getNumberOfPages()).toBeGreaterThanOrEqual(4);
     expect(pdf.output('arraybuffer').byteLength).toBeGreaterThan(1_000);
+  });
+
+  it('builds raw and cumulative PDF series for every dashboard energy graph', () => {
+    const data = fixture();
+    const raw = buildOctopusHistoryGraphSeries(
+      data.historySeries,
+      ['electricity_import', 'electricity_export'],
+      false,
+    );
+    const cumulative = buildOctopusHistoryGraphSeries(
+      data.historySeries,
+      ['electricity_import', 'electricity_export'],
+      true,
+    );
+    expect(raw[1].values).toEqual({ electricity_import: 2, electricity_export: 0.75 });
+    expect(cumulative[1].values).toEqual({ electricity_import: 3.5, electricity_export: 1.25 });
+    expect(buildOctopusHistoryGraphSeries(data.historySeries, ['gas'], true)[1].values.gas).toBe(5.5);
   });
 
   it('builds graph points with explicit unavailable gas costs and net fallback', () => {
