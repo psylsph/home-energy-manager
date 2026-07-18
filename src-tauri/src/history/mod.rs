@@ -74,6 +74,7 @@ pub struct OctopusBillingPeriod {
 #[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
 pub struct OctopusBillingReport {
     pub totals: OctopusBillingSummary,
+    pub daily: Vec<OctopusBillingPeriod>,
     pub monthly: Vec<OctopusBillingPeriod>,
     pub yearly: Vec<OctopusBillingPeriod>,
     pub gas_cost_available: bool,
@@ -1956,11 +1957,17 @@ impl HistoryDb {
                 ..Default::default()
             }
         }
-        fn period_keys(ts: i64) -> Result<(String, String), String> {
+        fn period_keys(ts: i64) -> Result<(String, String, String), String> {
             let utc = chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
                 .ok_or_else(|| "invalid Octopus billing timestamp".to_string())?;
             let local = utc.with_timezone(&chrono_tz::Europe::London);
             Ok((
+                format!(
+                    "{:04}-{:02}-{:02}",
+                    local.year(),
+                    local.month(),
+                    local.day()
+                ),
                 format!("{:04}-{:02}", local.year(), local.month()),
                 format!("{:04}", local.year()),
             ))
@@ -1984,6 +1991,7 @@ impl HistoryDb {
 
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut totals = fresh(gas_is_kwh);
+        let mut daily: BTreeMap<String, OctopusBillingSummary> = BTreeMap::new();
         let mut monthly: BTreeMap<String, OctopusBillingSummary> = BTreeMap::new();
         let mut yearly: BTreeMap<String, OctopusBillingSummary> = BTreeMap::new();
 
@@ -2040,9 +2048,10 @@ impl HistoryDb {
             } else {
                 day_rate
             });
-            let (month, year) = period_keys(ts)?;
+            let (day, month, year) = period_keys(ts)?;
             for summary in [
                 &mut totals,
+                daily.entry(day).or_insert_with(|| fresh(gas_is_kwh)),
                 monthly.entry(month).or_insert_with(|| fresh(gas_is_kwh)),
                 yearly.entry(year).or_insert_with(|| fresh(gas_is_kwh)),
             ] {
@@ -2130,10 +2139,13 @@ impl HistoryDb {
                         }
                     }
                 }
-                let (month, year) = period_keys(noon)?;
+                let (day, month, year) = period_keys(noon)?;
                 for ((kind, _), (_, pence)) in active {
                     for summary in [
                         &mut totals,
+                        daily
+                            .entry(day.clone())
+                            .or_insert_with(|| fresh(gas_is_kwh)),
                         monthly
                             .entry(month.clone())
                             .or_insert_with(|| fresh(gas_is_kwh)),
@@ -2157,6 +2169,9 @@ impl HistoryDb {
         }
 
         finalize(&mut totals, gas_is_kwh);
+        for summary in daily.values_mut() {
+            finalize(summary, gas_is_kwh);
+        }
         for summary in monthly.values_mut() {
             finalize(summary, gas_is_kwh);
         }
@@ -2166,6 +2181,10 @@ impl HistoryDb {
 
         Ok(OctopusBillingReport {
             totals,
+            daily: daily
+                .into_iter()
+                .map(|(period, summary)| OctopusBillingPeriod { period, summary })
+                .collect(),
             monthly: monthly
                 .into_iter()
                 .map(|(period, summary)| OctopusBillingPeriod { period, summary })
@@ -2732,8 +2751,11 @@ mod tests {
         .unwrap();
 
         let report = db.query_octopus_billing(start, end, true, 30, 450).unwrap();
+        assert_eq!(report.daily.len(), 1);
         assert_eq!(report.monthly.len(), 1);
         assert_eq!(report.yearly.len(), 1);
+        assert!((report.daily[0].summary.electricity_total_cost_gbp - 2.5).abs() < 1e-9);
+        assert!((report.daily[0].summary.gas_total_cost_gbp.unwrap() - 0.8).abs() < 1e-9);
         assert!((report.totals.electricity_energy_cost_gbp - 2.0).abs() < 1e-9);
         assert!((report.totals.electricity_standing_cost_gbp - 0.5).abs() < 1e-9);
         assert!((report.totals.electricity_total_cost_gbp - 2.5).abs() < 1e-9);
