@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.65.0] - 2026-07-19
+
+### Added
+
+- **Grid import and export can now be compared using the inverter's cumulative daily energy totals.** The Grid tab in History includes a new “Grid Energy Today (kWh)” chart, avoiding the inaccuracies that can arise from integrating five-minute average power readings. (issue #199)
+
+- **Octopus API setup now links directly to the personal API access page.** Use “Get your Octopus API key” in Settings to open the Octopus page where the key is available. (issue #212)
+
 ## [0.64.1] - 2026-07-18
 
 ### Changed
