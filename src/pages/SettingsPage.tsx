@@ -2072,6 +2072,7 @@ export default function SettingsPage() {
               ['solar', 'Solar'],
               ['meters', 'Meters'],
               ['history', 'History'],
+              ...(octopusKeyConfigured ? [['octopus', 'Octopus'] as const] : []),
               ['control', 'Control'],
             ] as const).map(([key, label]) => (
               <label key={key} className="flex items-center gap-2 cursor-pointer select-none bg-bg-elevated rounded-xl px-4 py-3 border border-white/5 hover:border-white/10 transition-colors">

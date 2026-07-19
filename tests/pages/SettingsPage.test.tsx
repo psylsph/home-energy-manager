@@ -359,6 +359,30 @@ describe('<SettingsPage/> — page shell & hydration', () => {
     });
   });
 
+  describe('panel visibility', () => {
+    it('offers the Octopus panel only when an API key is configured and saves the choice', async () => {
+      mountApiMocks();
+      const firstRender = render(<SettingsPage />);
+      await screen.findByText('Panel Visibility');
+      expect(screen.queryByRole('checkbox', { name: 'Octopus' })).toBeNull();
+      firstRender.unmount();
+
+      mountApiMocks({ octopus_api_key_configured: true });
+      render(<SettingsPage />);
+      const octopusCheckbox = await screen.findByRole('checkbox', { name: 'Octopus' });
+      expect((octopusCheckbox as HTMLInputElement).checked).toBe(true);
+
+      fireEvent.click(octopusCheckbox);
+      fireEvent.click(screen.getByRole('button', { name: 'Save Panel Visibility' }));
+
+      await waitFor(() => {
+        expect(apiPostMock).toHaveBeenCalledWith('/api/settings', {
+          hidden_panels: ['octopus'],
+        });
+      });
+    });
+  });
+
   describe('Octopus gas unit', () => {
     it('links to the Octopus dashboard API access page', async () => {
       mountApiMocks();
