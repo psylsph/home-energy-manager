@@ -179,6 +179,20 @@ function getCharts(tab: MetricTab, hasStandingCharge: boolean): ChartDef[] {
           ],
         },
         {
+          key: 'grid-energy',
+          title: 'Grid Energy Today (kWh)',
+          unit: 'kWh',
+          // Use the inverter's own daily counters rather than integrating the
+          // averaged power columns. Daily counters track the same registers as
+          // the GivEnergy portal and are not subject to 5-minute-bucket
+          // rounding, so this chart gives a cumulative total that matches the
+          // portal export figures (issue #199 follow-up).
+          fields: [
+            { field: 'today_export_kwh', color: '#22C55E', label: 'Export' },
+            { field: 'today_import_kwh', color: '#EF4444', label: 'Import' },
+          ],
+        },
+        {
           key: 'grid-voltage',
           title: 'Grid Voltage (V)',
           unit: 'V',

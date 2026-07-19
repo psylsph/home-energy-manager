@@ -124,6 +124,17 @@ describe('<HistoryPage/> — directional power field wiring (PR #166)', () => {
       const fieldsUsed = new Set(fetchHistoryCalls.flatMap((c) => c.fields));
       expect(fieldsUsed.has('grid_power')).toBe(false);
     });
+
+    it('requests the daily grid energy counters for the cumulative chart', async () => {
+      render(<HistoryPage />);
+      await clickTab('Grid');
+      await waitFor(() => {
+        expect(fetchHistoryCalls.length).toBeGreaterThan(1);
+      });
+      const fieldsUsed = new Set(fetchHistoryCalls.flatMap((c) => c.fields));
+      expect(fieldsUsed.has('today_import_kwh')).toBe(true);
+      expect(fieldsUsed.has('today_export_kwh')).toBe(true);
+    });
   });
 
   describe('tab isolation', () => {
