@@ -9938,28 +9938,23 @@ mod tests {
 
         #[tokio::test]
         async fn returns_reachable_false_when_no_snapshot_cached() {
-            let state = Arc::new(AppState::new());
-            // Fresh process — latest_evc is None, host is empty by default.
-            let (status, json) = evc_status(State(state.clone())).await;
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(json["ok"], serde_json::Value::Bool(true));
-            assert_eq!(
-                json["reachable"],
-                serde_json::Value::Bool(false),
-                "no cached snapshot -> reachable=false"
-            );
-            assert!(
-                json["snapshot"].is_null(),
-                "no cached snapshot -> snapshot=null, got: {}",
-                json["snapshot"]
-            );
-            assert_eq!(json["evc_host"], serde_json::Value::String(String::new()));
-            assert_eq!(json["evc_port"], serde_json::json!(502));
+            crate::test_util::with_isolated_config_dir_async(|| async {
+                let state = Arc::new(AppState::new());
+                // Fresh isolated config — latest_evc is None and host is empty.
+                let (status, json) = evc_status(State(state.clone())).await;
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(json["ok"], serde_json::Value::Bool(true));
+                assert_eq!(json["reachable"], serde_json::Value::Bool(false));
+                assert!(json["snapshot"].is_null());
+                assert_eq!(json["evc_host"], serde_json::Value::String(String::new()));
+                assert_eq!(json["evc_port"], serde_json::json!(502));
+            })
+            .await;
         }
 
         #[tokio::test]
         async fn returns_configured_host_even_when_unreachable() {
-            let state = Arc::new(AppState::new());
+            let state = crate::test_util::with_isolated_config_dir(|| Arc::new(AppState::new()));
             state.settings.lock().await.evc_host = "192.168.1.225".to_string();
             state.settings.lock().await.evc_port = 502;
             let (_status, json) = evc_status(State(state.clone())).await;
@@ -9980,7 +9975,7 @@ mod tests {
         async fn returns_reachable_true_with_snapshot_when_latest_evc_is_some() {
             // Simulate the EVC poll loop having decoded at least one
             // snapshot since startup.
-            let state = Arc::new(AppState::new());
+            let state = crate::test_util::with_isolated_config_dir(|| Arc::new(AppState::new()));
             state.settings.lock().await.evc_host = "192.168.1.225".to_string();
             {
                 let mut evc = state.latest_evc.lock().await;

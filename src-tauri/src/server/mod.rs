@@ -422,18 +422,21 @@ mod tests {
     /// Build the router against a throwaway dist and return the response's
     /// `Cache-Control` header for the given request URI.
     async fn cache_control_for(uri: &str) -> Option<String> {
-        let dist = TempDist::new();
-        let app =
-            create_router_with_frontend(Arc::new(AppState::new()), dist.path.to_str().unwrap());
-        let request = Request::builder()
-            .uri(uri)
-            .body(axum::body::Body::empty())
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-        response
-            .headers()
-            .get(CACHE_CONTROL)
-            .map(|v| v.to_str().unwrap().to_string())
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let dist = TempDist::new();
+            let app =
+                create_router_with_frontend(Arc::new(AppState::new()), dist.path.to_str().unwrap());
+            let request = Request::builder()
+                .uri(uri)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            response
+                .headers()
+                .get(CACHE_CONTROL)
+                .map(|v| v.to_str().unwrap().to_string())
+        })
+        .await
     }
 
     #[tokio::test]
@@ -630,7 +633,7 @@ mod tests {
         std::sync::mpsc::Receiver<Result<u16, String>>,
         tokio::task::JoinHandle<()>,
     ) {
-        let state = Arc::new(AppState::new());
+        let state = crate::test_util::with_isolated_config_dir(|| Arc::new(AppState::new()));
         let (tx, rx) = std::sync::mpsc::channel();
         let handle = tokio::spawn(async move {
             start_server_with_frontend_on_port(
