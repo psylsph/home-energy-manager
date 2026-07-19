@@ -968,40 +968,32 @@ mod tests {
     async fn run_evc_poll_loop_silently_sleeps_when_no_host() {
         use crate::inverter::poll::AppState;
 
-        let state = Arc::new(AppState::new());
-        // Confirm default settings have no EVC host.
-        {
-            let s = state.settings.lock().await;
-            assert!(s.evc_host.is_empty(), "default evc_host should be empty");
-        }
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            // Confirm isolated default settings have no EVC host.
+            {
+                let s = state.settings.lock().await;
+                assert!(s.evc_host.is_empty(), "default evc_host should be empty");
+            }
 
-        let state_clone = state.clone();
-        let handle = tokio::spawn(async move {
-            // Use a timeout so the test doesn't hang forever if the
-            // loop is misbehaving. The no-host branch sleeps 15s, so
-            // a 2-second timeout is plenty.
-            tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                run_evc_poll_loop(state_clone),
-            )
-            .await
-        });
+            let state_clone = state.clone();
+            let handle = tokio::spawn(async move {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    run_evc_poll_loop(state_clone),
+                )
+                .await
+            });
 
-        // Give the loop time to spin through its first 15s sleep.
-        // (The timeout will fire first — that's the test passing.)
-        let result = handle.await.expect("join");
-        assert!(
-            result.is_err(),
-            "poll loop should still be sleeping at 2s when no host is configured"
-        );
+            let result = handle.await.expect("join");
+            assert!(
+                result.is_err(),
+                "poll loop should still be sleeping at 2s when no host is configured"
+            );
 
-        // No snapshot should have been written.
-        let evc = state.latest_evc.lock().await;
-        assert!(evc.is_none(), "no EVC snapshot should be cached");
-
-        // No broadcast message should have been sent (other than the
-        // first one a fresh broadcast::channel can hold).
-        // We can't easily assert the channel is empty without a receiver,
-        // so this is implicitly covered by the snapshot check.
+            let evc = state.latest_evc.lock().await;
+            assert!(evc.is_none(), "no EVC snapshot should be cached");
+        })
+        .await;
     }
 }

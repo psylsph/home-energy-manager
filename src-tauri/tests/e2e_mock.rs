@@ -29,7 +29,7 @@
 //!     pure-decoder pieces (encoder.rs) are covered there instead.
 //!   * History aggregation (covered by `history::tests`).
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -41,11 +41,73 @@ use tower::ServiceExt;
 /// Max body size for the small JSON responses these tests produce.
 const BODY_LIMIT: usize = 64 * 1024;
 
-/// Build a fresh router backed by a fresh `AppState` so each test
-/// gets a clean world with no leftover state from the previous one.
-fn fresh_router() -> axum::Router {
+/// Serialise integration tests that alter the process-global config override.
+fn config_dir_mutex() -> &'static parking_lot::Mutex<()> {
+    static MUTEX: OnceLock<parking_lot::Mutex<()>> = OnceLock::new();
+    MUTEX.get_or_init(|| parking_lot::Mutex::new(()))
+}
+
+struct IsolatedConfig {
+    _lock: parking_lot::MutexGuard<'static, ()>,
+    dir: std::path::PathBuf,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl IsolatedConfig {
+    fn enter() -> Self {
+        let lock = config_dir_mutex().lock();
+        let dir = std::env::temp_dir().join(format!(
+            "givenergy-local-e2e-mock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time after Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create isolated integration-test config dir");
+        let previous = std::env::var_os("GIVENERGY_LOCAL_CONFIG_DIR");
+        std::env::set_var("GIVENERGY_LOCAL_CONFIG_DIR", &dir);
+        Self {
+            _lock: lock,
+            dir,
+            previous,
+        }
+    }
+}
+
+impl Drop for IsolatedConfig {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            std::env::set_var("GIVENERGY_LOCAL_CONFIG_DIR", previous);
+        } else {
+            std::env::remove_var("GIVENERGY_LOCAL_CONFIG_DIR");
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+struct IsolatedRouter {
+    router: axum::Router,
+    _config: IsolatedConfig,
+}
+
+impl std::ops::Deref for IsolatedRouter {
+    type Target = axum::Router;
+
+    fn deref(&self) -> &Self::Target {
+        &self.router
+    }
+}
+
+/// Build a fresh router backed by a fresh `AppState` and a unique temporary
+/// config directory that remains active for the router's lifetime.
+fn fresh_router() -> IsolatedRouter {
+    let config = IsolatedConfig::enter();
     let state = Arc::new(AppState::new());
-    create_router(state)
+    IsolatedRouter {
+        router: create_router(state),
+        _config: config,
+    }
 }
 
 /// Issue a request and return (status, parsed JSON body).
@@ -356,6 +418,7 @@ async fn mini_status_empty_state_returns_defaults() {
 async fn mini_status_seeded_snapshot_round_trips_and_is_no_store() {
     use givenergy_local::inverter::model::{BatteryMode, BatteryState, InverterSnapshot};
 
+    let _config = IsolatedConfig::enter();
     let state = Arc::new(AppState::new());
     *state.latest_snapshot.lock().await = Some(InverterSnapshot {
         timestamp: 1_700_000_000,

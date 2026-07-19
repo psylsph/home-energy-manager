@@ -29,7 +29,35 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use givenergy_local::settings::Settings;
+struct TempConfig {
+    root: PathBuf,
+    config: PathBuf,
+    home: PathBuf,
+}
+
+impl TempConfig {
+    fn new() -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "givenergy-local-headless-smoke-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let config = root.join("config");
+        let home = root.join("home");
+        std::fs::create_dir_all(&config).expect("create isolated config directory");
+        std::fs::create_dir_all(&home).expect("create isolated home directory");
+        Self { root, config, home }
+    }
+}
+
+impl Drop for TempConfig {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
 
 /// Resolve the headless binary path. Returns `None` if neither
 /// debug nor release build is present.
@@ -119,6 +147,7 @@ fn headless_init_tracing_and_run_headless_reach_a_responsive_http_server() {
     // app both want that one.
     let port = pick_ephemeral_port();
     let base_url = format!("http://127.0.0.1:{port}");
+    let temp = TempConfig::new();
 
     // Spawn the binary. We deliberately do NOT pass --dist so the
     // headless startup exercises the API-only fallback path inside
@@ -129,7 +158,8 @@ fn headless_init_tracing_and_run_headless_reach_a_responsive_http_server() {
     // "no dist found" branch breaks this test before users see it.
     let mut child = Command::new(&bin)
         .args(["--headless", "--port", &port.to_string()])
-        .env("GIVENERGY_LOCAL_CONFIG_DIR", Settings::settings_dir())
+        .env("GIVENERGY_LOCAL_CONFIG_DIR", &temp.config)
+        .env("HOME", &temp.home)
         .env("RUST_LOG", "info")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
