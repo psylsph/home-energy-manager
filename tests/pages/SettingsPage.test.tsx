@@ -14,6 +14,7 @@ type SettingsShape = Record<string, unknown>;
 
 const apiGetMock = vi.fn();
 const apiPostMock = vi.fn();
+const openExternalMock = vi.fn();
 
 vi.mock('../../src/lib/api', () => ({
   apiGet: (...args: unknown[]) => apiGetMock(...(args as [string])),
@@ -21,6 +22,10 @@ vi.mock('../../src/lib/api', () => ({
   getApiBase: () => 'http://localhost:7337',
   getServerPort: () => 7337,
   isTauri: false,
+}));
+
+vi.mock('../../src/lib/openExternal', () => ({
+  openExternal: (...args: unknown[]) => openExternalMock(...args),
 }));
 
 import SettingsPage from '../../src/pages/SettingsPage';
@@ -355,6 +360,17 @@ describe('<SettingsPage/> — page shell & hydration', () => {
   });
 
   describe('Octopus gas unit', () => {
+    it('links to the Octopus dashboard API access page', async () => {
+      mountApiMocks();
+      render(<SettingsPage />);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Get your Octopus API key' }));
+
+      expect(openExternalMock).toHaveBeenCalledWith(
+        'https://octopus.energy/dashboard/new/accounts/personal-details/api-access',
+      );
+    });
+
     it('hydrates and saves the explicit gas unit without requiring the key again', async () => {
       mountApiMocks({
         octopus_enabled: true,

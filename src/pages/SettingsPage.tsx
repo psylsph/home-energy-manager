@@ -1309,6 +1309,13 @@ export default function SettingsPage() {
             <input type="password" value={octopusApiKey} onChange={(e) => setOctopusApiKey(e.target.value)} placeholder={octopusKeyConfigured ? 'Saved — enter a new key to replace' : 'sk_live_…'} autoComplete="new-password" className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-flow-active" />
           </label>
         </div>
+        <button
+          type="button"
+          onClick={() => openExternal('https://octopus.energy/dashboard/new/accounts/personal-details/api-access')}
+          className="self-start text-sm text-flow-active underline hover:opacity-80"
+        >
+          Get your Octopus API key
+        </button>
         <label className="block max-w-sm">
           <span className="mb-1 block text-xs font-medium text-text-secondary">Gas API unit</span>
           <select
