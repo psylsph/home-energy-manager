@@ -90,6 +90,20 @@ describe('<HistoryPage/> — tabs, ranges, navigation, empty state', () => {
       expect(solarCalls.length).toBeGreaterThan(0);
     });
 
+    it('requests Grid tab fields (power + daily energy counters)', async () => {
+      render(<HistoryPage />);
+      await clickTab('Grid');
+      await waitFor(() => {
+        expect(fetchHistoryCalls.length).toBeGreaterThan(1);
+      });
+      const gridFields = new Set(fetchHistoryCalls.flatMap((c) => c.fields));
+      expect(gridFields.has('_grid_import_power')).toBe(true);
+      expect(gridFields.has('_grid_export_power')).toBe(true);
+      expect(gridFields.has('today_import_kwh')).toBe(true);
+      expect(gridFields.has('today_export_kwh')).toBe(true);
+      expect(gridFields.has('grid_voltage')).toBe(true);
+    });
+
     it('requests Home tab fields on switch', async () => {
       render(<HistoryPage />);
       await clickTab('Home');
