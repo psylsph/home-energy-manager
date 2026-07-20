@@ -21,7 +21,7 @@
     "lint": "eslint .",
     "lint:md": "markdownlint . --ignore node_modules --ignore src-tauri/target --ignore AUDIT.md --ignore REGISTER_AUDIT.md --ignore test-results --ignore ideas --ignore reviews",
     "check:versions": "bash scripts/check-versions.sh",
-    "test": "bash scripts/check-versions.sh && vitest run && bash tests/scripts/run-with-software-renderer.test.sh && bash tests/scripts/install-dev-desktop.test.sh && bash tests/scripts/check-versions.test.sh",
+    "test": "bash scripts/check-versions.sh && vitest run && bash tests/scripts/run-with-software-renderer.test.sh && bash tests/scripts/install-dev-desktop.test.sh && bash tests/scripts/check-versions.test.sh && bash tests/scripts/check-autostart-permissions.test.sh",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",

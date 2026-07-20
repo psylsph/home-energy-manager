@@ -1,0 +1,7 @@
+[[permission]]
+identifier = "allow-autostart-fallback"
+description = "Allows the main window to create or remove the Windows Startup-folder fallback."
+
+[permission.commands]
+allow = ["autostart_fallback"]
+deny = []
