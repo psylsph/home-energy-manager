@@ -1,7 +1,7 @@
 {
   "name": "givenergy-local",
   "private": true,
-  "version": "0.66.1",
+  "version": "0.66.2",
   "description": "Local monitoring and control for GivEnergy solar/battery inverters",
   "author": "Stuart Harding",
   "license": "MIT",
@@ -16,7 +16,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:desktop": "GIVENERGY_LOCAL_QUIET_DESKTOP=1 bash scripts/install-dev-desktop.sh",
+    "dev:desktop": "bash scripts/install-dev-desktop.sh --quiet",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "lint:md": "markdownlint . --ignore node_modules --ignore src-tauri/target --ignore AUDIT.md --ignore REGISTER_AUDIT.md --ignore test-results --ignore ideas --ignore reviews",

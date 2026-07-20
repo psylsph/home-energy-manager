@@ -2599,12 +2599,21 @@ mod tests {
 
     static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 
+    fn unique_test_dir(prefix: &str) -> std::path::PathBuf {
+        loop {
+            let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("{prefix}-{}-{id}", std::process::id()));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => return dir,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("create unique history test directory: {error}"),
+            }
+        }
+    }
+
     fn test_db() -> HistoryDb {
-        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("givenergy-history-test-{id}"));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = unique_test_dir("givenergy-history-test");
         let path = dir.join("test_history.db");
-        let _ = std::fs::remove_file(&path);
         HistoryDb::open(&path).unwrap()
     }
 
@@ -4593,12 +4602,7 @@ mod tests {
         // first rows instead of keeping the midnight reset (~0). v3 should
         // restore original values from the backup and re-run the corrected
         // repair with the fixed threshold (cur < 1.0 AND prev > 1.0).
-        use std::sync::atomic::{AtomicU32, Ordering};
-
-        static V3_COUNTER: AtomicU32 = AtomicU32::new(1000);
-        let id = V3_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("givenergy-v3-test-{id}"));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = unique_test_dir("givenergy-v3-test");
         let path = dir.join("history.db");
         let backup_path = path.with_extension("db.bak");
 
@@ -4773,19 +4777,16 @@ mod tests {
             .unwrap_or(false);
         assert!(v3_flag, "repair_v3_done meta flag should be set");
 
-        // Clean up
+        // Clean up after closing SQLite so Windows can remove the files.
+        drop(conn);
+        drop(db);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn repair_v3_skips_when_already_done() {
         // Verify that v3 does NOT re-run if the meta flag is already set.
-        use std::sync::atomic::{AtomicU32, Ordering};
-
-        static V3_SKIP_COUNTER: AtomicU32 = AtomicU32::new(2000);
-        let id = V3_SKIP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("givenergy-v3-skip-{id}"));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = unique_test_dir("givenergy-v3-skip");
         let path = dir.join("history.db");
 
         // Create a database with v3 already marked done
@@ -4830,6 +4831,8 @@ mod tests {
             "data should be unchanged, got {val}"
         );
 
+        drop(conn);
+        drop(db);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

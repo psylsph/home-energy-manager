@@ -20,6 +20,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { fileURLToPath } from 'url';
 import { writeTestSettings, type TestSettingsFixture } from './test-settings.js';
+import { backendExecutableName } from './binary-path.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -35,7 +36,7 @@ const BINARY_PATH = path.resolve(
   'src-tauri',
   'target',
   'release',
-  'givenergy-local',
+  backendExecutableName(),
 );
 
 let backendProcess: ChildProcess | null = null;

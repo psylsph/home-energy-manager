@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.66.2] - 2026-07-20
+
+### Fixed
+
+- **Start on Login now works in installed desktop builds.** Auto-start permissions now apply to the embedded local dashboard address used by packaged apps, not only the development window. (issue #215)
+
+- **Desktop development starts correctly from Windows terminals.** The setup hook no longer uses environment-variable syntax that Windows Command Prompt rejects.
+
 ## [0.66.1] - 2026-07-20
 
 ### Fixed

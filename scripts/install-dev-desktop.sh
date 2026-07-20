@@ -8,11 +8,18 @@
 # refreshes this file on every launch and the dock icon never goes
 # stale (e.g. after the repo is moved to a new path).
 #
-# Set GIVENERGY_LOCAL_QUIET_DESKTOP=1 to suppress the breakdown lines;
-# `beforeDevCommand` does this so the dev terminal stays clean.
+# Pass --quiet (or set GIVENERGY_LOCAL_QUIET_DESKTOP=1) to suppress the
+# breakdown lines; `beforeDevCommand` does this so the dev terminal stays clean.
 set -e
 
-if [ "${GIVENERGY_LOCAL_QUIET_DESKTOP:-0}" = "1" ]; then
+QUIET="${GIVENERGY_LOCAL_QUIET_DESKTOP:-0}"
+case "${1:-}" in
+  --quiet) QUIET=1 ;;
+  "") ;;
+  *) echo "Unknown argument: $1" >&2; exit 2 ;;
+esac
+
+if [ "$QUIET" = "1" ]; then
   say()  { :; }
   warn() { echo "⚠ $*"; }
 else

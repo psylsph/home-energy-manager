@@ -990,8 +990,8 @@ pub fn should_write_agile_action(
     action: &AgileSlotAction,
 ) -> bool {
     use crate::settings::AgileScope;
-    !matches!(action, AgileSlotAction::Defer)
-        && !(scope == AgileScope::Off && matches!(action, AgileSlotAction::Idle))
+    !(matches!(action, AgileSlotAction::Defer)
+        || (scope == AgileScope::Off && matches!(action, AgileSlotAction::Idle)))
 }
 
 /// Compute the slot-driven action the Agile state machine should take

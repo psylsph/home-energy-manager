@@ -19,6 +19,18 @@ permissions_dir = pathlib.Path(sys.argv[2])
 capability = json.loads(capability_path.read_text(encoding="utf-8"))
 granted = set(capability.get("permissions", []))
 
+# Release builds replace the bundled app URL with the embedded Axum server at
+# 127.0.0.1:<configured port>. Tauri treats that page as a remote origin, so
+# listing commands alone is not enough: the capability must also cover that
+# loopback origin or every invoke is rejected by the runtime ACL.
+remote_urls = set(capability.get("remote", {}).get("urls", []))
+required_remote_url = "http://127.0.0.1:*"
+if required_remote_url not in remote_urls:
+    raise SystemExit(
+        "FAIL: main-window capability does not grant the production loopback "
+        f"origin ({required_remote_url})"
+    )
+
 required_plugin_permissions = {
     "autostart:allow-enable",
     "autostart:allow-disable",
@@ -61,5 +73,5 @@ if "autostart_fallback" not in allowed_commands:
         "FAIL: application permission does not allow autostart_fallback"
     )
 
-print("PASS: Start on Login IPC permissions are explicitly granted")
+print("PASS: Start on Login IPC permissions and loopback origin are explicitly granted")
 PY

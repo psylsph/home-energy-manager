@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, existsSync, readFileSync, rmSync, mkdirSync, writeFileSync } from 'fs';
-import { tmpdir } from 'os';
+import { homedir, tmpdir } from 'os';
 import * as path from 'path';
 import { writeTestSettings } from '../../e2e/test-settings.js';
 
@@ -46,15 +46,20 @@ describe('e2e/test-settings.ts — production isolation contract', () => {
       // The settings file must exist on disk.
       expect(existsSync(fixture.settingsPath)).toBe(true);
 
-      // The settings path must NOT be under the user's real home directory.
-      // The helper uses os.tmpdir() so this should always hold on every
-      // supported platform (Linux: /tmp, macOS: /var/folders/..., Windows:
-      // %TEMP%). If a future refactor accidentally points at ~/.givenergy-
-      // local/, this catches it.
-      const userHome = process.env.HOME ?? '';
+      // The settings path must be inside the OS temp directory and must not
+      // equal the live config path. On Windows, %TEMP% normally lives under
+      // the user's profile, so merely asserting that it is outside HOME would
+      // reject a correctly isolated fixture.
       const settingsAbs = path.resolve(fixture.settingsPath);
-      const homeAbs = path.resolve(userHome);
-      expect(settingsAbs.startsWith(homeAbs + path.sep)).toBe(false);
+      const tempAbs = path.resolve(tmpdir());
+      const liveConfigDir = path.resolve(
+        originalConfigDir ?? path.join(originalHome ?? homedir(), '.givenergy-local'),
+      );
+      expect(settingsAbs.startsWith(tempAbs + path.sep)).toBe(true);
+      expect(settingsAbs).toBe(
+        path.resolve(fixture.configDir, '.givenergy-local', 'settings.json'),
+      );
+      expect(settingsAbs).not.toBe(path.join(liveConfigDir, 'settings.json'));
     } finally {
       await fixture.cleanup();
     }

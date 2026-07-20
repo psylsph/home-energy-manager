@@ -62,13 +62,17 @@ impl IsolationGuard {
     }
 }
 
+fn restore_config_dir(previous: Option<std::ffi::OsString>) {
+    if let Some(previous) = previous {
+        std::env::set_var("GIVENERGY_LOCAL_CONFIG_DIR", previous);
+    } else {
+        std::env::remove_var("GIVENERGY_LOCAL_CONFIG_DIR");
+    }
+}
+
 impl Drop for IsolationGuard {
     fn drop(&mut self) {
-        if let Some(previous) = self.previous_config_dir.take() {
-            std::env::set_var("GIVENERGY_LOCAL_CONFIG_DIR", previous);
-        } else {
-            std::env::remove_var("GIVENERGY_LOCAL_CONFIG_DIR");
-        }
+        restore_config_dir(self.previous_config_dir.take());
         if let Some(dir) = self.dir.take() {
             let _ = std::fs::remove_dir_all(dir);
         }
@@ -81,52 +85,77 @@ mod tests {
     use futures_util::FutureExt;
 
     #[test]
-    fn sync_helper_uses_temp_dir_and_restores_caller_override() {
-        let previous = std::env::var_os("GIVENERGY_LOCAL_CONFIG_DIR");
-        with_isolated_config_dir(|| {
+    fn sync_helper_uses_and_removes_temp_dir() {
+        let inside = with_isolated_config_dir(|| {
             let inside = crate::settings::Settings::settings_dir();
             assert!(inside.starts_with(std::env::temp_dir()));
             assert_eq!(inside, crate::settings::Settings::settings_dir());
+            inside
         });
-        assert_eq!(std::env::var_os("GIVENERGY_LOCAL_CONFIG_DIR"), previous);
+        assert!(!inside.exists());
     }
 
     #[tokio::test]
-    async fn async_helper_uses_temp_dir_and_restores_caller_override() {
-        let previous = std::env::var_os("GIVENERGY_LOCAL_CONFIG_DIR");
-        let result = with_isolated_config_dir_async(|| async {
+    async fn async_helper_uses_and_removes_temp_dir() {
+        let inside = with_isolated_config_dir_async(|| async {
             let inside = crate::settings::Settings::settings_dir();
             assert!(inside.starts_with(std::env::temp_dir()));
-            42_u32
+            inside
         })
         .await;
-        assert_eq!(result, 42);
-        assert_eq!(std::env::var_os("GIVENERGY_LOCAL_CONFIG_DIR"), previous);
+        assert!(!inside.exists());
     }
 
     #[test]
-    fn sync_helper_restores_override_after_panic() {
-        let previous = std::env::var_os("GIVENERGY_LOCAL_CONFIG_DIR");
+    fn sync_helper_cleans_up_after_panic() {
+        let inside = std::sync::Mutex::new(None);
         let result = std::panic::catch_unwind(|| {
             with_isolated_config_dir(|| {
-                assert!(crate::settings::Settings::settings_dir().starts_with(std::env::temp_dir()));
+                let dir = crate::settings::Settings::settings_dir();
+                assert!(dir.starts_with(std::env::temp_dir()));
+                *inside.lock().unwrap() = Some(dir);
                 panic!("intentional isolation test panic");
             })
         });
         assert!(result.is_err());
-        assert_eq!(std::env::var_os("GIVENERGY_LOCAL_CONFIG_DIR"), previous);
+        assert!(!inside.lock().unwrap().as_ref().unwrap().exists());
     }
 
     #[tokio::test]
-    async fn async_helper_restores_override_after_panic() {
-        let previous = std::env::var_os("GIVENERGY_LOCAL_CONFIG_DIR");
+    async fn async_helper_cleans_up_after_panic() {
+        let inside = std::sync::Mutex::new(None);
         let result = std::panic::AssertUnwindSafe(with_isolated_config_dir_async(|| async {
-            assert!(crate::settings::Settings::settings_dir().starts_with(std::env::temp_dir()));
+            let dir = crate::settings::Settings::settings_dir();
+            assert!(dir.starts_with(std::env::temp_dir()));
+            *inside.lock().unwrap() = Some(dir);
             panic!("intentional async isolation test panic");
         }))
         .catch_unwind()
         .await;
         assert!(result.is_err());
-        assert_eq!(std::env::var_os("GIVENERGY_LOCAL_CONFIG_DIR"), previous);
+        assert!(!inside.lock().unwrap().as_ref().unwrap().exists());
+    }
+
+    #[test]
+    fn restore_config_dir_reinstates_caller_override() {
+        let _lock = config_dir_mutex().lock();
+        let original = std::env::var_os("GIVENERGY_LOCAL_CONFIG_DIR");
+        let caller = make_temp_dir();
+        restore_config_dir(Some(caller.clone().into_os_string()));
+        assert_eq!(
+            std::env::var_os("GIVENERGY_LOCAL_CONFIG_DIR"),
+            Some(caller.into_os_string())
+        );
+        restore_config_dir(original);
+    }
+
+    #[test]
+    fn restore_config_dir_clears_missing_override() {
+        let _lock = config_dir_mutex().lock();
+        let original = std::env::var_os("GIVENERGY_LOCAL_CONFIG_DIR");
+        std::env::set_var("GIVENERGY_LOCAL_CONFIG_DIR", make_temp_dir());
+        restore_config_dir(None);
+        assert!(std::env::var_os("GIVENERGY_LOCAL_CONFIG_DIR").is_none());
+        restore_config_dir(original);
     }
 }
