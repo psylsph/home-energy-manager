@@ -78,7 +78,7 @@ To run the MSI if SmartScreen appears:
 1. Click **"More info"** on the SmartScreen screen
 2. Click **"Run anyway"**
 
-If the installer itself won't open, right-click the `.msi` → **Properties** → check the **"Unblock"** box → **OK**, then run it again. The `.msix` / `.msixupload` assets are primarily for Microsoft Store submission and MSIX sideload packaging.
+If the installer itself won't open, right-click the `.msi` → **Properties** → check the **"Unblock"** box → **OK**, then run it again. The `Windows-Store-MSIX-...msix` asset is an unsigned Microsoft Store submission package and is not intended for direct installation.
 
 **Mac users** — after opening the `.dmg`, drag the app to your **Desktop** or **Home folder** (not `/Applications`). On first launch, right-click the app → **Open** → **Open** to bypass Gatekeeper. See the [FAQ](./FAQ.md) if you get stuck.
 

@@ -45,7 +45,8 @@ reviews/*
 # E2E test results
 test-results/
 .playwright/
-.pyc*
+__pycache__/
+*.pyc
 
 # Coverage output
 coverage/
