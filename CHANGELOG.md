@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.66.0] - 2026-07-19
+
+### Added
+
+- **The Octopus panel can now be hidden from the bottom navigation.** When an Octopus API key is configured, an "Octopus" toggle appears under Settings → Panel Visibility alongside the other panels, so the tab can be hidden without removing the integration. (issue #212)
+
+- **Zoom controls are now available in the desktop (Tauri) window.** Use Ctrl+= / Ctrl+- to zoom in and out, and Ctrl+0 to reset — matching standard browser behaviour.
+
 ## [0.65.0] - 2026-07-19
 
 ### Added
