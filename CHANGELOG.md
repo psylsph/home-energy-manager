@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.66.1] - 2026-07-20
+
+### Fixed
+
+- **Start on Login can now be enabled and disabled in the Windows desktop app.** The desktop permissions now allow both the standard auto-start integration and its Windows Startup-folder fallback. (issue #215)
+
 ## [0.66.0] - 2026-07-19
 
 ### Added
