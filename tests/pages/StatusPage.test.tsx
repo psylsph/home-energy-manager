@@ -143,6 +143,28 @@ describe('StatusPage', () => {
     expect(container.querySelector('[data-testid="summary-tiles"]')).not.toBeNull();
   });
 
+  it('places the diagram beside the panels in a landscape grid', () => {
+    // The status page arranges the energy-flow diagram next to the summary
+    // + battery panels (rather than stacked) so the whole page fits in
+    // ~800px tall on wide viewports. The layout is driven by responsive
+    // Tailwind classes on this grid container; here we assert the
+    // structure (diagram section + panels column are siblings inside the
+    // grid) so a future refactor can't silently drop the side-by-side
+    // arrangement.
+    useInverterStore.setState({
+      snapshot: makeSnapshot(),
+      connectionState: 'connected',
+    });
+    const { container } = render(<StatusPage />);
+    const grid = container.querySelector('[data-testid="status-landscape-grid"]');
+    expect(grid).not.toBeNull();
+    // The diagram lives in a <section> that is a direct child of the grid.
+    expect(grid!.querySelector(':scope > section')).not.toBeNull();
+    // Both panels render inside the grid's panels column.
+    expect(grid!.querySelector('[data-testid="summary-tiles"]')).not.toBeNull();
+    expect(grid!.querySelector('[data-testid="battery-panel"]')).not.toBeNull();
+  });
+
   it('shows connection status bar when not connected even with snapshot', () => {
     useInverterStore.setState({
       snapshot: makeSnapshot(),

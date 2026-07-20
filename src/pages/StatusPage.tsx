@@ -135,7 +135,7 @@ export default function StatusPage() {
   }
 
   return (
-    <div className="flex flex-col gap-3 max-w-4xl mx-auto">
+    <div className="flex flex-col gap-3 mx-auto w-full max-w-4xl lg:max-w-6xl">
       {/* Connection status bar — only show when disconnected */}
       {connectionState !== 'connected' && (
         <section className="flex items-center justify-between gap-2 px-4 py-2 bg-bg-surface/50 rounded-2xl text-xs text-text-secondary/70">
@@ -190,25 +190,37 @@ export default function StatusPage() {
 
       <ColdBatteryWarning />
 
-      {/* Energy flow diagram — full width card */}
-      <section className="bg-bg-surface rounded-lg p-1">
-        <EnergyOrbitDiagram
-          snapshot={snapshot}
-          evcPower={evcPower}
-          evcChargingState={evcChargingState}
-          evcCharging={evcCharging}
-          evcConnected={evcConnected}
-          evcCableConnected={evcCableConnected}
-          evcSessionEnergyKwh={evcSessionEnergyKwh}
-          evcEverConnected={evcEverConnected}
-          showEvc={!!evcHost}
-        />
-      </section>
+      {/* Landscape layout on lg+ (≥1024px): energy diagram on the left
+          with the summary + battery panels stacked on the right, so the
+          whole status page fits in roughly 800px tall instead of stacking
+          past 900px and forcing a scroll. Below lg the diagram stays
+          full-width and the panels go side-by-side on md, matching the
+          original layout. */}
+      <div
+        className="grid grid-cols-1 lg:grid-cols-2 gap-3 lg:gap-4 items-start"
+        data-testid="status-landscape-grid"
+      >
+        {/* Energy flow diagram — full width card (left column on lg+) */}
+        <section className="bg-bg-surface rounded-lg p-1">
+          <EnergyOrbitDiagram
+            snapshot={snapshot}
+            evcPower={evcPower}
+            evcChargingState={evcChargingState}
+            evcCharging={evcCharging}
+            evcConnected={evcConnected}
+            evcCableConnected={evcCableConnected}
+            evcSessionEnergyKwh={evcSessionEnergyKwh}
+            evcEverConnected={evcEverConnected}
+            showEvc={!!evcHost}
+          />
+        </section>
 
-      {/* Battery + Summary side by side on md+ */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 md:gap-3 items-stretch">
-        <SummaryTiles snapshot={snapshot} />
-        <BatteryPanel snapshot={snapshot} />
+        {/* Battery + Summary: side-by-side on md, stacked in the right
+            column on lg+ */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 gap-2 md:gap-3 items-stretch">
+          <SummaryTiles snapshot={snapshot} />
+          <BatteryPanel snapshot={snapshot} />
+        </div>
       </div>
 
     </div>
