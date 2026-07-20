@@ -84,6 +84,33 @@ test.describe('Chart ranges', () => {
   });
 });
 
+test.describe('History chart axes', () => {
+  test('1h axis keeps distinct time labels when history only contains startup data', async ({ page }) => {
+    await page.route('**/api/history?*', async (route) => {
+      const url = new URL(route.request().url());
+      const fields = (url.searchParams.get('fields') ?? 'soc').split(',');
+      const end = Date.now();
+      const timestamps = [end - 30_000, end - 20_000, end - 10_000, end];
+      const data = Object.fromEntries(fields.map((field) => [
+        field,
+        timestamps.map((t, index) => ({ t, v: 50 + index })),
+      ]));
+      await route.fulfill({ json: { ok: true, data } });
+    });
+
+    await page.goto('/#/history');
+    await page.getByRole('button', { name: '1h', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'SOC %' })).toBeVisible();
+
+    const labels = page
+      .locator('.recharts-wrapper').first()
+      .locator('.recharts-xAxis .recharts-cartesian-axis-tick-value');
+    await expect(labels).toHaveCount(6);
+    const text = await labels.allTextContents();
+    expect(new Set(text).size).toBe(text.length);
+  });
+});
+
 test.describe('Chart legends', () => {
   test('Power page legend items can be muted and restored', async ({ page }) => {
     await page.goto('/#/power');

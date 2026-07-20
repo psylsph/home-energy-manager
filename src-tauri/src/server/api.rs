@@ -8994,6 +8994,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_history_one_hour_keeps_sparse_startup_samples_unique() {
+        // Issue #216 was visible immediately after startup, when the selected
+        // hour contained only a few recent buckets. The API should return that
+        // sparse data once, without padding the empty leading window or
+        // duplicating timestamps; the frontend owns the fixed one-hour axis.
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.0, 0.0, 0.0);
+            let start_ts = 1_700_000_000i64;
+            let end_ts = start_ts + 3600;
+            let db_guard = state.history.lock().await;
+            let db = db_guard.as_ref().unwrap();
+
+            db.insert_reading(&crate::inverter::model::InverterSnapshot {
+                timestamp: start_ts - 1,
+                soc: 10,
+                ..Default::default()
+            });
+            for (index, seconds_before_end) in [40i64, 25, 10].into_iter().enumerate() {
+                db.insert_reading(&crate::inverter::model::InverterSnapshot {
+                    timestamp: end_ts - seconds_before_end,
+                    soc: 50 + index as u8,
+                    ..Default::default()
+                });
+            }
+            drop(db_guard);
+
+            let (status, Json(json)) = get_history(
+                State(state),
+                Query(HistoryQuery {
+                    range: Some("1h".to_string()),
+                    fields: Some("soc".to_string()),
+                    offset: Some(0),
+                    rolling: Some(true),
+                    start_ms: Some(start_ts * 1000),
+                    end_ms: Some(end_ts * 1000),
+                }),
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::OK);
+            let points = json["data"]["soc"].as_array().unwrap();
+            assert!(
+                !points.is_empty(),
+                "recent startup samples must be returned"
+            );
+            assert!(
+                points.len() <= 2,
+                "30-second buckets must stay sparse: {points:?}"
+            );
+
+            let timestamps: Vec<i64> = points
+                .iter()
+                .map(|point| point["t"].as_i64().unwrap())
+                .collect();
+            let unique: std::collections::HashSet<i64> = timestamps.iter().copied().collect();
+            assert_eq!(
+                unique.len(),
+                timestamps.len(),
+                "bucket timestamps must be unique"
+            );
+            assert!(timestamps.iter().all(|t| *t >= start_ts * 1000));
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn get_report_returns_zero_costs_for_window_with_no_readings() {
         // Empty history → import_cost == Standing Charge (the seeded "no
         // data" bucket), export_income == 0. The endpoint must not 500.
