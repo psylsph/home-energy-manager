@@ -18,6 +18,7 @@ import * as fs from 'fs';
 import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
 import { startModbusServer, stopModbusServer } from './mock-modbus.js';
+import { backendExecutableName } from './binary-path.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -32,7 +33,7 @@ const BINARY_PATH = path.resolve(
   'src-tauri',
   'target',
   'release',
-  'givenergy-local',
+  backendExecutableName(),
 );
 
 export default async function globalSetup(_config: FullConfig): Promise<() => Promise<void>> {

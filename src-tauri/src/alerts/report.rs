@@ -1356,8 +1356,7 @@ mod tests {
             import_tariff_config: Some(cfg),
             ..crate::settings::Settings::default()
         };
-        let msg =
-            generate_daily_summary_text(&rows, "2026-06-27", &s).expect("enough data");
+        let msg = generate_daily_summary_text(&rows, "2026-06-27", &s).expect("enough data");
         assert!(
             msg.contains("@ 12.345p"),
             "per-window rate must render to 3dp; got: {msg}"

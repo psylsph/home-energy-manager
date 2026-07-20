@@ -103,12 +103,58 @@ pub fn is_enabled() -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+
+    fn appdata_mutex() -> &'static parking_lot::Mutex<()> {
+        static MUTEX: OnceLock<parking_lot::Mutex<()>> = OnceLock::new();
+        MUTEX.get_or_init(|| parking_lot::Mutex::new(()))
+    }
+
+    struct TestAppDataGuard {
+        _lock: parking_lot::MutexGuard<'static, ()>,
+        root: PathBuf,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl TestAppDataGuard {
+        fn enter() -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let lock = appdata_mutex().lock();
+            let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "givenergy-local-autostart-test-{}-{id}",
+                std::process::id()
+            ));
+            let appdata = root.join("AppData/Roaming");
+            let previous = std::env::var_os("APPDATA");
+            std::env::set_var("APPDATA", &appdata);
+            std::fs::create_dir_all(startup_folder()).expect("create isolated Startup folder");
+            Self {
+                _lock: lock,
+                root,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for TestAppDataGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                std::env::set_var("APPDATA", previous);
+            } else {
+                std::env::remove_var("APPDATA");
+            }
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
 
     /// `startup_folder()` must return a path ending with the expected
     /// Startup folder suffix and must exist (APPDATA is always set in
     /// test environments that run on Windows).
     #[test]
     fn startup_folder_returns_valid_path() {
+        let _appdata = TestAppDataGuard::enter();
         let path = startup_folder();
         let path_str = path.to_string_lossy();
         assert!(
@@ -127,10 +173,7 @@ mod tests {
     /// return true after creation.
     #[test]
     fn enable_creates_shortcut() {
-        // Only run on Windows.
-        if !cfg!(windows) {
-            return;
-        }
+        let _appdata = TestAppDataGuard::enter();
 
         // Clean up any pre-existing shortcut.
         let _ = disable();
@@ -159,9 +202,7 @@ mod tests {
     /// (idempotent cleanup).
     #[test]
     fn disable_is_idempotent() {
-        if !cfg!(windows) {
-            return;
-        }
+        let _appdata = TestAppDataGuard::enter();
 
         // Remove if present.
         let _ = disable();
@@ -172,9 +213,7 @@ mod tests {
     /// `is_enabled()` must return false when no shortcut exists.
     #[test]
     fn is_enabled_returns_false_when_not_enabled() {
-        if !cfg!(windows) {
-            return;
-        }
+        let _appdata = TestAppDataGuard::enter();
 
         let _ = disable();
         assert!(!is_enabled().unwrap(), "should return false when disabled");
@@ -184,9 +223,7 @@ mod tests {
     /// empty file).
     #[test]
     fn enable_creates_valid_lnk_file() {
-        if !cfg!(windows) {
-            return;
-        }
+        let _appdata = TestAppDataGuard::enter();
 
         let _ = disable();
         enable().expect("enable() should succeed");

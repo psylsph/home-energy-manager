@@ -27,6 +27,8 @@
 #      .desktop file still gets written so it doesn't go stale while
 #      the user builds for the first time.
 #   6. The desktop-file validates (so the DE actually accepts it).
+#   7. The npm hook uses the cross-platform --quiet argument rather than a
+#      POSIX-only leading environment assignment (which cmd.exe rejects).
 #
 # Run standalone: `bash tests/scripts/install-dev-desktop.test.sh`
 # Or via `npm test` (wired through package.json).
@@ -243,6 +245,33 @@ else
   assert_eq "desktop-file-validate exit" "0" "$VALIDATE_EXIT"
   rm -rf "$XDG" "$STAGE"
 fi
+
+# Test 7: npm runs scripts through cmd.exe on Windows. A leading
+# VAR=value command works in POSIX shells but fails before bash starts on
+# Windows, so quiet mode must be passed as a normal argument.
+echo
+echo "7. npm dev hook uses cross-platform quiet mode"
+DEV_DESKTOP_COMMAND="$(python3 - "$REPO_ROOT/package.json" <<'PY'
+import json
+import pathlib
+import sys
+
+package = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(package["scripts"]["dev:desktop"])
+PY
+)"
+assert_eq "dev:desktop command" \
+  "bash scripts/install-dev-desktop.sh --quiet" \
+  "$DEV_DESKTOP_COMMAND"
+XDG="$(stage_xdg_home)"
+STAGE="$(stage_fake_binary)"
+mkdir -p "$REPO_ROOT/src-tauri/target/debug"
+ln -sf "$STAGE/givenergy-local" "$REPO_ROOT/src-tauri/target/debug/givenergy-local"
+HOME="$XDG" XDG_DATA_HOME="$XDG" \
+  bash "$INSTALLER" --quiet >"$XDG/install.out" 2>&1
+rm -f "$REPO_ROOT/src-tauri/target/debug/givenergy-local"
+assert_eq "--quiet suppresses installer output" "" "$(cat "$XDG/install.out")"
+rm -rf "$XDG" "$STAGE"
 
 # --- Summary ------------------------------------------------------------------
 
