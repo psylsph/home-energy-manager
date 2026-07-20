@@ -19,7 +19,8 @@
         "x": 0,
         "y": 0,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "zoomHotkeysEnabled": true
       }
     ],
     "enableGTKAppId": true,
