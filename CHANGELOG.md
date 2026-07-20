@@ -4,9 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.66.4] - 2026-07-20
+
 ### Added
 
 - **Windows releases now include a Microsoft Store submission package.** The release workflow builds an unsigned MSIX alongside the existing MSI, allowing the Store to apply its trusted signature without changing the direct-download installer.
+
+### Changed
+
+- **The Status page makes better use of wide screens.** On landscape displays the energy-flow diagram now sits beside the summary and battery panels instead of stacking above them, so the whole page fits without scrolling.
 
 ## [0.66.3] - 2026-07-20
 
