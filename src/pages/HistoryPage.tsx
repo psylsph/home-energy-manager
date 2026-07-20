@@ -23,9 +23,7 @@ import {
   historyPickerValueToOffset,
   isRollingHistoryRange,
   shouldRefreshHistoryRange,
-  shouldTrimHistoryRangeLeadingGap,
   supportsHistoryDate,
-  trimDomainStartToFirstDataPoint,
 } from '../lib/historyRangeConfig';
 import { getSeriesOpacity, removeSpikes } from '../lib/chartSeries';
 import { SeriesLegend } from '../components/SeriesLegend';
@@ -685,10 +683,11 @@ export default function HistoryPage() {
   const now = useNow();
   const rolling = isRollingHistoryRange(range);
   const refreshKey = shouldRefreshHistoryRange(range, offset) ? now : 0;
-  const xDomain: [number, number] = getHistoryRangeDomain(range, offset, now);
-  const displayDomain = shouldTrimHistoryRangeLeadingGap(range)
-    ? trimDomainStartToFirstDataPoint(xDomain, data)
-    : xDomain;
+  // Keep the selected window fixed even when history only contains recent
+  // startup data. Cropping 1h/6h to the first point can collapse the axis to
+  // a few seconds, making several Recharts ticks format as the same HH:mm
+  // label (issue #216).
+  const displayDomain: [number, number] = getHistoryRangeDomain(range, offset, now);
 
   useEffect(() => {
     let cancelled = false;

@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.66.3] - 2026-07-20
+
+### Fixed
+
+- **One-hour History charts keep a readable time axis after startup.** The selected hour now stays fixed when only a few recent readings exist, instead of repeating the same minute label across the axis. (issue #216)
+
 ## [0.66.2] - 2026-07-20
 
 ### Fixed

@@ -186,6 +186,21 @@ describe('formatHistoryXAxisTick under BST', () => {
 // anything timezone-shifted.
 // ---------------------------------------------------------------------------
 
+describe('one-hour history window (issue #216)', () => {
+  it('keeps the full selected hour when the only reading is at startup', () => {
+    const nowMs = Date.UTC(2024, 5, 15, 15, 45, 0);
+    const domain = getHistoryRangeDomain('1h', 0, nowMs);
+
+    expect(domain).toEqual([nowMs - 3_600_000, nowMs]);
+    expect(domain[1] - domain[0]).toBe(3_600_000);
+
+    const labels = getHistoryXAxisTicks('1h', domain)!
+      .map((tick) => formatHistoryXAxisTick(tick, '1h'));
+    expect(labels.length).toBeGreaterThanOrEqual(5);
+    expect(new Set(labels).size).toBe(labels.length);
+  });
+});
+
 describe('trimDomainStartToFirstDataPoint under BST', () => {
   it('uses raw .t values, not timezone-shifted ones', () => {
     // Domain: 1h window ending at 15:40 UTC (16:40 BST). Min gap 60s.
