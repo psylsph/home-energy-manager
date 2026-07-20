@@ -128,7 +128,7 @@ Home Energy Manager connects directly to your inverter over your home network. I
 - **Month calendar view** — daily energy totals at a glance for the whole month
 - **Cost tracking** — enter your import and export tariffs to see running cost estimates on your charts
 - **CSV export** — download your energy history as a spreadsheet
-- **PDF consumption reports** — generate formatted A4 PDF reports with charts and summary tables for each energy metric (solar, home, grid, battery). Includes min/max/average values and cost breakdowns. One click from the History page.
+- **PDF consumption reports** — generate formatted reports with charts and summary tables for solar, home, grid, and battery energy, including cost breakdowns. Open **Consumption Report** from the Power page, then choose **Print / save as PDF**. The History page exports CSV only.
 - **Consumption Reports** — summary statistics for any time range including total energy, peak power, solar coverage percentage, and grid dependency, with time-bucketed breakdowns exportable as CSV
 
 ### Control
