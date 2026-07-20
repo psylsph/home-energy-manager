@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Windows releases now include a Microsoft Store submission package.** The release workflow builds an unsigned MSIX alongside the existing MSI, allowing the Store to apply its trusted signature without changing the direct-download installer.
+
 ## [0.66.3] - 2026-07-20
 
 ### Fixed

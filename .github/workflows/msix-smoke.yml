@@ -1,0 +1,75 @@
+name: Build Windows MSIX (Test)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-msix:
+    name: Build unsigned Store MSIX
+    runs-on: windows-latest
+    env:
+      CARGO_NET_RETRY: "10"
+      RUSTUP_MAX_RETRIES: "10"
+      MSIX_IDENTITY_NAME: ${{ vars.MSIX_IDENTITY_NAME }}
+      MSIX_PUBLISHER: ${{ vars.MSIX_PUBLISHER }}
+      MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: windows-msix-test
+          cache-on-failure: true
+
+      - name: Install frontend dependencies
+        uses: ./.github/actions/setup-frontend
+
+      - name: Install Tauri CLI
+        shell: bash
+        run: |
+          curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          cargo binstall --force --no-confirm tauri-cli
+
+      - name: Build Tauri executable
+        run: cargo tauri build --target x86_64-pc-windows-msvc --no-bundle
+
+      - name: Install WinApp CLI
+        uses: microsoft/setup-WinAppCli@v0.1
+        with:
+          version: v0.4.0
+
+      - name: Build unsigned MSIX
+        shell: pwsh
+        run: |
+          $version = (Get-Content "${{ github.workspace }}\package.json" | ConvertFrom-Json).version
+          python "${{ github.workspace }}\scripts\prepare-msix.py" `
+            --target "x86_64-pc-windows-msvc" `
+            --version $version `
+            --repo-root "${{ github.workspace }}"
+
+          $bundleDir = "${{ github.workspace }}\src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msix"
+          $stageDir = Join-Path $bundleDir "stage"
+          $output = Join-Path $bundleDir "HomeEnergyManager_${version}.0_x64.msix"
+          winapp pack $stageDir `
+            --manifest (Join-Path $stageDir "Package.appxmanifest") `
+            --executable "givenergy-local.exe" `
+            --output $output
+          if ($LASTEXITCODE -ne 0) {
+            throw "winapp pack failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Upload test package
+        uses: actions/upload-artifact@v6
+        with:
+          name: Windows-Store-MSIX-test
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msix/*.msix
+          if-no-files-found: error

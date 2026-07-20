@@ -172,6 +172,39 @@ jobs:
           echo "::error::Windows build failed after 3 attempts"
           exit 1
 
+      - name: Install WinApp CLI
+        if: matrix.platform == 'windows-latest'
+        continue-on-error: true
+        uses: microsoft/setup-WinAppCli@v0.1
+        with:
+          version: v0.4.0
+
+      - name: Build unsigned Microsoft Store MSIX
+        if: matrix.platform == 'windows-latest'
+        continue-on-error: true
+        shell: pwsh
+        env:
+          MSIX_IDENTITY_NAME: ${{ vars.MSIX_IDENTITY_NAME }}
+          MSIX_PUBLISHER: ${{ vars.MSIX_PUBLISHER }}
+          MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}
+        run: |
+          $version = (Get-Content "${{ github.workspace }}\package.json" | ConvertFrom-Json).version
+          python "${{ github.workspace }}\scripts\prepare-msix.py" `
+            --target "${{ matrix.target }}" `
+            --version $version `
+            --repo-root "${{ github.workspace }}"
+
+          $bundleDir = "${{ github.workspace }}\src-tauri\target\${{ matrix.target }}\release\bundle\msix"
+          $stageDir = Join-Path $bundleDir "stage"
+          $output = Join-Path $bundleDir "HomeEnergyManager_${version}.0_x64.msix"
+          winapp pack $stageDir `
+            --manifest (Join-Path $stageDir "Package.appxmanifest") `
+            --executable "givenergy-local.exe" `
+            --output $output
+          if ($LASTEXITCODE -ne 0) {
+            throw "winapp pack failed with exit code $LASTEXITCODE"
+          }
+
       - name: Build Tauri app (Linux)
         if: matrix.platform == 'ubuntu-22.04' || matrix.platform == 'ubuntu-24.04-arm'
         run: |
@@ -305,6 +338,8 @@ jobs:
                   return f"macOS-Intel-{product}-{version}.dmg"
               if ext_lower == ".msi":
                   return f"Windows-MSI-{product}-{version}.msi"
+              if ext_lower == ".msix":
+                  return f"Windows-Store-MSIX-{product}-{version}.msix"
 
               if ext_lower == ".deb":
                   return f"Linux-Debian-{arch}-{product}-{version}.deb"
@@ -316,7 +351,7 @@ jobs:
           for path in bundle_dir.rglob("*"):
               if not path.is_file():
                   continue
-              if path.suffix.lower() not in {".dmg", ".deb", ".rpm", ".msi", ".exe"}:
+              if path.suffix.lower() not in {".dmg", ".deb", ".rpm", ".msi", ".msix", ".exe"}:
                   continue
               dest = out_dir / friendly_name(path)
               if " " in dest.name:
@@ -394,6 +429,7 @@ jobs:
             | `macOS-Apple-Silicon-...dmg` | **macOS** — Apple Silicon (M1/M2/M3/M4) |
             | `macOS-Intel-...dmg` | **macOS** — Intel |
             | `Windows-MSI-...msi` | **Windows** — MSI installer |
+            | `Windows-Store-MSIX-...msix` | **Microsoft Store submission** — unsigned package, not for direct installation |
             | `Linux-Debian-x86_64-...deb` | **Linux** — Debian/Ubuntu (x86_64) |
             | `Linux-Debian-ARM64-...deb` | **Linux** — Debian/Ubuntu (ARM64, e.g. Raspberry Pi) |
             | `Linux-RPM-x86_64-...rpm` | **Linux** — RHEL/Fedora/openSUSE (x86_64) |
