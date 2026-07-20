@@ -15,7 +15,6 @@ ASSET_NAMES = (
     "Square44x44Logo.png",
     "Square71x71Logo.png",
     "Square150x150Logo.png",
-    "Square310x310Logo.png",
 )
 TARGET_ARCHITECTURES = {
     "x86_64": "x64",

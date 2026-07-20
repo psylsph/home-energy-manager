@@ -77,6 +77,13 @@ class PrepareMsixTests(unittest.TestCase):
             self.assertEqual(identity.attrib["Version"], "0.66.3.0")
             self.assertEqual(identity.attrib["ProcessorArchitecture"], "x64")
 
+            uap = {"uap": "http://schemas.microsoft.com/appx/manifest/uap/windows10"}
+            default_tile = root_element.find(".//uap:DefaultTile", uap)
+            self.assertIsNotNone(default_tile)
+            assert default_tile is not None
+            if "Square310x310Logo" in default_tile.attrib:
+                self.assertIn("Wide310x150Logo", default_tile.attrib)
+
     def test_release_workflow_builds_an_unsigned_store_package(self) -> None:
         workflow = (REPO_ROOT / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
         self.assertIn("uses: microsoft/setup-WinAppCli@v0.1", workflow)
