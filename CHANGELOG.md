@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.67.0] - 2026-07-21
+
 ### Added
 
 - **The desktop app can now minimise to the system tray.** A tray icon with Show and Quit entries is always present, and two new Settings toggles let you keep the app running in the background: "Minimise to Tray" hides the window to the tray when you close it instead of quitting, and "Start Hidden in Tray" launches the app quietly in the tray — handy alongside Start on Login. (issue #217)
