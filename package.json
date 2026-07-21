@@ -64,7 +64,7 @@
     "zustand": "^5.0.4"
   },
   "overrides": {
-    "js-yaml": "^4.2.0"
+    "js-yaml": "^4.3.0"
   },
   "optionalDependencies": {
     "@rolldown/binding-darwin-arm64": "^1.1.5",
