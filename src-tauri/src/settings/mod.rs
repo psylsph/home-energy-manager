@@ -926,6 +926,22 @@ pub struct Settings {
     #[serde(default)]
     pub autostart_enabled: bool,
 
+    /// When true, closing the main window hides it to the system tray
+    /// instead of quitting the app (issue #217). The tray icon (built on
+    /// every desktop launch) carries Show/Quit so the hidden window can be
+    /// reopened or the app exited. The close handler reads this live from
+    /// the settings mutex, so toggling it takes effect immediately with no
+    /// restart. Defaults to false so existing behaviour (close = quit) is
+    /// unchanged until the user opts in.
+    #[serde(default)]
+    pub minimise_to_tray: bool,
+    /// When true, the app launches with its main window already hidden in
+    /// the tray (issue #217). Read once at startup, so it takes effect on
+    /// the next launch after the user enables it. The tray icon's Show
+    /// entry restores the window.
+    #[serde(default)]
+    pub start_minimised: bool,
+
     // -- Read-only API (external access) --
     /// API key for the read-only external API server.
     /// When non-empty, a second HTTP server is started on `api_port` that
@@ -1246,6 +1262,8 @@ impl Default for Settings {
             octopus_economy7_end: default_octopus_economy7_end(),
             disable_auto_discovery: true,
             autostart_enabled: false,
+            minimise_to_tray: false,
+            start_minimised: false,
             api_key: String::new(),
             api_port: 7338,
             discharge_slots_backup: None,
@@ -1483,6 +1501,8 @@ mod tests {
             octopus_economy7_end: "07:30".to_string(),
             disable_auto_discovery: true,
             autostart_enabled: true,
+            minimise_to_tray: false,
+            start_minimised: false,
             api_key: String::new(),
             api_port: 0,
             discharge_slots_backup: Some(vec![
@@ -1893,6 +1913,8 @@ mod tests {
             octopus_economy7_end: "07:30".to_string(),
             disable_auto_discovery: true,
             autostart_enabled: false,
+            minimise_to_tray: false,
+            start_minimised: false,
             api_key: String::new(),
             api_port: 0,
             discharge_slots_backup: None,

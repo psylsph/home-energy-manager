@@ -290,6 +290,11 @@ pub fn run() {
             // `app_settings` is moved into the helper.
             let http_port = app_settings.http_port;
             let autostart_enabled = app_settings.autostart_enabled;
+            // Captured once at startup; takes effect on this launch. The
+            // close-to-tray preference (`minimise_to_tray`) is read live in
+            // the Builder-level `on_window_event` handler so the toggle
+            // applies immediately without a restart. (#217)
+            let start_minimised = app_settings.start_minimised;
             let api_key = app_settings.api_key.clone();
             let api_port = app_settings.api_port;
             let state = match tauri::async_runtime::block_on(initialize_app_state(
@@ -420,8 +425,17 @@ pub fn run() {
                             );
                             // Bring the window to the top of the screen and
                             // request focus so it appears in front of other
-                            // windows when launched. (#79)
-                            let _ = window.set_focus();
+                            // windows when launched. (#79) — unless the user
+                            // opted into launching hidden to the tray, in
+                            // which case hide it instead. (#217)
+                            if start_minimised {
+                                tracing::info!(
+                                    "Start-minimised enabled; hiding window to tray on launch"
+                                );
+                                let _ = window.hide();
+                            } else {
+                                let _ = window.set_focus();
+                            }
                         }
                         Ok(Err(e)) => {
                             tracing::error!("Embedded HTTP server failed to start: {e}");
@@ -478,6 +492,87 @@ pub fn run() {
                 }
             }
 
+            // Build the system-tray icon (issue #217). The tray is always
+            // present on desktop so a hidden window can be reopened and the
+            // app exited cleanly. Two opt-in settings drive its behaviour:
+            //   • `minimise_to_tray` — the window's close (X) button hides
+            //     to the tray instead of quitting (intercepted by the
+            //     Builder-level `on_window_event` handler below).
+            //   • `start_minimised`  — the window launches hidden (above).
+            #[cfg(desktop)]
+            {
+                use tauri::menu::{Menu, MenuItem};
+                use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
+
+                let show = MenuItem::with_id(
+                    app,
+                    "show",
+                    "Show Home Energy Manager",
+                    true,
+                    None::<&str>,
+                );
+                let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>);
+                match (show, quit) {
+                    (Ok(show_item), Ok(quit_item)) => {
+                        let menu =
+                            Menu::with_items(app, &[&show_item, &quit_item]);
+                        // Reuse the bundled window icon so the tray matches.
+                        let icon = tauri::image::Image::from_bytes(
+                            include_bytes!("../icons/128x128.png"),
+                        );
+                        // `show_menu_on_left_click(false)` makes left-click
+                        // restore the window (handled below) instead of opening
+                        // the menu; right-click still opens Show/Quit. On Linux
+                        // a menu is required for the icon to render at all.
+                        let mut builder = TrayIconBuilder::with_id("main-tray")
+                            .tooltip("Home Energy Manager")
+                            .show_menu_on_left_click(false)
+                            .on_menu_event(|app, event| match event.id().as_ref() {
+                                "show" => {
+                                    if let Some(window) = app.get_webview_window("main") {
+                                        let _ = window.show();
+                                        let _ = window.unminimize();
+                                        let _ = window.set_focus();
+                                    }
+                                }
+                                "quit" => app.exit(0),
+                                _ => {}
+                            })
+                            .on_tray_icon_event(|tray, event| {
+                                // Single left-click restores the window — the
+                                // Windows convention for "open from tray".
+                                if let TrayIconEvent::Click {
+                                    button: MouseButton::Left,
+                                    ..
+                                } = event
+                                {
+                                    let app = tray.app_handle();
+                                    if let Some(window) = app.get_webview_window("main") {
+                                        let _ = window.show();
+                                        let _ = window.unminimize();
+                                        let _ = window.set_focus();
+                                    }
+                                }
+                            });
+                        if let Ok(img) = icon {
+                            builder = builder.icon(img);
+                        }
+                        if let Ok(m) = &menu {
+                            builder = builder.menu(m);
+                        }
+                        match builder.build(app) {
+                            Ok(_) => tracing::info!("System tray icon created"),
+                            Err(e) => {
+                                tracing::warn!("Failed to build system tray icon: {e}")
+                            }
+                        }
+                    }
+                    (Err(e), _) | (_, Err(e)) => {
+                        tracing::warn!("Failed to create tray menu items: {e}");
+                    }
+                }
+            }
+
             // Spawn the Modbus polling loop
             let poll_state = state.clone();
             tauri::async_runtime::spawn(async move {
@@ -512,6 +607,21 @@ pub fn run() {
             }
 
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Issue #217: when "minimise to tray" is enabled, intercept the
+            // window close (X) so it hides to the tray instead of quitting the
+            // app. The user reopens via the tray's Show entry or a left-click.
+            // The preference is read live from disk so the in-app toggle
+            // takes effect immediately (the frontend persists on toggle);
+            // on any read error it falls back to false (= quit), the safe
+            // default that preserves the historic behaviour.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if Settings::load().minimise_to_tray {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -985,6 +1095,49 @@ mod tests {
             assert!(
                 !reloaded2.autostart_enabled,
                 "disabling autostart should also persist"
+            );
+        })
+        .await;
+    }
+
+    /// The tray window preferences (#217) must survive a save/load
+    /// round-trip. Like autostart they're read directly by the windowing
+    /// layer (`minimise_to_tray` live in the close handler,
+    /// `start_minimised` once at startup) rather than through
+    /// `initialize_app_state`, so the contract under test is: write to
+    /// disk, reload, observe the same value.
+    #[tokio::test]
+    async fn tray_preferences_round_trip_through_disk() {
+        with_isolated_config_dir_async(|| async {
+            let mut s = Settings::load();
+            s.minimise_to_tray = true;
+            s.start_minimised = true;
+            s.save().expect("settings save");
+
+            let reloaded = Settings::load();
+            assert!(
+                reloaded.minimise_to_tray,
+                "minimise_to_tray should persist across save/load"
+            );
+            assert!(
+                reloaded.start_minimised,
+                "start_minimised should persist across save/load"
+            );
+
+            // Flipping both back to false must also stick.
+            let mut s2 = Settings::load();
+            s2.minimise_to_tray = false;
+            s2.start_minimised = false;
+            s2.save().expect("settings save");
+
+            let reloaded2 = Settings::load();
+            assert!(
+                !reloaded2.minimise_to_tray,
+                "disabling minimise_to_tray should also persist"
+            );
+            assert!(
+                !reloaded2.start_minimised,
+                "disabling start_minimised should also persist"
             );
         })
         .await;

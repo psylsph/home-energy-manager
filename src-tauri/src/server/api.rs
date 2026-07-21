@@ -875,6 +875,10 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "evc_port": settings.evc_port,
             "disable_auto_discovery": settings.disable_auto_discovery,
             "autostart_enabled": settings.autostart_enabled,
+            // Issue #217: tray window preferences. Both default to false so
+            // an older settings.json simply reports them as off.
+            "minimise_to_tray": settings.minimise_to_tray,
+            "start_minimised": settings.start_minimised,
             "api_key": settings.api_key,
             "api_port": settings.api_port,
             // Issue #137: surface the discharge-slot backup so the frontend
@@ -1047,6 +1051,15 @@ pub async fn update_settings(
     // lib.rs re-applies it after a crash/restart. See issue #117.
     if let Some(a) = body.get("autostart_enabled").and_then(|v| v.as_bool()) {
         persist.autostart_enabled = a;
+    }
+    // Issue #217: tray window preferences. `minimise_to_tray` takes effect
+    // immediately (the close handler reads it live on each window close);
+    // `start_minimised` takes effect on the next launch.
+    if let Some(m) = body.get("minimise_to_tray").and_then(|v| v.as_bool()) {
+        persist.minimise_to_tray = m;
+    }
+    if let Some(s) = body.get("start_minimised").and_then(|v| v.as_bool()) {
+        persist.start_minimised = s;
     }
     // Persist the read-only API key and port. The read-only server is
     // started/stopped on the next app launch (no hot-reload of the
@@ -1256,6 +1269,12 @@ fn settings_log_fields(
     }
     if is_present("autostart_enabled") {
         out.push(format!("autostart_enabled={}", persist.autostart_enabled));
+    }
+    if is_present("minimise_to_tray") {
+        out.push(format!("minimise_to_tray={}", persist.minimise_to_tray));
+    }
+    if is_present("start_minimised") {
+        out.push(format!("start_minimised={}", persist.start_minimised));
     }
     if is_present("api_key") {
         // Redact the key value — never log the plaintext. The length
@@ -9923,6 +9942,30 @@ mod tests {
                     "disable_auto_discovery=false",
                     false,
                 ),
+                (
+                    "minimise_to_tray",
+                    json!(true),
+                    "minimise_to_tray=true",
+                    true,
+                ),
+                (
+                    "minimise_to_tray",
+                    json!(false),
+                    "minimise_to_tray=false",
+                    false,
+                ),
+                (
+                    "start_minimised",
+                    json!(true),
+                    "start_minimised=true",
+                    true,
+                ),
+                (
+                    "start_minimised",
+                    json!(false),
+                    "start_minimised=false",
+                    false,
+                ),
             ] {
                 let body = serde_json::json!({ field: value });
                 let (status, json) = update_settings(State(state.clone()), Json(body)).await;
@@ -9940,6 +9983,8 @@ mod tests {
                 let actual = match field {
                     "autostart_enabled" => saved.autostart_enabled,
                     "disable_auto_discovery" => saved.disable_auto_discovery,
+                    "minimise_to_tray" => saved.minimise_to_tray,
+                    "start_minimised" => saved.start_minimised,
                     _ => unreachable!(),
                 };
                 assert_eq!(actual, expected_disk, "{field} must be persisted");
