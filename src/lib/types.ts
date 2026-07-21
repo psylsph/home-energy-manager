@@ -277,6 +277,13 @@ export interface PollSettings {
    *  LaunchAgent on macOS, ~/.config/autostart/*.desktop on Linux).
    *  See issue #117. */
   autostart_enabled: boolean;
+  /** When true, the window's close button hides to the system tray instead
+   *  of quitting (issue #217). Takes effect immediately; the close handler
+   *  reads it live from the persisted settings. */
+  minimise_to_tray: boolean;
+  /** When true, the app launches with its window hidden in the tray
+   *  (issue #217). Read once at startup, so it applies on the next launch. */
+  start_minimised: boolean;
   /** API key for the read-only external API server (developer mode). */
   api_key: string;
   /** Port for the read-only external API server (0 = disabled). */

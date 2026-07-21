@@ -283,6 +283,11 @@ export default function SettingsPage() {
   // managed by tauri-plugin-autostart; the persisted preference is the
   // source of truth and the Rust startup self-heal re-applies it.
   const [autostartEnabled, setAutostartEnabled] = useState(false);
+  // Tray window preferences (issue #217). Both persist to settings.json via
+  // /api/settings; `minimise_to_tray` takes effect immediately (the Rust
+  // close handler reads it live), `start_minimised` on the next launch.
+  const [minimiseToTray, setMinimiseToTray] = useState(false);
+  const [startMinimised, setStartMinimised] = useState(false);
   // Read-only API key and port (developer mode, external access).
   const [apiKey, setApiKey] = useState('');
   const [apiPort, setApiPort] = useState(7338);
@@ -441,6 +446,8 @@ export default function SettingsPage() {
         setEvcPort(s.evc_port ?? 502);
         setDisableAutoDiscovery(s.disable_auto_discovery ?? true);
         setAutostartEnabled(s.autostart_enabled ?? false);
+        setMinimiseToTray(s.minimise_to_tray ?? false);
+        setStartMinimised(s.start_minimised ?? false);
         setApiKey(s.api_key ?? '');
         setApiPort(s.api_port ?? 7338);
         setSettingsLoaded(true);
@@ -901,6 +908,48 @@ export default function SettingsPage() {
     }
   };
 
+  // Issue #217: minimise to tray. Persist only — the Rust close handler
+  // reads the value live from settings.json, so the toggle applies to the
+  // very next window-close attempt with no restart. On failure we revert
+  // the optimistic toggle so the UI never shows a state that didn't save.
+  const handleMinimiseToTrayToggle = async (next: boolean) => {
+    const previous = minimiseToTray;
+    setMinimiseToTray(next);
+    try {
+      await apiPost('/api/settings', { minimise_to_tray: next });
+      flash(
+        next
+          ? 'Closing the window will now hide it to the tray'
+          : 'Closing the window will now quit the app',
+        true,
+      );
+    } catch (e) {
+      setMinimiseToTray(previous);
+      const msg = e instanceof Error ? e.message : String(e);
+      flash(`Failed to update minimise-to-tray: ${msg}`, false);
+    }
+  };
+
+  // Issue #217: start minimised. Persists for the next launch (read once at
+  // startup, so a toggle today only changes next-launch behaviour).
+  const handleStartMinimisedToggle = async (next: boolean) => {
+    const previous = startMinimised;
+    setStartMinimised(next);
+    try {
+      await apiPost('/api/settings', { start_minimised: next });
+      flash(
+        next
+          ? 'Will start hidden in the tray on next launch'
+          : 'Will show the window on next launch',
+        true,
+      );
+    } catch (e) {
+      setStartMinimised(previous);
+      const msg = e instanceof Error ? e.message : String(e);
+      flash(`Failed to update start-minimised: ${msg}`, false);
+    }
+  };
+
   // Discover
   const handleDiscover = async () => {
     setDiscovering(true);
@@ -1279,6 +1328,34 @@ export default function SettingsPage() {
             <Toggle
               checked={autostartEnabled}
               onChange={handleAutostartToggle}
+            />
+          </div>
+        )}
+        {autostartSupported && (
+          <div className="flex items-center justify-between">
+            <div className="flex flex-col gap-0.5">
+              <span className="text-text-primary text-sm font-sans font-medium">Minimise to Tray</span>
+              <span className="text-text-secondary text-xs font-sans">
+                Keep the app running in the background. Closing the window hides it to the system tray instead of quitting — reopen it from the tray icon.
+              </span>
+            </div>
+            <Toggle
+              checked={minimiseToTray}
+              onChange={handleMinimiseToTrayToggle}
+            />
+          </div>
+        )}
+        {autostartSupported && (
+          <div className="flex items-center justify-between">
+            <div className="flex flex-col gap-0.5">
+              <span className="text-text-primary text-sm font-sans font-medium">Start Hidden in Tray</span>
+              <span className="text-text-secondary text-xs font-sans">
+                Launch with the window already hidden in the tray. Handy alongside Start on Login so the app boots quietly in the background.
+              </span>
+            </div>
+            <Toggle
+              checked={startMinimised}
+              onChange={handleStartMinimisedToggle}
             />
           </div>
         )}
