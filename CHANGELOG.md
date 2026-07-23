@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.67.1] - 2026-07-23
+
+### Fixed
+
+- **Read-only links no longer permanently hide the Control and Settings panels.** Read-only mode now lasts only for the current browser tab, and upgrading automatically clears the old saved state so normal navigation returns. (issue #230)
+
 ## [0.67.0] - 2026-07-21
 
 ### Added
