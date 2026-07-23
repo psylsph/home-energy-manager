@@ -15,8 +15,9 @@ interface InverterState {
    * Read-only mode hides the Control and Settings tabs from the bottom
    * navigation. Set initially by visiting the app with a `?RO` URL
    * parameter (intended for sharing a household dashboard link with
-   * non-admin users — see issue #114). Persisted to localStorage so
-   * the flag sticks in the same browser across reloads.
+   * non-admin users — see issue #114). Persisted to sessionStorage so
+   * the flag sticks across navigation and reloads in the current tab, but
+   * a normal browser session is not permanently trapped in read-only mode.
    */
   readOnly: boolean;
 
@@ -222,8 +223,13 @@ function loadThemeMode(): ThemeMode {
 }
 
 function loadReadOnly(): boolean {
+  // Older releases persisted this flag permanently. Remove that stale key so
+  // upgrading immediately restores the normal navigation in a new session.
   try {
-    return localStorage.getItem('readOnly') === 'true';
+    localStorage.removeItem('readOnly');
+  } catch { /* ignore */ }
+  try {
+    return sessionStorage.getItem('readOnly') === 'true';
   } catch {
     return false;
   }
@@ -231,7 +237,10 @@ function loadReadOnly(): boolean {
 
 function saveReadOnly(enabled: boolean) {
   try {
-    localStorage.setItem('readOnly', String(enabled));
+    localStorage.removeItem('readOnly');
+  } catch { /* ignore */ }
+  try {
+    sessionStorage.setItem('readOnly', String(enabled));
   } catch { /* ignore */ }
 }
 

@@ -183,7 +183,7 @@ describe('<App/> Octopus navigation (issue #212)', () => {
 // ---------------------------------------------------------------------------
 //
 // The store is a module-level singleton, so we have to reset the readOnly
-// flag in beforeEach in addition to clearing localStorage — otherwise a
+// flag in beforeEach in addition to clearing sessionStorage — otherwise a
 // previous test's URL param would leave the store in read-only mode and
 // pollute the next test's assertions.
 
@@ -271,12 +271,14 @@ describe('<App/> read-only mode (issue #114)', () => {
   beforeEach(() => {
     silenceConsoleError();
     localStorage.clear();
+    sessionStorage.clear();
     useInverterStore.setState({ readOnly: false });
   });
 
   afterEach(() => {
     cleanup();
     localStorage.clear();
+    sessionStorage.clear();
     useInverterStore.setState({ readOnly: false });
     window.location.hash = '';
   });
@@ -311,19 +313,20 @@ describe('<App/> read-only mode (issue #114)', () => {
     expect(batteryLink.getAttribute('style')).toContain(`--nav-accent: ${socColor(10)}`);
   });
 
-  it('persists the read-only flag to localStorage when ?RO is visited', async () => {
+  it('persists the read-only flag only for the browser session when ?RO is visited', async () => {
+    localStorage.setItem('readOnly', 'true');
     await navigate('/?RO');
     render(<App />);
-    expect(localStorage.getItem('readOnly')).toBe('true');
+    expect(sessionStorage.getItem('readOnly')).toBe('true');
+    expect(localStorage.getItem('readOnly')).toBeNull();
     // The store mirrors the persisted value so subsequent renders don't
     // need to re-read storage on every paint.
     expect(useInverterStore.getState().readOnly).toBe(true);
   });
 
-  it('keeps read-only mode in subsequent visits via the persisted localStorage flag', async () => {
-    // Simulate a previous visit that already set the flag — the user
-    // bookmarked the URL, then returns to it without the ?RO param.
-    localStorage.setItem('readOnly', 'true');
+  it('keeps read-only mode in subsequent visits within the same browser session', async () => {
+    // Simulate a previous visit in this tab that already set the flag.
+    sessionStorage.setItem('readOnly', 'true');
     useInverterStore.setState({ readOnly: true });
 
     await navigate('/battery');
@@ -352,6 +355,7 @@ describe('<App/> read-only mode (issue #114)', () => {
     render(<App />);
     expect(screen.queryByRole('link', { name: 'Control' })).toBeNull();
     expect(screen.queryByRole('link', { name: 'Settings' })).toBeNull();
-    expect(localStorage.getItem('readOnly')).toBe('true');
+    expect(sessionStorage.getItem('readOnly')).toBe('true');
+    expect(localStorage.getItem('readOnly')).toBeNull();
   });
 });
