@@ -166,8 +166,9 @@ pub fn compute_daily_totals(rows: &[ReadingRow]) -> Option<DailyTotals> {
 
         totals.solar_kwh += integrate_pair(a.solar_power, b.solar_power, hours, positive_part);
         totals.home_kwh += integrate_pair(a.home_power, b.home_power, hours, positive_part);
-        totals.import_kwh += integrate_pair(a.grid_power, b.grid_power, hours, positive_part);
-        totals.export_kwh += integrate_pair(a.grid_power, b.grid_power, hours, negative_magnitude);
+        // App-wide grid convention: negative = importing, positive = exporting.
+        totals.import_kwh += integrate_pair(a.grid_power, b.grid_power, hours, negative_magnitude);
+        totals.export_kwh += integrate_pair(a.grid_power, b.grid_power, hours, positive_part);
         totals.battery_charge_kwh +=
             integrate_pair(a.battery_power, b.battery_power, hours, negative_magnitude);
         totals.battery_discharge_kwh +=
@@ -175,8 +176,8 @@ pub fn compute_daily_totals(rows: &[ReadingRow]) -> Option<DailyTotals> {
 
         let hour_start = (a.timestamp / 3600) * 3600;
         let e = hourly.entry(hour_start).or_insert((0.0, 0.0));
-        e.0 += integrate_pair(a.grid_power, b.grid_power, hours, positive_part);
-        e.1 += integrate_pair(a.grid_power, b.grid_power, hours, negative_magnitude);
+        e.0 += integrate_pair(a.grid_power, b.grid_power, hours, negative_magnitude);
+        e.1 += integrate_pair(a.grid_power, b.grid_power, hours, positive_part);
     }
 
     for row in &valid {
@@ -431,8 +432,9 @@ pub fn generate_daily_report_html(rows: &[ReadingRow], date_str: &str) -> Option
 
         let s = integrate_pair(a.solar_power, b.solar_power, hours, positive_part);
         let h = integrate_pair(a.home_power, b.home_power, hours, positive_part);
-        let gi = integrate_pair(a.grid_power, b.grid_power, hours, positive_part);
-        let ge = integrate_pair(a.grid_power, b.grid_power, hours, negative_magnitude);
+        // App-wide grid convention: negative = importing, positive = exporting.
+        let gi = integrate_pair(a.grid_power, b.grid_power, hours, negative_magnitude);
+        let ge = integrate_pair(a.grid_power, b.grid_power, hours, positive_part);
         let bc = integrate_pair(a.battery_power, b.battery_power, hours, negative_magnitude);
         let bd = integrate_pair(a.battery_power, b.battery_power, hours, positive_part);
 
@@ -446,8 +448,8 @@ pub fn generate_daily_report_html(rows: &[ReadingRow], date_str: &str) -> Option
         // Update peaks
         peak_solar_w = peak_solar_w.max(positive_part(a.solar_power));
         peak_home_w = peak_home_w.max(positive_part(a.home_power));
-        peak_grid_import_w = peak_grid_import_w.max(positive_part(a.grid_power));
-        peak_grid_export_w = peak_grid_export_w.max(negative_magnitude(a.grid_power));
+        peak_grid_import_w = peak_grid_import_w.max(negative_magnitude(a.grid_power));
+        peak_grid_export_w = peak_grid_export_w.max(positive_part(a.grid_power));
         peak_battery_charge_w = peak_battery_charge_w.max(negative_magnitude(a.battery_power));
         peak_battery_discharge_w = peak_battery_discharge_w.max(positive_part(a.battery_power));
 
@@ -1161,6 +1163,43 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_daily_totals_uses_app_grid_sign_convention() {
+        // The app-wide convention is negative grid power = import and positive
+        // grid power = export. A one-hour constant -1 kW interval must therefore
+        // be reported as 1 kWh imported, not exported.
+        let import_rows = vec![
+            dummy_reading(0, 0, 0, -1000, 1000, 50.0),
+            dummy_reading(3600, 0, 0, -1000, 1000, 50.0),
+        ];
+        let imported = compute_daily_totals(&import_rows).expect("should integrate import");
+        assert!((imported.import_kwh - 1.0).abs() < 0.001);
+        assert!(imported.export_kwh.abs() < 0.001);
+
+        // Conversely, +1 kW for one hour is 1 kWh exported.
+        let export_rows = vec![
+            dummy_reading(0, 1000, 0, 1000, 0, 50.0),
+            dummy_reading(3600, 1000, 0, 1000, 0, 50.0),
+        ];
+        let exported = compute_daily_totals(&export_rows).expect("should integrate export");
+        assert!(exported.import_kwh.abs() < 0.001);
+        assert!((exported.export_kwh - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_html_report_uses_app_grid_sign_convention() {
+        let rows = vec![
+            dummy_reading(0, 0, 0, -1000, 1000, 50.0),
+            dummy_reading(3600, 0, 0, -1000, 1000, 50.0),
+        ];
+        let html = generate_daily_report_html(&rows, "2026-07-23").expect("report");
+        assert!(html
+            .contains("<span>Grid import</span><strong style=\"color:#dc2626\">1.0 kWh</strong>"));
+        assert!(html
+            .contains("<span>Grid export</span><strong style=\"color:#0284c7\">0.0 kWh</strong>"));
+        assert!(html.contains("<span>Peak import</span><strong>1.0 kW</strong>"));
+    }
+
+    #[test]
     fn test_compute_daily_totals_insufficient_data() {
         assert!(compute_daily_totals(&[]).is_none());
         assert!(compute_daily_totals(&[dummy_reading(0, 0, 0, 0, 0, 0.0)]).is_none());
@@ -1221,15 +1260,14 @@ mod tests {
         }
     }
 
-    /// Two readings that, integrated, give 1 kWh of grid import at +1000 W.
-    /// The positive grid value reflects the inverter's "imported from grid"
-    /// convention; `positive_part` in this codebase treats positive grid as
-    /// import. The trapezoid integration between t=0 and t=3600 at +1000 W
+    /// Two readings that, integrated, give 1 kWh of grid import at -1000 W.
+    /// This reflects the app-wide convention of negative grid power meaning
+    /// import. The trapezoid integration between t=0 and t=3600 at -1000 W
     /// yields exactly 1.0 kWh.
     fn import_rows() -> Vec<ReadingRow> {
         vec![
-            dummy_reading(0, 0, 0, 1000, 1000, 50.0),
-            dummy_reading(3600, 0, 0, 1000, 1000, 60.0),
+            dummy_reading(0, 0, 0, -1000, 1000, 50.0),
+            dummy_reading(3600, 0, 0, -1000, 1000, 60.0),
         ]
     }
 
@@ -1319,14 +1357,14 @@ mod tests {
         // the earlier 1dp (12.3p), so sub-penny tariff rates aren't lost.
         //
         // Two hourly import buckets at unix-hour 0 and unix-hour 12 (each
-        // 1 kWh at +1000 W). The 11-hour gap between them is dropped by
+        // 1 kWh at -1000 W). The 11-hour gap between them is dropped by
         // the median-interval plausibility filter, leaving exactly two
         // hourly buckets — one per tariff window.
         let rows = vec![
-            dummy_reading(0, 0, 0, 1000, 1000, 50.0),
-            dummy_reading(3600, 0, 0, 1000, 1000, 50.0),
-            dummy_reading(12 * 3600, 0, 0, 1000, 1000, 50.0),
-            dummy_reading(13 * 3600, 0, 0, 1000, 1000, 50.0),
+            dummy_reading(0, 0, 0, -1000, 1000, 50.0),
+            dummy_reading(3600, 0, 0, -1000, 1000, 50.0),
+            dummy_reading(12 * 3600, 0, 0, -1000, 1000, 50.0),
+            dummy_reading(13 * 3600, 0, 0, -1000, 1000, 50.0),
         ];
         // The bucket→window mapping is local-timezone dependent, so place
         // the split between the two buckets' actual local minutes.
