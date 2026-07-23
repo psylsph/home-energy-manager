@@ -3,8 +3,8 @@
  *
  * The param hides the Control and Settings nav links so a household-shared
  * dashboard link can't be used to accidentally change settings. Once the
- * param is visited, the read-only flag is pinned in localStorage so the
- * link is sticky in that browser across reloads.
+ * param is visited, the read-only flag is pinned in sessionStorage so the
+ * link stays sticky across navigation and reloads in the current tab.
  *
  * Uses the real GivEnergy simulator via the headless backend.
  */
@@ -35,13 +35,17 @@ test.describe('Read-only mode (?RO URL param, issue #114)', () => {
     await expect(nav.getByText('Battery', { exact: true })).toBeVisible();
   });
 
-  test('persists read-only mode in localStorage after the first ?RO visit', async ({ page }) => {
+  test('persists read-only mode only for the session after the first ?RO visit', async ({ page }) => {
     await page.goto('/?RO');
     await expect(page.locator('text=Home Energy Manager')).toBeVisible({ timeout: 10_000 });
 
-    // The flag is pinned, so even navigating away from ?RO keeps RO mode.
-    const stored = await page.evaluate(() => localStorage.getItem('readOnly'));
-    expect(stored).toBe('true');
+    // The flag is pinned for this browser session, so navigating away from
+    // ?RO keeps read-only mode without permanently affecting future sessions.
+    const stored = await page.evaluate(() => ({
+      session: sessionStorage.getItem('readOnly'),
+      permanent: localStorage.getItem('readOnly'),
+    }));
+    expect(stored).toEqual({ session: 'true', permanent: null });
   });
 
   test('sticks to read-only mode in subsequent visits (no ?RO needed)', async ({ page }) => {

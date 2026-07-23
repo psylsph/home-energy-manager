@@ -352,10 +352,10 @@ function Layout() {
   // Read-only mode (?RO URL parameter, issue #114). When the URL carries
   // `?RO`, hide the Control and Settings nav icons so a household-shared
   // dashboard link (e.g. for a partner or kids) can't accidentally toggle
-  // settings. The localStorage flag is set immediately, so the link is
-  // sticky in this browser after the first visit — navigating to other
-  // routes within the same session (or reloading) keeps the flag. See the
-  // unit + E2E tests for the sticky-persistence spec.
+  // settings. The sessionStorage flag is set immediately, so the link stays
+  // read-only while navigating or reloading in the current tab, but closing
+  // the tab ends read-only mode. See the unit + E2E tests for the
+  // session-persistence spec.
   //
   // HashRouter reads the path from `window.location.hash` and ignores
   // `window.location.search`, so `?RO` placed before the `#` (the natural
@@ -367,9 +367,9 @@ function Layout() {
       setReadOnly(true);
     }
     // When ?RO is absent, do NOT clear the flag. The store initialises
-    // readOnly from localStorage (see loadReadOnly), so a previously-set
-    // flag persists across navigations and reloads. Clearing here would
-    // make the flag vanish the moment the user navigates to another route.
+    // readOnly from sessionStorage (see loadReadOnly), so the flag persists
+    // across navigation and reloads in this tab. Clearing here would make it
+    // vanish the moment the user navigates to another route.
   }, [searchParams, setReadOnly]);
 
   useEffect(() => {
