@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.67.2] - 2026-07-23
+
+### Fixed
+
+- **Daily Telegram and HTML reports now show grid import and export the right way round.** Import costs, export income, net cost, self-sufficiency, tariff breakdowns, and peak grid figures now follow the same power-direction convention as the rest of the app.
+
 ## [0.67.1] - 2026-07-23
 
 ### Fixed
