@@ -263,6 +263,34 @@ Recent `.deb` packages install these automatically, but older builds don't — i
 
 > **Raspberry Pi** users: you need a **64-bit operating system** (Raspberry Pi OS 64-bit, Ubuntu Server 64-bit, etc.). The 32-bit OS is not supported.
 
+#### Linux source-build dependencies
+
+Building a desktop bundle from source on Debian, Ubuntu, or LMDE requires the
+same development packages used by the project's Linux CI builds:
+
+```bash
+sudo apt install \
+  libwebkit2gtk-4.1-dev \
+  librsvg2-dev \
+  libssl-dev \
+  libgtk-3-dev \
+  libayatana-appindicator3-dev
+```
+
+Install `rpm` as well if you are creating an RPM bundle:
+
+```bash
+sudo apt install rpm
+```
+
+Development packages matter even when the equivalent runtime libraries are
+already installed. Tauri and its AppImage tooling use pkg-config metadata such
+as `ayatana-appindicator3-0.1.pc` and `librsvg-2.0.pc` while bundling. Without
+it, `cargo tauri build` may compile the application and then fail with either
+`Can't detect any appindicator library` or a `linuxdeploy` GTK plugin error.
+Home Energy Manager needs the appindicator package specifically because its
+minimise-to-tray support enables Tauri's `tray-icon` feature.
+
 ### Updating
 
 To update, simply download and install the latest version from the [**Releases page**](https://github.com/psylsph/home-energy-manager/releases/latest) — your settings and history are preserved automatically.
@@ -643,7 +671,9 @@ If two instances share the same port, the second one will fail to start. Change 
 
 ## Building from Source (for Developers)
 
-If you want to contribute or build from source:
+If you want to contribute or build from source, install the
+[Linux source-build dependencies](#linux-source-build-dependencies) first when
+building a desktop bundle on Debian, Ubuntu, or LMDE.
 
 ```bash
 # 1. Install dependencies

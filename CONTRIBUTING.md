@@ -4,6 +4,24 @@ Thanks for your interest! This project is a personal tool but suggestions and fi
 
 ## Development Setup
 
+On Debian, Ubuntu, or LMDE, install the Linux desktop development packages
+before creating a production bundle. These match the project's CI environment:
+
+```bash
+sudo apt install \
+  libwebkit2gtk-4.1-dev \
+  librsvg2-dev \
+  libssl-dev \
+  libgtk-3-dev \
+  libayatana-appindicator3-dev
+```
+
+Install `rpm` too when creating an RPM bundle. Tauri's tray and AppImage
+bundlers need the development packages' pkg-config metadata during
+`cargo tauri build`; equivalent runtime-only packages are not sufficient.
+
+Then install the project dependencies and start the desktop app:
+
 ```bash
 npm install
 cd src-tauri && cargo tauri dev

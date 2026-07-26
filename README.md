@@ -82,7 +82,9 @@ If the installer itself won't open, right-click the `.msi` → **Properties** �
 
 **Mac users** — after opening the `.dmg`, drag the app to your **Desktop** or **Home folder** (not `/Applications`). On first launch, right-click the app → **Open** → **Open** to bypass Gatekeeper. See the [FAQ](./FAQ.md) if you get stuck.
 
-**Linux users** — you may need to install two system libraries first. See [INSTALL.md](./INSTALL.md#linux-system-requirements) for details.
+**Linux users** — packaged installs may need two runtime libraries, while
+building desktop bundles from source requires additional Linux development
+packages. See [INSTALL.md](./INSTALL.md#linux-system-requirements) for details.
 
 ### 2. Find your inverter's IP address
 

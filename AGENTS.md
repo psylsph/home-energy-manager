@@ -23,6 +23,12 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 - **Node.js** + npm
 - **Rust** toolchain (stable; `rustup default stable`)
 - **Tauri CLI**: `cargo install tauri-cli`
+- **Linux desktop build dependencies** (Debian/Ubuntu/LMDE):
+  `sudo apt install libwebkit2gtk-4.1-dev librsvg2-dev libssl-dev libgtk-3-dev
+  libayatana-appindicator3-dev`. These match the CI build environment. Install
+  `rpm` as well when creating an RPM bundle. Tauri's `tray-icon` feature needs
+  the appindicator pkg-config metadata during `cargo tauri build`; runtime-only
+  packages are not sufficient.
 
 ## Commands
 
