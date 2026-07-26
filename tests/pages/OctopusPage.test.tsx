@@ -11,6 +11,13 @@ vi.mock('../../src/lib/octopusPdfDownload', () => ({
   downloadOctopusSummaryPdf: pdfDownloadMock,
 }));
 
+// Capture the props handed to each axis so we can assert on tick styling
+// (Recharts SVG ticks are not reachable from the DOM in these tests).
+const { xAxisProps, yAxisProps } = vi.hoisted(() => ({
+  xAxisProps: [] as Array<Record<string, unknown>>,
+  yAxisProps: [] as Array<Record<string, unknown>>,
+}));
+
 vi.mock('recharts', () => ({
   ResponsiveContainer: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   AreaChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
@@ -20,8 +27,8 @@ vi.mock('recharts', () => ({
   CartesianGrid: () => null,
   Legend: () => null,
   Tooltip: () => null,
-  XAxis: () => null,
-  YAxis: () => null,
+  XAxis: (props: Record<string, unknown>) => { xAxisProps.push(props); return null; },
+  YAxis: (props: Record<string, unknown>) => { yAxisProps.push(props); return null; },
 }));
 
 import OctopusPage from '../../src/pages/OctopusPage';
@@ -57,6 +64,8 @@ describe('OctopusPage', () => {
     revokeObjectUrlMock.mockClear();
     anchorClickMock.mockClear();
     pdfDownloadMock.mockClear();
+    xAxisProps.length = 0;
+    yAxisProps.length = 0;
     Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectUrlMock });
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectUrlMock });
     vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(anchorClickMock);
@@ -188,5 +197,35 @@ describe('OctopusPage', () => {
     fireEvent.click(button);
     await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/octopus/sync'));
     expect(screen.getByRole('button', { name: 'Syncing…' }).hasAttribute('disabled')).toBe(true);
+  });
+
+  it('renders chart axes with a readable, bold tick style (issue #232)', async () => {
+    render(<OctopusPage />);
+    await screen.findByText('Electricity consumption');
+    // Recharts otherwise derives tick fill from its muted default axis
+    // stroke. Use the primary theme colour explicitly so ticks are near-white
+    // in dark mode and dark in light mode, while retaining a bold weight.
+    expect(xAxisProps.length).toBeGreaterThan(0);
+    expect(yAxisProps.length).toBeGreaterThan(0);
+    for (const props of [...xAxisProps, ...yAxisProps]) {
+      const tick = props.tick as {
+        fill?: string;
+        style?: { fontWeight?: number };
+      } | undefined;
+      expect(tick?.fill).toBe('var(--app-text-primary)');
+      expect(tick?.style?.fontWeight).toBe(700);
+    }
+
+    const labels = yAxisProps
+      .map((props) => props.label as {
+        fill?: string;
+        style?: { fontWeight?: number };
+      } | undefined)
+      .filter((label) => label != null);
+    expect(labels.length).toBeGreaterThan(0);
+    for (const label of labels) {
+      expect(label.fill).toBe('var(--app-text-primary)');
+      expect(label.style?.fontWeight).toBe(700);
+    }
   });
 });

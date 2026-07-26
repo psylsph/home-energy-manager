@@ -519,8 +519,8 @@ export default function OctopusPage() {
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={costSeries}>
                 <CartesianGrid stroke="var(--color-grid-stroke-subtle)" strokeDasharray="3 4" />
-                <XAxis dataKey="period" minTickGap={24} tickFormatter={(value) => range === '7d' || range === '30d' ? String(value).slice(5) : String(value)} tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} tickFormatter={(value) => `£${Number(value).toFixed(0)}`} />
+                <XAxis tickLine={false} axisLine={false} dataKey="period" minTickGap={24} tickFormatter={(value) => range === '7d' || range === '30d' ? String(value).slice(5) : String(value)} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} />
+                <YAxis tickLine={false} axisLine={false} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} tickFormatter={(value) => `£${Number(value).toFixed(0)}`} />
                 <Tooltip formatter={(value) => formatMoney(Number(value))} />
                 <Legend />
                 <Line type="monotone" dataKey="electricity_import_cost" name="Electricity import" stroke="#ef4444" strokeWidth={2} dot={costSeries.length < 40} connectNulls />
@@ -544,8 +544,8 @@ export default function OctopusPage() {
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={costSeries}>
                 <CartesianGrid stroke="var(--color-grid-stroke-subtle)" strokeDasharray="3 4" />
-                <XAxis dataKey="period" minTickGap={24} tickFormatter={(value) => range === '7d' || range === '30d' ? String(value).slice(5) : String(value)} tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} tickFormatter={(value) => `£${Number(value).toFixed(0)}`} />
+                <XAxis tickLine={false} axisLine={false} dataKey="period" minTickGap={24} tickFormatter={(value) => range === '7d' || range === '30d' ? String(value).slice(5) : String(value)} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} />
+                <YAxis tickLine={false} axisLine={false} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} tickFormatter={(value) => `£${Number(value).toFixed(0)}`} />
                 <Tooltip formatter={(value) => formatMoney(Number(value))} />
                 <Line type="monotone" dataKey="export_income" name="Export income" stroke="#22c55e" strokeWidth={2} dot={costSeries.length < 40} />
               </LineChart>
@@ -563,8 +563,8 @@ export default function OctopusPage() {
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={electricity}>
                 <CartesianGrid stroke="var(--color-grid-stroke-subtle)" strokeDasharray="3 4" />
-                <XAxis dataKey="t" tickFormatter={(v) => formatTick(Number(v), range)} tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} label={{ value: 'kWh', angle: -90, position: 'insideLeft' }} />
+                <XAxis tickLine={false} axisLine={false} dataKey="t" tickFormatter={(v) => formatTick(Number(v), range)} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} />
+                <YAxis tickLine={false} axisLine={false} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} label={{ fill: 'var(--app-text-primary)', style: { fontWeight: 700 }, value: 'kWh', angle: -90, position: 'insideLeft' }} />
                 <Tooltip content={<ConsumptionTooltip />} />
                 <Legend />
                 <Area type="monotone" dataKey="electricity_import" name="Import" stroke="#ef4444" fill="#ef4444" fillOpacity={0.18} connectNulls />
@@ -584,8 +584,8 @@ export default function OctopusPage() {
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={cumulativeElectricity}>
                 <CartesianGrid stroke="var(--color-grid-stroke-subtle)" strokeDasharray="3 4" />
-                <XAxis dataKey="t" tickFormatter={(v) => formatTick(Number(v), range)} tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} label={{ value: 'Cumulative kWh', angle: -90, position: 'insideLeft' }} />
+                <XAxis tickLine={false} axisLine={false} dataKey="t" tickFormatter={(v) => formatTick(Number(v), range)} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} />
+                <YAxis tickLine={false} axisLine={false} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} label={{ fill: 'var(--app-text-primary)', style: { fontWeight: 700 }, value: 'Cumulative kWh', angle: -90, position: 'insideLeft' }} />
                 <Tooltip content={<ConsumptionTooltip />} />
                 <Legend />
                 <Area type="monotone" dataKey="electricity_import" name="Cumulative import" stroke="#ef4444" fill="#ef4444" fillOpacity={0.12} connectNulls />
@@ -608,8 +608,8 @@ export default function OctopusPage() {
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={gas}>
                 <CartesianGrid stroke="var(--color-grid-stroke-subtle)" strokeDasharray="3 4" />
-                <XAxis dataKey="t" tickFormatter={(v) => formatTick(Number(v), range)} tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} label={{ value: 'Reported units', angle: -90, position: 'insideLeft' }} />
+                <XAxis tickLine={false} axisLine={false} dataKey="t" tickFormatter={(v) => formatTick(Number(v), range)} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} />
+                <YAxis tickLine={false} axisLine={false} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} label={{ fill: 'var(--app-text-primary)', style: { fontWeight: 700 }, value: 'Reported units', angle: -90, position: 'insideLeft' }} />
                 <Tooltip content={<ConsumptionTooltip />} />
                 <Area type="monotone" dataKey="gas" name="Gas" stroke="#f59e0b" fill="#f59e0b" fillOpacity={0.2} connectNulls />
               </AreaChart>
@@ -628,8 +628,8 @@ export default function OctopusPage() {
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={cumulativeGas}>
                 <CartesianGrid stroke="var(--color-grid-stroke-subtle)" strokeDasharray="3 4" />
-                <XAxis dataKey="t" tickFormatter={(v) => formatTick(Number(v), range)} tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} label={{ value: 'Cumulative units', angle: -90, position: 'insideLeft' }} />
+                <XAxis tickLine={false} axisLine={false} dataKey="t" tickFormatter={(v) => formatTick(Number(v), range)} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} />
+                <YAxis tickLine={false} axisLine={false} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} label={{ fill: 'var(--app-text-primary)', style: { fontWeight: 700 }, value: 'Cumulative units', angle: -90, position: 'insideLeft' }} />
                 <Tooltip content={<ConsumptionTooltip />} />
                 <Area type="monotone" dataKey="gas" name="Cumulative gas" stroke="#f59e0b" fill="#f59e0b" fillOpacity={0.14} connectNulls />
               </AreaChart>
