@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.67.3] - 2026-07-26
+
+### Fixed
+
+- **Octopus graph axes are easier to read.** Date, value, and unit labels now use bold, high-contrast, theme-aware text so they remain clear in both dark and light mode. (issue #232)
+
+### Documentation
+
+- **Linux source-build requirements now match the release environment.** The build guide lists the desktop tray and AppImage development packages needed to create Linux bundles locally.
+
 ## [0.67.2] - 2026-07-23
 
 ### Fixed
