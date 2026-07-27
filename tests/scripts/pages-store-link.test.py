@@ -12,13 +12,14 @@ html = PAGE.read_text(encoding="utf-8")
 
 download_position = html.index(">Download Free</a>")
 store_position = html.index(f'href="{STORE_URL}"')
-warning_position = html.index('<div class="windows-warning">')
 
-assert download_position < store_position < warning_position, (
-    "Microsoft Store link must appear below Download Free and before the "
-    "Windows security notice"
+assert download_position < store_position, (
+    "Microsoft Store link must appear below Download Free"
 )
 assert "get Home Energy Manager from the Microsoft Store" in html
 assert f'href="{STORE_URL}" target="_blank" rel="noopener noreferrer"' in html
+assert "Windows security notice" not in html
+assert "windows-warning" not in html
+assert "Trojan:Script/Wacatac.C!ml" not in html
 
-print("PASS: Microsoft Store link is present in the requested hero position")
+print("PASS: Store link follows Download Free and the old warning is absent")

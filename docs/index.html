@@ -135,33 +135,6 @@
     }
     .hero .store-link a { font-weight: 600; }
 
-    /* Windows warning — collapsible on mobile via <details> */
-    .windows-warning {
-      max-width: 760px;
-      margin: 20px auto 0;
-      padding: 14px 16px;
-      background: rgba(187, 128, 9, 0.1);
-      border: 1px solid rgba(187, 128, 9, 0.35);
-      border-radius: 10px;
-      color: #d0d7de;
-      font-size: 0.9rem;
-      text-align: left;
-    }
-    .windows-warning strong { color: #f2cc60; }
-    .windows-warning summary {
-      cursor: pointer;
-      color: #f2cc60;
-      font-weight: 600;
-      font-size: 0.9rem;
-      padding: 2px 0;
-      -webkit-tap-highlight-color: transparent;
-    }
-    .windows-warning .warning-body {
-      margin-top: 10px;
-      padding-top: 10px;
-      border-top: 1px solid rgba(187, 128, 9, 0.2);
-    }
-
     /* ── Support (coffee button) ── */
     .support {
       max-width: 800px;
@@ -438,8 +411,6 @@
       .quickstart li::before { left: 12px; top: 14px; width: 22px; height: 22px; font-size: 0.75rem; }
 
       .compat .model-list span { font-size: 0.8rem; padding: 4px 12px; }
-
-      .windows-warning { font-size: 0.85rem; padding: 12px 14px; }
     }
 
     @media (max-width: 400px) {
@@ -463,7 +434,6 @@
 
     /* ── Print ── */
     @media print {
-      .windows-warning { display: none; }
       .support { display: none; }
     }
   </style>
@@ -483,14 +453,6 @@
     <p class="store-link">
       Windows users can also <a href="https://apps.microsoft.com/detail/9mtm4bf2htbt?ocid=webpdpshare" target="_blank" rel="noopener noreferrer">get Home Energy Manager from the Microsoft Store</a>.
     </p>
-    <div class="windows-warning">
-      <details>
-        <summary>⚠️ Windows security notice (click to expand)</summary>
-        <div class="warning-body">
-          SmartScreen may warn that the MSI is from an unknown publisher, and Microsoft Defender has recently false-flagged the unsigned Windows installer as <code>Trojan:Script/Wacatac.C!ml</code> on some systems. The installer has been submitted to Microsoft as a false positive, and VirusTotal reports it as clean.
-        </div>
-      </details>
-    </div>
   </section>
 
   <section class="support">
