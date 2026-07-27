@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.67.4] - 2026-07-27
+
+### Fixed
+
+- **Octopus cost graph pop-outs now keep the date readable.** Tooltip labels use the app’s high-contrast theme text instead of Recharts’ low-contrast default, so the selected date is clear in dark and light mode.
+
 ## [0.67.3] - 2026-07-26
 
 ### Fixed
