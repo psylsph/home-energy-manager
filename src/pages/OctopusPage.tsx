@@ -161,6 +161,22 @@ function formatMoney(value: number | null): string {
   });
 }
 
+const costTooltipProps = {
+  contentStyle: {
+    backgroundColor: 'var(--app-bg-elevated)',
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: '0.5rem',
+    boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1)',
+  },
+  labelStyle: {
+    color: 'var(--app-text-primary)',
+    fontWeight: 700,
+  },
+  itemStyle: {
+    fontWeight: 600,
+  },
+};
+
 function ConsumptionTooltip({ active, payload, label }: {
   active?: boolean;
   payload?: Array<{ name: string; value: number; color: string }>;
@@ -169,7 +185,7 @@ function ConsumptionTooltip({ active, payload, label }: {
   if (!active || !payload?.length || label == null) return null;
   return (
     <div className="rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-xs shadow-xl">
-      <div className="mb-1 text-text-secondary">{new Date(label).toLocaleString()}</div>
+      <div className="mb-1 font-semibold text-text-primary">{new Date(label).toLocaleString()}</div>
       {payload.map((entry) => (
         <div key={entry.name} style={{ color: entry.color }}>
           {entry.name}: {Number(entry.value).toFixed(3)}
@@ -521,7 +537,7 @@ export default function OctopusPage() {
                 <CartesianGrid stroke="var(--color-grid-stroke-subtle)" strokeDasharray="3 4" />
                 <XAxis tickLine={false} axisLine={false} dataKey="period" minTickGap={24} tickFormatter={(value) => range === '7d' || range === '30d' ? String(value).slice(5) : String(value)} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} />
                 <YAxis tickLine={false} axisLine={false} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} tickFormatter={(value) => `£${Number(value).toFixed(0)}`} />
-                <Tooltip formatter={(value) => formatMoney(Number(value))} />
+                <Tooltip {...costTooltipProps} formatter={(value) => formatMoney(Number(value))} />
                 <Legend />
                 <Line type="monotone" dataKey="electricity_import_cost" name="Electricity import" stroke="#ef4444" strokeWidth={2} dot={costSeries.length < 40} connectNulls />
                 <Line type="monotone" dataKey="gas_cost" name="Gas" stroke="#f59e0b" strokeWidth={2} dot={costSeries.length < 40} connectNulls />
@@ -546,7 +562,7 @@ export default function OctopusPage() {
                 <CartesianGrid stroke="var(--color-grid-stroke-subtle)" strokeDasharray="3 4" />
                 <XAxis tickLine={false} axisLine={false} dataKey="period" minTickGap={24} tickFormatter={(value) => range === '7d' || range === '30d' ? String(value).slice(5) : String(value)} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} />
                 <YAxis tickLine={false} axisLine={false} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} tickFormatter={(value) => `£${Number(value).toFixed(0)}`} />
-                <Tooltip formatter={(value) => formatMoney(Number(value))} />
+                <Tooltip {...costTooltipProps} formatter={(value) => formatMoney(Number(value))} />
                 <Line type="monotone" dataKey="export_income" name="Export income" stroke="#22c55e" strokeWidth={2} dot={costSeries.length < 40} />
               </LineChart>
             </ResponsiveContainer>

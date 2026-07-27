@@ -11,11 +11,12 @@ vi.mock('../../src/lib/octopusPdfDownload', () => ({
   downloadOctopusSummaryPdf: pdfDownloadMock,
 }));
 
-// Capture the props handed to each axis so we can assert on tick styling
-// (Recharts SVG ticks are not reachable from the DOM in these tests).
-const { xAxisProps, yAxisProps } = vi.hoisted(() => ({
+// Capture the props handed to chart components so we can assert on styling
+// (Recharts SVG ticks/tooltips are not reachable from the DOM in these tests).
+const { xAxisProps, yAxisProps, tooltipProps } = vi.hoisted(() => ({
   xAxisProps: [] as Array<Record<string, unknown>>,
   yAxisProps: [] as Array<Record<string, unknown>>,
+  tooltipProps: [] as Array<Record<string, unknown>>,
 }));
 
 vi.mock('recharts', () => ({
@@ -26,7 +27,7 @@ vi.mock('recharts', () => ({
   Line: () => null,
   CartesianGrid: () => null,
   Legend: () => null,
-  Tooltip: () => null,
+  Tooltip: (props: Record<string, unknown>) => { tooltipProps.push(props); return null; },
   XAxis: (props: Record<string, unknown>) => { xAxisProps.push(props); return null; },
   YAxis: (props: Record<string, unknown>) => { yAxisProps.push(props); return null; },
 }));
@@ -66,6 +67,7 @@ describe('OctopusPage', () => {
     pdfDownloadMock.mockClear();
     xAxisProps.length = 0;
     yAxisProps.length = 0;
+    tooltipProps.length = 0;
     Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectUrlMock });
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectUrlMock });
     vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(anchorClickMock);
@@ -226,6 +228,23 @@ describe('OctopusPage', () => {
     for (const label of labels) {
       expect(label.fill).toBe('var(--app-text-primary)');
       expect(label.style?.fontWeight).toBe(700);
+    }
+  });
+
+  it('renders cost chart tooltip labels with readable themed text', async () => {
+    render(<OctopusPage />);
+    await screen.findByText('Supplier costs');
+
+    const styledCostTooltips = tooltipProps.filter((props) => 'labelStyle' in props);
+    expect(styledCostTooltips.length).toBeGreaterThanOrEqual(2);
+    for (const props of styledCostTooltips) {
+      expect(props.labelStyle).toMatchObject({
+        color: 'var(--app-text-primary)',
+        fontWeight: 700,
+      });
+      expect(props.contentStyle).toMatchObject({
+        backgroundColor: 'var(--app-bg-elevated)',
+      });
     }
   });
 });
