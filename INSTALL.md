@@ -669,6 +669,37 @@ If two instances share the same port, the second one will fail to start. Change 
 
 ---
 
+## Copying Settings to Another PC
+
+All app configuration lives in a single folder. You can copy it to a second machine to avoid setting everything up from scratch — useful when moving to a new PC, or running a spare machine at home to keep charge schedules active while you're away.
+
+### What to copy
+
+Everything the app needs is in one directory:
+
+- **Windows:** `%USERPROFILE%\.givenergy-local\`
+- **Linux / macOS:** `~/.givenergy-local/`
+
+| File | Needed? | What it holds |
+|---|---|---|
+| `settings.json` | **Yes** | Inverter connection, tariff rates, Cosy charge slots, discharge slots, Agile config, load limiter, auto-winter, alerts, Octopus integration, and all other app settings |
+| `settings.json.bak` | Optional | Automatic backup of the previous `settings.json` — handy as a safety net |
+| `history.db` | Optional | Stored graph history (energy totals, power readings over time). Copy it if you want charts to pick up where they left off; skip it to start fresh on the new machine |
+
+You do **not** need `logs/` or `backup/` — those are runtime log files and internal backups.
+
+### Steps
+
+1. Install the app on the second PC and run it once so it creates the config folder, then close it.
+2. Copy `settings.json` (and optionally `history.db`) from the first PC's config folder into the second PC's config folder, overwriting the defaults.
+3. Launch the app on the second PC — your charge schedules, tariff rates, and all other settings will be there.
+
+### If both PCs will run at the same time
+
+If the two machines will ever connect to the same inverter simultaneously, give them different HTTP ports to avoid conflicts: change the port under **Settings → HTTP Port** on one of them before launching.
+
+---
+
 ## Building from Source (for Developers)
 
 If you want to contribute or build from source, install the
