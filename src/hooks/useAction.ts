@@ -71,9 +71,11 @@ export function useAction() {
         await apiPost(path, body);
         setState({ loading: false, success: true, error: null });
         scheduleReset(2000);
+        return true;
       } catch (e) {
         setState({ loading: false, success: false, error: (e as Error).message });
         scheduleReset(3000);
+        return false;
       }
     },
     [clearResetTimer, scheduleReset],

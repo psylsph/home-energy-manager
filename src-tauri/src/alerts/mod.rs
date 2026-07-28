@@ -869,6 +869,9 @@ fn build_mode_message(snapshot: &InverterSnapshot) -> String {
     if snapshot.load_limiter_active {
         flags.push("Load limiter");
     }
+    if snapshot.temperature_limiter_active {
+        flags.push("Temperature limiter");
+    }
     if flags.is_empty() {
         msg.push_str("Automation: none active");
     } else {

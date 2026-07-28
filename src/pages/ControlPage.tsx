@@ -4,6 +4,13 @@ import { useAction } from '../hooks/useAction';
 import { apiPost, apiGet } from '../lib/api';
 import { deviceSupportsEps, deviceSupportsTimedDischarge } from '../lib/deviceCapabilities';
 import type { ScheduleSlot } from '../lib/types';
+import {
+  DEFAULT_ADAPTIVE_PERIOD,
+  adaptiveStateLabel,
+  validateAdaptiveChargeConfig,
+  type AdaptiveChargeConfig,
+  type AdaptiveChargePeriod,
+} from '../lib/adaptiveCharge';
 import AwaitingConnection from '../components/AwaitingConnection';
 import {
   LOGARITHMIC_RANGE_MAX,
@@ -29,7 +36,7 @@ import {
  * `AgileScope::Off` plus `cosy_enabled = false`) and `'cosy'` (which
  * the backend models as `cosy_enabled = true` regardless of scope).
  */
-type ChargeMode = 'standard' | 'cosy' | 'agile' | 'agile_charge' | 'agile_discharge';
+type ChargeMode = 'standard' | 'cosy' | 'agile' | 'agile_charge' | 'agile_discharge' | 'adaptive';
 
 const RESERVE_SOC_MIN = 4;
 const RESERVE_SOC_MAX = 100;
@@ -41,19 +48,23 @@ function ActionButton({
   path,
   body,
   active = false,
+  onSuccess,
 }: {
   label: string;
   icon: string;
   path: string;
   body?: unknown;
   active?: boolean;
+  onSuccess?: () => void;
 }) {
   const { loading, success, error, execute } = useAction();
 
   return (
     <div className="relative">
       <button
-        onClick={() => execute(path, body)}
+        onClick={async () => {
+          if (await execute(path, body)) onSuccess?.();
+        }}
         disabled={loading}
         className={`w-full flex flex-col items-center gap-1 sm:gap-2 p-2 sm:p-4 rounded-xl border transition disabled:opacity-50 ${active
           ? 'bg-green-900/30 border-green-500/40 hover:bg-green-900/50'
@@ -473,7 +484,232 @@ function AutoWinterSection() {
   );
 }
 
-/** Charging mode section — select between Standard, Cosy, or Agile charging. */
+function AdaptiveChargeSection() {
+  const { snapshot } = useInverterStore();
+  const [config, setConfig] = useState<AdaptiveChargeConfig>({
+    periods: [{ ...DEFAULT_ADAPTIVE_PERIOD }],
+    confirmation_readings: 2,
+  });
+  const [saving, setSaving] = useState(false);
+  const [feedback, setFeedback] = useState<'saved' | 'error' | null>(null);
+  const [serverError, setServerError] = useState<string | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const response = await apiGet<{
+          ok: boolean;
+          data: { config: AdaptiveChargeConfig };
+        }>('/api/adaptive-charge');
+        if (response.ok) setConfig(response.data.config);
+      } catch { /* retain safe defaults */ }
+    })();
+  }, []);
+
+  const updatePeriod = (index: number, update: Partial<AdaptiveChargePeriod>) => {
+    setConfig((current) => ({
+      ...current,
+      periods: current.periods.map((period, periodIndex) =>
+        periodIndex === index ? { ...period, ...update } : period),
+    }));
+  };
+
+  const usesDirectLimit = snapshot?.device_type_code != null
+    && (snapshot.device_type_code.startsWith('30')
+      || snapshot.device_type_code.startsWith('40')
+      || snapshot.device_type_code.startsWith('41')
+      || snapshot.device_type_code.startsWith('60')
+      || snapshot.device_type_code.startsWith('70')
+      || snapshot.device_type_code.startsWith('81')
+      || snapshot.device_type_code.startsWith('82'));
+  const estimatedWatts = (percent: number) => {
+    const maxPower = snapshot?.max_battery_power_w ?? 0;
+    if (usesDirectLimit) return Math.round(percent / 100 * maxPower);
+    const capacityW = (snapshot?.battery_capacity_kwh ?? 0) * 1000;
+    return Math.min(Math.round(percent / 200 * capacityW), maxPower);
+  };
+
+  const save = async () => {
+    const validationError = validateAdaptiveChargeConfig(config);
+    if (validationError) {
+      setServerError(validationError);
+      setFeedback('error');
+      return;
+    }
+    setSaving(true);
+    setServerError(null);
+    setFeedback(null);
+    try {
+      await apiPost('/api/adaptive-charge', { config });
+      setFeedback('saved');
+    } catch (error) {
+      setServerError(error instanceof Error ? error.message : 'Unable to save Adaptive Charge.');
+      setFeedback('error');
+    }
+    setSaving(false);
+    setTimeout(() => setFeedback(null), 2000);
+  };
+
+  return (
+    <div className="space-y-4 mt-3">
+      <div className="bg-bg-surface rounded-xl p-3 flex items-center justify-between gap-3">
+        <div>
+          <div className="text-text-primary text-sm font-medium">
+            {adaptiveStateLabel(snapshot?.adaptive_charge_state)}
+          </div>
+          <div className="text-text-secondary text-xs">
+            {snapshot?.adaptive_charge_period != null
+              ? `Period ${snapshot.adaptive_charge_period}`
+              : 'No active period'}
+          </div>
+        </div>
+        {snapshot?.adaptive_charge_desired_rate_percent != null && (
+          <span className="font-mono text-battery text-sm">
+            {snapshot.adaptive_charge_desired_rate_percent}%
+          </span>
+        )}
+      </div>
+
+      {config.periods.map((period, index) => (
+        <div key={index} className="bg-bg-surface rounded-xl p-3 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-text-primary text-sm font-medium">Period {index + 1}</span>
+            <div className="flex items-center gap-3">
+              <label className="text-text-secondary text-xs flex items-center gap-1.5">
+                <input
+                  type="checkbox"
+                  checked={period.enabled}
+                  onChange={(event) => updatePeriod(index, { enabled: event.target.checked })}
+                />
+                Enabled
+              </label>
+              {config.periods.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => setConfig((current) => ({
+                    ...current,
+                    periods: current.periods.filter((_, periodIndex) => periodIndex !== index),
+                  }))}
+                  className="text-xs text-red-400 hover:text-red-300"
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+          </div>
+
+          {period.enabled && (
+            <>
+              <label className="text-text-secondary text-xs flex items-center gap-1.5">
+                <input
+                  type="checkbox"
+                  checked={period.all_day}
+                  onChange={(event) => updatePeriod(index, { all_day: event.target.checked })}
+                />
+                All day
+              </label>
+              {!period.all_day && (
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-text-secondary text-xs">Start</span>
+                    <TimePicker
+                      hour={period.start_hour}
+                      minute={period.start_minute}
+                      onChange={(hour, minute) => updatePeriod(index, {
+                        start_hour: hour,
+                        start_minute: minute,
+                      })}
+                    />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-text-secondary text-xs">End</span>
+                    <TimePicker
+                      hour={period.end_hour}
+                      minute={period.end_minute}
+                      onChange={(hour, minute) => updatePeriod(index, {
+                        end_hour: hour,
+                        end_minute: minute,
+                      })}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {([
+                ['Preferred charge rate', 'preferred_rate_percent'],
+                ['Recovery charge rate', 'recovery_rate_percent'],
+              ] as const).map(([label, field]) => (
+                <div key={field} className="space-y-1">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-text-secondary">{label}</span>
+                    <span className="font-mono text-text-primary">
+                      {period[field]}% ({(estimatedWatts(period[field]) / 1000).toFixed(1)} kW)
+                    </span>
+                  </div>
+                  <input
+                    aria-label={`${label} period ${index + 1}`}
+                    type="range"
+                    min={usesDirectLimit ? 1 : 0}
+                    max={100}
+                    value={period[field]}
+                    onChange={(event) => updatePeriod(index, { [field]: Number(event.target.value) })}
+                    className="w-full"
+                  />
+                </div>
+              ))}
+
+              {([
+                ['Low SOC', 'low_soc', 4, 99],
+                ['Recovery SOC', 'recovery_soc', 5, 100],
+              ] as const).map(([label, field, min, max]) => (
+                <div key={field} className="space-y-1">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-text-secondary">{label}</span>
+                    <span className="font-mono text-text-primary">{period[field]}%</span>
+                  </div>
+                  <input
+                    aria-label={`${label} period ${index + 1}`}
+                    type="range"
+                    min={min}
+                    max={max}
+                    value={period[field]}
+                    onChange={(event) => updatePeriod(index, { [field]: Number(event.target.value) })}
+                    className="w-full"
+                  />
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      ))}
+
+      {config.periods.length < 4 && (
+        <button
+          type="button"
+          onClick={() => setConfig((current) => ({
+            ...current,
+            periods: [...current.periods, { ...DEFAULT_ADAPTIVE_PERIOD, enabled: false }],
+          }))}
+          className="w-full py-2 border border-dashed border-bg-elevated text-text-secondary rounded-lg text-sm hover:text-text-primary"
+        >
+          Add period
+        </button>
+      )}
+
+      {serverError && <p className="text-red-400 text-xs">{serverError}</p>}
+      <button
+        type="button"
+        onClick={save}
+        disabled={saving}
+        className="w-full py-2 bg-battery/20 text-battery rounded-lg text-sm font-medium hover:bg-battery/30 disabled:opacity-50"
+      >
+        {saving ? 'Saving...' : feedback === 'saved' ? '✓ Saved' : feedback === 'error' ? 'Check settings' : 'Save Adaptive Charge'}
+      </button>
+    </div>
+  );
+}
+
+/** Charging mode section — select between Standard, Cosy, Agile, or Adaptive charging. */
 function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeMode; cosyActive: boolean; onModeChange: (m: ChargeMode) => void }) {
   const [slots, setSlots] = useState<
     { enabled: boolean; start_hour: number; start_minute: number; end_hour: number; end_minute: number; target_soc: number }[]
@@ -507,22 +743,10 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
   const handleModeChange = async (newMode: ChargeMode) => {
     // Don't switch until slots have loaded
     if (!loaded || slots.length === 0) return;
-    const cosyEnabled = newMode === 'cosy';
-    // Translate the new 5-value scope into the backend's wire format.
-    // The backend accepts `{ scope }` (new) or `{ enabled }` (legacy).
-    // We always send scope so the front-end's intent is explicit.
-    const scopeValue: 'off' | 'full' | 'charge_only' | 'discharge_only' =
-      newMode === 'standard' ? 'off' :
-      newMode === 'agile' ? 'full' :
-      newMode === 'agile_charge' ? 'charge_only' :
-      'discharge_only';
     onModeChange(newMode);
     setSaving(true);
     try {
-      await Promise.all([
-        apiPost('/api/cosy', { enabled: cosyEnabled, slots }),
-        apiPost('/api/agile', { scope: scopeValue }),
-      ]);
+      await apiPost('/api/charging-mode', { mode: newMode, cosy_slots: slots });
       setSaveFeedback('saved');
     } catch {
       setSaveFeedback('error');
@@ -557,6 +781,7 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
         >
           <option value="standard">Standard</option>
           <option value="cosy">Cosy</option>
+          <option value="adaptive">Adaptive Charge</option>
           <optgroup label="Agile">
             <option value="agile">Agile (full)</option>
             <option value="agile_charge">Agile — Charge only</option>
@@ -567,15 +792,7 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
             onClick={async () => {
               setSaving(true);
               try {
-                const scopeValue: 'off' | 'full' | 'charge_only' | 'discharge_only' =
-                  mode === 'standard' ? 'off' :
-                  mode === 'agile' ? 'full' :
-                  mode === 'agile_charge' ? 'charge_only' :
-                  'discharge_only';
-                await Promise.all([
-                  apiPost('/api/cosy', { enabled: mode === 'cosy', slots }),
-                  apiPost('/api/agile', { scope: scopeValue }),
-                ]);
+                await apiPost('/api/charging-mode', { mode, cosy_slots: slots });
                 setSaveFeedback('saved');
               } catch {
                 setSaveFeedback('error');
@@ -591,7 +808,7 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
       </div>
       </div>
 
-      {(mode === 'cosy' || mode === 'agile' || mode === 'agile_charge' || mode === 'agile_discharge') && (
+      {(mode === 'cosy' || mode === 'adaptive' || mode === 'agile' || mode === 'agile_charge' || mode === 'agile_discharge') && (
         <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-2.5 space-y-1">
           <div className="flex items-center gap-1.5">
             <span className="text-[10px] font-bold text-text-primary uppercase tracking-wide">Beta</span>
@@ -600,6 +817,8 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
           <p className="text-[11px] text-text-secondary leading-relaxed">
             {mode === 'cosy'
               ? 'Cosy mode schedules force-charging based on time slots you define. The app must stay running for slot entry and exit to work — if you close it mid-slot, the inverter stays in force-charge mode until you reopen the app or stop it manually.'
+              : mode === 'adaptive'
+                ? 'Adaptive Charge changes the maximum charge rate from time and battery SOC. It does not force charging. The app must stay running to evaluate periods and SOC thresholds.'
               : mode === 'agile'
                 ? 'Agile mode automatically charges and discharges based on live Octopus prices. The app must stay running for price checks and switching to work — if you close it, the inverter stays in whatever mode it was last set to.'
                 : mode === 'agile_charge'
@@ -609,6 +828,8 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
           </p>
         </div>
       )}
+
+      {mode === 'adaptive' && <AdaptiveChargeSection />}
 
       {mode === 'cosy' && (
         <p className="text-text-secondary/60 text-xs mt-3">
@@ -1435,7 +1656,7 @@ interface LoadLimiterConfig {
  * same period, restores Eco mode. Only operates when the battery is in Eco
  * mode and no other automated feature (auto-winter, Cosy, Agile) is active.
  */
-function LoadLimiterSection() {
+function LoadLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) {
   const { snapshot } = useInverterStore();
   const [enabled, setEnabled] = useState(false);
   const [thresholdW, setThresholdW] = useState(3000);
@@ -1463,7 +1684,7 @@ function LoadLimiterSection() {
         }
       } catch { /* use defaults */ }
     })();
-  }, []);
+  }, [refreshKey]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -1593,7 +1814,7 @@ function LoadLimiterSection() {
             {/* Trigger delay */}
             <div className="space-y-1">
               <div className="flex items-center justify-between">
-                <span className="text-text-secondary text-sm">Trigger Delay</span>
+                <span className="text-text-secondary text-sm">Pause / Recovery Delay</span>
                 <span className="font-mono text-text-primary text-sm">{triggerDelay} min</span>
               </div>
               <input
@@ -1606,7 +1827,7 @@ function LoadLimiterSection() {
                 className="w-full"
               />
               <p className="text-text-secondary text-xs">
-                How long the load must stay over/under the threshold before acting
+                Pauses after load stays above the threshold; unpauses after it stays at or below the threshold for this long
               </p>
             </div>
 
@@ -1658,6 +1879,177 @@ function LoadLimiterSection() {
 }
 
 
+interface TemperatureLimiterConfig {
+  enabled: boolean;
+  high_threshold: number;
+  recovery_threshold: number;
+  confirmation_readings: number;
+}
+
+function TemperatureLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) {
+  const { snapshot } = useInverterStore();
+  const [enabled, setEnabled] = useState(false);
+  const [highThreshold, setHighThreshold] = useState(60);
+  const [recoveryThreshold, setRecoveryThreshold] = useState(55);
+  const [confirmations, setConfirmations] = useState(3);
+  const [saving, setSaving] = useState(false);
+  const [feedback, setFeedback] = useState<'saved' | 'error' | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const response = await apiGet<{
+          ok: boolean;
+          data: { config: TemperatureLimiterConfig };
+        }>('/api/temperature-limiter');
+        if (response.ok && response.data?.config) {
+          const config = response.data.config;
+          setEnabled(config.enabled);
+          setHighThreshold(config.high_threshold);
+          setRecoveryThreshold(config.recovery_threshold);
+          setConfirmations(config.confirmation_readings);
+        }
+      } catch { /* retain safe defaults */ }
+    })();
+  }, [refreshKey]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setFeedback(null);
+    try {
+      await apiPost('/api/temperature-limiter', {
+        enabled,
+        high_threshold: highThreshold,
+        recovery_threshold: recoveryThreshold,
+        confirmation_readings: confirmations,
+      });
+      setFeedback('saved');
+    } catch {
+      setFeedback('error');
+    }
+    setSaving(false);
+    setTimeout(() => setFeedback(null), 2000);
+  };
+
+  const temperature = snapshot?.inverter_temperature;
+  const active = snapshot?.temperature_limiter_active ?? false;
+  const stateLabel = active
+    ? (temperature != null && temperature <= recoveryThreshold ? 'Cooling…' : 'Paused')
+    : enabled && temperature != null && temperature >= highThreshold ? 'Monitoring…' : 'Idle';
+
+  return (
+    <div className="space-y-3">
+      <h2 className="text-text-primary font-semibold text-lg">Inverter Temperature Limiter</h2>
+      <div className="bg-bg-surface rounded-xl p-4 space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <span className="text-text-primary text-sm font-medium">Enable</span>
+            <p className="text-text-secondary text-xs mt-0.5">
+              Pause battery discharge when the inverter gets too hot
+            </p>
+          </div>
+          <button
+            type="button"
+            aria-label="Enable inverter temperature limiter"
+            aria-pressed={enabled}
+            onClick={() => setEnabled(!enabled)}
+            className={`relative w-10 h-5 rounded-full transition ${enabled ? 'bg-battery' : 'bg-bg-elevated'}`}
+          >
+            <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition ${enabled ? 'left-5.5' : 'left-0.5'}`} />
+          </button>
+        </div>
+
+        {enabled && (
+          <>
+            {temperature != null && Number.isFinite(temperature) && (
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-text-secondary">State</span>
+                <span className={`font-mono font-medium ${active ? 'text-amber-400' : 'text-battery'}`}>
+                  {stateLabel} · {temperature.toFixed(1)}°C
+                </span>
+              </div>
+            )}
+
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-text-secondary text-sm">Pause Threshold</span>
+                <span className="font-mono text-text-primary text-sm">{highThreshold}°C</span>
+              </div>
+              <input
+                type="range"
+                min={30}
+                max={90}
+                step={1}
+                value={highThreshold}
+                onChange={(event) => {
+                  const value = Number(event.target.value);
+                  setHighThreshold(value);
+                  setRecoveryThreshold((current) => Math.min(current, value - 1));
+                }}
+                className="w-full"
+              />
+              <p className="text-text-secondary text-xs">
+                Pause discharge after this temperature is confirmed
+              </p>
+            </div>
+
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-text-secondary text-sm">Recovery Threshold</span>
+                <span className="font-mono text-text-primary text-sm">{recoveryThreshold}°C</span>
+              </div>
+              <input
+                type="range"
+                min={20}
+                max={Math.max(20, highThreshold - 1)}
+                step={1}
+                value={recoveryThreshold}
+                onChange={(event) => setRecoveryThreshold(Number(event.target.value))}
+                className="w-full"
+              />
+              <p className="text-text-secondary text-xs">
+                Restore normal Eco only after cooling to this temperature
+              </p>
+            </div>
+
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-text-secondary text-sm">Confirmation Readings</span>
+                <span className="font-mono text-text-primary text-sm">{confirmations}</span>
+              </div>
+              <input
+                type="range"
+                min={1}
+                max={30}
+                step={1}
+                value={confirmations}
+                onChange={(event) => setConfirmations(Number(event.target.value))}
+                className="w-full"
+              />
+              <p className="text-text-secondary text-xs">
+                Consecutive readings required before pausing or recovering
+              </p>
+            </div>
+
+            <div className="text-xs bg-yellow-900/30 text-text-primary px-3 py-2 rounded-lg">
+              Thermal protection overrides every discharge mode. Timed or forced discharge is cancelled when hot; recovery always returns the battery to normal Eco.
+            </div>
+          </>
+        )}
+
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={saving || recoveryThreshold >= highThreshold}
+          className="w-full py-2 bg-battery/20 text-battery rounded-lg text-sm font-medium hover:bg-battery/30 transition disabled:opacity-50"
+        >
+          {saving ? 'Saving...' : feedback === 'saved' ? '✓ Saved' : feedback === 'error' ? '✗ Error' : 'Save'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function ControlPage() {
   const { snapshot, developerMode, connectionState, connectedHost } = useInverterStore();
   const [ecoSaving, setEcoSaving] = useState(false);
@@ -1665,6 +2057,7 @@ export default function ControlPage() {
   const [timedExportSaving, setTimedExportSaving] = useState(false);
   const [timedDischargeSaving, setTimedDischargeSaving] = useState(false);
   const [timedDischargeOverride, setTimedDischargeOverride] = useState<boolean | null>(null);
+  const [loadLimiterRefreshKey, setLoadLimiterRefreshKey] = useState(0);
 
   // ---- Connection gate ----
   // When the inverter isn't currently connected, controls would be a lie:
@@ -1688,12 +2081,14 @@ export default function ControlPage() {
 
   // Battery limits: local draft state while dragging, otherwise from snapshot
   const [draftReserve, setDraftReserve] = useState<number | null>(null);
+  const [draftDischargeCutoff, setDraftDischargeCutoff] = useState<number | null>(null);
   const [draftCharge, setDraftCharge] = useState<number | null>(null);
   const [draftDischarge, setDraftDischarge] = useState<number | null>(null);
   const [draftActivePower, setDraftActivePower] = useState<number | null>(null);
   // ChargeMode is defined at module scope so it can be referenced by
   // the `CosyChargingSection` component declared earlier in this file.
   const snapshotCosyEnabled = snapshot?.cosy_enabled ?? false;
+  const snapshotAdaptiveEnabled = snapshot?.adaptive_charge_enabled ?? false;
   const snapshotAgileScope = snapshot?.agile_scope ?? 'off';
   const [localChargeOverride, setLocalChargeOverride] = useState<ChargeMode | null>(null);
   // Use local override if user has interacted; otherwise derive from the
@@ -1701,9 +2096,11 @@ export default function ControlPage() {
   // mutually exclusive in practice but this gives a deterministic
   // display order).
   const chargeMode: ChargeMode = localChargeOverride ?? (
-    snapshotCosyEnabled
-      ? 'cosy'
-      : snapshotAgileScope === 'charge_only'
+    snapshotAdaptiveEnabled
+      ? 'adaptive'
+      : snapshotCosyEnabled
+        ? 'cosy'
+        : snapshotAgileScope === 'charge_only'
         ? 'agile_charge'
         : snapshotAgileScope === 'discharge_only'
           ? 'agile_discharge'
@@ -1712,17 +2109,10 @@ export default function ControlPage() {
             : 'standard'
   );
   const cosyEnabled = chargeMode === 'cosy';
+  const adaptiveOwnsChargeRate = chargeMode === 'adaptive'
+    || snapshot?.adaptive_charge_state === 'restoring';
   const setChargeMode = (m: ChargeMode) => {
     setLocalChargeOverride(m);
-    // Keep the backend cosy flag in sync — only 'cosy' mode has it enabled.
-    const newCosyEnabled = m === 'cosy';
-    // Fire-and-forget: update cosy_enabled via the API so the next poll
-    // reflects it, but don't await (the local override takes immediate effect).
-    fetch('/api/cosy', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: newCosyEnabled }),
-    }).catch(() => {});
   };
 
   // On mount, load agile config from backend to seed the local override.
@@ -1737,7 +2127,7 @@ export default function ControlPage() {
           enabled?: boolean;
           scope?: 'off' | 'full' | 'charge_only' | 'discharge_only';
         }>('/api/agile');
-        if (res.ok && !snapshotCosyEnabled) {
+        if (res.ok && !snapshotCosyEnabled && !snapshotAdaptiveEnabled) {
           if (res.scope === 'charge_only') {
             setLocalChargeOverride('agile_charge');
           } else if (res.scope === 'discharge_only') {
@@ -1748,10 +2138,13 @@ export default function ControlPage() {
         }
       } catch { /* use defaults */ }
     })();
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const currentMode = snapshot?.battery_mode ?? 'eco';
   const cosyActive = snapshot?.cosy_active ?? false;
+  const loadLimiterActive = snapshot?.load_limiter_active ?? false;
+  const temperatureLimiterActive = snapshot?.temperature_limiter_active ?? false;
+  const automatedPauseActive = loadLimiterActive || temperatureLimiterActive;
   const ecoEnabled = snapshot?.battery_power_mode != null
     ? snapshot.battery_power_mode === 1
     : currentMode === 'eco' || currentMode === 'eco_paused' || currentMode === 'timed_demand';
@@ -1767,6 +2160,12 @@ export default function ControlPage() {
     ? Math.max(RESERVE_SOC_MIN, Math.min(RESERVE_SOC_MAX, draftReserve))
     : Math.max(RESERVE_SOC_MIN, Math.min(RESERVE_SOC_MAX, snapshot?.battery_reserve ?? RESERVE_SOC_MIN));
   const isAcCoupled = snapshot?.device_type_code === '3001' || snapshot?.device_type_code === '3002';
+  const deviceCode = snapshot?.device_type_code ?? '';
+  const supportsDischargeCutoff = ['10', '20', '21', '22', '30', '80', '83']
+    .some((prefix) => deviceCode.startsWith(prefix));
+  const dischargeCutoffSoc = draftDischargeCutoff
+    ?? snapshot?.battery_discharge_cutoff_soc
+    ?? RESERVE_SOC_MIN;
 
   // Whether this inverter exposes the Emergency Power Supply enable register
   // at HR 317 — see lib/deviceCapabilities.ts. DC hybrids and pure
@@ -1908,6 +2307,7 @@ export default function ControlPage() {
   const forceDischargeActive = localForceDischargeOverride ?? snapshotForceDischarge;
   const [forceDischargeLoading, setForceDischargeLoading] = useState(false);
   const [reserveSaving, setReserveSaving] = useState(false);
+  const [dischargeCutoffSaving, setDischargeCutoffSaving] = useState(false);
   const [chargeRateSaving, setChargeRateSaving] = useState(false);
   const [dischargeRateSaving, setDischargeRateSaving] = useState(false);
   const [activePowerSaving, setActivePowerSaving] = useState(false);
@@ -2066,6 +2466,16 @@ export default function ControlPage() {
     setReserveSaving(false);
   };
 
+  const handleDischargeCutoffSave = async () => {
+    const soc = draftDischargeCutoff ?? snapshot?.battery_discharge_cutoff_soc;
+    if (soc == null) return;
+    setDischargeCutoffSaving(true);
+    try {
+      await apiPost('/api/control/discharge-cutoff', { soc });
+    } catch (e: unknown) { console.warn('Discharge cutoff save failed:', e); }
+    setDischargeCutoffSaving(false);
+  };
+
   const handleChargeRateSave = async () => {
     if (chargeRate == null) return;
     setChargeRateSaving(true);
@@ -2199,10 +2609,19 @@ export default function ControlPage() {
             )}
           </div>
           <ActionButton
-            label={currentMode === 'eco_paused' ? 'Unpause Battery' : 'Pause Battery'}
-            icon={currentMode === 'eco_paused' ? '▶️' : '⏸️'}
-            path={currentMode === 'eco_paused' ? '/api/control/unpause' : '/api/control/pause'}
-            active={currentMode === 'eco_paused'}
+            label={automatedPauseActive
+              ? loadLimiterActive && temperatureLimiterActive
+                ? 'Disable Limiters & Unpause'
+                : 'Disable Limiter & Unpause'
+              : currentMode === 'eco_paused' ? 'Unpause Battery' : 'Pause Battery'}
+            icon={currentMode === 'eco_paused' || automatedPauseActive ? '▶️' : '⏸️'}
+            path={currentMode === 'eco_paused' || automatedPauseActive
+              ? '/api/control/unpause'
+              : '/api/control/pause'}
+            active={currentMode === 'eco_paused' || automatedPauseActive}
+            onSuccess={automatedPauseActive
+              ? () => setLoadLimiterRefreshKey((key) => key + 1)
+              : undefined}
           />
           <ActionButton
             label="Sync Clock"
@@ -2618,6 +3037,41 @@ export default function ControlPage() {
             </div>
           </div>
 
+          {supportsDischargeCutoff && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <div>
+                  <label htmlFor="discharge-cutoff-soc" className="text-text-secondary text-sm">
+                    Discharge Cutoff SOC
+                  </label>
+                  <p className="text-text-secondary/60 text-xs">
+                    Hard battery floor, including timed discharge modes.
+                  </p>
+                </div>
+                <span className="font-mono text-text-primary text-sm">{dischargeCutoffSoc}%</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <input
+                  id="discharge-cutoff-soc"
+                  type="range"
+                  min={RESERVE_SOC_MIN}
+                  max={RESERVE_SOC_MAX}
+                  step={1}
+                  value={dischargeCutoffSoc}
+                  onChange={(event) => setDraftDischargeCutoff(Number(event.target.value))}
+                  className="flex-1"
+                />
+                <button
+                  onClick={handleDischargeCutoffSave}
+                  disabled={dischargeCutoffSaving}
+                  className="px-3 py-1.5 bg-battery/20 text-battery rounded-lg text-xs font-medium hover:bg-battery/30 transition disabled:opacity-50"
+                >
+                  {dischargeCutoffSaving ? '...' : 'Save'}
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Charge Power Limit */}
           <div className="space-y-1">
             <div className="flex items-center justify-between">
@@ -2632,16 +3086,24 @@ export default function ControlPage() {
                 step={1}
                 value={chargeRate ?? 100}
                 onChange={(e) => setDraftCharge(Math.max(rateDisplayMin, Math.min(100, Number(e.target.value))))}
-                className="flex-1"
+                disabled={adaptiveOwnsChargeRate}
+                className="flex-1 disabled:opacity-50"
               />
               <button
                 onClick={handleChargeRateSave}
-                disabled={chargeRateSaving}
+                disabled={chargeRateSaving || adaptiveOwnsChargeRate}
                 className="px-3 py-1.5 bg-battery/20 text-battery rounded-lg text-xs font-medium hover:bg-battery/30 transition disabled:opacity-50"
               >
                 {chargeRateSaving ? '...' : 'Save'}
               </button>
             </div>
+            {adaptiveOwnsChargeRate && (
+              <p className="text-battery text-xs">
+                {chargeMode === 'adaptive'
+                  ? 'Controlled by Adaptive Charge. Switch to Standard mode to set this manually.'
+                  : 'Adaptive Charge is restoring the previous manual limit.'}
+              </p>
+            )}
           </div>
 
           {/* Discharge Power Limit */}
@@ -2697,7 +3159,9 @@ export default function ControlPage() {
           </div>
         </div>
         {/* Load Discharge Limiter — always visible when battery is in Eco mode */}
-        <LoadLimiterSection />
+        <LoadLimiterSection refreshKey={loadLimiterRefreshKey} />
+        {/* Inverter Temperature Limiter */}
+        <TemperatureLimiterSection refreshKey={loadLimiterRefreshKey} />
         {/* Auto Winter Mode */}
         <AutoWinterSection />
         {/* Developer Controls (dev mode only) */}

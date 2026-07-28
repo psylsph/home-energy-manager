@@ -56,7 +56,7 @@ describe('useAction', () => {
     mockApiPost.mockReturnValue(promise);
 
     const { result } = renderHook(() => useAction());
-    let pending!: Promise<void>;
+    let pending!: Promise<boolean>;
     act(() => {
       pending = result.current.execute('/api/foo', { a: 1 });
     });
@@ -65,11 +65,13 @@ describe('useAction', () => {
     expect(result.current.success).toBe(false);
     expect(mockApiPost).toHaveBeenCalledWith('/api/foo', { a: 1 });
 
+    let succeeded = false;
     await act(async () => {
       resolve({ ok: true });
-      await pending;
+      succeeded = await pending;
     });
 
+    expect(succeeded).toBe(true);
     expect(result.current.loading).toBe(false);
     expect(result.current.success).toBe(true);
     expect(result.current.error).toBeNull();
@@ -102,9 +104,11 @@ describe('useAction', () => {
     mockApiPost.mockRejectedValueOnce(new Error('dongle busy'));
     const { result } = renderHook(() => useAction());
 
+    let succeeded = true;
     await act(async () => {
-      await result.current.execute('/api/foo');
+      succeeded = await result.current.execute('/api/foo');
     });
+    expect(succeeded).toBe(false);
     expect(result.current.loading).toBe(false);
     expect(result.current.success).toBe(false);
     expect(result.current.error).toBe('dongle busy');
@@ -219,7 +223,7 @@ describe('useAction', () => {
     const { promise, resolve } = deferred();
     mockApiPost.mockReturnValue(promise);
 
-    let pending!: Promise<void>;
+    let pending!: Promise<boolean>;
     act(() => {
       pending = result.current.execute('/second');
     });
@@ -285,7 +289,7 @@ describe('useAction', () => {
     mockApiPost.mockResolvedValue({ ok: true });
     const { result } = renderHook(() => useAction());
 
-    let pending!: Promise<void>;
+    let pending!: Promise<boolean>;
     act(() => {
       pending = result.current.execute('/api/control/mode', { mode: 'eco' });
     });

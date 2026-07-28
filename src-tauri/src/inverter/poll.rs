@@ -71,13 +71,15 @@ use crate::inverter::sanitizer::{
     ConsecutiveSuspectCounts, DeltaCorrectionCounts, GraceCumulativeSamples, RateReleaseCounts,
 };
 use crate::inverter::state_machines::{
-    build_force_discharge_auto_revert_writes, check_auto_winter, check_load_limiter,
+    build_force_discharge_auto_revert_writes, check_adaptive_charge, check_auto_winter,
+    check_load_limiter_with_other_pause, check_temperature_limiter_after_automation,
     clear_cosy_slot_registers, cosy_slot_register_writes, persist_cosy_active,
     write_registers_to_inverter, AgileSlotAction,
 };
 pub use crate::inverter::state_machines::{
-    AutoWinterConfig, AutoWinterSaved, AutoWinterState, LoadLimiterConfig, LoadLimiterSaved,
-    LoadLimiterState, PriceSlot,
+    AdaptiveChargeState, AutoWinterConfig, AutoWinterSaved, AutoWinterState, LoadLimiterConfig,
+    LoadLimiterSaved, LoadLimiterState, PriceSlot, TemperatureLimiterConfig,
+    TemperatureLimiterState,
 };
 use crate::modbus::client::GatewayPollScope;
 use crate::modbus::client::ModbusClient;
@@ -319,12 +321,20 @@ pub struct AppState {
     pub auto_winter_state: Arc<Mutex<AutoWinterState>>,
     /// Saved register values to restore when winter mode deactivates.
     pub auto_winter_saved: Arc<Mutex<Option<AutoWinterSaved>>>,
+    /// Runtime state for Adaptive Charge SOC/time hysteresis.
+    pub adaptive_charge_state: Arc<Mutex<AdaptiveChargeState>>,
+    /// Raw pre-Adaptive charge limit retained until restoration is confirmed.
+    pub adaptive_charge_saved: Arc<Mutex<Option<crate::settings::AdaptiveChargeSavedLimit>>>,
     /// Load discharge limiter configuration.
     pub load_limiter_config: Arc<Mutex<LoadLimiterConfig>>,
     /// Load discharge limiter state machine.
     pub load_limiter_state: Arc<Mutex<LoadLimiterState>>,
-    /// Saved register values to restore when the load limiter deactivates.
+    /// Shared reserve captured before either discharge limiter pauses.
     pub load_limiter_saved: Arc<Mutex<Option<LoadLimiterSaved>>>,
+    /// Inverter-temperature discharge limiter configuration.
+    pub temperature_limiter_config: Arc<Mutex<TemperatureLimiterConfig>>,
+    /// Inverter-temperature discharge limiter runtime state.
+    pub temperature_limiter_state: Arc<Mutex<TemperatureLimiterState>>,
     /// Whether cosy charging is currently active (force-charging in a slot).
     pub cosy_active: Arc<Mutex<bool>>,
     /// Cached Octopus Agile prices for the current region.
@@ -386,9 +396,15 @@ impl AppState {
             auto_winter_config: Arc::new(Mutex::new(AutoWinterConfig::default())),
             auto_winter_state: Arc::new(Mutex::new(AutoWinterState::default())),
             auto_winter_saved: Arc::new(Mutex::new(None)),
+            adaptive_charge_state: Arc::new(Mutex::new(AdaptiveChargeState::default())),
+            adaptive_charge_saved: Arc::new(Mutex::new(
+                crate::settings::Settings::load().adaptive_charge_saved_limit,
+            )),
             load_limiter_config: Arc::new(Mutex::new(LoadLimiterConfig::default())),
             load_limiter_state: Arc::new(Mutex::new(LoadLimiterState::default())),
             load_limiter_saved: Arc::new(Mutex::new(None)),
+            temperature_limiter_config: Arc::new(Mutex::new(TemperatureLimiterConfig::default())),
+            temperature_limiter_state: Arc::new(Mutex::new(TemperatureLimiterState::default())),
             cosy_active: Arc::new(Mutex::new(
                 crate::settings::Settings::load().cosy_active_persisted,
             )),
@@ -437,9 +453,15 @@ impl AppState {
             auto_winter_config: Arc::new(Mutex::new(AutoWinterConfig::default())),
             auto_winter_state: Arc::new(Mutex::new(AutoWinterState::default())),
             auto_winter_saved: Arc::new(Mutex::new(None)),
+            adaptive_charge_state: Arc::new(Mutex::new(AdaptiveChargeState::default())),
+            adaptive_charge_saved: Arc::new(Mutex::new(
+                crate::settings::Settings::load().adaptive_charge_saved_limit,
+            )),
             load_limiter_config: Arc::new(Mutex::new(LoadLimiterConfig::default())),
             load_limiter_state: Arc::new(Mutex::new(LoadLimiterState::default())),
             load_limiter_saved: Arc::new(Mutex::new(None)),
+            temperature_limiter_config: Arc::new(Mutex::new(TemperatureLimiterConfig::default())),
+            temperature_limiter_state: Arc::new(Mutex::new(TemperatureLimiterState::default())),
             cosy_active: Arc::new(Mutex::new(
                 crate::settings::Settings::load().cosy_active_persisted,
             )),
@@ -1934,6 +1956,73 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     }
                                 }
 
+                                // ---- Adaptive Charge mode (issue #234) ----
+                                {
+                                    let now = chrono::Local::now();
+                                    let now_minutes = now.hour() as u16 * 60 + now.minute() as u16;
+                                    let mut adaptive_state =
+                                        state.adaptive_charge_state.lock().await;
+                                    let mut adaptive_saved =
+                                        state.adaptive_charge_saved.lock().await;
+                                    let saved_before = adaptive_saved.clone();
+                                    let outcome = check_adaptive_charge(
+                                        &snapshot,
+                                        &poll_settings.adaptive_charge_config,
+                                        poll_settings.adaptive_charge_enabled,
+                                        &mut adaptive_state,
+                                        &mut adaptive_saved,
+                                        now_minutes,
+                                    );
+
+                                    snapshot.charging_mode =
+                                        crate::settings::charging_mode_for_settings(&poll_settings);
+                                    snapshot.adaptive_charge_enabled =
+                                        poll_settings.adaptive_charge_enabled;
+                                    snapshot.adaptive_charge_state =
+                                        adaptive_state.api_name().to_string();
+                                    snapshot.adaptive_charge_period =
+                                        adaptive_state.active_period();
+                                    snapshot.adaptive_charge_desired_rate_percent =
+                                        outcome.desired_rate_percent;
+
+                                    let saved_after = adaptive_saved.clone();
+                                    drop(adaptive_state);
+                                    drop(adaptive_saved);
+
+                                    if saved_before != saved_after {
+                                        // Reload before the narrow persistence update so a
+                                        // concurrent mode/config save cannot be overwritten by
+                                        // this poll's older settings snapshot.
+                                        let mut app_settings = crate::settings::Settings::load();
+                                        app_settings.adaptive_charge_saved_limit = saved_after;
+                                        if let Err(e) = app_settings.save() {
+                                            tracing::warn!(
+                                                "Failed to persist Adaptive Charge baseline: {e}"
+                                            );
+                                        }
+                                    }
+
+                                    if let Some(write) = outcome.write {
+                                        match client
+                                            .write_register(write.address, write.value)
+                                            .await
+                                        {
+                                            Ok(()) => tracing::info!(
+                                                state = snapshot.adaptive_charge_state,
+                                                register = write.address,
+                                                value = write.value,
+                                                "Adaptive Charge updated charge limit"
+                                            ),
+                                            Err(e) => tracing::error!(
+                                                register = write.address,
+                                                value = write.value,
+                                                "Adaptive Charge write failed: {e}"
+                                            ),
+                                        }
+                                        tokio::time::sleep(Duration::from_millis(1500)).await;
+                                    }
+                                }
+
                                 // ---- Solar arrays (issue #110) ----
                                 // Stamp the per-array "% of max" summary from
                                 // settings so every page that reads the
@@ -1955,73 +2044,10 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     None
                                 };
 
-                                // ---- Load discharge limiter ----
-                                {
-                                    let config = state.load_limiter_config.lock().await;
-                                    let mut ll_state = state.load_limiter_state.lock().await;
-                                    let mut ll_saved = state.load_limiter_saved.lock().await;
-                                    let writes = check_load_limiter(
-                                        &snapshot,
-                                        &config,
-                                        &mut ll_state,
-                                        poll_settings.poll_interval,
-                                        &mut ll_saved,
-                                    );
-
-                                    // Tag the snapshot so the frontend knows.
-                                    snapshot.load_limiter_active =
-                                        matches!(*ll_state, LoadLimiterState::Paused)
-                                        || matches!(*ll_state, LoadLimiterState::PausedFromRestart);
-
-                                    let was_active = poll_settings.load_limiter_active_persisted;
-                                    let now_active = snapshot.load_limiter_active;
-
-                                    // Persist saved reserve values to disk so they survive a
-                                    // crash/restart. When the limiter deactivates, saved
-                                    // becomes None — this clears the persisted values.
-                                    let persist_saved = ll_saved.clone();
-                                    drop(config);
-                                    drop(ll_state);
-                                    drop(ll_saved);
-
-                                    let mut app_settings = poll_settings.clone();
-                                    let saved_changed = app_settings.load_limiter_saved_reserve
-                                        != persist_saved.as_ref().map(|s| s.reserve);
-                                    if saved_changed {
-                                        app_settings.load_limiter_saved_reserve =
-                                            persist_saved.as_ref().map(|s| s.reserve);
-                                        if let Err(e) = app_settings.save() {
-                                            tracing::warn!(
-                                                "Failed to persist load limiter saved values: {e}"
-                                            );
-                                        }
-                                    }
-
-                                    // Persist active flag to disk so a crash/restart can detect it.
-                                    if was_active != now_active {
-                                        let mut app_settings = poll_settings.clone();
-                                        app_settings.load_limiter_active_persisted = now_active;
-                                        if let Err(e) = app_settings.save() {
-                                            tracing::warn!("Failed to persist load limiter state: {e}");
-                                        }
-                                    }
-
-                                    if let Some(writes) = writes {
-                                        for w in &writes {
-                                            match client.write_register(w.address, w.value).await {
-                                                Ok(()) => tracing::info!(
-                                                    "Load limiter: wrote reg {} = {}",
-                                                    w.address, w.value
-                                                ),
-                                                Err(e) => tracing::error!(
-                                                    "Load limiter: write reg {} failed: {e}",
-                                                    w.address
-                                                ),
-                                            }
-                                            tokio::time::sleep(Duration::from_millis(1500)).await;
-                                        }
-                                    }
-                                }
+                                // Track same-cycle writes that can enable discharge. The
+                                // temperature limiter runs last and reasserts its pause when
+                                // the current snapshot cannot yet reflect one of these writes.
+                                let mut discharge_control_may_override_pause = false;
 
                                 // ---- Force Discharge auto-revert (issue #129) ----
                                 //
@@ -2068,6 +2094,8 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                 r.three_phase_force_charge_enable,
                                             );
                                             if let Some(writes) = writes {
+                                                discharge_control_may_override_pause =
+                                                    !writes.is_empty();
                                                 for w in &writes {
                                                     match client.write_register(w.address, w.value).await {
                                                         Ok(()) => tracing::info!(
@@ -2414,6 +2442,8 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     };
 
                                     // Convert the action into register writes.
+                                    let agile_enables_discharge =
+                                        matches!(action, AgileSlotAction::Discharge { .. });
                                     let use_3ph =
                                         snapshot.device_type.uses_three_phase_schedule_slots();
                                     // Defer means cosy/auto-winter owns the inverter —
@@ -2491,6 +2521,9 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     };
 
                                     if !skip_writes {
+                                        if agile_enables_discharge {
+                                            discharge_control_may_override_pause = true;
+                                        }
                                         if let Ok(writes) = cmd.encode() {
                                             let mut all_ok = true;
                                             for w in &writes {
@@ -2522,6 +2555,104 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     snapshot.agile_state = action.label().to_string();
                                     snapshot.agile_enabled = scope != crate::settings::AgileScope::Off;
                                     snapshot.agile_scope = scope;
+                                }
+
+                                // ---- Discharge pause limiters ----
+                                // Run after all charging/discharging automation so thermal
+                                // protection is the final authority in this poll. Both limiters
+                                // share the saved pre-pause reserve; each releases only its own
+                                // ownership, and the final owner to clear performs the Eco restore.
+                                {
+                                    let load_config = state.load_limiter_config.lock().await;
+                                    let mut load_state = state.load_limiter_state.lock().await;
+                                    let temperature_config =
+                                        state.temperature_limiter_config.lock().await;
+                                    let mut temperature_state =
+                                        state.temperature_limiter_state.lock().await;
+                                    let mut shared_saved = state.load_limiter_saved.lock().await;
+
+                                    let load_was_active = load_state.is_actively_pausing();
+                                    let temperature_writes =
+                                        check_temperature_limiter_after_automation(
+                                            &snapshot,
+                                            &temperature_config,
+                                            &mut temperature_state,
+                                            &mut shared_saved,
+                                            load_was_active,
+                                            discharge_control_may_override_pause,
+                                        );
+                                    let temperature_active =
+                                        temperature_state.is_actively_pausing();
+                                    let load_writes = check_load_limiter_with_other_pause(
+                                        &snapshot,
+                                        &load_config,
+                                        &mut load_state,
+                                        poll_settings.poll_interval,
+                                        &mut shared_saved,
+                                        temperature_active,
+                                    );
+
+                                    snapshot.load_limiter_active =
+                                        load_state.is_actively_pausing();
+                                    snapshot.temperature_limiter_active =
+                                        temperature_state.is_actively_pausing();
+                                    let persist_saved = shared_saved.clone();
+
+                                    drop(load_config);
+                                    drop(load_state);
+                                    drop(temperature_config);
+                                    drop(temperature_state);
+                                    drop(shared_saved);
+
+                                    let mut app_settings = crate::settings::Settings::load();
+                                    let persisted_reserve =
+                                        persist_saved.as_ref().map(|value| value.reserve);
+                                    let persistence_changed = app_settings
+                                        .load_limiter_saved_reserve
+                                        != persisted_reserve
+                                        || app_settings.load_limiter_active_persisted
+                                            != snapshot.load_limiter_active
+                                        || app_settings.temperature_limiter_active_persisted
+                                            != snapshot.temperature_limiter_active;
+                                    if persistence_changed {
+                                        app_settings.load_limiter_saved_reserve =
+                                            persisted_reserve;
+                                        app_settings.load_limiter_active_persisted =
+                                            snapshot.load_limiter_active;
+                                        app_settings.temperature_limiter_active_persisted =
+                                            snapshot.temperature_limiter_active;
+                                        if let Err(e) = app_settings.save() {
+                                            tracing::warn!(
+                                                "Failed to persist discharge limiter state: {e}"
+                                            );
+                                        }
+                                    }
+
+                                    for (label, writes) in [
+                                        ("Temperature limiter", temperature_writes),
+                                        ("Load limiter", load_writes),
+                                    ] {
+                                        if let Some(writes) = writes {
+                                            for write in &writes {
+                                                match client
+                                                    .write_register(write.address, write.value)
+                                                    .await
+                                                {
+                                                    Ok(()) => tracing::info!(
+                                                        "{label}: wrote reg {} = {}",
+                                                        write.address,
+                                                        write.value
+                                                    ),
+                                                    Err(e) => tracing::error!(
+                                                        "{label}: write reg {} failed: {e}",
+                                                        write.address
+                                                    ),
+                                                }
+                                                tokio::time::sleep(Duration::from_millis(1500))
+                                                    .await;
+                                            }
+                                        }
+                                    }
                                 }
 
                                 // ---- Email alerts ----

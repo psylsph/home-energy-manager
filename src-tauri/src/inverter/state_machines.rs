@@ -23,10 +23,12 @@ use crate::inverter::encoder::RegisterWrite;
 use crate::inverter::model::{BatteryMode, DeviceType, InverterSnapshot};
 use crate::modbus::client::ModbusClient;
 use crate::modbus::registers::{
-    encode_hhmm, HR_3PH_FORCE_CHARGE_ENABLE, HR_3PH_FORCE_DISCHARGE_ENABLE, HR_BATTERY_POWER_MODE,
-    HR_BATTERY_SOC_RESERVE, HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC,
-    HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END,
-    HR_DISCHARGE_SLOT_2_START, HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
+    encode_hhmm, HR_3PH_BATTERY_CHARGE_LIMIT, HR_3PH_BATTERY_SOC_RESERVE,
+    HR_3PH_FORCE_CHARGE_ENABLE, HR_3PH_FORCE_DISCHARGE_ENABLE, HR_AC_BATTERY_CHARGE_LIMIT,
+    HR_BATTERY_CHARGE_LIMIT, HR_BATTERY_POWER_MODE, HR_BATTERY_SOC_RESERVE, HR_CHARGE_SLOT_1_END,
+    HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC, HR_DISCHARGE_SLOT_1_END,
+    HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END, HR_DISCHARGE_SLOT_2_START,
+    HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
 };
 
 // ===========================================================================
@@ -145,11 +147,23 @@ pub enum LoadLimiterState {
     /// battery mode returning to Eco), so a failed write on the first
     /// poll after reconnect is retried on the next poll.
     PausedFromRestart,
-    /// Home load dropped below threshold, counting towards restore.
+    /// Home load dropped below threshold, counting towards restore. The
+    /// battery remains paused until this countdown completes.
     LowLoadPending {
         /// Consecutive polls where home_power was below threshold.
         consecutive: u32,
     },
+}
+
+impl LoadLimiterState {
+    /// Whether the limiter currently owns an Eco Paused battery state.
+    /// Recovery remains active until the restore writes are issued.
+    pub(crate) fn is_actively_pausing(&self) -> bool {
+        matches!(
+            self,
+            Self::Paused | Self::PausedFromRestart | Self::LowLoadPending { .. }
+        )
+    }
 }
 
 /// Configuration for the load discharge limiter.
@@ -182,6 +196,402 @@ impl Default for LoadLimiterConfig {
             end_hour: 0,
             end_minute: 0,
         }
+    }
+}
+
+// ===========================================================================
+// Inverter temperature limiter: types + transition logic
+// ===========================================================================
+
+/// Runtime state for temperature-driven discharge protection.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
+pub enum TemperatureLimiterState {
+    #[default]
+    Idle,
+    HighPending {
+        consecutive: u32,
+    },
+    Paused,
+    PausedFromRestart,
+    CoolingPending {
+        consecutive: u32,
+    },
+}
+
+impl TemperatureLimiterState {
+    pub(crate) fn is_actively_pausing(&self) -> bool {
+        matches!(
+            self,
+            Self::Paused | Self::PausedFromRestart | Self::CoolingPending { .. }
+        )
+    }
+}
+
+/// Configuration for inverter-temperature discharge protection.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TemperatureLimiterConfig {
+    pub enabled: bool,
+    /// Pause discharge at or above this inverter heatsink temperature.
+    pub high_threshold: f32,
+    /// Restore Eco at or below this temperature.
+    pub recovery_threshold: f32,
+    /// Consecutive sanitized readings required in either direction.
+    pub confirmation_readings: u32,
+}
+
+impl Default for TemperatureLimiterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            high_threshold: 60.0,
+            recovery_threshold: 55.0,
+            confirmation_readings: 3,
+        }
+    }
+}
+
+impl TemperatureLimiterConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if !(30.0..=90.0).contains(&self.high_threshold) {
+            return Err("High threshold must be between 30°C and 90°C".to_string());
+        }
+        if !(20.0..90.0).contains(&self.recovery_threshold) {
+            return Err("Recovery threshold must be between 20°C and 89°C".to_string());
+        }
+        if self.recovery_threshold >= self.high_threshold {
+            return Err("Recovery threshold must be below the high threshold".to_string());
+        }
+        if !(1..=30).contains(&self.confirmation_readings) {
+            return Err("Confirmation readings must be between 1 and 30".to_string());
+        }
+        Ok(())
+    }
+}
+
+// ===========================================================================
+// Adaptive Charge: types + transition logic
+// ===========================================================================
+
+/// Runtime state for the SOC/time charge-rate controller.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AdaptiveChargeState {
+    #[default]
+    Inactive,
+    OutsideWindow,
+    Preferred {
+        period: usize,
+        low_count: u32,
+    },
+    Recovery {
+        period: usize,
+        high_count: u32,
+    },
+    SuspendedAutoWinter {
+        restore_pending: bool,
+    },
+    Restoring,
+    Error {
+        message: String,
+    },
+}
+
+impl AdaptiveChargeState {
+    pub fn api_name(&self) -> &'static str {
+        match self {
+            Self::Inactive => "inactive",
+            Self::OutsideWindow => "outside_window",
+            Self::Preferred { .. } => "preferred",
+            Self::Recovery { .. } => "recovery",
+            Self::SuspendedAutoWinter { .. } => "suspended_auto_winter",
+            Self::Restoring => "restoring",
+            Self::Error { .. } => "error",
+        }
+    }
+
+    pub fn active_period(&self) -> Option<u8> {
+        match self {
+            Self::Preferred { period, .. } | Self::Recovery { period, .. } => {
+                Some((*period + 1) as u8)
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AdaptiveChargeOutcome {
+    pub write: Option<RegisterWrite>,
+    pub desired_rate_percent: Option<u8>,
+}
+
+/// Charge-limit register for device families with a controllable battery.
+pub fn adaptive_charge_register(device_type: DeviceType) -> Option<u16> {
+    if device_type.uses_three_phase_schedule_slots() {
+        return Some(HR_3PH_BATTERY_CHARGE_LIMIT);
+    }
+    match device_type {
+        DeviceType::ACCoupled | DeviceType::ACCoupledMk2 => Some(HR_AC_BATTERY_CHARGE_LIMIT),
+        DeviceType::PvInverter
+        | DeviceType::Ems
+        | DeviceType::EmsCommercial
+        | DeviceType::Gateway
+        | DeviceType::Unknown(_) => None,
+        _ => Some(HR_BATTERY_CHARGE_LIMIT),
+    }
+}
+
+/// Convert the normalized UI percentage to the model-specific raw register.
+pub fn normalized_charge_rate_to_raw(device_type: DeviceType, percent: u8) -> Option<u16> {
+    let register = adaptive_charge_register(device_type)?;
+    if register == HR_BATTERY_CHARGE_LIMIT {
+        Some((percent as u16).div_ceil(2).min(50))
+    } else {
+        Some((percent as u16).clamp(1, 100))
+    }
+}
+
+fn raw_charge_rate_to_normalized(device_type: DeviceType, raw: u16) -> u8 {
+    if adaptive_charge_register(device_type) == Some(HR_BATTERY_CHARGE_LIMIT) {
+        (raw.saturating_mul(2).min(100)) as u8
+    } else {
+        raw.min(100) as u8
+    }
+}
+
+fn adaptive_period_at(
+    config: &crate::settings::AdaptiveChargeConfig,
+    now_minutes: u16,
+) -> Option<usize> {
+    config.periods.iter().position(|period| {
+        if !period.enabled {
+            return false;
+        }
+        if period.all_day {
+            return true;
+        }
+        let start = period.start_hour as u16 * 60 + period.start_minute as u16;
+        let end = period.end_hour as u16 * 60 + period.end_minute as u16;
+        if start < end {
+            now_minutes >= start && now_minutes < end
+        } else {
+            now_minutes >= start || now_minutes < end
+        }
+    })
+}
+
+/// Evaluate Adaptive Charge and return at most one charge-limit write.
+///
+/// `saved` is captured once when the mode first takes ownership and is retained
+/// until a later snapshot confirms restoration after the mode is disabled.
+pub fn check_adaptive_charge(
+    snap: &InverterSnapshot,
+    config: &crate::settings::AdaptiveChargeConfig,
+    enabled: bool,
+    state: &mut AdaptiveChargeState,
+    saved: &mut Option<crate::settings::AdaptiveChargeSavedLimit>,
+    now_minutes: u16,
+) -> AdaptiveChargeOutcome {
+    let Some(register) = adaptive_charge_register(snap.device_type) else {
+        *state = AdaptiveChargeState::Error {
+            message: "Adaptive Charge is not supported by this inverter".to_string(),
+        };
+        return AdaptiveChargeOutcome {
+            write: None,
+            desired_rate_percent: None,
+        };
+    };
+
+    if !enabled {
+        let Some(baseline) = saved.as_ref() else {
+            *state = AdaptiveChargeState::Inactive;
+            return AdaptiveChargeOutcome {
+                write: None,
+                desired_rate_percent: None,
+            };
+        };
+        if baseline.inverter_serial != snap.inverter_serial
+            || baseline.device_type_code != snap.device_type_code
+            || baseline.register_address != register
+        {
+            *state = AdaptiveChargeState::Error {
+                message: "Saved charge limit belongs to a different inverter".to_string(),
+            };
+            return AdaptiveChargeOutcome {
+                write: None,
+                desired_rate_percent: None,
+            };
+        }
+        if snap.charge_rate as u16 == baseline.raw_value {
+            *saved = None;
+            *state = AdaptiveChargeState::Inactive;
+            return AdaptiveChargeOutcome {
+                write: None,
+                desired_rate_percent: None,
+            };
+        }
+        *state = AdaptiveChargeState::Restoring;
+        return AdaptiveChargeOutcome {
+            write: Some(RegisterWrite {
+                address: register,
+                value: baseline.raw_value,
+            }),
+            desired_rate_percent: Some(raw_charge_rate_to_normalized(
+                snap.device_type,
+                baseline.raw_value,
+            )),
+        };
+    }
+
+    if let Err(message) = config.validate() {
+        *state = AdaptiveChargeState::Error { message };
+        return AdaptiveChargeOutcome {
+            write: None,
+            desired_rate_percent: None,
+        };
+    }
+
+    if saved.is_none() {
+        *saved = Some(crate::settings::AdaptiveChargeSavedLimit {
+            inverter_serial: snap.inverter_serial.clone(),
+            device_type_code: snap.device_type_code.clone(),
+            register_address: register,
+            raw_value: snap.charge_rate as u16,
+        });
+    }
+    let baseline = saved.as_ref().expect("baseline captured above");
+    if baseline.inverter_serial != snap.inverter_serial
+        || baseline.device_type_code != snap.device_type_code
+        || baseline.register_address != register
+    {
+        *state = AdaptiveChargeState::Error {
+            message: "Saved charge limit belongs to a different inverter".to_string(),
+        };
+        return AdaptiveChargeOutcome {
+            write: None,
+            desired_rate_percent: None,
+        };
+    }
+
+    if snap.auto_winter_active {
+        let restore_pending = match state {
+            AdaptiveChargeState::SuspendedAutoWinter { restore_pending } => *restore_pending,
+            _ => true,
+        };
+        if restore_pending && snap.charge_rate as u16 != baseline.raw_value {
+            *state = AdaptiveChargeState::SuspendedAutoWinter {
+                restore_pending: true,
+            };
+            return AdaptiveChargeOutcome {
+                write: Some(RegisterWrite {
+                    address: register,
+                    value: baseline.raw_value,
+                }),
+                desired_rate_percent: Some(raw_charge_rate_to_normalized(
+                    snap.device_type,
+                    baseline.raw_value,
+                )),
+            };
+        }
+        *state = AdaptiveChargeState::SuspendedAutoWinter {
+            restore_pending: false,
+        };
+        return AdaptiveChargeOutcome {
+            write: None,
+            desired_rate_percent: None,
+        };
+    }
+
+    let Some(period_index) = adaptive_period_at(config, now_minutes) else {
+        *state = AdaptiveChargeState::OutsideWindow;
+        let desired = baseline.raw_value;
+        return AdaptiveChargeOutcome {
+            write: (snap.charge_rate as u16 != desired).then_some(RegisterWrite {
+                address: register,
+                value: desired,
+            }),
+            desired_rate_percent: Some(raw_charge_rate_to_normalized(snap.device_type, desired)),
+        };
+    };
+    let period = &config.periods[period_index];
+    let confirmations = config.confirmation_readings.max(1);
+
+    let recovery = match state.clone() {
+        AdaptiveChargeState::Recovery {
+            period: state_period,
+            high_count,
+        } if state_period == period_index => {
+            let next_count = if snap.soc >= period.recovery_soc {
+                high_count + 1
+            } else {
+                0
+            };
+            if next_count >= confirmations {
+                *state = AdaptiveChargeState::Preferred {
+                    period: period_index,
+                    low_count: 0,
+                };
+                false
+            } else {
+                *state = AdaptiveChargeState::Recovery {
+                    period: period_index,
+                    high_count: next_count,
+                };
+                true
+            }
+        }
+        AdaptiveChargeState::Preferred {
+            period: state_period,
+            low_count,
+        } if state_period == period_index => {
+            let next_count = if snap.soc <= period.low_soc {
+                low_count + 1
+            } else {
+                0
+            };
+            if next_count >= confirmations {
+                *state = AdaptiveChargeState::Recovery {
+                    period: period_index,
+                    high_count: 0,
+                };
+                true
+            } else {
+                *state = AdaptiveChargeState::Preferred {
+                    period: period_index,
+                    low_count: next_count,
+                };
+                false
+            }
+        }
+        _ if snap.soc <= period.low_soc => {
+            *state = AdaptiveChargeState::Recovery {
+                period: period_index,
+                high_count: 0,
+            };
+            true
+        }
+        _ => {
+            *state = AdaptiveChargeState::Preferred {
+                period: period_index,
+                low_count: 0,
+            };
+            false
+        }
+    };
+
+    let desired_percent = if recovery {
+        period.recovery_rate_percent
+    } else {
+        period.preferred_rate_percent
+    };
+    let desired_raw = normalized_charge_rate_to_raw(snap.device_type, desired_percent)
+        .expect("supported device has a charge-rate conversion");
+
+    AdaptiveChargeOutcome {
+        write: (snap.charge_rate as u16 != desired_raw).then_some(RegisterWrite {
+            address: register,
+            value: desired_raw,
+        }),
+        desired_rate_percent: Some(desired_percent),
     }
 }
 
@@ -480,11 +890,209 @@ pub(crate) fn check_auto_winter(
     None
 }
 
+fn discharge_pause_writes(device_type: DeviceType, reserve: u16) -> Vec<RegisterWrite> {
+    let mut writes = vec![
+        RegisterWrite {
+            address: HR_BATTERY_POWER_MODE,
+            value: 1,
+        },
+        RegisterWrite {
+            address: HR_ENABLE_DISCHARGE,
+            value: 0,
+        },
+    ];
+    if device_type.uses_three_phase_schedule_slots() {
+        writes.push(RegisterWrite {
+            address: HR_3PH_FORCE_DISCHARGE_ENABLE,
+            value: 0,
+        });
+        writes.push(RegisterWrite {
+            address: HR_3PH_BATTERY_SOC_RESERVE,
+            value: reserve,
+        });
+    } else {
+        writes.push(RegisterWrite {
+            address: HR_BATTERY_SOC_RESERVE,
+            value: reserve,
+        });
+    }
+    writes
+}
+
+fn release_shared_discharge_pause(
+    snap: &InverterSnapshot,
+    saved: &mut Option<LoadLimiterSaved>,
+    other_active: bool,
+) -> Option<Vec<RegisterWrite>> {
+    if other_active {
+        None
+    } else {
+        let reserve = saved.take().map(|value| value.reserve).unwrap_or(4);
+        Some(discharge_pause_writes(snap.device_type, reserve))
+    }
+}
+
+/// Evaluate inverter-temperature discharge protection. This safety limiter
+/// applies in every battery mode and always recovers to normal Eco. `other_active`
+/// represents another limiter that still owns the shared Eco Paused state.
+#[cfg(test)]
+pub(crate) fn check_temperature_limiter(
+    snap: &InverterSnapshot,
+    config: &TemperatureLimiterConfig,
+    state: &mut TemperatureLimiterState,
+    saved: &mut Option<LoadLimiterSaved>,
+    other_active: bool,
+) -> Option<Vec<RegisterWrite>> {
+    check_temperature_limiter_after_automation(snap, config, state, saved, other_active, false)
+}
+
+/// Temperature limiter variant used by the poll loop after automation writes.
+/// `reassert_pause` ensures a discharge command issued earlier in the same poll
+/// cannot override an already-confirmed thermal pause before the next read-back.
+pub(crate) fn check_temperature_limiter_after_automation(
+    snap: &InverterSnapshot,
+    config: &TemperatureLimiterConfig,
+    state: &mut TemperatureLimiterState,
+    saved: &mut Option<LoadLimiterSaved>,
+    other_active: bool,
+    reassert_pause: bool,
+) -> Option<Vec<RegisterWrite>> {
+    let release = |state: &mut TemperatureLimiterState,
+                   saved: &mut Option<LoadLimiterSaved>|
+     -> Option<Vec<RegisterWrite>> {
+        if other_active {
+            *state = TemperatureLimiterState::Idle;
+            None
+        } else {
+            // Keep ownership and the saved reserve until read-back confirms
+            // Eco. This makes failed dongle writes retry on the next poll.
+            *state = TemperatureLimiterState::PausedFromRestart;
+            let reserve = saved.as_ref().map(|value| value.reserve).unwrap_or(4);
+            Some(discharge_pause_writes(snap.device_type, reserve))
+        }
+    };
+
+    if !config.enabled {
+        return if state.is_actively_pausing() {
+            if matches!(state, TemperatureLimiterState::PausedFromRestart)
+                && snap.battery_mode == BatteryMode::Eco
+                && !other_active
+            {
+                *saved = None;
+                *state = TemperatureLimiterState::Idle;
+                None
+            } else {
+                release(state, saved)
+            }
+        } else {
+            *state = TemperatureLimiterState::Idle;
+            None
+        };
+    }
+
+    let temperature = snap.inverter_temperature;
+    if !temperature.is_finite() {
+        return None;
+    }
+
+    match state {
+        TemperatureLimiterState::Idle => {
+            if temperature >= config.high_threshold {
+                if config.confirmation_readings == 1 {
+                    if saved.is_none() && (4..100).contains(&(snap.battery_reserve as u16)) {
+                        *saved = Some(LoadLimiterSaved {
+                            reserve: snap.battery_reserve as u16,
+                        });
+                    }
+                    *state = TemperatureLimiterState::Paused;
+                    return Some(discharge_pause_writes(snap.device_type, 100));
+                } else {
+                    *state = TemperatureLimiterState::HighPending { consecutive: 1 };
+                }
+            }
+        }
+        TemperatureLimiterState::HighPending { consecutive } => {
+            if temperature >= config.high_threshold {
+                *consecutive += 1;
+                if *consecutive >= config.confirmation_readings {
+                    if saved.is_none() && (4..100).contains(&(snap.battery_reserve as u16)) {
+                        *saved = Some(LoadLimiterSaved {
+                            reserve: snap.battery_reserve as u16,
+                        });
+                    }
+                    *state = TemperatureLimiterState::Paused;
+                    tracing::warn!(
+                        temperature,
+                        threshold = config.high_threshold,
+                        "Temperature limiter: pausing battery discharge"
+                    );
+                    return Some(discharge_pause_writes(snap.device_type, 100));
+                }
+            } else {
+                *state = TemperatureLimiterState::Idle;
+            }
+        }
+        TemperatureLimiterState::Paused => {
+            if temperature <= config.recovery_threshold {
+                if config.confirmation_readings == 1 {
+                    return release(state, saved);
+                }
+                *state = TemperatureLimiterState::CoolingPending { consecutive: 1 };
+            }
+            if reassert_pause || snap.battery_mode != BatteryMode::EcoPaused {
+                // Reassert after a discharge write earlier in this poll because
+                // the snapshot predates that write and cannot reflect it yet.
+                return Some(discharge_pause_writes(snap.device_type, 100));
+            }
+        }
+        TemperatureLimiterState::PausedFromRestart => {
+            if temperature <= config.recovery_threshold {
+                if other_active {
+                    *state = TemperatureLimiterState::Idle;
+                } else if snap.battery_mode == BatteryMode::Eco {
+                    *saved = None;
+                    *state = TemperatureLimiterState::Idle;
+                } else {
+                    // Keep retrying until a later snapshot confirms Eco.
+                    let reserve = saved.as_ref().map(|value| value.reserve).unwrap_or(4);
+                    return Some(discharge_pause_writes(snap.device_type, reserve));
+                }
+            } else {
+                *state = TemperatureLimiterState::Paused;
+                if reassert_pause || snap.battery_mode != BatteryMode::EcoPaused {
+                    return Some(discharge_pause_writes(snap.device_type, 100));
+                }
+            }
+        }
+        TemperatureLimiterState::CoolingPending { consecutive } => {
+            if temperature <= config.recovery_threshold {
+                *consecutive += 1;
+                if *consecutive >= config.confirmation_readings {
+                    tracing::info!(
+                        temperature,
+                        threshold = config.recovery_threshold,
+                        "Temperature limiter: restoring Eco after cooling"
+                    );
+                    return release(state, saved);
+                }
+            } else if temperature >= config.high_threshold {
+                *state = TemperatureLimiterState::Paused;
+            }
+            if reassert_pause || snap.battery_mode != BatteryMode::EcoPaused {
+                return Some(discharge_pause_writes(snap.device_type, 100));
+            }
+        }
+    }
+
+    None
+}
+
 /// Check load discharge limiter and return register writes if the state
 /// machine transitions to Paused or back to Idle.
 ///
 /// Returns `Some(writes)` when a transition requires register writes,
 /// `None` otherwise.
+#[cfg(test)]
 pub(crate) fn check_load_limiter(
     snap: &InverterSnapshot,
     config: &LoadLimiterConfig,
@@ -492,31 +1100,47 @@ pub(crate) fn check_load_limiter(
     poll_interval_secs: u64,
     saved: &mut Option<LoadLimiterSaved>,
 ) -> Option<Vec<RegisterWrite>> {
+    check_load_limiter_with_other_pause(snap, config, state, poll_interval_secs, saved, false)
+}
+
+pub(crate) fn check_load_limiter_with_other_pause(
+    snap: &InverterSnapshot,
+    config: &LoadLimiterConfig,
+    state: &mut LoadLimiterState,
+    poll_interval_secs: u64,
+    saved: &mut Option<LoadLimiterSaved>,
+    other_active: bool,
+) -> Option<Vec<RegisterWrite>> {
+    let now = chrono::Local::now();
+    let now_minutes = now.hour() as u16 * 60 + now.minute() as u16;
+    check_load_limiter_at(
+        snap,
+        config,
+        state,
+        poll_interval_secs,
+        saved,
+        now_minutes,
+        other_active,
+    )
+}
+
+fn check_load_limiter_at(
+    snap: &InverterSnapshot,
+    config: &LoadLimiterConfig,
+    state: &mut LoadLimiterState,
+    poll_interval_secs: u64,
+    saved: &mut Option<LoadLimiterSaved>,
+    now_minutes: u16,
+    other_active: bool,
+) -> Option<Vec<RegisterWrite>> {
     if !config.enabled {
-        if matches!(*state, LoadLimiterState::Paused)
-            || matches!(*state, LoadLimiterState::PausedFromRestart)
-            || matches!(*state, LoadLimiterState::LowLoadPending { .. })
-        {
-            let restore_reserve = saved.take().map(|s| s.reserve).unwrap_or(4);
+        if state.is_actively_pausing() {
             tracing::info!(
-                restore_reserve,
-                "Load limiter: disabled while active, restoring Eco mode"
+                other_active,
+                "Load limiter: disabled while active, releasing pause ownership"
             );
             *state = LoadLimiterState::Idle;
-            return Some(vec![
-                RegisterWrite {
-                    address: HR_BATTERY_POWER_MODE,
-                    value: 1, // self-consumption
-                },
-                RegisterWrite {
-                    address: HR_ENABLE_DISCHARGE,
-                    value: 0,
-                },
-                RegisterWrite {
-                    address: HR_BATTERY_SOC_RESERVE,
-                    value: restore_reserve,
-                },
-            ]);
+            return release_shared_discharge_pause(snap, saved, other_active);
         }
         *state = LoadLimiterState::Idle;
         return None;
@@ -529,15 +1153,15 @@ pub(crate) fn check_load_limiter(
     if snap.battery_mode != BatteryMode::Eco && snap.battery_mode != BatteryMode::EcoPaused {
         // If we're Paused but the battery mode isn't one we manage,
         // someone changed it externally - return to Idle without writing.
-        if matches!(*state, LoadLimiterState::Paused)
-            || matches!(*state, LoadLimiterState::PausedFromRestart)
-            || matches!(*state, LoadLimiterState::LowLoadPending { .. })
-        {
+        if state.is_actively_pausing() {
             tracing::info!(
                 mode = ?snap.battery_mode,
                 "Load limiter: battery mode changed externally, returning to Idle"
             );
             *state = LoadLimiterState::Idle;
+            if !other_active {
+                *saved = None;
+            }
         }
         return None;
     }
@@ -548,8 +1172,6 @@ pub(crate) fn check_load_limiter(
     }
 
     // Check activation window.
-    let now = chrono::Local::now();
-    let now_minutes = now.hour() as u16 * 60 + now.minute() as u16;
     let start_mins = config.start_hour as u16 * 60 + config.start_minute as u16;
     let end_mins = config.end_hour as u16 * 60 + config.end_minute as u16;
 
@@ -564,31 +1186,19 @@ pub(crate) fn check_load_limiter(
     };
 
     if !in_window {
-        // Outside window - if we're Paused, restore Eco.
-        if matches!(*state, LoadLimiterState::Paused)
-            || matches!(*state, LoadLimiterState::PausedFromRestart)
-        {
-            let restore_reserve = saved.take().map(|s| s.reserve).unwrap_or(4);
+        // Outside the window, discard any unfinished high-load countdown. If
+        // the limiter already owns the pause (including the recovery delay),
+        // restore Eco immediately rather than leaving the battery paused until
+        // the activation window opens again.
+        if state.is_actively_pausing() {
             tracing::info!(
-                restore_reserve,
-                "Load limiter: outside activation window, restoring Eco"
+                other_active,
+                "Load limiter: outside activation window, releasing pause ownership"
             );
             *state = LoadLimiterState::Idle;
-            return Some(vec![
-                RegisterWrite {
-                    address: HR_BATTERY_POWER_MODE,
-                    value: 1, // self-consumption
-                },
-                RegisterWrite {
-                    address: HR_ENABLE_DISCHARGE,
-                    value: 0,
-                },
-                RegisterWrite {
-                    address: HR_BATTERY_SOC_RESERVE,
-                    value: restore_reserve,
-                },
-            ]);
+            return release_shared_discharge_pause(snap, saved, other_active);
         }
+        *state = LoadLimiterState::Idle;
         return None;
     }
 
@@ -621,25 +1231,16 @@ pub(crate) fn check_load_limiter(
                         "Load limiter: pausing battery discharge (Eco Paused)"
                     );
                     *state = LoadLimiterState::Paused;
-                    // Save the current reserve before pausing so we can
-                    // restore it later (survives crash/restart via disk).
-                    *saved = Some(LoadLimiterSaved {
-                        reserve: snap.battery_reserve as u16,
-                    });
-                    return Some(vec![
-                        RegisterWrite {
-                            address: HR_BATTERY_POWER_MODE,
-                            value: 1, // self-consumption
-                        },
-                        RegisterWrite {
-                            address: HR_ENABLE_DISCHARGE,
-                            value: 0,
-                        },
-                        RegisterWrite {
-                            address: HR_BATTERY_SOC_RESERVE,
-                            value: 100, // Eco Paused = reserve 100%
-                        },
-                    ]);
+                    // Capture the reserve only for the first limiter taking
+                    // ownership. A second limiter must preserve that baseline.
+                    if saved.is_none() && (4..100).contains(&(snap.battery_reserve as u16)) {
+                        *saved = Some(LoadLimiterSaved {
+                            reserve: snap.battery_reserve as u16,
+                        });
+                    }
+                    if !other_active {
+                        return Some(discharge_pause_writes(snap.device_type, 100));
+                    }
                 }
             } else {
                 tracing::info!(
@@ -674,18 +1275,18 @@ pub(crate) fn check_load_limiter(
                 tracing::info!(
                     "Load limiter: post-crash - battery already in Eco mode, restore confirmed"
                 );
-                // Consume the saved reserve on the final confirm so a
-                // stale value (e.g. the user's pre-pause 20% setting)
-                // doesn't linger in `load_limiter_saved_reserve` on
-                // disk. If the limiter is triggered again later the
-                // in-memory `saved` will be repopulated from the
-                // current snapshot, so this is safe to drop.
-                *saved = None;
+                if !other_active {
+                    *saved = None;
+                }
                 *state = LoadLimiterState::Idle;
                 return None;
             }
 
             if home_power <= threshold {
+                if other_active {
+                    *state = LoadLimiterState::Idle;
+                    return None;
+                }
                 let restore_reserve = saved.as_ref().map(|s| s.reserve).unwrap_or(4);
                 tracing::info!(
                     restore_reserve,
@@ -695,20 +1296,7 @@ pub(crate) fn check_load_limiter(
                 // busy on first poll after reconnect), the next poll will
                 // retry. Once the battery mode flips to Eco, the check
                 // above transitions to Idle.
-                return Some(vec![
-                    RegisterWrite {
-                        address: HR_BATTERY_POWER_MODE,
-                        value: 1,
-                    },
-                    RegisterWrite {
-                        address: HR_ENABLE_DISCHARGE,
-                        value: 0,
-                    },
-                    RegisterWrite {
-                        address: HR_BATTERY_SOC_RESERVE,
-                        value: restore_reserve,
-                    },
-                ]);
+                return Some(discharge_pause_writes(snap.device_type, restore_reserve));
             } else {
                 tracing::info!(
                     home_power,
@@ -722,27 +1310,13 @@ pub(crate) fn check_load_limiter(
             if home_power <= threshold {
                 *consecutive += 1;
                 if *consecutive >= debounce_count {
-                    let restore_reserve = saved.take().map(|s| s.reserve).unwrap_or(4);
                     tracing::info!(
                         consecutive = *consecutive,
-                        restore_reserve,
-                        "Load limiter: restoring Eco mode - load below threshold for full delay"
+                        other_active,
+                        "Load limiter: load recovered, releasing pause ownership"
                     );
                     *state = LoadLimiterState::Idle;
-                    return Some(vec![
-                        RegisterWrite {
-                            address: HR_BATTERY_POWER_MODE,
-                            value: 1, // self-consumption
-                        },
-                        RegisterWrite {
-                            address: HR_ENABLE_DISCHARGE,
-                            value: 0,
-                        },
-                        RegisterWrite {
-                            address: HR_BATTERY_SOC_RESERVE,
-                            value: restore_reserve,
-                        },
-                    ]);
+                    return release_shared_discharge_pause(snap, saved, other_active);
                 }
                 // Periodic progress log every ~20% of the delay
                 let every_nth = std::cmp::max(1, debounce_count / 5);
@@ -1169,6 +1743,205 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
+    // Adaptive Charge — pure transition logic
+    // -----------------------------------------------------------------
+
+    fn adaptive_snapshot(soc: u8, raw_rate: u8) -> InverterSnapshot {
+        InverterSnapshot {
+            soc,
+            charge_rate: raw_rate,
+            device_type: DeviceType::Gen3Hybrid,
+            device_type_code: "2001".to_string(),
+            inverter_serial: "CE234".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn adaptive_config() -> crate::settings::AdaptiveChargeConfig {
+        crate::settings::AdaptiveChargeConfig {
+            periods: vec![crate::settings::AdaptiveChargePeriod {
+                enabled: true,
+                all_day: false,
+                start_hour: 8,
+                start_minute: 0,
+                end_hour: 17,
+                end_minute: 0,
+                low_soc: 30,
+                recovery_soc: 40,
+                preferred_rate_percent: 40,
+                recovery_rate_percent: 100,
+            }],
+            confirmation_readings: 2,
+        }
+    }
+
+    #[test]
+    fn adaptive_rate_conversion_is_device_aware() {
+        assert_eq!(
+            normalized_charge_rate_to_raw(DeviceType::Gen3Hybrid, 41),
+            Some(21)
+        );
+        assert_eq!(
+            normalized_charge_rate_to_raw(DeviceType::ACCoupled, 41),
+            Some(41)
+        );
+        assert_eq!(
+            normalized_charge_rate_to_raw(DeviceType::ThreePhase, 41),
+            Some(41)
+        );
+        assert_eq!(normalized_charge_rate_to_raw(DeviceType::Gateway, 41), None);
+    }
+
+    #[test]
+    fn adaptive_preferred_captures_baseline_and_writes_limit() {
+        let snap = adaptive_snapshot(50, 50);
+        let mut state = AdaptiveChargeState::Inactive;
+        let mut saved = None;
+        let outcome = check_adaptive_charge(
+            &snap,
+            &adaptive_config(),
+            true,
+            &mut state,
+            &mut saved,
+            9 * 60,
+        );
+
+        assert!(matches!(
+            state,
+            AdaptiveChargeState::Preferred { period: 0, .. }
+        ));
+        assert_eq!(saved.as_ref().map(|value| value.raw_value), Some(50));
+        let write = outcome.write.expect("preferred rate differs from baseline");
+        assert_eq!(write.address, HR_BATTERY_CHARGE_LIMIT);
+        assert_eq!(write.value, 20);
+        assert_eq!(outcome.desired_rate_percent, Some(40));
+    }
+
+    #[test]
+    fn adaptive_low_soc_uses_confirmation_before_recovery() {
+        let config = adaptive_config();
+        let mut state = AdaptiveChargeState::Preferred {
+            period: 0,
+            low_count: 0,
+        };
+        let mut saved = Some(crate::settings::AdaptiveChargeSavedLimit {
+            inverter_serial: "CE234".to_string(),
+            device_type_code: "2001".to_string(),
+            register_address: HR_BATTERY_CHARGE_LIMIT,
+            raw_value: 50,
+        });
+        let low = adaptive_snapshot(30, 20);
+
+        let first = check_adaptive_charge(&low, &config, true, &mut state, &mut saved, 9 * 60);
+        assert!(matches!(
+            state,
+            AdaptiveChargeState::Preferred { low_count: 1, .. }
+        ));
+        assert_eq!(first.desired_rate_percent, Some(40));
+
+        let second = check_adaptive_charge(&low, &config, true, &mut state, &mut saved, 9 * 60);
+        assert!(matches!(state, AdaptiveChargeState::Recovery { .. }));
+        assert_eq!(second.desired_rate_percent, Some(100));
+        assert_eq!(second.write.expect("recovery raises limit").value, 50);
+    }
+
+    #[test]
+    fn adaptive_recovery_hysteresis_requires_recovery_confirmation() {
+        let config = adaptive_config();
+        let mut state = AdaptiveChargeState::Recovery {
+            period: 0,
+            high_count: 0,
+        };
+        let mut saved = Some(crate::settings::AdaptiveChargeSavedLimit {
+            inverter_serial: "CE234".to_string(),
+            device_type_code: "2001".to_string(),
+            register_address: HR_BATTERY_CHARGE_LIMIT,
+            raw_value: 50,
+        });
+
+        let middle = adaptive_snapshot(35, 50);
+        let outcome = check_adaptive_charge(&middle, &config, true, &mut state, &mut saved, 9 * 60);
+        assert!(matches!(
+            state,
+            AdaptiveChargeState::Recovery { high_count: 0, .. }
+        ));
+        assert!(outcome.write.is_none());
+
+        let high = adaptive_snapshot(40, 50);
+        let _ = check_adaptive_charge(&high, &config, true, &mut state, &mut saved, 9 * 60);
+        assert!(matches!(
+            state,
+            AdaptiveChargeState::Recovery { high_count: 1, .. }
+        ));
+        let second = check_adaptive_charge(&high, &config, true, &mut state, &mut saved, 9 * 60);
+        assert!(matches!(state, AdaptiveChargeState::Preferred { .. }));
+        assert_eq!(second.write.expect("preferred rate restored").value, 20);
+    }
+
+    #[test]
+    fn adaptive_outside_window_and_disable_restore_baseline() {
+        let config = adaptive_config();
+        let mut state = AdaptiveChargeState::Recovery {
+            period: 0,
+            high_count: 0,
+        };
+        let mut saved = Some(crate::settings::AdaptiveChargeSavedLimit {
+            inverter_serial: "CE234".to_string(),
+            device_type_code: "2001".to_string(),
+            register_address: HR_BATTERY_CHARGE_LIMIT,
+            raw_value: 35,
+        });
+        let snap = adaptive_snapshot(50, 50);
+
+        let outside = check_adaptive_charge(&snap, &config, true, &mut state, &mut saved, 18 * 60);
+        assert_eq!(outside.write.expect("outside restores baseline").value, 35);
+        assert_eq!(state, AdaptiveChargeState::OutsideWindow);
+
+        let restored = adaptive_snapshot(50, 35);
+        let disabled =
+            check_adaptive_charge(&restored, &config, false, &mut state, &mut saved, 18 * 60);
+        assert!(disabled.write.is_none());
+        assert!(saved.is_none());
+        assert_eq!(state, AdaptiveChargeState::Inactive);
+    }
+
+    #[test]
+    fn adaptive_auto_winter_restores_baseline_then_suspends() {
+        let config = adaptive_config();
+        let mut state = AdaptiveChargeState::Preferred {
+            period: 0,
+            low_count: 0,
+        };
+        let mut saved = Some(crate::settings::AdaptiveChargeSavedLimit {
+            inverter_serial: "CE234".to_string(),
+            device_type_code: "2001".to_string(),
+            register_address: HR_BATTERY_CHARGE_LIMIT,
+            raw_value: 45,
+        });
+        let mut snap = adaptive_snapshot(50, 20);
+        snap.auto_winter_active = true;
+
+        let outcome = check_adaptive_charge(&snap, &config, true, &mut state, &mut saved, 9 * 60);
+        assert_eq!(outcome.write.expect("winter restores baseline").value, 45);
+        assert_eq!(
+            state,
+            AdaptiveChargeState::SuspendedAutoWinter {
+                restore_pending: true
+            }
+        );
+
+        snap.charge_rate = 45;
+        let confirmed = check_adaptive_charge(&snap, &config, true, &mut state, &mut saved, 9 * 60);
+        assert!(confirmed.write.is_none());
+        assert_eq!(
+            state,
+            AdaptiveChargeState::SuspendedAutoWinter {
+                restore_pending: false
+            }
+        );
+    }
+
+    // -----------------------------------------------------------------
     // check_auto_winter — pure transition logic
     // -----------------------------------------------------------------
 
@@ -1326,6 +2099,228 @@ mod tests {
             Some(restored),
             "restored saved values must survive activation"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Inverter temperature limiter
+    // -----------------------------------------------------------------
+
+    fn temperature_config() -> TemperatureLimiterConfig {
+        TemperatureLimiterConfig {
+            enabled: true,
+            high_threshold: 60.0,
+            recovery_threshold: 55.0,
+            confirmation_readings: 2,
+        }
+    }
+
+    #[test]
+    fn temperature_limiter_validates_hysteresis_and_confirmation_bounds() {
+        assert!(temperature_config().validate().is_ok());
+        let mut invalid = temperature_config();
+        invalid.recovery_threshold = 60.0;
+        assert!(invalid.validate().is_err());
+        invalid = temperature_config();
+        invalid.confirmation_readings = 0;
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn temperature_limiter_overrides_timed_export_and_recovers_to_eco() {
+        let mut state = TemperatureLimiterState::Idle;
+        let mut saved = None;
+        let hot = InverterSnapshot {
+            battery_mode: BatteryMode::TimedExport,
+            battery_reserve: 23,
+            inverter_temperature: 62.0,
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        };
+
+        assert!(check_temperature_limiter(
+            &hot,
+            &temperature_config(),
+            &mut state,
+            &mut saved,
+            false,
+        )
+        .is_none());
+        let pause_writes =
+            check_temperature_limiter(&hot, &temperature_config(), &mut state, &mut saved, false)
+                .expect("second hot reading pauses");
+        assert_eq!(state, TemperatureLimiterState::Paused);
+        assert_eq!(saved, Some(LoadLimiterSaved { reserve: 23 }));
+        assert!(pause_writes
+            .iter()
+            .any(|write| write.address == HR_BATTERY_POWER_MODE && write.value == 1));
+        assert!(pause_writes
+            .iter()
+            .any(|write| write.address == HR_BATTERY_SOC_RESERVE && write.value == 100));
+
+        let cool = InverterSnapshot {
+            battery_mode: BatteryMode::EcoPaused,
+            inverter_temperature: 54.0,
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        };
+        assert!(check_temperature_limiter(
+            &cool,
+            &temperature_config(),
+            &mut state,
+            &mut saved,
+            false,
+        )
+        .is_none());
+        let restore_writes =
+            check_temperature_limiter(&cool, &temperature_config(), &mut state, &mut saved, false)
+                .expect("second cool reading restores");
+        assert_eq!(state, TemperatureLimiterState::PausedFromRestart);
+        assert_eq!(saved, Some(LoadLimiterSaved { reserve: 23 }));
+        assert!(restore_writes
+            .iter()
+            .any(|write| write.address == HR_BATTERY_SOC_RESERVE && write.value == 23));
+
+        let restored = InverterSnapshot {
+            battery_mode: BatteryMode::Eco,
+            inverter_temperature: 54.0,
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        };
+        assert!(check_temperature_limiter(
+            &restored,
+            &temperature_config(),
+            &mut state,
+            &mut saved,
+            false,
+        )
+        .is_none());
+        assert_eq!(state, TemperatureLimiterState::Idle);
+        assert!(saved.is_none());
+    }
+
+    #[test]
+    fn temperature_limiter_does_not_restore_while_load_limiter_owns_pause() {
+        let cool = InverterSnapshot {
+            battery_mode: BatteryMode::EcoPaused,
+            inverter_temperature: 54.0,
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        };
+        let mut state = TemperatureLimiterState::CoolingPending { consecutive: 1 };
+        let mut saved = Some(LoadLimiterSaved { reserve: 19 });
+        let writes =
+            check_temperature_limiter(&cool, &temperature_config(), &mut state, &mut saved, true);
+        assert!(writes.is_none());
+        assert_eq!(state, TemperatureLimiterState::Idle);
+        assert_eq!(saved, Some(LoadLimiterSaved { reserve: 19 }));
+    }
+
+    #[test]
+    fn temperature_limiter_reasserts_confirmed_pause_each_poll() {
+        let hot_paused = InverterSnapshot {
+            battery_mode: BatteryMode::EcoPaused,
+            inverter_temperature: 61.0,
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        };
+        let mut state = TemperatureLimiterState::Paused;
+        let mut saved = Some(LoadLimiterSaved { reserve: 17 });
+
+        let writes = check_temperature_limiter_after_automation(
+            &hot_paused,
+            &temperature_config(),
+            &mut state,
+            &mut saved,
+            true,
+            true,
+        )
+        .expect("thermal pause is reasserted after other automation");
+
+        assert_eq!(state, TemperatureLimiterState::Paused);
+        assert!(writes
+            .iter()
+            .any(|write| write.address == HR_BATTERY_SOC_RESERVE && write.value == 100));
+    }
+
+    #[test]
+    fn temperature_limiter_restart_reasserts_hot_pause_and_retries_cool_restore() {
+        let mut saved = Some(LoadLimiterSaved { reserve: 17 });
+        let hot = InverterSnapshot {
+            battery_mode: BatteryMode::TimedExport,
+            inverter_temperature: 61.0,
+            battery_reserve: 17,
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        };
+        let mut state = TemperatureLimiterState::PausedFromRestart;
+        let writes =
+            check_temperature_limiter(&hot, &temperature_config(), &mut state, &mut saved, false)
+                .expect("hot restart reasserts pause");
+        assert_eq!(state, TemperatureLimiterState::Paused);
+        assert!(writes
+            .iter()
+            .any(|write| write.address == HR_BATTERY_SOC_RESERVE && write.value == 100));
+
+        let cool = InverterSnapshot {
+            battery_mode: BatteryMode::EcoPaused,
+            inverter_temperature: 50.0,
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        };
+        state = TemperatureLimiterState::PausedFromRestart;
+        let writes =
+            check_temperature_limiter(&cool, &temperature_config(), &mut state, &mut saved, false)
+                .expect("cool restart retries restore");
+        assert_eq!(state, TemperatureLimiterState::PausedFromRestart);
+        assert!(writes
+            .iter()
+            .any(|write| write.address == HR_BATTERY_SOC_RESERVE && write.value == 17));
+    }
+
+    #[test]
+    fn temperature_limiter_uses_three_phase_pause_registers() {
+        let hot = InverterSnapshot {
+            inverter_temperature: 65.0,
+            battery_reserve: 20,
+            device_type: DeviceType::ThreePhase,
+            ..Default::default()
+        };
+        let config = TemperatureLimiterConfig {
+            confirmation_readings: 1,
+            ..temperature_config()
+        };
+        let mut state = TemperatureLimiterState::Idle;
+        let mut saved = None;
+        let writes = check_temperature_limiter(&hot, &config, &mut state, &mut saved, false)
+            .expect("hot three-phase inverter pauses");
+        assert!(writes
+            .iter()
+            .any(|write| { write.address == HR_3PH_FORCE_DISCHARGE_ENABLE && write.value == 0 }));
+        assert!(writes
+            .iter()
+            .any(|write| { write.address == HR_3PH_BATTERY_SOC_RESERVE && write.value == 100 }));
+        assert!(!writes
+            .iter()
+            .any(|write| write.address == HR_BATTERY_SOC_RESERVE));
+    }
+
+    #[test]
+    fn temperature_limiter_ignores_non_finite_reading() {
+        let snapshot = InverterSnapshot {
+            inverter_temperature: f32::NAN,
+            ..Default::default()
+        };
+        let mut state = TemperatureLimiterState::Idle;
+        let mut saved = None;
+        assert!(check_temperature_limiter(
+            &snapshot,
+            &temperature_config(),
+            &mut state,
+            &mut saved,
+            false,
+        )
+        .is_none());
+        assert_eq!(state, TemperatureLimiterState::Idle);
     }
 
     // -----------------------------------------------------------------
@@ -1635,6 +2630,25 @@ mod tests {
     }
 
     #[test]
+    fn load_limiter_recovery_does_not_restore_while_temperature_limiter_is_active() {
+        let config = ll_config(3000, 3);
+        let mut state = LoadLimiterState::LowLoadPending { consecutive: 2 };
+        let mut saved = Some(LoadLimiterSaved { reserve: 20 });
+        let low = InverterSnapshot {
+            battery_mode: BatteryMode::EcoPaused,
+            home_power: 1000,
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        };
+
+        let writes =
+            check_load_limiter_with_other_pause(&low, &config, &mut state, 60, &mut saved, true);
+        assert!(writes.is_none());
+        assert_eq!(state, LoadLimiterState::Idle);
+        assert_eq!(saved, Some(LoadLimiterSaved { reserve: 20 }));
+    }
+
+    #[test]
     fn load_limiter_low_load_pending_goes_back_to_paused_when_load_rises() {
         let config = ll_config(3000, 5);
         let mut state = LoadLimiterState::LowLoadPending { consecutive: 2 };
@@ -1688,40 +2702,68 @@ mod tests {
     }
 
     #[test]
-    fn load_limiter_outside_window_restores_with_saved_reserve() {
-        // Use a window that's almost certainly inactive: start=0:00,
-        // end=0:01. With end_mins (1) > start_mins (0), the condition
-        // is `now_minutes >= 0 && now_minutes < 1`, which is only true
-        // during the 00:00:00–00:00:59 minute of each day. For any
-        // other time, in_window is false.
+    fn load_limiter_active_state_includes_recovery_delay() {
+        assert!(LoadLimiterState::Paused.is_actively_pausing());
+        assert!(LoadLimiterState::PausedFromRestart.is_actively_pausing());
+        assert!(LoadLimiterState::LowLoadPending { consecutive: 2 }.is_actively_pausing());
+        assert!(!LoadLimiterState::Idle.is_actively_pausing());
+        assert!(!LoadLimiterState::HighLoadPending { consecutive: 2 }.is_actively_pausing());
+    }
+
+    #[test]
+    fn load_limiter_outside_window_restores_recovery_with_saved_reserve() {
         let config = LoadLimiterConfig {
             enabled: true,
             threshold_w: 3000,
             trigger_delay_minutes: 5,
-            start_hour: 0,
+            start_hour: 9,
             start_minute: 0,
-            end_hour: 0,
-            end_minute: 1,
+            end_hour: 17,
+            end_minute: 0,
         };
-        let mut state = LoadLimiterState::PausedFromRestart;
+        let mut state = LoadLimiterState::LowLoadPending { consecutive: 2 };
         let mut saved = Some(LoadLimiterSaved { reserve: 20 });
         let snap = InverterSnapshot {
             battery_mode: BatteryMode::EcoPaused,
-            home_power: 5000,
+            home_power: 1000,
             ..Default::default()
         };
 
-        // Outside window — restore with saved reserve. The !in_window
-        // branch handles PausedFromRestart by restoring Eco and
-        // consuming the saved reserve, regardless of current load
-        // (the app just restarted and needs to re-establish its state).
-        let writes = check_load_limiter(&snap, &config, &mut state, 60, &mut saved)
-            .expect("restore writes returned");
+        // At 18:00 the battery is still paused during its recovery delay.
+        // Leaving the activation window must restore Eco immediately.
+        let writes =
+            check_load_limiter_at(&snap, &config, &mut state, 60, &mut saved, 18 * 60, false)
+                .expect("restore writes returned");
         assert_eq!(state, LoadLimiterState::Idle);
         assert!(writes
             .iter()
             .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 20));
         assert!(saved.is_none(), "saved must be consumed on restore");
+    }
+
+    #[test]
+    fn load_limiter_outside_window_discards_high_load_countdown() {
+        let config = LoadLimiterConfig {
+            enabled: true,
+            threshold_w: 3000,
+            trigger_delay_minutes: 5,
+            start_hour: 9,
+            start_minute: 0,
+            end_hour: 17,
+            end_minute: 0,
+        };
+        let mut state = LoadLimiterState::HighLoadPending { consecutive: 4 };
+        let mut saved = None;
+        let snap = InverterSnapshot {
+            battery_mode: BatteryMode::Eco,
+            home_power: 5000,
+            ..Default::default()
+        };
+
+        let writes =
+            check_load_limiter_at(&snap, &config, &mut state, 60, &mut saved, 18 * 60, false);
+        assert!(writes.is_none());
+        assert_eq!(state, LoadLimiterState::Idle);
     }
 
     // -----------------------------------------------------------------

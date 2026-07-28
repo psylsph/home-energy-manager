@@ -2019,11 +2019,70 @@ pub async fn set_reserve(
     }
 }
 
+fn supports_discharge_cutoff(device_type: DeviceType) -> bool {
+    matches!(
+        device_type,
+        DeviceType::Gen1Hybrid
+            | DeviceType::Gen2Hybrid
+            | DeviceType::Gen3Hybrid
+            | DeviceType::PolarHybrid
+            | DeviceType::Gen3PlusHybrid
+            | DeviceType::ACCoupled
+            | DeviceType::ACCoupledMk2
+            | DeviceType::AllInOne6kW
+            | DeviceType::AllInOne3_6kW
+            | DeviceType::AllInOne5kW
+            | DeviceType::Gen4Hybrid
+    )
+}
+
+/// POST /api/control/discharge-cutoff — set the hard timed-mode SOC floor.
+pub async fn set_discharge_cutoff(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<Value>) {
+    let Some(soc) = body.get("soc").and_then(|value| value.as_u64()) else {
+        return error_response("Missing 'soc' field (4-100)");
+    };
+    if soc > u16::MAX as u64 {
+        return error_response("Discharge cutoff must be 4-100%");
+    }
+    let device_type = latest_device_type(&state).await;
+    if !supports_discharge_cutoff(device_type) {
+        return error_response("Discharge cutoff is not supported by this inverter");
+    }
+    match (ControlCommand::SetPowerReserve {
+        reserve: soc as u16,
+    })
+    .encode()
+    {
+        Ok(writes) => {
+            queue_writes(&state, writes).await;
+            ok_response(&format!("Discharge cutoff set to {soc}%"))
+        }
+        Err(e) => error_response(&format!("Validation error: {e}")),
+    }
+}
+
 /// POST /api/control/charge-rate — set battery charge limit percentage.
 pub async fn set_charge_rate(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
+    let settings = crate::settings::Settings::load();
+    if settings.adaptive_charge_enabled || settings.adaptive_charge_saved_limit.is_some() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "error": if settings.adaptive_charge_enabled {
+                    "Charge rate is controlled by Adaptive Charge"
+                } else {
+                    "Adaptive Charge is restoring the previous charge rate"
+                }
+            })),
+        );
+    }
     let limit: u16 = match body["limit"].as_u64() {
         Some(r) => r as u16,
         None => return error_response("Missing 'limit' field (0-50)"),
@@ -2245,22 +2304,47 @@ pub async fn pause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, J
 /// Eco Paused is represented as self-consumption mode with discharge disabled
 /// and SOC reserve at 100%. To unpause, keep the safe Eco/discharge-disabled
 /// flags but restore the reserve below 100% so the battery can discharge to
-/// serve house load again. If the load limiter captured a previous reserve,
-/// use it; otherwise fall back to the app's normal 4% reserve.
+/// serve house load again. If a limiter captured a previous reserve, use it;
+/// otherwise fall back to the app's normal 4% reserve. A manual unpause while
+/// either limiter owns the pause disables all active pause limiters, making
+/// the override lasting instead of immediately starting another countdown.
 pub async fn unpause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let device_type = latest_device_type(&state).await;
-    let restore_reserve = {
+    // Follow the poll loop's load config → load state → temperature config →
+    // temperature state → shared saved reserve lock order.
+    let (restore_reserve, disabled_load_limiter, disabled_temperature_limiter) = {
+        let mut load_config = state.load_limiter_config.lock().await;
+        let mut load_state = state.load_limiter_state.lock().await;
+        let mut temperature_config = state.temperature_limiter_config.lock().await;
+        let mut temperature_state = state.temperature_limiter_state.lock().await;
         let mut saved = state.load_limiter_saved.lock().await;
-        saved.take().map(|s| s.reserve).unwrap_or(4).clamp(4, 99)
+        let disabled_load_limiter = load_state.is_actively_pausing();
+        let disabled_temperature_limiter = temperature_state.is_actively_pausing();
+        if disabled_load_limiter {
+            load_config.enabled = false;
+        }
+        if disabled_temperature_limiter {
+            temperature_config.enabled = false;
+        }
+        *load_state = crate::inverter::poll::LoadLimiterState::Idle;
+        *temperature_state = crate::inverter::poll::TemperatureLimiterState::Idle;
+        let restore_reserve = saved.take().map(|s| s.reserve).unwrap_or(4).clamp(4, 99);
+        (
+            restore_reserve,
+            disabled_load_limiter,
+            disabled_temperature_limiter,
+        )
     };
 
-    {
-        let mut ll_state = state.load_limiter_state.lock().await;
-        *ll_state = crate::inverter::poll::LoadLimiterState::Idle;
-    }
-
     let mut settings = crate::settings::Settings::load();
+    if disabled_load_limiter {
+        settings.load_limiter_enabled = false;
+    }
+    if disabled_temperature_limiter {
+        settings.temperature_limiter_enabled = false;
+    }
     settings.load_limiter_active_persisted = false;
+    settings.temperature_limiter_active_persisted = false;
     settings.load_limiter_saved_reserve = None;
     if let Err(e) = settings.save() {
         tracing::warn!("Failed to persist load limiter reset during manual unpause: {e}");
@@ -2281,11 +2365,22 @@ pub async fn unpause_battery(State(state): State<Arc<AppState>>) -> (StatusCode,
         Err(e) => return error_response(&format!("Validation error: {}", e)),
     }
 
-    tracing::info!(restore_reserve, "UnpauseBattery encoded: {:?}", writes);
+    tracing::info!(
+        restore_reserve,
+        disabled_load_limiter,
+        disabled_temperature_limiter,
+        "UnpauseBattery encoded: {:?}",
+        writes
+    );
     queue_writes(&state, writes).await;
-    ok_response(&format!(
-        "Battery unpaused (reserve restored to {restore_reserve}%)"
-    ))
+    let message = if disabled_load_limiter || disabled_temperature_limiter {
+        format!(
+            "Active limiter(s) disabled and battery unpaused (reserve restored to {restore_reserve}%)"
+        )
+    } else {
+        format!("Battery unpaused (reserve restored to {restore_reserve}%)")
+    };
+    ok_response(&message)
 }
 
 /// POST /api/control/force-charge — enable charging with target SOC.
@@ -3488,6 +3583,189 @@ pub async fn evc_discover(State(_state): State<Arc<AppState>>) -> (StatusCode, J
 }
 
 // ---------------------------------------------------------------------------
+// Unified charging mode + Adaptive Charge endpoints (issue #234)
+// ---------------------------------------------------------------------------
+
+fn parse_cosy_slots(value: Option<&serde_json::Value>) -> Option<Vec<crate::settings::CosySlot>> {
+    value?.as_array().map(|slots| {
+        slots
+            .iter()
+            .map(|slot| crate::settings::CosySlot {
+                enabled: slot["enabled"].as_bool().unwrap_or(false),
+                start_hour: slot["start_hour"]
+                    .as_u64()
+                    .map(|value| value.min(23))
+                    .unwrap_or(0) as u8,
+                start_minute: slot["start_minute"]
+                    .as_u64()
+                    .map(|value| value.min(59))
+                    .unwrap_or(0) as u8,
+                end_hour: slot["end_hour"]
+                    .as_u64()
+                    .map(|value| value.min(23))
+                    .unwrap_or(0) as u8,
+                end_minute: slot["end_minute"]
+                    .as_u64()
+                    .map(|value| value.min(59))
+                    .unwrap_or(0) as u8,
+                target_soc: slot["target_soc"].as_u64().unwrap_or(100).clamp(4, 100) as u8,
+            })
+            .collect()
+    })
+}
+
+fn parse_charging_mode(value: &str) -> Option<crate::settings::ChargingMode> {
+    use crate::settings::ChargingMode;
+    match value {
+        "standard" => Some(ChargingMode::Standard),
+        "cosy" => Some(ChargingMode::Cosy),
+        "agile" => Some(ChargingMode::Agile),
+        "agile_charge" => Some(ChargingMode::AgileCharge),
+        "agile_discharge" => Some(ChargingMode::AgileDischarge),
+        "adaptive" => Some(ChargingMode::Adaptive),
+        _ => None,
+    }
+}
+
+fn apply_charging_mode(
+    settings: &mut crate::settings::Settings,
+    mode: crate::settings::ChargingMode,
+) {
+    use crate::settings::{AgileScope, ChargingMode};
+    settings.cosy_enabled = matches!(mode, ChargingMode::Cosy);
+    settings.adaptive_charge_enabled = matches!(mode, ChargingMode::Adaptive);
+    settings.agile_scope = match mode {
+        ChargingMode::Agile => AgileScope::Full,
+        ChargingMode::AgileCharge => AgileScope::ChargeOnly,
+        ChargingMode::AgileDischarge => AgileScope::DischargeOnly,
+        _ => AgileScope::Off,
+    };
+    settings.agile_enabled = settings.agile_scope.is_enabled();
+    if !settings.cosy_enabled {
+        settings.cosy_active_persisted = false;
+    }
+}
+
+pub async fn get_charging_mode(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let settings = crate::settings::Settings::load();
+    let adaptive_state = state.adaptive_charge_state.lock().await.clone();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "mode": crate::settings::charging_mode_for_settings(&settings),
+            "adaptive_state": adaptive_state.api_name(),
+            "active_period": adaptive_state.active_period(),
+        })),
+    )
+}
+
+pub async fn set_charging_mode(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<Value>) {
+    let Some(mode_name) = body.get("mode").and_then(|value| value.as_str()) else {
+        return error_response("Missing 'mode' field");
+    };
+    let Some(mode) = parse_charging_mode(mode_name) else {
+        return error_response("Unknown charging mode");
+    };
+
+    let mut settings = crate::settings::Settings::load();
+    let previous_scope = crate::settings::agile_scope_for_settings(&settings);
+    if mode == crate::settings::ChargingMode::Adaptive {
+        if let Err(e) = settings.adaptive_charge_config.validate() {
+            return error_response(&format!("Invalid Adaptive Charge config: {e}"));
+        }
+        let snapshot = state.latest_snapshot.lock().await.clone();
+        let Some(snapshot) = snapshot else {
+            return error_response("Connect to the inverter before enabling Adaptive Charge");
+        };
+        if crate::inverter::state_machines::adaptive_charge_register(snapshot.device_type).is_none()
+        {
+            return error_response("Adaptive Charge is not supported by this inverter");
+        }
+    }
+
+    apply_charging_mode(&mut settings, mode);
+    if let Some(slots) = parse_cosy_slots(body.get("cosy_slots")) {
+        settings.cosy_slots = slots;
+    }
+    if let Err(e) = settings.save() {
+        return server_error(&format!("Failed to save charging mode: {e}"));
+    }
+
+    if previous_scope != crate::settings::AgileScope::Off
+        && !matches!(
+            mode,
+            crate::settings::ChargingMode::Agile
+                | crate::settings::ChargingMode::AgileCharge
+                | crate::settings::ChargingMode::AgileDischarge
+        )
+    {
+        let device_type = latest_device_type(&state).await;
+        let command = if device_type.uses_three_phase_schedule_slots() {
+            ControlCommand::ThreePhaseAgileClearActiveSlot
+        } else {
+            ControlCommand::AgileClearActiveSlot
+        };
+        if let Ok(writes) = command.encode() {
+            queue_writes(&state, writes).await;
+        }
+    }
+
+    if matches!(
+        mode,
+        crate::settings::ChargingMode::Agile
+            | crate::settings::ChargingMode::AgileCharge
+            | crate::settings::ChargingMode::AgileDischarge
+    ) {
+        queue_cached_agile_action_for_settings(&state, &settings).await;
+    }
+    state.write_notify.notify_one();
+    ok_response("Charging mode updated")
+}
+
+pub async fn get_adaptive_charge(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let settings = crate::settings::Settings::load();
+    let runtime = state.adaptive_charge_state.lock().await.clone();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "data": {
+                "enabled": settings.adaptive_charge_enabled,
+                "config": settings.adaptive_charge_config,
+                "state": runtime.api_name(),
+                "active_period": runtime.active_period(),
+            }
+        })),
+    )
+}
+
+pub async fn set_adaptive_charge(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<Value>) {
+    let config_value = body.get("config").cloned().unwrap_or(body);
+    let config: crate::settings::AdaptiveChargeConfig = match serde_json::from_value(config_value) {
+        Ok(config) => config,
+        Err(e) => return error_response(&format!("Invalid Adaptive Charge config: {e}")),
+    };
+    if let Err(e) = config.validate() {
+        return error_response(&e);
+    }
+
+    let mut settings = crate::settings::Settings::load();
+    settings.adaptive_charge_config = config;
+    if let Err(e) = settings.save() {
+        return server_error(&format!("Failed to save Adaptive Charge config: {e}"));
+    }
+    state.write_notify.notify_one();
+    ok_response("Adaptive Charge config updated")
+}
+
+// ---------------------------------------------------------------------------
 // Cosy charging endpoints
 // ---------------------------------------------------------------------------
 
@@ -3516,29 +3794,15 @@ pub async fn set_cosy(
     let previous_agile_scope = crate::settings::agile_scope_for_settings(&app_settings);
     app_settings.cosy_enabled = enabled;
     if enabled {
+        app_settings.adaptive_charge_enabled = false;
         app_settings.agile_scope = crate::settings::AgileScope::Off;
         app_settings.agile_enabled = false;
     }
 
-    if let Some(slots) = body["slots"].as_array() {
-        app_settings.cosy_slots = slots
-            .iter()
-            .map(|s| crate::settings::CosySlot {
-                enabled: s["enabled"].as_bool().unwrap_or(false),
-                start_hour: s["start_hour"].as_u64().map(|v| v.min(23)).unwrap_or(0) as u8,
-                start_minute: s["start_minute"].as_u64().map(|v| v.min(59)).unwrap_or(0) as u8,
-                end_hour: s["end_hour"].as_u64().map(|v| v.min(23)).unwrap_or(0) as u8,
-                end_minute: s["end_minute"].as_u64().map(|v| v.min(59)).unwrap_or(0) as u8,
-                // Clamp on the u64 BEFORE the `as u8` truncation: a forged
-                // value like 1000 would otherwise land as 232 in the u8, then
-                // be written raw to HR_CHARGE_TARGET_SOC / HR_CHARGE_TARGET_SOC_1
-                // by `cosy_slot_register_writes` (which bypasses the encoder's
-                // validate_range). Clamping here keeps the persisted config —
-                // and the eventual register write — inside the safe [4, 100]
-                // band that protects the battery. Matches `auto_winter`.
-                target_soc: s["target_soc"].as_u64().unwrap_or(100).clamp(4, 100) as u8,
-            })
-            .collect();
+    if let Some(slots) = parse_cosy_slots(body.get("slots")) {
+        // `parse_cosy_slots` clamps before narrowing to u8, keeping eventual
+        // register writes inside the inverter-safe ranges.
+        app_settings.cosy_slots = slots;
     }
 
     if let Err(e) = app_settings.save() {
@@ -3773,6 +4037,7 @@ pub async fn set_agile(
     if scope_update_requested && new_scope != AgileScope::Off {
         app_settings.cosy_enabled = false;
         app_settings.cosy_active_persisted = false;
+        app_settings.adaptive_charge_enabled = false;
     }
 
     if let Some(r) = body["region"].as_str() {
@@ -3938,6 +4203,69 @@ pub async fn set_load_limiter(
     }
 
     ok_response("Load limiter config updated")
+}
+
+// ---------------------------------------------------------------------------
+// Inverter temperature limiter endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /api/temperature-limiter — current config and runtime state.
+pub async fn get_temperature_limiter(
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<Value>) {
+    let config = state.temperature_limiter_config.lock().await.clone();
+    let limiter_state = state.temperature_limiter_state.lock().await.clone();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "data": { "config": config, "state": limiter_state }
+        })),
+    )
+}
+
+/// POST /api/temperature-limiter — update temperature protection settings.
+pub async fn set_temperature_limiter(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<Value>) {
+    let mut candidate = state.temperature_limiter_config.lock().await.clone();
+    if let Some(value) = body.get("enabled").and_then(|value| value.as_bool()) {
+        candidate.enabled = value;
+    }
+    if let Some(value) = body.get("high_threshold").and_then(|value| value.as_f64()) {
+        candidate.high_threshold = value as f32;
+    }
+    if let Some(value) = body
+        .get("recovery_threshold")
+        .and_then(|value| value.as_f64())
+    {
+        candidate.recovery_threshold = value as f32;
+    }
+    if let Some(value) = body
+        .get("confirmation_readings")
+        .and_then(|value| value.as_u64())
+    {
+        if value > 30 {
+            return error_response("Confirmation readings must be between 1 and 30");
+        }
+        candidate.confirmation_readings = value as u32;
+    }
+    if let Err(error) = candidate.validate() {
+        return error_response(&error);
+    }
+
+    let mut app_settings = crate::settings::Settings::load();
+    app_settings.temperature_limiter_enabled = candidate.enabled;
+    app_settings.temperature_limiter_high_threshold = candidate.high_threshold;
+    app_settings.temperature_limiter_recovery_threshold = candidate.recovery_threshold;
+    app_settings.temperature_limiter_confirmation_readings = candidate.confirmation_readings;
+    if let Err(error) = app_settings.save() {
+        return server_error(&format!("Failed to save: {error}"));
+    }
+
+    *state.temperature_limiter_config.lock().await = candidate;
+    ok_response("Temperature limiter config updated")
 }
 
 // ---------------------------------------------------------------------------
@@ -5690,8 +6018,14 @@ mod tests {
             };
 
             let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            state.load_limiter_config.lock().await.enabled = true;
             *state.load_limiter_state.lock().await = LoadLimiterState::Paused;
             *state.load_limiter_saved.lock().await = Some(LoadLimiterSaved { reserve: 23 });
+            let mut settings = crate::settings::Settings::load();
+            settings.load_limiter_enabled = true;
+            settings.load_limiter_active_persisted = true;
+            settings.load_limiter_saved_reserve = Some(23);
+            settings.save().expect("seed load limiter settings");
 
             let _ = unpause_battery(State(state.clone())).await;
             let writes = drain_pending_writes(&state).await;
@@ -5701,6 +6035,11 @@ mod tests {
                 LoadLimiterState::Idle
             );
             assert!(state.load_limiter_saved.lock().await.is_none());
+            assert!(!state.load_limiter_config.lock().await.enabled);
+            let persisted = crate::settings::Settings::load();
+            assert!(!persisted.load_limiter_enabled);
+            assert!(!persisted.load_limiter_active_persisted);
+            assert!(persisted.load_limiter_saved_reserve.is_none());
             assert!(writes
                 .iter()
                 .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1));
@@ -5710,6 +6049,69 @@ mod tests {
             assert!(writes
                 .iter()
                 .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 23));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unpause_battery_disables_active_temperature_limiter() {
+        with_isolated_config_dir_async(|| async {
+            use crate::inverter::poll::{LoadLimiterSaved, TemperatureLimiterState};
+
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            state.temperature_limiter_config.lock().await.enabled = true;
+            *state.temperature_limiter_state.lock().await = TemperatureLimiterState::Paused;
+            *state.load_limiter_saved.lock().await = Some(LoadLimiterSaved { reserve: 18 });
+            let mut settings = crate::settings::Settings::load();
+            settings.temperature_limiter_enabled = true;
+            settings.temperature_limiter_active_persisted = true;
+            settings.load_limiter_saved_reserve = Some(18);
+            settings.save().expect("seed temperature limiter settings");
+
+            let _ = unpause_battery(State(state.clone())).await;
+            assert!(!state.temperature_limiter_config.lock().await.enabled);
+            assert_eq!(
+                *state.temperature_limiter_state.lock().await,
+                TemperatureLimiterState::Idle
+            );
+            let persisted = crate::settings::Settings::load();
+            assert!(!persisted.temperature_limiter_enabled);
+            assert!(!persisted.temperature_limiter_active_persisted);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn temperature_limiter_config_validates_and_persists() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "enabled": true,
+                "high_threshold": 65.0,
+                "recovery_threshold": 57.0,
+                "confirmation_readings": 4
+            });
+            let (status, _) = set_temperature_limiter(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let config = state.temperature_limiter_config.lock().await.clone();
+            assert!(config.enabled);
+            assert_eq!(config.high_threshold, 65.0);
+            assert_eq!(config.recovery_threshold, 57.0);
+            assert_eq!(config.confirmation_readings, 4);
+            let persisted = crate::settings::Settings::load();
+            assert!(persisted.temperature_limiter_enabled);
+            assert_eq!(persisted.temperature_limiter_high_threshold, 65.0);
+
+            let invalid = serde_json::json!({
+                "high_threshold": 55.0,
+                "recovery_threshold": 55.0
+            });
+            let (status, _) = set_temperature_limiter(State(state.clone()), Json(invalid)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                state.temperature_limiter_config.lock().await.high_threshold,
+                65.0
+            );
         })
         .await;
     }
@@ -9954,12 +10356,7 @@ mod tests {
                     "minimise_to_tray=false",
                     false,
                 ),
-                (
-                    "start_minimised",
-                    json!(true),
-                    "start_minimised=true",
-                    true,
-                ),
+                ("start_minimised", json!(true), "start_minimised=true", true),
                 (
                     "start_minimised",
                     json!(false),
@@ -10136,6 +10533,149 @@ mod tests {
     // GET must return both fields so existing frontends keep working.
 
     use crate::settings::AgileScope;
+
+    #[tokio::test]
+    async fn adaptive_charging_mode_disables_cosy_and_agile() {
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            *state.latest_snapshot.lock().await = Some(InverterSnapshot {
+                device_type: DeviceType::Gen3Hybrid,
+                device_type_code: "2001".to_string(),
+                inverter_serial: "CE234".to_string(),
+                charge_rate: 50,
+                ..Default::default()
+            });
+            let mut settings = crate::settings::Settings::default();
+            settings.cosy_enabled = true;
+            settings.agile_enabled = true;
+            settings.agile_scope = crate::settings::AgileScope::Full;
+            settings.save().unwrap();
+
+            let (status, _) = set_charging_mode(
+                State(state),
+                Json(json!({
+                    "mode": "adaptive",
+                    "cosy_slots": [{
+                        "enabled": true,
+                        "start_hour": 1,
+                        "start_minute": 0,
+                        "end_hour": 2,
+                        "end_minute": 0,
+                        "target_soc": 1000
+                    }]
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let saved = crate::settings::Settings::load();
+            assert!(saved.adaptive_charge_enabled);
+            assert!(!saved.cosy_enabled);
+            assert_eq!(saved.agile_scope, crate::settings::AgileScope::Off);
+            assert_eq!(saved.cosy_slots[0].target_soc, 100);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn adaptive_config_rejects_overlap_without_persisting() {
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            let body = json!({
+                "config": {
+                    "confirmation_readings": 2,
+                    "periods": [
+                        {
+                            "enabled": true, "all_day": false,
+                            "start_hour": 8, "start_minute": 0,
+                            "end_hour": 12, "end_minute": 0,
+                            "low_soc": 30, "recovery_soc": 40,
+                            "preferred_rate_percent": 40, "recovery_rate_percent": 100
+                        },
+                        {
+                            "enabled": true, "all_day": false,
+                            "start_hour": 11, "start_minute": 0,
+                            "end_hour": 14, "end_minute": 0,
+                            "low_soc": 30, "recovery_soc": 40,
+                            "preferred_rate_percent": 40, "recovery_rate_percent": 100
+                        }
+                    ]
+                }
+            });
+            let (status, _) = set_adaptive_charge(State(state), Json(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                crate::settings::Settings::load().adaptive_charge_config,
+                crate::settings::AdaptiveChargeConfig::default()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn manual_charge_rate_conflicts_while_adaptive_is_enabled() {
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            let settings = crate::settings::Settings {
+                adaptive_charge_enabled: true,
+                ..Default::default()
+            };
+            settings.save().unwrap();
+
+            let (status, Json(body)) =
+                set_charge_rate(State(state.clone()), Json(json!({ "limit": 25 }))).await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body["ok"], false);
+            assert!(state.pending_writes.lock().await.is_empty());
+
+            let restoring = crate::settings::Settings {
+                adaptive_charge_saved_limit: Some(crate::settings::AdaptiveChargeSavedLimit {
+                    inverter_serial: "CE234".to_string(),
+                    device_type_code: "2001".to_string(),
+                    register_address: crate::modbus::registers::HR_BATTERY_CHARGE_LIMIT,
+                    raw_value: 50,
+                }),
+                ..Default::default()
+            };
+            restoring.save().unwrap();
+            let (status, Json(body)) =
+                set_charge_rate(State(state), Json(json!({ "limit": 25 }))).await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(
+                body["error"],
+                "Adaptive Charge is restoring the previous charge rate"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn discharge_cutoff_routes_hr114_and_rejects_unsupported_devices() {
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            *state.latest_snapshot.lock().await = Some(InverterSnapshot {
+                device_type: DeviceType::Gen3Hybrid,
+                ..Default::default()
+            });
+            let (status, _) =
+                set_discharge_cutoff(State(state.clone()), Json(json!({ "soc": 25 }))).await;
+            assert_eq!(status, StatusCode::OK);
+            let queued = state.pending_writes.lock().await;
+            assert_eq!(
+                queued[0][0].address,
+                crate::modbus::registers::HR_BATTERY_DISCHARGE_MIN_POWER_RESERVE
+            );
+            assert_eq!(queued[0][0].value, 25);
+            drop(queued);
+
+            *state.latest_snapshot.lock().await = Some(InverterSnapshot {
+                device_type: DeviceType::ThreePhase,
+                ..Default::default()
+            });
+            let (status, _) = set_discharge_cutoff(State(state), Json(json!({ "soc": 25 }))).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        })
+        .await;
+    }
 
     #[test]
     fn parse_agile_scope_accepts_all_four_variants() {

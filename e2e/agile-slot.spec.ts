@@ -567,11 +567,12 @@ test.describe('Agile Charging Mode dropdown (UI)', () => {
   });
 
   test('selecting "Agile — Charge only" POSTs scope=charge_only', async ({ page }) => {
-    // Intercept the /api/agile POST so we can assert the body the
-    // frontend builds from the dropdown selection. Fulfil it so the
-    // store updates normally.
+    // Intercept the unified /api/charging-mode POST so we can assert
+    // the body the frontend builds from the dropdown selection. The
+    // backend maps `agile_charge` -> AgileScope::ChargeOnly, so this is
+    // the modern equivalent of the legacy `/api/agile { scope }` POST.
     let postedBody: unknown = null;
-    await page.route('**/api/agile', async (route) => {
+    await page.route('**/api/charging-mode', async (route) => {
       if (route.request().method() === 'POST') {
         postedBody = JSON.parse(route.request().postData() || 'null');
       }
@@ -589,7 +590,7 @@ test.describe('Agile Charging Mode dropdown (UI)', () => {
 
     // The dropdown change fires the POST immediately.
     await expect.poll(() => postedBody, { timeout: 10_000 }).toMatchObject({
-      scope: 'charge_only',
+      mode: 'agile_charge',
     });
   });
 

@@ -140,7 +140,8 @@ Home Energy Manager connects directly to your inverter over your home network. I
 - **Force Charge / Force Discharge** — one-click buttons for instant manual control (click to start, click again to stop)
 - **SOC control** — adjust battery reserve level, charge/discharge power limits, and charge target
 - **Battery calibration** — start calibration from the app when your battery needs it (auto-detected)
-- **Load Discharge Limiter** — cap battery discharge during high-demand periods with a configurable power threshold and time window
+- **Load Discharge Limiter** — pause battery discharge during high-demand periods with a configurable power threshold and time window
+- **Inverter Temperature Limiter** — pause discharge at a configurable heatsink temperature and restore normal Eco after the inverter cools
 
 ### Automation
 

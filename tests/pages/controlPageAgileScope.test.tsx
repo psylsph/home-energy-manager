@@ -37,6 +37,20 @@ vi.mock('../../src/lib/api', () => ({
         charge_threshold: 10,
         discharge_threshold: 30,
       };
+    if (path === '/api/adaptive-charge')
+      return {
+        ok: true,
+        data: {
+          config: {
+            periods: [{
+              enabled: true, all_day: false, start_hour: 8, start_minute: 0,
+              end_hour: 17, end_minute: 0, low_soc: 30, recovery_soc: 40,
+              preferred_rate_percent: 50, recovery_rate_percent: 100,
+            }],
+            confirmation_readings: 2,
+          },
+        },
+      };
     if (path === '/api/auto-winter')
       return {
         ok: true,
@@ -204,6 +218,20 @@ describe('<ControlPage/> — Agile scope UI', () => {
           charge_threshold: 10,
           discharge_threshold: 30,
         };
+      if (path === '/api/adaptive-charge')
+        return {
+          ok: true,
+          data: {
+            config: {
+              periods: [{
+                enabled: true, all_day: false, start_hour: 8, start_minute: 0,
+                end_hour: 17, end_minute: 0, low_soc: 30, recovery_soc: 40,
+                preferred_rate_percent: 50, recovery_rate_percent: 100,
+              }],
+              confirmation_readings: 2,
+            },
+          },
+        };
       if (path === '/api/auto-winter')
         return {
           ok: true,
@@ -285,7 +313,7 @@ describe('<ControlPage/> — Agile scope UI', () => {
   // Scope select rendering
   // ---------------------------------------------------------------
 
-  it('renders the select with five mode options including three Agile sub-modes', async () => {
+  it('renders the select with Adaptive Charge and three Agile sub-modes', async () => {
     useInverterStore.setState({ snapshot: makeSnapshot() });
     const { default: ControlPage } = await import('../../src/pages/ControlPage');
     render(<ControlPage />);
@@ -296,13 +324,14 @@ describe('<ControlPage/> — Agile scope UI', () => {
     const optionValues = Array.from(select.options).map((o) => o.value);
     expect(optionValues).toContain('standard');
     expect(optionValues).toContain('cosy');
+    expect(optionValues).toContain('adaptive');
     expect(optionValues).toContain('agile');
     expect(optionValues).toContain('agile_charge');
     expect(optionValues).toContain('agile_discharge');
   });
 
   // ---------------------------------------------------------------
-  // Wire format: scope field is sent on POST /api/agile
+  // Wire format: the unified charging-mode endpoint receives the selection
   // ---------------------------------------------------------------
 
   it('sends scope="full" when selecting Agile (full)', async () => {
@@ -317,8 +346,8 @@ describe('<ControlPage/> — Agile scope UI', () => {
     // Wait for the POST to fire after the change.
     await waitFor(() => {
       expect(apiPost).toHaveBeenCalledWith(
-        '/api/agile',
-        expect.objectContaining({ scope: 'full' }),
+        '/api/charging-mode',
+        expect.objectContaining({ mode: 'agile' }),
       );
     });
   });
@@ -334,8 +363,8 @@ describe('<ControlPage/> — Agile scope UI', () => {
     fireEvent.change(select, { target: { value: 'agile_charge' } });
     await waitFor(() => {
       expect(apiPost).toHaveBeenCalledWith(
-        '/api/agile',
-        expect.objectContaining({ scope: 'charge_only' }),
+        '/api/charging-mode',
+        expect.objectContaining({ mode: 'agile_charge' }),
       );
     });
   });
@@ -351,8 +380,8 @@ describe('<ControlPage/> — Agile scope UI', () => {
     fireEvent.change(select, { target: { value: 'agile_discharge' } });
     await waitFor(() => {
       expect(apiPost).toHaveBeenCalledWith(
-        '/api/agile',
-        expect.objectContaining({ scope: 'discharge_only' }),
+        '/api/charging-mode',
+        expect.objectContaining({ mode: 'agile_discharge' }),
       );
     });
   });
@@ -395,10 +424,46 @@ describe('<ControlPage/> — Agile scope UI', () => {
     fireEvent.change(select, { target: { value: 'standard' } });
     await waitFor(() => {
       expect(apiPost).toHaveBeenCalledWith(
-        '/api/agile',
-        expect.objectContaining({ scope: 'off' }),
+        '/api/charging-mode',
+        expect.objectContaining({ mode: 'standard' }),
       );
     }, { timeout: 3000 });
+  });
+
+  it('loads Adaptive Charge from the snapshot and shows its controls', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({
+        adaptive_charge_enabled: true,
+        adaptive_charge_state: 'recovery',
+        adaptive_charge_period: 1,
+        adaptive_charge_desired_rate_percent: 100,
+      }),
+    });
+    const { default: ControlPage } = await import('../../src/pages/ControlPage');
+    render(<ControlPage />);
+
+    const allCombos = await screen.findAllByRole('combobox');
+    expect((allCombos[0] as HTMLSelectElement).value).toBe('adaptive');
+    expect(await screen.findByText('Low-SOC recovery active')).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Save Adaptive Charge' })).toBeDefined();
+    expect(screen.getByText(/Controlled by Adaptive Charge/)).toBeDefined();
+  });
+
+  it('saves the inverter-native Discharge Cutoff SOC', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ battery_discharge_cutoff_soc: 25 }),
+    });
+    const { default: ControlPage } = await import('../../src/pages/ControlPage');
+    render(<ControlPage />);
+
+    const slider = screen.getByLabelText('Discharge Cutoff SOC') as HTMLInputElement;
+    fireEvent.change(slider, { target: { value: '30' } });
+    const saveButton = slider.parentElement?.querySelector('button');
+    expect(saveButton).not.toBeNull();
+    fireEvent.click(saveButton!);
+    await waitFor(() => {
+      expect(apiPost).toHaveBeenCalledWith('/api/control/discharge-cutoff', { soc: 30 });
+    });
   });
 
   // ---------------------------------------------------------------

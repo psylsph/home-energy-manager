@@ -17,6 +17,8 @@
 //!   * `GET /api/logs`      — empty, then after push, then incremental
 //!   * `GET /api/log-level` / `PUT /api/log-level` — round-trip + invalid
 //!   * `GET /api/evc/status` — empty when no EVC is configured
+//!   * `GET /api/charging-mode` / `/api/adaptive-charge` — automation defaults
+//!   * `GET/POST /api/temperature-limiter` — defaults, update, and validation
 //!   * `GET /api/mini/status` — tokenless glance summary (empty + seeded)
 //!   * `GET /api/{unknown}` — returns 404, not 200
 //!
@@ -503,8 +505,75 @@ async fn mini_page_serves_self_contained_html() {
 }
 
 // ====================================================================
-// 404 handling
+// Automation defaults and 404 handling
 // ====================================================================
+
+#[tokio::test]
+async fn adaptive_charge_endpoints_return_safe_defaults() {
+    let router = fresh_router();
+
+    let (status, mode) = get_json(&router, "/api/charging-mode").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(mode["ok"], true);
+    assert_eq!(mode["mode"], "standard");
+    assert_eq!(mode["adaptive_state"], "inactive");
+
+    let (status, adaptive) = get_json(&router, "/api/adaptive-charge").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(adaptive["ok"], true);
+    assert_eq!(adaptive["data"]["enabled"], false);
+    assert_eq!(adaptive["data"]["config"]["confirmation_readings"], 2);
+    assert_eq!(
+        adaptive["data"]["config"]["periods"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn temperature_limiter_round_trip_and_validation() {
+    let router = fresh_router();
+
+    let (status, initial) = get_json(&router, "/api/temperature-limiter").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(initial["data"]["config"]["enabled"], false);
+    assert_eq!(initial["data"]["config"]["high_threshold"], 60.0);
+    assert_eq!(initial["data"]["config"]["recovery_threshold"], 55.0);
+
+    let (status, _) = post_json(
+        &router,
+        "/api/temperature-limiter",
+        &serde_json::json!({
+            "enabled": true,
+            "high_threshold": 64.0,
+            "recovery_threshold": 56.0,
+            "confirmation_readings": 4
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, updated) = get_json(&router, "/api/temperature-limiter").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["data"]["config"]["enabled"], true);
+    assert_eq!(updated["data"]["config"]["high_threshold"], 64.0);
+    assert_eq!(updated["data"]["config"]["confirmation_readings"], 4);
+
+    let (status, invalid) = post_json(
+        &router,
+        "/api/temperature-limiter",
+        &serde_json::json!({
+            "high_threshold": 55.0,
+            "recovery_threshold": 55.0
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(invalid["error"]
+        .as_str()
+        .is_some_and(|message| { message.contains("Recovery threshold must be below") }));
+}
 
 #[tokio::test]
 async fn unknown_api_path_returns_404() {

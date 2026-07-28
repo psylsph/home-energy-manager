@@ -174,6 +174,15 @@ async fn initialize_app_state(
         ll.end_minute = app_settings.load_limiter_end_minute;
     }
 
+    // Apply saved inverter-temperature limiter config.
+    {
+        let mut limiter = state.temperature_limiter_config.lock().await;
+        limiter.enabled = app_settings.temperature_limiter_enabled;
+        limiter.high_threshold = app_settings.temperature_limiter_high_threshold;
+        limiter.recovery_threshold = app_settings.temperature_limiter_recovery_threshold;
+        limiter.confirmation_readings = app_settings.temperature_limiter_confirmation_readings;
+    }
+
     // If the load limiter was active when the app last ran, mark the state as
     // PausedFromRestart so the first poll immediately restores Eco if the load
     // has already dropped below threshold while the app was down.
@@ -182,8 +191,13 @@ async fn initialize_app_state(
         *ll_state = crate::inverter::poll::LoadLimiterState::PausedFromRestart;
         tracing::info!("Restored load limiter state: PausedFromRestart (post-crash)");
     }
+    if app_settings.temperature_limiter_active_persisted {
+        let mut limiter_state = state.temperature_limiter_state.lock().await;
+        *limiter_state = crate::inverter::poll::TemperatureLimiterState::PausedFromRestart;
+        tracing::info!("Restored temperature limiter state: PausedFromRestart (post-crash)");
+    }
 
-    // Restore the load limiter's saved reserve value so the exact previous
+    // Restore the shared limiter reserve so the exact previous
     // reserve is written back (not a hardcoded default).
     if let Some(reserve) = app_settings.load_limiter_saved_reserve {
         let mut ll_saved = state.load_limiter_saved.lock().await;

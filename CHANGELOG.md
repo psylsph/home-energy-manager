@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.68.0] - 2026-07-28
+
+### Added
+
+- **Adaptive Charge automatically protects daytime battery SOC while preserving solar export.** Configure time periods with preferred and low-SOC recovery charge rates; the app restores the previous manual limit outside those periods and suspends itself for Auto Winter. Supported single-phase inverters also gain a separate hard Discharge Cutoff SOC for timed modes. (issue #234)
+- **Inverter temperature protection can pause battery discharge before the inverter overheats.** Set separate pause and recovery temperatures with confirmation readings to prevent rapid cycling. Protection overrides timed and forced discharge while hot, then returns to normal Eco after cooling. (issue #236)
+
+### Fixed
+
+- **Load Discharge Limiter recovery and manual overrides now behave predictably.** Recovery remains visibly active until Eco is restored, leaving the activation window cannot strand the battery paused, and the Quick Action explicitly disables an active limiter before unpausing. (issue #236)
+
 ## [0.67.4] - 2026-07-27
 
 ### Fixed

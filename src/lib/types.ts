@@ -69,6 +69,8 @@ export interface InverterSnapshot {
   /** Raw Eco / self-consumption register HR27: 1 = Eco, 0 = export/max-power mode. */
   battery_power_mode?: number;
   battery_reserve: number;
+  /** Hard discharge cutoff SOC (HR114) on supported single-phase devices. */
+  battery_discharge_cutoff_soc?: number | null;
   charge_rate: number;
   discharge_rate: number;
   active_power_rate: number;
@@ -88,7 +90,13 @@ export interface InverterSnapshot {
   enable_charge: boolean;
   enable_discharge: boolean;
   auto_winter_active: boolean;
+  charging_mode?: 'standard' | 'cosy' | 'agile' | 'agile_charge' | 'agile_discharge' | 'adaptive';
+  adaptive_charge_enabled?: boolean;
+  adaptive_charge_state?: 'inactive' | 'outside_window' | 'preferred' | 'recovery' | 'suspended_auto_winter' | 'restoring' | 'error';
+  adaptive_charge_period?: number | null;
+  adaptive_charge_desired_rate_percent?: number | null;
   load_limiter_active: boolean;
+  temperature_limiter_active?: boolean;
   cosy_active: boolean;
   cosy_enabled: boolean;
   agile_active: boolean;

@@ -860,6 +860,13 @@ fn decode_holding_60_119(data: &[u16], snap: &mut InverterSnapshot, raw: &mut Ra
     snap.battery_reserve = (get_reg(data, 110 - 60) as u8).clamp(4, 100);
     raw.battery_soc_reserve = snap.battery_reserve as u16;
 
+    // Hard discharge cutoff SOC: HR(114). A zero/out-of-range value means the
+    // device does not expose the setting; do not manufacture a 4% readback.
+    let discharge_cutoff = get_reg(data, 114 - 60);
+    snap.battery_discharge_cutoff_soc = (4..=100)
+        .contains(&discharge_cutoff)
+        .then_some(discharge_cutoff as u8);
+
     // Battery charge/discharge limits for DC-coupled hybrids: HR(111/112).
     // AC-coupled inverters use HR(313/314) from the AC config block instead;
     // HR(111/112) can read as 0 on AC models and must not overwrite the real limits.
@@ -2422,6 +2429,7 @@ mod tests {
         holding_60_data[110 - 60] = 4; // HR(110): battery_soc_reserve = 4%
         holding_60_data[111 - 60] = 50; // HR(111): battery_charge_limit = 50%
         holding_60_data[112 - 60] = 50; // HR(112): battery_discharge_limit = 50%
+        holding_60_data[114 - 60] = 25; // HR(114): hard discharge cutoff = 25%
         holding_60_data[116 - 60] = 100; // HR(116): charge_target_soc = 100%
 
         let holding_60 = make_block(
@@ -2644,6 +2652,32 @@ mod tests {
     }
 
     #[test]
+    fn discharge_cutoff_only_reports_valid_hr114_values() {
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        };
+        let mut raw = RawConfig {
+            battery_power_mode: 0,
+            enable_discharge: false,
+            battery_soc_reserve: 0,
+        };
+        let mut data = vec![0u16; 60];
+        data[110 - 60] = 4;
+
+        decode_holding_60_119(&data, &mut snap, &mut raw);
+        assert_eq!(snap.battery_discharge_cutoff_soc, None);
+
+        data[114 - 60] = 101;
+        decode_holding_60_119(&data, &mut snap, &mut raw);
+        assert_eq!(snap.battery_discharge_cutoff_soc, None);
+
+        data[114 - 60] = 4;
+        decode_holding_60_119(&data, &mut snap, &mut raw);
+        assert_eq!(snap.battery_discharge_cutoff_soc, Some(4));
+    }
+
+    #[test]
     fn decode_full_snapshot() {
         let blocks = test_blocks();
         let snap = decode_snapshot(&blocks);
@@ -2693,6 +2727,7 @@ mod tests {
 
         // Config
         assert_eq!(snap.battery_reserve, 4);
+        assert_eq!(snap.battery_discharge_cutoff_soc, Some(25));
         assert_eq!(snap.charge_rate, 50);
         assert_eq!(snap.discharge_rate, 50);
         assert_eq!(snap.active_power_rate, 80);

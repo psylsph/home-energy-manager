@@ -688,6 +688,217 @@ impl AgileScope {
     }
 }
 
+/// User-facing charging mode. Existing Cosy/Agile settings remain persisted
+/// separately for backwards compatibility; this enum is the unified API and
+/// snapshot representation.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChargingMode {
+    #[default]
+    Standard,
+    Cosy,
+    Agile,
+    AgileCharge,
+    AgileDischarge,
+    Adaptive,
+}
+
+/// Return the single effective charging mode from persisted settings.
+pub fn charging_mode_for_settings(settings: &Settings) -> ChargingMode {
+    if settings.adaptive_charge_enabled {
+        ChargingMode::Adaptive
+    } else if settings.cosy_enabled {
+        ChargingMode::Cosy
+    } else {
+        match agile_scope_for_settings(settings) {
+            AgileScope::Off => ChargingMode::Standard,
+            AgileScope::Full => ChargingMode::Agile,
+            AgileScope::ChargeOnly => ChargingMode::AgileCharge,
+            AgileScope::DischargeOnly => ChargingMode::AgileDischarge,
+        }
+    }
+}
+
+/// A time window and SOC hysteresis policy for Adaptive Charge mode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdaptiveChargePeriod {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub all_day: bool,
+    #[serde(default = "default_adaptive_start_hour")]
+    pub start_hour: u8,
+    #[serde(default)]
+    pub start_minute: u8,
+    #[serde(default = "default_adaptive_end_hour")]
+    pub end_hour: u8,
+    #[serde(default)]
+    pub end_minute: u8,
+    #[serde(default = "default_adaptive_low_soc")]
+    pub low_soc: u8,
+    #[serde(default = "default_adaptive_recovery_soc")]
+    pub recovery_soc: u8,
+    #[serde(default = "default_adaptive_preferred_rate")]
+    pub preferred_rate_percent: u8,
+    #[serde(default = "default_adaptive_recovery_rate")]
+    pub recovery_rate_percent: u8,
+}
+
+impl Default for AdaptiveChargePeriod {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            all_day: false,
+            start_hour: default_adaptive_start_hour(),
+            start_minute: 0,
+            end_hour: default_adaptive_end_hour(),
+            end_minute: 0,
+            low_soc: default_adaptive_low_soc(),
+            recovery_soc: default_adaptive_recovery_soc(),
+            preferred_rate_percent: default_adaptive_preferred_rate(),
+            recovery_rate_percent: default_adaptive_recovery_rate(),
+        }
+    }
+}
+
+/// Persisted Adaptive Charge policy. Four bounded periods keep the UI and
+/// overlap validation predictable while covering morning/day/evening use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdaptiveChargeConfig {
+    #[serde(default = "default_adaptive_periods")]
+    pub periods: Vec<AdaptiveChargePeriod>,
+    #[serde(default = "default_adaptive_confirmation_readings")]
+    pub confirmation_readings: u32,
+}
+
+impl Default for AdaptiveChargeConfig {
+    fn default() -> Self {
+        Self {
+            periods: default_adaptive_periods(),
+            confirmation_readings: default_adaptive_confirmation_readings(),
+        }
+    }
+}
+
+impl AdaptiveChargeConfig {
+    /// Validate bounds and reject overlapping enabled periods.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.periods.is_empty() || !self.periods.iter().any(|period| period.enabled) {
+            return Err("At least one Adaptive Charge period must be enabled".to_string());
+        }
+        if self.periods.len() > 4 {
+            return Err("Adaptive Charge supports at most 4 periods".to_string());
+        }
+        if !(1..=10).contains(&self.confirmation_readings) {
+            return Err("Confirmation readings must be 1-10".to_string());
+        }
+
+        let mut occupied = [false; 1440];
+        for (index, period) in self.periods.iter().enumerate().filter(|(_, p)| p.enabled) {
+            if period.start_hour > 23 || period.end_hour > 23 {
+                return Err(format!("Period {} hour must be 0-23", index + 1));
+            }
+            if period.start_minute > 59 || period.end_minute > 59 {
+                return Err(format!("Period {} minute must be 0-59", index + 1));
+            }
+            if !(4..=99).contains(&period.low_soc) {
+                return Err(format!("Period {} Low SOC must be 4-99%", index + 1));
+            }
+            if period.recovery_soc <= period.low_soc || period.recovery_soc > 100 {
+                return Err(format!(
+                    "Period {} Recovery SOC must be greater than Low SOC and at most 100%",
+                    index + 1
+                ));
+            }
+            if period.preferred_rate_percent > 100 || period.recovery_rate_percent > 100 {
+                return Err(format!("Period {} charge rates must be 0-100%", index + 1));
+            }
+            if period.recovery_rate_percent < period.preferred_rate_percent {
+                return Err(format!(
+                    "Period {} Recovery rate must be at least the Preferred rate",
+                    index + 1
+                ));
+            }
+
+            let start = period.start_hour as usize * 60 + period.start_minute as usize;
+            let end = period.end_hour as usize * 60 + period.end_minute as usize;
+            if !period.all_day && start == end {
+                return Err(format!(
+                    "Period {} start and end must differ unless All day is enabled",
+                    index + 1
+                ));
+            }
+
+            let covers = |minute: usize| {
+                period.all_day
+                    || if start < end {
+                        minute >= start && minute < end
+                    } else {
+                        minute >= start || minute < end
+                    }
+            };
+            for (minute, used) in occupied.iter_mut().enumerate() {
+                if covers(minute) {
+                    if *used {
+                        return Err(format!(
+                            "Adaptive Charge period {} overlaps another period",
+                            index + 1
+                        ));
+                    }
+                    *used = true;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Original raw charge-limit register value captured before Adaptive Charge
+/// takes ownership. Inverter identity prevents restoring it to another unit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdaptiveChargeSavedLimit {
+    pub inverter_serial: String,
+    pub device_type_code: String,
+    pub register_address: u16,
+    pub raw_value: u16,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_adaptive_start_hour() -> u8 {
+    8
+}
+
+fn default_adaptive_end_hour() -> u8 {
+    17
+}
+
+fn default_adaptive_low_soc() -> u8 {
+    30
+}
+
+fn default_adaptive_recovery_soc() -> u8 {
+    40
+}
+
+fn default_adaptive_preferred_rate() -> u8 {
+    50
+}
+
+fn default_adaptive_recovery_rate() -> u8 {
+    100
+}
+
+fn default_adaptive_confirmation_readings() -> u32 {
+    2
+}
+
+fn default_adaptive_periods() -> Vec<AdaptiveChargePeriod> {
+    vec![AdaptiveChargePeriod::default()]
+}
+
 /// An external solar array tracked via a GivEnergy CT clamp (issue #110).
 ///
 /// For AC-coupled systems whose panels feed a separate third-party PV
@@ -796,6 +1007,15 @@ pub struct Settings {
     /// Cosy charging mode enabled.
     #[serde(default)]
     pub cosy_enabled: bool,
+    /// Adaptive Charge mode enabled. Mutually exclusive with Cosy and Agile.
+    #[serde(default)]
+    pub adaptive_charge_enabled: bool,
+    /// Time/SOC policies used by Adaptive Charge mode.
+    #[serde(default)]
+    pub adaptive_charge_config: AdaptiveChargeConfig,
+    /// Original raw charge limit retained until restoration is confirmed.
+    #[serde(default)]
+    pub adaptive_charge_saved_limit: Option<AdaptiveChargeSavedLimit>,
     /// Cosy charging slots (up to 3, stored locally).
     #[serde(default)]
     pub cosy_slots: Vec<CosySlot>,
@@ -852,11 +1072,23 @@ pub struct Settings {
     /// Persisted active flag so a crash/restart can detect the limiter was mid-pause.
     #[serde(default)]
     pub load_limiter_active_persisted: bool,
-    /// Persisted battery SOC reserve saved before the load limiter paused
-    /// discharge. `Some` means the limiter was active when last saved.
-    /// Restored on restart so the user's custom reserve isn't lost.
+    /// Persisted battery SOC reserve saved before a discharge limiter paused
+    /// the battery. Shared by load and temperature limiters so the original
+    /// reserve is restored only after every pause owner has cleared.
     #[serde(default)]
     pub load_limiter_saved_reserve: Option<u16>,
+
+    // -- Inverter temperature limiter --
+    #[serde(default)]
+    pub temperature_limiter_enabled: bool,
+    #[serde(default = "default_temperature_limiter_high")]
+    pub temperature_limiter_high_threshold: f32,
+    #[serde(default = "default_temperature_limiter_recovery")]
+    pub temperature_limiter_recovery_threshold: f32,
+    #[serde(default = "default_temperature_limiter_confirmations")]
+    pub temperature_limiter_confirmation_readings: u32,
+    #[serde(default)]
+    pub temperature_limiter_active_persisted: bool,
 
     /// Panels hidden from the bottom navigation bar (e.g. ["power", "battery", "solar", "meters", "history"]) .
     #[serde(default)]
@@ -999,6 +1231,18 @@ fn default_ll_threshold() -> u32 {
 
 fn default_ll_trigger_delay() -> u32 {
     5
+}
+
+fn default_temperature_limiter_high() -> f32 {
+    60.0
+}
+
+fn default_temperature_limiter_recovery() -> f32 {
+    55.0
+}
+
+fn default_temperature_limiter_confirmations() -> u32 {
+    3
 }
 
 fn default_import_tariff() -> f64 {
@@ -1238,6 +1482,11 @@ impl Default for Settings {
             load_limiter_end_minute: 0,
             load_limiter_active_persisted: false,
             load_limiter_saved_reserve: None,
+            temperature_limiter_enabled: false,
+            temperature_limiter_high_threshold: default_temperature_limiter_high(),
+            temperature_limiter_recovery_threshold: default_temperature_limiter_recovery(),
+            temperature_limiter_confirmation_readings: default_temperature_limiter_confirmations(),
+            temperature_limiter_active_persisted: false,
             import_tariff_config: None,
             export_tariff_config: None,
             agile_enabled: false,
@@ -1247,6 +1496,9 @@ impl Default for Settings {
             agile_discharge_threshold: default_agile_discharge_threshold(),
             agile_api_base_url: String::new(),
             cosy_enabled: false,
+            adaptive_charge_enabled: false,
+            adaptive_charge_config: AdaptiveChargeConfig::default(),
+            adaptive_charge_saved_limit: None,
             cosy_slots: (0..3).map(|_| CosySlot::default()).collect(),
             cosy_active_persisted: false,
             agile_state_persisted: String::new(),
@@ -1413,6 +1665,11 @@ mod tests {
         assert_eq!(s.load_limiter_start_hour, 0);
         assert_eq!(s.load_limiter_end_hour, 0);
         assert!(!s.load_limiter_active_persisted);
+        assert!(!s.temperature_limiter_enabled);
+        assert_eq!(s.temperature_limiter_high_threshold, 60.0);
+        assert_eq!(s.temperature_limiter_recovery_threshold, 55.0);
+        assert_eq!(s.temperature_limiter_confirmation_readings, 3);
+        assert!(!s.temperature_limiter_active_persisted);
         // Autostart must default to OFF — we never silently register the
         // app to launch on login, the user has to opt in via Settings.
         // See issue #117.
@@ -1466,6 +1723,11 @@ mod tests {
             load_limiter_end_minute: 0,
             load_limiter_active_persisted: false,
             load_limiter_saved_reserve: None,
+            temperature_limiter_enabled: true,
+            temperature_limiter_high_threshold: 64.0,
+            temperature_limiter_recovery_threshold: 56.0,
+            temperature_limiter_confirmation_readings: 4,
+            temperature_limiter_active_persisted: true,
             evc_host: String::new(),
             evc_port: default_evc_port(),
             import_tariff_config: None,
@@ -1477,6 +1739,9 @@ mod tests {
             agile_discharge_threshold: 35.0,
             agile_api_base_url: String::new(),
             cosy_enabled: false,
+            adaptive_charge_enabled: true,
+            adaptive_charge_config: AdaptiveChargeConfig::default(),
+            adaptive_charge_saved_limit: None,
             cosy_slots: vec![],
             cosy_active_persisted: false,
             agile_state_persisted: "discharging".to_string(),
@@ -1559,6 +1824,11 @@ mod tests {
         assert_eq!(decoded.load_limiter_trigger_delay_minutes, 10);
         assert_eq!(decoded.load_limiter_start_hour, 16);
         assert_eq!(decoded.load_limiter_end_hour, 20);
+        assert!(decoded.temperature_limiter_enabled);
+        assert_eq!(decoded.temperature_limiter_high_threshold, 64.0);
+        assert_eq!(decoded.temperature_limiter_recovery_threshold, 56.0);
+        assert_eq!(decoded.temperature_limiter_confirmation_readings, 4);
+        assert!(decoded.temperature_limiter_active_persisted);
         assert!(decoded.autostart_enabled);
         // Weather config roundtrips with all fields populated.
         assert!(decoded.weather_config.enabled);
@@ -1887,6 +2157,11 @@ mod tests {
             load_limiter_end_minute: 0,
             load_limiter_active_persisted: false,
             load_limiter_saved_reserve: None,
+            temperature_limiter_enabled: false,
+            temperature_limiter_high_threshold: 60.0,
+            temperature_limiter_recovery_threshold: 55.0,
+            temperature_limiter_confirmation_readings: 3,
+            temperature_limiter_active_persisted: false,
             evc_host: "192.168.1.200".to_string(),
             evc_port: 502,
             import_tariff_config: None,
@@ -1898,6 +2173,9 @@ mod tests {
             agile_discharge_threshold: 30.0,
             agile_api_base_url: String::new(),
             cosy_enabled: false,
+            adaptive_charge_enabled: false,
+            adaptive_charge_config: AdaptiveChargeConfig::default(),
+            adaptive_charge_saved_limit: None,
             cosy_slots: vec![],
             cosy_active_persisted: false,
             agile_state_persisted: String::new(),
@@ -2154,6 +2432,108 @@ mod tests {
     }
 
     // ======================================================================
+    #[test]
+    fn adaptive_charge_defaults_are_valid_and_standard_is_effective_mode() {
+        let settings = Settings::default();
+        assert_eq!(
+            charging_mode_for_settings(&settings),
+            ChargingMode::Standard
+        );
+        assert!(settings.adaptive_charge_config.validate().is_ok());
+        assert_eq!(settings.adaptive_charge_config.periods.len(), 1);
+    }
+
+    #[test]
+    fn adaptive_charge_mode_takes_precedence_over_legacy_flags() {
+        let settings = Settings {
+            adaptive_charge_enabled: true,
+            cosy_enabled: true,
+            agile_enabled: true,
+            agile_scope: AgileScope::Full,
+            ..Default::default()
+        };
+        assert_eq!(
+            charging_mode_for_settings(&settings),
+            ChargingMode::Adaptive
+        );
+    }
+
+    #[test]
+    fn adaptive_charge_validation_rejects_overlap_and_bad_hysteresis() {
+        let first = AdaptiveChargePeriod {
+            start_hour: 8,
+            end_hour: 12,
+            ..Default::default()
+        };
+        let second = AdaptiveChargePeriod {
+            start_hour: 11,
+            end_hour: 14,
+            ..Default::default()
+        };
+        let overlapping = AdaptiveChargeConfig {
+            periods: vec![first.clone(), second],
+            confirmation_readings: 2,
+        };
+        assert!(overlapping.validate().unwrap_err().contains("overlaps"));
+
+        let invalid_hysteresis = AdaptiveChargeConfig {
+            periods: vec![AdaptiveChargePeriod {
+                recovery_soc: first.low_soc,
+                ..first
+            }],
+            confirmation_readings: 2,
+        };
+        assert!(invalid_hysteresis
+            .validate()
+            .unwrap_err()
+            .contains("Recovery SOC"));
+    }
+
+    #[test]
+    fn adaptive_charge_validation_accepts_adjacent_and_overnight_periods() {
+        let config = AdaptiveChargeConfig {
+            periods: vec![
+                AdaptiveChargePeriod {
+                    start_hour: 22,
+                    end_hour: 6,
+                    ..Default::default()
+                },
+                AdaptiveChargePeriod {
+                    start_hour: 6,
+                    end_hour: 8,
+                    ..Default::default()
+                },
+            ],
+            confirmation_readings: 2,
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn adaptive_charge_settings_roundtrip() {
+        let settings = Settings {
+            adaptive_charge_enabled: true,
+            adaptive_charge_saved_limit: Some(AdaptiveChargeSavedLimit {
+                inverter_serial: "CE234".to_string(),
+                device_type_code: "2001".to_string(),
+                register_address: 111,
+                raw_value: 25,
+            }),
+            ..Default::default()
+        };
+        let encoded = serde_json::to_string(&settings).unwrap();
+        let decoded: Settings = serde_json::from_str(&encoded).unwrap();
+        assert!(decoded.adaptive_charge_enabled);
+        assert_eq!(
+            decoded.adaptive_charge_config,
+            settings.adaptive_charge_config
+        );
+        assert_eq!(
+            decoded.adaptive_charge_saved_limit,
+            settings.adaptive_charge_saved_limit
+        );
+    }
+
     // Cosy slot timing logic tests
     // ======================================================================
 

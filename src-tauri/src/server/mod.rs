@@ -72,6 +72,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/control/charge-slot", post(api::set_charge_slot))
         .route("/api/control/discharge-slot", post(api::set_discharge_slot))
         .route("/api/control/reserve", post(api::set_reserve))
+        .route(
+            "/api/control/discharge-cutoff",
+            post(api::set_discharge_cutoff),
+        )
         .route("/api/control/charge-rate", post(api::set_charge_rate))
         .route("/api/control/discharge-rate", post(api::set_discharge_rate))
         .route("/api/control/eps", post(api::set_eps))
@@ -100,6 +104,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/api/auto-winter",
             get(api::get_auto_winter).post(api::set_auto_winter),
         )
+        // Unified charging-mode selection and Adaptive Charge
+        .route(
+            "/api/charging-mode",
+            get(api::get_charging_mode).post(api::set_charging_mode),
+        )
+        .route(
+            "/api/adaptive-charge",
+            get(api::get_adaptive_charge).post(api::set_adaptive_charge),
+        )
         // Cosy charging
         .route("/api/cosy", get(api::get_cosy).post(api::set_cosy))
         // Agile Octopus battery automation
@@ -117,6 +130,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/load-limiter",
             get(api::get_load_limiter).post(api::set_load_limiter),
+        )
+        // Inverter-temperature discharge protection
+        .route(
+            "/api/temperature-limiter",
+            get(api::get_temperature_limiter).post(api::set_temperature_limiter),
         )
         // Email alerts
         .route("/api/alerts", get(api::get_alerts).post(api::set_alerts))

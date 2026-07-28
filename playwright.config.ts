@@ -4,6 +4,7 @@ export default defineConfig({
   testDir: './e2e',
   testMatch: [
     '**/control.spec.ts',
+    '**/adaptive-charge.spec.ts',
     '**/force-stop.spec.ts',
     '**/aio.spec.ts',
     '**/charts.spec.ts',

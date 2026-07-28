@@ -958,6 +958,9 @@ pub struct InverterSnapshot {
     /// Battery SOC reserve (HR 110 / HR 1109), clamped to min 4 to protect battery.
     #[serde(default = "default_soc_reserve")]
     pub battery_reserve: u8,
+    /// Hard discharge cutoff SOC (HR114) on supported single-phase devices.
+    #[serde(default)]
+    pub battery_discharge_cutoff_soc: Option<u8>,
     pub charge_rate: u8,
     pub discharge_rate: u8,
     /// Inverter max output active power rate (0-100%).
@@ -991,6 +994,21 @@ pub struct InverterSnapshot {
     /// mode (distinct from `enable_charge_target` which any write can set).
     #[serde(default)]
     pub auto_winter_active: bool,
+    /// Unified user-facing charging mode.
+    #[serde(default)]
+    pub charging_mode: crate::settings::ChargingMode,
+    /// Whether Adaptive Charge currently owns the charge-limit setting.
+    #[serde(default)]
+    pub adaptive_charge_enabled: bool,
+    /// Runtime Adaptive Charge state name.
+    #[serde(default)]
+    pub adaptive_charge_state: String,
+    /// Active Adaptive Charge period (1-based), if any.
+    #[serde(default)]
+    pub adaptive_charge_period: Option<u8>,
+    /// Desired normalized charge-rate percentage, if the controller has one.
+    #[serde(default)]
+    pub adaptive_charge_desired_rate_percent: Option<u8>,
     /// True when the Cosy tariff timer is actively force-charging the battery.
     #[serde(default)]
     pub cosy_active: bool,
@@ -1019,6 +1037,9 @@ pub struct InverterSnapshot {
     /// True when the load discharge limiter is actively pausing discharge.
     #[serde(default)]
     pub load_limiter_active: bool,
+    /// True when inverter-temperature protection is actively pausing discharge.
+    #[serde(default)]
+    pub temperature_limiter_active: bool,
     /// Whether this device supports manual battery calibration via HR(29).
     /// False for Gen3+ (auto-calibrates via BMS) and batteryless devices.
     #[serde(default)]

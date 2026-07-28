@@ -15,12 +15,14 @@
  * is something the limiter genuinely can't run in (Timed, Export).
  *
  * The backend's `check_load_limiter` (`src-tauri/src/inverter/state_machines.rs`)
- * already accepts both Eco and EcoPaused; `snapshot.load_limiter_active`
- * is true whenever the limiter's own state is `Paused` or
- * `PausedFromRestart`. So the fix is purely a frontend rendering bug.
+ * accepts both Eco and EcoPaused; `snapshot.load_limiter_active` remains true
+ * through Paused, PausedFromRestart, and LowLoadPending because the battery is
+ * still paused during its recovery delay.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, within } from '@testing-library/react';
+import { render, screen, cleanup, within, fireEvent, waitFor } from '@testing-library/react';
+
+const loadLimiterMock = vi.hoisted(() => ({ enabled: true }));
 
 // ---------------------------------------------------------------------------
 // Mocks — ControlPage pulls in the api helpers. Stub the side-effecting
@@ -52,12 +54,24 @@ vi.mock('../../src/lib/api', () => ({
         ok: true,
         data: { import_tariff: 0.285, export_tariff: 0.15, import_tariff_config: null },
       };
-    if (path === '/api/load-limiter')
+    if (path === '/api/temperature-limiter')
       return {
         ok: true,
         data: {
           config: {
             enabled: true,
+            high_threshold: 60,
+            recovery_threshold: 55,
+            confirmation_readings: 3,
+          },
+        },
+      };
+    if (path === '/api/load-limiter')
+      return {
+        ok: true,
+        data: {
+          config: {
+            enabled: loadLimiterMock.enabled,
             threshold_w: 7000,
             trigger_delay_minutes: 5,
             start_hour: 0,
@@ -69,7 +83,10 @@ vi.mock('../../src/lib/api', () => ({
       };
     return { ok: true, data: {} };
   }),
-  apiPost: vi.fn().mockResolvedValue({ ok: true, data: {} }),
+  apiPost: vi.fn(async (path: string) => {
+    if (path === '/api/control/unpause') loadLimiterMock.enabled = false;
+    return { ok: true, data: {} };
+  }),
   getApiBase: () => 'http://localhost:7337',
   getServerPort: () => 7337,
   fetchHistory: vi.fn().mockResolvedValue({}),
@@ -78,6 +95,7 @@ vi.mock('../../src/lib/api', () => ({
 
 // Imported after the vi.mock() calls above (factories are hoisted regardless).
 import ControlPage from '../../src/pages/ControlPage';
+import { apiGet, apiPost } from '../../src/lib/api';
 import { useInverterStore } from '../../src/store/useInverterStore';
 import type { InverterSnapshot } from '../../src/lib/types';
 
@@ -175,6 +193,9 @@ function makeSnapshot(overrides: Partial<InverterSnapshot> = {}): InverterSnapsh
 
 describe('<ControlPage/> — Load Discharge Limiter status (issue #158)', () => {
   beforeEach(() => {
+    loadLimiterMock.enabled = true;
+    vi.mocked(apiGet).mockClear();
+    vi.mocked(apiPost).mockClear();
     silenceConsoleError();
     // jsdom doesn't implement matchMedia; stub it defensively.
     vi.stubGlobal(
@@ -213,6 +234,94 @@ describe('<ControlPage/> — Load Discharge Limiter status (issue #158)', () => 
     if (!section) throw new Error('Load Discharge Limiter heading has no <div.space-y-3> ancestor');
     return section;
   }
+
+  it('shows active inverter-temperature protection and its all-mode warning', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({
+        battery_mode: 'eco_paused',
+        battery_reserve: 100,
+        inverter_temperature: 62,
+        temperature_limiter_active: true,
+      }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const heading = await screen.findByRole('heading', {
+      name: 'Inverter Temperature Limiter',
+    });
+    const section = heading.closest('div.space-y-3');
+    if (!section) throw new Error('temperature limiter section missing');
+    expect(within(section).getByText(/Paused · 62.0°C/)).toBeDefined();
+    expect(within(section).getByText(/Thermal protection overrides every discharge mode/)).toBeDefined();
+    expect(screen.getByRole('button', { name: /Disable Limiter & Unpause/i })).toBeDefined();
+  });
+
+  it('saves inverter-temperature limiter thresholds and confirmations', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot(),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+    const heading = await screen.findByRole('heading', {
+      name: 'Inverter Temperature Limiter',
+    });
+    const section = heading.closest('div.space-y-3');
+    if (!section) throw new Error('temperature limiter section missing');
+
+    fireEvent.click(within(section).getByRole('button', { name: 'Save' }));
+    await waitFor(() => {
+      expect(apiPost).toHaveBeenCalledWith('/api/temperature-limiter', {
+        enabled: true,
+        high_threshold: 60,
+        recovery_threshold: 55,
+        confirmation_readings: 3,
+      });
+    });
+  });
+
+  it('makes the recovery condition explicit in the delay control', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot(),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const section = await loadLimiterSection();
+    expect(within(section).getByText('Pause / Recovery Delay')).toBeDefined();
+    expect(within(section).getByText(
+      /Pauses after load stays above the threshold; unpauses after it stays at or below the threshold/,
+    )).toBeDefined();
+  });
+
+  it('disables the limiter when its Quick Action unpauses the battery', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({
+        battery_mode: 'eco_paused',
+        battery_reserve: 100,
+        load_limiter_active: true,
+        home_power: 10000,
+      }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+    await loadLimiterSection();
+    vi.mocked(apiGet).mockClear();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Disable Limiter & Unpause/i }));
+
+    await waitFor(() => {
+      expect(apiPost).toHaveBeenCalledWith('/api/control/unpause', undefined);
+    });
+    await waitFor(() => {
+      expect(apiGet).toHaveBeenCalledWith('/api/load-limiter');
+    });
+    expect(loadLimiterMock.enabled).toBe(false);
+  });
 
   it('shows "Paused" when the limiter is active in eco_paused mode with load still high', async () => {
     // The exact issue #158 scenario: home power 10 kW, threshold 7 kW,
