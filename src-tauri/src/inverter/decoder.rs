@@ -454,7 +454,6 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     // -- PV --
     snap.pv1_power = get_reg(data, 18) as i32; // IR(18): p_pv1 (W)
     snap.pv2_power = get_reg(data, 20) as i32; // IR(20): p_pv2 (W)
-    snap.solar_power = snap.pv1_power + snap.pv2_power;
     snap.pv1_voltage = get_reg(data, 1) as f32 * 0.1; // IR(1):  v_pv1 (/10 V)
     snap.pv2_voltage = get_reg(data, 2) as f32 * 0.1; // IR(2):  v_pv2 (/10 V)
     snap.pv1_current = get_reg(data, 8) as f32 * 0.1; // IR(8):  i_pv1 (/10 A)
@@ -464,6 +463,9 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     if snap.pv2_voltage == 0.0 && snap.pv2_current == 0.0 {
         snap.pv2_power = 0;
     }
+    // Compute the aggregate only after absent-string cleanup so a stale PV2
+    // power register cannot survive in the total while pv2_power itself is 0.
+    snap.solar_power = snap.pv1_power + snap.pv2_power;
 
     // -- Battery --
     // IR(52): p_battery (int16 W) — inverter/reference convention:
@@ -826,9 +828,14 @@ fn decode_holding_0_59(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawC
     );
     // Cap at half battery capacity (per GivTCP formula)
     let battery_capacity_w = snap.battery_capacity_kwh * 1000.0;
-    snap.max_battery_power_w = snap
-        .max_battery_power_w
-        .min((battery_capacity_w / 2.0) as u32);
+    // Three-phase-layout/HV devices commonly leave HR(55) at zero and derive
+    // capacity later from their BCU. Do not erase the DTC-specific hardware
+    // limit before that BCU derivation runs.
+    if battery_capacity_w > 0.0 {
+        snap.max_battery_power_w = snap
+            .max_battery_power_w
+            .min((battery_capacity_w / 2.0) as u32);
+    }
 
     // Export power limit: HR(26) — single-phase / AC-coupled / Gen1-4.
     // Three-phase models use HR(1063) in the high config block instead.
@@ -1125,6 +1132,10 @@ pub fn decode_holding_318_320(data: &[u16], snap: &mut InverterSnapshot) {
 /// doesn't reach. Additional registers are decoded by the three-phase
 /// register getter (inverter_threephase.py).
 fn decode_holding_1000_1079(data: &[u16], snap: &mut InverterSnapshot, _raw: &mut RawConfig) {
+    // HR 1002: active_rate — max inverter output percentage for every model
+    // using the 1000-range layout. This supersedes single-phase HR(50).
+    snap.active_power_rate = get_reg(data, 1002 - 1000) as u8;
+
     // HR 1063: p_export_limit — three-phase / HV plant-level export power
     // limit. Per givenergy-modbus threephase.py:91 the register is `C.deci`
     // (deci-watts = raw × 0.1 W). Divide the raw value by 10 to store watts.
@@ -1162,6 +1173,8 @@ fn decode_holding_1000_1079(data: &[u16], snap: &mut InverterSnapshot, _raw: &mu
 }
 
 fn decode_holding_1080_1124(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawConfig) {
+    // HR 1105: backup/EPS output enable for the three-phase/HV control bank.
+    snap.ac_eps_enabled = get_reg(data, 1105 - 1080) != 0;
     snap.discharge_rate = get_reg(data, 1108 - 1080) as u8;
     snap.battery_reserve = (get_reg(data, 1109 - 1080) as u8).clamp(4, 100);
     raw.battery_soc_reserve = snap.battery_reserve as u16;
@@ -1267,12 +1280,14 @@ fn decode_input_1000_1059(data: &[u16], snap: &mut InverterSnapshot) {
     let p_pv2 = uint32(get_reg(data, 19), get_reg(data, 20)) as f32 * 0.1;
     snap.pv1_power = p_pv1 as i32;
     snap.pv2_power = p_pv2 as i32;
-    snap.solar_power = snap.pv1_power + snap.pv2_power;
     // If PV2 has no voltage or current, there is no second string — zero
     // out the power field so garbage register values don't pollute history.
     if snap.pv2_voltage == 0.0 && snap.pv2_current == 0.0 {
         snap.pv2_power = 0;
     }
+    // Compute the aggregate only after absent-string cleanup so a stale PV2
+    // power register cannot survive in the total while pv2_power itself is 0.
+    snap.solar_power = snap.pv1_power + snap.pv2_power;
 }
 
 /// IR 1060-1119: Grid, inverter output, load and EPS-bound measurements.
@@ -1300,7 +1315,12 @@ fn decode_input_1060_1119(data: &[u16], snap: &mut InverterSnapshot) {
     snap.grid_voltage = v1;
     snap.grid_frequency = get_reg(data, 7) as f32 * 0.01;
     let max_grid_voltage = v1.max(v2).max(v3);
-    snap.grid_online = grid_online_from_ac(max_grid_voltage, snap.grid_frequency);
+    let ac_present = grid_online_from_ac(max_grid_voltage, snap.grid_frequency);
+    let system_mode = get_reg(data, 1075 - 1060);
+    let status = get_reg(data, 1076 - 1060);
+    snap.grid_online = ac_present;
+    snap.grid_loss = !ac_present && system_mode == SYSTEM_MODE_OFF_GRID;
+    snap.inverter_trip = status == STATUS_FAULT;
 
     let i1 = get_reg(data, 4) as f32 * 0.1;
     let i2 = get_reg(data, 5) as f32 * 0.1;
@@ -1316,8 +1336,14 @@ fn decode_input_1060_1119(data: &[u16], snap: &mut InverterSnapshot) {
     snap.home_power = (uint32(get_reg(data, 29), get_reg(data, 30)) as f32 * 0.1) as i32;
 
     // Create a synthetic meter entry from the inverter's built-in grid CT.
-    // Positive total = import (matching MeterData convention).
-    let i_total = (i1 + i2 + i3) / 3.0;
+    // Positive total = import (matching MeterData convention). The 0x81xx
+    // family uses this bank but is single-phase, so only i1 is meaningful;
+    // averaging all three would divide its displayed current by three.
+    let i_total = if snap.device_type == DeviceType::HybridHvGen3 {
+        i1
+    } else {
+        (i1 + i2 + i3) / 3.0
+    };
 
     // IR(1068): power_factor (int16, /1000) — three-phase inverter-wide PF.
     let pf_raw = signed(get_reg(data, 8)) as f32 * 0.001;
@@ -1373,10 +1399,17 @@ fn decode_input_1120_1179(data: &[u16], snap: &mut InverterSnapshot) {
     snap.battery_current = signed(get_reg(data, 20)) as f32 * 0.1;
 }
 
-/// IR 1180-1239: EPS measurements (not currently captured — placeholder).
-fn decode_input_1180_1239(_data: &[u16], _snap: &mut InverterSnapshot) {
-    // EPS-specific data (v_eps_ac1..3, i_eps_ac1..3, p_eps_ac1..3) lives here.
-    // Not yet exposed in InverterSnapshot; reserved for future use.
+/// IR 1180-1239: EPS measurements.
+fn decode_input_1180_1239(data: &[u16], snap: &mut InverterSnapshot) {
+    // IR(1187-1192): p_eps_ac1..3 as uint32 tenths-of-watts. The 0x81xx
+    // Hybrid HV Gen3 family uses this register layout despite being
+    // single-phase, so phase 2/3 normally read 0.
+    // Summing all three also gives the correct aggregate for true three-phase
+    // models without changing the frontend's existing total-only field.
+    let p1 = uint32(get_reg(data, 1187 - 1180), get_reg(data, 1188 - 1180)) as u64;
+    let p2 = uint32(get_reg(data, 1189 - 1180), get_reg(data, 1190 - 1180)) as u64;
+    let p3 = uint32(get_reg(data, 1191 - 1180), get_reg(data, 1192 - 1180)) as u64;
+    snap.eps_power_w = ((p1 + p2 + p3) / 10).min(u32::MAX as u64) as u32;
 }
 
 /// IR 1240-1299: Additional power meters (export, secondary meter).
@@ -1411,6 +1444,10 @@ fn decode_input_1240_1299(data: &[u16], snap: &mut InverterSnapshot) {
 
 /// IR 1300-1359: Fault codes and firmware identification.
 fn decode_input_1300_1359(data: &[u16], snap: &mut InverterSnapshot) {
+    // IR(1307) fault word 7, bit 6: battery over temperature. This is the
+    // 1000-range equivalent of single-phase charger_warning_code IR(57).
+    snap.battery_over_temp = (get_reg(data, 1307 - 1300) & (1 << 6)) != 0;
+
     // Offsets within this block (subtract 1300):
     //  17 → IR(1317)-IR(1319): software version string (3 registers = 6 chars)
     //  20 → IR(1320)-IR(1324): tph_firmware_version string (5 registers = 10 chars)
@@ -2990,6 +3027,13 @@ mod tests {
             "Should have 1 synthetic meter from 3-phase CT"
         );
         assert_eq!(snap.meters[0].address, 0x00);
+        assert!(
+            (snap.meters[0].i_total - 1.0).abs() < 0.01,
+            "existing true-three-phase current averaging must remain unchanged"
+        );
+        assert!(snap.grid_online);
+        assert!(!snap.grid_loss);
+        assert!(!snap.inverter_trip);
         assert_eq!(
             snap.meters[0].p_active_total, -600,
             "Meter total = -grid_power (positive = import)"
@@ -6342,12 +6386,243 @@ mod tests {
 
     // -- EPS power (IR(31) p_backup) --------------------------------------
     //
-    // IR(31) is only populated by `decode_input_0_59` which is dispatched
-    // for single-phase / AC-coupled / All-in-One devices. Three-phase and
-    // Gateway models skip input_0_59 entirely and read IR 1000-1414 /
-    // IR 1600-1859 instead; their EPS telemetry lives in IR 1180-1239 which
-    // is not currently captured (placeholder block). So eps_power_w stays
-    // 0 for those families until that decoder lands.
+    // Single-phase / AC-coupled / All-in-One devices populate this from
+    // IR(31). Three-phase-layout and Hybrid HV Gen3 devices populate the same
+    // aggregate field from IR(1187-1192). Gateway has no corresponding source.
+
+    #[test]
+    fn all_8100_variants_decode_complete_live_snapshot() {
+        for (dtc, rated_w, pv_w) in [
+            (0x8101, 6_000u32, 9_000u32),
+            (0x8102, 8_000, 12_000),
+            (0x8103, 10_000, 15_000),
+        ] {
+            let put_u32 = |data: &mut [u16], offset: usize, value: u32| {
+                data[offset] = (value >> 16) as u16;
+                data[offset + 1] = value as u16;
+            };
+
+            let mut holding_0 = vec![0u16; 60];
+            holding_0[0] = dtc;
+            let mut holding_1000 = vec![0u16; 80];
+            holding_1000[2] = 83; // HR1002 active_rate
+            holding_1000[63] = 50_000; // HR1063 export limit = 5 kW (deci-W)
+            let mut holding_1080 = vec![0u16; 45];
+            holding_1080[25] = 1; // HR1105 backup_enable
+            holding_1080[28] = 70; // HR1108 discharge rate
+            holding_1080[29] = 20; // HR1109 reserve
+            holding_1080[30] = 80; // HR1110 charge rate
+            holding_1080[31] = 90; // HR1111 target SOC
+
+            let mut input_1000 = vec![0u16; 60];
+            input_1000[1] = 3_800; // 380 V PV1
+            input_1000[9] = 250; // 25 A PV1
+            put_u32(&mut input_1000, 17, pv_w * 10);
+
+            let mut input_1060 = vec![0u16; 60];
+            input_1060[1] = 2_300; // 230 V
+            input_1060[4] = 123; // 12.3 A
+            input_1060[7] = 5_000; // 50 Hz
+            input_1060[16] = 1; // normal status
+            put_u32(&mut input_1060, 19, 10_000); // 1 kW import
+            put_u32(&mut input_1060, 21, 2_000); // 0.2 kW export
+            put_u32(&mut input_1060, 29, 50_000); // 5 kW load
+
+            let mut input_1120 = vec![0u16; 60];
+            input_1120[8] = 350; // 35 C inverter
+            input_1120[11] = 5_100; // 510 V battery
+            input_1120[12] = 75; // 75% SOC
+            put_u32(&mut input_1120, 16, 50_000); // 5 kW discharge
+            put_u32(&mut input_1120, 18, 10_000); // 1 kW charge
+            input_1120[20] = 80; // 8 A
+
+            let mut input_1180 = vec![0u16; 60];
+            put_u32(&mut input_1180, 7, 20_000); // 2 kW EPS
+
+            let blocks = vec![
+                make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_0),
+                make_block(
+                    RegisterType::Holding,
+                    1000,
+                    80,
+                    "holding_1000_1079",
+                    holding_1000,
+                ),
+                make_block(
+                    RegisterType::Holding,
+                    1080,
+                    45,
+                    "holding_1080_1124",
+                    holding_1080,
+                ),
+                make_block(RegisterType::Input, 1000, 60, "input_1000_1059", input_1000),
+                make_block(RegisterType::Input, 1060, 60, "input_1060_1119", input_1060),
+                make_block(RegisterType::Input, 1120, 60, "input_1120_1179", input_1120),
+                make_block(RegisterType::Input, 1180, 60, "input_1180_1239", input_1180),
+            ];
+
+            let snap = decode_snapshot(&blocks);
+            assert_eq!(snap.device_type, DeviceType::HybridHvGen3);
+            assert_eq!(snap.device_type_code, format!("{dtc:04X}"));
+            assert_eq!(snap.max_ac_power_w, rated_w);
+            assert_eq!(snap.max_battery_power_w, rated_w);
+            assert_eq!(snap.solar_power, pv_w as i32);
+            assert_eq!(snap.grid_power, -800);
+            assert_eq!(snap.home_power, 5_000);
+            assert_eq!(snap.battery_power, 4_000);
+            assert_eq!(snap.battery_voltage, 510.0);
+            assert_eq!(snap.soc, 75);
+            assert_eq!(snap.eps_power_w, 2_000);
+            assert!(snap.ac_eps_enabled);
+            assert_eq!(snap.active_power_rate, 83);
+            assert_eq!(snap.export_limit_w, 5_000);
+            assert_eq!(snap.meters[0].i_total, 12.3);
+            assert!(snap.grid_online);
+            assert!(!snap.inverter_trip);
+        }
+    }
+
+    #[test]
+    fn all_hybrid_hv_gen3_variants_decode_eps_power_from_1000_range() {
+        // Every 0x81xx power variant uses the same 1000-range register layout.
+        for dtc in [0x8101, 0x8102, 0x8103] {
+            let mut holding_data = vec![0u16; 60];
+            holding_data[0] = dtc;
+            let mut eps_data = vec![0u16; 60];
+            // p_eps_ac1 = 4.0 kW, encoded as uint32 tenths-of-watts. These
+            // single-phase models normally leave phase 2/3 at zero.
+            let tenths = 40_000u32;
+            eps_data[7] = (tenths >> 16) as u16;
+            eps_data[8] = tenths as u16;
+            let blocks = vec![
+                make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+                make_block(RegisterType::Input, 1180, 60, "input_1180_1239", eps_data),
+            ];
+
+            let snap = decode_snapshot(&blocks);
+            assert_eq!(snap.device_type, DeviceType::HybridHvGen3);
+            assert_eq!(snap.eps_power_w, 4_000, "DTC 0x{dtc:04X}");
+        }
+    }
+
+    #[test]
+    fn all_hybrid_hv_gen3_variants_decode_active_power_rate_from_hr1002() {
+        for dtc in [0x8101, 0x8102, 0x8103] {
+            let mut holding_data = vec![0u16; 60];
+            holding_data[0] = dtc;
+            holding_data[50] = 17; // Wrong bank must not win for 0x81xx.
+            let mut config_data = vec![0u16; 80];
+            config_data[1002 - 1000] = 83;
+            let blocks = vec![
+                make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+                make_block(
+                    RegisterType::Holding,
+                    1000,
+                    80,
+                    "holding_1000_1079",
+                    config_data,
+                ),
+            ];
+
+            let snap = decode_snapshot(&blocks);
+            assert_eq!(snap.active_power_rate, 83, "DTC 0x{dtc:04X}");
+        }
+    }
+
+    #[test]
+    fn all_hybrid_hv_gen3_variants_decode_eps_enable_from_hr1105() {
+        for dtc in [0x8101, 0x8102, 0x8103] {
+            let mut holding_data = vec![0u16; 60];
+            holding_data[0] = dtc;
+            let mut config_data = vec![0u16; 45];
+            config_data[1105 - 1080] = 1;
+            let blocks = vec![
+                make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+                make_block(
+                    RegisterType::Holding,
+                    1080,
+                    45,
+                    "holding_1080_1124",
+                    config_data,
+                ),
+            ];
+
+            let snap = decode_snapshot(&blocks);
+            assert!(snap.ac_eps_enabled, "0x{dtc:04X} must decode HR1105");
+        }
+    }
+
+    #[test]
+    fn all_hybrid_hv_gen3_variants_report_single_phase_grid_current() {
+        for dtc in [0x8101, 0x8102, 0x8103] {
+            let mut holding_data = vec![0u16; 60];
+            holding_data[0] = dtc;
+            let mut grid_data = vec![0u16; 60];
+            grid_data[1] = 2_300; // IR(1061): phase 1 voltage = 230 V
+            grid_data[4] = 123; // IR(1064): phase 1 current = 12.3 A
+            grid_data[7] = 5_000; // IR(1067): grid frequency = 50 Hz
+            let blocks = vec![
+                make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+                make_block(RegisterType::Input, 1060, 60, "input_1060_1119", grid_data),
+            ];
+
+            let snap = decode_snapshot(&blocks);
+            let meter = snap.meters.first().expect("synthetic grid meter");
+            assert_eq!(
+                meter.i_total, 12.3,
+                "0x{dtc:04X} is single-phase, so total current must equal phase 1"
+            );
+        }
+    }
+
+    #[test]
+    fn all_hybrid_hv_gen3_variants_decode_status_and_warning_registers() {
+        for dtc in [0x8101, 0x8102, 0x8103] {
+            let mut holding_data = vec![0u16; 60];
+            holding_data[0] = dtc;
+            let mut grid_data = vec![0u16; 60];
+            grid_data[15] = SYSTEM_MODE_OFF_GRID; // IR(1075)
+            grid_data[16] = STATUS_FAULT; // IR(1076)
+            let mut fault_data = vec![0u16; 60];
+            fault_data[7] = 1 << 6; // IR(1307): battery over temperature
+            let blocks = vec![
+                make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+                make_block(RegisterType::Input, 1060, 60, "input_1060_1119", grid_data),
+                make_block(RegisterType::Input, 1300, 60, "input_1300_1359", fault_data),
+            ];
+
+            let snap = decode_snapshot(&blocks);
+            assert!(!snap.grid_online, "DTC 0x{dtc:04X}");
+            assert!(snap.grid_loss, "DTC 0x{dtc:04X}");
+            assert!(snap.inverter_trip, "DTC 0x{dtc:04X}");
+            assert!(snap.battery_over_temp, "DTC 0x{dtc:04X}");
+        }
+    }
+
+    #[test]
+    fn all_hybrid_hv_gen3_variants_ignore_absent_pv2_power() {
+        for dtc in [0x8101, 0x8102, 0x8103] {
+            let mut holding_data = vec![0u16; 60];
+            holding_data[0] = dtc;
+            let mut pv_data = vec![0u16; 60];
+            pv_data[1] = 3_400; // PV1 voltage = 340 V
+            pv_data[9] = 100; // PV1 current = 10 A
+            pv_data[17] = 0;
+            pv_data[18] = 30_000; // PV1 power = 3 kW (tenths-of-watts)
+                                  // PV2 has zero voltage/current but a stale 5 kW power register.
+            pv_data[19] = 0;
+            pv_data[20] = 50_000;
+            let blocks = vec![
+                make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+                make_block(RegisterType::Input, 1000, 60, "input_1000_1059", pv_data),
+            ];
+
+            let snap = decode_snapshot(&blocks);
+            assert_eq!(snap.pv1_power, 3_000, "DTC 0x{dtc:04X}");
+            assert_eq!(snap.pv2_power, 0, "DTC 0x{dtc:04X}");
+            assert_eq!(snap.solar_power, 3_000, "DTC 0x{dtc:04X}");
+        }
+    }
 
     #[test]
     fn eps_power_w_defaults_to_zero_when_block_missing() {

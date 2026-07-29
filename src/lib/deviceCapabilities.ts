@@ -1,20 +1,19 @@
 import type { InverterSnapshot } from './types';
 
 /**
- * Whether the inverter exposes the Emergency Power Supply (EPS) enable
- * register at HR 317.
+ * Whether the inverter exposes a confirmed, safely writable Emergency Power
+ * Supply (EPS) enable register at HR 317.
  *
- * Mirrors the backend's `DeviceType::supports_eps` and the givenergy-modbus
- * reference library's `_AC_CONFIG_BLOCK_MODELS = {AC, AC_3PH, ALL_IN_ONE}`:
+ * Mirrors the backend's `DeviceType::supports_eps` and the reference safe-write
+ * map:
  *
  *   - 0x30xx — AC-coupled (single-phase AC battery inverter)
  *   - 0x60xx — AC three-phase
  *   - 0x80xx — Residential All-in-One (AIO 6kW, 3.6kW, 5kW)
  *
- * DC hybrids (Gen1/2/3/4, Polar, Gen3+) and pure three-phase models have no
- * AC output stage and lack HR 317; writing it is silently dropped by the
- * firmware. Used by `ControlPage` to hide the EPS toggle and by the `/api/control/eps`
- * handler to refuse the write with HTTP 400.
+ * Hybrid HV Gen3 exposes read-back state at HR 1105, but that register is not
+ * in either reference implementation's safe-write set. It and other DC hybrid
+ * families remain hidden until a safe write is confirmed.
  *
  * Returns false when the device type code is missing (pre-snapshot state) so
  * the UI doesn't briefly flash a control that will be rejected.

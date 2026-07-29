@@ -347,7 +347,8 @@ pub(crate) fn carry_forward_optional_block_values(
         && (snap.charge_rate != prev.charge_rate
             || snap.discharge_rate != prev.discharge_rate
             || snap.battery_reserve != prev.battery_reserve
-            || snap.target_soc != prev.target_soc)
+            || snap.target_soc != prev.target_soc
+            || snap.ac_eps_enabled != prev.ac_eps_enabled)
     {
         tracing::warn!(
             charge_prev = prev.charge_rate,
@@ -360,6 +361,7 @@ pub(crate) fn carry_forward_optional_block_values(
         snap.discharge_rate = prev.discharge_rate;
         snap.battery_reserve = prev.battery_reserve;
         snap.target_soc = prev.target_soc;
+        snap.ac_eps_enabled = prev.ac_eps_enabled;
         changed = true;
     }
 
@@ -420,6 +422,72 @@ pub(crate) fn carry_forward_optional_block_values(
         changed = true;
     }
 
+    changed
+}
+
+/// Preserve values sourced only from optional HR(1000-1079).
+///
+/// The three-phase/HV high-config block can fail independently of the lower
+/// HR(1080-1124) block. Without an explicit presence flag, HR(50) and defaults
+/// from the standard bank can overwrite the previous active-rate, cutoff and
+/// export-limit values for one cycle.
+pub(crate) fn carry_forward_three_phase_high_config_values(
+    snap: &mut InverterSnapshot,
+    prev: Option<&InverterSnapshot>,
+    has_three_phase_high_config_block: bool,
+) -> bool {
+    let Some(prev) = prev else { return false };
+    if has_three_phase_high_config_block
+        || !snap.device_type.needs_three_phase_input_blocks()
+        || snap.device_type != prev.device_type
+    {
+        return false;
+    }
+
+    let changed = snap.active_power_rate != prev.active_power_rate
+        || snap.battery_power_cutoff != prev.battery_power_cutoff
+        || snap.export_limit_w != prev.export_limit_w;
+    if changed {
+        tracing::warn!(
+            active_rate_prev = prev.active_power_rate,
+            cutoff_prev = prev.battery_power_cutoff,
+            export_limit_prev = prev.export_limit_w,
+            "Three-phase high config block missing - carrying forward previous values"
+        );
+        snap.active_power_rate = prev.active_power_rate;
+        snap.battery_power_cutoff = prev.battery_power_cutoff;
+        snap.export_limit_w = prev.export_limit_w;
+    }
+    changed
+}
+
+/// Preserve warning and firmware fields when optional IR(1300-1359) is missed.
+pub(crate) fn carry_forward_three_phase_fault_block_values(
+    snap: &mut InverterSnapshot,
+    prev: Option<&InverterSnapshot>,
+    has_three_phase_fault_block: bool,
+) -> bool {
+    let Some(prev) = prev else { return false };
+    if has_three_phase_fault_block
+        || !snap.device_type.needs_three_phase_input_blocks()
+        || snap.device_type != prev.device_type
+    {
+        return false;
+    }
+
+    let changed = snap.battery_over_temp != prev.battery_over_temp
+        || snap.firmware_version != prev.firmware_version
+        || snap.dsp_firmware_version != prev.dsp_firmware_version
+        || snap.dc_dsp_firmware_version != prev.dc_dsp_firmware_version;
+    if changed {
+        snap.battery_over_temp = prev.battery_over_temp;
+        snap.firmware_version = prev.firmware_version.clone();
+        snap.dsp_firmware_version = prev.dsp_firmware_version.clone();
+        snap.dc_dsp_firmware_version = prev.dc_dsp_firmware_version.clone();
+        tracing::warn!(
+            "Three-phase fault/firmware block missing - carrying forward previous values"
+        );
+    }
     changed
 }
 
@@ -517,6 +585,20 @@ pub(crate) fn derive_battery_fields_from_bms(
     }
 
     let is_three_phase = snap.device_type.needs_three_phase_input_blocks();
+    // Preserve the full-DTC hardware limit decoded before BMS enrichment.
+    // Coarse DeviceType variants cannot distinguish 0x8101/02/03 (6/8/10 kW),
+    // so falling straight back to DeviceType::max_battery_power_w() would
+    // incorrectly reduce a 0x8103 inverter to 6 kW.
+    let raw_dtc = u16::from_str_radix(&snap.device_type_code, 16).unwrap_or(0);
+    let hardware_power_limit = if snap.max_battery_power_w > 0 {
+        snap.max_battery_power_w
+    } else {
+        DeviceType::max_battery_power_for_dtc(
+            raw_dtc,
+            snap.firmware_version.parse().unwrap_or(0),
+            snap.device_type.max_battery_power_w(),
+        )
+    };
 
     // --- Temperature: always from BMS module average when available ---
     // The BCU cluster IR(68) and inverter IR(56) are both unreliable
@@ -550,7 +632,7 @@ pub(crate) fn derive_battery_fields_from_bms(
         // --- No BMS data at all ---
         if is_three_phase {
             snap.battery_capacity_kwh = 0.0;
-            snap.max_battery_power_w = snap.device_type.max_battery_power_w();
+            snap.max_battery_power_w = hardware_power_limit;
         }
         return;
     } else if is_three_phase {
@@ -565,11 +647,9 @@ pub(crate) fn derive_battery_fields_from_bms(
     if is_three_phase {
         let cap_w = snap.battery_capacity_kwh * 1000.0;
         snap.max_battery_power_w = if cap_w > 0.0 {
-            snap.device_type
-                .max_battery_power_w()
-                .min((cap_w / 2.0) as u32)
+            hardware_power_limit.min((cap_w / 2.0) as u32)
         } else {
-            snap.device_type.max_battery_power_w()
+            hardware_power_limit
         };
     }
 }
@@ -1499,7 +1579,17 @@ pub(crate) fn sanitize_snapshot(
     let mut sanitized = false;
     let max_battery_power: i32 = 10_000; // 10 kW - residential battery limit
     let max_grid_power: i32 = 15_000; // 15 kW - UK single-phase import can exceed 10 kW with EV charging (100A fuse ≈ 23 kW); matches max_home_power which carries the same EV-charging margin. Corruption spikes (e.g. ±32767) are still well above this.
-    let max_solar_power: i32 = 10_000; // 10 kW - residential PV limit
+    let max_solar_power: i32 = if snap.device_type == DeviceType::HybridHvGen3 {
+        // Hybrid HV Gen3 permits DC oversizing to 150% of rated AC power
+        // (0x8103: 10 kW AC / 15 kW PV input). Derive this from the full DTC
+        // because the coarse family fallback cannot distinguish 6/8/10 kW.
+        let raw_dtc = u16::from_str_radix(&snap.device_type_code, 16).unwrap_or(0);
+        let rated_ac =
+            DeviceType::max_ac_power_for_dtc(raw_dtc, snap.device_type.max_ac_power_w()) as i32;
+        (rated_ac * 3 / 2).max(10_000)
+    } else {
+        10_000 // default residential PV limit
+    };
     let max_home_power: i32 = 15_000; // 15 kW - includes EV charging margin
 
     // Gateway systems aggregate up to 3 AIO units (up to ~18 kW PV / 18 kW load
@@ -2575,9 +2665,11 @@ pub(crate) fn sanitize_snapshot(
         | crate::inverter::model::DeviceType::AllInOne3_6kW
         | crate::inverter::model::DeviceType::AllInOne5kW
         | crate::inverter::model::DeviceType::AioCommercial
-        | crate::inverter::model::DeviceType::HybridHvGen3
         | crate::inverter::model::DeviceType::AllInOneHybrid => 400.0,
-        crate::inverter::model::DeviceType::ThreePhase
+        // GIV-HY-10.0-G3-HV is rated for a 120-510 V battery range. Use the
+        // same 600 V safety ceiling as the other stackable-HV families.
+        crate::inverter::model::DeviceType::HybridHvGen3
+        | crate::inverter::model::DeviceType::ThreePhase
         | crate::inverter::model::DeviceType::ACThreePhase => 600.0,
         _ => 60.0,
     };
@@ -3109,6 +3201,108 @@ mod tests {
         assert_eq!(snap.soc, 87);
         // Max power: min(6000 hardware, 19584W/2) = 6000.
         assert_eq!(snap.max_battery_power_w, 6000);
+    }
+
+    #[test]
+    fn all_hybrid_hv_gen3_variants_keep_dtc_specific_battery_limits() {
+        // The final DTC digit distinguishes the 6/8/10 kW variants. BMS
+        // derivation must not replace the 8/10 kW limits with the coarse
+        // 6 kW HybridHvGen3 family fallback.
+        for (code, expected_w) in [("8101", 6_000), ("8102", 8_000), ("8103", 10_000)] {
+            let mut snap = InverterSnapshot {
+                device_type: DeviceType::HybridHvGen3,
+                device_type_code: code.to_string(),
+                // Exercise the fallback used when the inverter capacity bank is
+                // absent and no pre-derived limit survives into BMS enrichment.
+                max_battery_power_w: 0,
+                ..Default::default()
+            };
+
+            derive_battery_fields_from_bms(&mut snap, None);
+
+            assert_eq!(snap.max_battery_power_w, expected_w, "DTC {code}");
+        }
+    }
+
+    #[test]
+    fn all_hybrid_hv_gen3_variants_accept_510v_battery_ceiling() {
+        // The 0x81xx family uses the same 120-510 V HV battery architecture.
+        // A full stack must not be treated as corrupt above 400 V.
+        for code in ["8101", "8102", "8103"] {
+            let mut snap = InverterSnapshot {
+                timestamp: 1_000,
+                device_type: DeviceType::HybridHvGen3,
+                device_type_code: code.to_string(),
+                battery_voltage: 510.0,
+                soc: 90,
+                grid_voltage: 230.0,
+                grid_frequency: 50.0,
+                ..Default::default()
+            };
+            let mut pending_mode = None;
+            let mut delta_corrections = DeltaCorrectionCounts::default();
+            let mut suspect_counts = ConsecutiveSuspectCounts::default();
+            let mut rate_release_counts = RateReleaseCounts::default();
+
+            sanitize_snapshot(
+                &mut snap,
+                None,
+                true,
+                &mut pending_mode,
+                &mut delta_corrections,
+                &mut suspect_counts,
+                &mut rate_release_counts,
+            );
+
+            assert_eq!(snap.battery_voltage, 510.0, "DTC {code}");
+        }
+    }
+
+    #[test]
+    fn all_hybrid_hv_gen3_variants_accept_rated_pv_input() {
+        // The 0x8101/02/03 models permit PV input up to 150% of their
+        // 6/8/10 kW AC ratings. Use a long elapsed interval so this isolates
+        // the absolute model ceiling from the short-term power-rate smoother.
+        for (code, pv_w) in [("8101", 9_000), ("8102", 12_000), ("8103", 15_000)] {
+            let prev = InverterSnapshot {
+                timestamp: 1_000,
+                device_type: DeviceType::HybridHvGen3,
+                device_type_code: code.to_string(),
+                solar_power: pv_w - 1_000,
+                home_power: pv_w - 1_000,
+                soc: 50,
+                grid_voltage: 230.0,
+                grid_frequency: 50.0,
+                ..Default::default()
+            };
+            let mut snap = InverterSnapshot {
+                timestamp: 4_600,
+                device_type: DeviceType::HybridHvGen3,
+                device_type_code: code.to_string(),
+                solar_power: pv_w,
+                home_power: pv_w,
+                soc: 50,
+                grid_voltage: 230.0,
+                grid_frequency: 50.0,
+                ..Default::default()
+            };
+            let mut pending_mode = None;
+            let mut delta_corrections = DeltaCorrectionCounts::default();
+            let mut suspect_counts = ConsecutiveSuspectCounts::default();
+            let mut rate_release_counts = RateReleaseCounts::default();
+
+            sanitize_snapshot(
+                &mut snap,
+                Some(&prev),
+                true,
+                &mut pending_mode,
+                &mut delta_corrections,
+                &mut suspect_counts,
+                &mut rate_release_counts,
+            );
+
+            assert_eq!(snap.solar_power, pv_w, "DTC {code}");
+        }
     }
 
     #[test]
@@ -5261,6 +5455,7 @@ mod tests {
             discharge_rate: 65,
             battery_reserve: 20,
             target_soc: 90,
+            ac_eps_enabled: true,
             ..Default::default()
         };
         let mut snap = InverterSnapshot {
@@ -5275,6 +5470,66 @@ mod tests {
         assert_eq!(snap.discharge_rate, 65);
         assert_eq!(snap.battery_reserve, 20);
         assert_eq!(snap.target_soc, 90);
+        assert!(snap.ac_eps_enabled);
+    }
+
+    #[test]
+    fn optional_three_phase_high_config_carries_forward_for_all_8100_variants() {
+        for code in ["8101", "8102", "8103"] {
+            let prev = InverterSnapshot {
+                device_type: DeviceType::HybridHvGen3,
+                device_type_code: code.to_string(),
+                active_power_rate: 83,
+                battery_power_cutoff: 17,
+                export_limit_w: 5_000,
+                ..Default::default()
+            };
+            let mut snap = InverterSnapshot {
+                device_type: DeviceType::HybridHvGen3,
+                device_type_code: code.to_string(),
+                active_power_rate: 17, // stale standard-bank HR(50)
+                ..Default::default()
+            };
+
+            assert!(carry_forward_three_phase_high_config_values(
+                &mut snap,
+                Some(&prev),
+                false,
+            ));
+            assert_eq!(snap.active_power_rate, 83, "DTC {code}");
+            assert_eq!(snap.battery_power_cutoff, 17, "DTC {code}");
+            assert_eq!(snap.export_limit_w, 5_000, "DTC {code}");
+        }
+    }
+
+    #[test]
+    fn optional_three_phase_fault_block_carries_forward_for_all_8100_variants() {
+        for code in ["8101", "8102", "8103"] {
+            let prev = InverterSnapshot {
+                device_type: DeviceType::HybridHvGen3,
+                device_type_code: code.to_string(),
+                battery_over_temp: true,
+                firmware_version: "ARM-HV".to_string(),
+                dsp_firmware_version: "DSP-AC".to_string(),
+                dc_dsp_firmware_version: "DSP-DC".to_string(),
+                ..Default::default()
+            };
+            let mut snap = InverterSnapshot {
+                device_type: DeviceType::HybridHvGen3,
+                device_type_code: code.to_string(),
+                ..Default::default()
+            };
+
+            assert!(carry_forward_three_phase_fault_block_values(
+                &mut snap,
+                Some(&prev),
+                false,
+            ));
+            assert!(snap.battery_over_temp, "DTC {code}");
+            assert_eq!(snap.firmware_version, "ARM-HV", "DTC {code}");
+            assert_eq!(snap.dsp_firmware_version, "DSP-AC", "DTC {code}");
+            assert_eq!(snap.dc_dsp_firmware_version, "DSP-DC", "DTC {code}");
+        }
     }
 
     #[test]

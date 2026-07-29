@@ -678,6 +678,17 @@ pub const THREE_PHASE_INPUT_BLOCK_7: RegisterBlock = RegisterBlock {
     name: "input_1360_1413",
 };
 
+/// Dashboard-critical three-phase/HV telemetry blocks.
+///
+/// PV, grid/load and battery live in these first three ranges. A snapshot that
+/// omits any of them would decode core readings as zero, so the client retries
+/// them and rejects the partial poll if they remain unavailable.
+pub const THREE_PHASE_CRITICAL_INPUT_BLOCKS: &[RegisterBlock] = &[
+    THREE_PHASE_INPUT_BLOCK_1,
+    THREE_PHASE_INPUT_BLOCK_2,
+    THREE_PHASE_INPUT_BLOCK_3,
+];
+
 /// All seven three-phase input register blocks, in poll order.
 pub const THREE_PHASE_INPUT_BLOCKS: &[RegisterBlock] = &[
     THREE_PHASE_INPUT_BLOCK_1,

@@ -2159,12 +2159,8 @@ pub async fn set_eps(
     };
 
     // HR 317 only exists on AC-coupled / AC-three-phase / All-in-One models
-    // (see DeviceType::supports_eps). On every other family the firmware
-    // silently drops the write — earlier we returned 200 anyway, which left
-    // the user with a successful response but a UI that still showed EPS
-    // off on the next snapshot (because we don't poll HR 300-359 for those
-    // devices). Refuse the write up front with a clear error so the toggle
-    // can be hidden in the UI.
+    // with a confirmed safe write path (see DeviceType::supports_eps). Refuse
+    // every unverified register write up front with a clear error.
     let device_type = latest_device_type(&state).await;
     if !device_type.supports_eps() {
         return error_response(&format!(

@@ -67,6 +67,7 @@ use crate::inverter::model::{
 use crate::inverter::reconnect::ReconnectController;
 use crate::inverter::sanitizer::{
     carry_forward_battery_modules_with, carry_forward_optional_block_values,
+    carry_forward_three_phase_fault_block_values, carry_forward_three_phase_high_config_values,
     derive_battery_fields_from_bms, is_block_suspicious, sanitize_snapshot, validate_battery_bms,
     ConsecutiveSuspectCounts, DeltaCorrectionCounts, GraceCumulativeSamples, RateReleaseCounts,
 };
@@ -557,7 +558,12 @@ fn should_probe_external_meters(
         Some(dt) => dt,
         None => return false,
     };
-    if dt.needs_three_phase_input_blocks() || dt.is_batteryless() {
+    // True three-phase models use their built-in grid CT. Hybrid HV Gen3
+    // (0x81xx) shares the 1000-range register layout but is physically
+    // single-phase and can have an external EM115/CT meter, so keep probing it.
+    if (dt.needs_three_phase_input_blocks() && dt != DeviceType::HybridHvGen3)
+        || dt.is_batteryless()
+    {
         return false;
     }
 
@@ -591,10 +597,64 @@ const METER_RETRY_INTERVAL: u8 = 5;
 /// Only HV-capable device types use the BCU/BMU protocol; LV models answer at
 /// 0x32 instead. The probe runs once after model detection, then the per-cycle
 /// BCU cluster reads take over.
-fn should_probe_hv_stacks(known_device_type: Option<DeviceType>, hv_probe_done: bool) -> bool {
+const HV_PROBE_RETRY_INTERVAL_CYCLES: u8 = 5;
+
+fn should_probe_hv_stacks(
+    known_device_type: Option<DeviceType>,
+    hv_probe_done: bool,
+    hv_probe_attempted: bool,
+    cycles_since_last_probe: u8,
+) -> bool {
     known_device_type
-        .map(|dt| !hv_probe_done && dt.uses_hv_battery())
+        .map(|dt| {
+            !hv_probe_done
+                && dt.uses_hv_battery()
+                && (!hv_probe_attempted
+                    || cycles_since_last_probe >= HV_PROBE_RETRY_INTERVAL_CYCLES)
+        })
         .unwrap_or(false)
+}
+
+/// Convert one HV discovery result into the existing one-shot completion flag.
+/// Kept separate so retry semantics can be pinned by a focused unit test.
+fn hv_probe_completed(detected_stacks: &[(u8, u8)]) -> bool {
+    !detected_stacks.is_empty()
+}
+
+/// Restore the confirmed model identity after decoding a later poll.
+///
+/// HR(0) is subject to the same dongle corruption as any other register. For
+/// 0x81xx inverters the final DTC digit selects the 6/8/10 kW limits, so merely
+/// locking the coarse `DeviceType` is not enough: a corrupt DTC would silently
+/// fall back to the 6 kW family defaults and could make valid telemetry fail
+/// sanitization. Preserve the confirmed code and re-derive those limits.
+fn lock_snapshot_device_identity(
+    snapshot: &mut InverterSnapshot,
+    known_device_type: DeviceType,
+    known_device_type_code: &str,
+) {
+    snapshot.device_type = known_device_type;
+    snapshot.device_type_display = known_device_type.display_name().to_string();
+    snapshot.device_type_code = known_device_type_code.to_string();
+    snapshot.max_charge_slots = known_device_type.max_charge_slots();
+    snapshot.max_discharge_slots = known_device_type.max_discharge_slots();
+
+    if known_device_type == DeviceType::HybridHvGen3 {
+        let raw_dtc = u16::from_str_radix(known_device_type_code, 16).unwrap_or(0);
+        snapshot.max_ac_power_w =
+            DeviceType::max_ac_power_for_dtc(raw_dtc, known_device_type.max_ac_power_w());
+        let hardware_limit = DeviceType::max_battery_power_for_dtc(
+            raw_dtc,
+            snapshot.firmware_version.parse().unwrap_or(0),
+            known_device_type.max_battery_power_w(),
+        );
+        let capacity_limit = (snapshot.battery_capacity_kwh * 500.0) as u32;
+        snapshot.max_battery_power_w = if capacity_limit > 0 {
+            hardware_limit.min(capacity_limit)
+        } else {
+            hardware_limit
+        };
+    }
 }
 // ---------------------------------------------------------------------------
 // Main poll loop
@@ -869,6 +929,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 let mut suspect_counts = ConsecutiveSuspectCounts::default();
                 let mut rate_release_counts = RateReleaseCounts::default();
                 let mut known_device_type: Option<crate::inverter::model::DeviceType> = None;
+                let mut known_device_type_code: Option<String> = None;
                 let mut detected_meters: Vec<u8> = Vec::new();
                 // Battery slave addresses already announced this session, so
                 // "Battery #N detected" is logged once (INFO) per address
@@ -882,10 +943,13 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 let mut meter_retry_count: u8 = 0;
                 let mut meter_cycle_since_last: u8 = 0;
                 // HV battery stacks discovered via the BMS (0xA0) / BCU (0x70+)
-                // probe. Each entry is (bcu_offset, num_modules). Populated once
-                // after model detection for devices that use the HV BCU protocol.
+                // probe. Each entry is (bcu_offset, num_modules). Empty discovery
+                // remains retryable so a transient startup timeout cannot hide the
+                // battery for the rest of the TCP session.
                 let mut detected_hv_stacks: Vec<(u8, u8)> = Vec::new();
                 let mut hv_probe_done = false;
+                let mut hv_probe_attempted = false;
+                let mut hv_probe_cycles_since_last: u8 = 0;
 
                 // Tracks which Cosy slot index was last preloaded into the
                 // inverter's charge slot registers. Only re-writes when the
@@ -1110,10 +1174,20 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         && b.block.start == 240
                                         && b.block.count == 60
                                 });
+                                let has_three_phase_high_config_block = blocks.iter().any(|b| {
+                                    b.block.register_type == crate::modbus::registers::RegisterType::Holding
+                                        && b.block.start == 1000
+                                        && b.block.count == 80
+                                });
                                 let has_three_phase_config_block = blocks.iter().any(|b| {
                                     b.block.register_type == crate::modbus::registers::RegisterType::Holding
                                         && b.block.start == 1080
                                         && b.block.count == 45
+                                });
+                                let has_three_phase_fault_block = blocks.iter().any(|b| {
+                                    b.block.register_type == crate::modbus::registers::RegisterType::Input
+                                        && b.block.start == 1300
+                                        && b.block.count == 60
                                 });
                                 let has_ems_plant_block = blocks.iter().any(|b| {
                                     b.block.register_type == crate::modbus::registers::RegisterType::Holding
@@ -1203,6 +1277,8 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     )
                                     .is_empty();
                                     known_device_type = Some(snapshot.device_type);
+                                    known_device_type_code =
+                                        Some(snapshot.device_type_code.clone());
 
                                     // The first detection poll is intentionally minimal: it discovers
                                     // the model, then immediately re-polls with the model-specific
@@ -1246,9 +1322,9 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 ) {
                                     // Probe for external CT clamp meters (device addresses 0x01-0x08).
                                     // Per givenergy-modbus, a meter is present when V_phase_1
-                                    // (IR 60) is non-zero. Three-phase/HV models use the
-                                    // inverter's internal grid CT at IR 1079-1082 instead of
-                                    // separate external meters, so skip.
+                                    // (IR 60) is non-zero. True three-phase models use the
+                                    // built-in grid CT; single-phase 0x81xx HV hybrids still
+                                    // support an external MID meter and are probed here.
                                     //
                                     // Uses a short 3-second timeout with no retries for the
                                     // initial scan. If the inverter is configured for an
@@ -1361,15 +1437,14 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     }
                                 }
 
-                                // Once the model is identified, freeze the device type in the
-                                // snapshot to prevent a corrupted ARM firmware register read (HR 21)
-                                // from flipping the displayed model on subsequent polls. The
-                                // dongle occasionally returns garbage for any register.
-                                if let Some(kdt) = known_device_type {
-                                    snapshot.device_type = kdt;
-                                    snapshot.device_type_display = kdt.display_name().to_string();
-                                    snapshot.max_charge_slots = kdt.max_charge_slots();
-                                    snapshot.max_discharge_slots = kdt.max_discharge_slots();
+                                // Once identified, freeze both the coarse model and exact HR(0)
+                                // DTC. The exact 0x81xx code carries its 6/8/10 kW rating, so
+                                // allowing a later corrupt HR(0) through would lower valid power
+                                // ceilings even though the displayed DeviceType remained locked.
+                                if let (Some(kdt), Some(code)) =
+                                    (known_device_type, known_device_type_code.as_deref())
+                                {
+                                    lock_snapshot_device_identity(&mut snapshot, kdt, code);
                                 }
 
                                 // Populated by the HV battery path below; consumed by
@@ -1403,9 +1478,23 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 if is_hv {
                                     // --- HV battery: BCU cluster read ---
                                     //
-                                    // Discover the BCU layout once (via the BMS at 0xA0),
-                                    // then read each stack's cluster block every cycle.
-                                    if should_probe_hv_stacks(known_device_type, hv_probe_done) {
+                                    // Discover the BCU layout via the BMS at 0xA0. Once a
+                                    // usable layout is found, read each stack's cluster block
+                                    // every cycle. Empty attempts remain retryable on a slow
+                                    // cadence so startup timeouts recover without adding a BMS
+                                    // timeout to every poll.
+                                    if hv_probe_attempted && !hv_probe_done {
+                                        hv_probe_cycles_since_last =
+                                            hv_probe_cycles_since_last.saturating_add(1);
+                                    }
+                                    if should_probe_hv_stacks(
+                                        known_device_type,
+                                        hv_probe_done,
+                                        hv_probe_attempted,
+                                        hv_probe_cycles_since_last,
+                                    ) {
+                                        hv_probe_attempted = true;
+                                        hv_probe_cycles_since_last = 0;
                                         tracing::info!("Probing for HV battery BCU stacks...");
                                         let mut found: Vec<(u8, u8)> = Vec::new();
                                         // BMS at 0xA0 reports the number of BCUs at IR(61).
@@ -1498,7 +1587,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             }
                                         }
                                         detected_hv_stacks = found;
-                                        hv_probe_done = true;
+                                        hv_probe_done = hv_probe_completed(&detected_hv_stacks);
                                         if detected_hv_stacks.is_empty() {
                                             tracing::info!("No HV battery BCU stacks detected");
                                         } else {
@@ -1814,6 +1903,20 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         has_extended_slots_block,
                                         has_three_phase_config_block,
                                         has_ems_plant_block,
+                                    ) {
+                                        s = true;
+                                    }
+                                    if carry_forward_three_phase_high_config_values(
+                                        &mut snapshot,
+                                        prev.as_ref(),
+                                        has_three_phase_high_config_block,
+                                    ) {
+                                        s = true;
+                                    }
+                                    if carry_forward_three_phase_fault_block_values(
+                                        &mut snapshot,
+                                        prev.as_ref(),
+                                        has_three_phase_fault_block,
                                     ) {
                                         s = true;
                                     }
@@ -4044,6 +4147,72 @@ mod tests {
             0,
             0,
             0,
+        ));
+    }
+
+    #[test]
+    fn all_hybrid_hv_gen3_dtc_limits_survive_later_hr0_corruption() {
+        for (code, expected_w) in [("8101", 6_000), ("8102", 8_000), ("8103", 10_000)] {
+            let mut snapshot = InverterSnapshot {
+                device_type: DeviceType::Unknown(0x9999),
+                device_type_code: "9999".to_string(),
+                max_ac_power_w: 0,
+                max_battery_power_w: 0,
+                ..Default::default()
+            };
+
+            lock_snapshot_device_identity(&mut snapshot, DeviceType::HybridHvGen3, code);
+
+            assert_eq!(snapshot.device_type_code, code);
+            assert_eq!(snapshot.max_ac_power_w, expected_w);
+            assert_eq!(snapshot.max_battery_power_w, expected_w);
+        }
+    }
+
+    #[test]
+    fn external_meter_probe_runs_for_single_phase_hybrid_hv_gen3() {
+        // Every 0x81xx variant uses the 1000-range register layout but is
+        // physically single-phase. The reference implementation still probes
+        // meter addresses 0x01-0x08 for this family.
+        assert!(should_probe_external_meters(
+            Some(DeviceType::HybridHvGen3),
+            false,
+            false,
+            0,
+            0,
+            0,
+        ));
+    }
+
+    #[test]
+    fn hv_stack_probe_remains_retryable_after_empty_attempt() {
+        assert!(
+            !hv_probe_completed(&[]),
+            "an empty transient probe must not permanently disable HV discovery"
+        );
+        assert!(should_probe_hv_stacks(
+            Some(DeviceType::HybridHvGen3),
+            false,
+            false,
+            0,
+        ));
+        assert!(!should_probe_hv_stacks(
+            Some(DeviceType::HybridHvGen3),
+            false,
+            true,
+            HV_PROBE_RETRY_INTERVAL_CYCLES - 1,
+        ));
+        assert!(should_probe_hv_stacks(
+            Some(DeviceType::HybridHvGen3),
+            false,
+            true,
+            HV_PROBE_RETRY_INTERVAL_CYCLES,
+        ));
+        assert!(!should_probe_hv_stacks(
+            Some(DeviceType::HybridHvGen3),
+            true,
+            true,
+            HV_PROBE_RETRY_INTERVAL_CYCLES,
         ));
     }
 

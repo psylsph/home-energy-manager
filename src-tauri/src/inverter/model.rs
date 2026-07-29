@@ -505,15 +505,13 @@ impl DeviceType {
         )
     }
 
-    /// Whether this device exposes the Emergency Power Supply (EPS) enable
-    /// register at HR 317.
+    /// Whether this device has a confirmed, safely writable Emergency Power
+    /// Supply (EPS) enable register.
     ///
-    /// Mirrors givenergy-modbus `_AC_CONFIG_BLOCK_MODELS`: EPS is AC-coupled
-    /// (and AC-three-phase) and All-in-One only. DC hybrids (Gen1/2/3/4,
-    /// Polar, Gen3+, AIO Commercial) have no AC output stage and lack the
-    /// register; writing HR 317 there is silently dropped by the firmware
-    /// (or worse, corrupts unrelated state). Used by `set_eps` to refuse the
-    /// write and by the frontend to hide the toggle.
+    /// AC-coupled and residential All-in-One models use whitelisted HR 317.
+    /// Hybrid HV Gen3 exposes the read-back `backup_enable` field at HR 1105,
+    /// but neither reference implementation includes HR 1105 in its safe-write
+    /// set, so it remains excluded from user control until writing is confirmed.
     pub fn supports_eps(&self) -> bool {
         matches!(
             self,
@@ -820,12 +818,10 @@ pub struct InverterSnapshot {
     /// Instantaneous Emergency Power Supply (EPS) output power in watts
     /// (IR(31) `p_backup`).
     ///
-    /// Only meaningful on device families with an AC output stage that
-    /// supports EPS mode (see [`DeviceType::supports_eps`]) — single-phase
-    /// AC-coupled (3001/3002) and residential All-in-One (80xx). Other
-    /// families poll IR 1000-1414 instead of IR 0-59, where EPS
-    /// telemetry lives at IR 1180-1239 (not currently captured). On those
-    /// models this field stays at its default of 0.
+    /// Single-phase/AC-coupled families source this from IR(31). Models using
+    /// the 1000-range layout source it from the sum of IR(1187-1192)
+    /// (`p_eps_ac1..3`); Hybrid HV Gen3 is physically single-phase, so only
+    /// the first phase is normally populated.
     ///
     /// The reference library (`givenergy-modbus` `p_backup`, max=50000) and
     /// GivTCP (`p_eps_backup`) both treat the register as uint16, so we
@@ -862,16 +858,16 @@ pub struct InverterSnapshot {
     /// readings forward.
     #[serde(default = "default_grid_online")]
     pub grid_online: bool,
-    /// True when grid power is lost: the inverter's `system_mode` (IR(49))
-    /// reports OFF_GRID, and/or the fault/status word reports `No Utility`.
+    /// True when grid power is lost: `system_mode` (IR(49), or three-phase/HV
+    /// IR(1075)) reports OFF_GRID while the AC reference is absent.
     #[serde(default = "default_grid_loss")]
     pub grid_loss: bool,
     /// True when the inverter reports itself in a fault/trip state
-    /// (IR(0) `status` == FAULT).
+    /// (IR(0), or three-phase/HV IR(1076), `status` == FAULT).
     #[serde(default = "default_inverter_trip")]
     pub inverter_trip: bool,
     /// True when the inverter reports battery over-temperature
-    /// (IR(57) `charger_warning_code` == 1).
+    /// (IR(57) warning code, or three-phase/HV IR(1307) bit 6).
     #[serde(default = "default_battery_over_temp")]
     pub battery_over_temp: bool,
 
@@ -1074,7 +1070,7 @@ pub struct InverterSnapshot {
     /// Export priority (0=battery, 1=grid, 2=load) — HR 311.
     #[serde(default)]
     pub ac_export_priority: u8,
-    /// Emergency Power Supply enabled — HR 317.
+    /// Emergency Power Supply enabled — HR 317 or three-phase/HV HR 1105.
     #[serde(default)]
     pub ac_eps_enabled: bool,
     /// Battery pause mode (0=disabled) — HR 318.
@@ -1381,7 +1377,9 @@ mod tests {
             (0x8001, DeviceType::AllInOne6kW, "All-in-One 6kW", 307.0),
             (0x8002, DeviceType::AllInOne3_6kW, "All-in-One 3.6kW", 307.0),
             (0x8003, DeviceType::AllInOne5kW, "All-in-One 5kW", 307.0),
+            (0x8101, DeviceType::HybridHvGen3, "Hybrid HV Gen3", 76.8),
             (0x8102, DeviceType::HybridHvGen3, "Hybrid HV Gen3", 76.8),
+            (0x8103, DeviceType::HybridHvGen3, "Hybrid HV Gen3", 76.8),
             (
                 0x8204,
                 DeviceType::AllInOneHybrid,
@@ -1463,6 +1461,8 @@ mod tests {
         assert_eq!(DeviceType::max_battery_power_for_dtc(0x2201, 0, 0), 5400);
         assert_eq!(DeviceType::max_battery_power_for_dtc(0x3002, 0, 0), 3000);
         assert_eq!(DeviceType::max_battery_power_for_dtc(0x8002, 0, 0), 3600);
+        assert_eq!(DeviceType::max_battery_power_for_dtc(0x8101, 0, 6000), 6000);
+        assert_eq!(DeviceType::max_battery_power_for_dtc(0x8102, 0, 0), 8000);
         assert_eq!(DeviceType::max_battery_power_for_dtc(0x8103, 0, 0), 10000);
     }
 
@@ -1742,18 +1742,14 @@ mod tests {
 
     #[test]
     fn supports_eps_matches_extra_poll_blocks_for_ac_config() {
-        // The set of devices that poll HR 300-359 (and therefore can read
-        // back HR 317 on the next snapshot) must equal the set that supports
-        // EPS, otherwise we either:
-        //   - poll HR 317 on a device that ignores it (wasted cycle), or
-        //   - miss the EPS state on a device that genuinely has it.
+        // The set of safely writable EPS controls matches the models that poll
+        // HR 300-359 and can therefore read HR 317 back on the next snapshot.
         // Models whose `extra_poll_blocks()` include `AC_CONFIG_BLOCK`:
         //   - ACCoupled, ACCoupledMk2 → &[AC_CONFIG_BLOCK]
         //   - ACThreePhase             → AC_EXTENDED_AND_THREE_PHASE_BLOCKS
         //   - AllInOne{6kW,3_6kW,5kW}  → EXTENDED_AND_AC_CONFIG_BLOCKS
-        // All other families (DC hybrids, pure three-phase, AIO Commercial,
-        // AIO Hybrid, HV Gen3, Gateway, EMS, PV inverter) deliberately
-        // don't poll HR 300-359.
+        // Other families deliberately don't poll HR 300-359. Hybrid HV Gen3
+        // does read HR1105, but that register is not confirmed safe to write.
         let ac_block_models = [
             DeviceType::ACCoupled,
             DeviceType::ACCoupledMk2,

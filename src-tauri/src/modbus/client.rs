@@ -1416,8 +1416,10 @@ impl ModbusClient {
     ///
     /// Standard blocks are read with per-block retry on timeout
     /// ([`read_blocks_resilient`]) so a single slow block doesn't fail the
-    /// entire poll cycle. Model-specific blocks are read with a single
-    /// attempt (non-fatal on error).
+    /// entire poll cycle. The three dashboard-critical 1000-range input blocks
+    /// are also retried and remain fatal after retry, preventing partial
+    /// snapshots with zero PV/grid/battery readings. Other model-specific
+    /// blocks use a single non-fatal attempt.
     pub async fn read_all_with_extras(
         &mut self,
         device_type: Option<&crate::inverter::model::DeviceType>,
@@ -1452,7 +1454,35 @@ impl ModbusClient {
         let mut results = self.read_blocks_resilient(standard_blocks, 2).await?;
 
         if let Some(dt) = device_type {
+            // The first three 1000-range input blocks provide PV, grid/load and
+            // battery readings. Publishing without any one of them would turn
+            // core dashboard values into misleading zeros. Retry each once;
+            // if one remains unavailable, fail this poll so the caller keeps
+            // the previous complete snapshot.
+            if dt.needs_three_phase_input_blocks() {
+                tokio::time::sleep(self.inter_request_delay).await;
+                results.extend(
+                    self.read_blocks_resilient(
+                        super::registers::THREE_PHASE_CRITICAL_INPUT_BLOCKS,
+                        1,
+                    )
+                    .await?,
+                );
+            }
+
             for block in model_specific_blocks_in_poll_order(dt, gateway_scope) {
+                if dt.needs_three_phase_input_blocks()
+                    && super::registers::THREE_PHASE_CRITICAL_INPUT_BLOCKS
+                        .iter()
+                        .any(|critical| {
+                            critical.register_type == block.register_type
+                                && critical.start == block.start
+                                && critical.count == block.count
+                        })
+                {
+                    continue;
+                }
+
                 // Pause between blocks to let the dongle catch up.
                 tokio::time::sleep(self.inter_request_delay).await;
 
@@ -3777,6 +3807,119 @@ mod tests {
         );
 
         server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hybrid_hv_gen3_critical_telemetry_retries_then_succeeds() {
+        use crate::inverter::model::DeviceType;
+
+        let responses = vec![
+            holding_response(0x03, 0, 60),
+            holding_response(0x03, 60, 60),
+            // First IR(1000) attempt fails, matching a transient dongle error.
+            MockResponse::Exception {
+                slave: 0x11,
+                function: 0x04,
+                code: 4,
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 1000,
+                data: vec![0; 60],
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 1060,
+                data: vec![0; 60],
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 1120,
+                data: vec![0; 60],
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 1180,
+                data: vec![0; 60],
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 1240,
+                data: vec![0; 60],
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 1300,
+                data: vec![0; 60],
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 1360,
+                data: vec![0; 54],
+            },
+            holding_response(0x03, 240, 60),
+            holding_response(0x03, 1000, 80),
+            holding_response(0x03, 1080, 45),
+        ];
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+        client.set_timeout(Duration::from_millis(100));
+        client.set_inter_request_delay(Duration::ZERO);
+
+        let blocks = client
+            .read_all_with_extras(
+                Some(&DeviceType::HybridHvGen3),
+                None,
+                GatewayPollScope::Fast,
+            )
+            .await
+            .expect("critical telemetry should recover on retry");
+
+        assert!(blocks.iter().any(|b| b.block.name == "input_1000_1059"));
+        assert!(blocks.iter().any(|b| b.block.name == "input_1060_1119"));
+        assert!(blocks.iter().any(|b| b.block.name == "input_1120_1179"));
+    }
+
+    #[tokio::test]
+    async fn hybrid_hv_gen3_rejects_snapshot_when_critical_telemetry_stays_missing() {
+        use crate::inverter::model::DeviceType;
+
+        let responses = vec![
+            holding_response(0x03, 0, 60),
+            holding_response(0x03, 60, 60),
+            MockResponse::Exception {
+                slave: 0x11,
+                function: 0x04,
+                code: 4,
+            },
+            MockResponse::Exception {
+                slave: 0x11,
+                function: 0x04,
+                code: 4,
+            },
+        ];
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+        client.set_timeout(Duration::from_millis(100));
+        client.set_inter_request_delay(Duration::ZERO);
+
+        let result = client
+            .read_all_with_extras(
+                Some(&DeviceType::HybridHvGen3),
+                None,
+                GatewayPollScope::Fast,
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a snapshot missing critical PV telemetry must not replace the previous snapshot"
+        );
     }
 
     #[tokio::test]

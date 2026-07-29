@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.69.0] - 2026-07-29
+
+### Fixed
+
+- **Hybrid HV Gen 3 inverters now report complete and stable live data.** The 6, 8, and 10 kW models correctly show their rated power, high-voltage battery, solar, grid current, EPS output, operating limit, outage, trip, and battery-temperature readings without valid values being rejected or divided incorrectly.
+
+- **Transient dongle failures no longer leave Hybrid HV systems missing batteries, meters, or core readings.** Critical telemetry is retried before publishing, optional settings and warnings retain their last good values, and battery-stack discovery retries safely after an unsuccessful startup scan.
+
 ## [0.68.0] - 2026-07-28
 
 ### Added
