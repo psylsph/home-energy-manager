@@ -1,4 +1,5 @@
 import { getTodayBoundaryMs, getMonthBoundaryMs } from './historyRangeConfig';
+import type { HistorySummary } from './types';
 
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
@@ -85,17 +86,12 @@ export async function apiPut<T>(path: string, body: unknown): Promise<T> {
   return parseApiResponse<T>(res);
 }
 
-export async function fetchHistory(
+function historyWindowParams(
   range: string,
-  fields: string[],
-  offset: number = 0,
-  rolling: boolean = false,
-): Promise<Record<string, Array<{ t: number; v: number }>>> {
-  const params = new URLSearchParams({
-    range,
-    fields: fields.join(','),
-    offset: String(offset),
-  });
+  offset: number,
+  rolling: boolean,
+): URLSearchParams {
+  const params = new URLSearchParams({ range, offset: String(offset) });
   if (rolling) {
     params.set('rolling', 'true');
   }
@@ -113,8 +109,32 @@ export async function fetchHistory(
     params.set('start_ms', String(window[0]));
     params.set('end_ms', String(window[1]));
   }
+  return params;
+}
+
+export async function fetchHistory(
+  range: string,
+  fields: string[],
+  offset: number = 0,
+  rolling: boolean = false,
+): Promise<Record<string, Array<{ t: number; v: number }>>> {
+  const params = historyWindowParams(range, offset, rolling);
+  params.set('fields', fields.join(','));
   const res = await apiGet<{ ok: boolean; data: Record<string, Array<{ t: number; v: number }>> }>(
     `/api/history?${params}`,
+  );
+  return res.data;
+}
+
+/** Fetch additive energy/cost totals for the same exact window as the charts. */
+export async function fetchHistorySummary(
+  range: string,
+  offset: number = 0,
+  rolling: boolean = false,
+): Promise<HistorySummary> {
+  const params = historyWindowParams(range, offset, rolling);
+  const res = await apiGet<{ ok: boolean; data: HistorySummary }>(
+    `/api/history/summary?${params}`,
   );
   return res.data;
 }

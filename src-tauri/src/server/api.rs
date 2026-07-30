@@ -2641,7 +2641,7 @@ pub async fn sync_clock(State(state): State<Arc<AppState>>) -> (StatusCode, Json
 // History endpoint
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct HistoryQuery {
     /// Time range shorthand: "1h", "6h", "12h", "24h", "today", "7d", "30d", "6m", "1y"
     pub range: Option<String>,
@@ -2655,6 +2655,103 @@ pub struct HistoryQuery {
     pub start_ms: Option<i64>,
     /// Explicit UTC epoch millisecond end boundary supplied by the browser.
     pub end_ms: Option<i64>,
+}
+
+/// Resolve History query parameters to the exact database window shared by
+/// the period-summary endpoint and the chart API contract. Explicit browser
+/// boundaries win so Today/Month follow the viewer's local calendar even when
+/// the backend runs in UTC (Docker/NAS deployments).
+fn resolve_history_summary_window(
+    params: &HistoryQuery,
+) -> Result<(crate::history::HistoryWindow, i64), String> {
+    let range_str = params.range.as_deref().unwrap_or("24h");
+    let offset = params.offset.unwrap_or(0);
+    let rolling = params.rolling.unwrap_or(false);
+    let (range_secs, bucket_secs) = match range_str {
+        "1h" => (3600, 30),
+        "6h" => (3600 * 6, 60),
+        "12h" => (3600 * 12, 120),
+        "24h" => (86400, 300),
+        "today" => (86400, 300),
+        "7d" => (86400 * 7, 1800),
+        "30d" => (86400 * 30, 7200),
+        "6m" => (86400 * 180, 43200),
+        "1y" => (86400 * 365, 86400),
+        "month" => (0, 3600),
+        _ => {
+            return Err(
+                "Invalid range. Use: 1h, 6h, 12h, 24h, today, 7d, 30d, 6m, 1y, month"
+                    .to_string(),
+            )
+        }
+    };
+
+    let explicit_window = if let (Some(start_ms), Some(end_ms)) = (params.start_ms, params.end_ms)
+    {
+        if start_ms >= end_ms {
+            return Err("Invalid history window: start_ms must be before end_ms".to_string());
+        }
+        Some((
+            start_ms.div_euclid(1000),
+            (end_ms + 999).div_euclid(1000),
+        ))
+    } else if rolling && range_str != "month" && range_str != "today" {
+        let end_ts = chrono::Utc::now().timestamp() - offset * range_secs;
+        Some((end_ts - range_secs, end_ts))
+    } else if range_str == "today" {
+        let now = chrono::Local::now();
+        let start_date = now.date_naive() - chrono::Duration::days(offset);
+        let start_local = chrono::Local
+            .from_local_datetime(&start_date.and_hms_opt(0, 0, 0).unwrap())
+            .earliest()
+            .unwrap();
+        let end_date = start_date.succ_opt().unwrap();
+        let end_local = chrono::Local
+            .from_local_datetime(&end_date.and_hms_opt(0, 0, 0).unwrap())
+            .earliest()
+            .unwrap();
+        Some((start_local.timestamp(), end_local.timestamp()))
+    } else if range_str == "month" {
+        let now = chrono::Local::now();
+        let total_months = now.year() * 12 + now.month() as i32 - 1 - offset as i32;
+        let target_year = total_months.div_euclid(12);
+        let target_month = (total_months.rem_euclid(12) + 1) as u32;
+        let start_local = chrono::Local
+            .from_local_datetime(
+                &chrono::NaiveDate::from_ymd_opt(target_year, target_month, 1)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+            )
+            .earliest()
+            .unwrap();
+        let (next_year, next_month) = if target_month == 12 {
+            (target_year + 1, 1)
+        } else {
+            (target_year, target_month + 1)
+        };
+        let end_local = chrono::Local
+            .from_local_datetime(
+                &chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+            )
+            .earliest()
+            .unwrap();
+        Some((start_local.timestamp(), end_local.timestamp()))
+    } else {
+        None
+    };
+
+    Ok((
+        crate::history::HistoryWindow {
+            range_secs,
+            offset,
+            explicit_window,
+        },
+        bucket_secs,
+    ))
 }
 
 /// GET /api/history — aggregated time-series data for charts.
@@ -2949,6 +3046,121 @@ pub async fn get_history(
             }
         }
         None => server_error("History database not available"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// History period summary (issue #237)
+// ---------------------------------------------------------------------------
+
+/// GET /api/history/summary — additive energy and cost totals for the exact
+/// History range currently selected by the user.
+///
+/// Query params mirror `/api/history`: `range`, `offset`, `rolling`, and the
+/// optional browser-local `start_ms`/`end_ms` boundaries. The response is
+/// `{ok: true, data: {...}}`; energy values are kWh and money values are GBP.
+pub async fn get_history_summary(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HistoryQuery>,
+) -> (StatusCode, Json<Value>) {
+    let (window, bucket_secs) = match resolve_history_summary_window(&params) {
+        Ok(value) => value,
+        Err(error) => return error_response(&error),
+    };
+    let (start_ts, end_ts) = window.resolve();
+
+    let settings = crate::settings::Settings::load();
+    let import_tariff = settings
+        .import_tariff_config
+        .clone()
+        .unwrap_or_else(|| crate::settings::TariffConfig::flat(settings.import_tariff));
+    let export_tariff = settings
+        .export_tariff_config
+        .clone()
+        .unwrap_or_else(|| crate::settings::TariffConfig::flat(settings.export_tariff));
+    let standing_charge_p_per_day = settings.import_standing_charge_p_per_day.max(0.0);
+    let flat_import = settings.import_tariff;
+    let flat_export = settings.export_tariff;
+
+    let history_db = state.history.lock().await.clone();
+    let Some(db) = history_db else {
+        return server_error("History database not available");
+    };
+
+    let result = tokio::task::spawn_blocking(move || {
+        let energy = db.query_energy_summary(&window)?;
+        let import_series = db.query_cost_series(
+            &window,
+            bucket_secs,
+            "today_import_kwh",
+            &import_tariff,
+            flat_import,
+            standing_charge_p_per_day,
+        )?;
+        let export_series = db.query_cost_series(
+            &window,
+            bucket_secs,
+            "today_export_kwh",
+            &export_tariff,
+            flat_export,
+            0.0,
+        )?;
+        let days_in_range = crate::history::days_in_local_window(start_ts, end_ts);
+        let standing_charge_gbp =
+            days_in_range as f64 * standing_charge_p_per_day / 100.0;
+        let counter_import_cost_gbp = import_series
+            .last()
+            .map(|point| point.v)
+            .unwrap_or(standing_charge_gbp);
+        let counter_export_income_gbp =
+            export_series.last().map(|point| point.v).unwrap_or(0.0);
+
+        // Keep period-summary money aligned with `/api/report`, including its
+        // fallback for inverters whose daily grid counters remain at zero.
+        let grid_fallback = db.query_grid_power_cost_totals(
+            &window,
+            &import_tariff,
+            &export_tariff,
+            flat_import,
+            flat_export,
+        )?;
+        let counter_import_energy_gbp =
+            (counter_import_cost_gbp - standing_charge_gbp).max(0.0);
+        let import_energy_gbp =
+            if counter_import_energy_gbp <= 0.000_001 && grid_fallback.import_kwh > 0.001 {
+                grid_fallback.import_cost_gbp
+            } else {
+                counter_import_energy_gbp
+            };
+        let export_income_gbp =
+            if counter_export_income_gbp <= 0.000_001 && grid_fallback.export_kwh > 0.001 {
+                grid_fallback.export_income_gbp
+            } else {
+                counter_export_income_gbp
+            };
+        let import_cost_gbp = import_energy_gbp + standing_charge_gbp;
+
+        Ok::<_, String>(json!({
+            "ok": true,
+            "data": {
+                "solar_generated_kwh": energy.solar_generated_kwh,
+                "battery_charged_kwh": energy.battery_charged_kwh,
+                "battery_discharged_kwh": energy.battery_discharged_kwh,
+                "grid_imported_kwh": energy.grid_imported_kwh,
+                "grid_exported_kwh": energy.grid_exported_kwh,
+                "home_consumed_kwh": energy.home_consumed_kwh,
+                "import_cost_gbp": import_cost_gbp,
+                "export_income_gbp": export_income_gbp,
+                "net_cost_gbp": import_cost_gbp - export_income_gbp
+            }
+        }))
+    })
+    .await;
+
+    match result {
+        Ok(Ok(json)) => (StatusCode::OK, Json(json)),
+        Ok(Err(error)) => error_response(&error),
+        Err(error) => error_response(&format!("History summary query join error: {error}")),
     }
 }
 
@@ -9472,6 +9684,78 @@ mod tests {
                 "bucket timestamps must be unique"
             );
             assert!(timestamps.iter().all(|t| *t >= start_ts * 1000));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_history_summary_returns_energy_for_the_explicit_window() {
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.25, 0.15, 0.0);
+            let start = 1_700_300_000i64;
+            {
+                let guard = state.history.lock().await;
+                let db = guard.as_ref().unwrap();
+                for (offset, solar, imported) in [
+                    (-60, 4.75, 2.75),
+                    (0, 5.0, 3.0),
+                    (60, 5.25, 3.25),
+                    (120, 5.5, 3.5),
+                ] {
+                    db.insert_reading(&crate::inverter::model::InverterSnapshot {
+                        timestamp: start + offset,
+                        today_solar_kwh: solar,
+                        today_import_kwh: imported,
+                        home_energy_today_kwh: solar / 2.0,
+                        ..Default::default()
+                    });
+                }
+            }
+
+            let (status, Json(json)) = get_history_summary(
+                State(state),
+                Query(HistoryQuery {
+                    range: Some("1h".to_string()),
+                    fields: None,
+                    offset: Some(0),
+                    rolling: Some(true),
+                    start_ms: Some(start * 1000),
+                    end_ms: Some((start + 121) * 1000),
+                }),
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::OK);
+            assert!((json["data"]["solar_generated_kwh"].as_f64().unwrap() - 0.5).abs() < 1e-6);
+            assert!((json["data"]["grid_imported_kwh"].as_f64().unwrap() - 0.5).abs() < 1e-6);
+            assert!((json["data"]["home_consumed_kwh"].as_f64().unwrap() - 0.25).abs() < 1e-6);
+            assert!(json["data"]["import_cost_gbp"].is_number());
+            assert!(json["data"]["net_cost_gbp"].is_number());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_history_summary_rejects_an_inverted_explicit_window() {
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.0, 0.0, 0.0);
+            let (status, Json(json)) = get_history_summary(
+                State(state),
+                Query(HistoryQuery {
+                    range: Some("today".to_string()),
+                    fields: None,
+                    offset: Some(0),
+                    rolling: Some(false),
+                    start_ms: Some(2_000),
+                    end_ms: Some(1_000),
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                json["error"],
+                "Invalid history window: start_ms must be before end_ms"
+            );
         })
         .await;
     }

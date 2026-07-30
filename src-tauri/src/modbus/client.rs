@@ -156,12 +156,16 @@ pub fn preview_standard_blocks(
     device_type: Option<&crate::inverter::model::DeviceType>,
     prefilled_device_type: Option<&crate::inverter::model::DeviceType>,
 ) -> &'static [RegisterBlock] {
-    if device_type
-        .is_some_and(|dt| dt.needs_three_phase_input_blocks() || dt.needs_gateway_input_blocks())
-        || prefilled_device_type.is_some_and(|dt| {
-            dt.needs_three_phase_input_blocks() || dt.needs_gateway_input_blocks()
-        })
-    {
+    let uses_lean_set = |dt: &crate::inverter::model::DeviceType| {
+        // Hybrid HV Gen3 firmware exists with both telemetry layouts in the
+        // field. Keep IR(0-59) available as a fallback when its IR(1000+)
+        // bank answers successfully but contains only zeros.
+        (dt.needs_three_phase_input_blocks()
+            && *dt != crate::inverter::model::DeviceType::HybridHvGen3)
+            || dt.needs_gateway_input_blocks()
+    };
+
+    if device_type.is_some_and(uses_lean_set) || prefilled_device_type.is_some_and(uses_lean_set) {
         STANDARD_POLL_BLOCKS_3PH
     } else {
         STANDARD_POLL_BLOCKS
@@ -1440,15 +1444,7 @@ impl ModbusClient {
         // blocks are still gated on the confirmed `device_type` (not the
         // prefill) so a reflash that changes model identity still drives a
         // normal detection re-poll.
-        let standard_blocks = if device_type.is_some_and(|dt| {
-            dt.needs_three_phase_input_blocks() || dt.needs_gateway_input_blocks()
-        }) || prefilled_device_type.is_some_and(|dt| {
-            dt.needs_three_phase_input_blocks() || dt.needs_gateway_input_blocks()
-        }) {
-            STANDARD_POLL_BLOCKS_3PH
-        } else {
-            STANDARD_POLL_BLOCKS
-        };
+        let standard_blocks = preview_standard_blocks(device_type, prefilled_device_type);
         // Use resilient read for standard blocks — a single slow block
         // is retried rather than failing the entire poll cycle.
         let mut results = self.read_blocks_resilient(standard_blocks, 2).await?;
@@ -1459,7 +1455,9 @@ impl ModbusClient {
             // core dashboard values into misleading zeros. Retry each once;
             // if one remains unavailable, fail this poll so the caller keeps
             // the previous complete snapshot.
-            if dt.needs_three_phase_input_blocks() {
+            if dt.needs_three_phase_input_blocks()
+                && *dt != crate::inverter::model::DeviceType::HybridHvGen3
+            {
                 tokio::time::sleep(self.inter_request_delay).await;
                 results.extend(
                     self.read_blocks_resilient(
@@ -1472,6 +1470,7 @@ impl ModbusClient {
 
             for block in model_specific_blocks_in_poll_order(dt, gateway_scope) {
                 if dt.needs_three_phase_input_blocks()
+                    && *dt != crate::inverter::model::DeviceType::HybridHvGen3
                     && super::registers::THREE_PHASE_CRITICAL_INPUT_BLOCKS
                         .iter()
                         .any(|critical| {
@@ -1960,10 +1959,15 @@ mod tests {
             preview_standard_blocks(Some(&DeviceType::ThreePhase), None),
             STANDARD_POLL_BLOCKS_3PH
         ));
-        // A single-phase model (e.g. Gen2) keeps the full set even when
-        // confirmed.
+        // Single-phase-layout models keep the full set when confirmed. Hybrid
+        // HV Gen3 is included defensively because field firmware may expose
+        // live telemetry in IR(0-59) while returning zeros from IR(1000+).
         assert!(eq_set(
             preview_standard_blocks(Some(&DeviceType::Gen2Hybrid), None),
+            STANDARD_POLL_BLOCKS
+        ));
+        assert!(eq_set(
+            preview_standard_blocks(Some(&DeviceType::HybridHvGen3), None),
             STANDARD_POLL_BLOCKS
         ));
 
@@ -2000,7 +2004,6 @@ mod tests {
             DeviceType::ThreePhase,
             DeviceType::ACThreePhase,
             DeviceType::AioCommercial,
-            DeviceType::HybridHvGen3,
             DeviceType::AllInOneHybrid,
         ] {
             let lean = preview_standard_blocks(Some(&dt), None);
@@ -3810,7 +3813,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hybrid_hv_gen3_critical_telemetry_retries_then_succeeds() {
+    async fn three_phase_critical_telemetry_retries_then_succeeds() {
         use crate::inverter::model::DeviceType;
 
         let responses = vec![
@@ -3874,7 +3877,7 @@ mod tests {
 
         let blocks = client
             .read_all_with_extras(
-                Some(&DeviceType::HybridHvGen3),
+                Some(&DeviceType::ThreePhase),
                 None,
                 GatewayPollScope::Fast,
             )
@@ -3887,7 +3890,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hybrid_hv_gen3_rejects_snapshot_when_critical_telemetry_stays_missing() {
+    async fn three_phase_rejects_snapshot_when_critical_telemetry_stays_missing() {
         use crate::inverter::model::DeviceType;
 
         let responses = vec![
@@ -3910,7 +3913,7 @@ mod tests {
 
         let result = client
             .read_all_with_extras(
-                Some(&DeviceType::HybridHvGen3),
+                Some(&DeviceType::ThreePhase),
                 None,
                 GatewayPollScope::Fast,
             )
@@ -3919,6 +3922,25 @@ mod tests {
         assert!(
             result.is_err(),
             "a snapshot missing critical PV telemetry must not replace the previous snapshot"
+        );
+    }
+
+    /// Hybrid HV Gen3 (0x81xx) exists with both telemetry layouts in the
+    /// field. The runtime must keep IR(0-59) available as a standard block so
+    /// the decoder can fall back to single-phase telemetry when the 1000-range
+    /// bank answers successfully but contains only zeros.
+    #[tokio::test]
+    async fn hybrid_hv_gen3_keeps_single_phase_standard_blocks() {
+        use crate::inverter::model::DeviceType;
+        use crate::modbus::registers::RegisterType;
+
+        // No 3PH-critical block read is forced for the 0x81xx family, and the
+        // standard set must include the single-phase input banks.
+        assert!(
+            preview_standard_blocks(Some(&DeviceType::HybridHvGen3), None)
+                .iter()
+                .any(|b| b.register_type == RegisterType::Input && b.start == 0),
+            "Hybrid HV Gen3 must retain IR(0-59) as a fallback telemetry source"
         );
     }
 

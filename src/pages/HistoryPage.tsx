@@ -8,7 +8,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from 'recharts';
-import { apiGet, fetchHistory, isTauri } from '../lib/api';
+import { apiGet, fetchHistory, fetchHistorySummary, isTauri } from '../lib/api';
 import {
   getHistoryChartGridProps,
   HISTORY_RANGES,
@@ -29,10 +29,11 @@ import { getSeriesOpacity, removeSpikes } from '../lib/chartSeries';
 import { SeriesLegend } from '../components/SeriesLegend';
 import { useInverterStore } from '../store/useInverterStore';
 import type { SeriesLegendItem } from '../components/SeriesLegend';
-import type { HistoryRange, PollSettings } from '../lib/types';
+import type { HistoryRange, HistorySummary, PollSettings } from '../lib/types';
 import { computeTempDifferential, computeBatteryExternalDifferential } from '../lib/temperatureChart';
 import { computeTightDomain } from '../lib/chartDomain';
 import { openExternal } from '../lib/openExternal';
+import { formatEnergy } from '../lib/format';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -288,6 +289,87 @@ function getCharts(tab: MetricTab, hasStandingCharge: boolean): ChartDef[] {
 // existing Set logic in exportCSV.
 function getAllCharts(hasStandingCharge: boolean): ChartDef[] {
   return TABS.flatMap((t) => getCharts(t.key, hasStandingCharge));
+}
+
+interface PeriodTotalItem {
+  label: string;
+  value: string;
+  color: string;
+}
+
+function formatGbp(value: number): string {
+  return value.toLocaleString([], {
+    style: 'currency',
+    currency: 'GBP',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+/** Additive values that are meaningful for each History tab. */
+function getPeriodTotalItems(tab: MetricTab, summary: HistorySummary): PeriodTotalItem[] {
+  switch (tab) {
+    case 'battery':
+      return [
+        { label: 'Charged', value: formatEnergy(summary.battery_charged_kwh), color: '#22C55E' },
+        { label: 'Discharged', value: formatEnergy(summary.battery_discharged_kwh), color: '#EF4444' },
+      ];
+    case 'solar':
+      return [
+        { label: 'Generated', value: formatEnergy(summary.solar_generated_kwh), color: '#F59E0B' },
+      ];
+    case 'grid':
+      return [
+        { label: 'Imported', value: formatEnergy(summary.grid_imported_kwh), color: '#EF4444' },
+        { label: 'Exported', value: formatEnergy(summary.grid_exported_kwh), color: '#22C55E' },
+      ];
+    case 'home':
+      return [
+        { label: 'Consumed', value: formatEnergy(summary.home_consumed_kwh), color: '#14B8A6' },
+      ];
+    case 'cost':
+      return [
+        { label: 'Import cost', value: formatGbp(summary.import_cost_gbp), color: '#EF4444' },
+        { label: 'Export income', value: formatGbp(summary.export_income_gbp), color: '#22C55E' },
+        {
+          label: 'Net cost',
+          value: formatGbp(summary.net_cost_gbp),
+          color: summary.net_cost_gbp >= 0 ? '#F59E0B' : '#22C55E',
+        },
+      ];
+    case 'temperature':
+      // Temperatures are gauges, not additive quantities. A future min/max/
+      // average summary can be introduced separately without calling it a total.
+      return [];
+  }
+}
+
+function PeriodTotals({ tab, summary, windowLabel }: {
+  tab: MetricTab;
+  summary: HistorySummary;
+  windowLabel: string;
+}) {
+  const items = getPeriodTotalItems(tab, summary);
+  if (items.length === 0) return null;
+
+  return (
+    <section className="bg-bg-surface rounded-xl p-3" aria-label="Period totals">
+      <div className="flex items-baseline justify-between gap-3 mb-2 px-1">
+        <h2 className="text-text-primary text-sm font-sans font-bold">Period totals</h2>
+        <span className="text-text-secondary/70 text-[11px] font-sans text-right">{windowLabel}</span>
+      </div>
+      <div className={`grid gap-2 ${items.length === 1 ? 'grid-cols-1' : items.length === 2 ? 'grid-cols-2' : 'grid-cols-3'}`}>
+        {items.map((item) => (
+          <div key={item.label} className="bg-bg-elevated rounded-lg px-3 py-2 min-w-0">
+            <div className="text-text-secondary text-[11px] font-sans truncate">{item.label}</div>
+            <div className="text-lg font-mono font-bold truncate" style={{ color: item.color }}>
+              {item.value}
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -661,6 +743,11 @@ export default function HistoryPage() {
   const [offset, setOffset] = useState(0);
   const lastDateRef = useRef(getHistoryPickerValue(range, offset));
   const [data, setData] = useState<Record<string, TimePoint[]>>({});
+  const summaryKey = `${range}:${offset}`;
+  const [summaryState, setSummaryState] = useState<{
+    key: string;
+    data: HistorySummary | null;
+  }>({ key: '', data: null });
   // Whether an import Standing Charge is configured. Drives the Cost tab's
   // import-cost breakdown lines: with no standing charge there's nothing to
   // break out, so the chart stays as Import Cost + Export Income.
@@ -718,6 +805,19 @@ export default function HistoryPage() {
     return () => { cancelled = true; };
   }, [tab, range, offset, refreshKey, rolling, hasStandingCharge]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const requestedKey = summaryKey;
+    fetchHistorySummary(range, offset, rolling)
+      .then((result) => {
+        if (!cancelled) setSummaryState({ key: requestedKey, data: result });
+      })
+      .catch(() => {
+        if (!cancelled) setSummaryState({ key: requestedKey, data: null });
+      });
+    return () => { cancelled = true; };
+  }, [range, offset, refreshKey, rolling, summaryKey]);
+
   const handleTabChange = (t: MetricTab) => {
     setTab(t);
     setOffset(0);
@@ -730,6 +830,7 @@ export default function HistoryPage() {
 
   const charts = getCharts(tab, hasStandingCharge);
   const hasData = Object.values(data).some((pts) => pts.length > 0);
+  const summary = summaryState.key === summaryKey ? summaryState.data : null;
   const [csvToast, setCsvToast] = useState<string | null>(null);
   // True while the combined-export fetch is in flight. Disables both export
   // buttons so the user can't queue two fetches against the same offset.
@@ -932,6 +1033,14 @@ export default function HistoryPage() {
           </svg>
           {csvToast}
         </div>
+      )}
+
+      {hasData && summary && (
+        <PeriodTotals
+          tab={tab}
+          summary={summary}
+          windowLabel={formatWindowLabel(range, offset)}
+        />
       )}
 
       {/* Charts */}
