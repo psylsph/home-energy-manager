@@ -45,7 +45,7 @@ chrono-tz = "0.10"
 # HTTP client for Octopus API
 ureq = { version = "3", features = ["json"] }
 percent-encoding = "2"
-base64 = "0.22"
+base64 = "0.23"
 
 # Error handling
 thiserror = "2"
