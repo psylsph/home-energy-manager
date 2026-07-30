@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.70.0] - 2026-07-30
+
+### Added
+
+- **The History page now shows the total energy and cost for the selected period.** Each tab (Battery, Solar, Grid, Home, Cost) displays additive totals for exactly the range you're viewing, so you can read off figures like total solar generated this month or total grid exported over the last week. Totals come from the inverter's own daily energy counters (matching the portal) and fall back to power integration for devices whose counters stay at zero. (issue #237)
+
+### Fixed
+
+- **Hybrid HV Gen 3 inverters that carry their live readings in the single-phase register bank no longer show an all-zero dashboard with false grid-loss and low-temperature alarms.** A subset of 0x81xx firmware exposes PV, grid, load and temperature data in IR(0-59) while leaving the IR(1000+) bank at zero; the app now reads both banks, detects which one is live, and keeps the valid readings instead of letting the empty bank overwrite them.
+
 ## [0.69.0] - 2026-07-29
 
 ### Fixed

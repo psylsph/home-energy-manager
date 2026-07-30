@@ -17,6 +17,7 @@
 //!   * `GET /api/logs`      — empty, then after push, then incremental
 //!   * `GET /api/log-level` / `PUT /api/log-level` — round-trip + invalid
 //!   * `GET /api/evc/status` — empty when no EVC is configured
+//!   * `GET /api/history/summary` — route wiring and missing-DB response
 //!   * `GET /api/charging-mode` / `/api/adaptive-charge` — automation defaults
 //!   * `GET/POST /api/temperature-limiter` — defaults, update, and validation
 //!   * `GET /api/mini/status` — tokenless glance summary (empty + seeded)
@@ -573,6 +574,20 @@ async fn temperature_limiter_round_trip_and_validation() {
     assert!(invalid["error"]
         .as_str()
         .is_some_and(|message| { message.contains("Recovery threshold must be below") }));
+}
+
+#[tokio::test]
+async fn history_summary_route_is_wired() {
+    let router = fresh_router();
+    let (status, body) = get_json(
+        &router,
+        "/api/history/summary?range=1h&rolling=true&start_ms=1000&end_ms=2000",
+    )
+    .await;
+    // Fresh AppState intentionally has no HistoryDb installed. A 500 from the
+    // handler proves this is the real route rather than the catch-all 404.
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["error"], "History database not available");
 }
 
 #[tokio::test]

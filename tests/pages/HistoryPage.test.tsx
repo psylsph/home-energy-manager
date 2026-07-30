@@ -30,6 +30,17 @@ const apiGetMock = vi.fn(async () => ({ ok: true, data: {} }));
 vi.mock('../../src/lib/api', () => ({
   apiGet: (...args: unknown[]) => apiGetMock(...(args as [string])),
   fetchHistory: (...args: unknown[]) => fetchHistoryMock(...args),
+  fetchHistorySummary: async () => ({
+    solar_generated_kwh: 0,
+    battery_charged_kwh: 0,
+    battery_discharged_kwh: 0,
+    grid_imported_kwh: 0,
+    grid_exported_kwh: 0,
+    home_consumed_kwh: 0,
+    import_cost_gbp: 0,
+    export_income_gbp: 0,
+    net_cost_gbp: 0,
+  }),
   getApiBase: () => 'http://localhost:7337',
   getServerPort: () => 7337,
   isTauri: false,

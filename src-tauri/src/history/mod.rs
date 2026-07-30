@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use chrono::{Datelike, TimeZone, Timelike};
-use rusqlite::{params, Connection, Result as SqlResult};
+use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
 use serde::Serialize;
 
 use crate::inverter::model::InverterSnapshot;
@@ -155,6 +155,36 @@ pub struct GridPowerCostTotals {
     pub export_kwh: f64,
     pub import_cost_gbp: f64,
     pub export_income_gbp: f64,
+}
+
+/// Additive energy totals for an exact History window (issue #237).
+///
+/// Daily inverter counters are the primary source because they match the
+/// portal's energy figures and avoid display-bucket rounding. Raw power is
+/// integrated as a fallback for firmware that leaves a counter at zero.
+#[derive(Debug, Clone, Copy, Default, Serialize, serde::Deserialize, PartialEq)]
+pub struct EnergySummary {
+    pub solar_generated_kwh: f64,
+    pub battery_charged_kwh: f64,
+    pub battery_discharged_kwh: f64,
+    pub grid_imported_kwh: f64,
+    pub grid_exported_kwh: f64,
+    pub home_consumed_kwh: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EnergySummaryRow {
+    timestamp: i64,
+    today_solar_kwh: Option<f64>,
+    today_charge_kwh: Option<f64>,
+    today_discharge_kwh: Option<f64>,
+    today_import_kwh: Option<f64>,
+    today_export_kwh: Option<f64>,
+    home_energy_today_kwh: Option<f64>,
+    solar_power: Option<f64>,
+    battery_power: Option<f64>,
+    grid_power: Option<f64>,
+    home_power: Option<f64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -533,6 +563,122 @@ fn is_genuine_reset(peak: f64, value: f64, next: Option<f64>) -> bool {
         Some(n) => n < peak * RESET_RECOVERY_FRACTION,
         None => true,
     }
+}
+
+/// Sum the increments of one daily-resetting counter inside an exact window.
+///
+/// `samples` includes at most one reading on either side of the window. Those
+/// boundary samples let a rolling range subtract the energy already accrued
+/// before its start and prorate the two poll intervals cut by the boundaries.
+/// A genuine midnight reset contributes the new counter value; a downward
+/// glitch holds the previous baseline so its recovery is not counted twice.
+fn counter_total_in_window(
+    samples: &[(i64, f64)],
+    start_ts: i64,
+    end_ts: i64,
+) -> f64 {
+    if samples.len() < 2 || start_ts >= end_ts {
+        return 0.0;
+    }
+
+    let mut baseline = samples[0].1.max(0.0);
+    let mut total = 0.0;
+
+    for index in 1..samples.len() {
+        let (previous_ts, _) = samples[index - 1];
+        let (timestamp, raw_value) = samples[index];
+        if timestamp <= previous_ts {
+            continue;
+        }
+        let raw = raw_value.max(0.0);
+        let next = samples.get(index + 1).map(|(_, value)| value.max(0.0));
+
+        let (delta, next_baseline) = if raw >= baseline {
+            (raw - baseline, raw)
+        } else if is_genuine_reset(baseline, raw, next) {
+            // Everything in the fresh counter accumulated after the reset.
+            (raw, raw)
+        } else {
+            // A transient downward dip: keep the old peak so recovery does
+            // not manufacture a second copy of already-counted energy.
+            (0.0, baseline)
+        };
+
+        let elapsed_hours = (timestamp - previous_ts) as f64 / 3600.0;
+        let plausible_ceiling = MAX_PLAUSIBLE_POWER_KW * elapsed_hours.max(1.0 / 60.0);
+        if delta <= plausible_ceiling {
+            let overlap_start = previous_ts.max(start_ts);
+            let overlap_end = timestamp.min(end_ts);
+            if overlap_end > overlap_start {
+                let overlap_fraction = (overlap_end - overlap_start) as f64
+                    / (timestamp - previous_ts) as f64;
+                total += delta * overlap_fraction;
+            }
+            baseline = next_baseline;
+        }
+        // Implausible increases are discarded while retaining the prior
+        // baseline, matching the cost-series corruption defence.
+    }
+
+    total.max(0.0)
+}
+
+fn integrate_power_pair(
+    a: Option<f64>,
+    b: Option<f64>,
+    hours: f64,
+    transform: impl Fn(f64) -> f64,
+) -> f64 {
+    match (a, b) {
+        (None, None) => 0.0,
+        (Some(value), None) | (None, Some(value)) => transform(value) * hours / 1000.0,
+        (Some(a), Some(b)) => (transform(a) + transform(b)) / 2.0 * hours / 1000.0,
+    }
+}
+
+/// Integrate raw power over the selected window for counter-less firmware.
+/// Poll gaps over five minutes are deliberately not bridged.
+fn power_totals_in_window(
+    rows: &[EnergySummaryRow],
+    start_ts: i64,
+    end_ts: i64,
+) -> EnergySummary {
+    let mut totals = EnergySummary::default();
+    for pair in rows.windows(2) {
+        let a = pair[0];
+        let b = pair[1];
+        let elapsed = b.timestamp - a.timestamp;
+        if elapsed <= 0 || elapsed > 300 {
+            continue;
+        }
+        let overlap_start = a.timestamp.max(start_ts);
+        let overlap_end = b.timestamp.min(end_ts);
+        if overlap_end <= overlap_start {
+            continue;
+        }
+        let hours = (overlap_end - overlap_start) as f64 / 3600.0;
+        let positive = |value: f64| value.max(0.0);
+        let negative_magnitude = |value: f64| (-value).max(0.0);
+
+        totals.solar_generated_kwh +=
+            integrate_power_pair(a.solar_power, b.solar_power, hours, positive);
+        totals.home_consumed_kwh +=
+            integrate_power_pair(a.home_power, b.home_power, hours, positive);
+        totals.battery_charged_kwh += integrate_power_pair(
+            a.battery_power,
+            b.battery_power,
+            hours,
+            negative_magnitude,
+        );
+        totals.battery_discharged_kwh +=
+            integrate_power_pair(a.battery_power, b.battery_power, hours, positive);
+        // App-wide convention: negative grid power = import, positive = export.
+        totals.grid_imported_kwh +=
+            integrate_power_pair(a.grid_power, b.grid_power, hours, negative_magnitude);
+        totals.grid_exported_kwh +=
+            integrate_power_pair(a.grid_power, b.grid_power, hours, positive);
+    }
+    totals
 }
 
 /// Repair cumulative daily counters after aggregation.
@@ -1269,6 +1415,155 @@ impl HistoryDb {
         if let Err(e) = r {
             tracing::warn!("Failed to insert history reading: {e}");
         }
+    }
+
+    /// Return additive energy totals for the exact selected History window.
+    ///
+    /// One sample immediately outside each boundary is included so rolling
+    /// windows can subtract/prorate a daily counter at their edges. Counter
+    /// totals are preferred; raw-power integration fills only a direction
+    /// whose counter produced no energy while live power demonstrably did.
+    pub fn query_energy_summary(&self, window: &HistoryWindow) -> Result<EnergySummary, String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+        let (start_ts, end_ts) = window.resolve();
+        if start_ts >= end_ts {
+            return Ok(EnergySummary::default());
+        }
+
+        const COLUMNS: &str = "timestamp, today_solar_kwh, today_charge_kwh, \
+            today_discharge_kwh, today_import_kwh, today_export_kwh, \
+            home_energy_today_kwh, solar_power, battery_power, grid_power, home_power";
+        let read_row = |row: &rusqlite::Row<'_>| -> SqlResult<EnergySummaryRow> {
+            Ok(EnergySummaryRow {
+                timestamp: row.get(0)?,
+                today_solar_kwh: row.get(1)?,
+                today_charge_kwh: row.get(2)?,
+                today_discharge_kwh: row.get(3)?,
+                today_import_kwh: row.get(4)?,
+                today_export_kwh: row.get(5)?,
+                home_energy_today_kwh: row.get(6)?,
+                solar_power: row.get(7)?,
+                battery_power: row.get(8)?,
+                grid_power: row.get(9)?,
+                home_power: row.get(10)?,
+            })
+        };
+
+        let previous_sql = format!(
+            "SELECT {COLUMNS} FROM readings WHERE timestamp < ?1 ORDER BY timestamp DESC LIMIT 1"
+        );
+        let previous = conn
+            .query_row(&previous_sql, params![start_ts], read_row)
+            .optional()
+            .map_err(|e| format!("Failed to query summary start boundary: {e}"))?;
+
+        let range_sql = format!(
+            "SELECT {COLUMNS} FROM readings \
+             WHERE timestamp >= ?1 AND timestamp < ?2 ORDER BY timestamp"
+        );
+        let mut stmt = conn
+            .prepare(&range_sql)
+            .map_err(|e| format!("Failed to prepare energy summary query: {e}"))?;
+        let in_window: Vec<EnergySummaryRow> = stmt
+            .query_map(params![start_ts, end_ts], &read_row)
+            .map_err(|e| format!("Energy summary query failed: {e}"))?
+            .collect::<SqlResult<Vec<_>>>()
+            .map_err(|e| format!("Failed to read energy summary row: {e}"))?;
+
+        // An entirely unrecorded period must remain empty; do not interpolate
+        // between two readings on opposite sides of a long offline window.
+        if in_window.is_empty() {
+            return Ok(EnergySummary::default());
+        }
+
+        let next_sql = format!(
+            "SELECT {COLUMNS} FROM readings WHERE timestamp >= ?1 ORDER BY timestamp LIMIT 1"
+        );
+        let next = conn
+            .query_row(&next_sql, params![end_ts], read_row)
+            .optional()
+            .map_err(|e| format!("Failed to query summary end boundary: {e}"))?;
+
+        let mut rows = Vec::with_capacity(in_window.len() + 2);
+        if let Some(row) = previous {
+            rows.push(row);
+        }
+        rows.extend(in_window);
+        if let Some(row) = next {
+            rows.push(row);
+        }
+
+        let counter_samples = |pick: fn(&EnergySummaryRow) -> Option<f64>| {
+            rows.iter()
+                .filter_map(|row| pick(row).map(|value| (row.timestamp, value)))
+                .collect::<Vec<_>>()
+        };
+
+        let mut summary = EnergySummary {
+            solar_generated_kwh: counter_total_in_window(
+                &counter_samples(|row| row.today_solar_kwh),
+                start_ts,
+                end_ts,
+            ),
+            battery_charged_kwh: counter_total_in_window(
+                &counter_samples(|row| row.today_charge_kwh),
+                start_ts,
+                end_ts,
+            ),
+            battery_discharged_kwh: counter_total_in_window(
+                &counter_samples(|row| row.today_discharge_kwh),
+                start_ts,
+                end_ts,
+            ),
+            grid_imported_kwh: counter_total_in_window(
+                &counter_samples(|row| row.today_import_kwh),
+                start_ts,
+                end_ts,
+            ),
+            grid_exported_kwh: counter_total_in_window(
+                &counter_samples(|row| row.today_export_kwh),
+                start_ts,
+                end_ts,
+            ),
+            home_consumed_kwh: counter_total_in_window(
+                &counter_samples(|row| row.home_energy_today_kwh),
+                start_ts,
+                end_ts,
+            ),
+        };
+        let power = power_totals_in_window(&rows, start_ts, end_ts);
+
+        let prefer_power_when_counter_empty = |counter: &mut f64, integrated: f64| {
+            if *counter <= 0.001 && integrated > 0.001 {
+                *counter = integrated;
+            }
+        };
+        prefer_power_when_counter_empty(
+            &mut summary.solar_generated_kwh,
+            power.solar_generated_kwh,
+        );
+        prefer_power_when_counter_empty(
+            &mut summary.battery_charged_kwh,
+            power.battery_charged_kwh,
+        );
+        prefer_power_when_counter_empty(
+            &mut summary.battery_discharged_kwh,
+            power.battery_discharged_kwh,
+        );
+        prefer_power_when_counter_empty(
+            &mut summary.grid_imported_kwh,
+            power.grid_imported_kwh,
+        );
+        prefer_power_when_counter_empty(
+            &mut summary.grid_exported_kwh,
+            power.grid_exported_kwh,
+        );
+        prefer_power_when_counter_empty(&mut summary.home_consumed_kwh, power.home_consumed_kwh);
+
+        Ok(summary)
     }
 
     /// Query aggregated history data for the given fields and time range.
@@ -3019,6 +3314,107 @@ mod tests {
             "Expected >= 2 solar points, got {}",
             solar_points.len()
         );
+    }
+
+    #[test]
+    fn energy_summary_accumulates_resets_and_exact_window_boundaries() {
+        let db = test_db();
+        let start = 1_700_000_000i64;
+        let end = start + 4500;
+        let samples = [
+            (start - 900, 4.0),
+            (start, 5.0),
+            (start + 900, 6.0),
+            (start + 1800, 0.0),
+            (start + 2700, 1.0),
+            (start + 3600, 2.0),
+            (end, 3.0),
+        ];
+        for (timestamp, value) in samples {
+            db.insert_reading(&InverterSnapshot {
+                timestamp,
+                today_solar_kwh: value,
+                today_charge_kwh: value * 2.0,
+                today_discharge_kwh: value * 3.0,
+                today_import_kwh: value * 4.0,
+                today_export_kwh: value * 5.0,
+                home_energy_today_kwh: value * 6.0,
+                ..Default::default()
+            });
+        }
+
+        let summary = db
+            .query_energy_summary(&HistoryWindow {
+                range_secs: 0,
+                offset: 0,
+                explicit_window: Some((start, end)),
+            })
+            .unwrap();
+
+        // 5 -> 6 before reset contributes 1 kWh; the fresh counter then
+        // reaches 3 kWh at the end boundary, for 4 kWh in the window.
+        assert!((summary.solar_generated_kwh - 4.0).abs() < 1e-6);
+        assert!((summary.battery_charged_kwh - 8.0).abs() < 1e-6);
+        assert!((summary.battery_discharged_kwh - 12.0).abs() < 1e-6);
+        assert!((summary.grid_imported_kwh - 16.0).abs() < 1e-6);
+        assert!((summary.grid_exported_kwh - 20.0).abs() < 1e-6);
+        assert!((summary.home_consumed_kwh - 24.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn energy_summary_rejects_counter_spikes_without_recounting_recovery() {
+        let db = test_db();
+        let start = 1_700_100_000i64;
+        for (offset, value) in [(0, 5.0), (60, 5000.0), (120, 5.2), (180, 5.4)] {
+            db.insert_reading(&InverterSnapshot {
+                timestamp: start + offset,
+                today_solar_kwh: value,
+                ..Default::default()
+            });
+        }
+
+        let summary = db
+            .query_energy_summary(&HistoryWindow {
+                range_secs: 0,
+                offset: 0,
+                explicit_window: Some((start, start + 181)),
+            })
+            .unwrap();
+        assert!(
+            (summary.solar_generated_kwh - 0.4).abs() < 1e-5,
+            "counter recovery was recounted: {summary:?}"
+        );
+    }
+
+    #[test]
+    fn energy_summary_falls_back_to_power_with_app_sign_conventions() {
+        let db = test_db();
+        let start = 1_700_200_000i64;
+        for offset in [0, 60, 120] {
+            db.insert_reading(&InverterSnapshot {
+                timestamp: start + offset,
+                solar_power: 1000,
+                home_power: 750,
+                battery_power: -500,
+                grid_power: -250,
+                // Reproduce firmware that leaves every daily counter at zero.
+                ..Default::default()
+            });
+        }
+
+        let summary = db
+            .query_energy_summary(&HistoryWindow {
+                range_secs: 0,
+                offset: 0,
+                explicit_window: Some((start, start + 121)),
+            })
+            .unwrap();
+        assert!((summary.solar_generated_kwh - 1.0 / 30.0).abs() < 1e-6);
+        assert!((summary.home_consumed_kwh - 0.025).abs() < 1e-6);
+        assert!((summary.battery_charged_kwh - 1.0 / 60.0).abs() < 1e-6);
+        assert!(summary.battery_discharged_kwh.abs() < 1e-9);
+        assert!((summary.grid_imported_kwh - 1.0 / 120.0).abs() < 1e-6);
+        assert!(summary.grid_exported_kwh.abs() < 1e-9);
     }
 
     #[test]

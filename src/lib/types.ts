@@ -370,3 +370,16 @@ export interface TimePoint {
 }
 
 export type HistoryRange = '1h' | '6h' | '12h' | '24h' | 'today' | '7d' | '30d' | 'month' | '6m' | '1y';
+
+/** Additive totals for the exact range selected on the History page. */
+export interface HistorySummary {
+  solar_generated_kwh: number;
+  battery_charged_kwh: number;
+  battery_discharged_kwh: number;
+  grid_imported_kwh: number;
+  grid_exported_kwh: number;
+  home_consumed_kwh: number;
+  import_cost_gbp: number;
+  export_income_gbp: number;
+  net_cost_gbp: number;
+}

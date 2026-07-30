@@ -11,7 +11,7 @@ Object.defineProperty(window, 'location', {
 });
 
 // Import after mocks are set up
-const { apiGet, apiPost, apiPut, fetchHistory, getApiBase, getWsUrl } = await import('../../src/lib/api');
+const { apiGet, apiPost, apiPut, fetchHistory, fetchHistorySummary, getApiBase, getWsUrl } = await import('../../src/lib/api');
 
 describe('api', () => {
   beforeEach(() => {
@@ -187,6 +187,25 @@ describe('api', () => {
       await fetchHistory('today', ['solar_power', 'grid_power']);
       const url = mockFetch.mock.calls[0][0] as string;
       expect(url).toContain('fields=solar_power%2Cgrid_power');
+    });
+  });
+
+  describe('fetchHistorySummary', () => {
+    it('uses the summary endpoint and the same calendar boundaries', async () => {
+      const summary = { solar_generated_kwh: 12.5 };
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ ok: true, data: summary }),
+      });
+
+      await expect(fetchHistorySummary('month', 2, false)).resolves.toEqual(summary);
+      const url = mockFetch.mock.calls[0][0] as string;
+      expect(url).toContain('/api/history/summary?');
+      expect(url).toContain('range=month');
+      expect(url).toContain('offset=2');
+      expect(url).toContain('start_ms=');
+      expect(url).toContain('end_ms=');
+      expect(url).not.toContain('fields=');
     });
   });
 });
