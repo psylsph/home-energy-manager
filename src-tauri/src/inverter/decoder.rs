@@ -1654,6 +1654,15 @@ fn decode_input_1360_1413(data: &[u16], snap: &mut InverterSnapshot) {
 pub fn decode_meter_data(data: &[u16], address: u8) -> MeterData {
     let get = |idx: usize| -> u16 { data.get(idx).copied().unwrap_or(0) };
     let signed = |idx: usize| -> i32 { get(idx) as i16 as i32 };
+    let p_active_phase_1 = signed(8);
+    let p_active_phase_2 = signed(9);
+    let p_active_phase_3 = signed(10);
+    let reported_active_total = signed(11);
+    let p_active_total = if reported_active_total == 0 {
+        p_active_phase_1 + p_active_phase_2 + p_active_phase_3
+    } else {
+        reported_active_total
+    };
 
     MeterData {
         address,
@@ -1665,10 +1674,10 @@ pub fn decode_meter_data(data: &[u16], address: u8) -> MeterData {
         i_phase_3: get(5) as f32 * 0.01,
         i_ln: get(6) as f32 * 0.01, // IR(66): neutral-line current
         i_total: get(7) as f32 * 0.01,
-        p_active_phase_1: signed(8),
-        p_active_phase_2: signed(9),
-        p_active_phase_3: signed(10),
-        p_active_total: signed(11),
+        p_active_phase_1,
+        p_active_phase_2,
+        p_active_phase_3,
+        p_active_total,
         p_reactive_total: signed(15),
         p_apparent_total: signed(19),
         pf_total: get(23) as f32 * 0.001,
@@ -2447,6 +2456,33 @@ mod tests {
         let meter = decode_meter_data(&data, 0x01);
         assert_eq!(meter.i_ln, 2.50, "IR(66) i_ln must be decoded");
         assert_eq!(meter.i_total, 5.00);
+    }
+
+    #[test]
+    fn decode_meter_data_derives_missing_active_total_from_phases() {
+        let mut data = vec![0u16; 30];
+        // Some single-phase EM115 meters populate IR(68) but leave the
+        // nominal total register IR(71) at zero (issue #243).
+        data[8] = 4332;
+        data[11] = 0;
+
+        let meter = decode_meter_data(&data, 0x02);
+
+        assert_eq!(meter.p_active_phase_1, 4332);
+        assert_eq!(meter.p_active_total, 4332);
+    }
+
+    #[test]
+    fn decode_meter_data_preserves_reported_active_total() {
+        let mut data = vec![0u16; 30];
+        data[8] = 1000;
+        data[9] = 2000;
+        data[10] = 3000;
+        data[11] = 5900;
+
+        let meter = decode_meter_data(&data, 0x01);
+
+        assert_eq!(meter.p_active_total, 5900);
     }
 
     #[test]
