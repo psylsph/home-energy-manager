@@ -449,6 +449,134 @@ describe('<ControlPage/> — Agile scope UI', () => {
     expect(screen.getByText(/Controlled by Adaptive Charge/)).toBeDefined();
   });
 
+  it('restores the persisted charging mode when a mode change fails', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ adaptive_charge_enabled: true }) as never,
+    });
+    vi.mocked(apiPost).mockImplementation(async (path: string) => {
+      if (path === '/api/charging-mode') throw new Error('save failed');
+      return { ok: true };
+    });
+    const { default: ControlPage } = await import('../../src/pages/ControlPage');
+    render(<ControlPage />);
+
+    const select = (await screen.findAllByRole('combobox'))[0] as HTMLSelectElement;
+    expect(select.value).toBe('adaptive');
+    await waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/cosy'));
+
+    fireEvent.change(select, { target: { value: 'standard' } });
+    expect(select.value).toBe('standard');
+
+    await waitFor(() => {
+      expect(apiPost).toHaveBeenCalledWith(
+        '/api/charging-mode',
+        expect.objectContaining({ mode: 'standard' }),
+      );
+      expect(select.value).toBe('adaptive');
+    });
+  });
+
+  it('keeps charging mode disabled until its persisted configuration has loaded', async () => {
+    let resolveCosy!: (value: unknown) => void;
+    const cosyRequest = new Promise((resolve) => { resolveCosy = resolve; });
+    const defaultApiGet = vi.mocked(apiGet).getMockImplementation();
+    vi.mocked(apiGet).mockImplementation(async (path: string) => {
+      if (path === '/api/cosy') return await cosyRequest as never;
+      return await defaultApiGet!(path);
+    });
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ adaptive_charge_enabled: true }) as never,
+    });
+    const { default: ControlPage } = await import('../../src/pages/ControlPage');
+    render(<ControlPage />);
+
+    const select = (await screen.findAllByRole('combobox'))[0] as HTMLSelectElement;
+    expect(select.disabled).toBe(true);
+    const apply = screen.getByRole('button', { name: 'Apply' }) as HTMLButtonElement;
+    expect(apply.disabled).toBe(true);
+
+    resolveCosy({
+      ok: true,
+      enabled: false,
+      slots: Array.from({ length: 3 }, () => ({
+        enabled: false, start_hour: 0, start_minute: 0,
+        end_hour: 0, end_minute: 0, target_soc: 100,
+      })),
+    });
+    await waitFor(() => {
+      expect(select.disabled).toBe(false);
+      expect(apply.disabled).toBe(false);
+    });
+  });
+
+  it('keeps charging controls disabled when persisted configuration fails to load', async () => {
+    const defaultApiGet = vi.mocked(apiGet).getMockImplementation();
+    vi.mocked(apiGet).mockImplementation(async (path: string) => {
+      if (path === '/api/cosy') throw new Error('load failed');
+      return await defaultApiGet!(path);
+    });
+    useInverterStore.setState({ snapshot: makeSnapshot() as never });
+    const { default: ControlPage } = await import('../../src/pages/ControlPage');
+    render(<ControlPage />);
+
+    await screen.findByRole('alert');
+    expect(screen.getByText('Charging Mode settings could not be loaded.')).toBeDefined();
+    const select = (await screen.findAllByRole('combobox'))[0] as HTMLSelectElement;
+    const apply = screen.getByRole('button', { name: 'Apply' }) as HTMLButtonElement;
+    expect(select.disabled).toBe(true);
+    expect(apply.disabled).toBe(true);
+
+    fireEvent.click(apply);
+    expect(apiPost).not.toHaveBeenCalledWith('/api/charging-mode', expect.anything());
+  });
+
+  it('updates EPS immediately and blocks duplicate writes until the snapshot confirms it', async () => {
+    let resolveEps!: () => void;
+    const epsRequest = new Promise<void>((resolve) => { resolveEps = resolve; });
+    vi.mocked(apiPost).mockImplementation(async (path: string) => {
+      if (path === '/api/control/eps') await epsRequest;
+      return { ok: true };
+    });
+    useInverterStore.setState({ snapshot: makeSnapshot({ ac_eps_enabled: false }) as never });
+    const { default: ControlPage } = await import('../../src/pages/ControlPage');
+    render(<ControlPage />);
+
+    const epsToggle = await screen.findByRole('button', { name: 'Emergency Power Supply' });
+    expect(epsToggle.getAttribute('aria-pressed')).toBe('false');
+
+    fireEvent.click(epsToggle);
+
+    expect(epsToggle.getAttribute('aria-pressed')).toBe('true');
+    expect((epsToggle as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(epsToggle);
+    expect(apiPost).toHaveBeenCalledTimes(1);
+    expect(apiPost).toHaveBeenCalledWith('/api/control/eps', { enabled: true });
+
+    resolveEps();
+    useInverterStore.setState({ snapshot: makeSnapshot({ ac_eps_enabled: true }) as never });
+    await waitFor(() => expect((epsToggle as HTMLButtonElement).disabled).toBe(false));
+    expect(epsToggle.getAttribute('aria-pressed')).toBe('true');
+
+    useInverterStore.setState({ snapshot: makeSnapshot({ ac_eps_enabled: false }) as never });
+    await waitFor(() => {
+      expect((epsToggle as HTMLButtonElement).disabled).toBe(false);
+      expect(epsToggle.getAttribute('aria-pressed')).toBe('false');
+    });
+  });
+
+  it('presents EPS as its own card rather than a master toggle for all power controls', async () => {
+    useInverterStore.setState({ snapshot: makeSnapshot({ ac_eps_enabled: false }) as never });
+    const { default: ControlPage } = await import('../../src/pages/ControlPage');
+    render(<ControlPage />);
+
+    const epsToggle = await screen.findByRole('button', { name: 'Emergency Power Supply' });
+    const epsCard = epsToggle.closest<HTMLElement>('div.bg-bg-surface');
+    if (!epsCard) throw new Error('EPS card missing');
+
+    expect(within(epsCard).getByText('Emergency Power Supply (EPS)')).toBeDefined();
+    expect(within(epsCard).queryByText('Quick Action Duration')).toBeNull();
+  });
+
   it('saves the inverter-native Discharge Cutoff SOC', async () => {
     useInverterStore.setState({
       snapshot: makeSnapshot({ battery_discharge_cutoff_soc: 25 }),

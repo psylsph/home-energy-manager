@@ -718,6 +718,7 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
   const [saving, setSaving] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState(false);
 
   const enabled = mode === 'cosy';
 
@@ -725,19 +726,22 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
     (async () => {
       try {
         const res = await apiGet<{ ok: boolean; enabled: boolean; slots: typeof slots }>('/api/cosy');
-        if (res.ok) {
-          if (res.enabled !== (mode === 'cosy')) {
-            onModeChange(res.enabled ? 'cosy' : 'standard');
-          }
-          const initial = res.slots.length === 3
-            ? res.slots
-            : Array.from({ length: 3 }, () => ({
-                enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100,
-              }));
-          setSlots(initial);
+        if (!res.ok) throw new Error('Charging Mode settings request failed');
+        if (res.enabled !== (mode === 'cosy')) {
+          onModeChange(res.enabled ? 'cosy' : 'standard');
         }
-      } catch { /* use defaults */ }
-      setLoaded(true);
+        const initial = res.slots.length === 3
+          ? res.slots
+          : Array.from({ length: 3 }, () => ({
+              enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100,
+            }));
+        setSlots(initial);
+        setLoaded(true);
+      } catch {
+        // Do not enable controls with empty fallback slots: applying them would
+        // overwrite the user's persisted Cosy schedule.
+        setLoadError(true);
+      }
     })();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -750,6 +754,10 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
       await apiPost('/api/charging-mode', { mode: newMode, cosy_slots: slots });
       setSaveFeedback('saved');
     } catch {
+      // The dropdown is optimistic, so restore the last persisted mode if the
+      // backend rejects or cannot save the change. Otherwise it looks saved
+      // until a restart reloads the real setting.
+      onModeChange(mode);
       setSaveFeedback('error');
     }
     setSaving(false);
@@ -777,7 +785,7 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
           <select
           value={mode}
           onChange={(e) => handleModeChange(e.target.value as ChargeMode)}
-          disabled={saving}
+          disabled={saving || !loaded}
           className="bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-3 py-1.5 border border-transparent focus:border-battery outline-none cursor-pointer w-full sm:w-auto"
         >
           <option value="standard">Standard</option>
@@ -801,13 +809,19 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
               setSaving(false);
               setTimeout(() => setSaveFeedback(null), 2000);
             }}
-            disabled={saving}
+            disabled={saving || !loaded}
             className="text-sm font-medium px-4 py-1.5 rounded-lg bg-battery/20 text-battery hover:bg-battery/30 transition disabled:opacity-50"
           >
             {saveFeedback === 'saved' ? '✓' : saveFeedback === 'error' ? '!' : saving ? '...' : 'Apply'}
           </button>
       </div>
       </div>
+
+      {loadError && (
+        <p className="text-red-400 text-xs" role="alert">
+          Charging Mode settings could not be loaded.
+        </p>
+      )}
 
       {(mode === 'cosy' || mode === 'adaptive' || mode === 'agile' || mode === 'agile_charge' || mode === 'agile_discharge') && (
         <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-2.5 space-y-1">
@@ -2092,6 +2106,11 @@ export default function ControlPage() {
   const snapshotAdaptiveEnabled = snapshot?.adaptive_charge_enabled ?? false;
   const snapshotAgileScope = snapshot?.agile_scope ?? 'off';
   const [localChargeOverride, setLocalChargeOverride] = useState<ChargeMode | null>(null);
+  const snapshotEpsEnabled = snapshot?.ac_eps_enabled ?? false;
+  const [epsPending, setEpsPending] = useState<boolean | null>(null);
+  const [epsError, setEpsError] = useState<string | null>(null);
+  const epsWaitingForSnapshot = epsPending != null && snapshotEpsEnabled !== epsPending;
+  const epsEnabled = epsWaitingForSnapshot ? epsPending : snapshotEpsEnabled;
   // Use local override if user has interacted; otherwise derive from the
   // backend snapshot. Cosy wins if both are enabled (the two modes are
   // mutually exclusive in practice but this gives a deterministic
@@ -2114,6 +2133,37 @@ export default function ControlPage() {
     || snapshot?.adaptive_charge_state === 'restoring';
   const setChargeMode = (m: ChargeMode) => {
     setLocalChargeOverride(m);
+  };
+
+  useEffect(() => {
+    if (epsPending == null) return;
+    if (!epsWaitingForSnapshot) {
+      // Clear the optimistic override after the websocket snapshot confirms it.
+      // Scheduling this avoids a synchronous state cascade inside the effect.
+      const confirmed = window.setTimeout(() => {
+        setEpsPending(null);
+        setEpsError(null);
+      }, 0);
+      return () => window.clearTimeout(confirmed);
+    }
+    const timeout = window.setTimeout(() => {
+      setEpsPending(null);
+      setEpsError('EPS did not confirm the change. Please try again.');
+    }, 30_000);
+    return () => window.clearTimeout(timeout);
+  }, [epsPending, epsWaitingForSnapshot]);
+
+  const handleEpsToggle = async () => {
+    if (epsWaitingForSnapshot) return;
+    const enabled = !snapshotEpsEnabled;
+    setEpsPending(enabled);
+    setEpsError(null);
+    try {
+      await apiPost('/api/control/eps', { enabled });
+    } catch (error) {
+      setEpsPending(null);
+      setEpsError(error instanceof Error ? error.message : 'EPS toggle failed.');
+    }
   };
 
   // On mount, load agile config from backend to seed the local override.
@@ -2906,10 +2956,10 @@ export default function ControlPage() {
       {/* Section 6: Battery and Power Controls */}
       <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Battery and Power Controls</h2>
-        <div className="bg-bg-surface rounded-xl p-4 space-y-5">
-          {/* EPS (Emergency Power Supply) — AC-coupled / AC-three-phase / All-in-One */}
-          {supportsEps && (
-            <div className="space-y-1 pt-2 border-t border-bg-elevated">
+        {/* EPS is deliberately a separate card so its switch cannot be mistaken
+            for a master toggle controlling the settings below it. */}
+        {supportsEps && (
+          <div className="bg-bg-surface rounded-xl p-4 space-y-1">
               <div className="flex items-center justify-between">
                 <div>
                   <span className="text-text-primary text-sm font-medium">Emergency Power Supply (EPS)</span>
@@ -2918,20 +2968,25 @@ export default function ControlPage() {
                   </p>
                 </div>
                 <button
-                  onClick={async () => {
-                    try {
-                      await apiPost('/api/control/eps', { enabled: !snapshot?.ac_eps_enabled });
-                    } catch (e: unknown) { console.warn("EPS toggle failed:", e); }
-                  }}
-                  className={`relative w-10 h-5 rounded-full transition ${snapshot?.ac_eps_enabled ? 'bg-battery' : 'bg-bg-elevated'}`}
+                  type="button"
+                  aria-label="Emergency Power Supply"
+                  aria-pressed={epsEnabled}
+                  disabled={epsWaitingForSnapshot}
+                  onClick={handleEpsToggle}
+                  className={`relative w-10 h-5 rounded-full transition disabled:opacity-70 ${epsEnabled ? 'bg-battery' : 'bg-bg-elevated'}`}
                 >
                   <span
-                    className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition ${snapshot?.ac_eps_enabled ? 'left-5.5' : 'left-0.5'}`}
+                    className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition ${epsEnabled ? 'left-5.5' : 'left-0.5'}`}
                   />
                 </button>
               </div>
+              {epsWaitingForSnapshot && (
+                <p className="text-battery text-xs" role="status">Updating EPS…</p>
+              )}
+              {epsError && <p className="text-red-400 text-xs" role="alert">{epsError}</p>}
             </div>
           )}
+        <div className="bg-bg-surface rounded-xl p-4 space-y-5">
           {/* Quick Action Duration */}
           <div className="space-y-1">
             <div className="flex items-center justify-between">
