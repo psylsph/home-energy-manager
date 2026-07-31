@@ -86,6 +86,10 @@ If the installer itself won't open, right-click the `.msi` → **Properties** �
 building desktop bundles from source requires additional Linux development
 packages. See [INSTALL.md](./INSTALL.md#linux-system-requirements) for details.
 
+**Proxmox users** — a first-party helper can create an unprivileged Debian 13
+LXC and run Home Energy Manager headlessly without Docker. See the
+[Proxmox VE LXC instructions](./INSTALL.md#proxmox-ve-lxc).
+
 ### 2. Find your inverter's IP address
 
 The app needs the IP address of the small WiFi or Ethernet dongle connected to your inverter. You can find this in your router's device list — look for a device named "GivEnergy" or check the MAC address printed on the dongle.

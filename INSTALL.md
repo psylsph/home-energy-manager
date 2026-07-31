@@ -382,6 +382,78 @@ works. If you ever need to put `dist/` somewhere else, point at it with
 > log for "No frontend dist directory found" — it lists every path it searched
 > and how to fix the layout.
 
+#### Proxmox VE LXC
+
+The repository includes a first-party helper that creates a dedicated,
+unprivileged Debian 13 LXC and installs the latest Home Energy Manager release
+without Docker. Run it as `root` on the Proxmox host, not inside an existing
+container.
+
+Download and inspect the helper before running it:
+
+```bash
+curl --fail --silent --show-error --location \
+  --output /tmp/home-energy-manager-lxc.sh \
+  https://raw.githubusercontent.com/psylsph/home-energy-manager/master/scripts/proxmox/create-lxc.sh
+less /tmp/home-energy-manager-lxc.sh
+bash /tmp/home-energy-manager-lxc.sh
+```
+
+The defaults are an unprivileged container with one CPU core, 1 GB RAM, 512 MB
+swap, a 4 GB root disk, DHCP on `vmbr0`, autostart enabled, and the web UI on
+port 7337. The helper automatically chooses active template and root-disk
+storage, downloads a Debian 13 template, verifies that the in-container installer
+matches the copy reviewed with the helper, installs the architecture-matched
+release `.deb`, verifies its GitHub SHA-256 digest, and checks the local API.
+
+Common overrides are environment variables:
+
+```bash
+HEM_CTID=250 \
+HEM_BRIDGE=vmbr1 \
+HEM_ROOTFS_STORAGE=local-lvm \
+HEM_MEMORY_MB=2048 \
+bash /tmp/home-energy-manager-lxc.sh
+```
+
+For a static IPv4 address, include its prefix and gateway:
+
+```bash
+HEM_IP_CONFIG=192.168.1.50/24 \
+HEM_GATEWAY=192.168.1.1 \
+bash /tmp/home-energy-manager-lxc.sh
+```
+
+Other available overrides are `HEM_HOSTNAME`, `HEM_CORES`, `HEM_SWAP_MB`,
+`HEM_DISK_GB`, `HEM_PORT`, and `HEM_TEMPLATE_STORAGE`.
+
+The helper prints the container ID and dashboard URL when installation
+finishes. To update later, run the installed update command through Proxmox:
+
+```bash
+pct exec <container-id> -- home-energy-manager-update
+```
+
+Updates stop the service, save a pre-update copy of the persistent data under
+`/var/backups/home-energy-manager/`, retain the three newest backups, verify the
+new package digest, install it, restart the service, and check `/api/status`.
+Before changing anything, the updater also downloads and verifies the currently
+installed package. If package installation or the post-update health check
+fails, it reinstalls that package and restores the pre-update data automatically.
+Settings, logs, and history live under `/var/lib/givenergy-local` and are not
+owned by the application package.
+
+The Home Energy Manager web interface and control API do not provide their own
+login screen. Put the LXC only on a trusted LAN or restrict access to port 7337
+with the Proxmox firewall. The container must be able to reach the inverter or
+data adapter on TCP port 8899 and GitHub over HTTPS for installation and
+updates.
+
+To remove the complete installation, first confirm the printed container ID,
+then stop and destroy that LXC using the normal Proxmox UI or `pct`. Destroying
+the LXC also permanently deletes its settings and history unless you back up
+`/var/lib/givenergy-local` first.
+
 #### Raspberry Pi (headless server)
 
 Home Energy Manager runs great on a Raspberry Pi as a dedicated home server. You need **64-bit** Trixie (Debian 13) or newer — older releases (Bookworm, Raspberry Pi OS) ship glibc 2.36 which is too old for the prebuilt binary.
