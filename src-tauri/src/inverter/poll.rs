@@ -3559,7 +3559,7 @@ mod tests {
             p_active_phase_3: 0,
             p_active_total,
             p_reactive_total: 0,
-            p_apparent_total: 0,
+            p_apparent_total: 0.0,
             pf_total: 0.0,
             frequency: 50.0,
             e_import_active_kwh: 0.0,

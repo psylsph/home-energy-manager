@@ -1465,7 +1465,7 @@ fn decode_input_1060_1119(data: &[u16], snap: &mut InverterSnapshot) {
         p_active_phase_3: 0,
         p_active_total: -p_grid,
         p_reactive_total: 0, // no reactive register available
-        p_apparent_total: p_apparent as i32,
+        p_apparent_total: p_apparent,
         pf_total: pf_raw.abs().clamp(0.0, 1.0),
         frequency: snap.grid_frequency,
         e_import_active_kwh: 0.0,
@@ -1528,7 +1528,7 @@ fn decode_input_1240_1299(data: &[u16], snap: &mut InverterSnapshot) {
             p_active_phase_3: 0,
             p_active_total: -p_meter2 as i32, // positive = import
             p_reactive_total: 0,
-            p_apparent_total: (p_meter2 * 10.0) as i32, // rough: apparent ≈ active for resistive loads
+            p_apparent_total: p_meter2 * 10.0, // rough: apparent ≈ active for resistive loads
             pf_total: 1.0,
             frequency: snap.grid_frequency,
             e_import_active_kwh: 0.0,
@@ -1646,8 +1646,8 @@ fn decode_input_1360_1413(data: &[u16], snap: &mut InverterSnapshot) {
 ///   IR(63-67): i_phase_1..3, i_ln, i_total (/100 A)
 ///   IR(68-71): p_active_phase_1..3, p_active_total (int16 W)
 ///   IR(72-75): p_reactive_phase_1..3, p_reactive_total (int16 var)
-///   IR(76-79): p_apparent_phase_1..3, p_apparent_total (int16 VA)
-///   IR(80-83): pf_phase_1..3, pf_total (/1000)
+///   IR(76-79): p_apparent_phase_1..3, p_apparent_total (unsigned /10 VA)
+///   IR(80-83): pf_phase_1..3, pf_total (signed /10000)
 ///   IR(84):    frequency (/100 Hz)
 ///   IR(85-86): e_import_active, e_import_reactive (/10 kWh)
 ///   IR(87-88): e_export_active, e_export_reactive (/10 kWh)
@@ -1679,8 +1679,8 @@ pub fn decode_meter_data(data: &[u16], address: u8) -> MeterData {
         p_active_phase_3,
         p_active_total,
         p_reactive_total: signed(15),
-        p_apparent_total: signed(19),
-        pf_total: get(23) as f32 * 0.001,
+        p_apparent_total: get(19) as f32 * 0.1,
+        pf_total: signed(23) as f32 * 0.0001,
         frequency: get(24) as f32 * 0.01,
         e_import_active_kwh: get(25) as f32 * 0.1,
         e_export_active_kwh: get(27) as f32 * 0.1,
@@ -2486,6 +2486,29 @@ mod tests {
     }
 
     #[test]
+    fn decode_meter_data_scales_apparent_power_as_unsigned_deci_va() {
+        let mut data = vec![0u16; 30];
+        // IR(79) is an unsigned 0.1 VA magnitude. This value is deliberately
+        // above i16::MAX to prove it must not be decoded as signed power.
+        data[19] = 40_000;
+
+        let meter = decode_meter_data(&data, 0x01);
+
+        assert!((meter.p_apparent_total - 4_000.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn decode_meter_data_scales_power_factor_as_signed_ten_thousandths() {
+        let mut data = vec![0u16; 30];
+        // Captured export value: raw 64670 is -866 as i16, hence -0.0866.
+        data[23] = 64_670;
+
+        let meter = decode_meter_data(&data, 0x01);
+
+        assert!((meter.pf_total - (-0.0866)).abs() < 0.000_01);
+    }
+
+    #[test]
     fn decode_battery_block_decodes_cap_design2_from_ir101_102() {
         let mut data = vec![0u16; 60];
         // IR(86-87): cap_design = 200 Ah (0.01 Ah units → 20000)
@@ -3180,7 +3203,7 @@ mod tests {
         );
         // Apparent power from IR(1073-1074) — raw 15000 → 1500VA
         assert_eq!(
-            snap.meters[0].p_apparent_total, 1500,
+            snap.meters[0].p_apparent_total, 1500.0,
             "Apparent from register"
         );
         // Voltages from IR(1061-1063)

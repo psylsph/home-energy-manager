@@ -618,8 +618,8 @@ pub struct MeterData {
     /// Total reactive power in var (signed).
     pub p_reactive_total: i32,
     /// Total apparent power in VA.
-    pub p_apparent_total: i32,
-    /// Power factor (0.000-1.000).
+    pub p_apparent_total: f32,
+    /// Signed power factor (-1.0000 to 1.0000).
     pub pf_total: f32,
     /// Frequency in Hz.
     pub frequency: f32,
