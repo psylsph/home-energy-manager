@@ -23,6 +23,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, within, fireEvent, waitFor } from '@testing-library/react';
 
 const loadLimiterMock = vi.hoisted(() => ({ enabled: true }));
+const temperatureLimiterMock = vi.hoisted(() => ({ enabled: true }));
+const autoWinterMock = vi.hoisted(() => ({ enabled: false }));
 
 // ---------------------------------------------------------------------------
 // Mocks — ControlPage pulls in the api helpers. Stub the side-effecting
@@ -40,7 +42,7 @@ vi.mock('../../src/lib/api', () => ({
         ok: true,
         data: {
           config: {
-            enabled: false,
+            enabled: autoWinterMock.enabled,
             cold_threshold: 8,
             recovery_threshold: 12,
             target_soc: 80,
@@ -59,7 +61,7 @@ vi.mock('../../src/lib/api', () => ({
         ok: true,
         data: {
           config: {
-            enabled: true,
+            enabled: temperatureLimiterMock.enabled,
             high_threshold: 60,
             recovery_threshold: 55,
             confirmation_readings: 3,
@@ -194,6 +196,8 @@ function makeSnapshot(overrides: Partial<InverterSnapshot> = {}): InverterSnapsh
 describe('<ControlPage/> — Load Discharge Limiter status (issue #158)', () => {
   beforeEach(() => {
     loadLimiterMock.enabled = true;
+    temperatureLimiterMock.enabled = true;
+    autoWinterMock.enabled = false;
     vi.mocked(apiGet).mockClear();
     vi.mocked(apiPost).mockClear();
     silenceConsoleError();
@@ -230,10 +234,54 @@ describe('<ControlPage/> — Load Discharge Limiter status (issue #158)', () => 
       name: 'Load Discharge Limiter',
       exact: true,
     });
-    const section = heading.closest('div.space-y-3');
+    const section = heading.closest<HTMLElement>('div.space-y-3');
     if (!section) throw new Error('Load Discharge Limiter heading has no <div.space-y-3> ancestor');
     return section;
   }
+
+  it('hides disabled feature settings and reveals them when toggled on', async () => {
+    loadLimiterMock.enabled = false;
+    temperatureLimiterMock.enabled = false;
+    autoWinterMock.enabled = false;
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ battery_mode: 'timed_demand', auto_winter_active: true }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const loadSection = await loadLimiterSection();
+    const temperatureHeading = await screen.findByRole('heading', {
+      name: 'Inverter Temperature Limiter',
+    });
+    const temperatureSection = temperatureHeading.closest<HTMLElement>('div.space-y-3');
+    const winterHeading = await screen.findByRole('heading', { name: 'Auto Winter Mode' });
+    const winterSection = winterHeading.closest<HTMLElement>('section');
+    if (!temperatureSection || !winterSection) throw new Error('feature section missing');
+
+    expect(within(loadSection).queryByText('Load Threshold')).toBeNull();
+    expect(within(loadSection).queryByText(/Load limiter only operates in/)).toBeNull();
+    expect(within(loadSection).getByRole('button', { name: 'Save' })).toBeDefined();
+    expect(within(temperatureSection).queryByText('Pause Threshold')).toBeNull();
+    expect(within(temperatureSection).getByRole('button', { name: 'Save' })).toBeDefined();
+    expect(within(winterSection).queryByText('Cold Threshold')).toBeNull();
+    expect(within(winterSection).getByRole('button', { name: 'Save' })).toBeDefined();
+    expect(within(winterSection).queryByText(/implemented locally within this app/i)).toBeNull();
+    expect(within(winterSection).queryByText(/Winter mode active/)).toBeNull();
+
+    fireEvent.click(within(loadSection).getAllByRole('button')[0]);
+    fireEvent.click(within(temperatureSection).getAllByRole('button')[0]);
+    fireEvent.click(within(winterSection).getAllByRole('button')[0]);
+
+    expect(within(loadSection).getByText('Load Threshold')).toBeDefined();
+    expect(within(loadSection).getByText(/Load limiter only operates in/)).toBeDefined();
+    expect(within(loadSection).getByRole('button', { name: 'Save' })).toBeDefined();
+    expect(within(temperatureSection).getByText('Pause Threshold')).toBeDefined();
+    expect(within(temperatureSection).getByRole('button', { name: 'Save' })).toBeDefined();
+    expect(within(winterSection).getByText('Cold Threshold')).toBeDefined();
+    expect(within(winterSection).getByRole('button', { name: 'Save' })).toBeDefined();
+    expect(within(winterSection).getByText(/Winter mode active/)).toBeDefined();
+  });
 
   it('shows active inverter-temperature protection and its all-mode warning', async () => {
     useInverterStore.setState({

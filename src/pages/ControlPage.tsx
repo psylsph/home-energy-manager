@@ -352,7 +352,7 @@ function AutoWinterSection() {
     <section className="space-y-3">
       <h2 className="text-text-primary font-semibold text-lg">Auto Winter Mode</h2>
       <div className="bg-bg-surface rounded-xl p-4 space-y-4">
-        {winterActive && (
+        {enabled && winterActive && (
           <div className="text-xs bg-blue-900/40 text-text-primary px-3 py-2 rounded-lg">
             Winter mode active — battery is being charged to {snapshot?.target_soc ?? 80}%
             {batteryTemp != null && ` (${batteryTemp.toFixed(1)}°C)`}
@@ -464,13 +464,14 @@ function AutoWinterSection() {
           </>
         )}
 
-        {/* App vs cloud note — always visible, even when disabled */}
-        <div className="text-xs bg-blue-900/30 text-text-primary px-3 py-2 rounded-lg">
-          <strong>Note:</strong> This is implemented locally within this app — it monitors
-          battery temperature via Modbus and forces charging when the battery gets cold.
-          It does not use GivEnergy's cloud-based winter mode. The app must stay running
-          for it to work.
-        </div>
+        {enabled && (
+          <div className="text-xs bg-blue-900/30 text-text-primary px-3 py-2 rounded-lg">
+            <strong>Note:</strong> This is implemented locally within this app — it monitors
+            battery temperature via Modbus and forces charging when the battery gets cold.
+            It does not use GivEnergy's cloud-based winter mode. The app must stay running
+            for it to work.
+          </div>
+        )}
 
         <button
           onClick={handleSave}
@@ -1740,7 +1741,7 @@ function LoadLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) {
           hide the banner — "load limiter only operates in Eco (current:
           eco paused)" is misleading while the limiter is actively holding
           the battery in pause. */}
-      {snapshot != null && mode !== 'eco' && mode !== 'eco_paused' && (
+      {enabled && snapshot != null && mode !== 'eco' && mode !== 'eco_paused' && (
         <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-2.5 text-xs text-text-primary">
           Load limiter only operates in <strong>Eco</strong> mode (current:{' '}
           {snapshot.battery_mode.replace('_', ' ')})
