@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.70.1] - 2026-07-31
+
+### Fixed
+
+- **Solar arrays linked to an external meter no longer show 0 W when the meter reports power only in its per-phase readings.** The app now uses available phase readings when the meter's total is empty, while preserving a valid reported total. (issue #243)
+
+- **External-meter apparent power and power factor are now decoded correctly.** Values from affected meter models no longer appear negative or ten times too large because of incorrect sign or scaling handling.
+
 ## [0.70.0] - 2026-07-30
 
 ### Added
