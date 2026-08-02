@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.70.2] - 2026-08-02
+
+### Fixed
+
+- **Battery quick actions now show progress until the inverter confirms each change.** Pause Discharge, Resume Discharge, Force Charge, Force Discharge and both force-stop actions remain visibly in progress while their Modbus writes are being applied, with a clear error if confirmation never arrives. The renamed Pause Discharge action makes clear that Eco Paused holds stored energy while still allowing solar or scheduled grid charging. (issue #245)
+
+- **Force Charge and Force Discharge can no longer be started together.** The opposite action is disabled while one is active or being applied, and direct API requests are rejected until the active force action has been stopped, protecting the settings needed to restore the inverter afterwards.
+
 ## [0.70.1] - 2026-07-31
 
 ### Fixed

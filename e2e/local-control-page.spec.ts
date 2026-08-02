@@ -26,9 +26,9 @@ test.describe('Control Page - Quick Actions', () => {
     await expect(page.locator('text=Force Discharge')).toBeVisible({ timeout: 15_000 });
   });
 
-  test('should show Pause Battery button', async ({ page }) => {
+  test('should show Pause Discharge button', async ({ page }) => {
     await page.goto('/#/control');
-    await expect(page.locator('text=Pause Battery').first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('text=Pause Discharge').first()).toBeVisible({ timeout: 15_000 });
   });
 
   test('should show Sync Clock button', async ({ page }) => {
@@ -46,7 +46,7 @@ test.describe('Control Page - Quick Actions', () => {
     expect(data.ok).toBe(true);
   });
 
-  test('Pause Battery via API should disable both charge and discharge', async ({ baseUrl }) => {
+  test('Pause Discharge via API should hold discharge while leaving charging available', async ({ baseUrl }) => {
     const resp = await fetch(`${baseUrl}/api/control/pause`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

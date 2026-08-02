@@ -1842,7 +1842,7 @@ function LoadLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) {
                 className="w-full"
               />
               <p className="text-text-secondary text-xs">
-                Pauses after load stays above the threshold; unpauses after it stays at or below the threshold for this long
+                Pauses discharge after load stays above the threshold; resumes discharge after it stays at or below the threshold for this long
               </p>
             </div>
 
@@ -2073,6 +2073,12 @@ export default function ControlPage() {
   const [timedDischargeSaving, setTimedDischargeSaving] = useState(false);
   const [timedDischargeOverride, setTimedDischargeOverride] = useState<boolean | null>(null);
   const [loadLimiterRefreshKey, setLoadLimiterRefreshKey] = useState(0);
+  const [pauseDischargePending, setPauseDischargePending] = useState<'pause' | 'resume' | null>(null);
+  const [pauseDischargeError, setPauseDischargeError] = useState<string | null>(null);
+  const [forceChargePending, setForceChargePending] = useState<'start' | 'stop' | null>(null);
+  const [forceChargeError, setForceChargeError] = useState<string | null>(null);
+  const [forceDischargePending, setForceDischargePending] = useState<'start' | 'stop' | null>(null);
+  const [forceDischargeError, setForceDischargeError] = useState<string | null>(null);
 
   // ---- Connection gate ----
   // When the inverter isn't currently connected, controls would be a lie:
@@ -2203,6 +2209,63 @@ export default function ControlPage() {
   const timedExportEnabled = snapshot?.enable_discharge ?? false;
   const snapshotTimedDischargeEnabled = snapshot?.battery_pause_mode === 2;
   const timedDischargeEnabled = timedDischargeOverride ?? snapshotTimedDischargeEnabled;
+  const pauseDischargeActive = currentMode === 'eco_paused' || automatedPauseActive;
+  const hasLiveControlSnapshot = snapshot != null && connectionState === 'connected';
+  const pauseDischargeConfirmed = hasLiveControlSnapshot && (
+    pauseDischargePending === 'pause'
+      ? currentMode === 'eco_paused'
+      : pauseDischargePending === 'resume'
+        ? currentMode !== 'eco_paused' && !automatedPauseActive
+        : false
+  );
+
+  useEffect(() => {
+    if (pauseDischargePending == null) return;
+    if (pauseDischargeConfirmed) {
+      // Let the confirming websocket snapshot render before removing the
+      // progress state. Scheduling also avoids a synchronous state cascade
+      // inside the effect.
+      const confirmed = window.setTimeout(() => {
+        setPauseDischargePending(null);
+        setPauseDischargeError(null);
+      }, 0);
+      return () => window.clearTimeout(confirmed);
+    }
+    const action = pauseDischargePending;
+    const timeout = window.setTimeout(() => {
+      setPauseDischargePending(null);
+      setPauseDischargeError(
+        action === 'pause'
+          ? 'The inverter did not confirm that battery discharge was paused. Please try again.'
+          : 'The inverter did not confirm that battery discharge was resumed. Please try again.',
+      );
+    }, 30_000);
+    return () => window.clearTimeout(timeout);
+  }, [pauseDischargeConfirmed, pauseDischargePending]);
+
+  const handlePauseDischarge = async () => {
+    if (pauseDischargePending != null) return;
+    const action = pauseDischargeActive ? 'resume' : 'pause';
+    const disablingLimiter = action === 'resume' && automatedPauseActive;
+    setPauseDischargePending(action);
+    setPauseDischargeError(null);
+    try {
+      await apiPost(
+        action === 'pause' ? '/api/control/pause' : '/api/control/unpause',
+        undefined,
+      );
+      if (disablingLimiter) {
+        setLoadLimiterRefreshKey((key) => key + 1);
+      }
+    } catch (error) {
+      setPauseDischargePending(null);
+      setPauseDischargeError(
+        error instanceof Error
+          ? error.message
+          : action === 'pause' ? 'Pause discharge failed.' : 'Resume discharge failed.',
+      );
+    }
+  };
 
   // Show draft while dragging; once snapshot confirms the saved value, use snapshot.
   // Default to null (no data) until the first snapshot arrives to avoid showing
@@ -2310,14 +2373,10 @@ export default function ControlPage() {
       : Math.min(Math.round(dischargeRate / 200 * batteryCapacityW), maxBatteryPowerW)
     : null;
 
-  // Derive force charge/discharge state from snapshot registers, with
-  // local override so the toggle feels instant (doesn't wait for next poll).
-  // Force charge is active when enable_charge (master schedule flag) is set
-  // AND the current time falls within an active charge slot window. On
-  // three-phase, enable_charge maps to HR 1123 (dedicated force-charge flag).
-  // On single-phase/AC, it maps to HR 96 (schedule enable). In both cases,
-  // the window gate is the definitive "charging now" signal.
-  // For three-phase: enable_charge alone suffices (HR 1123 is the force-charge flag).
+  // Derive force charge/discharge state from live snapshot registers so the
+  // progress indicators remain visible until the inverter confirms each
+  // action. On three-phase, enable_charge maps to HR 1123 (the dedicated
+  // force-charge flag); on single-phase/AC it maps to HR 96.
   const inChargeWindow = (snapshot?.charge_slots ?? []).some(slot => {
     if (!slot.enabled) return false;
     const now = new Date();
@@ -2328,19 +2387,22 @@ export default function ControlPage() {
       ? curMin >= startMin && curMin < endMin
       : curMin >= startMin || curMin < endMin;
   });
-  // Force charge is active only when the master charge-enable flag is set
-  // AND the current time falls within an active charge slot window. Outside
-  // the window the inverter is idle (eco or discharging), not force-charging.
+  // Force charge is active only in Eco power mode, when the master
+  // charge-enable flag is set AND the current time falls within an active
+  // charge slot window. Power-mode gating keeps charge and discharge mutually
+  // exclusive even if stale firmware leaves both schedule flags enabled.
+  // Outside the window the inverter is idle (eco or discharging), not force-charging.
   // This prevents the button staying highlighted when a charge schedule is
   // configured but no slot is active — enable_charge (HR 96 / HR 1123) is a
   // sticky schedule-enable flag, not an instantaneous "charging now" signal.
-  const snapshotForceCharge = (snapshot?.enable_charge ?? false) && inChargeWindow;
-  const [localForceChargeOverride, setLocalForceChargeOverride] = useState<boolean | null>(null);
-  const forceChargeActive = localForceChargeOverride ?? snapshotForceCharge;
-  const [forceChargeLoading, setForceChargeLoading] = useState(false);
-  // Force discharge is active only when the schedule is enabled AND the
-  // current time falls within an active discharge slot window. Outside the
-  // window the inverter is idle (eco), not force-discharging. This prevents
+  const snapshotForceCharge = (snapshot?.enable_charge ?? false)
+    && snapshot?.battery_power_mode === 1
+    && inChargeWindow;
+  const forceChargeActive = snapshotForceCharge;
+  // Force discharge is active only in Max Power / export mode, when the
+  // schedule is enabled AND the current time falls within an active discharge
+  // slot window. Outside the window the inverter is idle (eco), not
+  // force-discharging. This prevents
   // the button staying highlighted during Timed Demand/Export when no slot
   // is active.
   const inDischargeWindow = (snapshot?.discharge_slots ?? []).some(slot => {
@@ -2353,10 +2415,10 @@ export default function ControlPage() {
       ? curMin >= startMin && curMin < endMin
       : curMin >= startMin || curMin < endMin; // overnight slot
   });
-  const snapshotForceDischarge = (snapshot?.enable_discharge ?? false) && inDischargeWindow;
-  const [localForceDischargeOverride, setLocalForceDischargeOverride] = useState<boolean | null>(null);
-  const forceDischargeActive = localForceDischargeOverride ?? snapshotForceDischarge;
-  const [forceDischargeLoading, setForceDischargeLoading] = useState(false);
+  const snapshotForceDischarge = (snapshot?.enable_discharge ?? false)
+    && snapshot?.battery_power_mode === 0
+    && inDischargeWindow;
+  const forceDischargeActive = snapshotForceDischarge;
   const [reserveSaving, setReserveSaving] = useState(false);
   const [dischargeCutoffSaving, setDischargeCutoffSaving] = useState(false);
   const [chargeRateSaving, setChargeRateSaving] = useState(false);
@@ -2371,6 +2433,95 @@ export default function ControlPage() {
     readPersistedDuration(typeof window === 'undefined' ? null : window.localStorage),
   );
   const [forceDurationSaving, setForceDurationSaving] = useState(false);
+
+  const forceChargeConfirmed = forceChargePending != null
+    && hasLiveControlSnapshot
+    && forceChargeActive === (forceChargePending === 'start');
+  const forceDischargeConfirmed = forceDischargePending != null
+    && hasLiveControlSnapshot
+    && forceDischargeActive === (forceDischargePending === 'start');
+
+  useEffect(() => {
+    if (forceChargePending == null) return;
+    if (forceChargeConfirmed) {
+      const confirmed = window.setTimeout(() => {
+        setForceChargePending(null);
+        setForceChargeError(null);
+      }, 0);
+      return () => window.clearTimeout(confirmed);
+    }
+    const action = forceChargePending;
+    const timeout = window.setTimeout(() => {
+      setForceChargePending(null);
+      setForceChargeError(
+        `The inverter did not confirm that Force Charge ${action === 'start' ? 'started' : 'stopped'}. Please try again.`,
+      );
+    }, 30_000);
+    return () => window.clearTimeout(timeout);
+  }, [forceChargeConfirmed, forceChargePending]);
+
+  useEffect(() => {
+    if (forceDischargePending == null) return;
+    if (forceDischargeConfirmed) {
+      const confirmed = window.setTimeout(() => {
+        setForceDischargePending(null);
+        setForceDischargeError(null);
+      }, 0);
+      return () => window.clearTimeout(confirmed);
+    }
+    const action = forceDischargePending;
+    const timeout = window.setTimeout(() => {
+      setForceDischargePending(null);
+      setForceDischargeError(
+        `The inverter did not confirm that Force Discharge ${action === 'start' ? 'started' : 'stopped'}. Please try again.`,
+      );
+    }, 30_000);
+    return () => window.clearTimeout(timeout);
+  }, [forceDischargeConfirmed, forceDischargePending]);
+
+  const handleForceCharge = async () => {
+    if (forceChargePending != null) return;
+    const action = forceChargeActive ? 'stop' : 'start';
+    if (action === 'start' && (forceDischargeActive || forceDischargePending != null)) return;
+
+    setForceChargePending(action);
+    setForceChargeError(null);
+    try {
+      if (action === 'stop') {
+        await apiPost('/api/control/force-charge/stop');
+      } else {
+        const minutes = Math.min(forceDurationMinutes, 1439);
+        await apiPost('/api/control/force-charge', { minutes });
+      }
+    } catch (error) {
+      setForceChargePending(null);
+      setForceChargeError(
+        error instanceof Error ? error.message : `Force Charge failed to ${action}.`,
+      );
+    }
+  };
+
+  const handleForceDischarge = async () => {
+    if (forceDischargePending != null) return;
+    const action = forceDischargeActive ? 'stop' : 'start';
+    if (action === 'start' && (forceChargeActive || forceChargePending != null)) return;
+
+    setForceDischargePending(action);
+    setForceDischargeError(null);
+    try {
+      if (action === 'stop') {
+        await apiPost('/api/control/force-discharge/stop');
+      } else {
+        const minutes = Math.min(forceDurationMinutes, 1439);
+        await apiPost('/api/control/force-discharge', { minutes });
+      }
+    } catch (error) {
+      setForceDischargePending(null);
+      setForceDischargeError(
+        error instanceof Error ? error.message : `Force Discharge failed to ${action}.`,
+      );
+    }
+  };
 
   // Limit slots shown to what the inverter model supports
   // (e.g. AC Coupled only has 1 charge slot; Gen3 has 10).
@@ -2390,21 +2541,6 @@ export default function ControlPage() {
       : Array.from({ length: maxDischargeSlots }, () => ({
         enabled: false, start_hour: 16, start_minute: 0, end_hour: 19, end_minute: 0, target_soc: 4,
       } as ScheduleSlot));
-
-  // Force-discharge local override auto-clear after 10s. Prevents stale
-  // overrides from previous interactions or failed writes from sticking.
-  useEffect(() => {
-    if (localForceDischargeOverride == null) return;
-    const timeout = setTimeout(() => setLocalForceDischargeOverride(null), 10_000);
-    return () => clearTimeout(timeout);
-  }, [localForceDischargeOverride]);
-
-  // Force-charge local override auto-clear after 10s (same pattern).
-  useEffect(() => {
-    if (localForceChargeOverride == null) return;
-    const timeout = setTimeout(() => setLocalForceChargeOverride(null), 10_000);
-    return () => clearTimeout(timeout);
-  }, [localForceChargeOverride]);
 
   const dischargeSlots: ScheduleSlot[] = baseDischargeSlots;
 
@@ -2577,109 +2713,110 @@ export default function ControlPage() {
         <div className="grid grid-cols-4 gap-2 sm:gap-3">
           <div className="relative">
             <button
-              onClick={async () => {
-                setForceChargeLoading(true);
-                try {
-                  if (forceChargeActive) {
-                    // Stop Charge: restore the inverter to its pre-force-charge
-                    // state via the dedicated endpoint. The backend snapshots
-                    // the relevant registers on Force Charge start and replays
-                    // them here (HR_ENABLE_CHARGE, HR_CHARGE_TARGET_SOC, the
-                    // charge slot, and three-phase force/AC-charge flags).
-                    await apiPost('/api/control/force-charge/stop');
-                    setLocalForceChargeOverride(false);
-                  } else {
-                    // Clamp 1440 → 1439 to match the backend's 1..=1439 slot clamp.
-                    // 1440 on the slider represents "full day" which the backend
-                    // expresses as a 00:00→23:59 slot — the Quick Action still
-                    // works in that case because the slot remains non-zero.
-                    const minutes = Math.min(forceDurationMinutes, 1439);
-                    await apiPost('/api/control/force-charge', { minutes });
-                    setLocalForceChargeOverride(true);
-                  }
-                } catch (e: unknown) { console.warn("Slot save failed:", e); }
-                setForceChargeLoading(false);
-              }}
-              disabled={forceChargeLoading}
-              className={`w-full flex flex-col items-center gap-1 sm:gap-2 p-2 sm:p-4 rounded-xl border transition disabled:opacity-50 ${forceChargeActive
+              type="button"
+              onClick={handleForceCharge}
+              disabled={forceChargePending != null
+                || (!forceChargeActive && (forceDischargeActive || forceDischargePending != null))}
+              aria-busy={forceChargePending != null}
+              className={`w-full h-full flex flex-col items-center gap-1 sm:gap-2 p-2 sm:p-4 rounded-xl border transition disabled:opacity-50 ${forceChargeActive
                 ? 'bg-green-900/30 border-green-500/40 hover:bg-green-900/50'
                 : 'bg-bg-surface border-transparent hover:border-battery/40 hover:bg-bg-elevated'
               }`}
             >
-              <span className="text-xl sm:text-2xl">{forceChargeActive ? '⏹' : '☀️'}</span>
+              {forceChargePending != null ? (
+                <span className="w-5 h-5 border-2 border-battery border-t-transparent rounded-full animate-spin" />
+              ) : (
+                <span className="text-xl sm:text-2xl">{forceChargeActive ? '⏹' : '☀️'}</span>
+              )}
               <span className="text-text-primary text-xs sm:text-sm font-medium leading-tight text-center">
-                {forceChargeActive ? 'Stop Charge' : 'Force Charge'}
+                {forceChargePending === 'start'
+                  ? 'Starting Force Charge…'
+                  : forceChargePending === 'stop'
+                    ? 'Stopping Force Charge…'
+                    : forceChargeActive ? 'Stop Charge' : 'Force Charge'}
               </span>
             </button>
-            {forceChargeLoading && (
-              <div className="absolute inset-0 flex items-center justify-center bg-bg-surface/80 rounded-xl">
-                <div className="w-5 h-5 border-2 border-battery border-t-transparent rounded-full animate-spin" />
-              </div>
-            )}
           </div>
           <div className="relative">
             <button
-              onClick={async () => {
-                setForceDischargeLoading(true);
-                try {
-                  if (forceDischargeActive) {
-                    // Stop Discharge: restore the inverter to its pre-force-discharge
-                    // state via the dedicated endpoint. The backend snapshots the
-                    // relevant registers (HR_ENABLE_DISCHARGE, the discharge slots,
-                    // three-phase force flags) on Force Discharge start and replays
-                    // them here.
-                    await apiPost('/api/control/force-discharge/stop');
-                    setLocalForceDischargeOverride(false);
-                  } else {
-                    // Mirror the force-charge path: pass the duration slider
-                    // value so the discharge slot is `now → now+minutes`
-                    // instead of the encoder's default 00:00–23:59. Clamp
-                    // 1440 → 1439 to match the backend's 1..=1439 slot clamp.
-                    const minutes = Math.min(forceDurationMinutes, 1439);
-                    await apiPost('/api/control/force-discharge', { minutes });
-                    setLocalForceDischargeOverride(true);
-                  }
-                } catch (e: unknown) { console.warn("Slot save failed:", e); }
-                setForceDischargeLoading(false);
-              }}
-              disabled={forceDischargeLoading}
-              className={`w-full flex flex-col items-center gap-1 sm:gap-2 p-2 sm:p-4 rounded-xl border transition disabled:opacity-50 ${forceDischargeActive
+              type="button"
+              onClick={handleForceDischarge}
+              disabled={forceDischargePending != null
+                || (!forceDischargeActive && (forceChargeActive || forceChargePending != null))}
+              aria-busy={forceDischargePending != null}
+              className={`w-full h-full flex flex-col items-center gap-1 sm:gap-2 p-2 sm:p-4 rounded-xl border transition disabled:opacity-50 ${forceDischargeActive
                 ? 'bg-green-900/30 border-green-500/40 hover:bg-green-900/50'
                 : 'bg-bg-surface border-transparent hover:border-battery/40 hover:bg-bg-elevated'
               }`}
             >
-              <span className="text-xl sm:text-2xl">{forceDischargeActive ? '⏹' : '⚡'}</span>
+              {forceDischargePending != null ? (
+                <span className="w-5 h-5 border-2 border-battery border-t-transparent rounded-full animate-spin" />
+              ) : (
+                <span className="text-xl sm:text-2xl">{forceDischargeActive ? '⏹' : '⚡'}</span>
+              )}
               <span className="text-text-primary text-xs sm:text-sm font-medium leading-tight text-center">
-                {forceDischargeActive ? 'Stop Discharge' : 'Force Discharge'}
+                {forceDischargePending === 'start'
+                  ? 'Starting Force Discharge…'
+                  : forceDischargePending === 'stop'
+                    ? 'Stopping Force Discharge…'
+                    : forceDischargeActive ? 'Stop Discharge' : 'Force Discharge'}
               </span>
             </button>
-            {forceDischargeLoading && (
-              <div className="absolute inset-0 flex items-center justify-center bg-bg-surface/80 rounded-xl">
-                <div className="w-5 h-5 border-2 border-battery border-t-transparent rounded-full animate-spin" />
-              </div>
-            )}
           </div>
-          <ActionButton
-            label={automatedPauseActive
-              ? loadLimiterActive && temperatureLimiterActive
-                ? 'Disable Limiters & Unpause'
-                : 'Disable Limiter & Unpause'
-              : currentMode === 'eco_paused' ? 'Unpause Battery' : 'Pause Battery'}
-            icon={currentMode === 'eco_paused' || automatedPauseActive ? '▶️' : '⏸️'}
-            path={currentMode === 'eco_paused' || automatedPauseActive
-              ? '/api/control/unpause'
-              : '/api/control/pause'}
-            active={currentMode === 'eco_paused' || automatedPauseActive}
-            onSuccess={automatedPauseActive
-              ? () => setLoadLimiterRefreshKey((key) => key + 1)
-              : undefined}
-          />
+          <div className="relative">
+            <button
+              type="button"
+              onClick={handlePauseDischarge}
+              disabled={pauseDischargePending != null}
+              aria-busy={pauseDischargePending != null}
+              className={`w-full h-full flex flex-col items-center gap-1 sm:gap-2 p-2 sm:p-4 rounded-xl border transition disabled:opacity-70 ${pauseDischargeActive
+                ? 'bg-green-900/30 border-green-500/40 hover:bg-green-900/50'
+                : 'bg-bg-surface border-transparent hover:border-battery/40 hover:bg-bg-elevated'
+              }`}
+            >
+              {pauseDischargePending != null ? (
+                <span className="w-5 h-5 border-2 border-battery border-t-transparent rounded-full animate-spin" />
+              ) : (
+                <span className="text-xl sm:text-2xl">{pauseDischargeActive ? '▶️' : '⏸️'}</span>
+              )}
+              <span className="text-text-primary text-xs sm:text-sm font-medium leading-tight text-center">
+                {pauseDischargePending === 'pause'
+                  ? 'Pausing Discharge…'
+                  : pauseDischargePending === 'resume'
+                    ? 'Resuming Discharge…'
+                    : automatedPauseActive
+                      ? loadLimiterActive && temperatureLimiterActive
+                        ? 'Disable Limiters & Resume Discharge'
+                        : 'Disable Limiter & Resume Discharge'
+                      : currentMode === 'eco_paused' ? 'Resume Discharge' : 'Pause Discharge'}
+              </span>
+            </button>
+          </div>
           <ActionButton
             label="Sync Clock"
             icon="🕐"
             path="/api/control/sync-clock"
           />
         </div>
+        {forceChargeError && (
+          <p className="text-red-400 text-xs" role="alert">{forceChargeError}</p>
+        )}
+        {forceDischargeError && (
+          <p className="text-red-400 text-xs" role="alert">{forceDischargeError}</p>
+        )}
+        {pauseDischargeError && (
+          <p className="text-red-400 text-xs" role="alert">{pauseDischargeError}</p>
+        )}
+        {(forceChargeActive || forceChargePending != null) && (
+          <p className="text-text-secondary text-xs">
+            Stop Force Charge before starting Force Discharge.
+          </p>
+        )}
+        {(forceDischargeActive || forceDischargePending != null) && (
+          <p className="text-text-secondary text-xs">
+            Stop Force Discharge before starting Force Charge.
+          </p>
+        )}
       </section>
 
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, within, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, within, fireEvent, waitFor, act } from '@testing-library/react';
 
 vi.mock('../../src/lib/api', () => ({
   apiGet: vi.fn(async (path: string) => {
@@ -293,7 +293,36 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
     });
   });
 
-  it('shows Unpause Battery in Quick Actions when the inverter is Eco Paused', async () => {
+  it('shows progress until a Pause Discharge snapshot is confirmed', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot(),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const button = await screen.findByRole('button', { name: /Pause Discharge/ });
+    fireEvent.click(button);
+
+    expect(
+      (screen.getByRole('button', { name: 'Pausing Discharge…' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    await waitFor(() => {
+      expect(apiPost).toHaveBeenCalledWith('/api/control/pause', undefined);
+    });
+
+    act(() => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ battery_mode: 'eco_paused', battery_reserve: 100 }),
+      });
+    });
+
+    expect(
+      (await screen.findByRole('button', { name: /Resume Discharge/ }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it('shows progress until a Resume Discharge snapshot is confirmed', async () => {
     useInverterStore.setState({
       snapshot: makeSnapshot({ battery_mode: 'eco_paused', battery_reserve: 100 }),
       developerMode: false,
@@ -301,14 +330,86 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
     });
     render(<ControlPage />);
 
-    const button = await screen.findByRole('button', { name: /Unpause Battery/i });
-    expect(screen.queryByText('Pause Battery')).toBeNull();
-
+    const button = await screen.findByRole('button', { name: /Resume Discharge/ });
+    expect(screen.queryByText('Pause Discharge')).toBeNull();
     fireEvent.click(button);
 
+    expect(
+      (screen.getByRole('button', { name: 'Resuming Discharge…' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
     await waitFor(() => {
       expect(apiPost).toHaveBeenCalledWith('/api/control/unpause', undefined);
     });
+
+    // Losing the live snapshot must not be mistaken for Eco confirmation.
+    act(() => {
+      useInverterStore.setState({ snapshot: null, connectionState: 'reconnecting' });
+    });
+    expect(screen.getByText('Connection lost — reconnecting…')).toBeDefined();
+    act(() => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ battery_mode: 'eco_paused', battery_reserve: 100 }),
+        connectionState: 'connected',
+      });
+    });
+    expect(
+      (await screen.findByRole('button', { name: 'Resuming Discharge…' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+
+    act(() => {
+      useInverterStore.setState({ snapshot: makeSnapshot() });
+    });
+
+    expect(
+      (await screen.findByRole('button', { name: /Pause Discharge/ }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it('shows the API error and restores the action when pausing is rejected', async () => {
+    vi.mocked(apiPost).mockRejectedValueOnce(new Error('Dongle busy'));
+    useInverterStore.setState({
+      snapshot: makeSnapshot(),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Pause Discharge/ }));
+
+    expect((await screen.findByRole('alert')).textContent).toContain('Dongle busy');
+    expect(
+      (screen.getByRole('button', { name: /Pause Discharge/ }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it('reports when the inverter does not confirm Resume Discharge', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ battery_mode: 'eco_paused', battery_reserve: 100 }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+    const button = await screen.findByRole('button', { name: /Resume Discharge/ });
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(button);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      act(() => {
+        vi.advanceTimersByTime(30_000);
+      });
+
+      expect(screen.getByRole('alert').textContent).toContain(
+        'The inverter did not confirm that battery discharge was resumed. Please try again.',
+      );
+      expect(
+        (screen.getByRole('button', { name: /Resume Discharge/ }) as HTMLButtonElement).disabled,
+      ).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('stays hidden before the first snapshot arrives', async () => {

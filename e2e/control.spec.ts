@@ -148,6 +148,7 @@ test.describe('Dashboard', () => {
 test.describe('Quick Actions', () => {
   test('Force Charge should send correct Modbus writes', async ({
     page,
+    baseUrl,
     drainModbusWrites,
     peekModbusWrites,
   }) => {
@@ -174,10 +175,28 @@ test.describe('Quick Actions', () => {
     expect(findWrite(writes, 96)!.value).toBe(1);
     expect(findWrite(writes, 20)!.value).toBe(1);
     expect(findWrite(writes, 116)!.value).toBe(100);
+
+    const conflict = await fetch(`${baseUrl}/api/control/force-discharge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ minutes: 30 }),
+    });
+    expect(conflict.status).toBe(400);
+    expect((await conflict.json()).error).toContain(
+      'Stop Force Charge before starting Force Discharge',
+    );
+
+    const stop = await fetch(`${baseUrl}/api/control/force-charge/stop`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    expect((await stop.json()).ok).toBe(true);
+    await waitForWrites(peekModbusWrites, drainModbusWrites, 7, 20_000);
   });
 
   test('Force Discharge should send correct Modbus writes', async ({
     page,
+    baseUrl,
     drainModbusWrites,
     peekModbusWrites,
   }) => {
@@ -215,9 +234,16 @@ test.describe('Quick Actions', () => {
     expect(slotStart).toBeGreaterThan(0);
     expect(slotEnd).toBeGreaterThan(0);
     expect(slotStart).not.toBe(slotEnd);
+
+    const stop = await fetch(`${baseUrl}/api/control/force-discharge/stop`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    expect((await stop.json()).ok).toBe(true);
+    await waitForWrites(peekModbusWrites, drainModbusWrites, 8, 25_000);
   });
 
-  test('Pause Battery should send correct Modbus write', async ({
+  test('Pause Discharge should send the Eco Paused Modbus writes', async ({
     page,
     drainModbusWrites,
     peekModbusWrites,
@@ -226,7 +252,7 @@ test.describe('Quick Actions', () => {
 
     await page.goto('/');
     await page.locator('text=Control').click();
-    await page.getByRole('button', { name: /Pause Battery/ }).click();
+    await page.getByRole('button', { name: /Pause Discharge/ }).click();
 
     // PauseBattery = 3 writes: HR 27=1 (eco), HR 59=0 (disable discharge),
     // HR 110=100 (SOC reserve = paused). Charge enable and schedules are
@@ -789,7 +815,7 @@ test.describe('Quick Actions - extended', () => {
     expect(findWrite(writes, 116)!.value).toBe(100); // target SOC
   });
 
-  test('Pause Battery should write HR110=100 and enter Eco Paused', async ({
+  test('Pause Discharge should write HR110=100 and enter Eco Paused', async ({
     page,
     drainModbusWrites,
     peekModbusWrites,
@@ -798,7 +824,7 @@ test.describe('Quick Actions - extended', () => {
 
     await page.goto('/');
     await page.locator('text=Control').click();
-    await page.getByRole('button', { name: /Pause Battery/ }).click();
+    await page.getByRole('button', { name: /Pause Discharge/ }).click();
 
     // Pause = eco mode + discharge off + SOC reserve=100 = 3 writes (~5s).
     // Charge enable and schedules are deliberately left untouched.

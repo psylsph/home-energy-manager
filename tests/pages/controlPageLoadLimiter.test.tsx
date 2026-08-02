@@ -303,7 +303,7 @@ describe('<ControlPage/> — Load Discharge Limiter status (issue #158)', () => 
     if (!section) throw new Error('temperature limiter section missing');
     expect(within(section).getByText(/Paused · 62.0°C/)).toBeDefined();
     expect(within(section).getByText(/Thermal protection overrides every discharge mode/)).toBeDefined();
-    expect(screen.getByRole('button', { name: /Disable Limiter & Unpause/i })).toBeDefined();
+    expect(screen.getByRole('button', { name: /Disable Limiter & Resume Discharge/i })).toBeDefined();
   });
 
   it('saves inverter-temperature limiter thresholds and confirmations', async () => {
@@ -341,11 +341,11 @@ describe('<ControlPage/> — Load Discharge Limiter status (issue #158)', () => 
     const section = await loadLimiterSection();
     expect(within(section).getByText('Pause / Recovery Delay')).toBeDefined();
     expect(within(section).getByText(
-      /Pauses after load stays above the threshold; unpauses after it stays at or below the threshold/,
+      /Pauses discharge after load stays above the threshold; resumes discharge after it stays at or below the threshold/,
     )).toBeDefined();
   });
 
-  it('disables the limiter when its Quick Action unpauses the battery', async () => {
+  it('disables the limiter when its Quick Action resumes battery discharge', async () => {
     useInverterStore.setState({
       snapshot: makeSnapshot({
         battery_mode: 'eco_paused',
@@ -360,7 +360,7 @@ describe('<ControlPage/> — Load Discharge Limiter status (issue #158)', () => 
     await loadLimiterSection();
     vi.mocked(apiGet).mockClear();
 
-    fireEvent.click(await screen.findByRole('button', { name: /Disable Limiter & Unpause/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /Disable Limiter & Resume Discharge/i }));
 
     await waitFor(() => {
       expect(apiPost).toHaveBeenCalledWith('/api/control/unpause', undefined);

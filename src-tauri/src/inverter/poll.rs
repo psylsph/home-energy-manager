@@ -298,6 +298,10 @@ pub struct AppState {
     /// the inverter to its prior configuration when the user clicks Stop
     /// Discharge. Set on `force_discharge` start, cleared on stop.
     pub force_discharge_revert: Arc<Mutex<Option<ForceDischargeRevert>>>,
+    /// Serialises Force Charge / Force Discharge start and stop handlers so
+    /// two concurrent API requests cannot arm both actions before either has
+    /// recorded its revert state.
+    pub force_action_lock: Arc<Mutex<()>>,
     /// SQLite history database (set after startup).
     pub history: Arc<Mutex<Option<Arc<HistoryDb>>>>,
     /// Ring buffer of recent log lines for the developer console.
@@ -391,6 +395,7 @@ impl AppState {
             write_notify: Arc::new(Notify::new()),
             force_charge_revert: Arc::new(Mutex::new(None)),
             force_discharge_revert: Arc::new(Mutex::new(None)),
+            force_action_lock: Arc::new(Mutex::new(())),
             history: Arc::new(Mutex::new(None)),
             log_ring: Arc::new(crate::server::logs::LogRing::new(2000)),
             connected_clients: Arc::new(parking_lot::Mutex::new(ConnectedClients::new())),
@@ -448,6 +453,7 @@ impl AppState {
             write_notify: Arc::new(Notify::new()),
             force_charge_revert: Arc::new(Mutex::new(None)),
             force_discharge_revert: Arc::new(Mutex::new(None)),
+            force_action_lock: Arc::new(Mutex::new(())),
             history: Arc::new(Mutex::new(None)),
             log_ring,
             connected_clients: Arc::new(parking_lot::Mutex::new(ConnectedClients::new())),
@@ -2172,6 +2178,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 // the restoration writes via the live Modbus client (same
                                 // path as the explicit Stop button).
                                 {
+                                    let _force_action_guard = state.force_action_lock.lock().await;
                                     let now_ms = chrono::Local::now().timestamp_millis();
                                     let mut revert_guard = state.force_discharge_revert.lock().await;
                                     let expired = revert_guard

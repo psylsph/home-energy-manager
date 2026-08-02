@@ -140,8 +140,8 @@ Home Energy Manager connects directly to your inverter over your home network. I
 ### Control
 
 - **Charge & discharge schedules** — set time slots for when your battery charges from the grid or discharges to power your home (up to **10 slots** on supported models)
-- **Battery modes** — switch between Eco (automatic self-consumption), Timed Discharge, and Pause
-- **Force Charge / Force Discharge** — one-click buttons for instant manual control (click to start, click again to stop)
+- **Battery modes** — switch between Eco (automatic self-consumption), Timed Discharge, and Pause Discharge, which holds stored energy while still allowing solar or scheduled grid charging
+- **Force Charge / Force Discharge** — mutually exclusive manual controls with live start/stop confirmation; stop the active action before starting the opposite one
 - **SOC control** — adjust battery reserve level, charge/discharge power limits, and charge target
 - **Battery calibration** — start calibration from the app when your battery needs it (auto-detected)
 - **Load Discharge Limiter** — pause battery discharge during high-demand periods with a configurable power threshold and time window

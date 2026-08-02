@@ -494,10 +494,10 @@ impl ControlCommand {
             }
             ControlCommand::PauseBattery => {
                 // Eco Paused: standard Eco / self-consumption mode with the
-                // SOC reserve pinned to 100%, so the battery neither charges
-                // from the grid nor discharges. Charge enable (HR 96) and the
-                // user's charge/discharge schedules are deliberately left
-                // untouched, so unpausing restores the prior state. Mirrors
+                // SOC reserve pinned to 100%, so the battery does not discharge.
+                // Solar charging and any enabled scheduled grid charging remain
+                // available because charge enable (HR 96) and the user's schedules
+                // are deliberately left untouched. Mirrors
                 // the `/api/control/pause` handler, which builds the same
                 // three writes (HR 27=1, HR 59=0, HR 110=100).
                 vec![
@@ -2370,9 +2370,9 @@ mod tests {
     #[test]
     fn pause_battery_enters_eco_paused() {
         // Eco Paused: eco mode (HR 27=1), discharge off (HR 59=0), and SOC
-        // reserve pinned to 100% (HR 110) so the battery neither charges from
-        // the grid nor discharges. Charge enable (HR 96) and the user's
-        // schedules are left untouched so unpausing restores prior state.
+        // reserve pinned to 100% (HR 110) so the battery does not discharge.
+        // Charge enable (HR 96) and the user's schedules are left untouched,
+        // allowing solar or scheduled grid charging while discharge is paused.
         let writes = ControlCommand::PauseBattery.encode().unwrap();
         assert_eq!(writes.len(), 3);
 

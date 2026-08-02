@@ -50,7 +50,7 @@ pub enum BatteryMode {
     Unknown,
     /// eco=1, discharge=false, reserve!=100
     Eco,
-    /// eco=1, discharge=false, reserve==100
+    /// eco=1, discharge=false, reserve==100; discharge is held but charging remains available
     EcoPaused,
     /// eco=1, discharge=true
     TimedDemand,

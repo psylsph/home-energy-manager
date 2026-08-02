@@ -2249,11 +2249,12 @@ pub async fn set_export_limit(
     }
 }
 
-/// POST /api/control/pause — put the battery into Eco Paused.
+/// POST /api/control/pause — pause battery discharge using Eco Paused.
 ///
 /// Eco Paused is the standard Eco/self-consumption mode with discharge
-/// disabled and the SOC reserve set to 100%. Keep this deliberately small:
-/// it should not clear the user's charge/discharge schedules or other slots.
+/// disabled and the SOC reserve set to 100%. Solar and scheduled grid charging
+/// remain available. Keep this deliberately small: it should not clear the
+/// user's charge/discharge schedules or other slots.
 pub async fn pause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let device_type = latest_device_type(&state).await;
     let reserve_before_pause = state
@@ -2295,7 +2296,7 @@ pub async fn pause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, J
     ok_response("Battery paused")
 }
 
-/// POST /api/control/unpause — restore Eco mode from Eco Paused.
+/// POST /api/control/unpause — resume battery discharge in Eco mode.
 ///
 /// Eco Paused is represented as self-consumption mode with discharge disabled
 /// and SOC reserve at 100%. To unpause, keep the safe Eco/discharge-disabled
@@ -2390,10 +2391,17 @@ pub async fn unpause_battery(State(state): State<Arc<AppState>>) -> (StatusCode,
 /// On start, captures the pre-force-charge state into `AppState::force_charge_revert`
 /// so the Stop Charge endpoint can restore the inverter to its prior
 /// configuration. Mirrors GivTCP's `revert` dict in `forceCharge`.
+/// Returns HTTP 400 while a HEM-owned Force Discharge is in progress; callers
+/// must stop it first so the two restore snapshots cannot overlap.
 pub async fn force_charge(
     State(state): State<Arc<AppState>>,
     body: Option<Json<serde_json::Value>>,
 ) -> (StatusCode, Json<Value>) {
+    let _force_action_guard = state.force_action_lock.lock().await;
+    if state.force_discharge_revert.lock().await.is_some() {
+        return error_response("Stop Force Discharge before starting Force Charge");
+    }
+
     let device_type = latest_device_type(&state).await;
     let is_three_phase = device_type.uses_three_phase_schedule_slots();
     let mut writes = Vec::new();
@@ -2402,7 +2410,6 @@ pub async fn force_charge(
     // writes, so the stop endpoint can restore the inverter to this point.
     // This is the Rust equivalent of GivTCP's `revert` dict (write.py:1148).
     let revert = capture_force_charge_revert(&state, device_type).await;
-    *state.force_charge_revert.lock().await = revert;
 
     // If minutes provided, write a charge slot first (now → now+minutes).
     let minutes = body
@@ -2424,6 +2431,7 @@ pub async fn force_charge(
     match cmd.encode() {
         Ok(mut cmd_writes) => {
             writes.append(&mut cmd_writes);
+            *state.force_charge_revert.lock().await = revert;
             tracing::info!("ForceCharge encoded: {:?}", writes);
             queue_writes(&state, writes).await;
             ok_response("Force charge enabled")
@@ -2444,6 +2452,7 @@ pub async fn force_charge(
 /// is `None`) — this prevents the user from accidentally clearing a
 /// working charge schedule they didn't intend to.
 pub async fn force_charge_stop(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let _force_action_guard = state.force_action_lock.lock().await;
     // Take the revert so a concurrent force-charge re-arm can't race with
     // us: the second start will overwrite the field, but the writes we
     // queue now restore the FIRST start's captured state, which is what
@@ -2484,10 +2493,17 @@ pub async fn force_charge_stop(State(state): State<Arc<AppState>>) -> (StatusCod
 /// at `write.py:1019`). The no-body path keeps the existing behaviour
 /// of a 00:00–23:59 slot (effectively "until stopped") for backward
 /// compatibility with any callers that don't supply a duration.
+/// Returns HTTP 400 while a HEM-owned Force Charge is in progress; callers
+/// must stop it first so the two restore snapshots cannot overlap.
 pub async fn force_discharge(
     State(state): State<Arc<AppState>>,
     body: Option<Json<serde_json::Value>>,
 ) -> (StatusCode, Json<Value>) {
+    let _force_action_guard = state.force_action_lock.lock().await;
+    if state.force_charge_revert.lock().await.is_some() {
+        return error_response("Stop Force Charge before starting Force Discharge");
+    }
+
     let device_type = latest_device_type(&state).await;
     let is_three_phase = device_type.uses_three_phase_schedule_slots();
 
@@ -2521,8 +2537,6 @@ pub async fn force_discharge(
             Err(e) => return error_response(&format!("Failed to encode discharge slot: {}", e)),
         }
     }
-
-    *state.force_discharge_revert.lock().await = revert;
 
     // Then the force-discharge flags (mode, enable_charge=0,
     // enable_charge_target=0, enable_discharge=1, and — on the no-body
@@ -2578,6 +2592,7 @@ pub async fn force_discharge(
             } else {
                 writes.extend(cmd_writes);
             }
+            *state.force_discharge_revert.lock().await = revert;
             tracing::info!("ForceDischarge encoded: {:?}", writes);
             queue_writes(&state, writes).await;
             ok_response("Force discharge enabled")
@@ -2599,6 +2614,7 @@ pub async fn force_discharge(
 /// based on the latest inverter snapshot instead of returning 400 and
 /// sending no writes.
 pub async fn force_discharge_stop(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let _force_action_guard = state.force_action_lock.lock().await;
     let device_type = latest_device_type(&state).await;
     let revert = state.force_discharge_revert.lock().await.take();
 
@@ -6763,7 +6779,7 @@ mod tests {
         .await;
     }
 
-    /// Pause Battery no longer clears discharge slots, so it must not create
+    /// Pause Discharge no longer clears discharge slots, so it must not create
     /// a backup. The user's schedule should remain untouched on the inverter.
     #[tokio::test]
     async fn pause_battery_does_not_back_up_discharge_slots() {
@@ -6898,7 +6914,7 @@ mod tests {
         .await;
     }
 
-    /// Pause Battery should not echo `discharge_slots_backup`: it does not
+    /// Pause Discharge should not echo `discharge_slots_backup`: it does not
     /// clear slots anymore, so there is nothing for the frontend to stage.
     #[tokio::test]
     async fn pause_battery_response_does_not_echo_backup() {
@@ -8801,43 +8817,91 @@ mod tests {
         .await;
     }
 
-    /// Sanity check: charge and discharge reverts are independent. A
-    /// force-charge followed by a force-discharge must leave the
-    /// force-charge revert in place (or whatever its lifecycle is), not
-    /// clobber the discharge revert or vice versa.
     #[tokio::test]
-    async fn force_charge_and_force_discharge_reverts_are_independent() {
+    async fn force_discharge_is_rejected_until_force_charge_is_stopped() {
         with_isolated_config_dir_async(|| async {
             let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
             seed_charging_pre_state(&state).await;
 
-            // Start a force charge, then verify its revert is captured.
-            let _ = force_charge(State(state.clone()), Some(Json(json!({ "minutes": 30 })))).await;
-            let _ = drain_pending_writes(&state).await;
-            assert!(state.force_charge_revert.lock().await.is_some());
-            assert!(state.force_discharge_revert.lock().await.is_none());
-
-            // Now start a force discharge. The discharge revert should be
-            // populated independently. The charge revert should be untouched
-            // (we don't auto-stop the charge; the user has to do that
-            // explicitly).
-            let _ = force_discharge(State(state.clone()), None).await;
-            let _ = drain_pending_writes(&state).await;
-            assert!(state.force_discharge_revert.lock().await.is_some());
-            assert!(
-                state.force_charge_revert.lock().await.is_some(),
-                "force_discharge should not clobber the force_charge_revert"
-            );
-
-            // Stop the discharge; the charge revert should still be there.
-            let (status, _) = force_discharge_stop(State(state.clone())).await;
+            let (status, _) =
+                force_charge(State(state.clone()), Some(Json(json!({ "minutes": 30 })))).await;
             assert_eq!(status, StatusCode::OK);
             let _ = drain_pending_writes(&state).await;
-            assert!(state.force_discharge_revert.lock().await.is_none());
-            assert!(
-                state.force_charge_revert.lock().await.is_some(),
-                "discharge stop should not touch the charge revert"
+
+            let (status, body) = force_discharge(State(state.clone()), None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                body.0["error"],
+                "Stop Force Charge before starting Force Discharge"
             );
+            assert!(state.force_discharge_revert.lock().await.is_none());
+            assert!(drain_pending_writes(&state).await.is_empty());
+
+            let (status, _) = force_charge_stop(State(state.clone())).await;
+            assert_eq!(status, StatusCode::OK);
+            let _ = drain_pending_writes(&state).await;
+
+            let (status, _) = force_discharge(State(state.clone()), None).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(state.force_discharge_revert.lock().await.is_some());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_is_rejected_until_force_discharge_is_stopped() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            seed_charging_pre_state(&state).await;
+
+            let (status, _) = force_discharge(State(state.clone()), None).await;
+            assert_eq!(status, StatusCode::OK);
+            let _ = drain_pending_writes(&state).await;
+
+            let (status, body) =
+                force_charge(State(state.clone()), Some(Json(json!({ "minutes": 30 })))).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                body.0["error"],
+                "Stop Force Discharge before starting Force Charge"
+            );
+            assert!(state.force_charge_revert.lock().await.is_none());
+            assert!(drain_pending_writes(&state).await.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_opposite_force_starts_only_arm_one_action() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            seed_charging_pre_state(&state).await;
+
+            let (charge, discharge) = tokio::join!(
+                force_charge(State(state.clone()), Some(Json(json!({ "minutes": 30 })))),
+                force_discharge(State(state.clone()), None),
+            );
+            let statuses = [charge.0, discharge.0];
+            assert_eq!(
+                statuses
+                    .iter()
+                    .filter(|status| **status == StatusCode::OK)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                statuses
+                    .iter()
+                    .filter(|status| **status == StatusCode::BAD_REQUEST)
+                    .count(),
+                1
+            );
+            assert_ne!(
+                state.force_charge_revert.lock().await.is_some(),
+                state.force_discharge_revert.lock().await.is_some(),
+                "exactly one force action should own a revert"
+            );
+            assert_eq!(state.pending_writes.lock().await.len(), 1);
         })
         .await;
     }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, within } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, within, act } from '@testing-library/react';
 
 vi.mock('../../src/lib/api', () => ({
   apiGet: vi.fn(async (path: string) => {
@@ -351,6 +351,190 @@ describe('<ControlPage/> — connection-state gate', () => {
     fireEvent.keyDown(slider, { key: 'ArrowRight' });
     expect(slider.getAttribute('aria-valuenow')).toBe('65');
     expect(slider.getAttribute('aria-valuetext')).toBe('1h 5m');
+  });
+
+  it('confirms Force Charge start and stop from snapshots and disables Force Discharge', async () => {
+    vi.mocked(apiPost).mockClear();
+    window.localStorage.setItem(FORCE_DURATION_STORAGE_KEY, '30');
+    useInverterStore.setState({
+      snapshot: makeSnapshot(),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Force Charge/i }));
+    expect(
+      (screen.getByRole('button', { name: 'Starting Force Charge…' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByRole('button', { name: /Force Discharge/i }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    await vi.waitFor(() => {
+      expect(apiPost).toHaveBeenCalledWith('/api/control/force-charge', { minutes: 30 });
+    });
+
+    act(() => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({
+          enable_charge: true,
+          enable_discharge: true,
+          charge_slots: [
+            { enabled: true, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100 },
+            { enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100 },
+          ],
+          discharge_slots: [
+            { enabled: true, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 4 },
+            { enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 4 },
+          ],
+        }),
+      });
+    });
+
+    const stop = await screen.findByRole('button', { name: /Stop Charge/i });
+    expect((stop as HTMLButtonElement).disabled).toBe(false);
+    expect(
+      (screen.getByRole('button', { name: /Force Discharge/i }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(screen.getByText('Stop Force Charge before starting Force Discharge.')).toBeDefined();
+
+    fireEvent.click(stop);
+    expect(
+      (screen.getByRole('button', { name: 'Stopping Force Charge…' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    await vi.waitFor(() => {
+      expect(apiPost).toHaveBeenCalledWith('/api/control/force-charge/stop');
+    });
+
+    act(() => {
+      useInverterStore.setState({ snapshot: makeSnapshot() });
+    });
+    expect(
+      (await screen.findByRole('button', { name: /Force Charge/i }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expect(
+      (screen.getByRole('button', { name: /Force Discharge/i }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it('confirms Force Discharge start and stop from snapshots and disables Force Charge', async () => {
+    vi.mocked(apiPost).mockClear();
+    window.localStorage.setItem(FORCE_DURATION_STORAGE_KEY, '30');
+    useInverterStore.setState({
+      snapshot: makeSnapshot(),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Force Discharge/i }));
+    expect(
+      (screen.getByRole('button', { name: 'Starting Force Discharge…' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByRole('button', { name: /Force Charge/i }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    await vi.waitFor(() => {
+      expect(apiPost).toHaveBeenCalledWith('/api/control/force-discharge', { minutes: 30 });
+    });
+
+    act(() => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({
+          battery_power_mode: 0,
+          enable_charge: true,
+          enable_discharge: true,
+          charge_slots: [
+            { enabled: true, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100 },
+            { enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100 },
+          ],
+          discharge_slots: [
+            { enabled: true, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 4 },
+            { enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 4 },
+          ],
+        }),
+      });
+    });
+
+    const stop = await screen.findByRole('button', { name: /Stop Discharge/i });
+    expect((stop as HTMLButtonElement).disabled).toBe(false);
+    expect(
+      (screen.getByRole('button', { name: /Force Charge/i }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(screen.getByText('Stop Force Discharge before starting Force Charge.')).toBeDefined();
+
+    fireEvent.click(stop);
+    expect(
+      (screen.getByRole('button', { name: 'Stopping Force Discharge…' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    await vi.waitFor(() => {
+      expect(apiPost).toHaveBeenCalledWith('/api/control/force-discharge/stop');
+    });
+
+    act(() => {
+      useInverterStore.setState({ snapshot: makeSnapshot() });
+    });
+    expect(
+      (await screen.findByRole('button', { name: /Force Discharge/i }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expect(
+      (screen.getByRole('button', { name: /Force Charge/i }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it('restores Force Discharge after an API error', async () => {
+    vi.mocked(apiPost).mockClear();
+    vi.mocked(apiPost).mockRejectedValueOnce(new Error('Dongle busy'));
+    useInverterStore.setState({
+      snapshot: makeSnapshot(),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Force Discharge/i }));
+
+    expect((await screen.findByRole('alert')).textContent).toContain('Dongle busy');
+    expect(
+      (screen.getByRole('button', { name: /Force Discharge/i }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expect(
+      (screen.getByRole('button', { name: /Force Charge/i }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it('reports when Force Charge is not confirmed by the inverter', async () => {
+    vi.mocked(apiPost).mockClear();
+    useInverterStore.setState({
+      snapshot: makeSnapshot(),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+    const button = await screen.findByRole('button', { name: /Force Charge/i });
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(button);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      act(() => {
+        vi.advanceTimersByTime(30_000);
+      });
+
+      expect(screen.getByRole('alert').textContent).toContain(
+        'The inverter did not confirm that Force Charge started. Please try again.',
+      );
+      expect(
+        (screen.getByRole('button', { name: /Force Charge/i }) as HTMLButtonElement).disabled,
+      ).toBe(false);
+      expect(
+        (screen.getByRole('button', { name: /Force Discharge/i }) as HTMLButtonElement).disabled,
+      ).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('uses a logarithmic Minimum SOC slider with one-percent keyboard steps', async () => {

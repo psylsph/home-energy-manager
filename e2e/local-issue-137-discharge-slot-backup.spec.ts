@@ -253,10 +253,10 @@ test.describe('Issue #137 — discharge slot backup & restore', () => {
     }
   });
 
-  test('pause battery response carries the same backup contract as eco', async ({
+  test('pause discharge response carries the same backup contract as eco', async ({
     baseUrl,
   }) => {
-    // Configure a slot, then click Pause Battery (the equivalent of
+    // Configure a slot, then use Pause Discharge (the equivalent of
     // /api/control/pause). Pause must echo the captured backup in its
     // response so the UI can surface it as pending edits after a
     // Timed→Pause round-trip.
