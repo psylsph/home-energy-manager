@@ -239,6 +239,23 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
     });
   });
 
+  it('uses the shared cyan accent for the selected battery mechanism', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ battery_power_mode: 1 }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const section = await batteryModeSection();
+    const ecoButton = within(section).getByText('Eco').closest('button');
+    expect(ecoButton).not.toBeNull();
+    expect(ecoButton!.className).toContain('bg-accent/20');
+    expect(ecoButton!.className).toContain('border-accent');
+    expect(ecoButton!.className).toContain('text-accent');
+    expect(ecoButton!.className).not.toContain('battery');
+  });
+
   describe('shown on devices with the HR 300-359 block', () => {
     it.each([
       ['8001', 'AIO 6kW'],

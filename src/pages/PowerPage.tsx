@@ -989,7 +989,7 @@ export default function PowerPage() {
                 onClick={() => handleRangeChange(r.key)}
                 className={`shrink-0 px-3 py-1.5 rounded-lg text-xs font-sans font-medium transition-colors ${
                   range === r.key
-                    ? 'bg-flow-active text-bg-base'
+                    ? 'bg-accent text-on-accent'
                     : 'bg-bg-elevated text-text-secondary hover:text-text-primary'
                 }`}
               >
@@ -1072,8 +1072,8 @@ export default function PowerPage() {
       </div>
 
       {exportToast && (
-        <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 bg-bg-surface border border-battery/30 rounded-xl px-4 py-2.5 shadow-lg text-sm text-text-primary font-sans flex items-center gap-2 animate-in fade-in slide-in-from-bottom-2 duration-200">
-          <svg className="w-4 h-4 text-battery shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 bg-bg-surface border border-accent/30 rounded-xl px-4 py-2.5 shadow-lg text-sm text-text-primary font-sans flex items-center gap-2 animate-in fade-in slide-in-from-bottom-2 duration-200">
+          <svg className="w-4 h-4 text-accent shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
           {exportToast}
@@ -1088,7 +1088,7 @@ export default function PowerPage() {
 
         {loading ? (
           <div className="flex flex-col items-center justify-center h-[320px] gap-4">
-            <div className="w-8 h-8 border-4 border-flow-active border-t-transparent rounded-full animate-spin" />
+            <div className="w-8 h-8 border-4 border-accent border-t-transparent rounded-full animate-spin" />
             <p className="text-text-secondary text-sm font-sans">Loading power history…</p>
           </div>
         ) : error ? (

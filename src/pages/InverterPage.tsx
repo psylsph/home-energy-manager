@@ -102,7 +102,7 @@ export default function InverterPage() {
           if (active.length === 0) {
             return (
               <div className="bg-bg-elevated rounded-lg px-3 py-2">
-                <span className="text-battery text-xs font-medium">✓ No faults</span>
+                <span className="text-green-400 text-xs font-medium">✓ No faults</span>
               </div>
             );
           }
@@ -121,7 +121,7 @@ export default function InverterPage() {
         <section className="bg-bg-surface rounded-2xl p-5">
           <div className="flex items-center gap-3 mb-4">
             <h2 className="text-text-primary font-semibold text-lg">Gateway</h2>
-            <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-flow-active/20 text-flow-active">
+            <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-accent/20 text-accent">
               {s.gateway_is_v2 ? 'V2' : 'V1'}
             </span>
           </div>
@@ -139,7 +139,7 @@ export default function InverterPage() {
             <span className="text-text-secondary">AIOs Configured</span>
             <span className="text-text-primary font-mono text-right">{s.parallel_aio_count ?? '—'}</span>
             <span className="text-text-secondary">AIOs Online</span>
-            <span className={`font-mono text-right ${(s.parallel_aio_online ?? 0) === (s.parallel_aio_count ?? 0) && (s.parallel_aio_online ?? 0) > 0 ? 'text-battery' : 'text-warning'}`}>
+            <span className={`font-mono text-right ${(s.parallel_aio_online ?? 0) === (s.parallel_aio_count ?? 0) && (s.parallel_aio_online ?? 0) > 0 ? 'text-green-400' : 'text-warning'}`}>
               {s.parallel_aio_online ?? '—'}
             </span>
           </div>
@@ -192,7 +192,7 @@ export default function InverterPage() {
           )}
           {s.gateway_fault_codes && s.gateway_fault_codes.length === 0 && (
             <div className="mt-4 bg-bg-elevated rounded-lg px-3 py-2">
-              <span className="text-battery text-xs font-medium">✓ No faults</span>
+              <span className="text-green-400 text-xs font-medium">✓ No faults</span>
             </div>
           )}
 
@@ -303,11 +303,11 @@ export default function InverterPage() {
           <span className="text-text-secondary">Discharge Rate</span>
           <span className="text-text-primary font-mono text-right">{formatPercent(s.discharge_rate)}</span>
           <span className="text-text-secondary">Enable Charge</span>
-          <span className={`font-mono text-right ${s.enable_charge ? 'text-battery' : 'text-text-secondary'}`}>{s.enable_charge ? 'Yes' : 'No'}</span>
+          <span className={`font-mono text-right ${s.enable_charge ? 'text-accent' : 'text-text-secondary'}`}>{s.enable_charge ? 'Yes' : 'No'}</span>
           <span className="text-text-secondary">Enable Charge Target</span>
-          <span className={`font-mono text-right ${s.enable_charge_target ? 'text-battery' : 'text-text-secondary'}`}>{s.enable_charge_target ? 'Yes' : 'No'}</span>
+          <span className={`font-mono text-right ${s.enable_charge_target ? 'text-accent' : 'text-text-secondary'}`}>{s.enable_charge_target ? 'Yes' : 'No'}</span>
           <span className="text-text-secondary">Enable Discharge</span>
-          <span className={`font-mono text-right ${s.enable_discharge ? 'text-battery' : 'text-text-secondary'}`}>{s.enable_discharge ? 'Yes' : 'No'}</span>
+          <span className={`font-mono text-right ${s.enable_discharge ? 'text-accent' : 'text-text-secondary'}`}>{s.enable_discharge ? 'Yes' : 'No'}</span>
           <span className="text-text-secondary">Modules</span>
           <span className="text-text-primary font-mono text-right">{s.battery_modules.length > 0 ? s.battery_modules.length : '—'}</span>
           <span className="text-text-secondary">Charge Today</span>
@@ -335,11 +335,11 @@ export default function InverterPage() {
           <span className="text-text-secondary">Auto Winter</span>
           <span className={`font-mono text-right ${s.auto_winter_active ? 'text-blue-400' : 'text-text-secondary'}`}>{s.auto_winter_active ? 'Active' : 'Inactive'}</span>
           <span className="text-text-secondary">Cosy Mode</span>
-          <span className={`font-mono text-right ${s.cosy_active ? 'text-battery' : s.cosy_enabled ? 'text-amber-400' : 'text-text-secondary'}`}>
+          <span className={`font-mono text-right ${s.cosy_active ? 'text-accent' : s.cosy_enabled ? 'text-amber-400' : 'text-text-secondary'}`}>
             {s.cosy_active ? 'Active' : s.cosy_enabled ? 'Enabled' : 'Disabled'}
           </span>
           <span className="text-text-secondary">Agile Mode</span>
-          <span className={`font-mono text-right ${s.agile_active ? 'text-battery' : s.agile_enabled ? 'text-amber-400' : 'text-text-secondary'}`}>
+          <span className={`font-mono text-right ${s.agile_active ? 'text-accent' : s.agile_enabled ? 'text-amber-400' : 'text-text-secondary'}`}>
             {s.agile_active
               ? (s.agile_state === 'charging'
                   ? 'Charging'

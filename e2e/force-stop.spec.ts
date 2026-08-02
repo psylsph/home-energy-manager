@@ -224,6 +224,10 @@ test.describe('Force Charge → Stop (mock Modbus)', () => {
     expect(findWrite(writes, 96)!.value).toBe(1);
     expect(findWrite(writes, 20)!.value).toBe(1);
     expect(findWrite(writes, 116)!.value).toBe(100);
+
+    const stop = await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' });
+    expect((await stop.json()).ok).toBe(true);
+    await waitForWrites(peekModbusWrites, drainModbusWrites, 7, 30_000);
   });
 });
 
@@ -252,11 +256,12 @@ test.describe('Force Discharge → Stop (mock Modbus)', () => {
     test.setTimeout(60_000);
     await clearWrites(drainModbusWrites);
 
-    await fetch(`${baseUrl}/api/control/force-discharge`, {
+    const start = await fetch(`${baseUrl}/api/control/force-discharge`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ minutes: 60 }),
     });
+    expect((await start.json()).ok).toBe(true);
 
     // 4 slot writes (HR 56, 57, 44, 45) + 4 force flags = 8 writes total.
     const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 8, 30_000);

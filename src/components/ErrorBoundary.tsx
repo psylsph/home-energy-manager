@@ -89,7 +89,7 @@ export default class ErrorBoundary extends Component<Props, State> {
           </p>
           <button
             onClick={this.handleRetry}
-            className="mt-1 px-4 py-2 rounded-lg bg-flow-active text-bg-base text-sm font-sans font-medium hover:opacity-90 transition-opacity"
+            className="mt-1 px-4 py-2 rounded-lg bg-accent text-on-accent text-sm font-sans font-medium hover:opacity-90 transition-opacity"
           >
             Retry now
           </button>

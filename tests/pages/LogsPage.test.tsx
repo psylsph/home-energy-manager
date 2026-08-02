@@ -172,7 +172,8 @@ describe('<LogsPage/>', () => {
     await screen.findByText(/connection refused/);
     // WARN is the active level returned by the mock.
     const warnBtn = screen.getByRole('button', { name: 'WARN' });
-    expect(warnBtn.className).toContain('flow-active');
+    expect(warnBtn.className).toContain('bg-accent');
+    expect(warnBtn.className).toContain('text-on-accent');
   });
 
   it('polls for new logs on the interval', async () => {

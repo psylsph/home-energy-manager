@@ -64,6 +64,10 @@ describe('<BatteryModeSummary/>', () => {
     const row = container.querySelector('[data-testid="battery-mode-eco"]');
     expect(row?.getAttribute('data-state')).toBe('active');
     expect(row?.textContent).toContain('on');
+    expect(row?.querySelector('.bg-accent')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="battery-mode-desc-eco"]')?.className,
+    ).toContain('text-accent');
   });
 
   it('renders an active Timed Export row with the exporting-now suffix', () => {

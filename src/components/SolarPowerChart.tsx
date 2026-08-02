@@ -161,7 +161,7 @@ export default function SolarPowerChart() {
       </h3>
       {pv1 === null ? (
         <div className="flex items-center justify-center h-[180px]">
-          <div className="w-8 h-8 border-4 border-flow-active border-t-transparent rounded-full animate-spin" />
+          <div className="w-8 h-8 border-4 border-accent border-t-transparent rounded-full animate-spin" />
         </div>
       ) : error ? (
         <div className="flex items-center justify-center h-[180px] text-red-400 text-sm font-sans">

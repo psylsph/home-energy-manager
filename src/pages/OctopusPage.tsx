@@ -352,7 +352,7 @@ export default function OctopusPage() {
               type="button"
               onClick={syncNow}
               disabled={status?.data.syncing}
-              className="rounded-lg bg-flow-active px-3 py-2 text-sm font-medium text-bg-base disabled:opacity-50"
+              className="rounded-lg bg-accent px-3 py-2 text-sm font-medium text-on-accent disabled:opacity-50"
             >
               {status?.data.syncing ? 'Syncing…' : 'Sync now'}
             </button>
@@ -388,7 +388,7 @@ export default function OctopusPage() {
             onClick={() => setRange(item.key)}
             className={`shrink-0 rounded-lg px-3 py-1.5 text-xs font-medium ${
               range === item.key
-                ? 'bg-flow-active text-bg-base'
+                ? 'bg-accent text-on-accent'
                 : 'bg-bg-elevated text-text-secondary hover:text-text-primary'
             }`}
           >

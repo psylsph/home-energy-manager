@@ -202,7 +202,8 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       // 30s button is the active one.
       await screen.findByText('Refresh Interval');
       const thirtyBtn = screen.getByText('30s');
-      expect(thirtyBtn.className).toContain('flow-active');
+      expect(thirtyBtn.className).toContain('bg-accent');
+      expect(thirtyBtn.className).toContain('text-on-accent');
     });
 
     it('hydrates the standing charge when set', async () => {

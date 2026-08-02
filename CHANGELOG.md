@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ## [0.70.2] - 2026-08-02
 
+### Changed
+
+- **Buttons and selected controls now use one consistent cyan highlight.** Control, Settings, History, and the other app pages share the same accessible accent in dark and light themes, while colours that identify battery and energy data remain distinct.
+
 ### Fixed
 
 - **Battery quick actions now show progress until the inverter confirms each change.** Pause Discharge, Resume Discharge, Force Charge, Force Discharge and both force-stop actions remain visibly in progress while their Modbus writes are being applied, with a clear error if confirmation never arrives. The renamed Pause Discharge action makes clear that Eco Paused holds stored energy while still allowing solar or scheduled grid charging. (issue #245)

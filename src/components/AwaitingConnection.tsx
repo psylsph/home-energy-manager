@@ -35,7 +35,7 @@ export default function AwaitingConnection({
 
   return (
     <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
-      <div className="w-10 h-10 border-4 border-flow-active border-t-transparent rounded-full animate-spin" />
+      <div className="w-10 h-10 border-4 border-accent border-t-transparent rounded-full animate-spin" />
       <p className="text-text-secondary text-sm font-sans">
         {awaitingConnectionMessage(connectionState)}
       </p>
@@ -70,7 +70,7 @@ export default function AwaitingConnection({
             href={FAQ_URL}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-flow-active hover:underline"
+            className="text-accent hover:underline"
           >
             FAQ
           </a>{' '}

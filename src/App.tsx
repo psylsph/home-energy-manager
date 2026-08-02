@@ -31,7 +31,7 @@ function ThemeToggle() {
     <button
       type="button"
       onClick={() => setThemeMode(isLight ? 'dark' : 'light')}
-      className="flex items-center gap-2 rounded-full bg-bg-elevated px-2 py-1 text-xs text-text-secondary transition hover:text-text-primary focus:outline-none focus:ring-2 focus:ring-flow-active/60"
+      className="flex items-center gap-2 rounded-full bg-bg-elevated px-2 py-1 text-xs text-text-secondary transition hover:text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/60"
       aria-label={`Switch to ${isLight ? 'dark' : 'light'} mode`}
       title={`Switch to ${isLight ? 'dark' : 'light'} mode`}
     >
@@ -146,7 +146,7 @@ export function ConnectionIndicator() {
           type="button"
           onClick={reconnect}
           disabled={reconnecting}
-          className="shrink-0 rounded-full bg-bg-elevated px-2 py-1 text-xs transition hover:text-text-primary focus:outline-none focus:ring-2 focus:ring-flow-active/60 disabled:opacity-50"
+          className="shrink-0 rounded-full bg-bg-elevated px-2 py-1 text-xs transition hover:text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/60 disabled:opacity-50"
           title="Force a fresh connection to the inverter now"
         >
           {reconnecting ? '…' : 'Reconnect'}
@@ -469,7 +469,7 @@ function Layout() {
                  text-[10px] sm:text-xs font-medium transition-colors
                  ${
                    isActive
-                    ? navAccent ? 'text-[var(--nav-accent)]' : 'text-flow-active'
+                    ? navAccent ? 'text-[var(--nav-accent)]' : 'text-accent'
                     : 'text-text-secondary hover:text-text-primary'
                 }`
               }
@@ -491,7 +491,7 @@ function Layout() {
                text-[10px] sm:text-xs font-medium transition-colors
                ${
                 isActive
-                  ? 'text-flow-active'
+                  ? 'text-accent'
                   : 'text-text-secondary hover:text-text-primary'
               }`
             }

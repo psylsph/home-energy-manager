@@ -230,8 +230,8 @@ describe('<SettingsPage/> — Minimise to Tray toggles (issue #217)', () => {
     const minimiseToggle = toggleFor('Minimise to Tray');
     const startToggle = toggleFor('Start Hidden in Tray');
     await waitFor(() => {
-      expect(minimiseToggle.querySelector('div.rounded-full')?.className).toContain('bg-flow-active');
-      expect(startToggle.querySelector('div.rounded-full')?.className).toContain('bg-flow-active');
+      expect(minimiseToggle.querySelector('div.rounded-full')?.className).toContain('bg-accent');
+      expect(startToggle.querySelector('div.rounded-full')?.className).toContain('bg-accent');
     });
   });
 });

@@ -68,7 +68,7 @@ function ActionButton({
         disabled={loading}
         className={`w-full flex flex-col items-center gap-1 sm:gap-2 p-2 sm:p-4 rounded-xl border transition disabled:opacity-50 ${active
           ? 'bg-green-900/30 border-green-500/40 hover:bg-green-900/50'
-          : 'bg-bg-surface border-transparent hover:border-battery/40 hover:bg-bg-elevated'
+          : 'bg-bg-surface border-transparent hover:border-accent/40 hover:bg-bg-elevated'
         }`}
       >
         <span className="text-xl sm:text-2xl">{icon}</span>
@@ -76,7 +76,7 @@ function ActionButton({
       </button>
       {loading && (
         <div className="absolute inset-0 flex items-center justify-center bg-bg-surface/80 rounded-xl">
-          <div className="w-5 h-5 border-2 border-battery border-t-transparent rounded-full animate-spin" />
+          <div className="w-5 h-5 border-2 border-accent border-t-transparent rounded-full animate-spin" />
         </div>
       )}
       {success && (
@@ -107,7 +107,7 @@ function TimePicker({
       <select
         value={hour}
         onChange={(e) => onChange(Number(e.target.value), minute)}
-        className="bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-2 py-1.5 border border-transparent focus:border-battery outline-none"
+        className="bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-2 py-1.5 border border-transparent focus:border-accent outline-none"
       >
         {Array.from({ length: 24 }, (_, i) => (
           <option key={i} value={i}>
@@ -119,7 +119,7 @@ function TimePicker({
       <select
         value={minute}
         onChange={(e) => onChange(hour, Number(e.target.value))}
-        className="bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-2 py-1.5 border border-transparent focus:border-battery outline-none"
+        className="bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-2 py-1.5 border border-transparent focus:border-accent outline-none"
       >
         {Array.from({ length: 60 }, (_, i) => i).map((m) => (
           <option key={m} value={m}>
@@ -228,7 +228,7 @@ function ScheduleSlotEditor({
         // body, distinct from the existing "configured but not armed"
         // opacity-60 rendering, so the user can tell why their slot
         // looks dim while an Agile sub-mode is active.
-        <div className="text-[11px] text-text-secondary/80 italic border-l-2 border-battery/40 pl-2">
+        <div className="text-[11px] text-text-secondary/80 italic border-l-2 border-accent/40 pl-2">
           Controlled by manual timer — not changed by Agile.
         </div>
       )}
@@ -238,7 +238,7 @@ function ScheduleSlotEditor({
           onClick={() => setLocal((l) => ({ ...l, enabled: !l.enabled }))}
           aria-pressed={local.enabled}
           aria-label={`Slot ${slotIndex + 1} ${local.enabled ? 'enabled' : 'disabled'}`}
-          className={`relative w-9 h-4 rounded-full transition ${local.enabled ? 'bg-battery' : 'bg-bg-elevated'
+          className={`relative w-9 h-4 rounded-full transition ${local.enabled ? 'bg-accent' : 'bg-bg-elevated'
             }`}
         >
           <span
@@ -292,7 +292,7 @@ function ScheduleSlotEditor({
       <button
         onClick={handleSave}
         disabled={saving}
-        className="w-full py-2 bg-battery/20 text-battery rounded-lg text-sm font-medium hover:bg-battery/30 transition disabled:opacity-50"
+        className="w-full py-2 bg-accent/20 text-accent rounded-lg text-sm font-medium hover:bg-accent/30 transition disabled:opacity-50"
       >
         {saving ? 'Saving...' : feedback === 'saved' ? '✓ Saved' : feedback === 'error' ? '✗ Error' : 'Save'}
       </button>
@@ -369,7 +369,7 @@ function AutoWinterSection() {
           </div>
           <button
             onClick={() => setEnabled(!enabled)}
-            className={`relative w-10 h-5 rounded-full transition ${enabled ? 'bg-battery' : 'bg-bg-elevated'}`}
+            className={`relative w-10 h-5 rounded-full transition ${enabled ? 'bg-accent' : 'bg-bg-elevated'}`}
           >
             <span
               className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition ${enabled ? 'left-5.5' : 'left-0.5'}`}
@@ -476,7 +476,7 @@ function AutoWinterSection() {
         <button
           onClick={handleSave}
           disabled={saving}
-          className="w-full py-2 bg-battery/20 text-battery rounded-lg text-sm font-medium hover:bg-battery/30 transition disabled:opacity-50"
+          className="w-full py-2 bg-accent/20 text-accent rounded-lg text-sm font-medium hover:bg-accent/30 transition disabled:opacity-50"
         >
           {saving ? 'Saving...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save'}
         </button>
@@ -702,7 +702,7 @@ function AdaptiveChargeSection() {
         type="button"
         onClick={save}
         disabled={saving}
-        className="w-full py-2 bg-battery/20 text-battery rounded-lg text-sm font-medium hover:bg-battery/30 disabled:opacity-50"
+        className="w-full py-2 bg-accent/20 text-accent rounded-lg text-sm font-medium hover:bg-accent/30 disabled:opacity-50"
       >
         {saving ? 'Saving...' : feedback === 'saved' ? '✓ Saved' : feedback === 'error' ? 'Check settings' : 'Save Adaptive Charge'}
       </button>
@@ -786,7 +786,7 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
           value={mode}
           onChange={(e) => handleModeChange(e.target.value as ChargeMode)}
           disabled={saving || !loaded}
-          className="bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-3 py-1.5 border border-transparent focus:border-battery outline-none cursor-pointer w-full sm:w-auto"
+          className="bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-3 py-1.5 border border-transparent focus:border-accent outline-none cursor-pointer w-full sm:w-auto"
         >
           <option value="standard">Standard</option>
           <option value="cosy">Cosy</option>
@@ -810,7 +810,7 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
               setTimeout(() => setSaveFeedback(null), 2000);
             }}
             disabled={saving || !loaded}
-            className="text-sm font-medium px-4 py-1.5 rounded-lg bg-battery/20 text-battery hover:bg-battery/30 transition disabled:opacity-50"
+            className="text-sm font-medium px-4 py-1.5 rounded-lg bg-accent/20 text-accent hover:bg-accent/30 transition disabled:opacity-50"
           >
             {saveFeedback === 'saved' ? '✓' : saveFeedback === 'error' ? '!' : saving ? '...' : 'Apply'}
           </button>
@@ -883,7 +883,7 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
                     next[i] = { ...next[i], enabled: !next[i].enabled };
                     setSlots(next);
                   }}
-                  className={`relative w-9 h-4 rounded-full transition ${slot.enabled ? 'bg-battery' : 'bg-bg-elevated'}`}
+                  className={`relative w-9 h-4 rounded-full transition ${slot.enabled ? 'bg-accent' : 'bg-bg-elevated'}`}
                 >
                   <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition ${slot.enabled ? 'left-5' : 'left-0.5'}`} />
                 </button>
@@ -941,7 +941,7 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
           <button
             onClick={saveSlots}
             disabled={saving}
-            className="w-full py-2 bg-battery/20 text-battery rounded-lg text-sm font-medium hover:bg-battery/30 transition disabled:opacity-50"
+            className="w-full py-2 bg-accent/20 text-accent rounded-lg text-sm font-medium hover:bg-accent/30 transition disabled:opacity-50"
           >
             {saving ? 'Saving...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save slots'}
           </button>
@@ -1337,7 +1337,7 @@ function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_o
         <div className="flex items-center justify-between">
           <span className="text-text-secondary text-sm">Postcode</span>
           {postcodeLookup === 'found' && (
-            <span className="text-xs text-battery">Region set to {region}</span>
+            <span className="text-xs text-green-400">Region set to {region}</span>
           )}
           {postcodeLookup === 'loading' && (
             <span className="text-xs text-text-secondary flex items-center gap-1">
@@ -1358,7 +1358,7 @@ function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_o
             placeholder="e.g. SW1A 1AA"
             value={postcode}
             onChange={(e) => handlePostcodeChange(e.target.value)}
-            className="flex-1 bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-3 py-2 border border-transparent focus:border-battery outline-none"
+            className="flex-1 bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-3 py-2 border border-transparent focus:border-accent outline-none"
           />
         </div>
         <p className="text-text-secondary text-xs">
@@ -1375,7 +1375,7 @@ function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_o
         <select
           value={region}
           onChange={(e) => setRegion(e.target.value)}
-          className="w-full bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-3 py-2 border border-transparent focus:border-battery outline-none cursor-pointer"
+          className="w-full bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-3 py-2 border border-transparent focus:border-accent outline-none cursor-pointer"
         >
           {regions.map((r) => (
             <option key={r.code} value={r.code}>{r.label}</option>
@@ -1529,7 +1529,7 @@ function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_o
       <button
         onClick={saveConfig}
         disabled={saving}
-        className="w-full py-2 bg-battery/20 text-battery rounded-lg text-sm font-medium hover:bg-battery/30 transition disabled:opacity-50"
+        className="w-full py-2 bg-accent/20 text-accent rounded-lg text-sm font-medium hover:bg-accent/30 transition disabled:opacity-50"
       >
         {saving ? 'Saving...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save'}
       </button>
@@ -1773,7 +1773,7 @@ function LoadLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) {
           </div>
           <button
             onClick={() => setEnabled(!enabled)}
-            className={`relative w-10 h-5 rounded-full transition ${enabled ? 'bg-battery' : 'bg-bg-elevated'}`}
+            className={`relative w-10 h-5 rounded-full transition ${enabled ? 'bg-accent' : 'bg-bg-elevated'}`}
           >
             <span
               className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition ${enabled ? 'left-5.5' : 'left-0.5'}`}
@@ -1787,7 +1787,7 @@ function LoadLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) {
             {snapshot != null && (
               <div className="flex items-center justify-between text-xs">
                 <span className="text-text-secondary">State</span>
-                <span className={`font-mono font-medium ${loadLimiterActive ? 'text-amber-400' : 'text-battery'}`}>
+                <span className={`font-mono font-medium ${loadLimiterActive ? 'text-amber-400' : 'text-accent'}`}>
                   {stateLabel}
                 </span>
               </div>
@@ -1884,7 +1884,7 @@ function LoadLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) {
         <button
           onClick={handleSave}
           disabled={saving}
-          className="w-full py-2 bg-battery/20 text-battery rounded-lg text-sm font-medium hover:bg-battery/30 transition disabled:opacity-50"
+          className="w-full py-2 bg-accent/20 text-accent rounded-lg text-sm font-medium hover:bg-accent/30 transition disabled:opacity-50"
         >
           {saving ? 'Saving...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save'}
         </button>
@@ -1968,7 +1968,7 @@ function TemperatureLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) 
             aria-label="Enable inverter temperature limiter"
             aria-pressed={enabled}
             onClick={() => setEnabled(!enabled)}
-            className={`relative w-10 h-5 rounded-full transition ${enabled ? 'bg-battery' : 'bg-bg-elevated'}`}
+            className={`relative w-10 h-5 rounded-full transition ${enabled ? 'bg-accent' : 'bg-bg-elevated'}`}
           >
             <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition ${enabled ? 'left-5.5' : 'left-0.5'}`} />
           </button>
@@ -1979,7 +1979,7 @@ function TemperatureLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) 
             {temperature != null && Number.isFinite(temperature) && (
               <div className="flex items-center justify-between text-xs">
                 <span className="text-text-secondary">State</span>
-                <span className={`font-mono font-medium ${active ? 'text-amber-400' : 'text-battery'}`}>
+                <span className={`font-mono font-medium ${active ? 'text-amber-400' : 'text-accent'}`}>
                   {stateLabel} · {temperature.toFixed(1)}°C
                 </span>
               </div>
@@ -2056,7 +2056,7 @@ function TemperatureLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) 
           type="button"
           onClick={handleSave}
           disabled={saving || recoveryThreshold >= highThreshold}
-          className="w-full py-2 bg-battery/20 text-battery rounded-lg text-sm font-medium hover:bg-battery/30 transition disabled:opacity-50"
+          className="w-full py-2 bg-accent/20 text-accent rounded-lg text-sm font-medium hover:bg-accent/30 transition disabled:opacity-50"
         >
           {saving ? 'Saving...' : feedback === 'saved' ? '✓ Saved' : feedback === 'error' ? '✗ Error' : 'Save'}
         </button>
@@ -2720,11 +2720,11 @@ export default function ControlPage() {
               aria-busy={forceChargePending != null}
               className={`w-full h-full flex flex-col items-center gap-1 sm:gap-2 p-2 sm:p-4 rounded-xl border transition disabled:opacity-50 ${forceChargeActive
                 ? 'bg-green-900/30 border-green-500/40 hover:bg-green-900/50'
-                : 'bg-bg-surface border-transparent hover:border-battery/40 hover:bg-bg-elevated'
+                : 'bg-bg-surface border-transparent hover:border-accent/40 hover:bg-bg-elevated'
               }`}
             >
               {forceChargePending != null ? (
-                <span className="w-5 h-5 border-2 border-battery border-t-transparent rounded-full animate-spin" />
+                <span className="w-5 h-5 border-2 border-accent border-t-transparent rounded-full animate-spin" />
               ) : (
                 <span className="text-xl sm:text-2xl">{forceChargeActive ? '⏹' : '☀️'}</span>
               )}
@@ -2746,11 +2746,11 @@ export default function ControlPage() {
               aria-busy={forceDischargePending != null}
               className={`w-full h-full flex flex-col items-center gap-1 sm:gap-2 p-2 sm:p-4 rounded-xl border transition disabled:opacity-50 ${forceDischargeActive
                 ? 'bg-green-900/30 border-green-500/40 hover:bg-green-900/50'
-                : 'bg-bg-surface border-transparent hover:border-battery/40 hover:bg-bg-elevated'
+                : 'bg-bg-surface border-transparent hover:border-accent/40 hover:bg-bg-elevated'
               }`}
             >
               {forceDischargePending != null ? (
-                <span className="w-5 h-5 border-2 border-battery border-t-transparent rounded-full animate-spin" />
+                <span className="w-5 h-5 border-2 border-accent border-t-transparent rounded-full animate-spin" />
               ) : (
                 <span className="text-xl sm:text-2xl">{forceDischargeActive ? '⏹' : '⚡'}</span>
               )}
@@ -2771,11 +2771,11 @@ export default function ControlPage() {
               aria-busy={pauseDischargePending != null}
               className={`w-full h-full flex flex-col items-center gap-1 sm:gap-2 p-2 sm:p-4 rounded-xl border transition disabled:opacity-70 ${pauseDischargeActive
                 ? 'bg-green-900/30 border-green-500/40 hover:bg-green-900/50'
-                : 'bg-bg-surface border-transparent hover:border-battery/40 hover:bg-bg-elevated'
+                : 'bg-bg-surface border-transparent hover:border-accent/40 hover:bg-bg-elevated'
               }`}
             >
               {pauseDischargePending != null ? (
-                <span className="w-5 h-5 border-2 border-battery border-t-transparent rounded-full animate-spin" />
+                <span className="w-5 h-5 border-2 border-accent border-t-transparent rounded-full animate-spin" />
               ) : (
                 <span className="text-xl sm:text-2xl">{pauseDischargeActive ? '▶️' : '⏸️'}</span>
               )}
@@ -2838,8 +2838,8 @@ export default function ControlPage() {
             disabled={ecoSaving}
             aria-pressed={ecoEnabled}
             className={`px-3 py-3 rounded-lg border text-xs font-medium transition flex flex-col items-start gap-1 ${ecoEnabled
-                ? 'bg-battery/20 border-battery text-battery'
-                : 'bg-bg-surface border-transparent hover:border-battery/40 text-text-secondary'
+                ? 'bg-accent/20 border-accent text-accent'
+                : 'bg-bg-surface border-transparent hover:border-accent/40 text-text-secondary'
               } disabled:opacity-50`}
           >
             <span className="flex items-center justify-center gap-2 w-full text-sm">
@@ -2854,8 +2854,8 @@ export default function ControlPage() {
             disabled={timedChargeSaving}
             aria-pressed={timedChargeEnabled}
             className={`px-3 py-3 rounded-lg border text-xs font-medium transition flex flex-col items-start gap-1 ${timedChargeEnabled
-                ? 'bg-battery/20 border-battery text-battery'
-                : 'bg-bg-surface border-transparent hover:border-battery/40 text-text-secondary'
+                ? 'bg-accent/20 border-accent text-accent'
+                : 'bg-bg-surface border-transparent hover:border-accent/40 text-text-secondary'
               } disabled:opacity-50`}
           >
             <span className="flex items-center justify-center gap-2 w-full text-sm">
@@ -2871,8 +2871,8 @@ export default function ControlPage() {
               disabled={timedDischargeSaving}
               aria-pressed={timedDischargeEnabled}
               className={`px-3 py-3 rounded-lg border text-xs font-medium transition flex flex-col items-start gap-1 ${timedDischargeEnabled
-                  ? 'bg-battery/20 border-battery text-battery'
-                  : 'bg-bg-surface border-transparent hover:border-battery/40 text-text-secondary'
+                  ? 'bg-accent/20 border-accent text-accent'
+                  : 'bg-bg-surface border-transparent hover:border-accent/40 text-text-secondary'
                 } disabled:opacity-50`}
             >
               <span className="flex items-center justify-center gap-2 w-full text-sm">
@@ -2888,8 +2888,8 @@ export default function ControlPage() {
             disabled={timedExportSaving}
             aria-pressed={timedExportEnabled}
             className={`px-3 py-3 rounded-lg border text-xs font-medium transition flex flex-col items-start gap-1 ${timedExportEnabled
-                ? 'bg-battery/20 border-battery text-battery'
-                : 'bg-bg-surface border-transparent hover:border-battery/40 text-text-secondary'
+                ? 'bg-accent/20 border-accent text-accent'
+                : 'bg-bg-surface border-transparent hover:border-accent/40 text-text-secondary'
               } disabled:opacity-50`}
           >
             <span className="flex items-center justify-center gap-2 w-full text-sm">
@@ -3110,7 +3110,7 @@ export default function ControlPage() {
                   aria-pressed={epsEnabled}
                   disabled={epsWaitingForSnapshot}
                   onClick={handleEpsToggle}
-                  className={`relative w-10 h-5 rounded-full transition disabled:opacity-70 ${epsEnabled ? 'bg-battery' : 'bg-bg-elevated'}`}
+                  className={`relative w-10 h-5 rounded-full transition disabled:opacity-70 ${epsEnabled ? 'bg-accent' : 'bg-bg-elevated'}`}
                 >
                   <span
                     className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition ${epsEnabled ? 'left-5.5' : 'left-0.5'}`}
@@ -3118,7 +3118,7 @@ export default function ControlPage() {
                 </button>
               </div>
               {epsWaitingForSnapshot && (
-                <p className="text-battery text-xs" role="status">Updating EPS…</p>
+                <p className="text-accent text-xs" role="status">Updating EPS…</p>
               )}
               {epsError && <p className="text-red-400 text-xs" role="alert">{epsError}</p>}
             </div>
@@ -3177,7 +3177,7 @@ export default function ControlPage() {
                   }
                 }}
                 disabled={forceDurationSaving}
-                className="px-3 py-1.5 bg-battery/20 text-battery rounded-lg text-xs font-medium hover:bg-battery/30 transition disabled:opacity-50"
+                className="px-3 py-1.5 bg-accent/20 text-accent rounded-lg text-xs font-medium hover:bg-accent/30 transition disabled:opacity-50"
               >
                 {forceDurationSaving ? '...' : 'Save'}
               </button>
@@ -3223,7 +3223,7 @@ export default function ControlPage() {
               <button
                 onClick={handleReserveSave}
                 disabled={reserveSaving}
-                className="px-3 py-1.5 bg-battery/20 text-battery rounded-lg text-xs font-medium hover:bg-battery/30 transition disabled:opacity-50"
+                className="px-3 py-1.5 bg-accent/20 text-accent rounded-lg text-xs font-medium hover:bg-accent/30 transition disabled:opacity-50"
               >
                 {reserveSaving ? '...' : 'Save'}
               </button>
@@ -3257,7 +3257,7 @@ export default function ControlPage() {
                 <button
                   onClick={handleDischargeCutoffSave}
                   disabled={dischargeCutoffSaving}
-                  className="px-3 py-1.5 bg-battery/20 text-battery rounded-lg text-xs font-medium hover:bg-battery/30 transition disabled:opacity-50"
+                  className="px-3 py-1.5 bg-accent/20 text-accent rounded-lg text-xs font-medium hover:bg-accent/30 transition disabled:opacity-50"
                 >
                   {dischargeCutoffSaving ? '...' : 'Save'}
                 </button>
@@ -3285,13 +3285,13 @@ export default function ControlPage() {
               <button
                 onClick={handleChargeRateSave}
                 disabled={chargeRateSaving || adaptiveOwnsChargeRate}
-                className="px-3 py-1.5 bg-battery/20 text-battery rounded-lg text-xs font-medium hover:bg-battery/30 transition disabled:opacity-50"
+                className="px-3 py-1.5 bg-accent/20 text-accent rounded-lg text-xs font-medium hover:bg-accent/30 transition disabled:opacity-50"
               >
                 {chargeRateSaving ? '...' : 'Save'}
               </button>
             </div>
             {adaptiveOwnsChargeRate && (
-              <p className="text-battery text-xs">
+              <p className="text-accent text-xs">
                 {chargeMode === 'adaptive'
                   ? 'Controlled by Adaptive Charge. Switch to Standard mode to set this manually.'
                   : 'Adaptive Charge is restoring the previous manual limit.'}
@@ -3318,7 +3318,7 @@ export default function ControlPage() {
               <button
                 onClick={handleDischargeRateSave}
                 disabled={dischargeRateSaving}
-                className="px-3 py-1.5 bg-battery/20 text-battery rounded-lg text-xs font-medium hover:bg-battery/30 transition disabled:opacity-50"
+                className="px-3 py-1.5 bg-accent/20 text-accent rounded-lg text-xs font-medium hover:bg-accent/30 transition disabled:opacity-50"
               >
                 {dischargeRateSaving ? '...' : 'Save'}
               </button>
@@ -3344,7 +3344,7 @@ export default function ControlPage() {
               <button
                 onClick={handleActivePowerSave}
                 disabled={activePowerSaving}
-                className="px-3 py-1.5 bg-battery/20 text-battery rounded-lg text-xs font-medium hover:bg-battery/30 transition disabled:opacity-50"
+                className="px-3 py-1.5 bg-accent/20 text-accent rounded-lg text-xs font-medium hover:bg-accent/30 transition disabled:opacity-50"
               >
                 {activePowerSaving ? '...' : 'Save'}
               </button>

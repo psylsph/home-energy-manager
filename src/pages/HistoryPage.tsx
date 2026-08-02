@@ -898,7 +898,7 @@ export default function HistoryPage() {
               onClick={() => handleTabChange(t.key)}
               className={`flex-1 px-3 py-2 rounded-lg text-sm font-sans font-medium transition-colors ${
                 tab === t.key
-                  ? 'bg-flow-active/20 text-flow-active'
+                  ? 'bg-accent/20 text-accent'
                   : 'text-text-secondary hover:text-text-primary'
               }`}
             >
@@ -929,7 +929,7 @@ export default function HistoryPage() {
               onClick={() => handleRangeChange(r.key)}
               className={`shrink-0 px-3 py-1.5 rounded-lg text-xs font-sans font-medium transition-colors ${
                 range === r.key
-                  ? 'bg-flow-active text-bg-base'
+                  ? 'bg-accent text-on-accent'
                   : 'bg-bg-elevated text-text-secondary hover:text-text-primary'
               }`}
             >
@@ -1027,8 +1027,8 @@ export default function HistoryPage() {
 
       {/* CSV export toast */}
       {csvToast && (
-        <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 bg-bg-surface border border-battery/30 rounded-xl px-4 py-2.5 shadow-lg text-sm text-text-primary font-sans flex items-center gap-2 animate-in fade-in slide-in-from-bottom-2 duration-200">
-          <svg className="w-4 h-4 text-battery shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 bg-bg-surface border border-accent/30 rounded-xl px-4 py-2.5 shadow-lg text-sm text-text-primary font-sans flex items-center gap-2 animate-in fade-in slide-in-from-bottom-2 duration-200">
+          <svg className="w-4 h-4 text-accent shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
           {csvToast}
@@ -1069,7 +1069,7 @@ export default function HistoryPage() {
               Outdoor temperature data by{' '}
               <button
                 onClick={() => openExternal('https://open-meteo.com/')}
-                className="text-flow-active underline hover:opacity-80 inline"
+                className="text-accent underline hover:opacity-80 inline"
               >
                 Open-Meteo.com
               </button>

@@ -189,6 +189,42 @@ make_mock "$STAGE/bin" apt <<'EOF'
 printf 'apt %s\n' "$*" >>"$HEM_TEST_LOG"
 exit 0
 EOF
+make_mock "$STAGE/bin" jq <<'EOF'
+#!/bin/bash
+field=''
+asset_name=''
+json_file=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -er) shift ;;
+    --arg)
+      [ "${2:-}" = "name" ] || exit 2
+      asset_name="${3:-}"
+      shift 3
+      ;;
+    .tag_name) field='tag_name'; shift ;;
+    *browser_download_url*) field='browser_download_url'; shift ;;
+    *digest*) field='digest'; shift ;;
+    *) json_file="$1"; shift ;;
+  esac
+done
+python3 - "$json_file" "$field" "$asset_name" <<'PY'
+import json
+import sys
+
+path, field, asset_name = sys.argv[1:]
+with open(path, encoding='utf-8') as handle:
+    payload = json.load(handle)
+if field == 'tag_name':
+    value = payload.get('tag_name')
+else:
+    asset = next((item for item in payload.get('assets', []) if item.get('name') == asset_name), None)
+    value = asset.get(field) if asset else None
+if value is None:
+    raise SystemExit(1)
+print(value)
+PY
+EOF
 make_mock "$STAGE/bin" systemctl <<'EOF'
 #!/bin/bash
 printf 'systemctl %s\n' "$*" >>"$HEM_TEST_LOG"

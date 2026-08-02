@@ -13,7 +13,7 @@ function StateDot({ state }: { state: MechanismRow['state'] }) {
       className={
         state === 'off'
           ? 'inline-block w-2.5 h-2.5 rounded-full border-2 border-text-secondary/40'
-          : 'inline-block w-2.5 h-2.5 rounded-full bg-battery'
+          : 'inline-block w-2.5 h-2.5 rounded-full bg-accent'
       }
     />
   );
@@ -25,8 +25,8 @@ function StateDot({ state }: { state: MechanismRow['state'] }) {
  * Replaces the old single `battery_mode` label with one row per
  * independent mechanism (Eco, Timed Charge, Timed Export, Timed Discharge),
  * showing whether each is off, armed, or actively doing its thing. The
- * filled/empty dots reuse the battery accent colour from the Control page
- * mechanism buttons so the two surfaces read consistently.
+ * filled/empty dots reuse the shared interaction accent from the Control
+ * page mechanism buttons so the two surfaces read consistently.
  */
 export function BatteryModeSummary({ snapshot, now }: Props) {
   const rows = deriveBatteryModeRows(snapshot, now);
@@ -54,7 +54,7 @@ export function BatteryModeSummary({ snapshot, now }: Props) {
             data-testid={`battery-mode-desc-${row.key}`}
             className={
               row.state === 'active'
-                ? 'font-mono text-battery whitespace-nowrap'
+                ? 'font-mono text-accent whitespace-nowrap'
                 : 'font-mono text-text-secondary whitespace-nowrap'
             }
           >

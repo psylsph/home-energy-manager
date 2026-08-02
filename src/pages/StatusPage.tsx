@@ -66,7 +66,7 @@ export default function StatusPage() {
   if (!snapshot) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
-        <div className="w-10 h-10 border-4 border-flow-active border-t-transparent rounded-full animate-spin" />
+        <div className="w-10 h-10 border-4 border-accent border-t-transparent rounded-full animate-spin" />
         <p className="text-text-secondary text-sm font-sans">
           {connectionState === 'reconnecting'
             ? 'Connection lost — reconnecting…'
@@ -128,7 +128,7 @@ export default function StatusPage() {
           If data doesn't appear, try restarting the app and check your firewall settings.
           If you've recently factory-reset your dongle, make sure the <strong>WiFi-UART</strong>
           setting is <strong>Server</strong> (not Client).
-          See the <a href="https://github.com/psylsph/home-energy-manager/blob/master/FAQ.md" target="_blank" rel="noopener noreferrer" className="text-flow-active hover:underline">FAQ</a> for help.
+          See the <a href="https://github.com/psylsph/home-energy-manager/blob/master/FAQ.md" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">FAQ</a> for help.
         </p>
       </div>
     );

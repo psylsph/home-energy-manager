@@ -27,8 +27,8 @@ function Toggle({ checked, onChange, ariaLabel }: { checked: boolean; onChange: 
       aria-checked={ariaLabel ? checked : undefined}
       onClick={() => onChange(!checked)}
     >
-      <div className={`w-10 h-5 rounded-full transition-colors ${checked ? 'bg-flow-active/40' : 'bg-bg-elevated'}`} />
-      <div className={`absolute left-0.5 top-0.5 w-4 h-4 rounded-full transition-all ${checked ? 'translate-x-5 bg-flow-active' : 'bg-text-secondary'}`} />
+      <div className={`w-10 h-5 rounded-full transition-colors ${checked ? 'bg-accent/40' : 'bg-bg-elevated'}`} />
+      <div className={`absolute left-0.5 top-0.5 w-4 h-4 rounded-full transition-all ${checked ? 'translate-x-5 bg-accent' : 'bg-text-secondary'}`} />
     </div>
   );
 }
@@ -90,7 +90,7 @@ function TariffSlotEditor({
         {config.slots.length < MAX_TARIFF_SLOTS && (
           <button
             onClick={() => onChange(addTariffSlot(config, 0.15))}
-            className="text-flow-active text-xs font-sans hover:opacity-80 transition-opacity"
+            className="text-accent text-xs font-sans hover:opacity-80 transition-opacity"
           >
             + Add window
           </button>
@@ -119,7 +119,7 @@ function TariffSlotEditor({
                   // previous slot's end, keeping the day tiled.
                   onChange={(e) => onChange(updateTariffSlot(config, i, 'start', e.target.value))}
                   disabled={isFirst}
-                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors disabled:opacity-40"
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors disabled:opacity-40"
                 >
                   {isFirst
                     ? <option value={slot.start}>{slot.start}</option>
@@ -135,7 +135,7 @@ function TariffSlotEditor({
                   value={slot.end}
                   onChange={(e) => onChange(updateTariffSlot(config, i, 'end', e.target.value))}
                   disabled={isLast}
-                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors disabled:opacity-40"
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors disabled:opacity-40"
                 >
                   {endOptions.map((t) => (
                     <option key={t} value={t}>{t}</option>
@@ -148,7 +148,7 @@ function TariffSlotEditor({
                   type="number" step="0.001" min="0"
                   value={Math.round(slot.rate * 100000) / 1000}
                   onChange={(e) => onChange(updateTariffSlot(config, i, 'rate', Number(e.target.value) / 100))}
-                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
                 />
               </label>
               {config.slots.length > 1 && (
@@ -188,7 +188,7 @@ function TariffSlotEditor({
             // valid flat-rate config using the first slot's rate as a
             // reasonable default.
             onClick={() => onChange(flatTariffConfig(config.slots[0]?.rate ?? 0.15))}
-            className="text-flow-active text-xs font-sans hover:opacity-80 transition-opacity whitespace-nowrap"
+            className="text-accent text-xs font-sans hover:opacity-80 transition-opacity whitespace-nowrap"
           >
             Reset to flat rate
           </button>
@@ -1004,7 +1004,7 @@ export default function SettingsPage() {
   if (!settingsLoaded) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
-        <div className="w-10 h-10 border-4 border-flow-active border-t-transparent rounded-full animate-spin" />
+        <div className="w-10 h-10 border-4 border-accent border-t-transparent rounded-full animate-spin" />
         <p className="text-text-secondary text-sm font-sans">Loading settings…</p>
       </div>
     );
@@ -1029,7 +1029,7 @@ export default function SettingsPage() {
                   setPendingConnect(false);
                 }
               }}
-              className="w-full py-2.5 bg-flow-active/20 text-flow-active rounded-lg text-sm font-medium hover:bg-flow-active/30 transition"
+              className="w-full py-2.5 bg-accent/20 text-accent rounded-lg text-sm font-medium hover:bg-accent/30 transition"
             >
               Got it
             </button>
@@ -1079,7 +1079,7 @@ export default function SettingsPage() {
               className={`min-w-0 flex-1 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border outline-none transition-colors ${
                 hostInvalid
                   ? 'border-red-500 focus:border-red-400'
-                  : 'border-bg-elevated focus:border-flow-active'
+                  : 'border-bg-elevated focus:border-accent'
               }`}
             />
             {developerMode && (
@@ -1088,7 +1088,7 @@ export default function SettingsPage() {
                 value={port}
                 onChange={(e) => setPort(Number(e.target.value))}
                 title="Inverter Modbus port"
-                className="w-[5.5em] shrink-0 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                className="w-[5.5em] shrink-0 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
               />
             )}
           </div>
@@ -1106,7 +1106,7 @@ export default function SettingsPage() {
             value={serial}
             onChange={(e) => setSerial(e.target.value)}
             placeholder="Leave blank to auto-detect"
-            className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+            className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
           />
         </label>
 
@@ -1114,7 +1114,7 @@ export default function SettingsPage() {
           <button
             onClick={handleConnect}
             disabled={saving || !host || hostInvalid}
-            className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+            className="bg-accent text-on-accent font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
           >
             {saving ? 'Saving…' : 'Connect'}
           </button>
@@ -1146,7 +1146,7 @@ export default function SettingsPage() {
                 </div>
                 <button
                   onClick={() => applyDiscovered(inv)}
-                  className="bg-flow-active/20 text-flow-active text-xs font-sans font-semibold px-3 py-1.5 rounded-md hover:bg-flow-active/30 transition-colors"
+                  className="bg-accent/20 text-accent text-xs font-sans font-semibold px-3 py-1.5 rounded-md hover:bg-accent/30 transition-colors"
                 >
                   Use
                 </button>
@@ -1182,7 +1182,7 @@ export default function SettingsPage() {
         <h2 className="text-text-primary text-lg font-semibold font-sans">Remote / Mobile Network Access</h2>
 
         <div className="flex items-center gap-3">
-          <code className="bg-bg-elevated text-flow-active rounded-lg px-4 py-2 text-sm font-mono flex-1 min-w-0 select-all overflow-hidden text-ellipsis whitespace-nowrap">
+          <code className="bg-bg-elevated text-accent rounded-lg px-4 py-2 text-sm font-mono flex-1 min-w-0 select-all overflow-hidden text-ellipsis whitespace-nowrap">
             {lanUrl}
           </code>
           <button
@@ -1205,7 +1205,7 @@ export default function SettingsPage() {
             with browser devtools out of the way, but isn't a security
             boundary. */}
         <div className="flex items-center gap-3 mt-2">
-          <code className="bg-bg-elevated text-flow-active rounded-lg px-4 py-2 text-sm font-mono flex-1 min-w-0 select-all overflow-hidden text-ellipsis whitespace-nowrap">
+          <code className="bg-bg-elevated text-accent rounded-lg px-4 py-2 text-sm font-mono flex-1 min-w-0 select-all overflow-hidden text-ellipsis whitespace-nowrap">
             {lanReadOnlyUrl}
           </code>
           <button
@@ -1222,7 +1222,7 @@ export default function SettingsPage() {
         {/* Mini display GUI page — a tiny glance view for a phone or Apple
             Watch browser. See INSTALL.md → “Glance from your Apple Watch”. */}
         <div className="flex items-center gap-3 mt-2">
-          <code className="bg-bg-elevated text-flow-active rounded-lg px-4 py-2 text-sm font-mono flex-1 min-w-0 select-all overflow-hidden text-ellipsis whitespace-nowrap">
+          <code className="bg-bg-elevated text-accent rounded-lg px-4 py-2 text-sm font-mono flex-1 min-w-0 select-all overflow-hidden text-ellipsis whitespace-nowrap">
             {miniPageUrl}
           </code>
           <button
@@ -1279,7 +1279,7 @@ export default function SettingsPage() {
                 onClick={() => handleIntervalChange(s)}
                 className={`flex-1 py-2 rounded-lg text-sm font-mono transition ${
                   intervalSecs === s
-                    ? 'bg-flow-active text-white font-semibold'
+                    ? 'bg-accent text-on-accent font-semibold'
                     : 'bg-bg-elevated text-text-primary hover:bg-bg-elevated/80'
                 }`}
               >
@@ -1306,7 +1306,7 @@ export default function SettingsPage() {
             />
             <button
               onClick={handleHttpPortSave}
-              className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
+              className="bg-accent text-on-accent font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
             >
               Save
             </button>
@@ -1374,22 +1374,22 @@ export default function SettingsPage() {
             <span className="block text-sm font-medium text-text-primary">Enable Octopus data</span>
             <span className="block text-xs text-text-secondary">Recent readings load first; older history continues in the background.</span>
           </span>
-          <input type="checkbox" checked={octopusEnabled} onChange={(e) => setOctopusEnabled(e.target.checked)} className="h-5 w-5 accent-flow-active" />
+          <input type="checkbox" checked={octopusEnabled} onChange={(e) => setOctopusEnabled(e.target.checked)} className="h-5 w-5 accent-accent" />
         </label>
         <div className="grid gap-4 sm:grid-cols-2">
           <label className="block">
             <span className="mb-1 block text-xs font-medium text-text-secondary">Account number</span>
-            <input value={octopusAccount} onChange={(e) => setOctopusAccount(e.target.value)} placeholder="A-1234ABCD" autoComplete="off" className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-flow-active" />
+            <input value={octopusAccount} onChange={(e) => setOctopusAccount(e.target.value)} placeholder="A-1234ABCD" autoComplete="off" className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-accent" />
           </label>
           <label className="block">
             <span className="mb-1 block text-xs font-medium text-text-secondary">API key</span>
-            <input type="password" value={octopusApiKey} onChange={(e) => setOctopusApiKey(e.target.value)} placeholder={octopusKeyConfigured ? 'Saved — enter a new key to replace' : 'sk_live_…'} autoComplete="new-password" className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-flow-active" />
+            <input type="password" value={octopusApiKey} onChange={(e) => setOctopusApiKey(e.target.value)} placeholder={octopusKeyConfigured ? 'Saved — enter a new key to replace' : 'sk_live_…'} autoComplete="new-password" className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-accent" />
           </label>
         </div>
         <button
           type="button"
           onClick={() => openExternal('https://octopus.energy/dashboard/new/accounts/personal-details/api-access')}
-          className="self-start text-sm text-flow-active underline hover:opacity-80"
+          className="self-start text-sm text-accent underline hover:opacity-80"
         >
           Get your Octopus API key
         </button>
@@ -1398,7 +1398,7 @@ export default function SettingsPage() {
           <select
             value={octopusGasUnit}
             onChange={(e) => setOctopusGasUnit(e.target.value as 'unknown' | 'kwh' | 'm3')}
-            className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-flow-active"
+            className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-accent"
           >
             <option value="unknown">Unknown — do not calculate gas cost</option>
             <option value="kwh">kWh — calculate gas cost</option>
@@ -1413,11 +1413,11 @@ export default function SettingsPage() {
           <div className="grid grid-cols-2 gap-3">
             <label className="block">
               <span className="sr-only">Economy 7 night rate starts</span>
-              <input type="time" value={octopusEconomy7Start} onChange={(e) => setOctopusEconomy7Start(e.target.value)} aria-label="Economy 7 night rate starts" className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-flow-active" />
+              <input type="time" value={octopusEconomy7Start} onChange={(e) => setOctopusEconomy7Start(e.target.value)} aria-label="Economy 7 night rate starts" className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-accent" />
             </label>
             <label className="block">
               <span className="sr-only">Economy 7 night rate ends</span>
-              <input type="time" value={octopusEconomy7End} onChange={(e) => setOctopusEconomy7End(e.target.value)} aria-label="Economy 7 night rate ends" className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-flow-active" />
+              <input type="time" value={octopusEconomy7End} onChange={(e) => setOctopusEconomy7End(e.target.value)} aria-label="Economy 7 night rate ends" className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-accent" />
             </label>
           </div>
           <span className="mt-1 block text-xs text-text-secondary">
@@ -1427,7 +1427,7 @@ export default function SettingsPage() {
         <p className="text-xs text-text-secondary">
           Find these in your Octopus dashboard. The key is stored locally, never displayed again, and never written to logs.
         </p>
-        <button type="button" onClick={handleOctopusSave} disabled={octopusSaving} className="rounded-lg bg-flow-active px-4 py-2 text-sm font-medium text-bg-base disabled:opacity-50">
+        <button type="button" onClick={handleOctopusSave} disabled={octopusSaving} className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-on-accent disabled:opacity-50">
           {octopusSaving ? 'Saving…' : 'Save Octopus Settings'}
         </button>
       </section>
@@ -1471,7 +1471,7 @@ export default function SettingsPage() {
               placeholder="e.g. 54.86"
               onChange={(e) => setImportStandingCharge(e.target.value)}
               aria-label="Import Standing Charge in pence per day"
-              className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+              className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
             />
             <span className="text-text-secondary text-xs font-sans">
               Daily fixed import cost added to every History cost total. UK Octopus Flux ≈ 54.86. Leave blank for no Standing Charge.
@@ -1487,7 +1487,7 @@ export default function SettingsPage() {
               ? 'Tariff configuration is invalid — see errors above.'
               : undefined
           }
-          className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity self-start"
+          className="bg-accent text-on-accent font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity self-start"
         >
           {saving ? 'Saving…' : 'Save Tariffs'}
         </button>
@@ -1655,7 +1655,7 @@ export default function SettingsPage() {
 
         <button
           onClick={handleSolarArraysSave}
-          className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity disabled:opacity-30 self-start"
+          className="bg-accent text-on-accent font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity disabled:opacity-30 self-start"
           disabled={solarSaving}
           data-testid="solar-arrays-save"
         >
@@ -1669,7 +1669,7 @@ export default function SettingsPage() {
           <h2 className="text-text-primary text-lg font-semibold font-sans">Local Weather</h2>
           <button
             onClick={() => openExternal('https://open-meteo.com/')}
-            className="text-flow-active text-xs font-sans underline hover:opacity-80 transition-opacity"
+            className="text-accent text-xs font-sans underline hover:opacity-80 transition-opacity"
           >
             Open-Meteo ↗
           </button>
@@ -1706,7 +1706,7 @@ export default function SettingsPage() {
                   placeholder="e.g. SW1A 1AA"
                   value={weatherPostcode}
                   onChange={(e) => setWeatherPostcode(e.target.value)}
-                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
                 />
               </label>
 
@@ -1725,7 +1725,7 @@ export default function SettingsPage() {
                     placeholder="51.501"
                     value={weatherLat}
                     onChange={(e) => setWeatherLat(e.target.value)}
-                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
                   />
                 </label>
                 <label className="flex flex-col gap-1">
@@ -1736,7 +1736,7 @@ export default function SettingsPage() {
                     placeholder="-0.141"
                     value={weatherLon}
                     onChange={(e) => setWeatherLon(e.target.value)}
-                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
                   />
                 </label>
               </div>
@@ -1772,7 +1772,7 @@ export default function SettingsPage() {
               <button
                 onClick={handleWeatherSave}
                 disabled={weatherSaving}
-                className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-4 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 transition-opacity sm:w-auto"
+                className="bg-accent text-on-accent font-sans font-semibold text-sm px-4 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 transition-opacity sm:w-auto"
               >
                 {weatherSaving ? 'Saving…' : 'Save Location'}
               </button>
@@ -1805,7 +1805,7 @@ export default function SettingsPage() {
           Weather data by{' '}
           <button
             onClick={() => openExternal('https://open-meteo.com/')}
-            className="text-flow-active underline hover:opacity-80 inline"
+            className="text-accent underline hover:opacity-80 inline"
           >
             Open-Meteo.com
           </button>
@@ -1819,7 +1819,7 @@ export default function SettingsPage() {
           <h2 className="text-text-primary text-lg font-semibold font-sans">Notifications</h2>
           <button
             onClick={() => openExternal('https://github.com/psylsph/home-energy-manager/blob/master/NOTIFICATIONS.md')}
-            className="text-flow-active text-xs font-sans underline hover:opacity-80 transition-opacity"
+            className="text-accent text-xs font-sans underline hover:opacity-80 transition-opacity"
           >
             Setup guide ↗
           </button>
@@ -1847,8 +1847,8 @@ export default function SettingsPage() {
               <h3 className="text-text-primary text-sm font-sans font-medium">Telegram</h3>
               <p className="text-text-secondary text-xs font-sans">
                 <strong className="text-green-400">Recommended</strong> — Send alerts when critical conditions are detected. Create a bot via{' '}
-                <button onClick={() => openExternal('https://t.me/botfather')} className="text-flow-active underline hover:opacity-80 inline">@BotFather</button> on Telegram, get your bot token, then send /start to your bot and get your chat ID from{' '}
-                <button onClick={() => openExternal('https://t.me/userinfobot')} className="text-flow-active underline hover:opacity-80 inline">@userinfobot</button>.
+                <button onClick={() => openExternal('https://t.me/botfather')} className="text-accent underline hover:opacity-80 inline">@BotFather</button> on Telegram, get your bot token, then send /start to your bot and get your chat ID from{' '}
+                <button onClick={() => openExternal('https://t.me/userinfobot')} className="text-accent underline hover:opacity-80 inline">@userinfobot</button>.
                 Once configured, send <code>/status</code>, <code>/today</code>, <code>/battery</code>, or <code>/help</code> in the chat to ask your inverter a question. The bot only replies to this chat id.
               </p>
               <label className="flex flex-col gap-1">
@@ -1857,7 +1857,7 @@ export default function SettingsPage() {
                   type="password" placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
                   value={alertsConfig.telegram_bot_token}
                   onChange={(e) => setAlertsConfig((p) => ({ ...p, telegram_bot_token: e.target.value }))}
-                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
                 />
               </label>
               <label className="flex flex-col gap-1">
@@ -1866,7 +1866,7 @@ export default function SettingsPage() {
                   type="text" placeholder="123456789"
                   value={alertsConfig.telegram_chat_id}
                   onChange={(e) => setAlertsConfig((p) => ({ ...p, telegram_chat_id: e.target.value }))}
-                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
                 />
               </label>
               <div className="flex justify-center gap-4 mt-1">
@@ -1886,7 +1886,7 @@ export default function SettingsPage() {
               <h3 className="text-text-primary text-sm font-sans font-medium">ntfy Push Notifications</h3>
               <p className="text-text-secondary/70 text-xs font-sans">
                 Free push notifications via&nbsp;
-                <button onClick={() => openExternal('https://ntfy.sh')} className="text-flow-active underline hover:opacity-80 inline">ntfy.sh</button>.
+                <button onClick={() => openExternal('https://ntfy.sh')} className="text-accent underline hover:opacity-80 inline">ntfy.sh</button>.
                 Install the app on your phone and subscribe to the topic below.
                 A topic is auto-generated from your inverter serial (unique to you) — edit it only if you want a custom one.
               </p>
@@ -1898,12 +1898,12 @@ export default function SettingsPage() {
                     placeholder={generatedNtfyTopic || 'hem-your-inverter-serial'}
                     value={alertsConfig.ntfy_topic}
                     onChange={(e) => setAlertsConfig((p) => ({ ...p, ntfy_topic: e.target.value }))}
-                    className="flex-1 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                    className="flex-1 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
                   />
                   <button
                     onClick={() => { navigator.clipboard.writeText(effectiveNtfyTopic); flash('Topic copied!', true); }}
                     disabled={!effectiveNtfyTopic}
-                    className="shrink-0 bg-flow-active text-bg-base text-xs font-sans font-semibold px-3 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 transition-opacity"
+                    className="shrink-0 bg-accent text-on-accent text-xs font-sans font-semibold px-3 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 transition-opacity"
                   >
                     Copy
                   </button>
@@ -1925,7 +1925,7 @@ export default function SettingsPage() {
                   type="text" placeholder="https://ntfy.sh"
                   value={alertsConfig.ntfy_server}
                   onChange={(e) => setAlertsConfig((p) => ({ ...p, ntfy_server: e.target.value }))}
-                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
                 />
               </label>
             </div>
@@ -1935,9 +1935,9 @@ export default function SettingsPage() {
               <h3 className="text-text-primary text-sm font-sans font-medium">Pushover</h3>
               <p className="text-text-secondary/70 text-xs font-sans">
                 Paid-once-per-platform push notifications via{' '}
-                <button onClick={() => openExternal('https://pushover.net')} className="text-flow-active underline hover:opacity-80 inline">Pushover</button>.
+                <button onClick={() => openExternal('https://pushover.net')} className="text-accent underline hover:opacity-80 inline">Pushover</button>.
                 Create an application at{' '}
-                <button onClick={() => openExternal('https://pushover.net/apps/build')} className="text-flow-active underline hover:opacity-80 inline">pushover.net/apps/build</button>{' '}
+                <button onClick={() => openExternal('https://pushover.net/apps/build')} className="text-accent underline hover:opacity-80 inline">pushover.net/apps/build</button>{' '}
                 to get your App API Token, then copy your User Key from your Pushover account settings.
               </p>
               <label className="flex flex-col gap-1">
@@ -1946,7 +1946,7 @@ export default function SettingsPage() {
                   type="password" placeholder="Your App API Token"
                   value={alertsConfig.pushover_app_token}
                   onChange={(e) => setAlertsConfig((p) => ({ ...p, pushover_app_token: e.target.value }))}
-                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
                 />
               </label>
               <label className="flex flex-col gap-1">
@@ -1955,7 +1955,7 @@ export default function SettingsPage() {
                   type="password" placeholder="Your User Key"
                   value={alertsConfig.pushover_user_key}
                   onChange={(e) => setAlertsConfig((p) => ({ ...p, pushover_user_key: e.target.value }))}
-                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
                 />
               </label>
             </div>
@@ -1983,7 +1983,7 @@ export default function SettingsPage() {
                         type="number" step="0.5" min="0" max="50"
                         value={alertsConfig.batt_temp_min}
                         onChange={(e) => setAlertsConfig((p) => ({ ...p, batt_temp_min: Number(e.target.value) }))}
-                        className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                        className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-accent outline-none transition-colors"
                       />
                     </label>
                     <label className="flex flex-col gap-1">
@@ -1992,7 +1992,7 @@ export default function SettingsPage() {
                         type="number" step="0.5" min="0" max="80"
                         value={alertsConfig.batt_temp_max}
                         onChange={(e) => setAlertsConfig((p) => ({ ...p, batt_temp_max: Number(e.target.value) }))}
-                        className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                        className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-accent outline-none transition-colors"
                       />
                     </label>
                     <label className="flex flex-col gap-1">
@@ -2001,7 +2001,7 @@ export default function SettingsPage() {
                         type="number" step="0.5" min="0" max="100"
                         value={alertsConfig.inverter_temp_min}
                         onChange={(e) => setAlertsConfig((p) => ({ ...p, inverter_temp_min: Number(e.target.value) }))}
-                        className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                        className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-accent outline-none transition-colors"
                       />
                     </label>
                     <label className="flex flex-col gap-1">
@@ -2010,7 +2010,7 @@ export default function SettingsPage() {
                         type="number" step="0.5" min="0" max="120"
                         value={alertsConfig.inverter_temp_max}
                         onChange={(e) => setAlertsConfig((p) => ({ ...p, inverter_temp_max: Number(e.target.value) }))}
-                        className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                        className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-accent outline-none transition-colors"
                       />
                     </label>
                   </>
@@ -2021,7 +2021,7 @@ export default function SettingsPage() {
                     type="number" min="0" max="100"
                     value={alertsConfig.soc_min}
                     onChange={(e) => setAlertsConfig((p) => ({ ...p, soc_min: Number(e.target.value) }))}
-                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-accent outline-none transition-colors"
                   />
                 </label>
                 <label className="flex flex-col gap-1">
@@ -2030,7 +2030,7 @@ export default function SettingsPage() {
                     type="number" min="0" max="100"
                     value={alertsConfig.soc_max}
                     onChange={(e) => setAlertsConfig((p) => ({ ...p, soc_max: Number(e.target.value) }))}
-                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-accent outline-none transition-colors"
                   />
                 </label>
               </div>
@@ -2081,7 +2081,7 @@ export default function SettingsPage() {
                     type="number" step="100" min="0" max="100000"
                     value={alertsConfig.solar_clipping_ceiling_w}
                     onChange={(e) => setAlertsConfig((p) => ({ ...p, solar_clipping_ceiling_w: Number(e.target.value) }))}
-                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-bg-elevated focus:border-flow-active outline-none transition-colors text-left"
+                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-bg-elevated focus:border-accent outline-none transition-colors text-left"
                   />
                 </label>
               )}
@@ -2105,7 +2105,7 @@ export default function SettingsPage() {
                     type="number" min={1} max={1440}
                     value={alertsConfig.cooldown_minutes}
                     onChange={(e) => setAlertsConfig((p) => ({ ...p, cooldown_minutes: Number(e.target.value) }))}
-                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-bg-elevated focus:border-flow-active outline-none transition-colors text-left"
+                    className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-bg-elevated focus:border-accent outline-none transition-colors text-left"
                   />
                 </label>
               </div>
@@ -2118,7 +2118,7 @@ export default function SettingsPage() {
           <button
             onClick={handleAlertsSave}
             disabled={alertsSaving}
-            className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-4 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 transition-opacity sm:w-auto"
+            className="bg-accent text-on-accent font-sans font-semibold text-sm px-4 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 transition-opacity sm:w-auto"
           >
             {alertsSaving ? 'Saving…' : 'Save Notification Settings'}
           </button>
@@ -2163,7 +2163,7 @@ export default function SettingsPage() {
                         : [...prev, key]
                     );
                   }}
-                  className="w-4 h-4 accent-battery rounded"
+                  className="w-4 h-4 accent-accent rounded"
                 />
                 <span className="text-text-primary text-sm font-sans">{label}</span>
               </label>
@@ -2171,7 +2171,7 @@ export default function SettingsPage() {
           </div>
           <button
             onClick={handlePanelSave}
-            className="self-start bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
+            className="self-start bg-accent text-on-accent font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
           >
             {panelSaving ? 'Saving…' : 'Save Panel Visibility'}
           </button>
@@ -2207,7 +2207,7 @@ export default function SettingsPage() {
                   onClick={() => setPanelGraphsScale(key)}
                   className={`flex-1 py-2 rounded-lg text-sm font-sans transition ${
                     panelGraphsScale === key
-                      ? 'bg-flow-active text-white font-semibold'
+                      ? 'bg-accent text-on-accent font-semibold'
                       : 'bg-bg-elevated text-text-primary hover:bg-bg-elevated/80'
                   }`}
                 >
@@ -2267,7 +2267,7 @@ export default function SettingsPage() {
                   aria-pressed={selected}
                   className={`flex-1 py-2 rounded-lg text-sm font-sans transition flex flex-col items-center gap-2 ${
                     selected
-                      ? 'bg-flow-active text-white font-semibold'
+                      ? 'bg-accent text-on-accent font-semibold'
                       : 'bg-bg-elevated text-text-primary hover:bg-bg-elevated/80'
                   }`}
                 >
@@ -2333,7 +2333,7 @@ export default function SettingsPage() {
                 onChange={(e) => setGridMeterAddress(Number(e.target.value))}
                 aria-label="Grid CT meter"
                 data-testid="grid-ct-meter-select"
-                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors w-full sm:w-auto"
+                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors w-full sm:w-auto"
               >
                 <option value={0}>Auto (recommended)</option>
                 {externalMeters.map((m) => (
@@ -2370,7 +2370,7 @@ export default function SettingsPage() {
                 if (!Number.isFinite(v)) return;
                 setVisualNoiseThreshold(Math.max(0, Math.min(100, v)));
               }}
-              className="w-20 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors text-center"
+              className="w-20 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors text-center"
             />
             <span className="text-text-secondary text-sm font-sans">watts</span>
           </div>
@@ -2408,7 +2408,7 @@ export default function SettingsPage() {
               className={`min-w-0 flex-1 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border outline-none transition-colors ${
                 evcHostInvalid
                   ? 'border-red-500 focus:border-red-400'
-                  : 'border-bg-elevated focus:border-flow-active'
+                  : 'border-bg-elevated focus:border-accent'
               }`}
             />
             {developerMode && (
@@ -2417,7 +2417,7 @@ export default function SettingsPage() {
                 value={evcPort}
                 onChange={(e) => setEvcPort(Number(e.target.value))}
                 title="EV Charger Modbus port"
-                className="w-[5.5em] shrink-0 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                className="w-[5.5em] shrink-0 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
               />
             )}
           </div>
@@ -2432,7 +2432,7 @@ export default function SettingsPage() {
           <button
             onClick={handleEvcSave}
             disabled={evcHostInvalid}
-            className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+            className="bg-accent text-on-accent font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Save
           </button>
@@ -2463,7 +2463,7 @@ export default function SettingsPage() {
                 </div>
                 <button
                   onClick={() => applyDiscoveredEvc(charger)}
-                  className="bg-flow-active/20 text-flow-active text-xs font-sans font-semibold px-3 py-1.5 rounded-md hover:bg-flow-active/30 transition-colors"
+                  className="bg-accent/20 text-accent text-xs font-sans font-semibold px-3 py-1.5 rounded-md hover:bg-accent/30 transition-colors"
                 >
                   Use
                 </button>
@@ -2498,7 +2498,7 @@ export default function SettingsPage() {
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
                 placeholder="Leave empty to disable"
-                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
               />
             </label>
             <label className="flex flex-col gap-1">
@@ -2508,7 +2508,7 @@ export default function SettingsPage() {
                 value={apiPort || ''}
                 onChange={(e) => setApiPort(Number(e.target.value))}
                 placeholder="e.g. 7338"
-                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors w-32"
+                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors w-32"
               />
             </label>
             <button
@@ -2516,7 +2516,7 @@ export default function SettingsPage() {
                 await apiPost('/api/settings', { api_key: apiKey, api_port: apiPort });
                 setMessage({ text: 'API key saved. Restart the app for the read-only server to start.', ok: true });
               }}
-              className="self-start bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
+              className="self-start bg-accent text-on-accent font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
             >
               Save API Key
             </button>
@@ -2532,7 +2532,7 @@ export default function SettingsPage() {
           onClick={() =>
             openExternal('https://psylsph.github.io/home-energy-manager/')
           }
-          className="text-flow-active text-sm font-sans hover:underline mt-1 text-left"
+          className="text-accent text-sm font-sans hover:underline mt-1 text-left"
         >
           psylsph.github.io/home-energy-manager
         </button>

@@ -469,7 +469,8 @@ describe('<HistoryPage/> — tabs, ranges, navigation, empty state', () => {
     it('renders the default Battery tab active', async () => {
       render(<HistoryPage />);
       const batteryBtn = await screen.findByRole('button', { name: 'Battery', exact: true });
-      expect(batteryBtn.className).toContain('flow-active');
+      expect(batteryBtn.className).toContain('bg-accent/20');
+      expect(batteryBtn.className).toContain('text-accent');
     });
 
     it('renders all six tabs', async () => {

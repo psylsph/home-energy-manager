@@ -581,6 +581,10 @@ test.describe('API Control Endpoints', () => {
     const enableIdx = writes.findIndex((w) => w.address === 96);
     expect(writes.indexOf(slotStart!)).toBeLessThan(enableIdx);
     expect(writes.indexOf(slotEnd!)).toBeLessThan(enableIdx);
+
+    const stop = await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' });
+    expect((await stop.json()).ok).toBe(true);
+    await waitForWrites(peekModbusWrites, drainModbusWrites, 7, 25_000);
   });
 
   test('POST /api/control/force-discharge sends correct writes', async ({
@@ -612,6 +616,10 @@ test.describe('API Control Endpoints', () => {
     // Slot 2 is cleared.
     expect(findWrite(writes, 44)!.value).toBe(0);
     expect(findWrite(writes, 45)!.value).toBe(0);
+
+    const stop = await fetch(`${baseUrl}/api/control/force-discharge/stop`, { method: 'POST' });
+    expect((await stop.json()).ok).toBe(true);
+    await waitForWrites(peekModbusWrites, drainModbusWrites, 8, 30_000);
   });
 
   test('POST /api/control/force-discharge without minutes keeps legacy 00:00–23:59 slot', async ({
@@ -633,6 +641,10 @@ test.describe('API Control Endpoints', () => {
     expect(findWrite(writes, 57)!.value).toBe(2359);  // slot end 23:59
     expect(findWrite(writes, 44)!.value).toBe(0);     // slot2 start
     expect(findWrite(writes, 45)!.value).toBe(0);     // slot2 end
+
+    const stop = await fetch(`${baseUrl}/api/control/force-discharge/stop`, { method: 'POST' });
+    expect((await stop.json()).ok).toBe(true);
+    await waitForWrites(peekModbusWrites, drainModbusWrites, 8, 30_000);
   });
 
   test('POST /api/control/pause enters Eco Paused (HR 27=1, 59=0, 110=100)', async ({
@@ -760,6 +772,10 @@ test.describe('Quick Actions - extended', () => {
     // Verify no slot registers were written
     expect(findWrite(writes, 94)).toBeUndefined();
     expect(findWrite(writes, 95)).toBeUndefined();
+
+    const stop = await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' });
+    expect((await stop.json()).ok).toBe(true);
+    await waitForWrites(peekModbusWrites, drainModbusWrites, 7, 25_000);
   });
 
   test('Force Charge when already in eco mode should still work', async ({
@@ -813,6 +829,10 @@ test.describe('Quick Actions - extended', () => {
     expect(findWrite(writes, 96)!.value).toBe(1);    // enable_charge
     expect(findWrite(writes, 20)!.value).toBe(1);    // enable_charge_target
     expect(findWrite(writes, 116)!.value).toBe(100); // target SOC
+
+    const stop = await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' });
+    expect((await stop.json()).ok).toBe(true);
+    await waitForWrites(peekModbusWrites, drainModbusWrites, 7, 25_000);
   });
 
   test('Pause Discharge should write HR110=100 and enter Eco Paused', async ({

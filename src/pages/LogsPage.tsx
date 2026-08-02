@@ -148,7 +148,7 @@ export default function LogsPage() {
                 onClick={() => changeCaptureLevel(level)}
                 className={`px-2 py-1.5 text-xs font-sans transition-colors ${
                   captureLevel === level
-                    ? 'bg-flow-active text-bg-base font-semibold'
+                    ? 'bg-accent text-on-accent font-semibold'
                     : 'bg-bg-elevated text-text-secondary hover:text-text-primary'
                 }`}
               >
@@ -165,7 +165,7 @@ export default function LogsPage() {
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             placeholder="Filter logs…"
-            className="flex-1 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+            className="flex-1 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
           />
           {filter && (
             <button
@@ -180,7 +180,7 @@ export default function LogsPage() {
 
       {/* Status message */}
       {statusMsg && (
-        <div className="text-xs text-flow-active font-sans text-center">{statusMsg}</div>
+        <div className="text-xs text-accent font-sans text-center">{statusMsg}</div>
       )}
 
       {/* Log output */}
@@ -215,7 +215,7 @@ export default function LogsPage() {
               containerRef.current.scrollTop = containerRef.current.scrollHeight;
             }
           }}
-          className="fixed bottom-20 right-8 bg-flow-active text-bg-base text-xs font-sans font-semibold px-3 py-2 rounded-full shadow-lg hover:opacity-90 transition-opacity z-40"
+          className="fixed bottom-20 right-8 bg-accent text-on-accent text-xs font-sans font-semibold px-3 py-2 rounded-full shadow-lg hover:opacity-90 transition-opacity z-40"
         >
           ↓ Scroll to bottom
         </button>

@@ -9,6 +9,8 @@
   --color-grid: var(--app-grid);
   --color-home: var(--app-home);
   --color-flow-active: var(--app-flow-active);
+  --color-accent: var(--app-accent);
+  --color-on-accent: var(--app-on-accent);
   --color-text-primary: var(--app-text-primary);
   --color-text-secondary: var(--app-text-secondary);
   --color-grid-stroke: var(--app-grid-stroke);
@@ -29,6 +31,10 @@
   --app-grid: #EF4444;
   --app-home: #14B8A6;
   --app-flow-active: #22D3EE;
+  --app-accent: #22D3EE;
+  --app-accent-active: #67E8F9;
+  --app-accent-shadow-rgb: 34, 211, 238;
+  --app-on-accent: #0D1117;
   --app-text-primary: #F0F6FC;
   --app-text-secondary: #8B949E;
   --app-scrollbar-thumb: #21262D;
@@ -55,6 +61,10 @@
   --app-grid: #DC2626;
   --app-home: #0D9488;
   --app-flow-active: #0891B2;
+  --app-accent: #0E7490;
+  --app-accent-active: #155E75;
+  --app-accent-shadow-rgb: 14, 116, 144;
+  --app-on-accent: #F6F8FA;
   --app-text-primary: #1F2328;
   --app-text-secondary: #57606A;
   --app-scrollbar-thumb: #D0D7DE;
@@ -125,14 +135,14 @@ input[type="range"]::-webkit-slider-thumb {
   width: 20px;
   height: 20px;
   border-radius: 50%;
-  background: var(--app-flow-active);
+  background: var(--app-accent);
   border: 3px solid var(--app-range-thumb-border);
   margin-top: -7px;
-  box-shadow: 0 0 6px rgba(34, 211, 238, 0.4);
+  box-shadow: 0 0 6px rgba(var(--app-accent-shadow-rgb), 0.4);
 }
 input[type="range"]:active::-webkit-slider-thumb {
-  background: #67E8F9;
-  box-shadow: 0 0 10px rgba(34, 211, 238, 0.6);
+  background: var(--app-accent-active);
+  box-shadow: 0 0 10px rgba(var(--app-accent-shadow-rgb), 0.6);
 }
 input[type="range"]::-moz-range-track {
   background: var(--app-range-track);
@@ -143,12 +153,12 @@ input[type="range"]::-moz-range-thumb {
   width: 20px;
   height: 20px;
   border-radius: 50%;
-  background: var(--app-flow-active);
+  background: var(--app-accent);
   border: 3px solid var(--app-range-thumb-border);
-  box-shadow: 0 0 6px rgba(34, 211, 238, 0.4);
+  box-shadow: 0 0 6px rgba(var(--app-accent-shadow-rgb), 0.4);
 }
 input[type="range"]:active::-moz-range-thumb {
-  background: #67E8F9;
+  background: var(--app-accent-active);
 }
 
 /* Select styling */
