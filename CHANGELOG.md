@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.71.1] - 2026-08-03
+
+### Fixed
+
+- **Home consumption no longer shows as a brief negative value when the app starts up.** Right after a reboot the inverter sometimes hasn't populated its house-load reading yet, which could make the dashboard display negative home use for the first few seconds until real data arrived. The app now treats any such transient as zero instead. (issue #247)
+
 ## [0.71.0] - 2026-08-03
 
 ### Added
