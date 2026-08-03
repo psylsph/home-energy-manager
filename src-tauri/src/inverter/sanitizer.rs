@@ -1770,6 +1770,42 @@ pub(crate) fn sanitize_snapshot(
         }
     }
 
+    // -- home_power physical sign floor --
+    // A house is a load, never a source, so `home_power` is physically
+    // bounded below by zero. The absolute-range check above is deliberately
+    // symmetric (it also serves the signed battery / grid fields), so a
+    // small negative value slips through: on single-phase the decoder reads
+    // `home_power` from the unsigned `IR(42) p_load_demand`, but when that
+    // register returns 0 (firmware quirk / not yet populated right after a
+    // reboot) the decoder falls back to the derived identity
+    // `home = solar + battery - grid`, which goes negative whenever grid
+    // export exceeds solar + battery. That transient negative then renders
+    // as "negative home consumption" on the initial status display
+    // (issue #247). Floor it at zero here — after the per-field checks and
+    // the cross-check have run — so a broadcast snapshot never carries an
+    // impossible value, regardless of grace period or device family. This
+    // enforces the invariant already documented above
+    // `cross_validate_power_balance` ("home_power >= 0, load is always
+    // positive") at the single point every snapshot passes through.
+    if snap.home_power < 0 {
+        tracing::info!(
+            raw = snap.home_power,
+            "home_power negative (likely derived-fallback while IR(42) p_load_demand is unpopulated after connect) - clamping to 0"
+        );
+        snap.home_power = 0;
+        // Deliberately do NOT set `sanitized`. Unlike the per-field range /
+        // rate checks (one-shot transitions, or carrying a suspect-release
+        // window), this sign floor is a stateless, unconditional clamp: a
+        // sustained fault that keeps producing a negative derived home_power
+        // (e.g. the simulator's StaleData mode with a frozen export-heavy
+        // frame and IR(42) stuck at 0) would trip it every cycle. Flipping
+        // `sanitized` triggers an immediate re-poll with no poll-interval
+        // sleep (see the re-poll path in poll.rs), so a persistent fault
+        // would spin the loop at full TCP speed. Correcting the value in
+        // place is enough to fix the display (issue #247); the next
+        // scheduled poll refreshes IR(42) on its own.
+    }
+
     // -- EPS power (IR(31) p_backup) --
     // Reference libraries cap the raw value at 50 kW and treat it as
     // uint16. The residential installs we care about (AC-coupled, AIO)
@@ -6721,6 +6757,178 @@ mod tests {
         assert_eq!(
             snap.home_power, 1_165,
             "grace period must hold rate-rejected home at prev (no cross-check)"
+        );
+    }
+
+    // ===== home_power sign-floor (issue #247: negative home consumption) =====
+    // Run the full sanitize_snapshot pipeline with an explicit grace flag,
+    // returning the sanitized flag so the tests can assert it flipped.
+    fn sanitize_with_skip(
+        snap: &mut InverterSnapshot,
+        prev: Option<&InverterSnapshot>,
+        skip_delta: bool,
+    ) -> bool {
+        let mut pending_mode = None;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+        let mut rate_release_counts = RateReleaseCounts::default();
+        sanitize_snapshot(
+            snap,
+            prev,
+            skip_delta,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+            &mut rate_release_counts,
+        )
+    }
+
+    #[test]
+    fn home_power_negative_is_clamped_to_zero_during_grace_period() {
+        // Issue #247: right after a reboot / fresh connect the dongle often
+        // returns IR(42) p_load_demand = 0, forcing the decoder's derived
+        // fallback `home = solar + battery - grid`. During the post-connect
+        // grace period the other three fields can be momentarily off, so the
+        // derived value goes negative (here: 0 + 0 - 800 export = -800). The
+        // power-balance cross-check is skipped during grace, so without an
+        // explicit sign floor this negative would be broadcast verbatim and
+        // render as "negative home consumption" on the initial status display.
+        let mut snap = cross_check_snap(0, 800, 0, -800, 100);
+        snap.device_type = DeviceType::Gen2Hybrid;
+        let sanitized = sanitize_with_skip(&mut snap, None, true);
+        // The sign floor corrects the value in place but must NOT flip the
+        // sanitized flag: doing so triggers an immediate re-poll (poll.rs)
+        // with no poll-interval sleep, and a sustained negative home_power
+        // fault would spin the loop. The clamp alone fixes the display.
+        assert!(
+            !sanitized,
+            "the sign floor must correct in place without flagging sanitized (avoids a re-poll tight-loop on sustained faults)"
+        );
+        assert_eq!(
+            snap.home_power, 0,
+            "negative home_power must be floored at 0 during the grace period"
+        );
+    }
+
+    #[test]
+    fn home_power_negative_is_clamped_to_zero_in_steady_state() {
+        // The sign floor is independent of the grace flag: a negative
+        // home_power is physically impossible in any state (a house is a
+        // load, never a source), so it must be floored even past grace.
+        let mut prev = cross_check_snap(0, 0, 0, 500, 97);
+        prev.device_type = DeviceType::Gen2Hybrid;
+        let mut snap = cross_check_snap(0, 800, 0, -800, 100);
+        snap.device_type = DeviceType::Gen2Hybrid;
+        let sanitized = sanitize_with_skip(&mut snap, Some(&prev), false);
+        assert!(
+            !sanitized,
+            "the sign floor must correct in place without flagging sanitized (avoids a re-poll tight-loop on sustained faults)"
+        );
+        assert_eq!(
+            snap.home_power, 0,
+            "negative home_power must be floored at 0 in steady state"
+        );
+    }
+
+    #[test]
+    fn home_power_zero_is_not_flagged_by_sign_floor() {
+        // A literal 0 (e.g. midnight with no load) is valid and must NOT trip
+        // the sign floor — only strictly-negative values are corrected.
+        let mut snap = cross_check_snap(0, 0, 0, 0, 100);
+        snap.device_type = DeviceType::Gen2Hybrid;
+        let sanitized = sanitize_with_skip(&mut snap, None, true);
+        assert_eq!(snap.home_power, 0);
+        assert!(
+            !sanitized,
+            "a zero home_power is valid and must not be flagged as sanitized"
+        );
+    }
+
+    #[test]
+    fn home_power_positive_is_unchanged_by_sign_floor() {
+        // A normal positive reading (direct from IR(42)) must pass through
+        // the sign floor untouched.
+        let mut snap = cross_check_snap(0, -500, 3_000, 2_500, 100);
+        snap.device_type = DeviceType::Gen2Hybrid;
+        sanitize_with_skip(&mut snap, None, true);
+        assert_eq!(
+            snap.home_power, 2_500,
+            "positive home_power must be unchanged by the sign floor"
+        );
+    }
+
+    #[test]
+    fn home_power_negative_is_clamped_on_gateway_device() {
+        // The sign floor's leading comment promises it applies "regardless
+        // of grace period or device family". Gateway is the one family that
+        // skips the power-balance cross-check (`needs_gateway_input_blocks`
+        // is true), so confirm the floor still catches a negative home_power
+        // there — the cross-check is not available as a backstop on gateway.
+        let mut snap = cross_check_snap(0, 1_000, 0, -1_000, 100);
+        snap.device_type = DeviceType::Gateway;
+        let sanitized = sanitize_with_skip(&mut snap, None, false);
+        assert!(
+            !sanitized,
+            "sign floor corrects in place without flagging sanitized on gateway too"
+        );
+        assert_eq!(
+            snap.home_power, 0,
+            "negative home_power must be floored at 0 on a gateway device"
+        );
+    }
+
+    #[test]
+    fn home_power_at_negative_range_ceiling_is_clamped() {
+        // The absolute-range check on home_power is deliberately symmetric
+        // (it also serves the signed battery / grid fields), so a value at
+        // the negative ceiling passes straight through. Here -15_000 W is
+        // within the Gen2Hybrid ±15 kW band (the check is `<= limit`), so it
+        // reaches the sign floor unmodified — exactly the gap the floor
+        // exists to close. Pins the contrast between the range check and the
+        // physical sign floor.
+        let mut snap = cross_check_snap(0, 15_000, 0, -15_000, 100);
+        snap.device_type = DeviceType::Gen2Hybrid;
+        let sanitized = sanitize_with_skip(&mut snap, None, true);
+        assert!(
+            !sanitized,
+            "the sign floor corrects in place without flagging sanitized"
+        );
+        assert_eq!(
+            snap.home_power, 0,
+            "a negative home_power at the range ceiling must still be floored at 0"
+        );
+    }
+
+    #[test]
+    fn home_power_negative_clamp_leaves_other_power_fields_untouched() {
+        // The floor must touch ONLY home_power — clamping it must not
+        // perturb the already-validated solar / battery / grid readings.
+        // home = solar + battery - grid = 3000 + 0 - 4000 = -1000 -> floored.
+        let mut snap = cross_check_snap(0, 4_000, 3_000, -1_000, 100);
+        snap.device_type = DeviceType::Gen2Hybrid;
+        sanitize_with_skip(&mut snap, None, true);
+        assert_eq!(snap.home_power, 0, "negative home_power must be floored");
+        assert_eq!(snap.solar_power, 3_000, "solar must be untouched");
+        assert_eq!(snap.battery_power, 0, "battery must be untouched");
+        assert_eq!(snap.grid_power, 4_000, "grid must be untouched");
+    }
+
+    #[test]
+    fn home_power_strictly_negative_minus_one_is_clamped() {
+        // The floor uses strict `< 0`, so even -1 W (just below the zero
+        // line) is corrected, while a literal 0 is left alone (covered by
+        // `home_power_zero_is_not_flagged_by_sign_floor`). Pins the boundary
+        // so a future refactor to `<= 0` would trip this test.
+        let mut snap = cross_check_snap(0, 0, 0, -1, 100);
+        snap.device_type = DeviceType::Gen2Hybrid;
+        let sanitized = sanitize_with_skip(&mut snap, None, true);
+        assert!(
+            !sanitized,
+            "the sign floor corrects in place without flagging sanitized"
+        );
+        assert_eq!(
+            snap.home_power, 0,
+            "-1 W is strictly negative and must be floored at 0"
         );
     }
 
