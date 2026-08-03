@@ -6,6 +6,7 @@ pub mod modbus;
 pub mod octopus;
 pub mod server;
 pub mod settings;
+pub mod update;
 #[cfg(test)]
 mod test_util;
 pub mod weather;
@@ -612,6 +613,12 @@ pub fn run() {
                 octopus::run_octopus_loop(octopus_state).await;
             });
 
+            // Spawn the "new version available" checker (GitHub Releases).
+            let update_state = state.clone();
+            tauri::async_runtime::spawn(async move {
+                update::run_update_loop(update_state).await;
+            });
+
             // Start the read-only API server if configured.
             let ro_state = state.clone();
             if !api_key.is_empty() && api_port > 0 {
@@ -856,6 +863,12 @@ pub fn run_headless(args: &[String]) {
         let octopus_state = state.clone();
         tokio::spawn(async move {
             octopus::run_octopus_loop(octopus_state).await;
+        });
+
+        // Spawn the "new version available" checker (GitHub Releases).
+        let update_state = state.clone();
+        tokio::spawn(async move {
+            update::run_update_loop(update_state).await;
         });
 
         // Start the read-only API server if configured.

@@ -292,6 +292,10 @@ export interface PollSettings {
   /** When true, the app launches with its window hidden in the tray
    *  (issue #217). Read once at startup, so it applies on the next launch. */
   start_minimised: boolean;
+  /** When true, the backend periodically checks GitHub for a newer release
+   *  and the frontend shows a dismissible "new version available" banner.
+   *  Defaults to on; the only data sent is the user's IP to api.github.com. */
+  check_for_updates?: boolean;
   /** API key for the read-only external API server (developer mode). */
   api_key: string;
   /** Port for the read-only external API server (0 = disabled). */
@@ -382,4 +386,28 @@ export interface HistorySummary {
   import_cost_gbp: number;
   export_income_gbp: number;
   net_cost_gbp: number;
+}
+
+/**
+ * Response shape of `GET /api/latest-version`. The backend caches the latest
+ * GitHub release in a background loop and serves this read-only; it never
+ * makes a network call on the request path. `latest_version` / `release_url`
+ * are absent while the cache is still empty (first ~30s after startup, or if
+ * GitHub is unreachable).
+ */
+export interface LatestVersionInfo {
+  /** The installed app version (e.g. `"0.70.2"`). */
+  current_version: string;
+  /** Latest release version from GitHub, or `null` while the cache is cold. */
+  latest_version: string | null;
+  /** Browser-friendly release URL (opened by the banner's link). */
+  release_url: string | null;
+  /** True when `latest_version` is strictly newer than `current_version`. */
+  update_available: boolean;
+  /** True while a background fetch is in flight (cold-start indicator). */
+  checking?: boolean;
+  /** ISO timestamp of the last cache refresh (best-effort, informational). */
+  last_checked_at?: string | null;
+  /** Present when the user has opted out of update checking entirely. */
+  disabled?: boolean;
 }

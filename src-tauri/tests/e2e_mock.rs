@@ -38,7 +38,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use givenergy_local::inverter::poll::AppState;
 use givenergy_local::server::create_router;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tower::ServiceExt;
 
 /// Max body size for the small JSON responses these tests produce.
@@ -380,6 +380,51 @@ async fn evc_status_empty_when_not_configured() {
     // and the frontend will render "Not Found" via the evcEverConnected
     // latch remaining false (issue #138).
     assert_eq!(body["reachable"], Value::Bool(false));
+}
+
+// ====================================================================
+// GET /api/latest-version ("new version available" cache)
+// ====================================================================
+// Hermetic: the endpoint only *reads* the cache (never fetches), and the
+// background `run_update_loop` is not spawned in tests, so the cache stays
+// empty. This pins the route wiring + payload shape + the current-version
+// field without touching the network.
+
+#[tokio::test]
+async fn latest_version_empty_cache_reports_current_and_no_update() {
+    let router = fresh_router();
+    let (status, body) = get_json(&router, "/api/latest-version").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], Value::Bool(true));
+    // current_version always reflects the compile-time package version.
+    assert_eq!(body["current_version"], json!(env!("CARGO_PKG_VERSION")));
+    // Empty cache → no latest known yet, never claims an update.
+    assert_eq!(body["update_available"], Value::Bool(false));
+    assert!(body
+        .get("latest_version")
+        .is_none_or(|v| v.is_null()));
+    assert!(body.get("release_url").is_none_or(|v| v.is_null()));
+}
+
+#[tokio::test]
+async fn latest_version_disabled_when_check_for_updates_off() {
+    // Write a settings.json with check_for_updates = false into the
+    // isolated config dir so the endpoint reports the opt-out.
+    let config = IsolatedConfig::enter();
+    {
+        let s = givenergy_local::settings::Settings {
+            check_for_updates: false,
+            ..Default::default()
+        };
+        s.save().expect("save settings");
+    }
+    let state = Arc::new(AppState::new());
+    let router = create_router(state);
+    let (status, body) = get_json(&router, "/api/latest-version").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["disabled"], Value::Bool(true));
+    assert_eq!(body["current_version"], json!(env!("CARGO_PKG_VERSION")));
+    drop(config);
 }
 
 // ====================================================================

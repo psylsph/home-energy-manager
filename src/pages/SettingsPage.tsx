@@ -240,6 +240,7 @@ export default function SettingsPage() {
     gridMeterAddress,
     setGridMeterAddress,
     snapshot,
+    latestVersionInfo,
   } = useInverterStore();
 
   // External CT clamps (address >= 0x01) — used to offer a grid-CT source
@@ -288,6 +289,8 @@ export default function SettingsPage() {
   // close handler reads it live), `start_minimised` on the next launch.
   const [minimiseToTray, setMinimiseToTray] = useState(false);
   const [startMinimised, setStartMinimised] = useState(false);
+  // "New version available" banner gate (defaults on).
+  const [checkForUpdates, setCheckForUpdates] = useState(true);
   // Read-only API key and port (developer mode, external access).
   const [apiKey, setApiKey] = useState('');
   const [apiPort, setApiPort] = useState(7338);
@@ -448,6 +451,7 @@ export default function SettingsPage() {
         setAutostartEnabled(s.autostart_enabled ?? false);
         setMinimiseToTray(s.minimise_to_tray ?? false);
         setStartMinimised(s.start_minimised ?? false);
+        setCheckForUpdates(s.check_for_updates ?? true);
         setApiKey(s.api_key ?? '');
         setApiPort(s.api_port ?? 7338);
         setSettingsLoaded(true);
@@ -947,6 +951,29 @@ export default function SettingsPage() {
       setStartMinimised(previous);
       const msg = e instanceof Error ? e.message : String(e);
       flash(`Failed to update start-minimised: ${msg}`, false);
+    }
+  };
+
+  // "New version available" banner gate. Persist only — the backend loop
+  // reads `check_for_updates` each cycle, and `GET /api/latest-version`
+  // returns `disabled: true` when it's off. Also clears the cached info so
+  // the banner hides immediately (a re-check on next mount repopulates if
+  // re-enabled).
+  const handleCheckForUpdatesToggle = async (next: boolean) => {
+    const previous = checkForUpdates;
+    setCheckForUpdates(next);
+    try {
+      await apiPost('/api/settings', { check_for_updates: next });
+      flash(
+        next
+          ? 'Will check for new releases'
+          : 'Update checking is now off',
+        true,
+      );
+    } catch (e) {
+      setCheckForUpdates(previous);
+      const msg = e instanceof Error ? e.message : String(e);
+      flash(`Failed to update update-checking: ${msg}`, false);
     }
   };
 
@@ -2522,6 +2549,53 @@ export default function SettingsPage() {
             </button>
           </div>
         )}
+      </section>
+
+      {/* ── Update checking ("new version available" banner) ── */}
+      <section className="bg-bg-surface rounded-xl p-5 space-y-4">
+        <div>
+          <h2 className="text-text-primary text-lg font-semibold font-sans">Updates</h2>
+          <p className="text-text-secondary text-sm mt-1">
+            The app checks GitHub for new releases and shows a dismissible banner when one is available. It doesn’t install anything automatically — clicking the banner opens the release page where you can download the update.
+          </p>
+        </div>
+        <div className="text-sm font-sans text-text-secondary flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span>
+            Current version:{' '}
+            <span className="font-mono text-text-primary">v{latestVersionInfo?.current_version ?? __APP_VERSION__}</span>
+          </span>
+          {latestVersionInfo && !latestVersionInfo.disabled && latestVersionInfo.latest_version && (
+            <>
+              <span aria-hidden="true" className="text-text-secondary/50">·</span>
+              <span>
+                Latest release:{' '}
+                <span className="font-mono text-text-primary">v{latestVersionInfo.latest_version}</span>
+                {latestVersionInfo.update_available && (
+                  <button
+                    type="button"
+                    onClick={() => void openExternal(latestVersionInfo.release_url ?? 'https://github.com/psylsph/home-energy-manager/releases')}
+                    className="ml-2 rounded-full bg-amber-500/30 hover:bg-amber-500/50 border border-amber-500/30 px-2.5 py-0.5 text-xs font-semibold text-amber-100 transition-colors"
+                  >
+                    View release
+                  </button>
+                )}
+              </span>
+            </>
+          )}
+        </div>
+        <div className="flex items-center justify-between">
+          <div className="flex flex-col gap-0.5">
+            <span className="text-text-primary text-sm font-sans font-medium">Check for New Releases</span>
+            <span className="text-text-secondary text-xs font-sans">
+              When on, the app contacts GitHub once every few hours to look for a newer version. The only information sent is your IP address — no usage data. Turn this off if you’d rather the app never reach out.
+            </span>
+          </div>
+          <Toggle
+            checked={checkForUpdates}
+            onChange={handleCheckForUpdatesToggle}
+            ariaLabel="Check for new releases"
+          />
+        </div>
       </section>
 
       {/* ─── Section 10: About ─── */}

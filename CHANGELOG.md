@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.71.0] - 2026-08-03
+
+### Added
+
+- **The app now lets you know when a new release is available.** A small dismissible banner appears under the header (and a version line in Settings) when a newer build is published on GitHub, with a link straight to the release page. It only checks periodically and only contacts GitHub with your IP address — no usage data is sent — and you can turn the check off entirely in Settings if you'd rather it never reach out.
+
 ## [0.70.2] - 2026-08-02
 
 ### Changed

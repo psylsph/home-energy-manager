@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { InverterSnapshot, ConnectionState, HistoryRange, ScheduleSlot } from '../lib/types';
+import type { InverterSnapshot, ConnectionState, HistoryRange, ScheduleSlot, LatestVersionInfo } from '../lib/types';
 import type { GridLineWeight } from '../lib/historyRangeConfig';
 import type { InverterTemperatureAlertConfig } from '../lib/gridFault';
 
@@ -180,6 +180,21 @@ interface InverterState {
   setShowFlowStatusWords: (enabled: boolean) => void;
   setVisualNoiseThreshold: (threshold: number) => void;
   setGridMeterAddress: (address: number) => void;
+  /**
+   * Cached result of `GET /api/latest-version` (fetched on app mount). Null
+   * until the first successful fetch; drives the dismissible "new version
+   * available" banner. Not persisted — it's a fresh cache read each launch.
+   */
+  latestVersionInfo: LatestVersionInfo | null;
+  setLatestVersionInfo: (info: LatestVersionInfo | null) => void;
+  /**
+   * Normalised version key the user has dismissed the banner for (e.g.
+   * `"0.70.3"`). Persisted to localStorage so the dismissal survives reloads,
+   * but only for that specific release — the banner reappears when an even
+   * newer version ships. Null when nothing has been dismissed.
+   */
+  dismissedUpdateVersion: string | null;
+  dismissUpdateVersion: (version: string) => void;
 }
 
 function loadDeveloperMode(): boolean {
@@ -313,6 +328,14 @@ function loadGridMeterAddress(): number {
   return 0; // auto: built-in grid CT (0x00) on three-phase / HV, else lowest external clamp
 }
 
+function loadDismissedUpdateVersion(): string | null {
+  try {
+    return localStorage.getItem('hem_dismissed_update_version');
+  } catch {
+    return null;
+  }
+}
+
 function loadGridLineWeight(): GridLineWeight {
   try {
     const stored = localStorage.getItem('gridLineWeight');
@@ -367,6 +390,8 @@ export const useInverterStore = create<InverterState>((set) => ({
   visualNoiseThreshold: loadVisualNoiseThreshold(),
   gridMeterAddress: loadGridMeterAddress(),
   gridLineWeight: loadGridLineWeight(),
+  latestVersionInfo: null,
+  dismissedUpdateVersion: loadDismissedUpdateVersion(),
   pendingDischargeSlots: loadPendingDischargeSlots(),
   evcHost: '',
   evcPower: 0,
@@ -445,6 +470,13 @@ export const useInverterStore = create<InverterState>((set) => ({
       localStorage.setItem('gridMeterAddress', String(address));
     } catch { /* ignore */ }
     set({ gridMeterAddress: address });
+  },
+  setLatestVersionInfo: (info) => set({ latestVersionInfo: info }),
+  dismissUpdateVersion: (version) => {
+    try {
+      localStorage.setItem('hem_dismissed_update_version', version);
+    } catch { /* ignore */ }
+    set({ dismissedUpdateVersion: version });
   },
   setGridLineWeight: (weight) => {
     // Defensive: the setter takes a `GridLineWeight`, so the type system

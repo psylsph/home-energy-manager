@@ -6,6 +6,7 @@ import { useWebSocket } from './hooks/useWebSocket';
 import { useGridOutageNotifications } from './hooks/useGridOutageNotifications';
 import { useReconnect } from './hooks/useReconnect';
 import type { PollSettings } from './lib/types';
+import type { LatestVersionInfo } from './lib/types';
 import { apiGet } from './lib/api';
 import { formatPercent, formatTimestamp } from './lib/format';
 import { buildSystemAlerts } from './lib/gridFault';
@@ -22,6 +23,7 @@ import SolarPage from './pages/SolarPage';
 import InverterPage from './pages/InverterPage';
 import PowerPage from './pages/PowerPage';
 import ErrorBoundary from './components/ErrorBoundary';
+import UpdateBanner from './components/UpdateBanner';
 
 function ThemeToggle() {
   const { themeMode, setThemeMode } = useInverterStore();
@@ -301,7 +303,7 @@ function Layout() {
   useWebSocket();
   useGridOutageNotifications();
   const [searchParams] = useSearchParams();
-  const { snapshot, developerMode, themeMode, hiddenPanels, readOnly, setHiddenPanels, setEvcHost, setInverterTempConfig, setReadOnly } = useInverterStore();
+  const { snapshot, developerMode, themeMode, hiddenPanels, readOnly, setHiddenPanels, setEvcHost, setInverterTempConfig, setReadOnly, setLatestVersionInfo } = useInverterStore();
   const [octopusConfigured, setOctopusConfigured] = useState(false);
 
   // Load navigation-affecting settings on mount. The Octopus page is opt-in:
@@ -348,6 +350,36 @@ function Layout() {
       .catch(() => { /* keep store defaults */ });
     return () => { cancelled = true; };
   }, [setInverterTempConfig]);
+
+  // "New version available" check. Fetches the backend's cached latest
+  // release on mount. The backend caches GitHub's response in a background
+  // loop that only fires ~30s after startup, so on a cold start the first
+  // fetch usually comes back empty (latest_version: null). We schedule a
+  // single follow-up fetch a minute later so the banner still appears
+  // without making the user reload — no perpetual polling for what is a
+  // rarely-changing value.
+  useEffect(() => {
+    let cancelled = false;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    const load = async () => {
+      try {
+        const res = await apiGet<LatestVersionInfo>('/api/latest-version');
+        if (cancelled) return;
+        setLatestVersionInfo(res);
+        // Cold cache: the background loop hasn't populated yet. Retry once.
+        if (!res.disabled && res.latest_version == null) {
+          retry = setTimeout(load, 60_000);
+        }
+      } catch {
+        /* keep store default (null) — banner simply won't show */
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+      if (retry) clearTimeout(retry);
+    };
+  }, [setLatestVersionInfo]);
 
   // Read-only mode (?RO URL parameter, issue #114). When the URL carries
   // `?RO`, hide the Control and Settings nav icons so a household-shared
@@ -422,6 +454,7 @@ function Layout() {
       </header>
 
       <SystemAlertBanners />
+      <UpdateBanner />
 
       {/* Content */}
       <main className="flex-1 overflow-auto px-4 py-3 md:px-6 md:py-4 pb-safe">

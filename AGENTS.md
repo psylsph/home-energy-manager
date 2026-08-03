@@ -158,10 +158,11 @@ Frontend talks exclusively to the local Axum server — never directly to the in
 - **`evc/`** — EV Charger (OCPP/Modbus) client + poll loop. Standard Modbus TCP on port 502; broadcasts `PollMessage::Evc` on every successful snapshot, `PollMessage::EvcConnected` immediately on TCP handshake (before first register read), and `PollMessage::EvcDisconnected` on invalid-host parse error or connect failure. Invalid-host parsing also clears `latest_evc` so the frontend's `/api/evc/status` reports the right `reachable=false`.
 - **`settings/`** — persisted JSON config (`~/.givenergy-local/settings.json`)
 - **`alerts/`** — alert evaluation engine + push notifications. Evaluates each sanitized `InverterSnapshot` against user thresholds (battery temperature high/low, battery SOC high/low, solar-clipping ceiling, inverter battery-warning flag, grid offline) with per-type cooldown and consecutive-read confirmation, then delivers via the **Telegram Bot API** and/or **ntfy.sh** (including self-hosted ntfy). Also generates/sends the daily consumption report and polls Telegram for `/status`, `/today`, `/report` commands. **This covers GitHub issue #85 (critical-condition notifications) — implemented as Telegram + ntfy push notifications rather than email.**
+- **`update.rs`** — "new version available" detection. A background `run_update_loop` polls the GitHub Releases API (`api.github.com`) every 6h (gated by the `check_for_updates` setting, default on) and caches the latest release tag in `AppState::update`. `GET /api/latest-version` is read-only — it never fetches on the request path, so it stays hermetic to test. The frontend compares `current_version` (`CARGO_PKG_VERSION`) against the cached `latest_version` and shows a dismissible banner.
 
 ### Shared state (`AppState`)
 
-`Arc<Mutex<…>>` shared between poll loop, API handlers, and WebSocket: `latest_snapshot`, `connection_state`, `pending_writes`, `write_notify` (wakes poll loop), `settings`, `history`, `log_ring` (2000-entry ring buffer).
+`Arc<Mutex<…>>` shared between poll loop, API handlers, and WebSocket: `latest_snapshot`, `connection_state`, `pending_writes`, `write_notify` (wakes poll loop), `settings`, `history`, `log_ring` (2000-entry ring buffer), `update` (cached latest GitHub release for the "new version available" banner).
 
 ## Data sanitization (register corruption defense)
 

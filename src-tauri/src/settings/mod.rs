@@ -1124,6 +1124,16 @@ pub struct Settings {
     #[serde(default)]
     pub weather_config: WeatherConfig,
 
+    // -- Update checking ("new version available" banner) --
+    /// When true, the backend periodically asks GitHub for the latest
+    /// release tag and the frontend shows a dismissible banner when a newer
+    /// version exists. Defaults to on so the banner just works; the only
+    /// data sent is the user's IP to `api.github.com` (no telemetry).
+    /// Toggling off stops the background loop's fetches and makes
+    /// `GET /api/latest-version` report `disabled: true`.
+    #[serde(default = "default_check_for_updates")]
+    pub check_for_updates: bool,
+
     // -- Octopus Energy customer consumption (issue #212) --
     /// Opt-in gate for authenticated Octopus account consumption sync.
     #[serde(default)]
@@ -1272,6 +1282,13 @@ fn default_agile_region() -> String {
 
 fn default_api_port() -> u16 {
     7338
+}
+
+/// Default for [`Settings::check_for_updates`] — on, so the "new version
+/// available" banner works out of the box. Users who'd rather the app never
+/// contact GitHub can turn it off in Settings.
+fn default_check_for_updates() -> bool {
+    true
 }
 
 fn default_octopus_gas_unit() -> String {
@@ -1505,6 +1522,7 @@ impl Default for Settings {
             hidden_panels: Vec::new(),
             alerts_config: AlertsConfig::default(),
             weather_config: WeatherConfig::default(),
+            check_for_updates: default_check_for_updates(),
             octopus_enabled: false,
             octopus_api_key: String::new(),
             octopus_account_number: String::new(),
@@ -1747,6 +1765,7 @@ mod tests {
             agile_state_persisted: "discharging".to_string(),
             hidden_panels: Vec::new(),
             alerts_config: AlertsConfig::default(),
+            check_for_updates: default_check_for_updates(),
             weather_config: WeatherConfig {
                 enabled: true,
                 postcode: "SW1A 1AA".to_string(),
@@ -2182,6 +2201,7 @@ mod tests {
             hidden_panels: Vec::new(),
             alerts_config: AlertsConfig::default(),
             weather_config: WeatherConfig::default(),
+            check_for_updates: default_check_for_updates(),
             octopus_enabled: false,
             octopus_api_key: String::new(),
             octopus_account_number: String::new(),

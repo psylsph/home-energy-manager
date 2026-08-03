@@ -875,6 +875,8 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "evc_port": settings.evc_port,
             "disable_auto_discovery": settings.disable_auto_discovery,
             "autostart_enabled": settings.autostart_enabled,
+            // "New version available" banner gate.
+            "check_for_updates": settings.check_for_updates,
             // Issue #217: tray window preferences. Both default to false so
             // an older settings.json simply reports them as off.
             "minimise_to_tray": settings.minimise_to_tray,
@@ -1043,6 +1045,11 @@ pub async fn update_settings(
     }
     if let Some(d) = body.get("disable_auto_discovery").and_then(|v| v.as_bool()) {
         persist.disable_auto_discovery = d;
+    }
+    // "New version available" banner gate. Disabling stops the background
+    // loop's GitHub fetches and makes the banner hide on next poll.
+    if let Some(c) = body.get("check_for_updates").and_then(|v| v.as_bool()) {
+        persist.check_for_updates = c;
     }
     // Persist the user's autostart preference. The actual platform
     // autostart entry is driven from the frontend via the
@@ -1266,6 +1273,9 @@ fn settings_log_fields(
             "disable_auto_discovery={}",
             persist.disable_auto_discovery
         ));
+    }
+    if is_present("check_for_updates") {
+        out.push(format!("check_for_updates={}", persist.check_for_updates));
     }
     if is_present("autostart_enabled") {
         out.push(format!("autostart_enabled={}", persist.autostart_enabled));

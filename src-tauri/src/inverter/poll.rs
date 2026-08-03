@@ -364,6 +364,10 @@ pub struct AppState {
     pub weather: Arc<Mutex<crate::weather::WeatherState>>,
     /// Octopus customer-consumption synchronization status.
     pub octopus: Arc<Mutex<crate::octopus::OctopusState>>,
+    /// "New version available" cache. Populated by the background
+    /// [`crate::update::run_update_loop`]; read (never written) by the
+    /// [`crate::update::get_latest_version`] HTTP handler.
+    pub update: Arc<Mutex<crate::update::UpdateState>>,
     /// Wall-clock time when the current connection was established (None if disconnected).
     pub connected_since: Arc<std::sync::Mutex<Option<std::time::SystemTime>>>,
     /// How many consecutive TCP connect attempts have failed since the last success.
@@ -428,6 +432,7 @@ impl AppState {
                 ..Default::default()
             })),
             octopus: Arc::new(Mutex::new(crate::octopus::OctopusState::default())),
+            update: Arc::new(Mutex::new(crate::update::UpdateState::default())),
         }
     }
 }
@@ -486,6 +491,7 @@ impl AppState {
                 ..Default::default()
             })),
             octopus: Arc::new(Mutex::new(crate::octopus::OctopusState::default())),
+            update: Arc::new(Mutex::new(crate::update::UpdateState::default())),
         }
     }
 }
