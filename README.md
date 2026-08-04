@@ -15,6 +15,8 @@ Home Energy Manager connects directly to your inverter over your home network an
 
 </div>
 
+> 💬 **Got a question or hit a snag?** Try asking your favourite AI assistant first — just point it at the [**installation guide**](https://github.com/psylsph/home-energy-manager/blob/master/INSTALL.md) and ask your question. If you don't get your answer, feel free to [raise an issue](https://github.com/psylsph/home-energy-manager/issues).
+
 ## Screenshots
 
 <table>
