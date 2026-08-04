@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.71.2] - 2026-08-04
+
+### Fixed
+
+- **Battery pause and resume now tell you exactly what went wrong instead of silently failing.** When the inverter rejects a setting during pause or resume — which happens on some Gen3 dongles — you now see which setting couldn't be applied and can retry, rather than waiting for a timeout. (issue #245)
+
+- **Eco mode now sticks on Gen3 inverters.** Switching from Timed Export to Eco used to leave stale discharge schedules that the Gen3 firmware re-armed, bouncing the battery back into export mode. Eco now clears the export schedule and discharge slots together so it holds. (issue #248)
+
+- **All battery mode buttons now show "Applying…" until the inverter confirms the change.** Eco, Timed Charge, Timed Export, and Timed Discharge stay visibly in progress while the inverter applies the write, with a clear error if confirmation never arrives — matching the Quick Actions.
+
 ## [0.71.1] - 2026-08-03
 
 ### Fixed
