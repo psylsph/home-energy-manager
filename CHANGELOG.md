@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.71.3] - 2026-08-04
+
+### Changed
+
+- **The "new version available" check now runs immediately when the app opens, rather than waiting up to 30 seconds.** The banner appears sooner after launch, and each check fetches fresh data from GitHub instead of relying solely on a cached result. It's rate-limited to once per minute so it stays well under GitHub's request ceiling.
+
 ## [0.71.2] - 2026-08-04
 
 ### Fixed
