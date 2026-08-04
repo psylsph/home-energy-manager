@@ -37,6 +37,15 @@ import {
  * the backend models as `cosy_enabled = true` regardless of scope).
  */
 type ChargeMode = 'standard' | 'cosy' | 'agile' | 'agile_charge' | 'agile_discharge' | 'adaptive';
+type BatteryModeKind = 'eco' | 'timed_charge' | 'timed_export' | 'timed_discharge';
+type BatteryModePending = { kind: BatteryModeKind; enabled: boolean };
+
+const BATTERY_MODE_LABELS: Record<BatteryModeKind, string> = {
+  eco: 'Eco',
+  timed_charge: 'Timed Charge',
+  timed_export: 'Timed Export',
+  timed_discharge: 'Timed Discharge',
+};
 
 const RESERVE_SOC_MIN = 4;
 const RESERVE_SOC_MAX = 100;
@@ -2067,10 +2076,8 @@ function TemperatureLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) 
 
 export default function ControlPage() {
   const { snapshot, developerMode, connectionState, connectedHost } = useInverterStore();
-  const [ecoSaving, setEcoSaving] = useState(false);
-  const [timedChargeSaving, setTimedChargeSaving] = useState(false);
-  const [timedExportSaving, setTimedExportSaving] = useState(false);
-  const [timedDischargeSaving, setTimedDischargeSaving] = useState(false);
+  const [batteryModePending, setBatteryModePending] = useState<BatteryModePending | null>(null);
+  const [batteryModeError, setBatteryModeError] = useState<string | null>(null);
   const [timedDischargeOverride, setTimedDischargeOverride] = useState<boolean | null>(null);
   const [loadLimiterRefreshKey, setLoadLimiterRefreshKey] = useState(0);
   const [pauseDischargePending, setPauseDischargePending] = useState<'pause' | 'resume' | null>(null);
@@ -2209,7 +2216,39 @@ export default function ControlPage() {
   const timedExportEnabled = snapshot?.enable_discharge ?? false;
   const snapshotTimedDischargeEnabled = snapshot?.battery_pause_mode === 2;
   const timedDischargeEnabled = timedDischargeOverride ?? snapshotTimedDischargeEnabled;
+  const batteryModeApplying = batteryModePending != null;
+  const batteryModeConfirmed = batteryModePending != null && (
+    batteryModePending.kind === 'eco'
+      ? ecoEnabled === batteryModePending.enabled
+        && (!batteryModePending.enabled || !timedExportEnabled)
+      : batteryModePending.kind === 'timed_charge'
+        ? timedChargeEnabled === batteryModePending.enabled
+        : batteryModePending.kind === 'timed_export'
+          ? timedExportEnabled === batteryModePending.enabled
+            && (!batteryModePending.enabled || snapshot?.battery_power_mode === 0)
+            && (batteryModePending.enabled || ecoEnabled)
+          : snapshotTimedDischargeEnabled === batteryModePending.enabled
+  );
   const pauseDischargeActive = currentMode === 'eco_paused' || automatedPauseActive;
+
+  useEffect(() => {
+    if (batteryModePending == null) return;
+    if (batteryModeConfirmed) {
+      const confirmed = window.setTimeout(() => {
+        setBatteryModePending(null);
+        setBatteryModeError(null);
+      }, 0);
+      return () => window.clearTimeout(confirmed);
+    }
+    const action = batteryModePending;
+    const timeout = window.setTimeout(() => {
+      setBatteryModePending(null);
+      setBatteryModeError(
+        `${BATTERY_MODE_LABELS[action.kind]} did not confirm the change. Please try again.`,
+      );
+    }, 30_000);
+    return () => window.clearTimeout(timeout);
+  }, [batteryModeConfirmed, batteryModePending]);
   const hasLiveControlSnapshot = snapshot != null && connectionState === 'connected';
   const pauseDischargeConfirmed = hasLiveControlSnapshot && (
     pauseDischargePending === 'pause'
@@ -2572,38 +2611,49 @@ export default function ControlPage() {
   }, [timedDischargeOverride]);
 
   const handleEcoToggle = async () => {
+    if (batteryModeApplying) return;
     const enabled = !ecoEnabled;
-    setEcoSaving(true);
+    setBatteryModePending({ kind: 'eco', enabled });
+    setBatteryModeError(null);
     try {
       await apiPost('/api/control/eco', { enabled });
-    } finally {
-      setEcoSaving(false);
+    } catch (error) {
+      setBatteryModePending(null);
+      setBatteryModeError(error instanceof Error ? error.message : 'Eco toggle failed.');
     }
   };
 
   const handleTimedChargeToggle = async () => {
+    if (batteryModeApplying) return;
     const enabled = !timedChargeEnabled;
-    setTimedChargeSaving(true);
+    setBatteryModePending({ kind: 'timed_charge', enabled });
+    setBatteryModeError(null);
     try {
       await apiPost('/api/control/timed-charge', { enabled });
-    } finally {
-      setTimedChargeSaving(false);
+    } catch (error) {
+      setBatteryModePending(null);
+      setBatteryModeError(error instanceof Error ? error.message : 'Timed Charge toggle failed.');
     }
   };
 
   const handleTimedExportToggle = async () => {
+    if (batteryModeApplying) return;
     const enabled = !timedExportEnabled;
-    setTimedExportSaving(true);
+    setBatteryModePending({ kind: 'timed_export', enabled });
+    setBatteryModeError(null);
     try {
       await apiPost('/api/control/timed-export', { enabled });
-    } finally {
-      setTimedExportSaving(false);
+    } catch (error) {
+      setBatteryModePending(null);
+      setBatteryModeError(error instanceof Error ? error.message : 'Timed Export toggle failed.');
     }
   };
 
   const handleTimedDischargeToggle = async () => {
+    if (batteryModeApplying) return;
     const enabled = !timedDischargeEnabled;
-    setTimedDischargeSaving(true);
+    setBatteryModePending({ kind: 'timed_discharge', enabled });
+    setBatteryModeError(null);
     setTimedDischargeOverride(enabled);
     try {
       await apiPost('/api/control/timed-discharge', {
@@ -2613,10 +2663,10 @@ export default function ControlPage() {
         end_hour: timedDischargeSlot.end_hour,
         end_minute: timedDischargeSlot.end_minute,
       });
-    } catch {
+    } catch (error) {
       setTimedDischargeOverride(null);
-    } finally {
-      setTimedDischargeSaving(false);
+      setBatteryModePending(null);
+      setBatteryModeError(error instanceof Error ? error.message : 'Timed Discharge toggle failed.');
     }
   };
 
@@ -2835,7 +2885,7 @@ export default function ControlPage() {
           <button
             type="button"
             onClick={handleEcoToggle}
-            disabled={ecoSaving}
+            disabled={batteryModeApplying}
             aria-pressed={ecoEnabled}
             className={`px-3 py-3 rounded-lg border text-xs font-medium transition flex flex-col items-start gap-1 ${ecoEnabled
                 ? 'bg-accent/20 border-accent text-accent'
@@ -2843,15 +2893,15 @@ export default function ControlPage() {
               } disabled:opacity-50`}
           >
             <span className="flex items-center justify-center gap-2 w-full text-sm">
-              {ecoSaving && <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />}
-              <b>Eco</b>
+              {batteryModePending?.kind === 'eco' && <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />}
+              <b>{batteryModePending?.kind === 'eco' ? 'Applying…' : 'Eco'}</b>
             </span>
             <span className="text-[11px] text-text-secondary">Battery Covers Home Demand</span>
           </button>
           <button
             type="button"
             onClick={handleTimedChargeToggle}
-            disabled={timedChargeSaving}
+            disabled={batteryModeApplying}
             aria-pressed={timedChargeEnabled}
             className={`px-3 py-3 rounded-lg border text-xs font-medium transition flex flex-col items-start gap-1 ${timedChargeEnabled
                 ? 'bg-accent/20 border-accent text-accent'
@@ -2859,8 +2909,8 @@ export default function ControlPage() {
               } disabled:opacity-50`}
           >
             <span className="flex items-center justify-center gap-2 w-full text-sm">
-              {timedChargeSaving && <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />}
-              <b>Timed Charge</b>
+              {batteryModePending?.kind === 'timed_charge' && <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />}
+              <b>{batteryModePending?.kind === 'timed_charge' ? 'Applying…' : 'Timed Charge'}</b>
             </span>
             <span className="text-[11px] text-text-secondary">Performs Charge During Specified Time(s)</span>
           </button>
@@ -2868,7 +2918,7 @@ export default function ControlPage() {
             <button
               type="button"
               onClick={handleTimedDischargeToggle}
-              disabled={timedDischargeSaving}
+              disabled={batteryModeApplying}
               aria-pressed={timedDischargeEnabled}
               className={`px-3 py-3 rounded-lg border text-xs font-medium transition flex flex-col items-start gap-1 ${timedDischargeEnabled
                   ? 'bg-accent/20 border-accent text-accent'
@@ -2876,8 +2926,8 @@ export default function ControlPage() {
                 } disabled:opacity-50`}
             >
               <span className="flex items-center justify-center gap-2 w-full text-sm">
-                {timedDischargeSaving && <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />}
-                <b>Timed Discharge</b>
+                {batteryModePending?.kind === 'timed_discharge' && <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />}
+                <b>{batteryModePending?.kind === 'timed_discharge' ? 'Applying…' : 'Timed Discharge'}</b>
               </span>
               <span className="text-[11px] text-text-secondary">Only Allow Discharge During Specified Time</span>
             </button>
@@ -2885,7 +2935,7 @@ export default function ControlPage() {
           <button
             type="button"
             onClick={handleTimedExportToggle}
-            disabled={timedExportSaving}
+            disabled={batteryModeApplying}
             aria-pressed={timedExportEnabled}
             className={`px-3 py-3 rounded-lg border text-xs font-medium transition flex flex-col items-start gap-1 ${timedExportEnabled
                 ? 'bg-accent/20 border-accent text-accent'
@@ -2893,13 +2943,24 @@ export default function ControlPage() {
               } disabled:opacity-50`}
           >
             <span className="flex items-center justify-center gap-2 w-full text-sm">
-              {timedExportSaving && <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />}
-              <b>Timed Export</b>
+              {batteryModePending?.kind === 'timed_export' && <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />}
+              <b>{batteryModePending?.kind === 'timed_export' ? 'Applying…' : 'Timed Export'}</b>
             </span>
             <span className="text-[11px] text-text-secondary">Forces Battery Export During Specified Time(s)</span>
           </button>
 
         </div>
+        {batteryModeError && (
+          <p className="text-red-400 text-xs" role="alert">{batteryModeError}</p>
+        )}
+        {timedExportEnabled && (
+          <p
+            role="status"
+            className="text-xs text-amber-200 bg-amber-900/20 border border-amber-700/30 rounded-lg px-3 py-2"
+          >
+            Timed Export is active. Enabling Eco will disable Timed Export and return the battery to self-consumption.
+          </p>
+        )}
       </section>
 
       {/* Section 3: Charging Mode */}

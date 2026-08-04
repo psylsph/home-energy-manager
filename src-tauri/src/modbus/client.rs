@@ -287,6 +287,21 @@ pub struct ModbusClient {
     consumer_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// What [`ModbusClient::write_register`] should do after receiving a
+/// Modbus-exception response. Extracted as a pure decision so every branch
+/// — including the code-67 "treat as acknowledged" exhaustion path — can be
+/// unit-tested without the real (slow) retry sleeps.
+#[derive(Debug, PartialEq, Eq)]
+enum WriteExceptionAction {
+    /// Retry the write after sleeping for `gap`.
+    Retry { gap: Duration },
+    /// Code-67 exhaustion: the dongle stayed "busy" through every retry but
+    /// may still have applied the write — treat it as acknowledged.
+    Acknowledged,
+    /// Non-67 exhaustion: surface the rejection to the caller.
+    Fail,
+}
+
 impl ModbusClient {
     /// Create a new client that will connect to `host:port`.
     ///
@@ -1221,6 +1236,30 @@ impl ModbusClient {
         Ok(values)
     }
 
+    /// Decide the retry/exhaustion action for a Modbus exception received on
+    /// attempt `attempt` (0-indexed) out of `max_attempts`. `is_busy` is true
+    /// for the code-67 "dongle busy" exception, which keeps its longer 2 s
+    /// gap and its acknowledge-on-exhaust semantics.
+    fn write_exception_action(
+        attempt: u8,
+        max_attempts: u8,
+        is_busy: bool,
+    ) -> WriteExceptionAction {
+        if attempt + 1 < max_attempts {
+            WriteExceptionAction::Retry {
+                gap: if is_busy {
+                    Duration::from_secs(2)
+                } else {
+                    Self::RETRY_DELAY
+                },
+            }
+        } else if is_busy {
+            WriteExceptionAction::Acknowledged
+        } else {
+            WriteExceptionAction::Fail
+        }
+    }
+
     /// Write a single holding register (transparent function code 6).
     ///
     /// Per the givenergy-modbus reference library, writes use:
@@ -1280,20 +1319,44 @@ impl ModbusClient {
                     tracing::debug!("Write ack: register {register} = {value} (0x{value:04X})");
                     return Ok(());
                 }
-                Err(ClientError::InvalidResponse(msg)) if msg.contains("code 67") => {
-                    if attempt + 1 < max_attempts {
-                        tracing::debug!(
-                            "Write at {register} got exception 67 (busy), retrying ({}/{})",
-                            attempt + 1,
-                            max_attempts
-                        );
-                        tokio::time::sleep(Duration::from_secs(2)).await;
-                        continue;
+                // Retry on ANY Modbus exception, not just the documented
+                // code-67 "dongle busy". GivEnergy dongles also emit
+                // spurious non-standard codes (e.g. code 0 observed on Gen3
+                // hybrids when writing the SOC reserve, issue #245) that are
+                // transient — the next attempt usually lands. Code 67 keeps its
+                // longer 2s gap and its "treat as acknowledged" exhaustion
+                // behaviour (the dongle may have applied the write); other
+                // codes use the standard retry gap and surface a real error
+                // if every attempt is rejected. The decision is centralised in
+                // [`Self::write_exception_action`] so it can be unit-tested
+                // without the real (slow) retry sleeps.
+                Err(ClientError::InvalidResponse(msg))
+                    if msg.starts_with("Modbus exception") =>
+                {
+                    let is_busy = msg.contains("code 67");
+                    match Self::write_exception_action(attempt, max_attempts, is_busy) {
+                        WriteExceptionAction::Retry { gap } => {
+                            tracing::debug!(
+                                "Write at {register} got exception ({msg}), retrying ({}/{})",
+                                attempt + 1,
+                                max_attempts
+                            );
+                            tokio::time::sleep(gap).await;
+                            continue;
+                        }
+                        WriteExceptionAction::Acknowledged => {
+                            tracing::warn!(
+                                "Write at {register} got exception 67 after {max_attempts} retries — treating as acknowledged"
+                            );
+                            return Ok(());
+                        }
+                        WriteExceptionAction::Fail => {
+                            tracing::warn!(
+                                "Write at {register} rejected after {max_attempts} retries: {msg}"
+                            );
+                            return Err(ClientError::InvalidResponse(msg));
+                        }
                     }
-                    tracing::warn!(
-                        "Write at {register} got exception 67 after {max_attempts} retries — treating as acknowledged"
-                    );
-                    return Ok(());
                 }
                 Err(ClientError::Timeout) if attempt + 1 < max_attempts => {
                     tracing::debug!(
@@ -1527,7 +1590,7 @@ impl ModbusClient {
 // ===========================================================================
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #![allow(dead_code)]
     use super::super::framer::HEADER_SIZE;
     use super::*;
@@ -2135,7 +2198,8 @@ mod tests {
     use tokio::net::TcpListener;
 
     /// Programmed response for a single request.
-    enum MockResponse {
+    #[derive(Clone)]
+    pub(crate) enum MockResponse {
         /// Send this frame as-is.
         Raw(Vec<u8>),
         /// Simulate a read response with the given slave/function/base/data.
@@ -2405,7 +2469,7 @@ mod tests {
 
     /// Helper: start a mock server and connect a client to it.
     /// Returns (port, server_handle, client).
-    async fn setup_client_with_server(
+    pub(crate) async fn setup_client_with_server(
         responses: Vec<MockResponse>,
     ) -> (u16, tokio::task::JoinHandle<()>, ModbusClient) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3283,6 +3347,154 @@ mod tests {
         );
 
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_register_retries_non_67_exception_then_succeeds() {
+        // Regression for issue #245: GivEnergy dongles sometimes reject a
+        // write with a spurious non-standard exception code (code 0 observed
+        // on a Gen3 hybrid when writing the SOC reserve, HR 110). Such
+        // exceptions are transient — the write lands on a retry. Previously
+        // only code 67 was retried, so a code-0 rejection failed the write
+        // immediately. Responses: exception (code 0), then a valid ack.
+        let exception = MockResponse::Exception {
+            slave: 0x11,
+            function: 0x06,
+            code: 0,
+        };
+
+        let mut payload = Vec::with_capacity(14);
+        payload.extend_from_slice(b"TEST123456");
+        payload.extend_from_slice(&[0x00u8, 0x6E]); // register 110 (HR_BATTERY_SOC_RESERVE)
+        payload.extend_from_slice(&[0x00u8, 0x64]); // value 100
+        let ack = crate::modbus::framer::encode_frame("TEST123456", 0x11, 0x06, &payload);
+
+        let responses = vec![exception, MockResponse::Raw(ack)];
+
+        let (_port, server, mut client) = setup_client_with_server(responses).await;
+
+        let result = client.write_register(110, 100).await;
+        assert!(
+            result.is_ok(),
+            "Write rejected with a non-67 exception must be retried, got: {:?}",
+            result
+        );
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_register_fails_after_exhausting_non_67_exception_retries() {
+        // A register that the dongle keeps rejecting with a non-67 exception
+        // (even after the full retry set) must surface a real error — unlike
+        // code 67, which is treated as acknowledged once exhausted. The mock
+        // cycles a single code-0 exception across all 6 attempts.
+        let responses = vec![MockResponse::Exception {
+            slave: 0x11,
+            function: 0x06,
+            code: 0,
+        }];
+
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+
+        let result = client.write_register(110, 100).await;
+        let err = result.expect_err(
+            "A persistently-rejected non-67 exception must fail the write, not return Ok",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("code 0"),
+            "Error must name the exception code, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_register_retries_code_67_then_succeeds() {
+        // The code-67 "dongle busy" path keeps its retry behaviour even after
+        // the retry match was broadened to all Modbus exceptions (issue #245):
+        // a busy dongle is retried (using the longer 2s gap) and the write
+        // succeeds once the dongle recovers. Responses: code 67, then a valid
+        // ack. (Exhaustion of code 67 is still treated as acknowledged —
+        // that 2-line branch is preserved but not exercised here to avoid a
+        // ~10 s test; the read-path code_67_busy_triggers_retry_and_succeeds
+        // test covers the same semantics for reads.)
+        let exception = MockResponse::Exception {
+            slave: 0x11,
+            function: 0x06,
+            code: 67,
+        };
+
+        let mut payload = Vec::with_capacity(14);
+        payload.extend_from_slice(b"TEST123456");
+        payload.extend_from_slice(&[0x00u8, 0x6E]); // register 110
+        payload.extend_from_slice(&[0x00u8, 0x64]); // value 100
+        let ack = crate::modbus::framer::encode_frame("TEST123456", 0x11, 0x06, &payload);
+
+        let responses = vec![exception, MockResponse::Raw(ack)];
+
+        let (_port, server, mut client) = setup_client_with_server(responses).await;
+
+        let result = client.write_register(110, 100).await;
+        assert!(
+            result.is_ok(),
+            "A code-67 busy write must be retried and succeed, got: {:?}",
+            result
+        );
+
+        server.await.unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // write_exception_action: pure decision logic (no sleeps, instant tests).
+    // Covers every branch of the Modbus-exception retry/exhaustion table,
+    // including the code-67 "treat as acknowledged" path that would otherwise
+    // need a ~10 s exhaustion test.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn write_exception_action_retries_busy_with_2s_gap() {
+        // A code-67 (busy) exception with retries remaining uses the longer
+        // 2 s gap.
+        assert_eq!(
+            ModbusClient::write_exception_action(0, 6, true),
+            WriteExceptionAction::Retry {
+                gap: Duration::from_secs(2)
+            }
+        );
+    }
+
+    #[test]
+    fn write_exception_action_retries_non_busy_with_retry_delay() {
+        // A non-67 exception (e.g. code 0) with retries remaining uses the
+        // standard retry gap.
+        assert_eq!(
+            ModbusClient::write_exception_action(2, 6, false),
+            WriteExceptionAction::Retry {
+                gap: ModbusClient::RETRY_DELAY
+            }
+        );
+    }
+
+    #[test]
+    fn write_exception_action_acknowledges_on_busy_exhaustion() {
+        // When every retry has been consumed, a code-67 exception is treated
+        // as acknowledged (the dongle may have applied the write) — NOT as a
+        // failure. This is the distinctive behaviour preserved by the
+        // broadened retry match (issue #245).
+        assert_eq!(
+            ModbusClient::write_exception_action(5, 6, true),
+            WriteExceptionAction::Acknowledged
+        );
+    }
+
+    #[test]
+    fn write_exception_action_fails_on_non_busy_exhaustion() {
+        // When every retry has been consumed, a non-67 exception surfaces a
+        // real failure so the caller can report the rejected register.
+        assert_eq!(
+            ModbusClient::write_exception_action(5, 6, false),
+            WriteExceptionAction::Fail
+        );
     }
 
     // =======================================================================

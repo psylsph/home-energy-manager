@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, within } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, within, act } from '@testing-library/react';
 
 vi.mock('../../src/lib/api', () => ({
   apiGet: vi.fn(async (path: string) => {
@@ -192,6 +192,7 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     cleanup();
     useInverterStore.setState({ snapshot: null, connectionState: 'disconnected' });
@@ -231,6 +232,73 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
 
     expect(vi.mocked(apiPost)).toHaveBeenCalledWith('/api/control/timed-export', { enabled: true });
     expect(vi.mocked(apiPost).mock.calls.some(([path]) => path === '/api/control/mode')).toBe(false);
+  });
+
+  it('warns that enabling Eco will disable active Timed Export', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ enable_discharge: true, battery_power_mode: 0 }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    expect(
+      await screen.findByText(
+        'Timed Export is active. Enabling Eco will disable Timed Export and return the battery to self-consumption.',
+      ),
+    ).toBeDefined();
+  });
+
+  it('shows Applying while Timed Export awaits snapshot confirmation', async () => {
+    vi.mocked(apiPost).mockImplementationOnce(() => new Promise(() => {}));
+    useInverterStore.setState({ snapshot: makeSnapshot({ enable_discharge: false }), developerMode: false, connectionState: 'connected' });
+    render(<ControlPage />);
+
+    const section = await batteryModeSection();
+    fireEvent.click(within(section).getByText('Timed Export').closest('button')!);
+
+    expect(await within(section).findByText('Applying…')).toBeDefined();
+  });
+
+  it('clears Applying once the WebSocket snapshot confirms the mode change', async () => {
+    useInverterStore.setState({ snapshot: makeSnapshot({ enable_discharge: false }), developerMode: false, connectionState: 'connected' });
+    render(<ControlPage />);
+
+    const section = await batteryModeSection();
+    fireEvent.click(within(section).getByText('Timed Export').closest('button')!);
+
+    // Wait for the pending state to appear.
+    expect(await within(section).findByText('Applying…')).toBeDefined();
+
+    // Simulate the next poll cycle confirming the register change.
+    act(() => {
+      useInverterStore.setState({ snapshot: makeSnapshot({ enable_discharge: true, battery_power_mode: 0 }) });
+    });
+
+    // The Applying indicator should clear — the button label reverts to
+    // 'Timed Export' (not 'Applying…').
+    await within(section).findByText('Timed Export');
+    expect(within(section).queryByText('Applying…')).toBeNull();
+  });
+
+  it('shows a timeout error when a mode change is not confirmed within 30 seconds', async () => {
+    // shouldAdvanceTime lets findBy* polling work while still allowing
+    // advanceTimersByTime to fast-forward the 30s confirmation timeout.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    useInverterStore.setState({ snapshot: makeSnapshot({ enable_discharge: false }), developerMode: false, connectionState: 'connected' });
+    render(<ControlPage />);
+
+    const section = await batteryModeSection();
+    fireEvent.click(within(section).getByText('Timed Export').closest('button')!);
+    expect(await within(section).findByText('Applying…')).toBeDefined();
+
+    // Fast-forward past the 30-second confirmation timeout.
+    act(() => { vi.advanceTimersByTime(30_001); });
+
+    expect(
+      await within(section).findByText('Timed Export did not confirm the change. Please try again.'),
+    ).toBeDefined();
+    expect(within(section).queryByText('Applying…')).toBeNull();
   });
 
   it('toggles Timed Charge independently through HR96 endpoint', async () => {

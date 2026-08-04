@@ -55,12 +55,12 @@ use chrono::Timelike;
 
 use crate::server::logs::LogRing;
 use crate::server::ws::ConnectedClients;
-use tokio::sync::{broadcast, Mutex, Notify};
+use tokio::sync::{broadcast, Mutex, Notify, oneshot};
 
 use crate::alerts::AlertType;
 use crate::history::HistoryDb;
 use crate::inverter::decoder::decode_snapshot;
-use crate::inverter::encoder::{ControlCommand, RegisterWrite};
+use crate::inverter::encoder::{ControlCommand, RegisterWrite, WriteOutcome};
 use crate::inverter::model::{
     BatteryMode, DeviceType, InverterSnapshot, SolarArraySource, SolarArraySummary,
 };
@@ -273,6 +273,27 @@ pub struct ForceDischargeRevert {
     pub force_discharge_slot_end_ms: Option<i64>,
 }
 
+/// A batch of register writes queued for the poll loop to drain, with an
+/// optional one-shot channel for reporting the outcome back to the control
+/// endpoint that queued it.
+///
+/// Most control endpoints fire-and-forget: they queue writes and return
+/// immediately, and the poll loop logs any per-register failure. The
+/// `completion` channel lets an endpoint instead await the actual write
+/// outcome so it can report precisely which register the inverter rejected
+/// — rather than leaving the UI to time out after 30 s with a generic
+/// "did not confirm" message (issue #245).
+#[derive(Debug)]
+pub struct PendingWriteBatch {
+    /// The writes, executed in order by the poll loop.
+    pub writes: Vec<RegisterWrite>,
+    /// If set, the poll loop sends the batch outcome here once execution
+    /// finishes (success, or the first failing register + error). A send
+    /// error is ignored silently — the receiver may already be gone if the
+    /// request that queued this batch timed out, and the writes still run.
+    pub completion: Option<oneshot::Sender<WriteOutcome>>,
+}
+
 /// Shared state accessible from HTTP handlers, the WebSocket endpoint, etc.
 pub struct AppState {
     /// Most recently decoded snapshot (or `None` if never polled).
@@ -286,7 +307,7 @@ pub struct AppState {
     pub settings: Arc<Mutex<PollSettings>>,
     /// Pending register writes queued by the control API.
     /// The poll loop drains this queue and writes to the inverter.
-    pub pending_writes: Arc<Mutex<Vec<Vec<RegisterWrite>>>>,
+    pub pending_writes: Arc<Mutex<Vec<PendingWriteBatch>>>,
     /// Signaled when new writes are queued so the poll loop wakes immediately.
     pub write_notify: Arc<Notify>,
     /// Captured pre-state for an in-progress Force Charge, used to restore
@@ -699,6 +720,73 @@ fn next_gateway_detail_countdown(current: u8) -> u8 {
     }
 }
 
+/// Drain and execute pending write batches against `client`, signalling each
+/// batch's outcome to any queued completion channel.
+///
+/// For each batch the poll loop still attempts *every* write (a transient
+/// failure on one register doesn't skip later ones), but only the **first**
+/// failing register is captured and reported — it is usually the actionable
+/// one. Extracted from `run_poll_loop` so the capture / completion / trailing-
+/// sleep logic can be unit-tested directly against a mock TCP server (issue
+/// #245) rather than only through the full poll loop.
+async fn drain_write_batches(client: &mut ModbusClient, pending: Vec<PendingWriteBatch>) {
+    drain_write_batches_with_gap(client, pending, Duration::from_millis(1500)).await
+}
+
+/// Like [`drain_write_batches`] but with a configurable inter-write gap, so
+/// the capture / completion / trailing-sleep logic can be unit-tested against
+/// a mock TCP server (issue #245) without the real ~1.5 s gaps slowing every
+/// test. The trailing gap after the final write of an awaited batch is always
+/// skipped regardless of this value.
+async fn drain_write_batches_with_gap(
+    client: &mut ModbusClient,
+    pending: Vec<PendingWriteBatch>,
+    inter_write_gap: Duration,
+) {
+    for batch in pending {
+        // First failing register in this batch (if any), reported back to any
+        // endpoint that queued a completion channel.
+        let mut first_failure: Option<WriteOutcome> = None;
+        // Skip the inter-write gap after the final write of a batch a caller
+        // is awaiting, so the response isn't delayed by an idle gap.
+        // Fire-and-forget batches keep the trailing gap (unchanged behaviour)
+        // to preserve spacing before whatever the poll loop does next.
+        let awaiting = batch.completion.is_some();
+        let last_idx = batch.writes.len().saturating_sub(1);
+        for (i, w) in batch.writes.iter().enumerate() {
+            match client.write_register(w.address, w.value).await {
+                Ok(()) => {
+                    tracing::info!("Wrote register {} = {}", w.address, w.value);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to write register {} = {}: {e}", w.address, w.value);
+                    if first_failure.is_none() {
+                        first_failure = Some(WriteOutcome::Failed {
+                            address: w.address,
+                            value: w.value,
+                            error: e.to_string(),
+                        });
+                    }
+                }
+            }
+            // The dongle needs significant time between writes to adjacent
+            // registers (up to 13s observed for exception-67 recovery). The
+            // trailing gap after the final write is skipped when a caller is
+            // awaiting the outcome.
+            if !(awaiting && i == last_idx) {
+                tokio::time::sleep(inter_write_gap).await;
+            }
+        }
+        if let Some(tx) = batch.completion {
+            let outcome = first_failure.unwrap_or(WriteOutcome::Ok);
+            // Ignore send error: the receiver may be gone if the requesting
+            // endpoint already timed out and returned. The writes still
+            // executed.
+            let _ = tx.send(outcome);
+        }
+    }
+}
+
 /// Runs the polling loop indefinitely (spawn as a Tokio task).
 ///
 /// ## Behaviour
@@ -1031,36 +1119,12 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 
                     // Drain and execute any pending register writes from the
                     // control API before reading the latest state.
-                    let pending: Vec<Vec<RegisterWrite>> = {
+                    let pending: Vec<PendingWriteBatch> = {
                         let mut pw = state.pending_writes.lock().await;
                         std::mem::take(&mut *pw)
                     };
                     if !pending.is_empty() {
-                        for writes in &pending {
-                            for w in writes {
-                                match client.write_register(w.address, w.value).await {
-                                    Ok(()) => {
-                                        tracing::info!(
-                                            "Wrote register {} = {}",
-                                            w.address,
-                                            w.value
-                                        );
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "Failed to write register {} = {}: {e}",
-                                            w.address,
-                                            w.value
-                                        );
-                                    }
-                                }
-                                // Pause between individual register writes
-                                // The dongle needs significant time between writes
-                                // to adjacent registers (up to 13s observed for
-                                // exception-67 recovery)
-                                tokio::time::sleep(Duration::from_millis(1500)).await;
-                            }
-                        }
+                        drain_write_batches(&mut client, pending).await;
                     }
 
                     // The consumer task handles stale frames - unmatched
@@ -4509,5 +4573,216 @@ mod tests {
             );
         })
         .await;
+    }
+
+    // -----------------------------------------------------------------------
+    // drain_write_batches: the poll-loop write-drain logic (issue #245).
+    //
+    // These run the REAL drain against a mock TCP server — they do NOT inject
+    // the outcome the way the api.rs pause/unpause helpers do, so they cover
+    // the capture (first failing register), completion-channel signalling,
+    // fire-and-forget batches, and the trailing-sleep skip.
+    //
+    // The inter-write gap is shrunk to 1 ms via `drain_write_batches_with_gap`
+    // so the happy-path tests are instant; only the failure tests are slow,
+    // because a rejected write genuinely retries 5× (RETRY_DELAY 500 ms) inside
+    // `write_register` before surfacing — that cost is inherent and realistic.
+    // The mock server replies from a fixed list, cycling with `idx % len`, so
+    // mixed ack/exception sequences spell out every response explicitly.
+    // -----------------------------------------------------------------------
+
+    /// Build a GivEnergy-wrapped FC6 write-ack frame (echo of the request):
+    /// serial(10) + register(2) + value(2), wrapped by `encode_frame`.
+    fn write_ack_frame(register: u16, value: u16) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(14);
+        payload.extend_from_slice(b"TEST123456");
+        payload.extend_from_slice(&register.to_be_bytes());
+        payload.extend_from_slice(&value.to_be_bytes());
+        crate::modbus::framer::encode_frame("TEST123456", 0x11, 0x06, &payload)
+    }
+
+    #[tokio::test]
+    async fn drain_signals_ok_when_all_writes_succeed() {
+        use crate::inverter::encoder::{RegisterWrite, WriteOutcome};
+        use crate::inverter::poll::{drain_write_batches_with_gap, PendingWriteBatch};
+        use crate::modbus::client::tests::{setup_client_with_server, MockResponse};
+        use tokio::sync::oneshot;
+
+        let writes = vec![
+            RegisterWrite { address: 27, value: 1 },
+            RegisterWrite { address: 59, value: 0 },
+            RegisterWrite { address: 110, value: 100 },
+        ];
+        let responses: Vec<MockResponse> = writes
+            .iter()
+            .map(|w| MockResponse::Raw(write_ack_frame(w.address, w.value)))
+            .collect();
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+
+        let (tx, rx) = oneshot::channel();
+        let batch = PendingWriteBatch { writes, completion: Some(tx) };
+        drain_write_batches_with_gap(&mut client, vec![batch], Duration::from_millis(1)).await;
+
+        assert_eq!(rx.await.unwrap(), WriteOutcome::Ok);
+    }
+
+    #[tokio::test]
+    async fn drain_signals_first_failing_register() {
+        use crate::inverter::encoder::{RegisterWrite, WriteOutcome};
+        use crate::inverter::poll::{drain_write_batches_with_gap, PendingWriteBatch};
+        use crate::modbus::client::tests::{setup_client_with_server, MockResponse};
+        use tokio::sync::oneshot;
+
+        // write1 (reg 27) is acked; write2 (reg 110) is rejected with a
+        // code-0 exception, retried 5× inside write_register then surfaced.
+        // Total requests: 1 (write1) + 6 (write2 attempts) = 7.
+        let exc = MockResponse::Exception { slave: 0x11, function: 0x06, code: 0 };
+        let responses = vec![
+            MockResponse::Raw(write_ack_frame(27, 1)),
+            exc.clone(),
+            exc.clone(),
+            exc.clone(),
+            exc.clone(),
+            exc.clone(),
+            exc,
+        ];
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+
+        let writes = vec![
+            RegisterWrite { address: 27, value: 1 },
+            RegisterWrite { address: 110, value: 100 },
+        ];
+        let (tx, rx) = oneshot::channel();
+        let batch = PendingWriteBatch { writes, completion: Some(tx) };
+        drain_write_batches_with_gap(&mut client, vec![batch], Duration::from_millis(1)).await;
+
+        match rx.await.unwrap() {
+            WriteOutcome::Failed { address, value, error } => {
+                assert_eq!(address, 110, "should report the failing register");
+                assert_eq!(value, 100);
+                assert!(
+                    error.contains("code 0"),
+                    "error should carry the exception detail, got: {error}"
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_reports_first_failure_not_a_later_one() {
+        // Two writes both rejected: the reported register must be the FIRST
+        // failure, not the last — this is the `first_failure.is_none()` guard.
+        use crate::inverter::encoder::{RegisterWrite, WriteOutcome};
+        use crate::inverter::poll::{drain_write_batches_with_gap, PendingWriteBatch};
+        use crate::modbus::client::tests::{setup_client_with_server, MockResponse};
+        use tokio::sync::oneshot;
+
+        // A single exception response cycles across every retry of both
+        // writes (12 requests total), so both registers are rejected.
+        let responses = vec![MockResponse::Exception { slave: 0x11, function: 0x06, code: 0 }];
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+
+        let writes = vec![
+            RegisterWrite { address: 27, value: 1 },
+            RegisterWrite { address: 110, value: 100 },
+        ];
+        let (tx, rx) = oneshot::channel();
+        let batch = PendingWriteBatch { writes, completion: Some(tx) };
+        drain_write_batches_with_gap(&mut client, vec![batch], Duration::from_millis(1)).await;
+
+        match rx.await.unwrap() {
+            WriteOutcome::Failed { address, .. } => {
+                assert_eq!(
+                    address, 27,
+                    "must report the FIRST failing register, not the last (110)"
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_handles_fire_and_forget_batch_without_completion() {
+        // A batch with no completion channel (the legacy fire-and-forget path
+        // used by every other control endpoint) must still execute its writes
+        // and must not hang or panic trying to signal an outcome.
+        use crate::inverter::encoder::RegisterWrite;
+        use crate::inverter::poll::{drain_write_batches_with_gap, PendingWriteBatch};
+        use crate::modbus::client::tests::{setup_client_with_server, MockResponse};
+
+        let writes = vec![
+            RegisterWrite { address: 27, value: 1 },
+            RegisterWrite { address: 110, value: 100 },
+        ];
+        let responses = vec![
+            MockResponse::Raw(write_ack_frame(27, 1)),
+            MockResponse::Raw(write_ack_frame(110, 100)),
+        ];
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+
+        let batch = PendingWriteBatch { writes, completion: None };
+        // No rx to await — just confirm this returns without hanging.
+        drain_write_batches_with_gap(&mut client, vec![batch], Duration::from_millis(1)).await;
+    }
+
+    #[tokio::test]
+    async fn drain_skips_trailing_sleep_when_outcome_awaited() {
+        // The trailing inter-write gap after the final write is skipped for an
+        // awaited batch (faster API response) but kept for fire-and-forget.
+        // With a 200 ms gap, an awaited 2-write batch sleeps once (~200 ms)
+        // while a fire-and-forget one sleeps twice (~400 ms) — a robust gap
+        // to assert against without a slow test.
+        use crate::inverter::encoder::RegisterWrite;
+        use crate::inverter::poll::{drain_write_batches_with_gap, PendingWriteBatch};
+        use crate::modbus::client::tests::{setup_client_with_server, MockResponse};
+        use tokio::sync::oneshot;
+        use std::time::Instant;
+
+        let gap = Duration::from_millis(200);
+
+        // Awaited: 2 writes → 1 inter-write sleep (after write 1), no trailing.
+        let responses = vec![
+            MockResponse::Raw(write_ack_frame(27, 1)),
+            MockResponse::Raw(write_ack_frame(110, 100)),
+        ];
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+        let (tx, _rx) = oneshot::channel();
+        let batch = PendingWriteBatch {
+            writes: vec![
+                RegisterWrite { address: 27, value: 1 },
+                RegisterWrite { address: 110, value: 100 },
+            ],
+            completion: Some(tx),
+        };
+        let awaited_start = Instant::now();
+        drain_write_batches_with_gap(&mut client, vec![batch], gap).await;
+        let awaited_elapsed = awaited_start.elapsed();
+
+        // Fire-and-forget: 2 writes → sleep after write 1 AND trailing sleep.
+        let responses = vec![
+            MockResponse::Raw(write_ack_frame(27, 1)),
+            MockResponse::Raw(write_ack_frame(110, 100)),
+        ];
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+        let batch = PendingWriteBatch {
+            writes: vec![
+                RegisterWrite { address: 27, value: 1 },
+                RegisterWrite { address: 110, value: 100 },
+            ],
+            completion: None,
+        };
+        let fire_forget_start = Instant::now();
+        drain_write_batches_with_gap(&mut client, vec![batch], gap).await;
+        let fire_forget_elapsed = fire_forget_start.elapsed();
+
+        assert!(
+            awaited_elapsed < Duration::from_millis(300),
+            "awaited batch should skip the trailing sleep (~1 gap), took {awaited_elapsed:?}"
+        );
+        assert!(
+            fire_forget_elapsed > Duration::from_millis(350),
+            "fire-and-forget batch should keep the trailing sleep (~2 gaps), took {fire_forget_elapsed:?}"
+        );
     }
 }

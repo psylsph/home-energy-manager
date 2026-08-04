@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -10,9 +11,12 @@ use chrono::{Datelike, Duration as ChronoDuration, Local, TimeZone, Timelike};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::inverter::encoder::{ControlCommand, RegisterWrite};
+use crate::inverter::encoder::{ControlCommand, RegisterWrite, WriteOutcome};
 use crate::inverter::model::{DeviceType, InverterSnapshot};
-use crate::inverter::poll::{AppState, ForceChargeRevert, ForceDischargeRevert, PollSettings};
+use crate::inverter::poll::{
+    AppState, ConnectionState, ForceChargeRevert, ForceDischargeRevert, PendingWriteBatch,
+    PollSettings,
+};
 use crate::modbus::registers::encode_hhmm;
 use crate::settings::TariffConfig;
 
@@ -429,11 +433,77 @@ fn force_discharge_slot_writes(
 async fn queue_writes(state: &Arc<AppState>, writes: Vec<RegisterWrite>) {
     let mut pw = state.pending_writes.lock().await;
     tracing::info!("Queued {} register write(s)", writes.len());
-    pw.push(writes);
+    pw.push(PendingWriteBatch {
+        writes,
+        completion: None,
+    });
     drop(pw);
     // Wake the poll loop immediately so writes are applied without
     // waiting for the next read cycle or sleep interval.
     state.write_notify.notify_one();
+}
+
+/// Queue register writes for execution by the poll loop and return a
+/// receiver that resolves with the outcome once the poll loop has executed
+/// the batch. Used by endpoints (currently Pause Discharge) that need to
+/// report the exact failing register instead of leaving the UI to time out
+/// after 30 s with a generic "did not confirm" message.
+async fn queue_writes_with_completion(
+    state: &Arc<AppState>,
+    writes: Vec<RegisterWrite>,
+) -> tokio::sync::oneshot::Receiver<WriteOutcome> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let mut pw = state.pending_writes.lock().await;
+    tracing::info!("Queued {} register write(s)", writes.len());
+    pw.push(PendingWriteBatch {
+        writes,
+        completion: Some(tx),
+    });
+    drop(pw);
+    state.write_notify.notify_one();
+    rx
+}
+
+/// How long to wait for the poll loop to finish executing a write batch
+/// before returning to the caller. Comfortably covers the normal pause batch
+/// (~3 writes plus the 1.5 s inter-write gap) and a few retries on a glitchy
+/// register, while staying well under the frontend's 30 s confirmation
+/// timeout. On timeout the writes are still queued and will complete; we
+/// return success so the normal snapshot-confirmation path covers the
+/// slow-but-progressing case.
+const WRITE_COMPLETION_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Await the outcome of a write batch queued via
+/// [`queue_writes_with_completion`]. Returns `Ok(())` when every register was
+/// accepted, or `Err(message)` naming the first register the inverter
+/// rejected. A timeout is treated as success (see [`WRITE_COMPLETION_TIMEOUT`]).
+async fn await_write_outcome(
+    rx: tokio::sync::oneshot::Receiver<WriteOutcome>,
+) -> Result<(), String> {
+    await_write_outcome_with_timeout(rx, WRITE_COMPLETION_TIMEOUT).await
+}
+
+/// Testable implementation of [`await_write_outcome`] with an injectable
+/// timeout. Production callers use [`WRITE_COMPLETION_TIMEOUT`]; tests can
+/// exercise the slow-but-progressing fallback without waiting 15 seconds.
+async fn await_write_outcome_with_timeout(
+    rx: tokio::sync::oneshot::Receiver<WriteOutcome>,
+    timeout: Duration,
+) -> Result<(), String> {
+    match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(WriteOutcome::Ok)) => Ok(()),
+        Ok(Ok(WriteOutcome::Failed { address, value, error })) => Err(format!(
+            "the inverter rejected the write to register {address} (value {value}): {error}"
+        )),
+        Ok(Err(_)) => Err("the write batch was dropped before completing".to_string()),
+        Err(_) => {
+            tracing::debug!(
+                "Write batch still in progress after {:?} — leaving confirmation to the poll loop",
+                timeout
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Capture the pre-force-charge state of the inverter into a `ForceChargeRevert`
@@ -1551,29 +1621,68 @@ pub async fn set_mode(
     }
 }
 
-/// POST /api/control/eco — toggle Eco / self-consumption (HR27) independently.
+/// POST /api/control/eco — toggle Eco / self-consumption.
 ///
-/// Body: `{ "enabled": true }` writes HR27=1; false writes HR27=0.
+/// Body: `{ "enabled": true }`. When enabling, this is treated the same as
+/// `set_mode({ mode: "eco" })`: it captures the current discharge schedule
+/// into a backup (issue #137), clears HR59, zeroes all discharge slot
+/// registers (Gen3 firmware re-asserts `enable_discharge` when slots are
+/// non-zero), and finally restores self-consumption (HR27=1). When
+/// disabling, it writes HR27=0 only.
 pub async fn set_eco(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
     let enabled = body["enabled"].as_bool().unwrap_or(true);
-    let cmd = ControlCommand::SetBatteryPowerMode {
-        mode: if enabled { 1 } else { 0 },
-    };
-    match cmd.encode() {
-        Ok(writes) => {
-            tracing::info!("SetEco encoded: {:?}", writes);
-            queue_writes(&state, writes).await;
-            ok_response(if enabled {
-                "Eco enabled"
-            } else {
-                "Eco disabled"
-            })
+
+    if !enabled {
+        let cmd = ControlCommand::SetBatteryPowerMode { mode: 0 };
+        match cmd.encode() {
+            Ok(writes) => {
+                tracing::info!("SetEco encoded: {:?}", writes);
+                queue_writes(&state, writes).await;
+                ok_response("Eco disabled")
+            }
+            Err(e) => error_response(&format!("Validation error: {}", e)),
         }
-        Err(e) => error_response(&format!("Validation error: {}", e)),
+    } else {
+        apply_eco_enable(&state).await
     }
+}
+
+/// Eco-enable logic for the independent `set_eco` toggle. Captures the
+/// discharge schedule backup, clears HR59, zeroes discharge slot registers,
+/// and writes HR27=1. Mirrors the Eco path in `set_mode` (which uses
+/// `SetEcoMode { soc_reserve }` instead, adding an SOC-reserve write), but
+/// does not touch the SOC reserve — toggling Eco independently must not
+/// reset the user's configured reserve.
+///
+/// Order matters: HR59 is cleared *before* the slot registers so the
+/// inverter never briefly sees an active export schedule with live slots
+/// while being returned to Eco. Slots are then zeroed because Gen3 firmware
+/// re-asserts `enable_discharge` (HR59=1) whenever any discharge slot is
+/// non-zero — without clearing them, Eco does not stick (issue #248).
+async fn apply_eco_enable(state: &Arc<AppState>) -> (StatusCode, Json<Value>) {
+    let captured_backup = capture_discharge_schedule_backup(state).await;
+
+    let mut writes = Vec::new();
+    // Clear HR59 (disable discharge) before anything else.
+    match (ControlCommand::SetEnableDischarge { enabled: false }).encode() {
+        Ok(mut w) => writes.append(&mut w),
+        Err(e) => return error_response(&format!("Validation error: {}", e)),
+    }
+    // Zero all discharge slot registers (Gen3 firmware safety — see above).
+    let device_type = latest_device_type(state).await;
+    writes.extend(clear_discharge_slot_writes(device_type));
+    // Finally restore self-consumption (HR27=1).
+    match (ControlCommand::SetBatteryPowerMode { mode: 1 }).encode() {
+        Ok(mut w) => writes.append(&mut w),
+        Err(e) => return error_response(&format!("Validation error: {}", e)),
+    }
+
+    tracing::info!("SetEco encoded: {:?}", writes);
+    queue_writes(state, writes).await;
+    ok_response_with_backup("Eco enabled", captured_backup.as_deref())
 }
 
 /// POST /api/control/timed-charge — toggle scheduled charge (HR96)
@@ -2266,6 +2375,19 @@ pub async fn set_export_limit(
 /// remain available. Keep this deliberately small: it should not clear the
 /// user's charge/discharge schedules or other slots.
 pub async fn pause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    // Refuse to pause while clearly offline. Writes queued while Disconnected
+    // would sit idle until the next reconnect (and likely time out the
+    // frontend's confirmation), so surface a precise error immediately
+    // instead of a silent ~15 s wait. A transient Reconnecting blip is
+    // allowed — the write queues and runs as soon as the link comes back.
+    if matches!(
+        state.connection_state.lock().await.clone(),
+        ConnectionState::Disconnected
+    ) {
+        return error_response(
+            "Cannot pause discharge: the inverter is not connected. Please retry once the connection is restored.",
+        );
+    }
     let device_type = latest_device_type(&state).await;
     let reserve_before_pause = state
         .latest_snapshot
@@ -2302,8 +2424,16 @@ pub async fn pause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, J
     }
 
     tracing::info!("PauseBattery encoded: {:?}", writes);
-    queue_writes(&state, writes).await;
-    ok_response("Battery paused")
+    let rx = queue_writes_with_completion(&state, writes).await;
+    match await_write_outcome(rx).await {
+        Ok(()) => ok_response("Battery paused"),
+        Err(msg) => {
+            tracing::warn!("Pause discharge rejected: {msg}");
+            error_response(&format!(
+                "Pause discharge could not be fully applied ({msg}). Discharge may be only partially paused; please try again."
+            ))
+        }
+    }
 }
 
 /// POST /api/control/unpause — resume battery discharge in Eco mode.
@@ -2316,6 +2446,17 @@ pub async fn pause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, J
 /// either limiter owns the pause disables all active pause limiters, making
 /// the override lasting instead of immediately starting another countdown.
 pub async fn unpause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    // See pause_battery: refuse while clearly offline so the caller gets an
+    // immediate, precise error instead of a silent timeout. No side effects
+    // have run yet on refusal, so the limiter state is left untouched.
+    if matches!(
+        state.connection_state.lock().await.clone(),
+        ConnectionState::Disconnected
+    ) {
+        return error_response(
+            "Cannot resume discharge: the inverter is not connected. Please retry once the connection is restored.",
+        );
+    }
     let device_type = latest_device_type(&state).await;
     // Follow the poll loop's load config → load state → temperature config →
     // temperature state → shared saved reserve lock order.
@@ -2379,7 +2520,19 @@ pub async fn unpause_battery(State(state): State<Arc<AppState>>) -> (StatusCode,
         "UnpauseBattery encoded: {:?}",
         writes
     );
-    queue_writes(&state, writes).await;
+    let rx = queue_writes_with_completion(&state, writes).await;
+    match await_write_outcome(rx).await {
+        Ok(()) => {}
+        Err(msg) => {
+            tracing::warn!("Resume discharge rejected: {msg}");
+            let detail = if disabled_load_limiter || disabled_temperature_limiter {
+                format!(" Active limiter(s) were disabled, but the inverter rejected the reserve restore ({msg}); please try again.")
+            } else {
+                format!(" The inverter rejected the reserve restore ({msg}); please try again.")
+            };
+            return error_response(&format!("Resume discharge could not be fully applied.{detail}"));
+        }
+    }
     let message = if disabled_load_limiter || disabled_temperature_limiter {
         format!(
             "Active limiter(s) disabled and battery unpaused (reserve restored to {restore_reserve}%)"
@@ -4951,6 +5104,10 @@ mod tests {
             ..Default::default()
         };
         *state.latest_snapshot.lock().await = Some(snapshot);
+        // Tests using this helper set a snapshot, implying a successful poll —
+        // model a connected inverter so the pause/unpause connection guard
+        // (issue #245) doesn't short-circuit these exercises.
+        *state.connection_state.lock().await = ConnectionState::Connected;
         state
     }
 
@@ -4965,6 +5122,7 @@ mod tests {
             ..Default::default()
         };
         *state.latest_snapshot.lock().await = Some(snapshot);
+        *state.connection_state.lock().await = ConnectionState::Connected;
         state
     }
 
@@ -4973,7 +5131,80 @@ mod tests {
         let mut pw = state.pending_writes.lock().await;
         let batches = std::mem::take(&mut *pw);
         drop(pw);
-        batches.into_iter().flatten().collect()
+        batches.into_iter().flat_map(|b| b.writes).collect()
+    }
+
+    /// Run [`pause_battery`] against `state` while driving the write-
+    /// completion channel that the real poll loop would resolve. The handler
+    /// now awaits write confirmation (so it can surface register-rejection
+    /// errors); without a poll loop in unit tests it would otherwise block
+    /// for `WRITE_COMPLETION_TIMEOUT`. This signals `WriteOutcome::Ok` the
+    /// moment the batch lands, leaving the batch in the queue so the test's
+    /// subsequent [`drain_pending_writes`] still observes the queued writes.
+    /// Returns the same `(StatusCode, Json<Value>)` as `pause_battery` so it
+    /// is a drop-in replacement at each call site.
+    async fn drive_pause_battery_completion(state: &Arc<AppState>) -> (StatusCode, Json<Value>) {
+        drive_pause_battery_completion_with(state, WriteOutcome::Ok).await
+    }
+
+    /// Like [`drive_pause_battery_completion`] but lets the test choose the
+    /// outcome the poll loop would report (e.g. a rejected register), so the
+    /// handler's error-surfacing path can be exercised.
+    async fn drive_pause_battery_completion_with(
+        state: &Arc<AppState>,
+        outcome: WriteOutcome,
+    ) -> (StatusCode, Json<Value>) {
+        let handle = tokio::spawn(pause_battery(State(state.clone())));
+        loop {
+            if handle.is_finished() {
+                // Handler returned without queuing (validation-error path).
+                break;
+            }
+            let mut pw = state.pending_writes.lock().await;
+            if let Some(batch) = pw.first_mut() {
+                if let Some(tx) = batch.completion.take() {
+                    let _ = tx.send(outcome.clone());
+                    drop(pw);
+                    break;
+                }
+            }
+            drop(pw);
+            tokio::task::yield_now().await;
+        }
+        handle.await.unwrap()
+    }
+
+    /// Like [`drive_pause_battery_completion`] but for [`unpause_battery`]. The
+    /// handler now also awaits write confirmation (issue #245 follow-up) so
+    /// it can surface register-rejection errors the same way pause does.
+    async fn drive_unpause_battery_completion(state: &Arc<AppState>) -> (StatusCode, Json<Value>) {
+        drive_unpause_battery_completion_with(state, WriteOutcome::Ok).await
+    }
+
+    /// Like [`drive_pause_battery_completion_with`] but for [`unpause_battery`].
+    async fn drive_unpause_battery_completion_with(
+        state: &Arc<AppState>,
+        outcome: WriteOutcome,
+    ) -> (StatusCode, Json<Value>) {
+        let handle = tokio::spawn(unpause_battery(State(state.clone())));
+        loop {
+            if handle.is_finished() {
+                // Handler returned without queuing (validation-error path or
+                // connection-refused guard).
+                break;
+            }
+            let mut pw = state.pending_writes.lock().await;
+            if let Some(batch) = pw.first_mut() {
+                if let Some(tx) = batch.completion.take() {
+                    let _ = tx.send(outcome.clone());
+                    drop(pw);
+                    break;
+                }
+            }
+            drop(pw);
+            tokio::task::yield_now().await;
+        }
+        handle.await.unwrap()
     }
 
     fn assert_all_whitelisted(writes: &[RegisterWrite]) {
@@ -5738,18 +5969,107 @@ mod tests {
 
     // -- Split control register contracts (issue #131 follow-up / portal parity) ----
 
+    /// Enabling Eco via the independent toggle must mirror `set_mode({ mode:
+    /// "eco" })`: clear HR59, zero discharge slot registers (Gen3 firmware
+    /// re-asserts HR59 when slots are non-zero), then restore self-consumption
+    /// (HR27=1). The HR59 clear must come *before* the slot clears, and HR27
+    /// must come *after*, so the inverter never sees an armed export schedule
+    /// during the transition.
     #[tokio::test]
-    async fn set_eco_toggles_hr27_only() {
+    async fn set_eco_enable_clears_slots_and_hr59_before_hr27() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_BATTERY_POWER_MODE, HR_DISCHARGE_SLOT_1_END,
+                HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END,
+                HR_DISCHARGE_SLOT_2_START, HR_ENABLE_DISCHARGE,
+            };
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            state.latest_snapshot.lock().await.as_mut().unwrap().enable_discharge = true;
+            let body = serde_json::json!({ "enabled": true });
+            let _ = set_eco(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+
+            // HR59 clear must be the first write.
+            assert_eq!(writes[0].address, HR_ENABLE_DISCHARGE);
+            assert_eq!(writes[0].value, 0);
+
+            // HR27=1 (self-consumption) must be the last write.
+            let hr27 = writes
+                .iter()
+                .find(|w| w.address == HR_BATTERY_POWER_MODE)
+                .expect("must write HR27");
+            assert_eq!(hr27.value, 1);
+            assert_eq!(
+                writes.last().unwrap().address,
+                HR_BATTERY_POWER_MODE,
+                "HR27 must come after slot clears"
+            );
+
+            // All four discharge slot registers must be zeroed.
+            for reg in [
+                HR_DISCHARGE_SLOT_1_START,
+                HR_DISCHARGE_SLOT_1_END,
+                HR_DISCHARGE_SLOT_2_START,
+                HR_DISCHARGE_SLOT_2_END,
+            ] {
+                let w = writes
+                    .iter()
+                    .find(|w| w.address == reg)
+                    .unwrap_or_else(|| panic!("eco enable must clear slot register {reg}"));
+                assert_eq!(w.value, 0);
+            }
+        })
+        .await;
+    }
+
+    /// Enabling Eco with a configured discharge schedule must back up the
+    /// slots so the user can restore them on the next Timed Export toggle
+    /// (issue #137 parity with `set_mode`).
+    #[tokio::test]
+    async fn set_eco_enable_backs_up_configured_slots() {
+        with_isolated_config_dir_async(|| async {
+            use crate::inverter::model::ScheduleSlot;
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            {
+                let mut snap = state.latest_snapshot.lock().await;
+                let snap = snap.as_mut().unwrap();
+                snap.enable_discharge = true;
+                snap.discharge_slots[0] = ScheduleSlot {
+                    enabled: true,
+                    start_hour: 5,
+                    start_minute: 0,
+                    end_hour: 7,
+                    end_minute: 0,
+                    target_soc: 10,
+                };
+            }
+            let body = serde_json::json!({ "enabled": true });
+            let _ = set_eco(State(state.clone()), Json(body)).await;
+
+            let backup = crate::settings::Settings::load()
+                .discharge_slots_backup
+                .expect("eco enable must back up configured slots");
+            let slot0 = &backup[0];
+            assert!(slot0.enabled);
+            assert_eq!(slot0.start_hour, 5);
+            assert_eq!(slot0.end_hour, 7);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_eco_disable_writes_hr27_only() {
         with_isolated_config_dir_async(|| async {
             use crate::modbus::registers::HR_BATTERY_POWER_MODE;
             let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
-            let body = serde_json::json!({ "enabled": true });
+            let body = serde_json::json!({ "enabled": false });
             let _ = set_eco(State(state.clone()), Json(body)).await;
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
             assert_eq!(writes.len(), 1);
             assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
-            assert_eq!(writes[0].value, 1);
+            assert_eq!(writes[0].value, 0);
         })
         .await;
     }
@@ -6183,7 +6503,7 @@ mod tests {
                 HR_DISCHARGE_SLOT_2_START, HR_ENABLE_CHARGE, HR_ENABLE_DISCHARGE,
             };
             let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
-            let _ = pause_battery(State(state.clone())).await;
+            let _ = drive_pause_battery_completion(&state).await;
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
             assert_eq!(
@@ -6223,7 +6543,7 @@ mod tests {
                 snap.as_mut().expect("snapshot seeded").battery_reserve = 27;
             }
 
-            let _ = pause_battery(State(state.clone())).await;
+            let _ = drive_pause_battery_completion(&state).await;
             let _ = drain_pending_writes(&state).await;
             assert_eq!(
                 *state.load_limiter_saved.lock().await,
@@ -6234,7 +6554,7 @@ mod tests {
                 Some(27)
             );
 
-            let _ = unpause_battery(State(state.clone())).await;
+            let _ = drive_unpause_battery_completion(&state).await;
             let writes = drain_pending_writes(&state).await;
             assert!(writes
                 .iter()
@@ -6261,7 +6581,7 @@ mod tests {
             settings.load_limiter_saved_reserve = Some(23);
             settings.save().expect("seed load limiter settings");
 
-            let _ = unpause_battery(State(state.clone())).await;
+            let _ = drive_unpause_battery_completion(&state).await;
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
             assert_eq!(
@@ -6302,7 +6622,7 @@ mod tests {
             settings.load_limiter_saved_reserve = Some(18);
             settings.save().expect("seed temperature limiter settings");
 
-            let _ = unpause_battery(State(state.clone())).await;
+            let _ = drive_unpause_battery_completion(&state).await;
             assert!(!state.temperature_limiter_config.lock().await.enabled);
             assert_eq!(
                 *state.temperature_limiter_state.lock().await,
@@ -6356,7 +6676,7 @@ mod tests {
             use crate::modbus::registers::HR_BATTERY_SOC_RESERVE;
 
             let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
-            let _ = unpause_battery(State(state.clone())).await;
+            let _ = drive_unpause_battery_completion(&state).await;
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
             assert!(writes
@@ -6375,7 +6695,7 @@ mod tests {
                 HR_ENABLE_DISCHARGE,
             };
             let state = make_state_with_device(DeviceType::ThreePhase).await;
-            let _ = pause_battery(State(state.clone())).await;
+            let _ = drive_pause_battery_completion(&state).await;
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
             assert_eq!(
@@ -6797,7 +7117,7 @@ mod tests {
             let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
             seed_gen3_timed_pre_state(&state).await;
 
-            let _ = pause_battery(State(state.clone())).await;
+            let _ = drive_pause_battery_completion(&state).await;
 
             assert!(
                 crate::settings::Settings::load()
@@ -6932,7 +7252,7 @@ mod tests {
             let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
             seed_gen3_timed_pre_state(&state).await;
 
-            let (status, response) = pause_battery(State(state.clone())).await;
+            let (status, response) = drive_pause_battery_completion(&state).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(response.0["ok"], serde_json::Value::Bool(true));
             assert!(response.0.get("discharge_slots_backup").is_none());
@@ -7253,7 +7573,7 @@ mod tests {
                 HR_DISCHARGE_SLOT_1_START,
             };
             let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
-            let _ = pause_battery(State(state.clone())).await;
+            let _ = drive_pause_battery_completion(&state).await;
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
             assert!(writes
@@ -7267,7 +7587,7 @@ mod tests {
                 .any(|w| w.address == HR_DISCHARGE_SLOT_1_START));
 
             let state = make_state_with_device(DeviceType::ThreePhase).await;
-            let _ = pause_battery(State(state.clone())).await;
+            let _ = drive_pause_battery_completion(&state).await;
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
             assert!(writes
@@ -7293,7 +7613,7 @@ mod tests {
                 HR_ENABLE_DISCHARGE,
             };
             let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
-            let _ = pause_battery(State(state.clone())).await;
+            let _ = drive_pause_battery_completion(&state).await;
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
             assert_eq!(writes.len(), 3);
@@ -7321,7 +7641,7 @@ mod tests {
                 HR_ENABLE_DISCHARGE,
             };
             let state = make_state_with_device(DeviceType::ACCoupled).await;
-            let _ = pause_battery(State(state.clone())).await;
+            let _ = drive_pause_battery_completion(&state).await;
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
             assert_eq!(writes.len(), 3);
@@ -7337,6 +7657,216 @@ mod tests {
             assert!(!writes
                 .iter()
                 .any(|w| w.address == HR_DISCHARGE_SLOT_1_START));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pause_battery_returns_ok_when_writes_are_accepted() {
+        // Issue #245: when every register in the pause batch is accepted by
+        // the inverter, the endpoint must return 200 with the same success
+        // message as before the write-completion plumbing was added.
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            let (status, response) =
+                drive_pause_battery_completion(&state).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(response["ok"], json!(true));
+            assert_eq!(response["message"], json!("Battery paused"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pause_battery_surfaces_register_rejection_error() {
+        // Issue #245: when the inverter rejects one of the pause writes (here
+        // the SOC-reserve register HR 110, exactly the failure seen in the
+        // user's logs), the endpoint must return 400 naming the failing
+        // register and the exception — instead of leaving the UI to time out
+        // after 30 s with a generic "did not confirm" message.
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_BATTERY_SOC_RESERVE;
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            let (status, response) = drive_pause_battery_completion_with(
+                &state,
+                WriteOutcome::Failed {
+                    address: HR_BATTERY_SOC_RESERVE,
+                    value: 100,
+                    error: "Modbus exception: function 0x86, code 0".to_string(),
+                },
+            )
+            .await;
+
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "a rejected write must surface as a 400, got {status}"
+            );
+            assert_eq!(response["ok"], json!(false));
+            let error = response["error"].as_str().expect("error message present");
+            assert!(
+                error.contains("110"),
+                "error must name the failing register (110), got: {error}"
+            );
+            assert!(
+                error.contains("code 0"),
+                "error must include the exception detail, got: {error}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pause_battery_refuses_while_disconnected() {
+        // Issue #245 follow-up: when the backend has no inverter connection,
+        // pause must fail fast with a precise error instead of queueing
+        // writes that would sit idle (and time out the frontend's
+        // confirmation). No write should be queued.
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            *state.connection_state.lock().await =
+                ConnectionState::Disconnected;
+            let (status, response) = pause_battery(State(state.clone())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(response["ok"], json!(false));
+            let error = response["error"].as_str().expect("error message present");
+            assert!(
+                error.contains("not connected"),
+                "error must explain the cause, got: {error}"
+            );
+            // Refusal happens before any write is queued.
+            assert!(
+                drain_pending_writes(&state).await.is_empty(),
+                "no writes should be queued while disconnected"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pause_battery_allows_reconnecting_state() {
+        // The connection guard refuses only Disconnected. A transient
+        // Reconnecting blip must still proceed — the write queues and runs
+        // once the link comes back, so the user isn't blocked by a brief
+        // dongle drop right when they hit Pause.
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            *state.connection_state.lock().await = ConnectionState::Reconnecting;
+            let (status, response) = drive_pause_battery_completion(&state).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(response["ok"], json!(true));
+            assert!(
+                !drain_pending_writes(&state).await.is_empty(),
+                "writes should still be queued while Reconnecting"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn await_write_outcome_returns_error_when_channel_dropped() {
+        // If the poll loop is dropped (or the batch removed) before sending an
+        // outcome, the receiver resolves with a closed-channel error.
+        // await_write_outcome must surface that as an Err rather than hanging
+        // or silently treating it as success.
+        let (tx, rx) = tokio::sync::oneshot::channel::<WriteOutcome>();
+        drop(tx);
+        let result = await_write_outcome(rx).await;
+        let msg = result.expect_err("a dropped sender must surface as an error");
+        assert!(
+            msg.contains("dropped"),
+            "error should explain the batch was dropped, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn await_write_outcome_treats_timeout_as_pending_success() {
+        // A slow-but-progressing poll loop must not produce a false rejection;
+        // the frontend's snapshot confirmation remains responsible for the
+        // eventual result after the API wait expires.
+        let (_tx, rx) = tokio::sync::oneshot::channel::<WriteOutcome>();
+        let result =
+            await_write_outcome_with_timeout(rx, Duration::from_millis(1)).await;
+        assert_eq!(result, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn unpause_battery_refuses_while_disconnected() {
+        // Symmetric guard on unpause: fail fast while offline, before any
+        // limiter state is mutated.
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            *state.connection_state.lock().await =
+                ConnectionState::Disconnected;
+            let (status, response) = unpause_battery(State(state.clone())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(response["ok"], json!(false));
+            let error = response["error"].as_str().expect("error message present");
+            assert!(
+                error.contains("not connected"),
+                "error must explain the cause, got: {error}"
+            );
+            assert!(
+                drain_pending_writes(&state).await.is_empty(),
+                "no writes should be queued while disconnected"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unpause_battery_returns_ok_when_writes_are_accepted() {
+        // Symmetric to pause: when every register in the unpause batch is
+        // accepted, the endpoint returns 200 with the resume message.
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            let (status, response) =
+                drive_unpause_battery_completion(&state).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(response["ok"], json!(true));
+            assert!(
+                response["message"].as_str().unwrap().contains("unpaused"),
+                "success message should mention unpaused, got: {}",
+                response["message"]
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unpause_battery_surfaces_register_rejection_error() {
+        // Issue #245 follow-up: when the inverter rejects the reserve-restore
+        // write, unpause must surface a precise 400 (the limiter was already
+        // disabled as intended) rather than reporting success the UI can't
+        // confirm.
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_BATTERY_SOC_RESERVE;
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            let (status, response) = drive_unpause_battery_completion_with(
+                &state,
+                WriteOutcome::Failed {
+                    address: HR_BATTERY_SOC_RESERVE,
+                    value: 4,
+                    error: "Modbus exception: function 0x86, code 0".to_string(),
+                },
+            )
+            .await;
+
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "a rejected write must surface as a 400, got {status}"
+            );
+            assert_eq!(response["ok"], json!(false));
+            let error = response["error"].as_str().expect("error message present");
+            assert!(
+                error.contains("110"),
+                "error must name the failing register (110), got: {error}"
+            );
+            assert!(
+                error.contains("code 0"),
+                "error must include the exception detail, got: {error}"
+            );
         })
         .await;
     }
@@ -11015,10 +11545,10 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
             let queued = state.pending_writes.lock().await;
             assert_eq!(
-                queued[0][0].address,
+                queued[0].writes[0].address,
                 crate::modbus::registers::HR_BATTERY_DISCHARGE_MIN_POWER_RESERVE
             );
-            assert_eq!(queued[0][0].value, 25);
+            assert_eq!(queued[0].writes[0].value, 25);
             drop(queued);
 
             *state.latest_snapshot.lock().await = Some(InverterSnapshot {
@@ -11131,9 +11661,8 @@ mod tests {
                 .pending_writes
                 .lock()
                 .await
-                .clone()
-                .into_iter()
-                .flatten()
+                .iter()
+                .flat_map(|b| b.writes.iter().cloned())
                 .collect();
             let addresses: Vec<u16> = writes.iter().map(|w| w.address).collect();
             assert!(addresses.contains(&96), "clear must disable charge (HR 96)");
@@ -11209,9 +11738,8 @@ mod tests {
                 .pending_writes
                 .lock()
                 .await
-                .clone()
-                .into_iter()
-                .flatten()
+                .iter()
+                .flat_map(|b| b.writes.iter().cloned())
                 .collect();
             assert!(!writes.is_empty(), "scope=off must queue clear writes");
             let addresses: Vec<u16> = writes.iter().map(|w| w.address).collect();
@@ -11395,9 +11923,8 @@ mod tests {
                 .pending_writes
                 .lock()
                 .await
-                .clone()
-                .into_iter()
-                .flatten()
+                .iter()
+                .flat_map(|b| b.writes.iter().cloned())
                 .collect();
             let addresses: Vec<u16> = writes.iter().map(|w| w.address).collect();
             assert!(

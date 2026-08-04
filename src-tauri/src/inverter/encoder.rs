@@ -127,6 +127,24 @@ pub struct RegisterWrite {
     pub value: u16,
 }
 
+/// Outcome of executing a batch of register writes, reported back to the
+/// control endpoint that requested confirmation (see
+/// [`crate::inverter::poll::PendingWriteBatch`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteOutcome {
+    /// Every write in the batch was accepted by the inverter.
+    Ok,
+    /// At least one write in the batch was rejected. The poll loop still
+    /// attempts the remaining writes (so partial application is possible),
+    /// but the first failure is the one surfaced — it is usually the
+    /// actionable one (e.g. a register the dongle is refusing this cycle).
+    Failed {
+        address: u16,
+        value: u16,
+        error: String,
+    },
+}
+
 // ---------------------------------------------------------------------------
 // Control commands
 // ---------------------------------------------------------------------------

@@ -48,12 +48,20 @@ const FALLBACK_SUBNETS: &[&str] = &[
 /// Uses the provided gateway IP to infer the /24 subnet, then probes
 /// each address on MODBUS_PORT (8899) concurrently.
 pub async fn scan_subnet(subnet_base: &str) -> Vec<DiscoveredInverter> {
-    tracing::info!("Starting subnet scan on {}.x:{}", subnet_base, MODBUS_PORT);
+    scan_subnet_on_port(subnet_base, MODBUS_PORT).await
+}
+
+/// Like [`scan_subnet`] but probes a caller-chosen port. Production code
+/// always passes [`MODBUS_PORT`]; tests pass an ephemeral free port so the
+/// "found nothing" path is deterministic regardless of whether a simulator
+/// happens to be listening on 8899.
+pub async fn scan_subnet_on_port(subnet_base: &str, port: u16) -> Vec<DiscoveredInverter> {
+    tracing::info!("Starting subnet scan on {}.x:{}", subnet_base, port);
 
     let mut tasks = Vec::new();
     for host in 1..255u8 {
         let ip = format!("{}.{}", subnet_base, host);
-        tasks.push(probe_host(ip));
+        tasks.push(probe_host(ip, port));
     }
 
     let results = futures_util::future::join_all(tasks).await;
@@ -77,9 +85,18 @@ pub async fn scan_subnet(subnet_base: &str) -> Vec<DiscoveredInverter> {
 
 /// Scan multiple subnets concurrently and return all discovered inverters.
 pub async fn scan_multiple_subnets(subnets: &[String]) -> Vec<DiscoveredInverter> {
+    scan_multiple_subnets_on_port(subnets, MODBUS_PORT).await
+}
+
+/// Like [`scan_multiple_subnets`] but probes a caller-chosen port (see
+/// [`scan_subnet_on_port`]).
+pub async fn scan_multiple_subnets_on_port(
+    subnets: &[String],
+    port: u16,
+) -> Vec<DiscoveredInverter> {
     let mut all_found = Vec::new();
     for subnet in subnets {
-        let found = scan_subnet(subnet).await;
+        let found = scan_subnet_on_port(subnet, port).await;
         all_found.extend(found);
     }
     all_found
@@ -91,8 +108,8 @@ pub async fn scan_multiple_subnets(subnets: &[String]) -> Vec<DiscoveredInverter
 /// and checks that the response contains a valid GivEnergy frame header
 /// (transaction ID 0x5959). Devices that merely have port 8899 open but don't
 /// speak the protocol will fail this check.
-async fn probe_host(ip: String) -> Option<DiscoveredInverter> {
-    let addr = format!("{}:{}", ip, MODBUS_PORT);
+async fn probe_host(ip: String, port: u16) -> Option<DiscoveredInverter> {
+    let addr = format!("{}:{}", ip, port);
     let ip_for_closure = ip.clone();
     let ip_for_result = ip.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -129,7 +146,7 @@ async fn probe_host(ip: String) -> Option<DiscoveredInverter> {
                 tracing::debug!(
                     "Non-GivEnergy response from {}:{} (txn=0x{:04X})",
                     ip_for_closure,
-                    MODBUS_PORT,
+                    port,
                     txn_id
                 );
                 None
@@ -145,11 +162,11 @@ async fn probe_host(ip: String) -> Option<DiscoveredInverter> {
             tracing::debug!(
                 "Found GivEnergy device at {}:{}",
                 ip_for_result,
-                MODBUS_PORT
+                port
             );
             Some(DiscoveredInverter {
                 ip: ip_for_result,
-                port: MODBUS_PORT,
+                port,
             })
         }
         _ => None,
@@ -398,14 +415,29 @@ mod tests {
     //   * a scan against a subnet with no GivEnergy device returns []
     //   * scan_multiple_subnets is the union of all subnet results
     //
-    // We use 127.0.0.x because nothing is listening on those ports,
-    // and connect attempts will time out fast.
+    // To avoid environment sensitivity (a dev simulator may be listening
+    // on 0.0.0.0:8899), we reserve an ephemeral port by binding a listener
+    // to 127.0.0.1:0, reading the assigned port, then dropping it. Connect
+    // attempts to that port on any 127.0.0.x host then fail with
+    // "connection refused" immediately.
+
+    /// Reserve an ephemeral TCP port that is guaranteed (modulo a negligible
+    /// TOCTOU race) to have no listener. Used by discovery tests so they
+    /// don't depend on port 8899 being free.
+    fn free_ephemeral_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        port
+    }
 
     #[tokio::test]
     async fn scan_subnet_no_devices_returns_empty() {
-        // 127.0.0.x — connect attempts will fail quickly because no
-        // 8899 listener is bound. This pins the "found nothing" path.
-        let result = scan_subnet("127.0.0").await;
+        let port = free_ephemeral_port();
+        // Connect attempts will fail quickly because nothing is listening on
+        // this port. This pins the "found nothing" path deterministically,
+        // regardless of whether a dev simulator is bound to 8899.
+        let result = scan_subnet_on_port("127.0.0", port).await;
         assert!(result.is_empty(), "expected no inverters, got {result:?}");
     }
 
@@ -417,9 +449,10 @@ mod tests {
 
     #[tokio::test]
     async fn scan_multiple_subnets_unreachable_returns_empty() {
-        // All subnets are loopback-ish with no listeners. The
+        let port = free_ephemeral_port();
+        // All subnets are loopback-ish with no listeners on this port. The
         // function should aggregate (i.e. union) empty results.
-        let result = scan_multiple_subnets(&["127.0.0".to_string()]).await;
+        let result = scan_multiple_subnets_on_port(&["127.0.0".to_string()], port).await;
         assert!(result.is_empty());
     }
 }
