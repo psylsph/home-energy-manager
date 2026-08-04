@@ -4,18 +4,13 @@
 
 Home Energy Manager connects directly to your inverter over your home network and shows you live data in real time. You can check your solar generation, battery charge, and energy costs, set charge schedules, and automate your battery — all without sending any data to the internet.
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
-
-> 🙏 **Huge thanks to the open-source projects that made this possible:**
-> [**GivTCP**](https://github.com/GivEnergy/giv_tcp) and [**givenergy-modbus**](https://github.com/dewet22/givenergy-modbus) — the community-driven GivEnergy protocol references that this app builds on.
+> 💬 **Got a question or hit a snag?** Try asking your favourite AI assistant first — just point it at the [**installation guide**](https://github.com/psylsph/home-energy-manager/blob/master/INSTALL.md) and ask your question. If you don't get your answer, feel free to [raise an issue](https://github.com/psylsph/home-energy-manager/issues).
 
 <div align="center">
 
-<a href="https://www.buymeacoffee.com/psylsph" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-blue.png" alt="Buy Me a Coffee" style="height: 60px !important;width: 217px !important;" ></a>
+<a href="https://www.buymeacoffee.com/psylsph" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-blue.png" alt="Buy Me a Coffee" style="height: 80px !important;width: 275px !important;" ></a>
 
 </div>
-
-> 💬 **Got a question or hit a snag?** Try asking your favourite AI assistant first — just point it at the [**installation guide**](https://github.com/psylsph/home-energy-manager/blob/master/INSTALL.md) and ask your question. If you don't get your answer, feel free to [raise an issue](https://github.com/psylsph/home-energy-manager/issues).
 
 ## Screenshots
 
@@ -290,7 +285,7 @@ This project was originally called **GivEnergy-Local**. The user-facing name is 
 
 ## Credits
 
-This project would not exist without the pioneering reverse-engineering work of the GivEnergy open-source community.
+🙏 **Huge thanks to the open-source projects that made this possible:**, this project would not exist without the pioneering reverse-engineering work of the GivEnergy open-source community.
 
 - **[GivTCP](https://github.com/GivEnergy/giv_tcp)** — the original GivEnergy Modbus integration for Home Assistant. This app builds on the protocol mapping and write methodology that GivTCP established.
 

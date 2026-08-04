@@ -3,10 +3,10 @@
 //! The app has no built-in auto-updater, but it can still tell the user when
 //! a newer release is out. This module mirrors the weather / Octopus pattern:
 //! a background loop periodically fetches the latest release tag from the
-//! GitHub Releases API and caches it in [`AppState::update`]; the
-//! [`get_latest_version`] HTTP handler only ever *reads* that cache — it never
-//! makes a network call on the request path, so the endpoint stays fast and
-//! hermetic to test.
+//! GitHub Releases API and caches it in [`AppState::update`]. The
+//! [`get_latest_version`] HTTP handler reads that cache for the response, but
+//! *also* triggers a background refresh when the cache is stale — so poking
+//! the endpoint forces a fresh check without waiting for the 6-hour loop.
 //!
 //! The frontend compares `current_version` (the compile-time
 //! `CARGO_PKG_VERSION`) against the cached `latest_version` and shows a
@@ -14,8 +14,9 @@
 //!
 //! Privacy: the only thing sent to GitHub is the user's IP (unauthenticated
 //! `GET` to `api.github.com`). The whole feature is gated behind a Settings
-//! toggle (`check_for_updates`, default on) — when it's off the loop never
-//! fetches and the handler reports `disabled: true`.
+//! toggle (`check_for_updates`, default on) — when it's off neither the loop
+//! nor the on-demand refresh ever fetches, and the handler reports
+//! `disabled: true`.
 
 use std::time::Duration;
 
@@ -38,6 +39,13 @@ const GITHUB_RELEASES_URL: &str =
 /// sees a same-day release within hours; long enough to stay far under
 /// GitHub's unauthenticated rate limit (60 req/hour/IP).
 const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Minimum time between on-demand refreshes triggered by the HTTP endpoint.
+/// Prevents a user (or a script) from exhausting GitHub's 60/hour/IP
+/// unauthenticated rate limit by repeatedly poking the endpoint. At most
+/// one on-demand fetch per minute keeps us well under the ceiling even
+/// before counting the 6-hour background loop.
+const ON_DEMAND_MIN_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Initial delay before the first fetch. Keeps startup snappy — the release
 /// check is low priority and the inverter connection / history should take
@@ -87,6 +95,11 @@ pub struct UpdateState {
     /// True while a fetch is in flight. Read by the handler so the frontend
     /// can show "checking…" rather than a bare empty state on first load.
     pub checking: bool,
+    /// True once [`run_update_loop`] has started. The HTTP handler uses this
+    /// to gate on-demand refreshes so integration tests (which don't spawn
+    /// the loop) never trigger a network call.
+    #[serde(skip)]
+    pub loop_registered: bool,
 }
 
 /// Strip a leading `v`/`V` from a version tag (`"v0.70.2"` → `"0.70.2"`).
@@ -201,6 +214,10 @@ async fn refresh(state: &std::sync::Arc<AppState>) {
 /// which keeps the endpoint hermetic.
 pub async fn run_update_loop(state: std::sync::Arc<AppState>) {
     tracing::info!("Update checker loop starting");
+    // Mark the loop as registered before the initial delay so the HTTP
+    // handler knows it's safe to trigger on-demand refreshes (tests don't
+    // spawn the loop, so they stay hermetic).
+    state.update.lock().await.loop_registered = true;
     // Stagger the first fetch away from startup so inverter connection and
     // history get a clean run at the network first.
     tokio::time::sleep(INITIAL_DELAY).await;
@@ -218,11 +235,31 @@ pub async fn run_update_loop(state: std::sync::Arc<AppState>) {
     }
 }
 
-/// `GET /api/latest-version` — current vs latest version, read straight from
-/// the cache. Never fetches on the request path (the background loop owns the
-/// network); returns `disabled: true` when the user has opted out, and
-/// `update_available: false` with no `latest_version` while the cache is still
-/// empty (first ~30s after startup, or while GitHub is unreachable).
+/// Decide whether poking `GET /api/latest-version` should trigger a
+/// background refresh. Returns true when the background loop has started
+/// (so tests stay hermetic), no fetch is already in flight, and the cache
+/// is either empty or older than [`ON_DEMAND_MIN_INTERVAL`].
+fn should_trigger_on_demand_refresh(cached: &UpdateState) -> bool {
+    if !cached.loop_registered || cached.checking {
+        return false;
+    }
+    match cached.last_checked_at {
+        None => true, // never checked — cold cache
+        Some(last) => {
+            let elapsed = Utc::now().signed_duration_since(last);
+            elapsed.num_seconds() >= ON_DEMAND_MIN_INTERVAL.as_secs() as i64
+        }
+    }
+}
+
+/// `GET /api/latest-version` — current vs latest version, read from the
+/// cache. Also triggers a background refresh when the cache is stale, so
+/// poking the endpoint forces a fresh check without waiting for the 6-hour
+/// loop. The response itself returns the current cache immediately (the
+/// refresh runs in the background and the frontend's retry picks it up).
+/// Returns `disabled: true` when the user has opted out, and
+/// `update_available: false` with no `latest_version` while the cache is
+/// still empty (first ~30s after startup, or while GitHub is unreachable).
 pub async fn get_latest_version(State(state): State<std::sync::Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let check_enabled = Settings::load().check_for_updates;
     let current = env!("CARGO_PKG_VERSION");
@@ -239,6 +276,18 @@ pub async fn get_latest_version(State(state): State<std::sync::Arc<AppState>>) -
     }
 
     let cached = state.update.lock().await.clone();
+
+    // Trigger a background refresh when the cache is stale. Non-blocking:
+    // the response below returns the current cache immediately; the
+    // frontend's retry (or the next endpoint hit) picks up the refreshed
+    // data once the fetch completes.
+    if should_trigger_on_demand_refresh(&cached) {
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            refresh(&state_clone).await;
+        });
+    }
+
     let (latest_version, release_url, update_available) = match &cached.latest {
         Some(release) => (
             Some(release.version.clone()),
@@ -334,5 +383,68 @@ mod tests {
         };
         assert_eq!(cached.version, "0.70.3");
         assert!(cached.release_url.starts_with("https://"));
+    }
+
+    // -----------------------------------------------------------------------
+    // should_trigger_on_demand_refresh: the decision that gates whether poking
+    // GET /api/latest-version spawns a background GitHub fetch. Pure function —
+    // no network, instant.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn on_demand_refresh_triggers_on_cold_cache_when_registered() {
+        // The background loop has started but hasn't fetched yet. This is the
+        // cold-start case: the user opens the app, the frontend pokes the
+        // endpoint, and we should trigger an immediate fetch.
+        let state = UpdateState {
+            loop_registered: true,
+            ..Default::default()
+        };
+        assert!(should_trigger_on_demand_refresh(&state));
+    }
+
+    #[test]
+    fn on_demand_refresh_skipped_when_loop_not_registered() {
+        // Tests don't spawn the loop, so loop_registered stays false and the
+        // handler never triggers a network call — this is the hermeticity
+        // guard.
+        let state = UpdateState::default();
+        assert!(!should_trigger_on_demand_refresh(&state));
+    }
+
+    #[test]
+    fn on_demand_refresh_skipped_while_checking() {
+        // A fetch is already in flight — don't start a duplicate.
+        let state = UpdateState {
+            loop_registered: true,
+            checking: true,
+            ..Default::default()
+        };
+        assert!(!should_trigger_on_demand_refresh(&state));
+    }
+
+    #[test]
+    fn on_demand_refresh_skipped_within_min_interval() {
+        // Cache was checked moments ago — don't re-fetch so soon (rate-limit
+        // protection).
+        let state = UpdateState {
+            loop_registered: true,
+            last_checked_at: Some(Utc::now()),
+            ..Default::default()
+        };
+        assert!(!should_trigger_on_demand_refresh(&state));
+    }
+
+    #[test]
+    fn on_demand_refresh_triggers_after_interval_expires() {
+        // Cache is older than ON_DEMAND_MIN_INTERVAL — safe to re-fetch.
+        let state = UpdateState {
+            loop_registered: true,
+            last_checked_at: Some(
+                Utc::now() - chrono::Duration::seconds(ON_DEMAND_MIN_INTERVAL.as_secs() as i64 + 1),
+            ),
+            ..Default::default()
+        };
+        assert!(should_trigger_on_demand_refresh(&state));
     }
 }

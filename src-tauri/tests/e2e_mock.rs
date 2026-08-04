@@ -385,10 +385,11 @@ async fn evc_status_empty_when_not_configured() {
 // ====================================================================
 // GET /api/latest-version ("new version available" cache)
 // ====================================================================
-// Hermetic: the endpoint only *reads* the cache (never fetches), and the
-// background `run_update_loop` is not spawned in tests, so the cache stays
-// empty. This pins the route wiring + payload shape + the current-version
-// field without touching the network.
+// The endpoint now triggers a background refresh when the cache is stale,
+// but only when the update loop has been registered (`loop_registered`).
+// Tests don't spawn the loop, so the cache stays empty and no network
+// call is made — keeping these tests hermetic. This pins the route wiring
+// + payload shape + the current-version field.
 
 #[tokio::test]
 async fn latest_version_empty_cache_reports_current_and_no_update() {
