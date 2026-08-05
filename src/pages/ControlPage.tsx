@@ -6,6 +6,7 @@ import { deviceSupportsEps, deviceSupportsTimedDischarge } from '../lib/deviceCa
 import type { ScheduleSlot } from '../lib/types';
 import {
   DEFAULT_ADAPTIVE_PERIOD,
+  adaptiveSocFieldCaption,
   adaptiveStateLabel,
   validateAdaptiveChargeConfig,
   type AdaptiveChargeConfig,
@@ -686,6 +687,9 @@ function AdaptiveChargeSection() {
                     onChange={(event) => updatePeriod(index, { [field]: Number(event.target.value) })}
                     className="w-full"
                   />
+                  <p className="text-text-secondary/60 text-[11px] leading-relaxed">
+                    {adaptiveSocFieldCaption(field)}
+                  </p>
                 </div>
               ))}
             </>

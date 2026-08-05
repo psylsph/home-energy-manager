@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_ADAPTIVE_PERIOD,
+  adaptiveSocFieldCaption,
   adaptiveStateLabel,
   validateAdaptiveChargeConfig,
   type AdaptiveChargeConfig,
@@ -55,6 +56,22 @@ describe('validateAdaptiveChargeConfig', () => {
     expect(validateAdaptiveChargeConfig(config({
       periods: [{ ...DEFAULT_ADAPTIVE_PERIOD, enabled: false }],
     }))).toContain('Enable at least one');
+  });
+});
+
+describe('adaptiveSocFieldCaption', () => {
+  it('clarifies that Low SOC is a charge-rate trigger, not a discharge floor', () => {
+    const caption = adaptiveSocFieldCaption('low_soc');
+    // Must steer users away from the #256 misunderstanding: Low SOC does
+    // not cap discharge, and must point them at the right controls.
+    expect(caption).toMatch(/charge-rate trigger/i);
+    expect(caption).toMatch(/does not stop discharge/i);
+    expect(caption).toMatch(/discharge cutoff soc/i);
+    expect(caption).toMatch(/target soc/i);
+  });
+
+  it('describes Recovery SOC as the return-to-preferred threshold', () => {
+    expect(adaptiveSocFieldCaption('recovery_soc')).toMatch(/preferred charge rate/i);
   });
 });
 

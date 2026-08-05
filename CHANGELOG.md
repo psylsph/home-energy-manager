@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.71.6] - 2026-08-05
+
+### Changed
+
+- **Adaptive Charge now spells out that its "Low SOC" is a charge-rate trigger, not a discharge floor.** A caption under the field explains that it only switches the charge rate and never stops discharge, and points you to the slot Target SOC or Discharge Cutoff SOC when you actually want to cap how low the battery drains. (issue #256)
+
 ## [0.71.5] - 2026-08-05
 
 ### Changed

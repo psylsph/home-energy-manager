@@ -70,6 +70,24 @@ export function validateAdaptiveChargeConfig(config: AdaptiveChargeConfig): stri
   return null;
 }
 
+/**
+ * Short caption shown under each Adaptive Charge SOC field.
+ *
+ * Adaptive Charge only sets a maximum *charge* rate within its time window —
+ * it never forces charging and has no effect on discharge. "Low SOC" is the
+ * point where the rate switches to the recovery charge rate; it is not a
+ * discharge floor. To cap discharge, use the per-slot Target SOC or the
+ * global Discharge Cutoff SOC.
+ */
+export function adaptiveSocFieldCaption(field: 'low_soc' | 'recovery_soc'): string {
+  switch (field) {
+    case 'low_soc':
+      return 'Below this, switch to the recovery charge rate. This is a charge-rate trigger only — it does not stop discharge. Use the slot Target SOC or Discharge Cutoff SOC to cap discharge.';
+    case 'recovery_soc':
+      return 'Once SOC climbs back above this, drop to the preferred charge rate.';
+  }
+}
+
 export function adaptiveStateLabel(state: string | undefined): string {
   switch (state) {
     case 'outside_window': return 'Outside configured period';
