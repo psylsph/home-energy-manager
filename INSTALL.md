@@ -431,7 +431,7 @@ The helper prints the container ID and dashboard URL when installation
 finishes. To update later, run the installed update command through Proxmox:
 
 ```bash
-pct exec <container-id> -- home-energy-manager-update
+pct exec <container-id> -- update
 ```
 
 Updates stop the service, save a pre-update copy of the persistent data under

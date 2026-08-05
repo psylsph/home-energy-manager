@@ -7,7 +7,9 @@ DESTDIR="${HEM_ROOT:-}"
 DATA_DIR="/var/lib/givenergy-local"
 SERVICE_NAME="home-energy-manager.service"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
-UPDATER_PATH="/usr/local/sbin/home-energy-manager-update"
+UPDATER_PATH="/usr/local/bin/update"
+# Legacy path from <v0.72.0; removed on upgrade so stale copies don't linger.
+OLD_UPDATER_PATH="/usr/local/sbin/home-energy-manager-update"
 PORT_CONFIG_PATH="/etc/default/home-energy-manager"
 
 fail() {
@@ -52,6 +54,10 @@ curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
 TAG="$(jq -er '.tag_name' "$RELEASE_JSON")" || fail "latest GitHub release has no tag"
 [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "unexpected release tag: $TAG"
 INSTALLED_VERSION="$(dpkg-query -W -f='${Version}' home-energy-manager 2>/dev/null || true)"
+# Remove the legacy <v0.72.0 updater path if it exists from a prior install.
+if [ -e "$(root_path "$OLD_UPDATER_PATH")" ]; then
+  rm -f "$(root_path "$OLD_UPDATER_PATH")"
+fi
 if [ "$INSTALLED_VERSION" = "${TAG#v}" ]; then
   systemctl enable --now "$SERVICE_NAME"
   printf 'Home Energy Manager %s is already installed and running.\n' "$TAG"
@@ -141,6 +147,7 @@ cleanup_failed_install() {
   systemctl disable --now "$SERVICE_NAME" || true
   rm -f "$(root_path "$SERVICE_PATH")" \
     "$(root_path "$UPDATER_PATH")" \
+    "$(root_path "$OLD_UPDATER_PATH")" \
     "$(root_path "$PORT_CONFIG_PATH")"
   systemctl daemon-reload
   apt remove -y home-energy-manager \
