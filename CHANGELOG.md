@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.71.4] - 2026-08-04
+
+### Changed
+
+- **The install guide now covers migrating from a desktop install to Docker.** If you're moving from Windows, macOS, or Linux to Docker, there's a step-by-step section showing which files to copy (`settings.json` and `history.db`) so your settings and energy history carry over. (issue #250)
+
+- **The Windows NSIS `.exe` installer is no longer listed on the release page.** The MSI installer remains the recommended Windows download. The NSIS build still compiles for anyone who builds from source, but it won't appear as a downloadable asset on GitHub releases.
+
 ## [0.71.3] - 2026-08-04
 
 ### Changed
