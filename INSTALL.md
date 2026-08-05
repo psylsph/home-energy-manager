@@ -581,6 +581,18 @@ docker compose build && docker compose up -d
 
 When using the Compose file from the repository, settings and history are stored in `~/.givenergy-local` on the host machine.
 
+#### Migrating from a desktop install to Docker
+
+You can move an existing Windows, macOS, or Linux desktop install into Docker without losing your settings or history. The app stores everything in a single folder, and the history database (`history.db`) is a plain SQLite file that is portable across platforms.
+
+1. Copy these two files from your current install's config folder (Windows: `%USERPROFILE%\.givenergy-local\`, macOS/Linux: `~/.givenergy-local/`):
+   - `settings.json` — your connection, tariff, and schedule config
+   - `history.db` — your stored energy history
+2. Place them in a directory on your Docker host, e.g. `~/.givenergy-local/`.
+3. Start the container with that directory mounted as shown in the `docker run` or `docker compose` examples above. Your settings and history will pick up where you left off.
+
+After launching, check the inverter IP on the Settings page — if your Docker host is on a different network than your old machine, the address may need updating. Stop the old desktop install before starting the Docker container so both don't poll the same inverter at once.
+
 ### Option 3: unRAID
 
 If you use unRAID, you can run Home Energy Manager as a Docker container:
