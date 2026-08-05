@@ -351,7 +351,7 @@ jobs:
           for path in bundle_dir.rglob("*"):
               if not path.is_file():
                   continue
-              if path.suffix.lower() not in {".dmg", ".deb", ".rpm", ".msi", ".msix", ".exe"}:
+              if path.suffix.lower() not in {".dmg", ".deb", ".rpm", ".msi", ".msix"}:
                   continue
               dest = out_dir / friendly_name(path)
               if " " in dest.name:
