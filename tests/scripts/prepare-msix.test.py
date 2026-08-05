@@ -93,7 +93,8 @@ class PrepareMsixTests(unittest.TestCase):
         self.assertIn("winapp pack $stageDir", workflow)
         self.assertNotIn("winapp pack $stageDir --cert", workflow)
         self.assertIn('if ext_lower == ".msix":', workflow)
-        self.assertIn('".msix", ".exe"', workflow)
+        self.assertNotIn('".msix", ".exe"', workflow)
+        self.assertIn('".msix"}', workflow)
 
     def test_manual_smoke_workflow_uploads_the_msix_without_creating_a_release(self) -> None:
         workflow = (REPO_ROOT / ".github" / "workflows" / "msix-smoke.yml").read_text(encoding="utf-8")

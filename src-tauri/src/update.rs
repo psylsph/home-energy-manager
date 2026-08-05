@@ -447,4 +447,73 @@ mod tests {
         };
         assert!(should_trigger_on_demand_refresh(&state));
     }
+
+    // ================================================================
+    // get_latest_version handler — response shape per cache/opt-in state
+    // ================================================================
+
+    #[tokio::test]
+    async fn get_latest_version_reports_disabled_when_opted_out() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let mut settings = Settings::load();
+            settings.check_for_updates = false;
+            settings.save().unwrap();
+
+            let state = std::sync::Arc::new(AppState::new());
+            let (status, body) = get_latest_version(State(state)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["ok"], true);
+            assert_eq!(body["disabled"], true);
+            assert_eq!(body["current_version"], env!("CARGO_PKG_VERSION"));
+            // No version fields are emitted when the feature is off.
+            assert!(body.get("latest_version").is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_latest_version_serves_empty_cache_then_cached_release() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let mut settings = Settings::load();
+            settings.check_for_updates = true;
+            settings.save().unwrap();
+            let state = std::sync::Arc::new(AppState::new());
+
+            // Empty cache (loop not registered → no on-demand refresh fires):
+            // no latest_version, no banner.
+            let (status, body) = get_latest_version(State(state.clone())).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["latest_version"], Value::Null);
+            assert_eq!(body["update_available"], false);
+            assert_eq!(body["current_version"], env!("CARGO_PKG_VERSION"));
+
+            // Populate the cache with a newer release → banner fires.
+            {
+                let mut u = state.update.lock().await.clone();
+                u.latest = Some(CachedRelease {
+                    version: "99.99.99".to_string(),
+                    release_url: "https://example/release".to_string(),
+                });
+                *state.update.lock().await = u;
+            }
+            let (_, body) = get_latest_version(State(state.clone())).await;
+            assert_eq!(body["latest_version"], "99.99.99");
+            assert_eq!(body["release_url"], "https://example/release");
+            assert_eq!(body["update_available"], true);
+
+            // A cached release older than the running version → no banner.
+            {
+                let mut u = state.update.lock().await.clone();
+                u.latest = Some(CachedRelease {
+                    version: "0.0.1".to_string(),
+                    release_url: "https://example/old".to_string(),
+                });
+                *state.update.lock().await = u;
+            }
+            let (_, body) = get_latest_version(State(state)).await;
+            assert_eq!(body["latest_version"], "0.0.1");
+            assert_eq!(body["update_available"], false);
+        })
+        .await;
+    }
 }

@@ -404,32 +404,60 @@ async fn fetch_tariff_prices(
         encode(&from.to_rfc3339()),
         encode(&to.to_rfc3339()),
     );
-    let mut selected: std::collections::HashMap<(i64, Option<i64>), (u8, PriceResult)> =
-        std::collections::HashMap::new();
+    let mut all_prices: Vec<PriceResult> = Vec::new();
     loop {
         let page: PricePage =
             serde_json::from_value(get_json(url, settings.octopus_api_key.clone()).await?)
                 .map_err(|e| format!("invalid Octopus tariff response: {e}"))?;
-        for price in page.results {
-            // Agile rates can legitimately be negative; reject only non-finite
-            // corruption, not a real paid-to-consume interval.
-            if !price.value_inc_vat.is_finite() {
-                continue;
-            }
-            let from = parse_timestamp(&price.valid_from)?;
-            let to = price.valid_to.as_deref().map(parse_timestamp).transpose()?;
-            let priority = payment_priority(price.payment_method.as_deref());
-            let key = (from, to);
-            if selected
-                .get(&key)
-                .is_none_or(|(current, _)| priority > *current)
-            {
-                selected.insert(key, (priority, price));
-            }
-        }
+        all_prices.extend(page.results);
         match validated_next_url(page.next, &allowed_page_prefix)? {
             Some(next) => url = next,
             None => break,
+        }
+    }
+
+    select_tariff_rows(all_prices, agreement, stream, rate_type)
+}
+
+/// Deduplicate one or more pages of Octopus tariff prices into a single row
+/// per `(valid_from, valid_to)` interval, then clamp each interval to the
+/// agreement window and drop any that collapse to empty.
+///
+/// Pure (operates only on already-fetched prices) so the dedup,
+/// payment-method priority, and agreement-clamping rules are unit-tested
+/// directly without any network. Paginated results are collected in order
+/// before calling this, so the "first highest-priority price wins a tied
+/// interval" behaviour is preserved exactly.
+fn select_tariff_rows(
+    prices: Vec<PriceResult>,
+    agreement: &Agreement,
+    stream: &Stream,
+    rate_type: &str,
+) -> Result<Vec<OctopusTariffPriceRow>, String> {
+    let agreement_start = parse_timestamp(&agreement.valid_from)?;
+    let agreement_end = agreement
+        .valid_to
+        .as_deref()
+        .map(parse_timestamp)
+        .transpose()?;
+
+    let mut selected: std::collections::HashMap<(i64, Option<i64>), (u8, PriceResult)> =
+        std::collections::HashMap::new();
+    for price in prices {
+        // Agile rates can legitimately be negative; reject only non-finite
+        // corruption, not a real paid-to-consume interval.
+        if !price.value_inc_vat.is_finite() {
+            continue;
+        }
+        let from = parse_timestamp(&price.valid_from)?;
+        let to = price.valid_to.as_deref().map(parse_timestamp).transpose()?;
+        let priority = payment_priority(price.payment_method.as_deref());
+        let key = (from, to);
+        if selected
+            .get(&key)
+            .is_none_or(|(current, _)| priority > *current)
+        {
+            selected.insert(key, (priority, price));
         }
     }
 
@@ -1020,5 +1048,504 @@ mod tests {
             parse_timestamp("2024-03-31T02:00:00+01:00").unwrap(),
             parse_timestamp("2024-03-31T01:00:00Z").unwrap()
         );
+    }
+
+    // ================================================================
+    // Pure helpers: encode / base_url / Stream paths
+    // ================================================================
+
+    #[test]
+    fn test_encode_escapes_non_alphanumeric() {
+        // Alphanumerics pass through untouched.
+        assert_eq!(encode("ABC123"), "ABC123");
+        // Everything else is percent-encoded by the NON_ALPHANUMERIC set.
+        assert_eq!(encode("a/b c"), "a%2Fb%20c");
+        assert_eq!(encode("-"), "%2D");
+    }
+
+    #[test]
+    fn test_base_url_falls_back_and_trims() {
+        fn settings(url: &str) -> Settings {
+            Settings {
+                octopus_api_base_url: url.to_string(),
+                ..Default::default()
+            }
+        }
+        // Empty or whitespace-only → the official host.
+        assert_eq!(base_url(&settings("")), OFFICIAL_BASE_URL);
+        assert_eq!(base_url(&settings("   \t ")), OFFICIAL_BASE_URL);
+        // A custom host is kept verbatim ...
+        assert_eq!(
+            base_url(&settings("https://proxy.example")),
+            "https://proxy.example"
+        );
+        // ... with only a *trailing* slash trimmed (internal path kept).
+        assert_eq!(
+            base_url(&settings("https://proxy.example/v1/")),
+            "https://proxy.example/v1"
+        );
+    }
+
+    #[test]
+    fn test_stream_key_and_path_branch_gas_vs_electricity() {
+        let elec = Stream {
+            kind: "electricity_import".to_string(),
+            meter_point: "MPAN/1".to_string(),
+            serial: "S 100".to_string(),
+            earliest: 0,
+            agreements: vec![],
+        };
+        // key is a stable kind:meter:serial tuple.
+        assert_eq!(elec.key(), "electricity_import:MPAN/1:S 100");
+        // Electricity streams route to the electricity-meter endpoint ...
+        assert!(elec.path().starts_with("/v1/electricity-meter-points/"));
+        // ... and both meter point + serial are URL-encoded into the path.
+        assert!(elec.path().contains("MPAN%2F1"));
+        assert!(elec.path().contains("S%20100"));
+
+        let gas = Stream {
+            kind: "gas".to_string(),
+            meter_point: "333".to_string(),
+            serial: "G1".to_string(),
+            earliest: 0,
+            agreements: vec![],
+        };
+        // Gas streams route to the gas-meter endpoint instead.
+        assert!(gas.path().starts_with("/v1/gas-meter-points/"));
+        assert_eq!(gas.key(), "gas:333:G1");
+    }
+
+    // ================================================================
+    // validated_next_url / parse_timestamp / hhmm_minutes edge cases
+    // ================================================================
+
+    #[test]
+    fn test_validated_next_url_none_is_ok_none() {
+        // No `next` link → pagination finished, not an error.
+        assert_eq!(
+            validated_next_url(None, "https://api.octopus.energy/").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_parse_timestamp_rejects_malformed() {
+        let err = parse_timestamp("not-a-timestamp").unwrap_err();
+        assert!(err.contains("invalid Octopus timestamp"));
+        assert!(err.contains("not-a-timestamp"));
+    }
+
+    #[test]
+    fn test_hhmm_minutes_full_day_boundaries() {
+        assert_eq!(hhmm_minutes("00:00"), Some(0));
+        assert_eq!(hhmm_minutes("23:59"), Some(23 * 60 + 59));
+        // Out-of-range components are rejected.
+        assert_eq!(hhmm_minutes("12:60"), None); // minute overflow
+        assert_eq!(hhmm_minutes("24:00"), None); // hour overflow
+        // Malformed strings.
+        assert_eq!(hhmm_minutes("5"), None); // no colon
+        assert_eq!(hhmm_minutes(":5"), None); // missing hour
+    }
+
+    // ================================================================
+    // Endpoint response shapes when Octopus is not configured
+    // ================================================================
+
+    #[tokio::test]
+    async fn test_endpoints_report_not_configured_when_disabled() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            // Default settings → Octopus integration not configured.
+            let state = Arc::new(AppState::new());
+
+            // get_status always returns 200, but reports configured=false.
+            let (status, body) = get_status(State(state.clone())).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["ok"], true);
+            assert_eq!(body["configured"], false);
+
+            // get_history / get_summary both short-circuit to 404.
+            let (hist_status, _) = get_history(
+                State(state.clone()),
+                Query(HistoryQuery { range: None, offset: None }),
+            )
+            .await;
+            assert_eq!(hist_status, StatusCode::NOT_FOUND);
+
+            let (sum_status, _) = get_summary(
+                State(state),
+                Query(HistoryQuery { range: None, offset: None }),
+            )
+            .await;
+            assert_eq!(sum_status, StatusCode::NOT_FOUND);
+        })
+        .await;
+    }
+
+    // ================================================================
+    // select_tariff_rows — dedup / payment priority / agreement clamping
+    // ================================================================
+
+    fn price(value: f64, from: &str, to: Option<&str>, method: Option<&str>) -> PriceResult {
+        PriceResult {
+            value_inc_vat: value,
+            valid_from: from.to_string(),
+            valid_to: to.map(|s| s.to_string()),
+            payment_method: method.map(|s| s.to_string()),
+        }
+    }
+
+    fn agreement(from: &str, to: Option<&str>, code: &str) -> Agreement {
+        Agreement {
+            tariff_code: code.to_string(),
+            valid_from: from.to_string(),
+            valid_to: to.map(|s| s.to_string()),
+        }
+    }
+
+    fn stream_of(kind: &str) -> Stream {
+        Stream {
+            kind: kind.to_string(),
+            meter_point: "MPAN".to_string(),
+            serial: "S1".to_string(),
+            earliest: 0,
+            agreements: vec![],
+        }
+    }
+
+    const AGR_FROM: &str = "2024-01-01T00:00:00Z";
+    const OPEN_AGR: &str = "E-1R-AGILE-24-10-01-A";
+
+    #[test]
+    fn select_tariff_rows_prefers_direct_debit_on_a_tied_interval() {
+        // Two prices for the same interval: DIRECT_DEBIT must win over a
+        // cheaper-to-Octopus non-direct-debit method (priority 3 > 1).
+        let rows = select_tariff_rows(
+            vec![
+                price(20.0, AGR_FROM, Some("2024-01-01T01:00:00Z"), Some("NON_DIRECT_DEBIT")),
+                price(15.0, AGR_FROM, Some("2024-01-01T01:00:00Z"), Some("DIRECT_DEBIT")),
+            ],
+            &agreement(AGR_FROM, None, OPEN_AGR),
+            &stream_of("electricity_import"),
+            "standard",
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].value_inc_vat, 15.0);
+    }
+
+    #[test]
+    fn select_tariff_rows_none_payment_beats_named_non_direct_debit() {
+        // Unspecified payment method (priority 2) outranks a named non-DD one (1).
+        let rows = select_tariff_rows(
+            vec![
+                price(20.0, AGR_FROM, Some("2024-01-01T01:00:00Z"), Some("OTHER")),
+                price(12.0, AGR_FROM, Some("2024-01-01T01:00:00Z"), None),
+            ],
+            &agreement(AGR_FROM, None, OPEN_AGR),
+            &stream_of("electricity_import"),
+            "standard",
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].value_inc_vat, 12.0);
+    }
+
+    #[test]
+    fn select_tariff_rows_rejects_non_finite_but_keeps_negative_agile() {
+        // NaN/inf is corruption → dropped; a real negative Agile rate survives.
+        let rows = select_tariff_rows(
+            vec![
+                price(f64::NAN, AGR_FROM, Some("2024-01-01T01:00:00Z"), None),
+                price(-5.0, AGR_FROM, Some("2024-01-01T01:00:00Z"), None),
+            ],
+            &agreement(AGR_FROM, None, OPEN_AGR),
+            &stream_of("electricity_import"),
+            "standard",
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].value_inc_vat, -5.0);
+    }
+
+    #[test]
+    fn select_tariff_rows_clamps_to_the_agreement_window() {
+        // Price interval 00:00–03:00, agreement 00:30–02:00 → clamped.
+        let rows = select_tariff_rows(
+            vec![price(10.0, "2024-01-01T00:00:00Z", Some("2024-01-01T03:00:00Z"), None)],
+            &agreement("2024-01-01T00:30:00Z", Some("2024-01-01T02:00:00Z"), OPEN_AGR),
+            &stream_of("electricity_import"),
+            "standard",
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        let from = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:30:00Z")
+            .unwrap()
+            .timestamp();
+        let to = chrono::DateTime::parse_from_rfc3339("2024-01-01T02:00:00Z")
+            .unwrap()
+            .timestamp();
+        assert_eq!(rows[0].valid_from, from);
+        assert_eq!(rows[0].valid_to, Some(to));
+    }
+
+    #[test]
+    fn select_tariff_rows_drops_intervals_entirely_before_the_agreement() {
+        // Price 00:00–01:00, agreement starts the next day → collapses to
+        // valid_to <= valid_from and is dropped.
+        let rows = select_tariff_rows(
+            vec![price(10.0, "2024-01-01T00:00:00Z", Some("2024-01-01T01:00:00Z"), None)],
+            &agreement("2024-01-02T00:00:00Z", None, OPEN_AGR),
+            &stream_of("electricity_import"),
+            "standard",
+        )
+        .unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn select_tariff_rows_keeps_distinct_intervals_and_tags_metadata() {
+        let rows = select_tariff_rows(
+            vec![
+                price(10.0, AGR_FROM, Some("2024-01-01T01:00:00Z"), None),
+                price(12.0, "2024-01-01T01:00:00Z", Some("2024-01-01T02:00:00Z"), None),
+            ],
+            &agreement(AGR_FROM, None, OPEN_AGR),
+            &stream_of("gas"),
+            "standing",
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        // Metadata comes from the stream / agreement / rate_type, not the price.
+        assert_eq!(rows[0].meter_kind, "gas");
+        assert_eq!(rows[0].meter_point, "MPAN");
+        assert_eq!(rows[0].tariff_code, OPEN_AGR);
+        assert_eq!(rows[0].rate_type, "standing");
+    }
+
+    #[test]
+    fn select_tariff_rows_empty_input_is_empty_output() {
+        assert!(select_tariff_rows(
+            vec![],
+            &agreement(AGR_FROM, None, OPEN_AGR),
+            &stream_of("electricity_import"),
+            "standard",
+        )
+        .unwrap()
+        .is_empty());
+    }
+
+    // ================================================================
+    // HTTP-layer tests — a mock Octopus API served by axum on an
+    // ephemeral port. No new dependency: axum is already the app's
+    // embedded HTTP server. The octopus fetch/sync helpers are pointed
+    // at it via `Settings::octopus_api_base_url`, so ureq's real HTTP
+    // GET exercises the full fetch → parse → store pipeline.
+    // ================================================================
+
+    use std::sync::Arc;
+    use axum::{extract::Request, http::StatusCode, Router};
+    use crate::settings::Settings;
+
+    /// A throwaway HTTP server speaking just enough of the Octopus REST
+    /// API to exercise the fetch/sync paths. Each `(needle, body)` entry
+    /// returns `body` (raw JSON) for any request whose path contains
+    /// `needle`; the first match wins, and anything unmatched answers 404
+    /// (which ureq surfaces as an error). Bound to `127.0.0.1:0` so tests
+    /// never collide, and torn down via graceful shutdown on drop.
+    struct MockOctopus {
+        base_url: String,
+        _shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl MockOctopus {
+        async fn spawn(routes: Vec<(&'static str, String)>) -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind ephemeral port");
+            let addr = listener.local_addr().expect("local addr");
+            let routes = Arc::new(routes);
+            let app = Router::new().fallback(move |req: Request| {
+                let routes = routes.clone();
+                async move {
+                    let path = req.uri().path();
+                    for (needle, body) in routes.iter() {
+                        if path.contains(needle) {
+                            return (StatusCode::OK, body.clone());
+                        }
+                    }
+                    (StatusCode::NOT_FOUND, "no mock route".to_string())
+                }
+            });
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+            tokio::spawn(async move {
+                let _ = axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await;
+            });
+            Self {
+                base_url: format!("http://{addr}"),
+                _shutdown: Some(shutdown_tx),
+            }
+        }
+    }
+
+    impl Drop for MockOctopus {
+        fn drop(&mut self) {
+            if let Some(tx) = self._shutdown.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    fn octopus_settings(base_url: &str) -> Settings {
+        Settings {
+            octopus_enabled: true,
+            octopus_api_key: "sk_live_test".to_string(),
+            octopus_account_number: "A-TEST1".to_string(),
+            octopus_api_base_url: base_url.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn open_temp_history() -> Arc<crate::history::HistoryDb> {
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("givenergy-octopus-test-{id}/history.db"));
+        Arc::new(crate::history::HistoryDb::open(&path).unwrap())
+    }
+
+    fn electricity_stream(agreements: Vec<Agreement>) -> Stream {
+        Stream {
+            kind: "electricity_import".to_string(),
+            meter_point: "1200000012345".to_string(),
+            serial: "11A1234567".to_string(),
+            earliest: 0,
+            agreements,
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_account_parses_properties_from_mock_api() {
+        let body = r#"{
+            "properties": [{
+                "electricity_meter_points": [{
+                    "mpan": "1200000012345",
+                    "meters": [{"serial_number": "11A1234567"}],
+                    "agreements": [{
+                        "tariff_code": "E-1R-AGILE-24-10-01-A",
+                        "valid_from": "2024-01-01T00:00:00Z"
+                    }]
+                }]
+            }]
+        }"#
+        .to_string();
+        let mock = MockOctopus::spawn(vec![("accounts", body)]).await;
+        let settings = octopus_settings(&mock.base_url);
+
+        let account = fetch_account(&settings).await.unwrap();
+        assert_eq!(account.properties.len(), 1);
+        let ep = &account.properties[0].electricity_meter_points[0];
+        assert_eq!(ep.mpan, "1200000012345");
+        assert_eq!(ep.meters[0].serial_number, "11A1234567");
+        assert_eq!(ep.agreements[0].tariff_code, "E-1R-AGILE-24-10-01-A");
+    }
+
+    #[tokio::test]
+    async fn fetch_account_errors_when_route_unmatched() {
+        // No routes registered → the account path is unmatched → 404 → ureq
+        // surfaces it as an error rather than a response body.
+        let mock = MockOctopus::spawn(vec![]).await;
+        let settings = octopus_settings(&mock.base_url);
+        let err = fetch_account(&settings).await.unwrap_err();
+        assert!(err.contains("Octopus request failed"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn sync_tariffs_fetches_and_stores_tariff_prices() {
+        // E-1R tariff → rate types [standard, standing]; mock answers each
+        // rate-type path with a single price row.
+        let standard = r#"{"results":[
+            {"value_inc_vat":15.5,"valid_from":"2024-01-01T00:00:00Z","valid_to":"2024-01-01T00:30:00Z","payment_method":"DIRECT_DEBIT"}
+        ],"next":null}"#
+        .to_string();
+        let standing = r#"{"results":[
+            {"value_inc_vat":54.86,"valid_from":"2024-01-01T00:00:00Z","valid_to":null,"payment_method":"DIRECT_DEBIT"}
+        ],"next":null}"#
+        .to_string();
+        let mock = MockOctopus::spawn(vec![
+            ("standard-unit-rates", standard),
+            ("standing-charges", standing),
+        ])
+        .await;
+        let settings = octopus_settings(&mock.base_url);
+        let db = open_temp_history();
+        let stream = electricity_stream(vec![Agreement {
+            tariff_code: "E-1R-AGILE-24-10-01-A".to_string(),
+            valid_from: "2024-01-01T00:00:00Z".to_string(),
+            valid_to: None,
+        }]);
+
+        let now = 1_704_067_200_i64; // 2024-01-01T00:00:00Z
+        let (stored, error) = sync_tariffs(&settings, &db, &[stream], now).await;
+        assert!(error.is_none(), "unexpected tariff sync error: {error:?}");
+        assert!(stored >= 2, "expected standard+standing rows stored, got {stored}");
+        assert!(db.has_octopus_tariff_prices(
+            "electricity_import",
+            "1200000012345",
+            "E-1R-AGILE-24-10-01-A",
+            "standard",
+        ));
+        assert!(db.has_octopus_tariff_prices(
+            "electricity_import",
+            "1200000012345",
+            "E-1R-AGILE-24-10-01-A",
+            "standing",
+        ));
+    }
+
+    #[tokio::test]
+    async fn sync_recent_fetches_consumption_and_sets_cursor() {
+        let page = r#"{"results":[
+            {"consumption":0.5,"interval_start":"2024-06-01T00:00:00Z","interval_end":"2024-06-01T00:30:00Z"}
+        ],"next":null}"#
+        .to_string();
+        let mock = MockOctopus::spawn(vec![("consumption", page)]).await;
+        let settings = octopus_settings(&mock.base_url);
+        let db = open_temp_history();
+        let stream = electricity_stream(vec![]);
+
+        let now = 1_717_200_000_i64; // ~2024-06-01
+        let imported = sync_recent(&settings, &db, &stream, now).await.unwrap();
+        assert_eq!(imported, 1, "expected the one valid consumption row");
+        // Fresh sync (no prior cursor): seeds cursor at recent_start and flags
+        // completion relative to stream.earliest (0 here → not yet complete).
+        let (cursor_before, complete) = db.octopus_sync_cursor(&stream.key()).unwrap();
+        assert_eq!(cursor_before, now - RECENT_INITIAL_DAYS * 86400);
+        assert!(!complete);
+    }
+
+    #[tokio::test]
+    async fn fetch_window_drops_negative_consumption_rows() {
+        // JSON cannot express NaN, so only the `< 0.0` guard is reachable via
+        // the wire; the valid positive row must survive.
+        let page = r#"{"results":[
+            {"consumption":-0.25,"interval_start":"2024-06-01T00:00:00Z","interval_end":"2024-06-01T00:30:00Z"},
+            {"consumption":0.75,"interval_start":"2024-06-01T00:30:00Z","interval_end":"2024-06-01T01:00:00Z"}
+        ],"next":null}"#
+        .to_string();
+        let mock = MockOctopus::spawn(vec![("consumption", page)]).await;
+        let settings = octopus_settings(&mock.base_url);
+        let stream = electricity_stream(vec![]);
+
+        let rows = fetch_window(&settings, &stream, 1_717_200_000, 1_717_286_400)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "only the non-negative row survives");
+        assert!((rows[0].consumption - 0.75).abs() < 1e-9);
     }
 }

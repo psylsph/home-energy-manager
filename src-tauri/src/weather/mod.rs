@@ -170,6 +170,16 @@ async fn fetch_current(
     .map_err(|e| format!("spawn_blocking failed: {e}"))?;
 
     let json = result?;
+    parse_current_response(&json)
+}
+
+/// Parse Open-Meteo's forecast `current` response into a single observation.
+///
+/// Pure (operates only on the already-fetched JSON) so the full parsing
+/// table — missing-field errors, the two accepted timestamp formats, and the
+/// optional resolved grid coords — is unit-tested directly without any
+/// network.
+fn parse_current_response(json: &serde_json::Value) -> Result<WeatherObservation, String> {
     let current = json
         .get("current")
         .ok_or_else(|| "missing 'current'".to_string())?;
@@ -239,6 +249,16 @@ async fn fetch_archive_month(
     .map_err(|e| format!("spawn_blocking failed: {e}"))?;
 
     let json = result?;
+    parse_archive_response(&json)
+}
+
+/// Parse Open-Meteo's archive `hourly` response into one observation per
+/// timestamp, ordered ascending.
+///
+/// Pure (operates only on the already-fetched JSON) so the parsing table —
+/// Open-Meteo's own error bodies, missing fields, length mismatches, and
+/// malformed/null rows — is unit-tested directly without any network.
+fn parse_archive_response(json: &serde_json::Value) -> Result<Vec<WeatherObservation>, String> {
     // Guard against Open-Meteo's own error responses (HTTP 200 with an
     // `error: true` body, e.g. for malformed parameters).
     if json.get("error").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -687,5 +707,115 @@ mod tests {
         // Whatever chrono's arithmetic produces, it must remain a
         // valid date and not panic.
         assert!(result < earliest);
+    }
+
+    // ================================================================
+    // JSON response parsing (extracted from fetch_current / fetch_archive_month)
+    // ================================================================
+
+    #[test]
+    fn parse_current_response_extracts_temperature_and_grid_coords() {
+        let json = serde_json::json!({
+            "latitude": 51.25,
+            "longitude": -0.5,
+            "current": { "time": "2024-06-21T12:00", "temperature_2m": 18.5 }
+        });
+        let obs = parse_current_response(&json).unwrap();
+        assert_eq!(obs.temperature_c, 18.5);
+        assert!(obs.timestamp > 0);
+        assert_eq!(obs.grid_lat, Some(51.25));
+        assert_eq!(obs.grid_lon, Some(-0.5));
+    }
+
+    #[test]
+    fn parse_current_response_accepts_seconds_precision_and_missing_coords() {
+        let json =
+            serde_json::json!({ "current": { "time": "2024-06-21T12:00:30", "temperature_2m": 1.0 } });
+        let obs = parse_current_response(&json).unwrap();
+        assert_eq!(obs.temperature_c, 1.0);
+        // No top-level coords → None (Settings UI hides the grid-cell line).
+        assert_eq!(obs.grid_lat, None);
+        assert_eq!(obs.grid_lon, None);
+    }
+
+    #[test]
+    fn parse_current_response_rejects_missing_fields() {
+        assert!(parse_current_response(&serde_json::json!({})).is_err());
+        assert!(parse_current_response(&serde_json::json!({ "current": {} })).is_err());
+        assert!(parse_current_response(&serde_json::json!({
+            "current": { "time": "2024-06-21T12:00" }
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn parse_current_response_rejects_bad_time() {
+        let json =
+            serde_json::json!({ "current": { "time": "not-a-time", "temperature_2m": 5.0 } });
+        let err = parse_current_response(&json).unwrap_err();
+        assert!(err.contains("invalid time"));
+    }
+
+    #[test]
+    fn parse_archive_response_zips_time_and_temperature_ascending() {
+        let json = serde_json::json!({
+            "latitude": 51.0,
+            "longitude": 0.0,
+            "hourly": {
+                "time": ["2024-06-21T00:00", "2024-06-21T01:00", "2024-06-21T02:00"],
+                "temperature_2m": [10.0, 10.5, 11.0]
+            }
+        });
+        let obs = parse_archive_response(&json).unwrap();
+        assert_eq!(obs.len(), 3);
+        assert_eq!(obs[0].temperature_c, 10.0);
+        assert_eq!(obs[2].temperature_c, 11.0);
+        assert_eq!(obs[0].grid_lat, Some(51.0));
+        // Timestamps come out ascending (one hour apart).
+        assert_eq!(obs[1].timestamp - obs[0].timestamp, 3600);
+    }
+
+    #[test]
+    fn parse_archive_response_skips_malformed_and_null_rows() {
+        // A bad timestamp and a null temperature are silently dropped rather
+        // than failing the whole month — Open-Meteo occasionally emits gaps.
+        let json = serde_json::json!({
+            "hourly": {
+                "time": ["2024-06-21T00:00", "bad", "2024-06-21T02:00"],
+                "temperature_2m": [10.0, 10.5, null]
+            }
+        });
+        let obs = parse_archive_response(&json).unwrap();
+        // Only the first row survives (row 2 bad time, row 3 null temp).
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].temperature_c, 10.0);
+    }
+
+    #[test]
+    fn parse_archive_response_surfaces_open_meteo_error_body() {
+        // Open-Meteo returns HTTP 200 with `error: true` for bad params.
+        let json = serde_json::json!({ "error": true, "reason": "bad date range" });
+        let err = parse_archive_response(&json).unwrap_err();
+        assert!(err.contains("Open-Meteo error"));
+        assert!(err.contains("bad date range"));
+    }
+
+    #[test]
+    fn parse_archive_response_rejects_missing_hourly_and_length_mismatch() {
+        assert!(parse_archive_response(&serde_json::json!({})).is_err());
+        let mismatched = serde_json::json!({
+            "hourly": {
+                "time": ["2024-06-21T00:00"],
+                "temperature_2m": [10.0, 11.0]
+            }
+        });
+        let err = parse_archive_response(&mismatched).unwrap_err();
+        assert!(err.contains("lengths differ"));
+    }
+
+    #[test]
+    fn parse_archive_response_empty_is_ok_empty() {
+        let json = serde_json::json!({ "hourly": { "time": [], "temperature_2m": [] } });
+        assert!(parse_archive_response(&json).unwrap().is_empty());
     }
 }

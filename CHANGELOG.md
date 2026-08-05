@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.71.5] - 2026-08-05
+
+### Changed
+
+- **Maintenance release.** Internal reliability and test coverage were expanded across inverter polling, tariff synchronisation, weather parsing, update checks, and alerts.
+
 ## [0.71.4] - 2026-08-04
 
 ### Changed

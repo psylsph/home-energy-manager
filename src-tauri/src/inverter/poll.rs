@@ -4785,4 +4785,133 @@ mod tests {
             "fire-and-forget batch should keep the trailing sleep (~2 gaps), took {fire_forget_elapsed:?}"
         );
     }
+
+    // ==================================================================
+    // End-to-end first poll cycle against a keyed Modbus mock.
+    // ==================================================================
+
+    /// Respond to every read by its requested `(slave, function, base, count)`
+    /// rather than relying on response order. This mirrors a dongle's register
+    /// map closely enough to drive the real connect → warmup → decode →
+    /// sanitize → broadcast path without a live inverter.
+    async fn run_keyed_register_mock(listener: tokio::net::TcpListener) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        loop {
+            let mut header = [0u8; 6];
+            if stream.read_exact(&mut header).await.is_err() {
+                break;
+            }
+            let length = u16::from_be_bytes([header[4], header[5]]) as usize;
+            let mut body = vec![0u8; length];
+            if stream.read_exact(&mut body).await.is_err() {
+                break;
+            }
+
+            let mut frame = header.to_vec();
+            frame.extend_from_slice(&body);
+            let decoded = match crate::modbus::framer::decode_frame(&frame) {
+                Ok(decoded) => decoded,
+                Err(_) => break,
+            };
+            if decoded.payload.len() < 4 {
+                break;
+            }
+
+            let base = u16::from_be_bytes([decoded.payload[0], decoded.payload[1]]);
+            let count = u16::from_be_bytes([decoded.payload[2], decoded.payload[3]]) as usize;
+            let mut data = vec![0u16; count];
+
+            // Safe, deliberately boring telemetry for the first standard input
+            // block. Unknown(0) at HR(0) avoids an immediate model-specific
+            // re-poll, while the rest of the values pass absolute sanitization.
+            if decoded.function == 4 && decoded.slave == 0x32 && base == 60 {
+                // LV BMS IR(103): maximum battery temperature, /10 °C.
+                if count > 43 {
+                    data[43] = 250;
+                }
+            }
+            if decoded.function == 4 && decoded.slave == 0x11 && base == 0 {
+                if count > 5 {
+                    data[5] = 2300; // 230.0 V
+                }
+                if count > 13 {
+                    data[13] = 5000; // 50.00 Hz
+                }
+                if count > 41 {
+                    data[41] = 250; // 25.0 °C
+                }
+                if count > 50 {
+                    data[50] = 4800; // 48.0 V
+                }
+                if count > 56 {
+                    data[56] = 250; // 25.0 °C
+                }
+                if count > 59 {
+                    data[59] = 50; // 50% SOC
+                }
+            }
+
+            // Read responses contain the serial prefix, start register, count,
+            // then the returned register values. This is the exact frame shape
+            // consumed by ModbusClient's response parser.
+            let mut payload = Vec::with_capacity(14 + count * 2);
+            payload.extend_from_slice(b"TEST123456");
+            payload.extend_from_slice(&base.to_be_bytes());
+            payload.extend_from_slice(&(count as u16).to_be_bytes());
+            for value in data {
+                payload.extend_from_slice(&value.to_be_bytes());
+            }
+            let response = crate::modbus::framer::encode_frame(
+                "TEST123456",
+                decoded.slave,
+                decoded.function,
+                &payload,
+            );
+            if stream.write_all(&response).await.is_err() {
+                break;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_loop_broadcasts_first_sanitized_snapshot_from_mock_dongle() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(run_keyed_register_mock(listener));
+
+            let state = Arc::new(AppState::new());
+            {
+                let mut settings = state.settings.lock().await;
+                settings.host = "127.0.0.1".to_string();
+                settings.port = port;
+                settings.serial = "TEST123456".to_string();
+                settings.interval_secs = 1;
+            }
+
+            let poll_task = tokio::spawn(run_poll_loop(state.clone()));
+            let snapshot = tokio::time::timeout(Duration::from_secs(8), async {
+                loop {
+                    if let Some(snapshot) = state.latest_snapshot.lock().await.clone() {
+                        break snapshot;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("poll loop did not broadcast a snapshot");
+
+            poll_task.abort();
+            server.abort();
+
+            assert_eq!(snapshot.soc, 50);
+            assert_eq!(snapshot.grid_voltage, 230.0);
+            assert_eq!(snapshot.grid_frequency, 50.0);
+            assert_eq!(snapshot.battery_temperature, 25.0);
+            assert_eq!(snapshot.device_type_code, "0000");
+        })
+        .await;
+    }
 }

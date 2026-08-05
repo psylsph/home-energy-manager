@@ -2136,4 +2136,399 @@ mod tests {
         let b = telegram_agent();
         assert!(std::ptr::eq(a, b));
     }
+
+    // ================================================================
+    // AlertType::human_name — display labels
+    // ================================================================
+
+    #[test]
+    fn test_human_name_returns_distinct_label_for_each_variant() {
+        let variants = [
+            AlertType::BatteryTempHigh,
+            AlertType::BatteryTempLow,
+            AlertType::InverterTempHigh,
+            AlertType::InverterTempLow,
+            AlertType::BatterySocHigh,
+            AlertType::BatterySocLow,
+            AlertType::InverterTrip,
+            AlertType::GridOffline,
+            AlertType::BatteryOverTemp,
+            AlertType::SolarClipping,
+            AlertType::ConnectionLost,
+        ];
+        let names: Vec<&str> = variants.iter().map(|a| a.human_name()).collect();
+        // Every variant has a non-empty, human-readable label.
+        assert!(names.iter().all(|n| !n.is_empty()));
+        // No two alert types may share a display name (ambiguous UI).
+        let unique: std::collections::HashSet<_> = names.iter().collect();
+        assert_eq!(unique.len(), names.len(), "alert display names must be unique");
+        // Spot-check the deliberately-distinct labels.
+        assert_eq!(
+            AlertType::BatteryOverTemp.human_name(),
+            "Inverter Battery Warning"
+        );
+        assert_eq!(
+            AlertType::ConnectionLost.human_name(),
+            "Inverter Connection Lost"
+        );
+        // The over-temp hardware warning must not collide with the threshold alert.
+        assert_ne!(
+            AlertType::BatteryOverTemp.human_name(),
+            AlertType::BatteryTempHigh.human_name()
+        );
+    }
+
+    // ================================================================
+    // AlertDebounce — extract_cleared / reset_for_type / clear / is_empty
+    // ================================================================
+
+    #[test]
+    fn test_extract_cleared_reports_resolved_and_drops_from_active() {
+        let mut d = AlertDebounce::new();
+        assert!(d.should_fire(AlertType::BatteryTempHigh, 30));
+        // No longer triggered this cycle → reported as cleared and removed.
+        assert_eq!(d.extract_cleared(&[]), vec![AlertType::BatteryTempHigh]);
+        // A second pass must not re-report it (it's gone from the active set).
+        assert!(d.extract_cleared(&[]).is_empty());
+    }
+
+    #[test]
+    fn test_extract_cleared_keeps_alerts_still_triggered() {
+        let mut d = AlertDebounce::new();
+        d.should_fire(AlertType::BatteryTempHigh, 30);
+        d.should_fire(AlertType::BatterySocLow, 30);
+        // BatteryTempHigh is still triggered → only BatterySocLow clears.
+        assert_eq!(
+            d.extract_cleared(&[AlertType::BatteryTempHigh]),
+            vec![AlertType::BatterySocLow]
+        );
+        // BatteryTempHigh survives a cycle where it stays triggered ...
+        assert!(d.extract_cleared(&[AlertType::BatteryTempHigh]).is_empty());
+        // ... and only clears once it stops being triggered.
+        assert_eq!(
+            d.extract_cleared(&[]),
+            vec![AlertType::BatteryTempHigh]
+        );
+    }
+
+    #[test]
+    fn test_reset_for_type_re_enables_immediate_refire() {
+        let mut d = AlertDebounce::new();
+        assert!(d.should_fire(AlertType::BatteryTempHigh, 30));
+        // Inside the cooldown window a repeat fire is suppressed.
+        assert!(!d.should_fire(AlertType::BatteryTempHigh, 30));
+        // reset_for_type clears both the cooldown and the active entry, so the
+        // next should_fire goes through immediately.
+        d.reset_for_type(AlertType::BatteryTempHigh);
+        assert!(d.should_fire(AlertType::BatteryTempHigh, 30));
+        // An unrelated alert type is unaffected by the reset.
+        assert!(d.should_fire(AlertType::GridOffline, 30));
+    }
+
+    #[test]
+    fn test_clear_wipes_everything_and_re_enables_refire() {
+        let mut d = AlertDebounce::new();
+        d.should_fire(AlertType::BatteryTempHigh, 30);
+        d.should_fire(AlertType::BatterySocLow, 30);
+        // Build the streak up to the confirmation threshold (3 consecutive
+        // trues) so we can prove clear() resets it afterwards.
+        assert!(!d.confirm_battery_warning(true)); // streak 1
+        assert!(!d.confirm_battery_warning(true)); // streak 2
+        assert!(d.confirm_battery_warning(true)); // streak 3 → confirmed
+        assert!(!d.is_empty());
+
+        d.clear();
+        assert!(d.is_empty());
+        assert_eq!(d.len(), 0);
+        // Streak reset → a single confirm can no longer reach the threshold.
+        assert!(!d.confirm_battery_warning(true));
+        // And cooldown reset → the alert can fire again right away.
+        assert!(d.should_fire(AlertType::BatteryTempHigh, 30));
+    }
+
+    #[test]
+    fn test_is_empty_reflects_last_sent() {
+        let mut d = AlertDebounce::new();
+        assert!(d.is_empty());
+        assert_eq!(d.len(), 0);
+        d.should_fire(AlertType::BatteryTempHigh, 30);
+        assert!(!d.is_empty());
+        assert_eq!(d.len(), 1);
+    }
+
+    // ================================================================
+    // Notification message builders
+    // ================================================================
+
+    #[test]
+    fn test_build_cleared_message_marks_resolved() {
+        let snap = make_snapshot();
+        let msg = build_cleared_message(&snap, &[AlertType::BatteryTempHigh, AlertType::GridOffline]);
+        assert!(msg.contains("All Clear"));
+        assert!(msg.contains("Resolved"));
+        assert!(msg.contains("Battery Temperature High"));
+        assert!(msg.contains("Grid Offline"));
+        assert!(msg.contains("back to normal"));
+        // System-status block echoes the live snapshot values.
+        assert!(msg.contains(&format!("Battery SOC: {}%", snap.soc)));
+        assert!(msg.contains(&format!("Solar: {} W", snap.solar_power)));
+    }
+
+    #[test]
+    fn test_build_connection_lost_message_mentions_host() {
+        let msg = build_connection_lost_message("192.168.1.42");
+        assert!(msg.contains("Connection Lost"));
+        assert!(msg.contains("192.168.1.42"));
+        assert!(msg.contains("Reconnection"));
+    }
+
+    #[test]
+    fn test_build_connection_restored_message_mentions_host() {
+        let msg = build_connection_restored_message("inverter.local");
+        assert!(msg.contains("Connection Restored"));
+        assert!(msg.contains("inverter.local"));
+    }
+
+    #[test]
+    fn test_build_status_message_renders_live_fields() {
+        let snap = make_snapshot(); // grid_online = true
+        let msg = build_status_message(&snap);
+        assert!(msg.contains("System Status"));
+        assert!(msg.contains(&format!("Solar: <b>{} W</b>", snap.solar_power)));
+        assert!(msg.contains(&format!("Home: <b>{} W</b>", snap.home_power)));
+        assert!(msg.contains(&format!("SOC: <b>{}%</b>", snap.soc)));
+        assert!(msg.contains("🟢 Online"));
+
+        // Flip grid offline → the indicator swaps to the offline emoji.
+        let mut offline = snap;
+        offline.grid_online = false;
+        assert!(build_status_message(&offline).contains("🔴 Offline"));
+    }
+
+    #[test]
+    fn test_build_battery_message_with_modules() {
+        let mut snap = make_snapshot();
+        snap.battery_modules.push(crate::inverter::model::BatteryModule {
+            index: 1,
+            soc: 92,
+            temperature: 31.0,
+            voltage: 52.4,
+            num_cycles: 120,
+            capacity_ah: 200.0,
+            remaining_capacity_ah: 184.0,
+            ..Default::default()
+        });
+        let msg = build_battery_message(&snap);
+        assert!(msg.contains("Battery Detail"));
+        assert!(msg.contains("Modules (1)"));
+        assert!(msg.contains("#1: 92%"));
+        assert!(msg.contains("31.0°C"));
+        assert!(msg.contains("184.0/200Ah"));
+        assert!(msg.contains("120 cycles"));
+    }
+
+    #[test]
+    fn test_build_battery_message_without_modules() {
+        let snap = make_snapshot(); // default: no modules
+        let msg = build_battery_message(&snap);
+        assert!(msg.contains("Battery Detail"));
+        assert!(msg.contains("No per-module BMS data available."));
+    }
+
+    #[test]
+    fn test_build_mode_message_covers_every_battery_mode_label() {
+        use crate::inverter::model::BatteryMode;
+        let mut snap = make_snapshot();
+        for (mode, label) in [
+            (BatteryMode::Eco, "Eco"),
+            (BatteryMode::EcoPaused, "Eco (Paused)"),
+            (BatteryMode::TimedDemand, "Timed Demand"),
+            (BatteryMode::TimedExport, "Timed Export"),
+            (BatteryMode::ExportPaused, "Export (Paused)"),
+            (BatteryMode::Unknown, "Unknown"),
+        ] {
+            snap.battery_mode = mode;
+            let msg = build_mode_message(&snap);
+            assert!(
+                msg.contains(&format!("Mode: <b>{label}</b>")),
+                "mode {label} should be rendered"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_mode_message_all_automation_flags_active() {
+        let mut snap = make_snapshot();
+        snap.cosy_active = true;
+        snap.agile_active = true;
+        snap.auto_winter_active = true;
+        snap.load_limiter_active = true;
+        snap.temperature_limiter_active = true;
+        let msg = build_mode_message(&snap);
+        assert!(msg.contains("Cosy charging"));
+        assert!(msg.contains("Agile active"));
+        assert!(msg.contains("Auto-winter"));
+        assert!(msg.contains("Load limiter"));
+        assert!(msg.contains("Temperature limiter"));
+    }
+
+    #[test]
+    fn test_build_mode_message_idle_variants_and_none() {
+        let mut snap = make_snapshot();
+        // All flags at default false → explicit "none active" line.
+        assert!(build_mode_message(&snap).contains("Automation: none active"));
+        // Enabled-but-not-active → the idle wording.
+        snap.cosy_enabled = true;
+        snap.agile_enabled = true;
+        let msg = build_mode_message(&snap);
+        assert!(msg.contains("Cosy idle"));
+        assert!(msg.contains("Agile idle"));
+    }
+
+    #[test]
+    fn test_build_version_message_with_and_without_optional_fields() {
+        let mut snap = make_snapshot();
+        snap.device_type_display = "Gen3 Hybrid".to_string();
+        snap.inverter_serial = "SA999".to_string();
+        snap.firmware_version = "302".to_string();
+        snap.dsp_firmware_version = "DSP1.0".to_string();
+        let full = build_version_message(&snap);
+        assert!(full.contains("System Info"));
+        assert!(full.contains(&format!("v{}", env!("CARGO_PKG_VERSION"))));
+        assert!(full.contains("Device: Gen3 Hybrid"));
+        assert!(full.contains("SA999"));
+        assert!(full.contains("ARM firmware: 302"));
+        assert!(full.contains("DSP firmware: DSP1.0"));
+
+        // Without the optional device/DSP fields those lines disappear.
+        let mut bare = make_snapshot();
+        bare.device_type_display = String::new();
+        bare.dsp_firmware_version = String::new();
+        let bare_msg = build_version_message(&bare);
+        assert!(!bare_msg.contains("Device:"));
+        assert!(!bare_msg.contains("DSP firmware:"));
+    }
+
+    // ==================================================================
+    // build_today_reply / build_report_reply — history-dependent branches
+    // (the summary/report builders themselves are covered in report.rs;
+    // these exercise the state-gating branches that wrap them.)
+    // ==================================================================
+
+    fn open_temp_history() -> std::sync::Arc<crate::history::HistoryDb> {
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("givenergy-alerts-test-{id}/history.db"));
+        std::sync::Arc::new(crate::history::HistoryDb::open(&path).unwrap())
+    }
+
+    #[tokio::test]
+    async fn build_today_reply_when_history_db_unavailable() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            // AppState::new() starts with no history DB wired up.
+            let state = crate::inverter::poll::AppState::new();
+            assert!(state.history.lock().await.is_none());
+            assert_eq!(
+                build_today_reply(&state).await,
+                "⚠️ History database not available."
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_today_reply_when_no_rows_for_today() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = crate::inverter::poll::AppState::new();
+            // A fresh DB holds no readings, so today's slice is empty.
+            *state.history.lock().await = Some(open_temp_history());
+            assert_eq!(
+                build_today_reply(&state).await,
+                "⚠️ No history data for today yet."
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_report_reply_none_when_history_db_unavailable() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = crate::inverter::poll::AppState::new();
+            assert!(build_report_reply(&state).await.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_report_reply_none_when_too_few_rows() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = crate::inverter::poll::AppState::new();
+            // Fresh DB: zero rows for yesterday → below the len() >= 2 guard.
+            *state.history.lock().await = Some(open_temp_history());
+            assert!(build_report_reply(&state).await.is_none());
+        })
+        .await;
+    }
+
+    // ================================================================
+    // send_ntfy_message — the ntfy `server` is fully configurable (unlike
+    // the hardcoded Telegram/Pushover hosts), so it is the one push sink
+    // we can drive against an axum mock on an ephemeral port with no new
+    // dependency.
+    //
+    // send_ntfy_message calls ureq *synchronously* (no spawn_blocking), so
+    // the test runtime must be multi-threaded or the blocking POST would
+    // starve the single-thread runtime that serves the mock and deadlock.
+    // ================================================================
+
+    struct MockNtfy {
+        base_url: String,
+        _shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl MockNtfy {
+        async fn spawn(status: axum::http::StatusCode) -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind ephemeral port");
+            let addr = listener.local_addr().expect("local addr");
+            let app = axum::Router::new().fallback(move || async move { (status, "") });
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+            tokio::spawn(async move {
+                let _ = axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await;
+            });
+            Self {
+                base_url: format!("http://{addr}"),
+                _shutdown: Some(shutdown_tx),
+            }
+        }
+    }
+
+    impl Drop for MockNtfy {
+        fn drop(&mut self) {
+            if let Some(tx) = self._shutdown.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_ntfy_message_returns_ok_on_2xx() {
+        let mock = MockNtfy::spawn(axum::http::StatusCode::OK).await;
+        let res = send_ntfy_message("hem-alerts", &mock.base_url, "battery temp high");
+        assert!(res.is_ok(), "2xx should succeed, got: {res:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_ntfy_message_errors_on_non_2xx() {
+        let mock = MockNtfy::spawn(axum::http::StatusCode::NOT_FOUND).await;
+        let err = send_ntfy_message("hem-alerts", &mock.base_url, "battery temp high").unwrap_err();
+        assert!(err.contains("ntfy API"), "expected an ntfy API error, got: {err}");
+    }
 }
