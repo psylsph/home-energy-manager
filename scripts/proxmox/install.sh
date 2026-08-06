@@ -8,7 +8,7 @@ DATA_DIR="/var/lib/givenergy-local"
 SERVICE_NAME="home-energy-manager.service"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
 UPDATER_PATH="/usr/local/bin/update"
-# Legacy path from <v0.72.0; removed on upgrade so stale copies don't linger.
+# Legacy path from <v0.71.6; removed on upgrade so stale copies don't linger.
 OLD_UPDATER_PATH="/usr/local/sbin/home-energy-manager-update"
 PORT_CONFIG_PATH="/etc/default/home-energy-manager"
 
@@ -54,9 +54,17 @@ curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
 TAG="$(jq -er '.tag_name' "$RELEASE_JSON")" || fail "latest GitHub release has no tag"
 [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "unexpected release tag: $TAG"
 INSTALLED_VERSION="$(dpkg-query -W -f='${Version}' home-energy-manager 2>/dev/null || true)"
-# Remove the legacy <v0.72.0 updater path if it exists from a prior install.
+# Remove the legacy <v0.71.6 updater path if it exists from a prior install.
 if [ -e "$(root_path "$OLD_UPDATER_PATH")" ]; then
   rm -f "$(root_path "$OLD_UPDATER_PATH")"
+fi
+# Install or refresh the in-container `update` command before the
+# already-installed early return, so re-running a fresh installer on an
+# up-to-date container migrates the command name instead of only deleting the
+# legacy path and leaving no updater behind.
+install -d -m 0755 "$(dirname "$(root_path "$UPDATER_PATH")")"
+if [ "$(readlink -f "$0")" != "$(readlink -m "$(root_path "$UPDATER_PATH")")" ]; then
+  install -m 0755 "$0" "$(root_path "$UPDATER_PATH")"
 fi
 if [ "$INSTALLED_VERSION" = "${TAG#v}" ]; then
   systemctl enable --now "$SERVICE_NAME"
@@ -195,11 +203,6 @@ ReadWritePaths=$DATA_DIR
 [Install]
 WantedBy=multi-user.target
 EOF
-
-install -d -m 0755 "$(dirname "$(root_path "$UPDATER_PATH")")"
-if [ "$(readlink -f "$0")" != "$(readlink -m "$(root_path "$UPDATER_PATH")")" ]; then
-  install -m 0755 "$0" "$(root_path "$UPDATER_PATH")"
-fi
 
 systemctl daemon-reload
 systemctl enable --now "$SERVICE_NAME"

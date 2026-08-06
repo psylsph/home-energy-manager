@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **The Proxmox LXC update command is now just `update`, matching other community helper scripts.** New containers use `pct exec <container-id> -- update` in place of `home-energy-manager-update`. Containers created before this change keep working as they are — the old command still updates the app. (issue #254)
+
 ## [0.71.6] - 2026-08-05
 
 ### Changed

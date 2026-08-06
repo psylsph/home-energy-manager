@@ -310,6 +310,29 @@ assert_eq "installer exits successfully" "0" "$LEGACY_RC"
 assert_contains "removes legacy update path" "no" "$([ -e "$STAGE/root/usr/local/sbin/home-energy-manager-update" ] && echo yes || echo no)"
 
 echo
+echo "3c. migrating an up-to-date container installs the new update command"
+rm -f "$STAGE/root/usr/local/bin/update"
+install -d -m 0755 "$STAGE/root/usr/local/sbin"
+: >"$STAGE/root/usr/local/sbin/home-energy-manager-update"
+chmod 0755 "$STAGE/root/usr/local/sbin/home-energy-manager-update"
+: >"$STAGE/commands.log"
+set +e
+PATH="$STAGE/bin:/usr/bin:/bin" \
+  HEM_TEST_LOG="$STAGE/commands.log" \
+  HEM_TEST_DEB="$STAGE/deb-fixture" \
+  HEM_TEST_DIGEST="$DIGEST" \
+  HEM_TEST_INSTALLED_VERSION="1.2.3" \
+  HEM_ROOT="$STAGE/root" \
+  HEM_PORT=7444 \
+  bash "$REPO_ROOT/scripts/proxmox/install.sh" >"$STAGE/migrate-output.log" 2>&1
+MIGRATE_RC=$?
+set -e
+assert_eq "installer exits successfully" "0" "$MIGRATE_RC"
+assert_contains "removes legacy update path" "no" "$([ -e "$STAGE/root/usr/local/sbin/home-energy-manager-update" ] && echo yes || echo no)"
+assert_contains "installs the new update command" "yes" "$([ -x "$STAGE/root/usr/local/bin/update" ] && echo yes || echo no)"
+assert_not_contains "does not reinstall the package" "apt install -y /tmp/" "$(cat "$STAGE/commands.log")"
+
+echo
 echo "4. update command is a no-op when the latest version is installed"
 : >"$STAGE/commands.log"
 set +e
