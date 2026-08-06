@@ -3,7 +3,7 @@
 //! Translates high-level control commands into raw Modbus register writes.
 //! Only whitelisted register addresses from SAFE_WRITE_REGS are allowed.
 
-use chrono::{Datelike, Timelike, Utc};
+use chrono::{Datelike, Local, Timelike};
 
 use crate::modbus::registers::{
     HR_3PH_AC_CHARGE_ENABLE,
@@ -713,7 +713,15 @@ impl ControlCommand {
                 vec![rw(HR_3PH_EXPORT_LIMIT, (*watts).saturating_mul(10))]
             }
             ControlCommand::SyncClock => {
-                let now = Utc::now();
+                // The inverter RTC keeps LOCAL time. givTCP's syncDateTime
+                // writes naive `datetime.now()` (write.py) and stamps the
+                // read-back system_time with the local timezone (read.py:
+                // `system_time.replace(tzinfo=GivLUT.timezone)`). Writing UTC
+                // here would shift every user charge/discharge slot (HHMM,
+                // evaluated in the inverter's wall clock) by the UTC offset.
+                // History DB timestamps stay UTC (see decoder.rs) — only this
+                // clock-sync write must be local.
+                let now = Local::now();
                 vec![
                     rw(HR_SYSTEM_TIME_YEAR, (now.year() - 2000) as u16),
                     rw(HR_SYSTEM_TIME_MONTH, now.month() as u16),
@@ -1492,6 +1500,42 @@ mod tests {
         assert_eq!(writes[3].address, HR_SYSTEM_TIME_HOUR);
         assert_eq!(writes[4].address, HR_SYSTEM_TIME_MINUTE);
         assert_eq!(writes[5].address, HR_SYSTEM_TIME_SECOND);
+    }
+
+    #[test]
+    fn sync_clock_uses_local_time() {
+        // The inverter RTC runs in LOCAL time (matches givTCP syncDateTime:
+        // `datetime.now()`, and read.py stamps read-backs with the local
+        // timezone). SyncClock must therefore use chrono::Local, not Utc —
+        // a regression to Utc shifts every charge/discharge slot by the UTC
+        // offset on non-UTC hosts. History timestamps stay UTC (decoder.rs).
+        //
+        // This assertion is a tautology on a UTC host (local == utc); the bug
+        // only manifests off-UTC, so that is acceptable. It catches the
+        // regression on any non-UTC CI / developer machine.
+        let time_of_day_secs = |t: chrono::DateTime<chrono::Local>| {
+            t.hour() * 3600 + t.minute() * 60 + t.second()
+        };
+        let before = time_of_day_secs(chrono::Local::now());
+        let writes = ControlCommand::SyncClock.encode().unwrap();
+        let after = time_of_day_secs(chrono::Local::now());
+        let encoded = writes[3].value as u32 * 3600
+            + writes[4].value as u32 * 60
+            + writes[5].value as u32;
+
+        // Encode is sub-millisecond, so `before == after == encoded` almost
+        // always. Handle a midnight wraparound in the (microsecond-wide) edge
+        // case where the window straddles 00:00:00.
+        let in_window = if before <= after {
+            (before..=after).contains(&encoded)
+        } else {
+            encoded >= before || encoded <= after
+        };
+        assert!(
+            in_window,
+            "SyncClock encoded time-of-day ({encoded}s) fell outside the local-now window \
+             [{before}s, {after}s] — SyncClock must use chrono::Local, not Utc"
+        );
     }
 
     #[test]
