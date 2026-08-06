@@ -2508,6 +2508,10 @@ pub(crate) mod tests {
         data[13] = 5000; // 50.0 Hz
         data[17] = pv1_today_tenths; // today_solar source (tenths)
         data[18] = pv1_power_w; // p_pv1 (W)
+        // A live string carries current (P = V×I); the decode-time dormant-
+        // string guard keys off current, so non-zero PV power must be paired
+        // with non-zero current to survive decode (issue #261).
+        data[8] = if pv1_power_w > 0 { 100 } else { 0 }; // i_pv1 (/10 A)
         data[59] = 50; // soc 50%
         MockResponse::ReadResponse {
             slave: 0x11,

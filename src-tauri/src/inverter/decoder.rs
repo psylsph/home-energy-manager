@@ -553,13 +553,21 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.pv2_voltage = get_reg(data, 2) as f32 * 0.1; // IR(2):  v_pv2 (/10 V)
     snap.pv1_current = get_reg(data, 8) as f32 * 0.1; // IR(8):  i_pv1 (/10 A)
     snap.pv2_current = get_reg(data, 9) as f32 * 0.1; // IR(9):  i_pv2 (/10 A)
-                                                      // If PV2 has no voltage or current, there is no second string — zero
-                                                      // out the power field so garbage register values don't pollute history.
-    if snap.pv2_voltage == 0.0 && snap.pv2_current == 0.0 {
+    // Zero any string carrying no current. Real generation always produces
+    // current (P = V×I); a dark string at night frequently holds a residual
+    // open-circuit voltage while the MPPT reports a small idle "phantom"
+    // power (tens of W) on the dormant input, so testing current rather than
+    // voltage is what actually catches it (issue #261). This also covers a
+    // system with no second string wired at all, where current is naturally 0.
+    if snap.pv1_current == 0.0 {
+        snap.pv1_power = 0;
+    }
+    if snap.pv2_current == 0.0 {
         snap.pv2_power = 0;
     }
-    // Compute the aggregate only after absent-string cleanup so a stale PV2
-    // power register cannot survive in the total while pv2_power itself is 0.
+    // Compute the aggregate only after dormant-string cleanup so a stale power
+    // register cannot survive in the total while its own current (and therefore
+    // its own power field) is 0.
     snap.solar_power = snap.pv1_power + snap.pv2_power;
 
     // -- Battery --
@@ -1375,13 +1383,19 @@ fn decode_input_1000_1059(data: &[u16], snap: &mut InverterSnapshot) {
     let p_pv2 = uint32(get_reg(data, 19), get_reg(data, 20)) as f32 * 0.1;
     snap.pv1_power = p_pv1 as i32;
     snap.pv2_power = p_pv2 as i32;
-    // If PV2 has no voltage or current, there is no second string — zero
-    // out the power field so garbage register values don't pollute history.
-    if snap.pv2_voltage == 0.0 && snap.pv2_current == 0.0 {
+    // Zero any string carrying no current (P = V×I): a dark string at night
+    // can hold a residual open-circuit voltage while the MPPT reports a small
+    // idle "phantom" power on the dormant input (issue #261). Also covers a
+    // system with no second string wired at all.
+    if snap.pv1_current == 0.0 {
+        snap.pv1_power = 0;
+    }
+    if snap.pv2_current == 0.0 {
         snap.pv2_power = 0;
     }
-    // Compute the aggregate only after absent-string cleanup so a stale PV2
-    // power register cannot survive in the total while pv2_power itself is 0.
+    // Compute the aggregate only after dormant-string cleanup so a stale power
+    // register cannot survive in the total while its own current (and therefore
+    // its own power field) is 0.
     snap.solar_power = snap.pv1_power + snap.pv2_power;
 }
 
@@ -4389,6 +4403,85 @@ mod tests {
     }
 
     #[test]
+    fn single_phase_pv2_phantom_power_zeroed_when_current_is_zero() {
+        // Issue #261: at night a connected-but-dark PV2 string holds a residual
+        // open-circuit voltage while the MPPT reports a small idle "phantom"
+        // power (here 30 W). With no current flowing there is no real
+        // generation (P = V×I), so the phantom must be zeroed and kept out of
+        // solar_power and history.
+        let mut snap = InverterSnapshot::default();
+        let mut data = vec![0u16; 60];
+        data[1] = 340; // IR(1):  pv1_voltage = 34.0 V (residual dark voltage)
+        data[8] = 0; // IR(8):  pv1_current = 0.0 A — PV1 dark
+        data[18] = 25; // IR(18): pv1_power = 25 W phantom
+        data[2] = 380; // IR(2):  pv2_voltage = 38.0 V (residual dark voltage)
+        data[9] = 0; // IR(9):  pv2_current = 0.0 A — PV2 dark
+        data[20] = 30; // IR(20): pv2_power = 30 W phantom
+        decode_input_0_59(&data, &mut snap);
+        assert_eq!(snap.pv1_power, 0, "dark PV1 phantom must be zeroed");
+        assert_eq!(snap.pv2_power, 0, "dark PV2 phantom must be zeroed");
+        assert_eq!(snap.solar_power, 0, "no current on either string ⇒ 0 solar");
+        // Voltage/current readings themselves must be untouched.
+        assert!((snap.pv2_voltage - 38.0).abs() < 0.01);
+        assert_eq!(snap.pv2_current, 0.0);
+    }
+
+    #[test]
+    fn single_phase_pv2_power_zeroed_when_string_absent() {
+        // A system with no second string wired at all: voltage AND current
+        // both 0. The current-based dormant-string guard still zeroes a stale
+        // power register — the case the original guard was written for.
+        let mut snap = InverterSnapshot::default();
+        let mut data = vec![0u16; 60];
+        data[8] = 100; // pv1_current = 10 A (PV1 live)
+        data[18] = 3000; // pv1_power = 3 kW
+        data[20] = 5000; // pv2 stale garbage
+        // pv2_voltage / pv2_current both default 0
+        decode_input_0_59(&data, &mut snap);
+        assert_eq!(snap.pv1_power, 3000, "live PV1 survives");
+        assert_eq!(snap.pv2_power, 0, "absent PV2 zeroed");
+        assert_eq!(snap.solar_power, 3000);
+    }
+
+    #[test]
+    fn single_phase_live_pv_power_survives_when_current_flows() {
+        // Daytime: both strings producing with measurable current. The
+        // current-based guard must NOT suppress genuine generation.
+        let mut snap = InverterSnapshot::default();
+        let mut data = vec![0u16; 60];
+        data[1] = 3400; // pv1_voltage = 340 V
+        data[8] = 50; // pv1_current = 5.0 A
+        data[18] = 1700; // pv1_power = 1.7 kW
+        data[2] = 3200; // pv2_voltage = 320 V
+        data[9] = 40; // pv2_current = 4.0 A
+        data[20] = 1280; // pv2_power = 1.28 kW
+        decode_input_0_59(&data, &mut snap);
+        assert_eq!(snap.pv1_power, 1700);
+        assert_eq!(snap.pv2_power, 1280);
+        assert_eq!(snap.solar_power, 2980);
+    }
+
+    #[test]
+    fn three_phase_pv2_phantom_power_zeroed_when_current_is_zero() {
+        // Same #261 phantom on the three-phase / HV decode path (IR 1000-1059).
+        // Here p_pv is a uint32 in tenths of a watt.
+        let mut snap = InverterSnapshot::default();
+        let mut data = vec![0u16; 60];
+        data[9] = 50; // IR(1009): pv1_current = 5.0 A (PV1 live)
+        data[17] = 0; // p_pv1 high
+        data[18] = 17_000; // p_pv1 low → uint32(0,17000)/10 = 1700 W
+        data[2] = 3000; // IR(1002): pv2_voltage = 300 V (residual dark)
+        data[10] = 0; // IR(1010): pv2_current = 0 A — PV2 dark
+        data[19] = 0; // p_pv2 high
+        data[20] = 300; // p_pv2 low → uint32(0,300)/10 = 30 W phantom
+        decode_input_1000_1059(&data, &mut snap);
+        assert_eq!(snap.pv1_power, 1700, "live PV1 survives (3ph)");
+        assert_eq!(snap.pv2_power, 0, "dark PV2 phantom must be zeroed (3ph)");
+        assert_eq!(snap.solar_power, 1700);
+        assert!((snap.pv2_voltage - 300.0).abs() < 0.01);
+    }
+
+    #[test]
     fn three_phase_per_string_pv1_pv2_populated_from_ir1366_ir1370() {
         // uint32(high, low) — IR(1366)=high, IR(1367)=low.
         // PV1: high=0, low=1500 → 150.0 kWh.
@@ -6175,6 +6268,10 @@ mod tests {
         let mut input_data = vec![0u16; 60];
         input_data[5] = 2410; // grid voltage
         input_data[18] = solar as u16; // IR(18): pv1_power
+        // A live string carries current (P = V×I); the decode-time dormant-
+        // string guard keys off current, so a non-zero solar reading must be
+        // accompanied by non-zero current to survive (issue #261).
+        input_data[8] = if solar > 0 { 100 } else { 0 }; // IR(8): i_pv1 (/10 A)
         input_data[30] = grid as i16 as u16; // IR(30): p_grid_out (+ = export)
         input_data[52] = raw_p_battery as u16; // IR(52): p_battery
         let mut holding_data = vec![0u16; 60];
@@ -6796,6 +6893,7 @@ mod tests {
         input_0[5] = 2_300; // IR(5): grid voltage 230.0 V
         input_0[13] = 5_000; // IR(13): grid frequency 50.0 Hz
         input_0[18] = 3_000; // IR(18): pv1 power 3000 W
+        input_0[8] = 100; // IR(8): i_pv1 10.0 A (live string carries current)
         input_0[30] = 500; // IR(30): grid power +500 W (exporting)
         input_0[41] = 350; // IR(41): inverter temp 35.0 °C
         input_0[42] = 600; // IR(42): home load 600 W
@@ -6852,6 +6950,7 @@ mod tests {
         // p_pv1 = 3000 W encoded as uint32 tenths.
         input_1000[17] = 0;
         input_1000[18] = 30_000;
+        input_1000[9] = 100; // IR(1009): i_pv1 10.0 A (live string carries current)
 
         // Single-phase bank reports a dead grid reference (0 V / 0 Hz) so the
         // selector prefers the live three-phase bank.
