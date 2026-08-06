@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.71.7] - 2026-08-06
+
+### Fixed
+
+- **The inverter clock now syncs in local time, so charge and discharge slots fire when you expect.** Sync Clock was writing UTC to the inverter, which shifted every timed slot by your timezone offset — an hour off during British Summer Time, for instance. Slots now line up with your local clock.
+
+- **Phantom solar power no longer shows up overnight.** A dark PV string can hold a residual open-circuit voltage while the inverter's MPPT reports a small idle current, which read as a few watts of generation after dark. Those idle readings are now zeroed, so overnight solar sits flat. (issue #261)
+
 ### Changed
 
 - **The Proxmox LXC update command is now just `update`, matching other community helper scripts.** New containers use `pct exec <container-id> -- update` in place of `home-energy-manager-update`. Containers created before this change keep working as they are — the old command still updates the app. (issue #254)
