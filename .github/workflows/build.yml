@@ -483,7 +483,11 @@ jobs:
           java-version: 17
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        # v4: Node 24 runtime (v3's node20 is deprecated on runners) and a
+        # current cmdline-tools default. v3's pinned 12266719 URL was 404ing
+        # intermittently on dl.google.com (Google's T&C gating on direct
+        # cmdline-tools downloads, see android-actions/setup-android#513).
+        uses: android-actions/setup-android@v4
 
       - name: Install NDK
         run: |
