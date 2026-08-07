@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.71.8] - 2026-08-07
+
+### Fixed
+
+- **Timed Export mode can no longer be left armed with no discharge slots set.** In that state the battery would sit idle or export unchecked. The Timed Export button now stays locked until you've configured at least one discharge slot; clearing the last slot while Timed Export is on drops you back to Eco; and if the bad state ever appears after a restart or a cloud-side change, the app notices and disarms it on its own.
+
+- **Agile Tariff mode no longer stalls the live data feed.** Once Agile had fetched its price data, a lock in the polling loop could seize up and leave the dashboard frozen on stale readings — which was most of the time whenever Agile was in use. Live updates now keep flowing.
+
+### Changed
+
+- **Switching Agile region or price source no longer drops the inverter connection.** Changing those settings used to force a full reconnect that left a gap in your live data; the app now picks up the new settings on the next poll without disconnecting.
+
 ## [0.71.7] - 2026-08-06
 
 ### Fixed
