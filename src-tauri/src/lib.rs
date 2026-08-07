@@ -304,6 +304,11 @@ pub fn run() {
             // sequences cannot diverge. `http_port` is captured first because
             // `app_settings` is moved into the helper.
             let http_port = app_settings.http_port;
+            // Only read on desktop targets: the self-heal block below is
+            // `#[cfg(desktop)]`, and reading it unconditionally leaves an
+            // unused variable on Android/mobile where `cfg(desktop)` is
+            // false.
+            #[cfg(desktop)]
             let autostart_enabled = app_settings.autostart_enabled;
             // Captured once at startup; takes effect on this launch. The
             // close-to-tray preference (`minimise_to_tray`) is read live in
