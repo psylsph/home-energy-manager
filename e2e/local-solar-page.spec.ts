@@ -114,8 +114,10 @@ test.describe('Solar Page - API Data', () => {
     await page.goto('/#/solar');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    // The Today line is always rendered below Total Solar Power.
-    await expect(page.getByText(/^Today:/)).toBeVisible({ timeout: 5_000 });
+    // The Today line is always rendered below Total Solar Power. It also
+    // appears on the PV1/PV2 cards, so pin the first match to avoid a
+    // strict-mode violation.
+    await expect(page.getByText(/^Today:/).first()).toBeVisible({ timeout: 5_000 });
   });
 
   test('PV1 card shows its own Today row (not the combined total)', async ({ page }) => {

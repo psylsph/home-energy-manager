@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use chrono::Timelike;
 
-use crate::inverter::encoder::RegisterWrite;
-use crate::inverter::model::{BatteryMode, DeviceType, InverterSnapshot};
+use crate::inverter::encoder::{ControlCommand, RegisterWrite};
+use crate::inverter::model::{BatteryMode, DeviceType, InverterSnapshot, ScheduleSlot};
 use crate::modbus::client::ModbusClient;
 use crate::modbus::registers::{
     encode_hhmm, HR_3PH_BATTERY_CHARGE_LIMIT, HR_3PH_BATTERY_SOC_RESERVE,
@@ -30,6 +30,33 @@ use crate::modbus::registers::{
     HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END, HR_DISCHARGE_SLOT_2_START,
     HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
 };
+
+/// Build the writes that leave Timed Export and return the inverter to Eco.
+///
+/// Keep this sequence shared by HTTP handlers and the poll-loop safety repair:
+/// clearing HR59 alone leaves HR27 in export mode, while writing HR27 first
+/// can briefly leave an armed schedule in an ambiguous state.
+pub(crate) fn build_timed_export_disable_writes() -> Vec<RegisterWrite> {
+    [
+        ControlCommand::SetEnableDischarge { enabled: false },
+        ControlCommand::SetBatteryPowerMode { mode: 1 },
+    ]
+    .into_iter()
+    .flat_map(|command| command.encode().unwrap_or_default())
+    .collect()
+}
+
+/// Whether a snapshot represents an externally-created invalid Timed Export
+/// state that the poll loop should repair.
+pub(crate) fn should_repair_timed_export(
+    enable_discharge: bool,
+    slots: &[ScheduleSlot],
+    force_discharge_in_progress: bool,
+) -> bool {
+    enable_discharge
+        && !slots.iter().any(ScheduleSlot::is_configured)
+        && !force_discharge_in_progress
+}
 
 // ===========================================================================
 // Agile Octopus price types
@@ -1727,7 +1754,36 @@ fn unix_to_hhmm<Tz: chrono::TimeZone>(unix_ts: i64, tz: &Tz) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inverter::model::InverterSnapshot;
+    use crate::inverter::model::{InverterSnapshot, ScheduleSlot};
+
+    fn configured_slot() -> ScheduleSlot {
+        ScheduleSlot {
+            enabled: true,
+            start_hour: 16,
+            start_minute: 0,
+            end_hour: 19,
+            end_minute: 0,
+            target_soc: 4,
+        }
+    }
+
+    #[test]
+    fn timed_export_repair_requires_hr59_and_no_configured_slot() {
+        assert!(should_repair_timed_export(true, &[], false));
+        assert!(!should_repair_timed_export(false, &[], false));
+        assert!(!should_repair_timed_export(true, &[configured_slot()], false));
+        assert!(!should_repair_timed_export(true, &[], true));
+    }
+
+    #[test]
+    fn timed_export_repair_writes_disable_schedule_then_eco() {
+        let writes = build_timed_export_disable_writes();
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0].address, HR_ENABLE_DISCHARGE);
+        assert_eq!(writes[0].value, 0);
+        assert_eq!(writes[1].address, HR_BATTERY_POWER_MODE);
+        assert_eq!(writes[1].value, 1);
+    }
 
     #[test]
     fn cosy_persist_helper_round_trips_through_disk() {

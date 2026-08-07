@@ -73,7 +73,14 @@ async function clearForceState(baseUrl: string) {
 // ---------------------------------------------------------------------------
 
 test.describe('Force Charge with minutes', () => {
-
+  // Every test arms a force charge and only the NEXT test's clearForceState
+  // would undo it — the last test would leave the shared simulator's
+  // schedule armed (enable_charge stuck at 1), poisoning every spec that
+  // runs afterwards. Stop any force operation after each test.
+  test.afterEach(async ({ baseUrl }) => {
+    await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' }).catch(() => {});
+    await fetch(`${baseUrl}/api/control/force-discharge/stop`, { method: 'POST' }).catch(() => {});
+  });
   test('minutes=30: API returns ok and the inverter enters force-charge mode', async ({ baseUrl }) => {
     await clearForceState(baseUrl);
 
@@ -131,6 +138,12 @@ test.describe('Force Charge with minutes', () => {
 });
 
 test.describe('Force Discharge with minutes', () => {
+  // Same shared-sim hygiene as the Force Charge describe: every test arms a
+  // force operation and must leave the inverter clean for the next spec.
+  test.afterEach(async ({ baseUrl }) => {
+    await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' }).catch(() => {});
+    await fetch(`${baseUrl}/api/control/force-discharge/stop`, { method: 'POST' }).catch(() => {});
+  });
 
   test('minutes=60: API returns ok', async ({ baseUrl }) => {
     await clearForceState(baseUrl);
@@ -182,6 +195,10 @@ test.describe('Force Discharge with minutes', () => {
 });
 
 test.describe('Force Discharge without body (backward compat)', () => {
+  test.afterEach(async ({ baseUrl }) => {
+    await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' }).catch(() => {});
+    await fetch(`${baseUrl}/api/control/force-discharge/stop`, { method: 'POST' }).catch(() => {});
+  });
 
   test('no body: API returns ok and the inverter enters force-discharge mode', async ({ baseUrl }) => {
     await clearForceState(baseUrl);

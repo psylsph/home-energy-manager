@@ -11,6 +11,7 @@ export default defineConfig({
     '**/history-cost.spec.ts',
     '**/agile-slot.spec.ts',
     '**/pv2-after-sunset.spec.ts',
+    '**/timed-export-slot-guard.spec.ts',
   ],
   fullyParallel: false,
   workers: 1,

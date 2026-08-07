@@ -137,10 +137,12 @@ test.describe('Battery Page - Modules', () => {
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
     // Each module renders as a button containing "Module" + "#N" in
-    // separate divs (the "#N" is the index label).
+    // separate divs (the "#N" is the index label). The second battery's
+    // BMS read can land a poll cycle after the first, so wait for the
+    // full count rather than asserting immediately after "Waiting for
+    // data" hides.
     const moduleEntries = page.locator('button:has-text("Module")');
-    await expect(moduleEntries.first()).toBeVisible({ timeout: 5_000 });
-    expect(await moduleEntries.count()).toBeGreaterThanOrEqual(2);
+    await expect(moduleEntries).toHaveCount(2, { timeout: 10_000 });
   });
 
   test('should expand module details on click', async ({ page }) => {
@@ -158,10 +160,11 @@ test.describe('Battery Page - Modules', () => {
     await page.goto('/#/battery');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    // Each module should show SOC% and voltage
+    // Each module should show SOC% and voltage. Use the auto-retrying
+    // toHaveCount so a module that lands a poll cycle late (second battery
+    // BMS read) doesn't trip the assertion.
     const moduleButtons = page.locator('button:has-text("Module")');
-    const count = await moduleButtons.count();
-    expect(count).toBeGreaterThanOrEqual(2);
+    await expect(moduleButtons).toHaveCount(2, { timeout: 10_000 });
   });
 
   test('should show cell voltage chart when module expanded', async ({ page }) => {

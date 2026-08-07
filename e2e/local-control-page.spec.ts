@@ -44,6 +44,12 @@ test.describe('Control Page - Quick Actions', () => {
     });
     const data = await resp.json();
     expect(data.ok).toBe(true);
+
+    // Stop the force charge so the shared simulator's schedule isn't left
+    // armed for the rest of the suite (enable_charge stays 1 in the sim's
+    // internal schedule until explicitly cleared).
+    const stop = await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' });
+    expect((await stop.json()).ok).toBe(true);
   });
 
   test('Pause Discharge via API should hold discharge while leaving charging available', async ({ baseUrl }) => {

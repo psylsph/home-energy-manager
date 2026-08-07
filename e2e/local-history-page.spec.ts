@@ -72,7 +72,9 @@ test.describe('History Page - Navigation', () => {
 test.describe('History Page - CSV Export', () => {
   test('should show CSV button', async ({ page }) => {
     await page.goto('/#/history');
-    await expect(page.getByRole('button', { name: 'CSV' })).toBeVisible({ timeout: 15_000 });
+    // The page has two CSV buttons (per-tab and "Export all tabs"), so
+    // pin the exact-name match to avoid a strict-mode violation.
+    await expect(page.getByRole('button', { name: 'CSV', exact: true })).toBeVisible({ timeout: 15_000 });
   });
 });
 

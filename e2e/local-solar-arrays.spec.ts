@@ -31,7 +31,7 @@ async function patchSettings(baseUrl: string, body: Record<string, unknown>) {
  * polling the REST endpoint as a proxy (the WS carries the same snapshot). */
 async function waitForPvPct(
   baseUrl: string,
-  timeoutMs = 30_000,
+  timeoutMs = 150_000,
 ): Promise<{ pv1_pct: number; pv2_pct: number }> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -176,7 +176,7 @@ test.describe('Settings - Solar Arrays (issue #110)', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Solar page — % of max (issue #110)', () => {
-  test.describe.configure({ mode: 'serial' });
+  test.describe.configure({ mode: 'serial', timeout: 180_000 });
 
   test.beforeAll(async ({ baseUrl }) => {
     // Set a rated kWp so pv1_pct / pv2_pct are populated.
@@ -191,7 +191,10 @@ test.describe('Solar page — % of max (issue #110)', () => {
   test('Solar page shows the Solar Arrays section when rated kWp is configured', async ({ page }) => {
     await page.goto('/#/solar');
     await expect(page.locator('[data-testid="awaiting"]')).toBeHidden({ timeout: 20_000 });
-    await expect(page.getByTestId('solar-arrays')).toBeVisible({ timeout: 10_000 });
+    // The section renders once the poll stamps solar_arrays from the rated
+    // kWp setting — the shared-sim poll can be mid-drain for ~a minute,
+    // so allow a generous wait.
+    await expect(page.getByTestId('solar-arrays')).toBeVisible({ timeout: 60_000 });
   });
 
   test('Solar Arrays section shows PV1 and PV2 labels', async ({ page }) => {
@@ -208,8 +211,9 @@ test.describe('Solar page — % of max (issue #110)', () => {
     await page.goto('/#/solar');
     await expect(page.locator('[data-testid="awaiting"]')).toBeHidden({ timeout: 20_000 });
     const arraysSection = page.getByTestId('solar-arrays');
-    // The "of max" text appears next to the numeric % for both arrays.
-    await expect(arraysSection.getByText('of max')).toBeVisible();
+    // The "of max" text appears next to the numeric % for BOTH arrays, so
+    // pin the first match to avoid a strict-mode violation.
+    await expect(arraysSection.getByText('of max').first()).toBeVisible();
   });
 
   test('Solar page hides the Solar Arrays section when no kWp is configured', async ({ page, baseUrl }) => {
@@ -225,9 +229,10 @@ test.describe('Solar page — % of max (issue #110)', () => {
     await page.goto('/#/solar');
     await expect(page.locator('[data-testid="awaiting"]')).toBeHidden({ timeout: 20_000 });
     const arraysSection = page.getByTestId('solar-arrays');
-    // Both arrays have progress bars.
-    const bars = arraysSection.getByRole('progressbar');
-    expect(await bars.count()).toBeGreaterThanOrEqual(1);
+    // Progress bars appear once the poll stamps pv1_pct / pv2_pct from the
+    // rated-kWp settings (next poll after the settings save), so wait for
+    // one rather than counting immediately.
+    await expect(arraysSection.getByRole('progressbar').first()).toBeVisible({ timeout: 10_000 });
   });
 });
 
@@ -254,15 +259,15 @@ test.describe('History → Solar — PV % of Rated chart (issue #110)', () => {
     await expect(page.getByText('PV % of Rated (kWp)')).toBeVisible({ timeout: 5_000 });
   });
 
-  test('PV % chart is selectable as a history chart', async ({ page }) => {
+  test('PV % chart is available on the Solar history tab', async ({ page }) => {
     await page.goto('/#/history');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
-    // Click Solar tab.
+    // All solar charts render stacked on the tab (no per-chart tab buttons
+    // in the current UI) — verify the PV % chart card is present.
     await page.getByRole('button', { name: 'Solar' }).click();
-    // Click the "PV % of Rated (kWp)" chart tab.
-    await page.getByRole('button', { name: 'PV % of Rated (kWp)' }).click();
-    // The chart title should now be visible.
-    await expect(page.getByText('PV % of Rated (kWp)')).toBeVisible();
+    await expect(
+      page.getByRole('heading', { name: 'PV % of Rated (kWp)' }),
+    ).toBeVisible();
   });
 });
 
@@ -271,7 +276,7 @@ test.describe('History → Solar — PV % of Rated chart (issue #110)', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('API — pv1_pct / pv2_pct in snapshot (issue #110)', () => {
-  test.describe.configure({ mode: 'serial' });
+  test.describe.configure({ mode: 'serial', timeout: 180_000 });
 
   test.beforeAll(async ({ baseUrl }) => {
     await patchSettings(baseUrl, { pv1_rated_kw: 5, pv2_rated_kw: 3 });

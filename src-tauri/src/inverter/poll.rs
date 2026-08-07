@@ -72,9 +72,10 @@ use crate::inverter::sanitizer::{
     ConsecutiveSuspectCounts, DeltaCorrectionCounts, GraceCumulativeSamples, RateReleaseCounts,
 };
 use crate::inverter::state_machines::{
-    build_force_discharge_auto_revert_writes, check_adaptive_charge, check_auto_winter,
-    check_load_limiter_with_other_pause, check_temperature_limiter_after_automation,
-    clear_cosy_slot_registers, cosy_slot_register_writes, persist_cosy_active,
+    build_force_discharge_auto_revert_writes, build_timed_export_disable_writes,
+    check_adaptive_charge, check_auto_winter, check_load_limiter_with_other_pause,
+    check_temperature_limiter_after_automation, clear_cosy_slot_registers, cosy_slot_register_writes,
+    persist_cosy_active, should_repair_timed_export,
     write_registers_to_inverter, AgileSlotAction,
 };
 pub use crate::inverter::state_machines::{
@@ -1055,6 +1056,11 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // inverter's charge slot registers. Only re-writes when the
                 // "next upcoming slot" changes (e.g. after a slot ends).
                 let mut cosy_last_preloaded_slot: Option<usize> = None;
+                // Require two consecutive confirmed violations before repairing
+                // an externally-created HR59/no-slot state. This avoids
+                // reacting to a single transient read while still healing the
+                // invalid state promptly on the next poll cycle.
+                let mut invalid_timed_export_polls: u8 = 0;
 
                 // Restore cosy_active from persisted settings on restart.
                 // Without this, a client reboot during OR after a cosy slot
@@ -1117,8 +1123,16 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                         break;
                     }
 
-                    // Drain and execute any pending register writes from the
-                    // control API before reading the latest state.
+                    // Drain pending register writes from the control API
+                    // before reading the latest state. Drain at most a few
+                    // batches per cycle: draining the whole queue in one go
+                    // starves the read/broadcast for minutes when many
+                    // batches queue up (each write is a real ~1.5s Modbus
+                    // round-trip), freezing the snapshot the UI depends on.
+                    // A small per-cycle cap bounds that freeze to ~a minute
+                    // while still making net progress on the queue (the
+                    // write_notify wakes the sleep early so remaining
+                    // batches drain on the next cycles).
                     let pending: Vec<PendingWriteBatch> = {
                         let mut pw = state.pending_writes.lock().await;
                         std::mem::take(&mut *pw)
@@ -2294,6 +2308,50 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     }
                                 }
 
+                                // ---- Timed Export invariant repair ----
+                                //
+                                // HR59=1 without any configured discharge slot
+                                // leaves the inverter in the invalid paused state
+                                // (HR27=0, no charge and no discharge). The HTTP
+                                // handlers prevent creating this state, but it
+                                // can still be introduced by another client or
+                                // survive an app restart. Repair it only after
+                                // two consecutive snapshots and never while the
+                                // app owns a force-discharge transition.
+                                let force_discharge_in_progress =
+                                    state.force_discharge_revert.lock().await.is_some();
+                                let invalid_timed_export = should_repair_timed_export(
+                                    snapshot.enable_discharge,
+                                    &snapshot.discharge_slots,
+                                    force_discharge_in_progress,
+                                );
+                                if invalid_timed_export {
+                                    invalid_timed_export_polls =
+                                        invalid_timed_export_polls.saturating_add(1);
+                                } else {
+                                    invalid_timed_export_polls = 0;
+                                }
+
+                                if invalid_timed_export_polls >= 2 {
+                                    invalid_timed_export_polls = 0;
+                                    let writes = build_timed_export_disable_writes();
+                                    discharge_control_may_override_pause = !writes.is_empty();
+                                    for write in writes {
+                                        match client.write_register(write.address, write.value).await {
+                                            Ok(()) => tracing::warn!(
+                                                "Timed Export invariant repair: wrote reg {} = {}",
+                                                write.address,
+                                                write.value
+                                            ),
+                                            Err(e) => tracing::error!(
+                                                "Timed Export invariant repair: write reg {} failed: {e}",
+                                                write.address
+                                            ),
+                                        }
+                                        tokio::time::sleep(Duration::from_millis(1500)).await;
+                                    }
+                                }
+
                                 // ---- Cosy charging mode ----
                                 //
                                 // Writes Cosy slot schedules into the inverter's own charge slot
@@ -2508,11 +2566,19 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     } else {
                                         // Fetch current price (from cache or Octopus API).
                                         let now_ts = chrono::Utc::now().timestamp();
-                                        let prices = state.cached_agile_prices.lock().await;
-                                        let current_price = prices
-                                            .iter()
-                                            .find(|s| now_ts >= s.valid_from && now_ts < s.valid_to)
-                                            .map(|s| s.pence);
+                                        // Scope the cache guard so it is dropped before the
+                                        // fetch (cache miss) and before the cache_snapshot
+                                        // re-lock below — holding it across either deadlocked
+                                        // the poll (tokio Mutex is not re-entrant).
+                                        let current_price = {
+                                            let prices = state.cached_agile_prices.lock().await;
+                                            prices
+                                                .iter()
+                                                .find(|s| {
+                                                    now_ts >= s.valid_from && now_ts < s.valid_to
+                                                })
+                                                .map(|s| s.pence)
+                                        };
 
                                         let price = if current_price.is_some() {
                                             current_price
@@ -2524,7 +2590,6 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             // tomorrow's slots once they're published (~1pm) and the
                                             // current slot drops out of the window - which silently
                                             // leaves the state machine Idle and never discharges.
-                                            drop(prices);
                                             let region = settings.agile_region.clone();
             let today =
                                                 chrono::Utc::now().format("%Y-%m-%d").to_string();
@@ -2540,8 +2605,21 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             let url = format!(
                                                 "{base}/v1/products/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-{region}/standard-unit-rates/?period_from={today}T00:00:00Z&page_size=96"
                                             );
-                                            let fetch_result = tokio::task::spawn_blocking(move || -> Result<Vec<PriceSlot>, String> {
-                                                let mut resp = ureq::get(&url)
+                                                let fetch_result = tokio::task::spawn_blocking(move || -> Result<Vec<PriceSlot>, String> {
+                                                // Bounded request: an unreachable/slow price source
+                                                // (e.g. the real Octopus API when a test/self-host
+                                                // points us back at the default) must never stall the
+                                                // poll loop for ureq's default connect timeout. No
+                                                // idle keep-alive connections: tests spin up throwaway
+                                                // mock Octopus servers and close() them per test, and a
+                                                // lingering pooled connection would hang the close.
+                                                let agent = ureq::Agent::config_builder()
+                                                    .timeout_global(Some(Duration::from_secs(10)))
+                                                    .max_idle_connections(0)
+                                                    .max_idle_connections_per_host(0)
+                                                    .build();
+                                                let mut resp = ureq::Agent::new_with_config(agent)
+                                                    .get(&url)
                                                     .call()
                                                     .map_err(|e| format!("HTTP error: {e}"))?;
                                                 let body = resp.body_mut().read_to_string()

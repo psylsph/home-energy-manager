@@ -291,7 +291,7 @@ Slots 3-10 (on supported models) live in HR 240-299, with per-slot target SOCs i
 
 ### Discharge slot handling
 
-Discharge Schedule is always visible regardless of mode. In Eco mode, edits are client-side only (no API call — prevents Gen3 firmware quirk where non-zero slot auto-enables discharge). Timed mode button is locked until at least one discharge slot is configured. Switching to Timed mode writes slots before `enable_discharge=1` flag (prevents unrestricted export). Switching from Timed to Eco clears all discharge slot registers.
+Discharge Schedule is always visible regardless of battery mode. Editing a discharge slot always writes it through the API, but `/api/control/discharge-slot` normally writes only the slot time registers and never arms `enable_discharge` (mirroring givenergy-modbus `set_discharge_slot()`), so configuring a slot never forces an Eco→Timed mode switch. The Timed Export button is locked until at least one discharge slot is configured, and the backend rejects direct enable requests without a slot. When a persisted schedule backup is restored, slot writes precede `enable_discharge=1` (preventing an invalid no-window state). Disabling the last slot while Timed Export is armed returns the inverter to Eco. On reconnect, the poll loop also repairs an externally-created `enable_discharge=1` state with no configured slot. Switching from Timed to Eco clears all discharge slot registers.
 
 ### Optional block carry-forward
 

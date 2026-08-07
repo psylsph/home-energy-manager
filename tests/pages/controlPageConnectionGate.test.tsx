@@ -409,9 +409,17 @@ describe('<ControlPage/> — connection-state gate', () => {
     act(() => {
       useInverterStore.setState({ snapshot: makeSnapshot() });
     });
-    expect(
-      (await screen.findByRole('button', { name: /Force Charge/i }) as HTMLButtonElement).disabled,
-    ).toBe(false);
+    // The stop's pending-clear runs on a setTimeout(0) after the snapshot
+    // confirms it, so the button labels and disabled state can briefly lag
+    // the setState re-render. Wait for Force Charge to actually re-enable
+    // rather than racing the timer — the same guard the sibling test below
+    // uses after its Force Discharge stop.
+    const chargeButton = (await screen.findByRole('button', {
+      name: /Force Charge/i,
+    })) as HTMLButtonElement;
+    await vi.waitFor(() => {
+      expect(chargeButton.disabled).toBe(false);
+    });
     expect(
       (screen.getByRole('button', { name: /Force Discharge/i }) as HTMLButtonElement).disabled,
     ).toBe(false);
@@ -474,9 +482,16 @@ describe('<ControlPage/> — connection-state gate', () => {
     act(() => {
       useInverterStore.setState({ snapshot: makeSnapshot() });
     });
-    expect(
-      (await screen.findByRole('button', { name: /Force Discharge/i }) as HTMLButtonElement).disabled,
-    ).toBe(false);
+    // The pending-clear is scheduled with setTimeout(0) after the snapshot
+    // confirms the stop, so the label can briefly still read "Stopping
+    // Force Discharge…" here. Wait for the button to actually re-enable
+    // rather than racing the timer.
+    const dischargedButton = await screen.findByRole('button', {
+      name: /Force Discharge/i,
+    }) as HTMLButtonElement;
+    await vi.waitFor(() => {
+      expect(dischargedButton.disabled).toBe(false);
+    });
     expect(
       (screen.getByRole('button', { name: /Force Charge/i }) as HTMLButtonElement).disabled,
     ).toBe(false);

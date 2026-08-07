@@ -248,10 +248,14 @@ test.describe('Force Discharge → Stop API', () => {
   });
 
   test('Force Charge and Force Discharge reverts are independent', async ({ baseUrl }) => {
-    // Set up Eco so the simulator is in a clean baseline.
+    // The backend enforces mutual exclusion: force-discharge is rejected
+    // while a force-charge revert is armed, and vice versa. "Independent"
+    // means each revert round-trips on its own without leaking into the
+    // other, and the guard between them holds in both directions.
     await setMode(baseUrl, 'eco');
 
-    // Retry the start if the revert wasn't captured (snapshot briefly None).
+    // Arm force charge (retry until the revert is captured — the snapshot
+    // can be briefly None right after the Eco mode write).
     let fcOk = false;
     for (let i = 0; i < 3 && !fcOk; i++) {
       await fetch(`${baseUrl}/api/control/force-charge`, {
@@ -260,7 +264,7 @@ test.describe('Force Discharge → Stop API', () => {
         body: JSON.stringify({ minutes: 30 }),
       });
       if (i > 0) await new Promise((r) => setTimeout(r, 500));
-      // Probe: try to stop and re-arm if it fails.
+      // Probe: try to stop and re-arm if the revert wasn't captured.
       const probe = await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' });
       fcOk = (await probe.json()).ok;
     }
@@ -272,7 +276,22 @@ test.describe('Force Discharge → Stop API', () => {
     });
     expect((await fcResp.json()).ok).toBe(true);
 
-    // Now start a force discharge. The charge revert should still be alive.
+    // Force discharge while the charge revert is armed must be rejected,
+    // leaving the charge revert intact.
+    const fdRejected = await fetch(`${baseUrl}/api/control/force-discharge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ minutes: 30 }),
+    });
+    const fdRejectedBody = await fdRejected.json();
+    expect(fdRejectedBody.ok).toBe(false);
+    expect(fdRejectedBody.error).toMatch(/stop force charge/i);
+
+    // Stop the charge; its revert is consumed.
+    const stopFc = await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' });
+    expect((await stopFc.json()).ok).toBe(true);
+
+    // Now force discharge arms its own revert...
     const fdResp = await fetch(`${baseUrl}/api/control/force-discharge`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -280,13 +299,29 @@ test.describe('Force Discharge → Stop API', () => {
     });
     expect((await fdResp.json()).ok).toBe(true);
 
-    // Stop the discharge; the charge revert should still be there.
+    // ...and force charge is rejected while the discharge revert is armed.
+    const fcRejected = await fetch(`${baseUrl}/api/control/force-charge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ minutes: 30 }),
+    });
+    const fcRejectedBody = await fcRejected.json();
+    expect(fcRejectedBody.ok).toBe(false);
+    expect(fcRejectedBody.error).toMatch(/stop force discharge/i);
+
+    // Stop the discharge; its revert is consumed independently.
     const stopFd = await fetch(`${baseUrl}/api/control/force-discharge/stop`, { method: 'POST' });
     expect((await stopFd.json()).ok).toBe(true);
 
-    // And we should still be able to stop the charge.
-    const stopFc = await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' });
-    expect((await stopFc.json()).ok).toBe(true);
+    // Both sides can arm again cleanly afterwards.
+    const fcAgain = await fetch(`${baseUrl}/api/control/force-charge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ minutes: 30 }),
+    });
+    expect((await fcAgain.json()).ok).toBe(true);
+    const stopFc2 = await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' });
+    expect((await stopFc2.json()).ok).toBe(true);
   });
 });
 

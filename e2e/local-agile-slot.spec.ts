@@ -161,6 +161,12 @@ async function startMockOctopus(
 // ---------------------------------------------------------------------------
 
 test.describe('Agile slot-based mode with mocked Octopus API', () => {
+  // The real-sim poll loop legitimately takes 10-20s+ per state change: each
+  // scope-off transition drains an 8-register clear batch (~12s of Modbus
+  // round-trips) before the next read, and the connect/grace sequence adds
+  // more. The 30s default test timeout and 20-40s snapshot waits raced this
+  // and flaked intermittently. Give the block a budget that matches reality.
+  test.describe.configure({ timeout: 120_000 });
   let mock: { server: Server; baseUrl: string; setPrice: (p: number) => void } | null = null;
 
   test.afterEach(async () => {
@@ -224,7 +230,7 @@ test.describe('Agile slot-based mode with mocked Octopus API', () => {
     const data = await waitForSnapshot(
       baseUrl,
       (d) => d.agile_scope === 'charge_only',
-      20_000,
+      60_000,
     );
     // The snapshot should report idle (not discharging) because Charge
     // Only ignores the discharge threshold.
@@ -249,7 +255,7 @@ test.describe('Agile slot-based mode with mocked Octopus API', () => {
     const data = await waitForSnapshot(
       baseUrl,
       (d) => d.agile_scope === 'discharge_only',
-      20_000,
+      60_000,
     );
     expect(data.agile_state).toBe('idle');
     expect(data.agile_active).toBe(false);
@@ -269,17 +275,18 @@ test.describe('Agile slot-based mode with mocked Octopus API', () => {
     });
 
     // Wait for the snapshot to report charging. The poll loop fetches
-    // prices, evaluates, and writes the slot. We give it up to 40s
-    // (several poll cycles at the test's 5s interval) to account for
-    // the price fetch + write latency.
+    // prices, evaluates, and writes the slot. We assert the poll-side
+    // fields only (agile_state / agile_active): the simulator re-projects
+    // its internal Schedule into the charge-slot registers and HR 96 every
+    // tick, so enable_charge / charge_slots in the snapshot never reflect
+    // what HEM wrote — the same limitation documented in
+    // local-issue-137-discharge-slot-backup.spec.ts.
     const data = await waitForSnapshot(
       baseUrl,
-      (d) => d.agile_state === 'charging' && d.enable_charge === true,
-      40_000,
+      (d) => d.agile_state === 'charging',
+      60_000,
     );
-    // The charge slot should be enabled with a non-zero window.
-    const activeSlot = data.charge_slots.find((s) => s.enabled);
-    expect(activeSlot, 'expected at least one enabled charge slot').toBeTruthy();
+    expect(data.agile_active).toBe(true);
 
     // Cleanup.
     await setAgile(baseUrl, { scope: 'off', api_base_url: '' });
@@ -293,7 +300,7 @@ test.describe('Agile slot-based mode with mocked Octopus API', () => {
       scope: 'full',
       api_base_url: mock.baseUrl,
     });
-    await waitForSnapshot(baseUrl, (d) => d.agile_state === 'charging', 40_000);
+    await waitForSnapshot(baseUrl, (d) => d.agile_state === 'charging', 60_000);
 
     // Switch to Standard.
     await setAgile(baseUrl, { scope: 'off', api_base_url: '' });
@@ -302,7 +309,7 @@ test.describe('Agile slot-based mode with mocked Octopus API', () => {
     const data = await waitForSnapshot(
       baseUrl,
       (d) => d.agile_scope === 'off' && d.agile_state === 'idle',
-      20_000,
+      60_000,
     );
     expect(data.agile_active).toBe(false);
     expect(data.agile_enabled).toBe(false);

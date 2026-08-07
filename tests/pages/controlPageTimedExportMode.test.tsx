@@ -223,6 +223,63 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
     expect(within(section).getByText('Timed Discharge')).toBeDefined();
   });
 
+  it('locks Timed Export and explains the required discharge slot when none is configured', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({
+        enable_discharge: false,
+        discharge_slots: [emptySlot(), emptySlot()],
+      }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const section = await batteryModeSection();
+    const button = within(section).getByText('Timed Export').closest('button') as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(
+      within(section).getByText(
+        'Configure at least one discharge slot before enabling Timed Export.',
+      ),
+    ).toBeDefined();
+    fireEvent.click(button);
+    expect(apiPost).not.toHaveBeenCalledWith('/api/control/timed-export', { enabled: true });
+  });
+
+  it('keeps Timed Export available to turn off if the inverter reports a bad no-slot state', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({
+        enable_discharge: true,
+        battery_power_mode: 0,
+        discharge_slots: [emptySlot(), emptySlot()],
+      }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const section = await batteryModeSection();
+    const button = within(section).getByText('Timed Export').closest('button') as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+    expect(apiPost).toHaveBeenCalledWith('/api/control/timed-export', { enabled: false });
+  });
+
+  it('surfaces a backend rejection when Timed Export cannot be enabled', async () => {
+    vi.mocked(apiPost).mockRejectedValueOnce(
+      new Error('Configure at least one discharge slot before enabling Timed Export'),
+    );
+    useInverterStore.setState({ snapshot: makeSnapshot(), developerMode: false, connectionState: 'connected' });
+    render(<ControlPage />);
+
+    const section = await batteryModeSection();
+    fireEvent.click(within(section).getByText('Timed Export').closest('button')!);
+
+    expect((await within(section).findByRole('alert')).textContent).toContain(
+      'Configure at least one discharge slot before enabling Timed Export',
+    );
+  });
+
   it('toggles Timed Export through the split endpoint, not the old combined mode endpoint', async () => {
     useInverterStore.setState({ snapshot: makeSnapshot({ enable_discharge: false }), developerMode: false, connectionState: 'connected' });
     render(<ControlPage />);

@@ -706,6 +706,21 @@ pub struct ScheduleSlot {
     pub target_soc: u8,
 }
 
+impl ScheduleSlot {
+    /// Whether this slot contains an enabled, non-empty discharge window.
+    ///
+    /// A slot may retain zeroed or stale time registers while its enable flag
+    /// is set. Such a slot must not count as a safety constraint for Timed
+    /// Export: HR59 may only be armed when at least one real window exists.
+    pub fn is_configured(&self) -> bool {
+        self.enabled
+            && (self.start_hour != 0
+                || self.start_minute != 0
+                || self.end_hour != 0
+                || self.end_minute != 0)
+    }
+}
+
 fn default_target_soc() -> u8 {
     4
 }
@@ -1183,6 +1198,27 @@ pub struct InverterSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schedule_slot_configuration_requires_enabled_non_zero_window() {
+        let mut slot = ScheduleSlot {
+            enabled: false,
+            start_hour: 16,
+            start_minute: 0,
+            end_hour: 19,
+            end_minute: 0,
+            target_soc: 4,
+        };
+        assert!(!slot.is_configured());
+
+        slot.enabled = true;
+        assert!(slot.is_configured());
+
+        slot.start_hour = 0;
+        slot.end_hour = 0;
+        slot.end_minute = 0;
+        assert!(!slot.is_configured());
+    }
 
     // -- BatteryState --------------------------------------------------------
     #[test]

@@ -146,6 +146,12 @@ test.describe('Dashboard', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Quick Actions', () => {
+  // These tests click through the UI and then wait for 7-8 sequential Modbus
+  // writes (each a real ~1.5s round-trip) twice — once for start, once for
+  // stop. The default 30s test timeout is too tight under CI/parallel load
+  // (the Force Discharge test measures ~28s standalone); give the block a
+  // budget that matches its actual work.
+  test.describe.configure({ timeout: 90_000 });
   test('Force Charge should send correct Modbus writes', async ({
     page,
     baseUrl,
@@ -438,10 +444,9 @@ test.describe('API Control Endpoints', () => {
     expect(findWrite(writes, 110)!.value).toBe(4);  // SOC reserve
   });
 
-  test('POST /api/control/timed-export defaults to legacy HR27=0 export mode', async ({
+  test('POST /api/control/timed-export rejects enabling without a discharge slot', async ({
     baseUrl,
     drainModbusWrites,
-    peekModbusWrites,
   }) => {
     await clearWrites(drainModbusWrites);
 
@@ -450,11 +455,11 @@ test.describe('API Control Endpoints', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled: true }),
     });
-    expect((await resp.json()).ok).toBe(true);
-
-    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 2, 15_000);
-    expect(findWrite(writes, 27)!.value).toBe(0);
-    expect(findWrite(writes, 59)!.value).toBe(1);
+    expect(resp.status).toBe(409);
+    const body = await resp.json();
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain('Configure at least one discharge slot');
+    expect((await drainModbusWrites()).some((write) => write.address === 59 && write.value === 1)).toBe(false);
   });
 
   test('POST /api/control/timed-discharge writes HR318 pause-discharge inverse window', async ({

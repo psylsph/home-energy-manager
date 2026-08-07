@@ -48,6 +48,15 @@ const BATTERY_MODE_LABELS: Record<BatteryModeKind, string> = {
   timed_discharge: 'Timed Discharge',
 };
 
+function hasConfiguredDischargeSlot(slots: ReadonlyArray<ScheduleSlot> | undefined): boolean {
+  return (slots ?? []).some((slot) => slot.enabled && (
+    slot.start_hour !== 0
+      || slot.start_minute !== 0
+      || slot.end_hour !== 0
+      || slot.end_minute !== 0
+  ));
+}
+
 const RESERVE_SOC_MIN = 4;
 const RESERVE_SOC_MAX = 100;
 const RESERVE_SOC_STEP = 1;
@@ -2218,6 +2227,7 @@ export default function ControlPage() {
     : currentMode === 'eco' || currentMode === 'eco_paused' || currentMode === 'timed_demand';
   const timedChargeEnabled = snapshot?.enable_charge ?? false;
   const timedExportEnabled = snapshot?.enable_discharge ?? false;
+  const hasConfiguredTimedExportSlot = hasConfiguredDischargeSlot(snapshot?.discharge_slots);
   const snapshotTimedDischargeEnabled = snapshot?.battery_pause_mode === 2;
   const timedDischargeEnabled = timedDischargeOverride ?? snapshotTimedDischargeEnabled;
   const batteryModeApplying = batteryModePending != null;
@@ -2939,7 +2949,7 @@ export default function ControlPage() {
           <button
             type="button"
             onClick={handleTimedExportToggle}
-            disabled={batteryModeApplying}
+            disabled={batteryModeApplying || (!timedExportEnabled && !hasConfiguredTimedExportSlot)}
             aria-pressed={timedExportEnabled}
             className={`px-3 py-3 rounded-lg border text-xs font-medium transition flex flex-col items-start gap-1 ${timedExportEnabled
                 ? 'bg-accent/20 border-accent text-accent'
@@ -2956,6 +2966,11 @@ export default function ControlPage() {
         </div>
         {batteryModeError && (
           <p className="text-red-400 text-xs" role="alert">{batteryModeError}</p>
+        )}
+        {!timedExportEnabled && !hasConfiguredTimedExportSlot && (
+          <p className="text-text-secondary text-xs" role="status">
+            Configure at least one discharge slot before enabling Timed Export.
+          </p>
         )}
         {timedExportEnabled && (
           <p

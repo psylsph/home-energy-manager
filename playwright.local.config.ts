@@ -15,6 +15,12 @@ export default defineConfig({
   testDir: './e2e',
   testMatch: '**/local-*.spec.ts',
   fullyParallel: false,
+  // One worker: every local spec shares the single simulator + backend
+  // spawned by local-global-setup, so spec files MUST run serially. Running
+  // files in parallel made them clobber each other's settings and register
+  // writes on the shared backend (e.g. solar-arrays posting rated kWp while
+  // agile posts scope) and flaked intermittently.
+  workers: 1,
   timeout: 30_000,
   expect: { timeout: 10_000 },
   retries: 0,
