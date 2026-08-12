@@ -1548,4 +1548,278 @@ mod tests {
         assert_eq!(rows.len(), 1, "only the non-negative row survives");
         assert!((rows[0].consumption - 0.75).abs() < 1e-9);
     }
+
+    // ================================================================
+    // Pure helpers: tariff_product_code / tariff_rate_types / payment_priority
+    // ================================================================
+
+    #[test]
+    fn test_tariff_product_code_extracts_product_from_single_rate() {
+        assert_eq!(
+            tariff_product_code("E-1R-AGILE-FLEX-22-11-25-A").unwrap(),
+            "AGILE-FLEX-22-11-25"
+        );
+    }
+
+    #[test]
+    fn test_tariff_product_code_extracts_product_from_two_rate() {
+        assert_eq!(
+            tariff_product_code("E-2R-GO-GREEN-VAR-22-10-14-C").unwrap(),
+            "GO-GREEN-VAR-22-10-14"
+        );
+    }
+
+    #[test]
+    fn test_tariff_product_code_extracts_product_from_gas() {
+        assert_eq!(
+            tariff_product_code("G-1R-SILVER-FLEX-22-11-25-B").unwrap(),
+            "SILVER-FLEX-22-11-25"
+        );
+    }
+
+    #[test]
+    fn test_tariff_product_code_rejects_unknown_prefix() {
+        assert!(tariff_product_code("X-1R-FOO-A").is_err());
+        assert!(tariff_product_code("no-prefix").is_err());
+    }
+
+    #[test]
+    fn test_tariff_product_code_rejects_empty_product() {
+        // Prefix matches but product segment is empty: E-1R--A
+        assert!(tariff_product_code("E-1R--A").is_err());
+    }
+
+    #[test]
+    fn test_tariff_rate_types_single_rate() {
+        assert_eq!(tariff_rate_types("E-1R-VAR-22-11-25-A"), &["standard", "standing"]);
+    }
+
+    #[test]
+    fn test_tariff_rate_types_two_rate() {
+        assert_eq!(tariff_rate_types("E-2R-ECO-22-11-25-A"), &["day", "night", "standing"]);
+    }
+
+    #[test]
+    fn test_payment_priority_direct_debit_highest() {
+        assert_eq!(payment_priority(Some("DIRECT_DEBIT")), 3);
+        assert_eq!(payment_priority(None), 2);
+        assert_eq!(payment_priority(Some("OTHER")), 1);
+    }
+
+    // ================================================================
+    // auth_header
+    // ================================================================
+
+    #[test]
+    fn test_auth_header_is_base64_basic() {
+        let header = auth_header("sk_test_123");
+        assert!(header.starts_with("Basic "));
+        // Decode and verify the payload is "sk_test_123:"
+        let encoded = &header[6..];
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        assert_eq!(decoded, b"sk_test_123:");
+    }
+
+    // ================================================================
+    // discover_streams
+    // ================================================================
+
+    #[test]
+    fn test_discover_streams_extracts_electricity_and_gas() {
+        let json = r#"{
+            "properties": [{
+                "moved_in_at": "2023-01-01T00:00:00Z",
+                "moved_out_at": null,
+                "electricity_meter_points": [{
+                    "mpan": "A_MPAN",
+                    "is_export": false,
+                    "meters": [{"serial_number": "E_SN"}],
+                    "agreements": [{"tariff_code": "E-1R-VAR-22-11-25-A", "valid_from": "2023-06-01T00:00:00Z", "valid_to": null}]
+                }],
+                "gas_meter_points": [{
+                    "mprn": "A_MPRN",
+                    "meters": [{"serial_number": "G_SN"}],
+                    "agreements": [{"tariff_code": "G-1R-VAR-22-11-25-A", "valid_from": "2023-06-01T00:00:00Z", "valid_to": null}]
+                }]
+            }]
+        }"#;
+        let account: AccountResponse = serde_json::from_str(json).unwrap();
+        let streams = discover_streams(account, 1_700_000_000);
+        assert_eq!(streams.len(), 2);
+        assert_eq!(streams[0].kind, "electricity_import");
+        assert_eq!(streams[0].meter_point, "A_MPAN");
+        assert_eq!(streams[1].kind, "gas");
+        assert_eq!(streams[1].meter_point, "A_MPRN");
+    }
+
+    #[test]
+    fn test_discover_streams_marks_export_meters() {
+        let json = r#"{
+            "properties": [{
+                "moved_in_at": null, "moved_out_at": null,
+                "electricity_meter_points": [{
+                    "mpan": "EXP_MPAN", "is_export": true,
+                    "meters": [{"serial_number": "SN1"}],
+                    "agreements": []
+                }],
+                "gas_meter_points": []
+            }]
+        }"#;
+        let account: AccountResponse = serde_json::from_str(json).unwrap();
+        let streams = discover_streams(account, 1_700_000_000);
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].kind, "electricity_export");
+    }
+
+    #[test]
+    fn test_discover_streams_skips_moved_out_properties() {
+        let json = r#"{
+            "properties": [{
+                "moved_in_at": null,
+                "moved_out_at": "2023-12-31T00:00:00Z",
+                "electricity_meter_points": [{"mpan": "X", "is_export": false, "meters": [{"serial_number": "S"}], "agreements": []}],
+                "gas_meter_points": []
+            }]
+        }"#;
+        let account: AccountResponse = serde_json::from_str(json).unwrap();
+        let streams = discover_streams(account, 1_700_000_000);
+        assert!(streams.is_empty(), "moved-out properties must be skipped");
+    }
+
+    // ================================================================
+    // select_tariff_rows
+    // ================================================================
+
+    fn dummy_agreement() -> Agreement {
+        Agreement {
+            tariff_code: "E-1R-VAR-22-11-25-A".to_string(),
+            valid_from: "2024-01-01T00:00:00Z".to_string(),
+            valid_to: None,
+        }
+    }
+
+    fn dummy_stream() -> Stream {
+        Stream {
+            kind: "electricity_import".to_string(),
+            meter_point: "MPAN1".to_string(),
+            serial: "SN1".to_string(),
+            earliest: 0,
+            agreements: vec![],
+        }
+    }
+
+    #[test]
+    fn test_select_tariff_rows_picks_direct_debit_over_other() {
+        let prices = vec![
+            PriceResult {
+                value_inc_vat: 0.25,
+                valid_from: "2024-06-01T00:00:00Z".to_string(),
+                valid_to: Some("2024-06-01T00:30:00Z".to_string()),
+                payment_method: Some("OTHER".to_string()),
+            },
+            PriceResult {
+                value_inc_vat: 0.22,
+                valid_from: "2024-06-01T00:00:00Z".to_string(),
+                valid_to: Some("2024-06-01T00:30:00Z".to_string()),
+                payment_method: Some("DIRECT_DEBIT".to_string()),
+            },
+        ];
+        let rows = select_tariff_rows(prices, &dummy_agreement(), &dummy_stream(), "standard").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!((rows[0].value_inc_vat - 0.22).abs() < 1e-9, "DIRECT_DEBIT should win");
+    }
+
+    #[test]
+    fn test_select_tariff_rows_skips_nan_values() {
+        let prices = vec![
+            PriceResult {
+                value_inc_vat: f64::NAN,
+                valid_from: "2024-06-01T00:00:00Z".to_string(),
+                valid_to: Some("2024-06-01T00:30:00Z".to_string()),
+                payment_method: None,
+            },
+            PriceResult {
+                value_inc_vat: 0.15,
+                valid_from: "2024-06-01T00:30:00Z".to_string(),
+                valid_to: Some("2024-06-01T01:00:00Z".to_string()),
+                payment_method: None,
+            },
+        ];
+        let rows = select_tariff_rows(prices, &dummy_agreement(), &dummy_stream(), "standard").unwrap();
+        assert_eq!(rows.len(), 1, "NaN row should be skipped");
+        assert!((rows[0].value_inc_vat - 0.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_select_tariff_rows_allows_negative_agile_rates() {
+        let prices = vec![PriceResult {
+            value_inc_vat: -5.0,
+            valid_from: "2024-06-01T00:00:00Z".to_string(),
+            valid_to: Some("2024-06-01T00:30:00Z".to_string()),
+            payment_method: None,
+        }];
+        let rows = select_tariff_rows(prices, &dummy_agreement(), &dummy_stream(), "standard").unwrap();
+        assert_eq!(rows.len(), 1, "negative Agile rates are valid");
+        assert!((rows[0].value_inc_vat - (-5.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_select_tariff_rows_clamps_to_agreement_window() {
+        let agreement = Agreement {
+            tariff_code: "E-1R-VAR-22-11-25-A".to_string(),
+            valid_from: "2024-06-01T00:00:00Z".to_string(),
+            valid_to: Some("2024-06-01T01:00:00Z".to_string()),
+        };
+        let prices = vec![PriceResult {
+            value_inc_vat: 0.30,
+            valid_from: "2024-06-01T00:00:00Z".to_string(),
+            valid_to: Some("2024-06-01T03:00:00Z".to_string()),
+            payment_method: None,
+        }];
+        let rows = select_tariff_rows(prices, &agreement, &dummy_stream(), "standard").unwrap();
+        assert_eq!(rows.len(), 1);
+        // valid_to should be clamped to agreement_end
+        assert_eq!(rows[0].valid_to, Some(parse_timestamp("2024-06-01T01:00:00Z").unwrap()));
+    }
+
+    // ================================================================
+    // configured
+    // ================================================================
+
+    #[test]
+    fn test_configured_requires_all_fields() {
+        let mut s = Settings::default();
+        assert!(!configured(&s), "disabled by default");
+        s.octopus_enabled = true;
+        assert!(!configured(&s), "still missing key and account");
+        s.octopus_api_key = " sk_live ".to_string();
+        s.octopus_account_number = "A-12345".to_string();
+        assert!(configured(&s));
+        // Whitespace-only key is empty
+        s.octopus_api_key = "  ".to_string();
+        assert!(!configured(&s));
+    }
+
+    // ================================================================
+    // validated_next_url
+    // ================================================================
+
+    #[test]
+    fn test_validated_next_url_rejects_foreign_origin() {
+        // URL with a foreign origin → error, not Ok(None)
+        assert!(validated_next_url(
+            Some("https://evil.example/page".to_string()),
+            "https://api.octopus.energy"
+        ).is_err());
+        // Matching prefix → Ok(Some)
+        assert_eq!(
+            validated_next_url(
+                Some("https://api.octopus.energy/v1/page2".to_string()),
+                "https://api.octopus.energy"
+            ).unwrap(),
+            Some("https://api.octopus.energy/v1/page2".to_string())
+        );
+    }
 }

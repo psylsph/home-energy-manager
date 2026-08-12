@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.71.9] - 2026-08-12
+
+### Fixed
+
+- **The dashboard no longer shows frozen energy-flow animations as live data when the browser loses its connection to the app.** If a phone or remote browser drops off the network — for example when Tailscale disconnects — the dashboard now clears the last reading, shows the connection-lost state, and reconnects automatically once the route returns. (issue #262)
+
 ## [0.71.8] - 2026-08-07
 
 ### Fixed

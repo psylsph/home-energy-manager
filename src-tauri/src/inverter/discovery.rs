@@ -455,4 +455,79 @@ mod tests {
         let result = scan_multiple_subnets_on_port(&["127.0.0".to_string()], port).await;
         assert!(result.is_empty());
     }
+
+    #[test]
+    fn detect_lan_ip_returns_something_on_this_machine() {
+        // This test runs on a machine with at least one network interface.
+        // It should either return Some IP string or None (if only virtual
+        // interfaces exist, e.g. in CI). Either way, it must not panic.
+        let result = detect_lan_ip();
+        if let Some(ref ip) = result {
+            assert!(!ip.is_empty(), "IP string should not be empty");
+            // Should be a valid IPv4
+            assert!(ip.parse::<std::net::Ipv4Addr>().is_ok(), "should be valid IPv4: {ip}");
+        }
+    }
+
+    #[test]
+    fn collect_physical_subnets_accepts_multiple_real_interfaces() {
+        use std::str::FromStr;
+        let interfaces = vec![
+            ("eth0".to_string(), IpAddr::from_str("192.168.1.100").unwrap()),
+            ("wlan0".to_string(), IpAddr::from_str("10.0.0.50").unwrap()),
+            ("eth1".to_string(), IpAddr::from_str("192.168.2.1").unwrap()),
+        ];
+        let subnets = collect_physical_subnets(&interfaces);
+        assert_eq!(subnets.len(), 3);
+        assert!(subnets.contains(&"192.168.1".to_string()));
+        assert!(subnets.contains(&"10.0.0".to_string()));
+        assert!(subnets.contains(&"192.168.2".to_string()));
+    }
+
+    #[test]
+    fn collect_physical_subnets_skips_ipv6() {
+        use std::str::FromStr;
+        let interfaces = vec![
+            ("eth0".to_string(), IpAddr::from_str("fe80::1").unwrap()),
+            ("eth1".to_string(), IpAddr::from_str("192.168.1.1").unwrap()),
+        ];
+        let subnets = collect_physical_subnets(&interfaces);
+        assert_eq!(subnets, vec!["192.168.1"]);
+    }
+
+    #[test]
+    fn collect_physical_subnets_skips_vmnet_interface() {
+        use std::str::FromStr;
+        let interfaces = vec![
+            ("vmnet8".to_string(), IpAddr::from_str("192.168.100.1").unwrap()),
+            ("eth0".to_string(), IpAddr::from_str("192.168.1.1").unwrap()),
+        ];
+        let subnets = collect_physical_subnets(&interfaces);
+        // vmnet8 should be skipped, only eth0's subnet should remain.
+        assert_eq!(subnets, vec!["192.168.1"]);
+    }
+
+    #[test]
+    fn collect_physical_subnets_skips_virbr0() {
+        use std::str::FromStr;
+        let interfaces = vec![
+            ("virbr0".to_string(), IpAddr::from_str("192.168.122.1").unwrap()),
+            ("ens3".to_string(), IpAddr::from_str("10.1.2.3").unwrap()),
+        ];
+        let subnets = collect_physical_subnets(&interfaces);
+        assert_eq!(subnets, vec!["10.1.2"]);
+    }
+
+    #[tokio::test]
+    async fn scan_multiple_subnets_aggregates_results_from_all_subnets() {
+        let port = free_ephemeral_port();
+        // Scan two loopback subnets — both empty, but the function should
+        // iterate over both (not just the first).
+        let result = scan_multiple_subnets_on_port(
+            &["127.0.0".to_string(), "127.0.1".to_string()],
+            port,
+        )
+        .await;
+        assert!(result.is_empty());
+    }
 }

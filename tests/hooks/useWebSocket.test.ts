@@ -52,7 +52,7 @@ vi.stubGlobal('WebSocket', MockWebSocket);
 // Mock setTimeout/clearTimeout for controlled timing
 vi.useFakeTimers();
 
-const { useWebSocket } = await import('../../src/hooks/useWebSocket');
+const { SNAPSHOT_STALE_AFTER_MS, useWebSocket } = await import('../../src/hooks/useWebSocket');
 
 function resetStore() {
   useInverterStore.setState({
@@ -142,6 +142,51 @@ describe('useWebSocket', () => {
     });
 
     expect(useInverterStore.getState().snapshot).toBeNull();
+  });
+
+  it('clears the snapshot when the browser WebSocket closes unexpectedly', () => {
+    useInverterStore.setState({
+      snapshot: { soc: 50 } as unknown as InverterSnapshot,
+      connectionState: 'connected',
+    });
+    renderHook(() => useWebSocket());
+
+    mockWsInstances[0].onclose?.({ code: 1001, reason: 'network lost' });
+
+    expect(useInverterStore.getState().snapshot).toBeNull();
+    expect(useInverterStore.getState().connectionState).toBe('disconnected');
+  });
+
+  it('clears a frozen snapshot after the browser stops receiving frames', () => {
+    renderHook(() => useWebSocket());
+    const ws = mockWsInstances[0];
+
+    ws.onmessage?.({
+      data: JSON.stringify({
+        type: 'snapshot',
+        soc: 75,
+      }),
+    });
+    expect(useInverterStore.getState().snapshot).not.toBeNull();
+
+    vi.advanceTimersByTime(SNAPSHOT_STALE_AFTER_MS + 15_000);
+
+    expect(useInverterStore.getState().snapshot).toBeNull();
+    expect(useInverterStore.getState().connectionState).toBe('disconnected');
+  });
+
+  it('keeps a snapshot while frames continue arriving', () => {
+    renderHook(() => useWebSocket());
+    const ws = mockWsInstances[0];
+
+    for (let i = 0; i < 3; i += 1) {
+      ws.onmessage?.({
+        data: JSON.stringify({ type: 'snapshot', soc: 75 + i }),
+      });
+      vi.advanceTimersByTime(SNAPSHOT_STALE_AFTER_MS - 15_000);
+    }
+
+    expect(useInverterStore.getState().snapshot?.soc).toBe(77);
   });
 
   it('updates EVC data on evc message', () => {

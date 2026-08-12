@@ -1,5 +1,9 @@
 import { defineConfig } from '@playwright/test';
 
+const envExecutablePath = (globalThis as typeof globalThis & {
+  process?: { env?: Record<string, string | undefined> };
+}).process?.env?.PLAYWRIGHT_EXECUTABLE_PATH;
+
 export default defineConfig({
   testDir: './e2e',
   testMatch: [
@@ -12,6 +16,7 @@ export default defineConfig({
     '**/agile-slot.spec.ts',
     '**/pv2-after-sunset.spec.ts',
     '**/timed-export-slot-guard.spec.ts',
+    '**/websocket-stale-timeout.spec.ts',
   ],
   fullyParallel: false,
   workers: 1,
@@ -28,7 +33,11 @@ export default defineConfig({
   use: {
     headless: true,
     browserName: 'chromium',
-    channel: 'chrome',
+    // CI uses Playwright's managed Chromium; local Debian installs can opt
+    // into the system browser with PLAYWRIGHT_EXECUTABLE_PATH.
+    launchOptions: {
+      executablePath: envExecutablePath,
+    },
     viewport: { width: 1280, height: 900 },
     actionTimeout: 10_000,
     navigationTimeout: 10_000,

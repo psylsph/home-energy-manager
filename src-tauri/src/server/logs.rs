@@ -539,4 +539,75 @@ mod tests {
             .store(4, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(ring.min_level.load(std::sync::atomic::Ordering::Relaxed), 4);
     }
+
+    // --- LogCaptureLayer / FieldVisitor coverage -------------------------
+
+    use std::sync::Arc;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::Registry;
+
+    #[test]
+    fn log_capture_layer_captures_info_message() {
+        let ring = Arc::new(LogRing::new(20));
+        let capture = LogCaptureLayer::new(ring.clone());
+
+        let subscriber = Registry::default().with(capture);
+        let _guard = tracing::dispatcher::set_default(&tracing::dispatcher::Dispatch::new(
+            subscriber,
+        ));
+
+        tracing::info!("test message from log_capture test");
+
+        let lines = ring.read_all();
+        assert!(
+            lines.iter().any(|l| l.contains("test message")),
+            "expected captured log to contain 'test message', got: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn log_capture_layer_respects_min_level() {
+        let ring = Arc::new(LogRing::new(20));
+        ring.min_level
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+
+        let capture = LogCaptureLayer::new(ring.clone());
+        let subscriber = Registry::default().with(capture);
+        let _guard = tracing::dispatcher::set_default(&tracing::dispatcher::Dispatch::new(
+            subscriber,
+        ));
+
+        tracing::info!("this should be filtered out");
+        tracing::error!("this should pass");
+
+        let lines = ring.read_all();
+        assert!(
+            lines.iter().any(|l| l.contains("this should pass")),
+            "ERROR message should be captured"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("filtered out")),
+            "INFO message should be filtered out when min_level=ERROR"
+        );
+    }
+
+    #[test]
+    fn log_capture_layer_formats_level_and_target() {
+        let ring = Arc::new(LogRing::new(20));
+        let capture = LogCaptureLayer::new(ring.clone());
+        let subscriber = Registry::default().with(capture);
+        let _guard = tracing::dispatcher::set_default(&tracing::dispatcher::Dispatch::new(
+            subscriber,
+        ));
+
+        tracing::warn!(target: "my_module::sub", "danger ahead");
+
+        let lines = ring.read_all();
+        let entry = lines
+            .iter()
+            .find(|l| l.contains("danger ahead"))
+            .expect("expected to find the warning message");
+        assert!(entry.contains("WARN"), "should contain level WARN");
+        assert!(entry.contains("[my_module]"), "should contain short target");
+    }
 }

@@ -3,6 +3,13 @@ import { getWsUrl, apiGet } from '../lib/api';
 import { useInverterStore } from '../store/useInverterStore';
 import type { InverterSnapshot, ConnectionState } from '../lib/types';
 
+/**
+ * The inverter normally sends one snapshot per configured poll interval. Keep
+ * the last rendered data for at most two minutes so a half-open browser
+ * connection cannot present frozen values as live data indefinitely.
+ */
+export const SNAPSHOT_STALE_AFTER_MS = 2 * 60 * 1000;
+
 export interface EvcSnapshot {
   charging_state: string;
   connection_status: string;
@@ -23,8 +30,15 @@ export interface EvcSnapshot {
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeout = useRef<number>(0);
+  const lastSnapshotReceivedAt = useRef<number | null>(null);
   const connectRef = useRef<() => void>(() => {});
   const { setSnapshot, clearSnapshot, setConnection, setEvcData } = useInverterStore();
+
+  const markBrowserDisconnected = useCallback(() => {
+    lastSnapshotReceivedAt.current = null;
+    clearSnapshot();
+    setConnection('disconnected');
+  }, [clearSnapshot, setConnection]);
 
   // Fetch initial connection state from REST API (in case WS messages
   // were missed before the page loaded).
@@ -126,6 +140,7 @@ export function useWebSocket() {
             return rest as InverterSnapshot;
           })();
           setSnapshot(snapshot);
+          lastSnapshotReceivedAt.current = Date.now();
         } else if (data.type === 'connection') {
           setConnection(
             data.state as ConnectionState,
@@ -139,6 +154,7 @@ export function useWebSocket() {
           // Clear stale snapshot when connection drops so the UI shows
           // "waiting for data" instead of frozen old values.
           if (data.state !== 'connected') {
+            lastSnapshotReceivedAt.current = null;
             clearSnapshot();
           }
         } else if (data.type === 'evc') {
@@ -179,15 +195,21 @@ export function useWebSocket() {
         // The component intentionally closed this connection — don't reconnect.
         return;
       }
+      // The browser may lose its route to the laptop (for example when
+      // Tailscale drops) without receiving the backend's connection message.
+      // Clear the last inverter snapshot immediately instead of leaving the
+      // animated diagram presenting frozen values as live data.
+      markBrowserDisconnected();
       console.log('WebSocket closed, reconnecting in 3s...');
       reconnectTimeout.current = window.setTimeout(() => connectRef.current(), 3000);
     };
 
     ws.onerror = (err) => {
       console.error('WebSocket error:', err);
+      markBrowserDisconnected();
       ws.close();
     };
-  }, [setSnapshot, clearSnapshot, setConnection, setEvcData]);
+  }, [setSnapshot, clearSnapshot, setConnection, setEvcData, markBrowserDisconnected]);
 
   // Keep ref in sync so the reconnect closure always calls the latest connect
   useEffect(() => {
@@ -203,4 +225,22 @@ export function useWebSocket() {
       wsRef.current?.close(1000, 'Unmount');
     };
   }, [connect, fetchInitialStatus, fetchInitialEvcStatus]);
+
+  // A half-open WebSocket can remain apparently connected in the browser even
+  // after the network route disappears. The backend timestamp is not enough
+  // here: only receipt of a new frame proves that this browser is seeing live
+  // data. Stop rendering the cached snapshot after a bounded grace period.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const receivedAt = lastSnapshotReceivedAt.current;
+      if (receivedAt != null && Date.now() - receivedAt >= SNAPSHOT_STALE_AFTER_MS) {
+        markBrowserDisconnected();
+        // Force the half-open socket through its normal reconnect path. This
+        // also ensures a resumed network gets a fresh backend connection
+        // message, rather than leaving the UI disconnected after recovery.
+        wsRef.current?.close(3000, 'Snapshot stale');
+      }
+    }, 15_000);
+    return () => window.clearInterval(id);
+  }, [markBrowserDisconnected]);
 }

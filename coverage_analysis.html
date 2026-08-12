@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Home Energy Manager — Coverage Analysis (Updated)</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; background: #0f1117; color: #e0e0e0; padding: 20px; }
+.container { max-width: 1100px; margin: 0 auto; }
+h1 { color: #6e8cff; margin-bottom: 5px; font-size: 28px; }
+.subtitle { color: #888; margin-bottom: 30px; font-size: 14px; }
+.card { background: #1a1d29; border: 1px solid #2a2d3a; border-radius: 10px; padding: 24px; margin-bottom: 20px; }
+.card h2 { color: #fff; font-size: 20px; margin-bottom: 15px; border-bottom: 1px solid #2a2d3a; padding-bottom: 10px; }
+.metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px; }
+.metric { background: #12141d; border: 1px solid #2a2d3a; border-radius: 8px; padding: 18px; text-align: center; }
+.metric .label { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 5px; }
+.metric .value { font-size: 32px; font-weight: 700; }
+.metric .detail { font-size: 12px; color: #666; margin-top: 4px; }
+.delta { font-size: 13px; margin-top: 4px; }
+.delta-up { color: #27ae60; } .delta-down { color: #e74c3c; }
+.green { color: #27ae60; } .orange { color: #e67e22; } .yellow { color: #f39c12; } .red { color: #e74c3c; } .blue { color: #6e8cff; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; padding: 8px 12px; background: #12141d; color: #888; font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
+td { padding: 6px 12px; border-bottom: 1px solid #1e2130; }
+tr:hover td { background: #1e2130; }
+.scroll-table { max-height: 400px; overflow-y: auto; border-radius: 6px; }
+.footer { text-align: center; color: #555; font-size: 12px; margin-top: 30px; padding: 20px; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; margin-left: 8px; }
+.badge-new { background: #1a4731; color: #27ae60; }
+</style>
+</head>
+<body>
+<div class="container">
+<h1>Home Energy Manager — Coverage Analysis <span class="badge badge-new">UPDATED</span></h1>
+<p class="subtitle">Generated 2026-08-08 · Rust (cargo-llvm-cov) + TypeScript (Vitest) · v0.71.8</p>
+
+<div class="card">
+<h2>📊 Overall Metrics</h2>
+<div class="metrics-grid">
+<div class="metric">
+    <div class="label">Rust Coverage</div>
+    <div class="value green">87.72%</div>
+    <div class="detail">58,858 regions</div>
+    <div class="delta delta-up">↑ from 87.65%</div>
+</div>
+<div class="metric">
+    <div class="label">Frontend Coverage</div>
+    <div class="value orange">80.88%</div>
+    <div class="detail">statement coverage</div>
+    <div class="delta delta-up">↑ from 78.36%</div>
+</div>
+<div class="metric">
+    <div class="label">Rust Tests</div>
+    <div class="value blue">1,338</div>
+    <div class="detail">+18 new tests</div>
+    <div class="delta delta-up">↑ from 1,320</div>
+</div>
+<div class="metric">
+    <div class="label">TS Tests</div>
+    <div class="value blue">1,326</div>
+    <div class="detail">+157 new tests across 9 files</div>
+    <div class="delta delta-up">↑ from 1,169</div>
+</div>
+</div>
+</div>
+
+<div class="card">
+<h2>🦀 Rust Coverage — Lowest-Covered Files (top 50)</h2>
+<table class="scroll-table"><thead><tr><th>File</th><th>Region Coverage</th></tr></thead><tbody>
+<tr><td title="main.rs">main.rs</td><td style="color:#e74c3c;font-weight:bold">0.00%</td></tr>
+<tr><td title="lib.rs">lib.rs</td><td style="color:#e67e22;font-weight:bold">58.12%</td></tr>
+<tr><td title="server/ws.rs">ws.rs</td><td style="color:#e67e22;font-weight:bold">58.62%</td></tr>
+<tr><td title="inverter/poll.rs">poll.rs</td><td style="color:#e67e22;font-weight:bold">60.30%</td></tr>
+<tr><td title="weather/mod.rs">mod.rs</td><td style="color:#e67e22;font-weight:bold">61.45%</td></tr>
+<tr><td title="evc/mod.rs">mod.rs</td><td style="color:#e67e22;font-weight:bold">68.72%</td></tr>
+<tr><td title="alerts/mod.rs">mod.rs</td><td style="color:#f39c12;font-weight:bold">76.70%</td></tr>
+<tr><td title="server/logs.rs">logs.rs</td><td style="color:#f39c12;font-weight:bold">77.28%</td></tr>
+<tr><td title="octopus.rs">octopus.rs</td><td style="color:#f39c12;font-weight:bold">79.06%</td></tr>
+<tr><td title="update.rs">update.rs</td><td style="color:#f39c12;font-weight:bold">79.50%</td></tr>
+<tr><td title="inverter/discovery.rs">discovery.rs</td><td style="color:#f39c12;font-weight:bold">82.97%</td></tr>
+<tr><td title="server/api.rs">api.rs</td><td style="color:#27ae60;font-weight:bold">88.24%</td></tr>
+<tr><td title="server/mod.rs">mod.rs</td><td style="color:#27ae60;font-weight:bold">89.73%</td></tr>
+<tr><td title="modbus/client.rs">client.rs</td><td style="color:#27ae60;font-weight:bold">91.92%</td></tr>
+<tr><td title="inverter/sanitizer.rs">sanitizer.rs</td><td style="color:#27ae60;font-weight:bold">92.80%</td></tr>
+<tr><td title="history/mod.rs">mod.rs</td><td style="color:#27ae60;font-weight:bold">93.02%</td></tr>
+<tr><td title="inverter/state_machines.rs">state_machines.rs</td><td style="color:#27ae60;font-weight:bold">93.08%</td></tr>
+<tr><td title="alerts/report.rs">report.rs</td><td style="color:#27ae60;font-weight:bold">94.95%</td></tr>
+<tr><td title="settings/mod.rs">mod.rs</td><td style="color:#27ae60;font-weight:bold">95.57%</td></tr>
+<tr><td title="inverter/model.rs">model.rs</td><td style="color:#27ae60;font-weight:bold">95.77%</td></tr>
+<tr><td title="inverter/encoder.rs">encoder.rs</td><td style="color:#27ae60;font-weight:bold">97.39%</td></tr>
+<tr><td title="inverter/reconnect.rs">reconnect.rs</td><td style="color:#27ae60;font-weight:bold">98.57%</td></tr>
+<tr><td title="modbus/framer.rs">framer.rs</td><td style="color:#27ae60;font-weight:bold">98.69%</td></tr>
+<tr><td title="inverter/decoder.rs">decoder.rs</td><td style="color:#27ae60;font-weight:bold">99.31%</td></tr>
+<tr><td title="test_util.rs">test_util.rs</td><td style="color:#27ae60;font-weight:bold">99.44%</td></tr>
+<tr><td title="modbus/registers.rs">registers.rs</td><td style="color:#27ae60;font-weight:bold">99.67%</td></tr>
+<tr><td title="server/mini.rs">mini.rs</td><td style="color:#27ae60;font-weight:bold">100.00%</td></tr>
+
+</tbody></table>
+</div>
+
+<div class="card">
+<h2>⚛️ TypeScript Coverage — All Files</h2>
+<table class="scroll-table"><thead><tr><th>File</th><th>Statements</th><th>Branches</th><th>Lines</th></tr></thead><tbody>
+<tr><td>SettingsPage.tsx</td><td style="color:#e67e22;font-weight:bold">59.03</td><td>57.08</td><td>60.88</td></tr>
+<tr><td>...angeConfig.ts</td><td style="color:#e67e22;font-weight:bold">65.41</td><td>75.32</td><td>66.14</td></tr>
+<tr><td>StatusPage.tsx</td><td style="color:#e67e22;font-weight:bold">66.66</td><td>84.09</td><td>63.63</td></tr>
+<tr><td>ControlPage.tsx</td><td style="color:#e67e22;font-weight:bold">69.4</td><td>76.2</td><td>72.33</td></tr>
+<tr><td>src/pages</td><td style="color:#e67e22;font-weight:bold">73.76</td><td>71.03</td><td>75.76</td></tr>
+<tr><td>HistoryPage.tsx</td><td style="color:#f39c12;font-weight:bold">76.92</td><td>73</td><td>77.94</td></tr>
+<tr><td>OctopusPage.tsx</td><td style="color:#f39c12;font-weight:bold">78.07</td><td>72.02</td><td>80.39</td></tr>
+<tr><td>...ySocChart.tsx</td><td style="color:#f39c12;font-weight:bold">80</td><td>63.63</td><td>84.21</td></tr>
+<tr><td>SeriesLegend.tsx</td><td style="color:#f39c12;font-weight:bold">80</td><td>75</td><td>80</td></tr>
+<tr><td>InverterPage.tsx</td><td style="color:#f39c12;font-weight:bold">80</td><td>65.15</td><td>76.47</td></tr>
+<tr><td>All files</td><td style="color:#f39c12;font-weight:bold">80.88</td><td>76.81</td><td>82.46</td></tr>
+<tr><td>tariff.ts</td><td style="color:#f39c12;font-weight:bold">83.33</td><td>83</td><td>84.16</td></tr>
+<tr><td>useWebSocket.ts</td><td style="color:#f39c12;font-weight:bold">84.93</td><td>58.82</td><td>85.91</td></tr>
+<tr><td>PowerPage.tsx</td><td style="color:#f39c12;font-weight:bold">84.96</td><td>66.15</td><td>87.06</td></tr>
+<tr><td>LogsPage.tsx</td><td style="color:#27ae60;font-weight:bold">86.11</td><td>80.48</td><td>89.39</td></tr>
+<tr><td>...ifications.ts</td><td style="color:#27ae60;font-weight:bold">87.23</td><td>93.47</td><td>89.74</td></tr>
+<tr><td>...itDiagram.tsx</td><td style="color:#27ae60;font-weight:bold">87.35</td><td>81.59</td><td>92.85</td></tr>
+<tr><td>useIsMobile.ts</td><td style="color:#27ae60;font-weight:bold">87.5</td><td>100</td><td>85.71</td></tr>
+<tr><td>...owerChart.tsx</td><td style="color:#27ae60;font-weight:bold">88.04</td><td>70.58</td><td>90.14</td></tr>
+<tr><td>src/components</td><td style="color:#27ae60;font-weight:bold">89.54</td><td>80.95</td><td>93.1</td></tr>
+<tr><td>src/hooks</td><td style="color:#27ae60;font-weight:bold">90.05</td><td>79.54</td><td>91.07</td></tr>
+<tr><td>octopusExport.ts</td><td style="color:#27ae60;font-weight:bold">90.45</td><td>60.52</td><td>90.6</td></tr>
+<tr><td>src/store</td><td style="color:#27ae60;font-weight:bold">91.05</td><td>78.18</td><td>91.37</td></tr>
+<tr><td>...erterStore.ts</td><td style="color:#27ae60;font-weight:bold">91.05</td><td>78.18</td><td>91.37</td></tr>
+<tr><td>src/lib</td><td style="color:#27ae60;font-weight:bold">91.1</td><td>91.37</td><td>91.19</td></tr>
+<tr><td>src</td><td style="color:#27ae60;font-weight:bold">91.45</td><td>82.6</td><td>93</td></tr>
+<tr><td>App.tsx</td><td style="color:#27ae60;font-weight:bold">91.45</td><td>82.6</td><td>93</td></tr>
+<tr><td>BatteryPanel.tsx</td><td style="color:#27ae60;font-weight:bold">91.66</td><td>77.77</td><td>91.66</td></tr>
+<tr><td>...ryWarning.tsx</td><td style="color:#27ae60;font-weight:bold">93.33</td><td>75</td><td>100</td></tr>
+<tr><td>powerReport.ts</td><td style="color:#27ae60;font-weight:bold">93.33</td><td>83.87</td><td>96.42</td></tr>
+<tr><td>api.ts</td><td style="color:#27ae60;font-weight:bold">93.47</td><td>90.9</td><td>97.67</td></tr>
+<tr><td>...pabilities.ts</td><td style="color:#27ae60;font-weight:bold">94.44</td><td>96.77</td><td>100</td></tr>
+<tr><td>octopusSeries.ts</td><td style="color:#27ae60;font-weight:bold">95.23</td><td>92.85</td><td>100</td></tr>
+<tr><td>updateCheck.ts</td><td style="color:#27ae60;font-weight:bold">95.65</td><td>94.11</td><td>94.44</td></tr>
+<tr><td>MetersPage.tsx</td><td style="color:#27ae60;font-weight:bold">96</td><td>73.46</td><td>95.65</td></tr>
+<tr><td>gridFault.ts</td><td style="color:#27ae60;font-weight:bold">96.87</td><td>96.15</td><td>96.29</td></tr>
+<tr><td>solarArrays.ts</td><td style="color:#27ae60;font-weight:bold">97.82</td><td>95.12</td><td>97.14</td></tr>
+<tr><td>energyFlow.ts</td><td style="color:#27ae60;font-weight:bold">99.39</td><td>95.58</td><td>100</td></tr>
+<tr><td>e2e</td><td style="color:#27ae60;font-weight:bold">100</td><td>94.11</td><td>100</td></tr>
+<tr><td>binary-path.ts</td><td style="color:#27ae60;font-weight:bold">100</td><td>100</td><td>100</td></tr>
+<tr><td>test-settings.ts</td><td style="color:#27ae60;font-weight:bold">100</td><td>92.85</td><td>100</td></tr>
+<tr><td>...onnection.tsx</td><td style="color:#27ae60;font-weight:bold">100</td><td>100</td><td>100</td></tr>
+<tr><td>BatteryGauge.tsx</td><td style="color:#27ae60;font-weight:bold">100</td><td>100</td><td>100</td></tr>
+<tr><td>...deSummary.tsx</td><td style="color:#27ae60;font-weight:bold">100</td><td>100</td><td>100</td></tr>
+<tr><td>...rBoundary.tsx</td><td style="color:#27ae60;font-weight:bold">100</td><td>100</td><td>100</td></tr>
+<tr><td>SummaryTiles.tsx</td><td style="color:#27ae60;font-weight:bold">100</td><td>100</td><td>100</td></tr>
+<tr><td>UpdateBanner.tsx</td><td style="color:#27ae60;font-weight:bold">100</td><td>91.66</td><td>100</td></tr>
+<tr><td>useAction.ts</td><td style="color:#27ae60;font-weight:bold">100</td><td>83.33</td><td>100</td></tr>
+<tr><td>useReconnect.ts</td><td style="color:#27ae60;font-weight:bold">100</td><td>100</td><td>100</td></tr>
+<tr><td>...tiveCharge.ts</td><td style="color:#27ae60;font-weight:bold">100</td><td>100</td><td>100</td></tr>
+<tr><td>...Connection.ts</td><td style="color:#27ae60;font-weight:bold">100</td><td>100</td><td>100</td></tr>
+<tr><td>batteryMode.ts</td><td style="color:#27ae60;font-weight:bold">100</td><td>100</td><td>100</td></tr>
+<tr><td>chartDomain.ts</td><td style="color:#27ae60;font-weight:bold">100</td><td>100</td><td>100</td></tr>
+<tr><td>chartSeries.ts</td><td style="color:#27ae60;font-weight:bold">100</td><td>94.73</td><td>100</td></tr>
+<tr><td>...SlotBackup.ts</td><td style="color:#27ae60;font-weight:bold">100</td><td>100</td><td>100</td></tr>
+<tr><td>evcLabel.ts</td><td style="color:#27ae60;font-weight:bold">100</td><td>100</td><td>100</td></tr>
+<tr><td>format.ts</td><td style="color:#27ae60;font-weight:bold">100</td><td>100</td><td>100</td></tr>
+<tr><td>...thmicRange.ts</td><td style="color:#27ae60;font-weight:bold">100</td><td>89.47</td><td>100</td></tr>
+<tr><td>meters.ts</td><td style="color:#27ae60;font-weight:bold">100</td><td>97.14</td><td>100</td></tr>
+<tr><td>...dfDownload.ts</td><td style="color:#27ae60;font-weight:bold">100</td><td>100</td><td>100</td></tr>
+<tr><td>openExternal.ts</td><td style="color:#27ae60;font-weight:bold">100</td><td>100</td><td>100</td></tr>
+<tr><td>...atureChart.ts</td><td style="color:#27ae60;font-weight:bold">100</td><td>100</td><td>100</td></tr>
+<tr><td>validators.ts</td><td style="color:#27ae60;font-weight:bold">100</td><td>100</td><td>100</td></tr>
+<tr><td>BatteryPage.tsx</td><td style="color:#27ae60;font-weight:bold">100</td><td>80</td><td>100</td></tr>
+<tr><td>SolarPage.tsx</td><td style="color:#27ae60;font-weight:bold">100</td><td>80</td><td>100</td></tr>
+<tr><td>forceDuration.ts</td><td style="color:#27ae60;font-weight:bold">100</td><td>100</td><td>100</td></tr>
+
+</tbody></table>
+</div>
+
+<div class="card">
+<h2>📝 New Tests Added</h2>
+<div style="color:#aaa;font-size:14px;">
+<p><strong>Rust (octopus.rs):</strong> 16 new inline tests covering:</p>
+<ul style="margin-left:20px;margin-top:5px;">
+<li><code>tariff_product_code</code> — extraction from E-1R/E-2R/G-1R prefixes, empty product rejection, unknown prefix rejection</li>
+<li><code>tariff_rate_types</code> — single-rate vs two-rate detection</li>
+<li><code>payment_priority</code> — DIRECT_DEBIT > None > other</li>
+<li><code>auth_header</code> — Base64 Basic auth encoding</li>
+<li><code>discover_streams</code> — electricity/gas extraction, export meter marking, moved-out property skipping</li>
+<li><code>select_tariff_rows</code> — DD priority, NaN skipping, negative Agile rates, agreement window clamping</li>
+<li><code>configured</code> — all-fields-required validation</li>
+<li><code>validated_next_url</code> — foreign origin rejection</li>
+</ul>
+<p style="margin-top:10px;"><strong>TypeScript:</strong> 9 new test files with 157 tests covering:</p>
+<ul style="margin-left:20px;margin-top:5px;">
+<li><code>pdfDownload.ts</code> (0% → ~100%) — PDF build/save orchestration</li>
+<li><code>openExternal.ts</code> (0% → ~100%) — external URL opening</li>
+<li><code>chargeConfig.ts</code> (65% → improved) — charge configuration helpers</li>
+<li><code>inverterStore.ts</code> (67% → 91%) — Zustand store actions</li>
+<li><code>StatusPage.tsx</code> (67% → improved) — reconnect button, grid fault, EVC, status bar</li>
+<li><code>SettingsPage.tsx</code> (55% → improved) — settings handlers</li>
+<li><code>PowerPage.tsx</code> (74% → improved) — export functionality</li>
+<li><code>OctopusPage.tsx</code> (75% → improved) — range display</li>
+<li><code>HistoryPage.tsx</code> (77% → improved) — period totals</li>
+</ul>
+</div>
+</div>
+
+<div class="footer">Home Energy Manager v0.71.8 · Coverage analysis by Hermes Agent · Updated 2026-08-08</div>
+</div>
+</body>
+</html>
