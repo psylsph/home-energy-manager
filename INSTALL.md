@@ -507,6 +507,53 @@ Check it's running:
 sudo journalctl -u givenergy-local -f
 ```
 
+**4. Access the Pi securely from your phone with Tailscale (optional)**
+
+Tailscale lets you reach the HEM web interface when your phone is away from
+home without opening port 7337 to the public internet. The Pi remains the one
+always-on HEM instance; the Android or iPhone only runs the Tailscale app and a
+web browser. Do **not** install or run a second headless HEM instance on the
+phone.
+
+```text
+                         Tailscale tailnet
+              encrypted private connection over the internet
+
+  Android phone                                     Raspberry Pi
+  Tailscale app + Chrome                            Tailscale + HEM
+  http://100.x.y.z:7337  ----------------------->  :7337
+                                                     |
+                                                     | LAN / TCP 8899
+                                                     v
+                                                GivEnergy inverter
+```
+
+On the Pi, install Tailscale and join the same tailnet as your phone:
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+# Note the address printed, or display it later with:
+tailscale ip -4
+```
+
+On Android:
+
+1. Install **Tailscale** from the [Google Play Store](https://play.google.com/store/apps/details?id=com.tailscale.ipn).
+2. Sign in using the same Tailscale account as the Pi and switch Tailscale on.
+3. Open Chrome and visit `http://<pi-tailscale-ip>:7337`, replacing the placeholder with the Pi address (usually in the `100.x.y.z` range).
+4. Optionally choose **⋮ → Add to Home screen** or **Install app**.
+
+On iPhone, install Tailscale from the [App Store](https://apps.apple.com/app/tailscale/id1470499037), sign in to the same account, switch it on, and open the same URL in Safari.
+
+A few important points:
+
+- Use the **Pi's Tailscale IP**, not the inverter's LAN address. The phone does not need direct access to the inverter.
+- The Pi must stay powered on and HEM must be running. Tailscale only provides the network path; it does not replace HEM.
+- Tailscale uses Android/iOS's VPN slot. If another VPN is active, disable it or check its routing if the connection does not work.
+- You do not need port forwarding, Tailscale Funnel, or a subnet router for this setup.
+- If the URL does not open, first confirm that Tailscale shows both devices as connected, then try the Pi's Tailscale IP from the Pi itself with `curl http://127.0.0.1:7337/api/status`.
+
 #### Blank window, flicker, or the app fails to open on Raspberry Pi
 
 On Raspberry Pi GPU stacks (notably the Pi 5's VideoCore VII, and Pi 4 with the default Raspberry Pi OS desktop) WebKitGTK's DMA-BUF GPU renderer can fail to produce a first paint, show banded / torn output, or stop the window from opening at all. This is the same family of bugs tracked upstream at [tauri-apps/tauri#13885](https://github.com/tauri-apps/tauri/issues/13885) and [launchpad.net/bugs/2037015](https://bugs.launchpad.net/bugs/2037015).
