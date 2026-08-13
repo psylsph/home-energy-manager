@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.71.10] - 2026-08-13
+
+### Fixed
+
+- **Daily import cost on the History page is now accurate for past days, not just today.** The cost series is built by walking the `today_import_kwh` counter at native reading resolution. When it crossed a local-midnight boundary with a short gap (the normal case — last reading before midnight, first after), the energy accumulated during that gap was silently dropped. Today's figure was unaffected because no midnight had been crossed yet, but every previous day lost a small amount, compounding into a noticeable undercount over multi-day and week-long ranges. The walk now credits energy accumulated during short overnight gaps (up to 4 hours), priced at the reading's tariff slot. Longer gaps still get zero credit to avoid mispricing a large unknown chunk at a single rate. (issue #269)
+
 ## [0.71.9] - 2026-08-12
 
 ### Fixed

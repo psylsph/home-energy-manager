@@ -390,6 +390,16 @@ pub fn is_directional_field(field: &str) -> bool {
 /// of magnitude), not to bound real power precisely.
 const MAX_PLAUSIBLE_POWER_KW: f64 = 30.0;
 
+/// Maximum gap (in seconds) between the last reading before midnight and the
+/// first reading after midnight for the post-midnight counter value to be
+/// credited as real energy. Within this threshold the energy accumulated since
+/// midnight is small enough that pricing it at the reading's tariff slot is a
+/// reasonable approximation (for a near-midnight reading that's the correct
+/// off-peak rate). Beyond it the energy was accumulated at unknown tariff slots
+/// across a substantial portion of the day, so crediting it at one rate would
+/// be more wrong than dropping it. Issue #269.
+const MIDNIGHT_GAP_CREDIT_THRESHOLD_SECS: i64 = 4 * 3600;
+
 /// Whether two Unix-second timestamps fall on the same LOCAL calendar day.
 ///
 /// The inverter's `today_*_kwh` counters reset at local midnight, so the
@@ -572,11 +582,7 @@ fn is_genuine_reset(peak: f64, value: f64, next: Option<f64>) -> bool {
 /// before its start and prorate the two poll intervals cut by the boundaries.
 /// A genuine midnight reset contributes the new counter value; a downward
 /// glitch holds the previous baseline so its recovery is not counted twice.
-fn counter_total_in_window(
-    samples: &[(i64, f64)],
-    start_ts: i64,
-    end_ts: i64,
-) -> f64 {
+fn counter_total_in_window(samples: &[(i64, f64)], start_ts: i64, end_ts: i64) -> f64 {
     if samples.len() < 2 || start_ts >= end_ts {
         return 0.0;
     }
@@ -610,8 +616,8 @@ fn counter_total_in_window(
             let overlap_start = previous_ts.max(start_ts);
             let overlap_end = timestamp.min(end_ts);
             if overlap_end > overlap_start {
-                let overlap_fraction = (overlap_end - overlap_start) as f64
-                    / (timestamp - previous_ts) as f64;
+                let overlap_fraction =
+                    (overlap_end - overlap_start) as f64 / (timestamp - previous_ts) as f64;
                 total += delta * overlap_fraction;
             }
             baseline = next_baseline;
@@ -638,11 +644,7 @@ fn integrate_power_pair(
 
 /// Integrate raw power over the selected window for counter-less firmware.
 /// Poll gaps over five minutes are deliberately not bridged.
-fn power_totals_in_window(
-    rows: &[EnergySummaryRow],
-    start_ts: i64,
-    end_ts: i64,
-) -> EnergySummary {
+fn power_totals_in_window(rows: &[EnergySummaryRow], start_ts: i64, end_ts: i64) -> EnergySummary {
     let mut totals = EnergySummary::default();
     for pair in rows.windows(2) {
         let a = pair[0];
@@ -664,12 +666,8 @@ fn power_totals_in_window(
             integrate_power_pair(a.solar_power, b.solar_power, hours, positive);
         totals.home_consumed_kwh +=
             integrate_power_pair(a.home_power, b.home_power, hours, positive);
-        totals.battery_charged_kwh += integrate_power_pair(
-            a.battery_power,
-            b.battery_power,
-            hours,
-            negative_magnitude,
-        );
+        totals.battery_charged_kwh +=
+            integrate_power_pair(a.battery_power, b.battery_power, hours, negative_magnitude);
         totals.battery_discharged_kwh +=
             integrate_power_pair(a.battery_power, b.battery_power, hours, positive);
         // App-wide convention: negative grid power = import, positive = export.
@@ -1553,14 +1551,8 @@ impl HistoryDb {
             &mut summary.battery_discharged_kwh,
             power.battery_discharged_kwh,
         );
-        prefer_power_when_counter_empty(
-            &mut summary.grid_imported_kwh,
-            power.grid_imported_kwh,
-        );
-        prefer_power_when_counter_empty(
-            &mut summary.grid_exported_kwh,
-            power.grid_exported_kwh,
-        );
+        prefer_power_when_counter_empty(&mut summary.grid_imported_kwh, power.grid_imported_kwh);
+        prefer_power_when_counter_empty(&mut summary.grid_exported_kwh, power.grid_exported_kwh);
         prefer_power_when_counter_empty(&mut summary.home_consumed_kwh, power.home_consumed_kwh);
 
         Ok(summary)
@@ -1880,16 +1872,27 @@ impl HistoryDb {
                 Some(base) => {
                     let day_changed = last_ts.is_some_and(|lt| !same_local_day(lt, ts));
                     let (delta, new_baseline) = if day_changed {
-                        // Counter reset at local midnight. Re-baseline only;
-                        // credit nothing for the first reading of the new day.
-                        // In continuous data that reading is ~0, so this is a
-                        // no-op. After a data gap (app or inverter offline) the
-                        // first reading can already hold a chunk of the day,
-                        // accumulated at unknown times; crediting it here would
-                        // price that whole chunk at this single reading's tariff
-                        // slot. We only count energy whose accumulation we
-                        // actually observe via within-day deltas.
-                        (0.0, raw)
+                        // Counter reset at local midnight. In continuous data
+                        // the first reading of the new day is ~0, so this is
+                        // a no-op. After a data gap (app or inverter offline)
+                        // the first reading can already hold a chunk of the
+                        // day, accumulated at unknown times.
+                        //
+                        // Issue #269: if the gap is short (within
+                        // MIDNIGHT_GAP_CREDIT_THRESHOLD_SECS of the last
+                        // pre-midnight reading), the energy is small and the
+                        // reading's tariff slot is close to midnight (off-peak
+                        // on most UK tariffs), so crediting it is a better
+                        // approximation than dropping it — dropping it was
+                        // causing cumulative undercount on multi-day windows.
+                        // Long gaps still get zero credit to avoid pricing a
+                        // large unknown chunk at a single rate.
+                        let gap_secs = ts - last_ts.unwrap_or(ts);
+                        if gap_secs <= MIDNIGHT_GAP_CREDIT_THRESHOLD_SECS {
+                            (raw.max(0.0), raw)
+                        } else {
+                            (0.0, raw)
+                        }
                     } else if raw >= base {
                         (raw - base, raw) // normal same-day increase
                     } else if is_genuine_reset(base, raw, next_raw) {
@@ -6599,6 +6602,291 @@ mod tests {
             (breakdown_standing_total(&breakdown) - 4.0 * 0.5486).abs() < 1e-3,
             "standing component should be 4 × £0.5486 (got {})",
             breakdown_standing_total(&breakdown)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #269: daily import cost loses accuracy going back > 1 day.
+    //
+    // The cost walk's `day_changed` branch fires when a reading falls on a
+    // new local calendar day. Previously it credited zero energy for the
+    // first reading after midnight, silently dropping the small amount of
+    // energy that accumulated across the overnight gap (last reading ~23:00,
+    // first reading ~01:00). This compounded across multi-day windows.
+    //
+    // Fix: when the gap is short (≤ MIDNIGHT_GAP_CREDIT_THRESHOLD_SECS),
+    // credit the counter value as energy priced at the reading's tariff
+    // slot. Long gaps still get zero credit to avoid mispricing a large
+    // unknown chunk at one rate.
+    // -----------------------------------------------------------------------
+
+    /// Insert one day of import data with a gap around midnight. The previous
+    /// evening has a reading at 22:30 (counter at 0 — just reset, so the
+    /// pre-midnight portion is from the prior day's counter which already
+    /// reset). Then there's a gap until 01:00 when the app resumes polling.
+    /// The counter at 01:00 shows `next_day_initial_kwh` (energy accumulated
+    /// from midnight to 01:00 while the app wasn't polling), and ramps up to
+    /// `next_day_initial_kwh + daily_kwh` by 23:00.
+    fn insert_import_day_with_overnight_gap(
+        db: &HistoryDb,
+        day_offset: i64,
+        daily_kwh: f32,
+        next_day_initial_kwh: f32,
+    ) {
+        let midnight = local_midnight_secs(day_offset);
+        // Previous evening reading at 22:30 (the inverter's daily counter
+        // has already reset to 0 at this point — it's the new day's counter
+        // starting to tick up before the app stopped polling for the night).
+        let prev_evening = midnight - 90 * 60; // 22:30 previous day
+        db.insert_reading(&make_snapshot_with_kwh(prev_evening, 0.0, 0.0));
+        // Gap from 22:30 to 01:00 (2.5h). App resumes at 01:00.
+        for step in 2..47i64 {
+            let ts = midnight + step * 1800;
+            let min_of_day = step * 30;
+            let frac = if min_of_day <= 6 * 60 {
+                0.0
+            } else if min_of_day >= 23 * 60 {
+                1.0
+            } else {
+                (min_of_day - 6 * 60) as f64 / (23 * 60 - 6 * 60) as f64
+            };
+            let kwh = next_day_initial_kwh as f64 + daily_kwh as f64 * frac;
+            db.insert_reading(&make_snapshot_with_kwh(ts, kwh as f32, 0.0));
+        }
+    }
+
+    #[test]
+    fn cost_series_single_day_matches_total_energy() {
+        // Baseline: a single day with no gaps — cost should exactly match
+        // daily_kwh × rate. This confirms the basic arithmetic is correct
+        // for today (offset=0), matching Pete's report that today's cost
+        // is accurate.
+        let db = test_db();
+        insert_import_day(&db, 0, 10.0, 6 * 60, 22 * 60);
+        let m = local_midnight_secs(0);
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let total = series_total(
+            &db.query_cost_series(
+                &window(m, local_midnight_secs(1)),
+                3600,
+                "today_import_kwh",
+                &flat,
+                0.25,
+                0.0,
+            )
+            .unwrap(),
+        );
+        // 10 kWh × £0.25 = £2.50
+        assert!(
+            (total - 2.50).abs() < 1e-6,
+            "single day: expected £2.50, got {total}"
+        );
+    }
+
+    #[test]
+    fn cost_series_overnight_gap_credits_short_gap_energy() {
+        // Issue #269: A 3-day window where each day has readings up to 23:00,
+        // then resumes at 01:00 with the counter already showing ~0.4 kWh
+        // accumulated from midnight to 01:00. The gap from 23:00 to 01:00
+        // is 2h, well within MIDNIGHT_GAP_CREDIT_THRESHOLD_SECS (4h), so
+        // the energy must now be credited.
+        let db = test_db();
+        let daily_kwh = 10.0_f32;
+        let gap_energy = 0.4_f32;
+        for d in -2..=0 {
+            insert_import_day_with_overnight_gap(&db, d, daily_kwh, gap_energy);
+        }
+        let start = local_midnight_secs(-2);
+        let end = local_midnight_secs(1);
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let total = series_total(
+            &db.query_cost_series(
+                &window(start, end),
+                3600,
+                "today_import_kwh",
+                &flat,
+                0.25,
+                0.0,
+            )
+            .unwrap(),
+        );
+        // The first day's gap energy is NOT credited because there's no
+        // pre-midnight reading inside the query window (the 22:30 reading
+        // belongs to the day before the window starts, so it's excluded by
+        // the SQL WHERE clause). The remaining 2 days each have their gap
+        // energy credited. Total = 3 × 10 × 0.25 + 2 × 0.4 × 0.25 = £7.70.
+        let expected = 3.0 * daily_kwh as f64 * 0.25 + 2.0 * gap_energy as f64 * 0.25;
+        assert!(
+            (total - expected).abs() < 0.01,
+            "3-day overnight-gap: expected £{expected:.2} (2 of 3 gap energies credited), got £{total:.4}"
+        );
+    }
+
+    #[test]
+    fn cost_series_7d_window_credits_overnight_gap_energy() {
+        // Issue #269: Over a 7-day window the overnight gap energy must be
+        // fully credited. Previously each night's gap energy was silently
+        // dropped, causing a cumulative undercount of ~£0.88 over 7 days.
+        let db = test_db();
+        let daily_kwh = 12.0_f32;
+        let gap_energy = 0.5_f32;
+        for d in -6..=0 {
+            insert_import_day_with_overnight_gap(&db, d, daily_kwh, gap_energy);
+        }
+        let start = local_midnight_secs(-6);
+        let end = local_midnight_secs(1);
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let total = series_total(
+            &db.query_cost_series(
+                &window(start, end),
+                1800,
+                "today_import_kwh",
+                &flat,
+                0.25,
+                0.0,
+            )
+            .unwrap(),
+        );
+        // The first day's gap energy is not credited (no pre-midnight reading
+        // inside the query window). The remaining 6 days each have their gap
+        // energy credited. Total = 7 × 12 × 0.25 + 6 × 0.5 × 0.25 = £21.75.
+        let expected = 7.0 * daily_kwh as f64 * 0.25 + 6.0 * gap_energy as f64 * 0.25;
+        assert!(
+            (total - expected).abs() < 0.02,
+            "7-day window: expected £{expected:.4} (6 of 7 gap energies credited), got £{total:.4}"
+        );
+    }
+
+    #[test]
+    fn cost_series_day_offset_window_accurate_without_gaps() {
+        // Control: a single past day (offset=1 = yesterday) with NO gaps should
+        // be exactly accurate. This confirms the issue isn't about the offset
+        // itself but about the gap handling.
+        let db = test_db();
+        insert_import_day(&db, -1, 10.0, 6 * 60, 22 * 60);
+        insert_import_day(&db, 0, 5.0, 6 * 60, 12 * 60);
+
+        let start = local_midnight_secs(-1);
+        let end = local_midnight_secs(0);
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let total = series_total(
+            &db.query_cost_series(
+                &window(start, end),
+                3600,
+                "today_import_kwh",
+                &flat,
+                0.25,
+                0.0,
+            )
+            .unwrap(),
+        );
+        // 10 kWh × £0.25 = £2.50 — exact when there are no gaps.
+        assert!(
+            (total - 2.50).abs() < 1e-6,
+            "past day without gaps should be exact: expected £2.50, got {total}"
+        );
+    }
+
+    #[test]
+    fn cost_series_past_day_with_overnight_gap_credits_energy() {
+        // Issue #269: yesterday (offset=1) has an overnight gap at its start
+        // (midnight to 01:00). The first reading at 01:00 carries 0.4 kWh
+        // already accumulated. After the fix this energy IS credited.
+        let db = test_db();
+        let m_prev = local_midnight_secs(-2);
+        // Day -2: full data ending at 23:00
+        for step in 0..47i64 {
+            let ts = m_prev + step * 1800;
+            let min_of_day = step * 30;
+            let frac = if min_of_day <= 6 * 60 {
+                0.0
+            } else if min_of_day >= 23 * 60 {
+                1.0
+            } else {
+                (min_of_day - 6 * 60) as f64 / (23 * 60 - 6 * 60) as f64
+            };
+            db.insert_reading(&make_snapshot_with_kwh(ts, (10.0 * frac) as f32, 0.0));
+        }
+        // Day -1 (yesterday): starts at 01:00 with counter already at 0.4
+        let m = local_midnight_secs(-1);
+        db.insert_reading(&make_snapshot_with_kwh(m + 3600, 0.4, 0.0));
+        for step in 2..47i64 {
+            let ts = m + step * 1800;
+            let min_of_day = step * 30;
+            let frac = if min_of_day <= 6 * 60 {
+                0.04
+            } else if min_of_day >= 23 * 60 {
+                1.0
+            } else {
+                0.04 + ((min_of_day - 6 * 60) as f64 / (23 * 60 - 6 * 60) as f64) * 0.96
+            };
+            db.insert_reading(&make_snapshot_with_kwh(ts, (10.4 * frac) as f32, 0.0));
+        }
+        // Day 0 (today): some data
+        insert_import_day(&db, 0, 5.0, 6 * 60, 12 * 60);
+
+        let start = local_midnight_secs(-1);
+        let end = local_midnight_secs(0);
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let total = series_total(
+            &db.query_cost_series(
+                &window(start, end),
+                3600,
+                "today_import_kwh",
+                &flat,
+                0.25,
+                0.0,
+            )
+            .unwrap(),
+        );
+        // The counter goes from 0.4 (baseline, not credited — no pre-midnight
+        // reading inside this day-only window) then 0.4→10.4 (observed) = 10.0 kWh.
+        // 10.0 kWh × £0.25 = £2.50. The gap energy (0.4 kWh) is not credited
+        // here because there's no reading from the previous evening inside the
+        // query window. In a multi-day window the gap IS credited because the
+        // previous day's evening reading is in-window.
+        assert!(
+            (total - 2.50).abs() < 0.01,
+            "past day with gap in day-only window: expected £2.50, got £{total:.4}"
+        );
+    }
+
+    #[test]
+    fn cost_series_long_gap_still_drops_energy() {
+        // Issue #269 safeguard: a gap longer than
+        // MIDNIGHT_GAP_CREDIT_THRESHOLD_SECS must still NOT credit the
+        // accumulated energy, since it was produced at unknown tariff slots
+        // across a large part of the day. This is the existing behaviour
+        // validated by `cost_series_does_not_misprice_energy_accrued_during_a_gap`,
+        // restated here with an explicit long-gap scenario.
+        let db = test_db();
+        let m = local_midnight_secs(0);
+        // Last reading before midnight at 22:00, counter at 5.0
+        db.insert_reading(&make_snapshot_with_kwh(m - 2 * 3600, 5.0, 0.0));
+        // Next reading at 10:00 the next day — a 12h gap (well over 4h threshold).
+        // Counter already at 8.0 kWh accumulated at unknown times.
+        let m1 = local_midnight_secs(1);
+        db.insert_reading(&make_snapshot_with_kwh(m1 + 10 * 3600, 8.0, 0.0));
+        db.insert_reading(&make_snapshot_with_kwh(m1 + 11 * 3600, 9.0, 0.0));
+
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let total = series_total(
+            &db.query_cost_series(
+                &window(m - 3 * 3600, m1 + 12 * 3600),
+                3600,
+                "today_import_kwh",
+                &flat,
+                0.25,
+                0.0,
+            )
+            .unwrap(),
+        );
+        // The 8 kWh at the start of day 1 was accumulated during a 12h gap —
+        // must NOT be credited. Only the observed 8→9 = 1 kWh is counted.
+        // 1 kWh × £0.25 = £0.25.
+        assert!(
+            (total - 0.25).abs() < 0.01,
+            "long gap (>4h) must still drop energy: expected £0.25, got £{total:.4}"
         );
     }
 }
