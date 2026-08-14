@@ -1513,15 +1513,13 @@ mod tests {
         // This assertion is a tautology on a UTC host (local == utc); the bug
         // only manifests off-UTC, so that is acceptable. It catches the
         // regression on any non-UTC CI / developer machine.
-        let time_of_day_secs = |t: chrono::DateTime<chrono::Local>| {
-            t.hour() * 3600 + t.minute() * 60 + t.second()
-        };
+        let time_of_day_secs =
+            |t: chrono::DateTime<chrono::Local>| t.hour() * 3600 + t.minute() * 60 + t.second();
         let before = time_of_day_secs(chrono::Local::now());
         let writes = ControlCommand::SyncClock.encode().unwrap();
         let after = time_of_day_secs(chrono::Local::now());
-        let encoded = writes[3].value as u32 * 3600
-            + writes[4].value as u32 * 60
-            + writes[5].value as u32;
+        let encoded =
+            writes[3].value as u32 * 3600 + writes[4].value as u32 * 60 + writes[5].value as u32;
 
         // Encode is sub-millisecond, so `before == after == encoded` almost
         // always. Handle a midnight wraparound in the (microsecond-wide) edge

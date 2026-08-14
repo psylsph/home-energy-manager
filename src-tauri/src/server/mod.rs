@@ -129,7 +129,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         // "New version available" detection. Read-only cache populated by
         // the background `run_update_loop`; never fetches on the request path.
-        .route("/api/latest-version", get(crate::update::get_latest_version))
+        .route(
+            "/api/latest-version",
+            get(crate::update::get_latest_version),
+        )
         // Load discharge limiter
         .route(
             "/api/load-limiter",

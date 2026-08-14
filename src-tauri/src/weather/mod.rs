@@ -729,8 +729,7 @@ mod tests {
 
     #[test]
     fn parse_current_response_accepts_seconds_precision_and_missing_coords() {
-        let json =
-            serde_json::json!({ "current": { "time": "2024-06-21T12:00:30", "temperature_2m": 1.0 } });
+        let json = serde_json::json!({ "current": { "time": "2024-06-21T12:00:30", "temperature_2m": 1.0 } });
         let obs = parse_current_response(&json).unwrap();
         assert_eq!(obs.temperature_c, 1.0);
         // No top-level coords → None (Settings UI hides the grid-cell line).

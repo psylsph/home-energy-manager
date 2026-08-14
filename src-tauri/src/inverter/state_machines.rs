@@ -1771,7 +1771,11 @@ mod tests {
     fn timed_export_repair_requires_hr59_and_no_configured_slot() {
         assert!(should_repair_timed_export(true, &[], false));
         assert!(!should_repair_timed_export(false, &[], false));
-        assert!(!should_repair_timed_export(true, &[configured_slot()], false));
+        assert!(!should_repair_timed_export(
+            true,
+            &[configured_slot()],
+            false
+        ));
         assert!(!should_repair_timed_export(true, &[], true));
     }
 

@@ -2161,7 +2161,11 @@ mod tests {
         assert!(names.iter().all(|n| !n.is_empty()));
         // No two alert types may share a display name (ambiguous UI).
         let unique: std::collections::HashSet<_> = names.iter().collect();
-        assert_eq!(unique.len(), names.len(), "alert display names must be unique");
+        assert_eq!(
+            unique.len(),
+            names.len(),
+            "alert display names must be unique"
+        );
         // Spot-check the deliberately-distinct labels.
         assert_eq!(
             AlertType::BatteryOverTemp.human_name(),
@@ -2205,10 +2209,7 @@ mod tests {
         // BatteryTempHigh survives a cycle where it stays triggered ...
         assert!(d.extract_cleared(&[AlertType::BatteryTempHigh]).is_empty());
         // ... and only clears once it stops being triggered.
-        assert_eq!(
-            d.extract_cleared(&[]),
-            vec![AlertType::BatteryTempHigh]
-        );
+        assert_eq!(d.extract_cleared(&[]), vec![AlertType::BatteryTempHigh]);
     }
 
     #[test]
@@ -2263,7 +2264,8 @@ mod tests {
     #[test]
     fn test_build_cleared_message_marks_resolved() {
         let snap = make_snapshot();
-        let msg = build_cleared_message(&snap, &[AlertType::BatteryTempHigh, AlertType::GridOffline]);
+        let msg =
+            build_cleared_message(&snap, &[AlertType::BatteryTempHigh, AlertType::GridOffline]);
         assert!(msg.contains("All Clear"));
         assert!(msg.contains("Resolved"));
         assert!(msg.contains("Battery Temperature High"));
@@ -2308,16 +2310,17 @@ mod tests {
     #[test]
     fn test_build_battery_message_with_modules() {
         let mut snap = make_snapshot();
-        snap.battery_modules.push(crate::inverter::model::BatteryModule {
-            index: 1,
-            soc: 92,
-            temperature: 31.0,
-            voltage: 52.4,
-            num_cycles: 120,
-            capacity_ah: 200.0,
-            remaining_capacity_ah: 184.0,
-            ..Default::default()
-        });
+        snap.battery_modules
+            .push(crate::inverter::model::BatteryModule {
+                index: 1,
+                soc: 92,
+                temperature: 31.0,
+                voltage: 52.4,
+                num_cycles: 120,
+                capacity_ah: 200.0,
+                remaining_capacity_ah: 184.0,
+                ..Default::default()
+            });
         let msg = build_battery_message(&snap);
         assert!(msg.contains("Battery Detail"));
         assert!(msg.contains("Modules (1)"));
@@ -2529,6 +2532,9 @@ mod tests {
     async fn send_ntfy_message_errors_on_non_2xx() {
         let mock = MockNtfy::spawn(axum::http::StatusCode::NOT_FOUND).await;
         let err = send_ntfy_message("hem-alerts", &mock.base_url, "battery temp high").unwrap_err();
-        assert!(err.contains("ntfy API"), "expected an ntfy API error, got: {err}");
+        assert!(
+            err.contains("ntfy API"),
+            "expected an ntfy API error, got: {err}"
+        );
     }
 }

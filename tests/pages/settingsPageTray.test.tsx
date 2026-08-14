@@ -119,6 +119,15 @@ describe('<SettingsPage/> — Minimise to Tray toggles (issue #217)', () => {
     delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   });
 
+  it('top-aligns the Check for New Releases switch beside wrapped help text', async () => {
+    render(<SettingsPage />);
+    const label = await screen.findByText('Check for New Releases');
+    const row = label.parentElement?.parentElement;
+    expect(row?.className).toContain('items-start');
+    expect(row?.className).toContain('gap-3');
+    expect(row?.querySelector('.cursor-pointer')?.className).toContain('shrink-0');
+  });
+
   it('renders both tray toggles when running inside the Tauri shell', async () => {
     render(<SettingsPage />);
     expect(await screen.findByText('Minimise to Tray')).toBeDefined();

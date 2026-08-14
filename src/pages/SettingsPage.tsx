@@ -21,7 +21,7 @@ import { isValidIpv4Host } from '../lib/validators';
 function Toggle({ checked, onChange, ariaLabel }: { checked: boolean; onChange: (v: boolean) => void; ariaLabel?: string }) {
   return (
     <div
-      className="relative cursor-pointer"
+      className="relative cursor-pointer shrink-0"
       role={ariaLabel ? 'switch' : undefined}
       aria-label={ariaLabel}
       aria-checked={ariaLabel ? checked : undefined}
@@ -2583,18 +2583,20 @@ export default function SettingsPage() {
             </>
           )}
         </div>
-        <div className="flex items-center justify-between">
+        <div className="flex items-start justify-between gap-3">
           <div className="flex flex-col gap-0.5">
             <span className="text-text-primary text-sm font-sans font-medium">Check for New Releases</span>
             <span className="text-text-secondary text-xs font-sans">
               When on, the app contacts GitHub once every few hours to look for a newer version. The only information sent is your IP address — no usage data. Turn this off if you’d rather the app never reach out.
             </span>
           </div>
-          <Toggle
-            checked={checkForUpdates}
-            onChange={handleCheckForUpdatesToggle}
-            ariaLabel="Check for new releases"
-          />
+          <div className="shrink-0 mt-1">
+            <Toggle
+              checked={checkForUpdates}
+              onChange={handleCheckForUpdatesToggle}
+              ariaLabel="Check for new releases"
+            />
+          </div>
         </div>
       </section>
 

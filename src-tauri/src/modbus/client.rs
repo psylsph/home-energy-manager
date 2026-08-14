@@ -1330,9 +1330,7 @@ impl ModbusClient {
                 // if every attempt is rejected. The decision is centralised in
                 // [`Self::write_exception_action`] so it can be unit-tested
                 // without the real (slow) retry sleeps.
-                Err(ClientError::InvalidResponse(msg))
-                    if msg.starts_with("Modbus exception") =>
-                {
+                Err(ClientError::InvalidResponse(msg)) if msg.starts_with("Modbus exception") => {
                     let is_busy = msg.contains("code 67");
                     match Self::write_exception_action(attempt, max_attempts, is_busy) {
                         WriteExceptionAction::Retry { gap } => {
@@ -2508,9 +2506,9 @@ pub(crate) mod tests {
         data[13] = 5000; // 50.0 Hz
         data[17] = pv1_today_tenths; // today_solar source (tenths)
         data[18] = pv1_power_w; // p_pv1 (W)
-        // A live string carries current (P = V×I); the decode-time dormant-
-        // string guard keys off current, so non-zero PV power must be paired
-        // with non-zero current to survive decode (issue #261).
+                                // A live string carries current (P = V×I); the decode-time dormant-
+                                // string guard keys off current, so non-zero PV power must be paired
+                                // with non-zero current to survive decode (issue #261).
         data[8] = if pv1_power_w > 0 { 100 } else { 0 }; // i_pv1 (/10 A)
         data[59] = 50; // soc 50%
         MockResponse::ReadResponse {
@@ -4092,11 +4090,7 @@ pub(crate) mod tests {
         client.set_inter_request_delay(Duration::ZERO);
 
         let blocks = client
-            .read_all_with_extras(
-                Some(&DeviceType::ThreePhase),
-                None,
-                GatewayPollScope::Fast,
-            )
+            .read_all_with_extras(Some(&DeviceType::ThreePhase), None, GatewayPollScope::Fast)
             .await
             .expect("critical telemetry should recover on retry");
 
@@ -4128,11 +4122,7 @@ pub(crate) mod tests {
         client.set_inter_request_delay(Duration::ZERO);
 
         let result = client
-            .read_all_with_extras(
-                Some(&DeviceType::ThreePhase),
-                None,
-                GatewayPollScope::Fast,
-            )
+            .read_all_with_extras(Some(&DeviceType::ThreePhase), None, GatewayPollScope::Fast)
             .await;
 
         assert!(

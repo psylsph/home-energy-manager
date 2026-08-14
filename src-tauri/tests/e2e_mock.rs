@@ -401,9 +401,7 @@ async fn latest_version_empty_cache_reports_current_and_no_update() {
     assert_eq!(body["current_version"], json!(env!("CARGO_PKG_VERSION")));
     // Empty cache → no latest known yet, never claims an update.
     assert_eq!(body["update_available"], Value::Bool(false));
-    assert!(body
-        .get("latest_version")
-        .is_none_or(|v| v.is_null()));
+    assert!(body.get("latest_version").is_none_or(|v| v.is_null()));
     assert!(body.get("release_url").is_none_or(|v| v.is_null()));
 }
 

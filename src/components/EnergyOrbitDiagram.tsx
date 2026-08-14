@@ -58,6 +58,10 @@ const OUTER_ORBIT_R = 202;
 const HUB_R = 48;
 const SAT_R = 47;
 const BATTERY_R = 50;
+// The moving dot can reach a 9 px radius and its glow extends another 6 px.
+// Keep the trajectory outside the node boundary so neither the ball nor its
+// glow is painted over a satellite circle.
+const FLOW_DOT_CLEARANCE = 15;
 
 function satellitePositions(showEv: boolean): Partial<Record<FlowNodeId, { x: number; y: number }>> {
   if (showEv) {
@@ -279,7 +283,7 @@ function clockwiseDelta(from: number, to: number): number {
 }
 
 function orbitGap(id: FlowNodeId): number {
-  return Math.asin(Math.min(0.45, (radiusFor(id) + 12) / OUTER_ORBIT_R));
+  return Math.asin(Math.min(0.45, (radiusFor(id) + FLOW_DOT_CLEARANCE) / OUTER_ORBIT_R));
 }
 
 function outerArcPath(from: FlowNodeId, to: FlowNodeId, posOf: (id: FlowNodeId) => { x: number; y: number }): FlowPath {
@@ -308,7 +312,12 @@ function outerArcPath(from: FlowNodeId, to: FlowNodeId, posOf: (id: FlowNodeId) 
 function directPath(from: FlowNodeId, to: FlowNodeId, posOf: (id: FlowNodeId) => { x: number; y: number }): FlowPath {
   const a = posOf(from);
   const b = posOf(to);
-  const { x1, y1, x2, y2, mx, my } = trimLine(a, b, radiusFor(from), radiusFor(to));
+  const { x1, y1, x2, y2, mx, my } = trimLine(
+    a,
+    b,
+    radiusFor(from) + FLOW_DOT_CLEARANCE,
+    radiusFor(to) + FLOW_DOT_CLEARANCE,
+  );
   return {
     path: `M ${x1} ${y1} L ${x2} ${y2}`,
     length: Math.hypot(x2 - x1, y2 - y1),

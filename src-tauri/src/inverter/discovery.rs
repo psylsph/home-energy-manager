@@ -159,11 +159,7 @@ async fn probe_host(ip: String, port: u16) -> Option<DiscoveredInverter> {
 
     match result {
         Ok(Some(_)) => {
-            tracing::debug!(
-                "Found GivEnergy device at {}:{}",
-                ip_for_result,
-                port
-            );
+            tracing::debug!("Found GivEnergy device at {}:{}", ip_for_result, port);
             Some(DiscoveredInverter {
                 ip: ip_for_result,
                 port,
@@ -465,7 +461,10 @@ mod tests {
         if let Some(ref ip) = result {
             assert!(!ip.is_empty(), "IP string should not be empty");
             // Should be a valid IPv4
-            assert!(ip.parse::<std::net::Ipv4Addr>().is_ok(), "should be valid IPv4: {ip}");
+            assert!(
+                ip.parse::<std::net::Ipv4Addr>().is_ok(),
+                "should be valid IPv4: {ip}"
+            );
         }
     }
 
@@ -473,7 +472,10 @@ mod tests {
     fn collect_physical_subnets_accepts_multiple_real_interfaces() {
         use std::str::FromStr;
         let interfaces = vec![
-            ("eth0".to_string(), IpAddr::from_str("192.168.1.100").unwrap()),
+            (
+                "eth0".to_string(),
+                IpAddr::from_str("192.168.1.100").unwrap(),
+            ),
             ("wlan0".to_string(), IpAddr::from_str("10.0.0.50").unwrap()),
             ("eth1".to_string(), IpAddr::from_str("192.168.2.1").unwrap()),
         ];
@@ -499,7 +501,10 @@ mod tests {
     fn collect_physical_subnets_skips_vmnet_interface() {
         use std::str::FromStr;
         let interfaces = vec![
-            ("vmnet8".to_string(), IpAddr::from_str("192.168.100.1").unwrap()),
+            (
+                "vmnet8".to_string(),
+                IpAddr::from_str("192.168.100.1").unwrap(),
+            ),
             ("eth0".to_string(), IpAddr::from_str("192.168.1.1").unwrap()),
         ];
         let subnets = collect_physical_subnets(&interfaces);
@@ -511,7 +516,10 @@ mod tests {
     fn collect_physical_subnets_skips_virbr0() {
         use std::str::FromStr;
         let interfaces = vec![
-            ("virbr0".to_string(), IpAddr::from_str("192.168.122.1").unwrap()),
+            (
+                "virbr0".to_string(),
+                IpAddr::from_str("192.168.122.1").unwrap(),
+            ),
             ("ens3".to_string(), IpAddr::from_str("10.1.2.3").unwrap()),
         ];
         let subnets = collect_physical_subnets(&interfaces);
@@ -523,11 +531,9 @@ mod tests {
         let port = free_ephemeral_port();
         // Scan two loopback subnets — both empty, but the function should
         // iterate over both (not just the first).
-        let result = scan_multiple_subnets_on_port(
-            &["127.0.0".to_string(), "127.0.1".to_string()],
-            port,
-        )
-        .await;
+        let result =
+            scan_multiple_subnets_on_port(&["127.0.0".to_string(), "127.0.1".to_string()], port)
+                .await;
         assert!(result.is_empty());
     }
 }

@@ -30,7 +30,7 @@ function SummaryTilesInner({ snapshot: s }: Props) {
   // having to read the source code.
   const tiles: TileDef[] = [
     {
-      label: 'Solar Today',
+      label: 'Solar',
       value: formatEnergy(s.today_solar_kwh),
       accent: '#F59E0B',
       icon: '☀️',

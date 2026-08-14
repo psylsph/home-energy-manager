@@ -1142,7 +1142,7 @@ mod tests {
         // Out-of-range components are rejected.
         assert_eq!(hhmm_minutes("12:60"), None); // minute overflow
         assert_eq!(hhmm_minutes("24:00"), None); // hour overflow
-        // Malformed strings.
+                                                 // Malformed strings.
         assert_eq!(hhmm_minutes("5"), None); // no colon
         assert_eq!(hhmm_minutes(":5"), None); // missing hour
     }
@@ -1166,14 +1166,20 @@ mod tests {
             // get_history / get_summary both short-circuit to 404.
             let (hist_status, _) = get_history(
                 State(state.clone()),
-                Query(HistoryQuery { range: None, offset: None }),
+                Query(HistoryQuery {
+                    range: None,
+                    offset: None,
+                }),
             )
             .await;
             assert_eq!(hist_status, StatusCode::NOT_FOUND);
 
             let (sum_status, _) = get_summary(
                 State(state),
-                Query(HistoryQuery { range: None, offset: None }),
+                Query(HistoryQuery {
+                    range: None,
+                    offset: None,
+                }),
             )
             .await;
             assert_eq!(sum_status, StatusCode::NOT_FOUND);
@@ -1221,8 +1227,18 @@ mod tests {
         // cheaper-to-Octopus non-direct-debit method (priority 3 > 1).
         let rows = select_tariff_rows(
             vec![
-                price(20.0, AGR_FROM, Some("2024-01-01T01:00:00Z"), Some("NON_DIRECT_DEBIT")),
-                price(15.0, AGR_FROM, Some("2024-01-01T01:00:00Z"), Some("DIRECT_DEBIT")),
+                price(
+                    20.0,
+                    AGR_FROM,
+                    Some("2024-01-01T01:00:00Z"),
+                    Some("NON_DIRECT_DEBIT"),
+                ),
+                price(
+                    15.0,
+                    AGR_FROM,
+                    Some("2024-01-01T01:00:00Z"),
+                    Some("DIRECT_DEBIT"),
+                ),
             ],
             &agreement(AGR_FROM, None, OPEN_AGR),
             &stream_of("electricity_import"),
@@ -1271,8 +1287,17 @@ mod tests {
     fn select_tariff_rows_clamps_to_the_agreement_window() {
         // Price interval 00:00–03:00, agreement 00:30–02:00 → clamped.
         let rows = select_tariff_rows(
-            vec![price(10.0, "2024-01-01T00:00:00Z", Some("2024-01-01T03:00:00Z"), None)],
-            &agreement("2024-01-01T00:30:00Z", Some("2024-01-01T02:00:00Z"), OPEN_AGR),
+            vec![price(
+                10.0,
+                "2024-01-01T00:00:00Z",
+                Some("2024-01-01T03:00:00Z"),
+                None,
+            )],
+            &agreement(
+                "2024-01-01T00:30:00Z",
+                Some("2024-01-01T02:00:00Z"),
+                OPEN_AGR,
+            ),
             &stream_of("electricity_import"),
             "standard",
         )
@@ -1293,7 +1318,12 @@ mod tests {
         // Price 00:00–01:00, agreement starts the next day → collapses to
         // valid_to <= valid_from and is dropped.
         let rows = select_tariff_rows(
-            vec![price(10.0, "2024-01-01T00:00:00Z", Some("2024-01-01T01:00:00Z"), None)],
+            vec![price(
+                10.0,
+                "2024-01-01T00:00:00Z",
+                Some("2024-01-01T01:00:00Z"),
+                None,
+            )],
             &agreement("2024-01-02T00:00:00Z", None, OPEN_AGR),
             &stream_of("electricity_import"),
             "standard",
@@ -1307,7 +1337,12 @@ mod tests {
         let rows = select_tariff_rows(
             vec![
                 price(10.0, AGR_FROM, Some("2024-01-01T01:00:00Z"), None),
-                price(12.0, "2024-01-01T01:00:00Z", Some("2024-01-01T02:00:00Z"), None),
+                price(
+                    12.0,
+                    "2024-01-01T01:00:00Z",
+                    Some("2024-01-01T02:00:00Z"),
+                    None,
+                ),
             ],
             &agreement(AGR_FROM, None, OPEN_AGR),
             &stream_of("gas"),
@@ -1342,9 +1377,9 @@ mod tests {
     // GET exercises the full fetch → parse → store pipeline.
     // ================================================================
 
-    use std::sync::Arc;
-    use axum::{extract::Request, http::StatusCode, Router};
     use crate::settings::Settings;
+    use axum::{extract::Request, http::StatusCode, Router};
+    use std::sync::Arc;
 
     /// A throwaway HTTP server speaking just enough of the Octopus REST
     /// API to exercise the fetch/sync paths. Each `(needle, body)` entry
@@ -1414,8 +1449,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("givenergy-octopus-test-{id}/history.db"));
+        let path = std::env::temp_dir().join(format!("givenergy-octopus-test-{id}/history.db"));
         Arc::new(crate::history::HistoryDb::open(&path).unwrap())
     }
 
@@ -1493,7 +1527,10 @@ mod tests {
         let now = 1_704_067_200_i64; // 2024-01-01T00:00:00Z
         let (stored, error) = sync_tariffs(&settings, &db, &[stream], now).await;
         assert!(error.is_none(), "unexpected tariff sync error: {error:?}");
-        assert!(stored >= 2, "expected standard+standing rows stored, got {stored}");
+        assert!(
+            stored >= 2,
+            "expected standard+standing rows stored, got {stored}"
+        );
         assert!(db.has_octopus_tariff_prices(
             "electricity_import",
             "1200000012345",
@@ -1591,12 +1628,18 @@ mod tests {
 
     #[test]
     fn test_tariff_rate_types_single_rate() {
-        assert_eq!(tariff_rate_types("E-1R-VAR-22-11-25-A"), &["standard", "standing"]);
+        assert_eq!(
+            tariff_rate_types("E-1R-VAR-22-11-25-A"),
+            &["standard", "standing"]
+        );
     }
 
     #[test]
     fn test_tariff_rate_types_two_rate() {
-        assert_eq!(tariff_rate_types("E-2R-ECO-22-11-25-A"), &["day", "night", "standing"]);
+        assert_eq!(
+            tariff_rate_types("E-2R-ECO-22-11-25-A"),
+            &["day", "night", "standing"]
+        );
     }
 
     #[test]
@@ -1726,9 +1769,13 @@ mod tests {
                 payment_method: Some("DIRECT_DEBIT".to_string()),
             },
         ];
-        let rows = select_tariff_rows(prices, &dummy_agreement(), &dummy_stream(), "standard").unwrap();
+        let rows =
+            select_tariff_rows(prices, &dummy_agreement(), &dummy_stream(), "standard").unwrap();
         assert_eq!(rows.len(), 1);
-        assert!((rows[0].value_inc_vat - 0.22).abs() < 1e-9, "DIRECT_DEBIT should win");
+        assert!(
+            (rows[0].value_inc_vat - 0.22).abs() < 1e-9,
+            "DIRECT_DEBIT should win"
+        );
     }
 
     #[test]
@@ -1747,7 +1794,8 @@ mod tests {
                 payment_method: None,
             },
         ];
-        let rows = select_tariff_rows(prices, &dummy_agreement(), &dummy_stream(), "standard").unwrap();
+        let rows =
+            select_tariff_rows(prices, &dummy_agreement(), &dummy_stream(), "standard").unwrap();
         assert_eq!(rows.len(), 1, "NaN row should be skipped");
         assert!((rows[0].value_inc_vat - 0.15).abs() < 1e-9);
     }
@@ -1760,7 +1808,8 @@ mod tests {
             valid_to: Some("2024-06-01T00:30:00Z".to_string()),
             payment_method: None,
         }];
-        let rows = select_tariff_rows(prices, &dummy_agreement(), &dummy_stream(), "standard").unwrap();
+        let rows =
+            select_tariff_rows(prices, &dummy_agreement(), &dummy_stream(), "standard").unwrap();
         assert_eq!(rows.len(), 1, "negative Agile rates are valid");
         assert!((rows[0].value_inc_vat - (-5.0)).abs() < 1e-9);
     }
@@ -1781,7 +1830,10 @@ mod tests {
         let rows = select_tariff_rows(prices, &agreement, &dummy_stream(), "standard").unwrap();
         assert_eq!(rows.len(), 1);
         // valid_to should be clamped to agreement_end
-        assert_eq!(rows[0].valid_to, Some(parse_timestamp("2024-06-01T01:00:00Z").unwrap()));
+        assert_eq!(
+            rows[0].valid_to,
+            Some(parse_timestamp("2024-06-01T01:00:00Z").unwrap())
+        );
     }
 
     // ================================================================
@@ -1812,13 +1864,15 @@ mod tests {
         assert!(validated_next_url(
             Some("https://evil.example/page".to_string()),
             "https://api.octopus.energy"
-        ).is_err());
+        )
+        .is_err());
         // Matching prefix → Ok(Some)
         assert_eq!(
             validated_next_url(
                 Some("https://api.octopus.energy/v1/page2".to_string()),
                 "https://api.octopus.energy"
-            ).unwrap(),
+            )
+            .unwrap(),
             Some("https://api.octopus.energy/v1/page2".to_string())
         );
     }

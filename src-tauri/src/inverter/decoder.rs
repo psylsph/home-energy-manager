@@ -553,12 +553,12 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.pv2_voltage = get_reg(data, 2) as f32 * 0.1; // IR(2):  v_pv2 (/10 V)
     snap.pv1_current = get_reg(data, 8) as f32 * 0.1; // IR(8):  i_pv1 (/10 A)
     snap.pv2_current = get_reg(data, 9) as f32 * 0.1; // IR(9):  i_pv2 (/10 A)
-    // Zero any string carrying no current. Real generation always produces
-    // current (P = V×I); a dark string at night frequently holds a residual
-    // open-circuit voltage while the MPPT reports a small idle "phantom"
-    // power (tens of W) on the dormant input, so testing current rather than
-    // voltage is what actually catches it (issue #261). This also covers a
-    // system with no second string wired at all, where current is naturally 0.
+                                                      // Zero any string carrying no current. Real generation always produces
+                                                      // current (P = V×I); a dark string at night frequently holds a residual
+                                                      // open-circuit voltage while the MPPT reports a small idle "phantom"
+                                                      // power (tens of W) on the dormant input, so testing current rather than
+                                                      // voltage is what actually catches it (issue #261). This also covers a
+                                                      // system with no second string wired at all, where current is naturally 0.
     if snap.pv1_current == 0.0 {
         snap.pv1_power = 0;
     }
@@ -4436,7 +4436,7 @@ mod tests {
         data[8] = 100; // pv1_current = 10 A (PV1 live)
         data[18] = 3000; // pv1_power = 3 kW
         data[20] = 5000; // pv2 stale garbage
-        // pv2_voltage / pv2_current both default 0
+                         // pv2_voltage / pv2_current both default 0
         decode_input_0_59(&data, &mut snap);
         assert_eq!(snap.pv1_power, 3000, "live PV1 survives");
         assert_eq!(snap.pv2_power, 0, "absent PV2 zeroed");
@@ -6268,9 +6268,9 @@ mod tests {
         let mut input_data = vec![0u16; 60];
         input_data[5] = 2410; // grid voltage
         input_data[18] = solar as u16; // IR(18): pv1_power
-        // A live string carries current (P = V×I); the decode-time dormant-
-        // string guard keys off current, so a non-zero solar reading must be
-        // accompanied by non-zero current to survive (issue #261).
+                                       // A live string carries current (P = V×I); the decode-time dormant-
+                                       // string guard keys off current, so a non-zero solar reading must be
+                                       // accompanied by non-zero current to survive (issue #261).
         input_data[8] = if solar > 0 { 100 } else { 0 }; // IR(8): i_pv1 (/10 A)
         input_data[30] = grid as i16 as u16; // IR(30): p_grid_out (+ = export)
         input_data[52] = raw_p_battery as u16; // IR(52): p_battery
@@ -6909,9 +6909,27 @@ mod tests {
         let blocks = vec![
             make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_0),
             make_block(RegisterType::Input, 0, 60, "input_0_59", input_0),
-            make_block(RegisterType::Input, 1000, 60, "input_1000_1059", zero60.clone()),
-            make_block(RegisterType::Input, 1060, 60, "input_1060_1119", zero60.clone()),
-            make_block(RegisterType::Input, 1120, 60, "input_1120_1179", zero60.clone()),
+            make_block(
+                RegisterType::Input,
+                1000,
+                60,
+                "input_1000_1059",
+                zero60.clone(),
+            ),
+            make_block(
+                RegisterType::Input,
+                1060,
+                60,
+                "input_1060_1119",
+                zero60.clone(),
+            ),
+            make_block(
+                RegisterType::Input,
+                1120,
+                60,
+                "input_1120_1179",
+                zero60.clone(),
+            ),
             make_block(RegisterType::Input, 1360, 54, "input_1360_1413", zero54),
         ];
 
@@ -6921,14 +6939,23 @@ mod tests {
         assert_eq!(snap.device_type, DeviceType::HybridHvGen3);
         assert!((snap.grid_voltage - 230.0).abs() < 0.1, "grid voltage");
         assert!((snap.grid_frequency - 50.0).abs() < 0.01, "grid frequency");
-        assert!(snap.grid_online, "grid must be online — no false grid-loss alarm");
+        assert!(
+            snap.grid_online,
+            "grid must be online — no false grid-loss alarm"
+        );
         assert!(!snap.grid_loss, "no false grid-loss alarm");
         assert_eq!(snap.solar_power, 3_000, "solar power");
         assert_eq!(snap.grid_power, 500, "grid power");
         assert_eq!(snap.battery_power, 1_000, "battery power");
         assert_eq!(snap.home_power, 600, "home power");
-        assert!((snap.inverter_temperature - 35.0).abs() < 0.1, "inverter temp");
-        assert!((snap.battery_temperature - 28.4).abs() < 0.1, "battery temp");
+        assert!(
+            (snap.inverter_temperature - 35.0).abs() < 0.1,
+            "inverter temp"
+        );
+        assert!(
+            (snap.battery_temperature - 28.4).abs() < 0.1,
+            "battery temp"
+        );
         assert_eq!(snap.soc, 60, "SOC");
         // No synthetic zeroed grid meter must be pushed.
         assert!(snap.meters.is_empty(), "no dead three-phase meter entries");

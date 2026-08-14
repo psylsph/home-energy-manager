@@ -942,7 +942,7 @@ export default function PowerPage() {
           label="Combined PV"
           value={currentSolar}
           color="#F59E0B"
-          direction="Generation"
+          direction="Generating"
           waiting={waitingForLiveData}
         />
         <PowerStat

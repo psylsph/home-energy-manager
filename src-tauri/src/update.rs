@@ -58,10 +58,7 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 /// A user-agent is recommended by the GitHub API and keeps us off generic
 /// blocking lists. Includes the current version so the release check itself
 /// shows up as identifiable traffic.
-const USER_AGENT: &str = concat!(
-    "home-energy-manager/",
-    env!("CARGO_PKG_VERSION")
-);
+const USER_AGENT: &str = concat!("home-energy-manager/", env!("CARGO_PKG_VERSION"));
 
 /// Cached result of the last successful release fetch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,7 +122,10 @@ pub fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
     // The patch component may carry a prerelease suffix (`3-rc.1`); take the
     // leading run of digits.
     let patch_raw = parts.next()?;
-    let patch_digits: String = patch_raw.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let patch_digits: String = patch_raw
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     if patch_digits.is_empty() {
         return None;
     }
@@ -169,8 +169,8 @@ fn http_fetch_latest_release() -> Result<CachedRelease, String> {
         .body_mut()
         .read_to_string()
         .map_err(|e| format!("failed to read GitHub response: {e}"))?;
-    let release: GithubRelease = serde_json::from_str(&body)
-        .map_err(|e| format!("invalid GitHub release response: {e}"))?;
+    let release: GithubRelease =
+        serde_json::from_str(&body).map_err(|e| format!("invalid GitHub release response: {e}"))?;
     Ok(CachedRelease {
         version: strip_v(&release.tag_name).to_string(),
         release_url: release.html_url,
@@ -260,7 +260,9 @@ fn should_trigger_on_demand_refresh(cached: &UpdateState) -> bool {
 /// Returns `disabled: true` when the user has opted out, and
 /// `update_available: false` with no `latest_version` while the cache is
 /// still empty (first ~30s after startup, or while GitHub is unreachable).
-pub async fn get_latest_version(State(state): State<std::sync::Arc<AppState>>) -> (StatusCode, Json<Value>) {
+pub async fn get_latest_version(
+    State(state): State<std::sync::Arc<AppState>>,
+) -> (StatusCode, Json<Value>) {
     let check_enabled = Settings::load().check_for_updates;
     let current = env!("CARGO_PKG_VERSION");
 

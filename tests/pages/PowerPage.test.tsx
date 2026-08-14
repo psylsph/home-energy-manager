@@ -109,6 +109,14 @@ describe('<PowerPage/> — stats, ranges, navigation, states', () => {
   });
 
   describe('live power stats', () => {
+    it('calls live PV output Generating', () => {
+      useInverterStore.setState({ snapshot: makeSnapshot() });
+      render(<PowerPage />);
+
+      expect(screen.getByText('Generating', { exact: true })).toBeDefined();
+      expect(screen.queryByText('Generation', { exact: true })).toBeNull();
+    });
+
     it('shows Waiting for data when no snapshot', async () => {
       render(<PowerPage />);
       const waiting = await screen.findAllByText('Waiting for data');

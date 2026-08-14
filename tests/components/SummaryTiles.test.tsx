@@ -15,6 +15,14 @@ function snapshot(): InverterSnapshot {
 }
 
 describe('<SummaryTiles/> mobile layout', () => {
+  it('does not repeat Today in the Solar tile label', () => {
+    const { unmount } = render(<SummaryTiles snapshot={snapshot()} />);
+
+    expect(screen.getByText('Solar')).toBeDefined();
+    expect(screen.queryByText('Solar Today')).toBeNull();
+    unmount();
+  });
+
   it('hides the Today heading on mobile and restores it on md+', () => {
     render(<SummaryTiles snapshot={snapshot()} />);
 

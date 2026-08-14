@@ -6,9 +6,9 @@ pub mod modbus;
 pub mod octopus;
 pub mod server;
 pub mod settings;
-pub mod update;
 #[cfg(test)]
 mod test_util;
+pub mod update;
 pub mod weather;
 pub mod windows_autostart;
 

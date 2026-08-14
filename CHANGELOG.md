@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.71.11] - 2026-08-14
+
+### Fixed
+
+- **Small dashboard styling details are now cleaner.** The Today summary no longer repeats “Today” in the Solar tile, the Power page now says “Generating”, and the update switch stays aligned beside its wrapped description. Energy-flow dots also keep clear of the battery and grid circles instead of appearing on top of them. (issue #271)
+
 ## [0.71.10] - 2026-08-13
 
 ### Fixed

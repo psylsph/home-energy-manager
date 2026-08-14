@@ -552,9 +552,8 @@ mod tests {
         let capture = LogCaptureLayer::new(ring.clone());
 
         let subscriber = Registry::default().with(capture);
-        let _guard = tracing::dispatcher::set_default(&tracing::dispatcher::Dispatch::new(
-            subscriber,
-        ));
+        let _guard =
+            tracing::dispatcher::set_default(&tracing::dispatcher::Dispatch::new(subscriber));
 
         tracing::info!("test message from log_capture test");
 
@@ -573,9 +572,8 @@ mod tests {
 
         let capture = LogCaptureLayer::new(ring.clone());
         let subscriber = Registry::default().with(capture);
-        let _guard = tracing::dispatcher::set_default(&tracing::dispatcher::Dispatch::new(
-            subscriber,
-        ));
+        let _guard =
+            tracing::dispatcher::set_default(&tracing::dispatcher::Dispatch::new(subscriber));
 
         tracing::info!("this should be filtered out");
         tracing::error!("this should pass");
@@ -596,9 +594,8 @@ mod tests {
         let ring = Arc::new(LogRing::new(20));
         let capture = LogCaptureLayer::new(ring.clone());
         let subscriber = Registry::default().with(capture);
-        let _guard = tracing::dispatcher::set_default(&tracing::dispatcher::Dispatch::new(
-            subscriber,
-        ));
+        let _guard =
+            tracing::dispatcher::set_default(&tracing::dispatcher::Dispatch::new(subscriber));
 
         tracing::warn!(target: "my_module::sub", "danger ahead");
 

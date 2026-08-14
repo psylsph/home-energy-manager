@@ -65,6 +65,18 @@ function resetStore(threshold = 20) {
   });
 }
 
+function pathEndpoints(path: string): [{ x: number; y: number }, { x: number; y: number }] {
+  const values = path.match(/-?\d+(?:\.\d+)?/g)?.map(Number) ?? [];
+  return [
+    { x: values[0] ?? 0, y: values[1] ?? 0 },
+    { x: values.at(-2) ?? 0, y: values.at(-1) ?? 0 },
+  ];
+}
+
+function distance(a: { x: number; y: number }, b: { x: number; y: number }): number {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
 beforeEach(() => {
   cleanup();
   resetStore(20);
@@ -487,6 +499,49 @@ describe('EnergyOrbitDiagram', () => {
     expect(container.querySelector('[data-flow-track-id="discharge_to_grid"]')?.getAttribute('stroke')).toBe(BATTERY_OUTPUT_COLOR);
   });
 
+  it('keeps the battery discharge dot and glow clear of both node boundaries', () => {
+    const { container } = render(
+      <EnergyOrbitDiagram
+        snapshot={makeSnapshot({
+          home_power: 500,
+          battery_power: 2000,
+          battery_state: 'discharging',
+        })}
+      />,
+    );
+
+    const track = container.querySelector('[data-flow-track-id="discharge"]');
+    expect(track).not.toBeNull();
+    const [start, end] = pathEndpoints(track?.getAttribute('d') ?? '');
+
+    // Battery is at (118, 370), Home at (260, 260), and the node radius is
+    // 50. The moving dot's maximum glow radius is 15, so its trajectory must
+    // begin/end at least 15 px beyond either node boundary.
+    expect(distance(start, { x: 118, y: 370 })).toBeGreaterThanOrEqual(65);
+    expect(distance(end, { x: 260, y: 260 })).toBeGreaterThanOrEqual(62.9);
+  });
+
+  it('keeps the battery export dot and glow clear of the grid node', () => {
+    const { container } = render(
+      <EnergyOrbitDiagram
+        snapshot={makeSnapshot({
+          home_power: 500,
+          battery_power: 2000,
+          battery_state: 'discharging',
+        })}
+      />,
+    );
+
+    const track = container.querySelector('[data-flow-track-id="discharge_to_grid"]');
+    expect(track).not.toBeNull();
+    const [start, end] = pathEndpoints(track?.getAttribute('d') ?? '');
+
+    // Battery/grid are both satellites on the outer orbit. The arc endpoints
+    // must leave a full dot+glow clearance rather than ending on the circles.
+    expect(distance(start, { x: 118, y: 370 })).toBeGreaterThanOrEqual(65);
+    expect(distance(end, { x: 402, y: 370 })).toBeGreaterThanOrEqual(62);
+  });
+
   it('battery→grid spoke stays on battery-output green under reduced motion (issue #170)', () => {
     mockMatchMedia({ '(prefers-reduced-motion: reduce)': true });
     const { container } = render(
@@ -549,7 +604,9 @@ describe('EnergyOrbitDiagram', () => {
     const dur = parseFloat(
       container.querySelector('[data-flow-id="solar"]')?.getAttribute('data-duration') ?? '0',
     );
-    expect(dur).toBeGreaterThan(1.2);
+    // Extra endpoint clearance shortens the direct path slightly; the
+    // animation's documented one-second floor still applies.
+    expect(dur).toBeGreaterThanOrEqual(1.0);
     expect(dur).toBeLessThan(8.0);
   });
 

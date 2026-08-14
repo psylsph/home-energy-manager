@@ -55,7 +55,7 @@ use chrono::Timelike;
 
 use crate::server::logs::LogRing;
 use crate::server::ws::ConnectedClients;
-use tokio::sync::{broadcast, Mutex, Notify, oneshot};
+use tokio::sync::{broadcast, oneshot, Mutex, Notify};
 
 use crate::alerts::AlertType;
 use crate::history::HistoryDb;
@@ -74,8 +74,8 @@ use crate::inverter::sanitizer::{
 use crate::inverter::state_machines::{
     build_force_discharge_auto_revert_writes, build_timed_export_disable_writes,
     check_adaptive_charge, check_auto_winter, check_load_limiter_with_other_pause,
-    check_temperature_limiter_after_automation, clear_cosy_slot_registers, cosy_slot_register_writes,
-    persist_cosy_active, should_repair_timed_export,
+    check_temperature_limiter_after_automation, clear_cosy_slot_registers,
+    cosy_slot_register_writes, persist_cosy_active, should_repair_timed_export,
     write_registers_to_inverter, AgileSlotAction,
 };
 pub use crate::inverter::state_machines::{
@@ -4687,9 +4687,18 @@ mod tests {
         use tokio::sync::oneshot;
 
         let writes = vec![
-            RegisterWrite { address: 27, value: 1 },
-            RegisterWrite { address: 59, value: 0 },
-            RegisterWrite { address: 110, value: 100 },
+            RegisterWrite {
+                address: 27,
+                value: 1,
+            },
+            RegisterWrite {
+                address: 59,
+                value: 0,
+            },
+            RegisterWrite {
+                address: 110,
+                value: 100,
+            },
         ];
         let responses: Vec<MockResponse> = writes
             .iter()
@@ -4698,7 +4707,10 @@ mod tests {
         let (_port, _server, mut client) = setup_client_with_server(responses).await;
 
         let (tx, rx) = oneshot::channel();
-        let batch = PendingWriteBatch { writes, completion: Some(tx) };
+        let batch = PendingWriteBatch {
+            writes,
+            completion: Some(tx),
+        };
         drain_write_batches_with_gap(&mut client, vec![batch], Duration::from_millis(1)).await;
 
         assert_eq!(rx.await.unwrap(), WriteOutcome::Ok);
@@ -4714,7 +4726,11 @@ mod tests {
         // write1 (reg 27) is acked; write2 (reg 110) is rejected with a
         // code-0 exception, retried 5× inside write_register then surfaced.
         // Total requests: 1 (write1) + 6 (write2 attempts) = 7.
-        let exc = MockResponse::Exception { slave: 0x11, function: 0x06, code: 0 };
+        let exc = MockResponse::Exception {
+            slave: 0x11,
+            function: 0x06,
+            code: 0,
+        };
         let responses = vec![
             MockResponse::Raw(write_ack_frame(27, 1)),
             exc.clone(),
@@ -4727,15 +4743,28 @@ mod tests {
         let (_port, _server, mut client) = setup_client_with_server(responses).await;
 
         let writes = vec![
-            RegisterWrite { address: 27, value: 1 },
-            RegisterWrite { address: 110, value: 100 },
+            RegisterWrite {
+                address: 27,
+                value: 1,
+            },
+            RegisterWrite {
+                address: 110,
+                value: 100,
+            },
         ];
         let (tx, rx) = oneshot::channel();
-        let batch = PendingWriteBatch { writes, completion: Some(tx) };
+        let batch = PendingWriteBatch {
+            writes,
+            completion: Some(tx),
+        };
         drain_write_batches_with_gap(&mut client, vec![batch], Duration::from_millis(1)).await;
 
         match rx.await.unwrap() {
-            WriteOutcome::Failed { address, value, error } => {
+            WriteOutcome::Failed {
+                address,
+                value,
+                error,
+            } => {
                 assert_eq!(address, 110, "should report the failing register");
                 assert_eq!(value, 100);
                 assert!(
@@ -4758,15 +4787,28 @@ mod tests {
 
         // A single exception response cycles across every retry of both
         // writes (12 requests total), so both registers are rejected.
-        let responses = vec![MockResponse::Exception { slave: 0x11, function: 0x06, code: 0 }];
+        let responses = vec![MockResponse::Exception {
+            slave: 0x11,
+            function: 0x06,
+            code: 0,
+        }];
         let (_port, _server, mut client) = setup_client_with_server(responses).await;
 
         let writes = vec![
-            RegisterWrite { address: 27, value: 1 },
-            RegisterWrite { address: 110, value: 100 },
+            RegisterWrite {
+                address: 27,
+                value: 1,
+            },
+            RegisterWrite {
+                address: 110,
+                value: 100,
+            },
         ];
         let (tx, rx) = oneshot::channel();
-        let batch = PendingWriteBatch { writes, completion: Some(tx) };
+        let batch = PendingWriteBatch {
+            writes,
+            completion: Some(tx),
+        };
         drain_write_batches_with_gap(&mut client, vec![batch], Duration::from_millis(1)).await;
 
         match rx.await.unwrap() {
@@ -4790,8 +4832,14 @@ mod tests {
         use crate::modbus::client::tests::{setup_client_with_server, MockResponse};
 
         let writes = vec![
-            RegisterWrite { address: 27, value: 1 },
-            RegisterWrite { address: 110, value: 100 },
+            RegisterWrite {
+                address: 27,
+                value: 1,
+            },
+            RegisterWrite {
+                address: 110,
+                value: 100,
+            },
         ];
         let responses = vec![
             MockResponse::Raw(write_ack_frame(27, 1)),
@@ -4799,7 +4847,10 @@ mod tests {
         ];
         let (_port, _server, mut client) = setup_client_with_server(responses).await;
 
-        let batch = PendingWriteBatch { writes, completion: None };
+        let batch = PendingWriteBatch {
+            writes,
+            completion: None,
+        };
         // No rx to await — just confirm this returns without hanging.
         drain_write_batches_with_gap(&mut client, vec![batch], Duration::from_millis(1)).await;
     }
@@ -4814,8 +4865,8 @@ mod tests {
         use crate::inverter::encoder::RegisterWrite;
         use crate::inverter::poll::{drain_write_batches_with_gap, PendingWriteBatch};
         use crate::modbus::client::tests::{setup_client_with_server, MockResponse};
-        use tokio::sync::oneshot;
         use std::time::Instant;
+        use tokio::sync::oneshot;
 
         let gap = Duration::from_millis(200);
 
@@ -4828,8 +4879,14 @@ mod tests {
         let (tx, _rx) = oneshot::channel();
         let batch = PendingWriteBatch {
             writes: vec![
-                RegisterWrite { address: 27, value: 1 },
-                RegisterWrite { address: 110, value: 100 },
+                RegisterWrite {
+                    address: 27,
+                    value: 1,
+                },
+                RegisterWrite {
+                    address: 110,
+                    value: 100,
+                },
             ],
             completion: Some(tx),
         };
@@ -4845,8 +4902,14 @@ mod tests {
         let (_port, _server, mut client) = setup_client_with_server(responses).await;
         let batch = PendingWriteBatch {
             writes: vec![
-                RegisterWrite { address: 27, value: 1 },
-                RegisterWrite { address: 110, value: 100 },
+                RegisterWrite {
+                    address: 27,
+                    value: 1,
+                },
+                RegisterWrite {
+                    address: 110,
+                    value: 100,
+                },
             ],
             completion: None,
         };

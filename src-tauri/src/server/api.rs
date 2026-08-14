@@ -332,7 +332,9 @@ async fn capture_discharge_schedule_backup(
         snap.discharge_slots.to_vec()
     };
 
-    let has_any_configured_slot = slots.iter().any(crate::inverter::model::ScheduleSlot::is_configured);
+    let has_any_configured_slot = slots
+        .iter()
+        .any(crate::inverter::model::ScheduleSlot::is_configured);
     if !has_any_configured_slot {
         // Nothing worth backing up — leave the existing backup field alone
         // so a stale snapshot from earlier in the day doesn't get restored
@@ -489,7 +491,11 @@ async fn await_write_outcome_with_timeout(
 ) -> Result<(), String> {
     match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(WriteOutcome::Ok)) => Ok(()),
-        Ok(Ok(WriteOutcome::Failed { address, value, error })) => Err(format!(
+        Ok(Ok(WriteOutcome::Failed {
+            address,
+            value,
+            error,
+        })) => Err(format!(
             "the inverter rejected the write to register {address} (value {value}): {error}"
         )),
         Ok(Err(_)) => Err("the write batch was dropped before completing".to_string()),
@@ -2122,9 +2128,11 @@ pub async fn set_discharge_slot(
                     .discharge_slots
                     .get(slot_index)
                     .is_some_and(crate::inverter::model::ScheduleSlot::is_configured)
-                && snapshot.discharge_slots.iter().enumerate().all(|(index, candidate)| {
-                    index == slot_index || !candidate.is_configured()
-                })
+                && snapshot
+                    .discharge_slots
+                    .iter()
+                    .enumerate()
+                    .all(|(index, candidate)| index == slot_index || !candidate.is_configured())
         })
     };
 
@@ -2584,7 +2592,9 @@ pub async fn unpause_battery(State(state): State<Arc<AppState>>) -> (StatusCode,
             } else {
                 format!(" The inverter rejected the reserve restore ({msg}); please try again.")
             };
-            return error_response(&format!("Resume discharge could not be fully applied.{detail}"));
+            return error_response(&format!(
+                "Resume discharge could not be fully applied.{detail}"
+            ));
         }
     }
     let message = if disabled_load_limiter || disabled_temperature_limiter {
@@ -2913,21 +2923,16 @@ fn resolve_history_summary_window(
         "month" => (0, 3600),
         _ => {
             return Err(
-                "Invalid range. Use: 1h, 6h, 12h, 24h, today, 7d, 30d, 6m, 1y, month"
-                    .to_string(),
+                "Invalid range. Use: 1h, 6h, 12h, 24h, today, 7d, 30d, 6m, 1y, month".to_string(),
             )
         }
     };
 
-    let explicit_window = if let (Some(start_ms), Some(end_ms)) = (params.start_ms, params.end_ms)
-    {
+    let explicit_window = if let (Some(start_ms), Some(end_ms)) = (params.start_ms, params.end_ms) {
         if start_ms >= end_ms {
             return Err("Invalid history window: start_ms must be before end_ms".to_string());
         }
-        Some((
-            start_ms.div_euclid(1000),
-            (end_ms + 999).div_euclid(1000),
-        ))
+        Some((start_ms.div_euclid(1000), (end_ms + 999).div_euclid(1000)))
     } else if rolling && range_str != "month" && range_str != "today" {
         let end_ts = chrono::Utc::now().timestamp() - offset * range_secs;
         Some((end_ts - range_secs, end_ts))
@@ -3339,14 +3344,12 @@ pub async fn get_history_summary(
             0.0,
         )?;
         let days_in_range = crate::history::days_in_local_window(start_ts, end_ts);
-        let standing_charge_gbp =
-            days_in_range as f64 * standing_charge_p_per_day / 100.0;
+        let standing_charge_gbp = days_in_range as f64 * standing_charge_p_per_day / 100.0;
         let counter_import_cost_gbp = import_series
             .last()
             .map(|point| point.v)
             .unwrap_or(standing_charge_gbp);
-        let counter_export_income_gbp =
-            export_series.last().map(|point| point.v).unwrap_or(0.0);
+        let counter_export_income_gbp = export_series.last().map(|point| point.v).unwrap_or(0.0);
 
         // Keep period-summary money aligned with `/api/report`, including its
         // fallback for inverters whose daily grid counters remain at zero.
@@ -3357,8 +3360,7 @@ pub async fn get_history_summary(
             flat_import,
             flat_export,
         )?;
-        let counter_import_energy_gbp =
-            (counter_import_cost_gbp - standing_charge_gbp).max(0.0);
+        let counter_import_energy_gbp = (counter_import_cost_gbp - standing_charge_gbp).max(0.0);
         let import_energy_gbp =
             if counter_import_energy_gbp <= 0.000_001 && grid_fallback.import_kwh > 0.001 {
                 grid_fallback.import_cost_gbp
@@ -6035,12 +6037,17 @@ mod tests {
     async fn set_eco_enable_clears_slots_and_hr59_before_hr27() {
         with_isolated_config_dir_async(|| async {
             use crate::modbus::registers::{
-                HR_BATTERY_POWER_MODE, HR_DISCHARGE_SLOT_1_END,
-                HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END,
-                HR_DISCHARGE_SLOT_2_START, HR_ENABLE_DISCHARGE,
+                HR_BATTERY_POWER_MODE, HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START,
+                HR_DISCHARGE_SLOT_2_END, HR_DISCHARGE_SLOT_2_START, HR_ENABLE_DISCHARGE,
             };
             let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
-            state.latest_snapshot.lock().await.as_mut().unwrap().enable_discharge = true;
+            state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .enable_discharge = true;
             let body = serde_json::json!({ "enabled": true });
             let _ = set_eco(State(state.clone()), Json(body)).await;
             let writes = drain_pending_writes(&state).await;
@@ -6237,16 +6244,14 @@ mod tests {
             use crate::settings::{DischargeSlotBackup, Settings};
             let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
             let mut settings = Settings::load();
-            settings.discharge_slots_backup = Some(vec![
-                DischargeSlotBackup {
-                    enabled: true,
-                    start_hour: 16,
-                    start_minute: 0,
-                    end_hour: 19,
-                    end_minute: 0,
-                    target_soc: 4,
-                },
-            ]);
+            settings.discharge_slots_backup = Some(vec![DischargeSlotBackup {
+                enabled: true,
+                start_hour: 16,
+                start_minute: 0,
+                end_hour: 19,
+                end_minute: 0,
+                target_soc: 4,
+            }]);
             settings.save().unwrap();
 
             let (status, _) = set_timed_export(
@@ -6300,8 +6305,17 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
-            assert_eq!(writes.last().map(|write| (write.address, write.value)), Some((HR_BATTERY_POWER_MODE, 1)));
-            assert_eq!(writes.iter().find(|write| write.address == HR_ENABLE_DISCHARGE).map(|write| write.value), Some(0));
+            assert_eq!(
+                writes.last().map(|write| (write.address, write.value)),
+                Some((HR_BATTERY_POWER_MODE, 1))
+            );
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|write| write.address == HR_ENABLE_DISCHARGE)
+                    .map(|write| write.value),
+                Some(0)
+            );
         })
         .await;
     }
@@ -6326,8 +6340,12 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
-            assert!(!writes.iter().any(|write| write.address == HR_ENABLE_DISCHARGE));
-            assert!(!writes.iter().any(|write| write.address == HR_BATTERY_POWER_MODE));
+            assert!(!writes
+                .iter()
+                .any(|write| write.address == HR_ENABLE_DISCHARGE));
+            assert!(!writes
+                .iter()
+                .any(|write| write.address == HR_BATTERY_POWER_MODE));
         })
         .await;
     }
@@ -7846,8 +7864,7 @@ mod tests {
         // message as before the write-completion plumbing was added.
         with_isolated_config_dir_async(|| async {
             let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
-            let (status, response) =
-                drive_pause_battery_completion(&state).await;
+            let (status, response) = drive_pause_battery_completion(&state).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(response["ok"], json!(true));
             assert_eq!(response["message"], json!("Battery paused"));
@@ -7902,8 +7919,7 @@ mod tests {
         // confirmation). No write should be queued.
         with_isolated_config_dir_async(|| async {
             let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
-            *state.connection_state.lock().await =
-                ConnectionState::Disconnected;
+            *state.connection_state.lock().await = ConnectionState::Disconnected;
             let (status, response) = pause_battery(State(state.clone())).await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
             assert_eq!(response["ok"], json!(false));
@@ -7963,8 +7979,7 @@ mod tests {
         // the frontend's snapshot confirmation remains responsible for the
         // eventual result after the API wait expires.
         let (_tx, rx) = tokio::sync::oneshot::channel::<WriteOutcome>();
-        let result =
-            await_write_outcome_with_timeout(rx, Duration::from_millis(1)).await;
+        let result = await_write_outcome_with_timeout(rx, Duration::from_millis(1)).await;
         assert_eq!(result, Ok(()));
     }
 
@@ -7974,8 +7989,7 @@ mod tests {
         // limiter state is mutated.
         with_isolated_config_dir_async(|| async {
             let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
-            *state.connection_state.lock().await =
-                ConnectionState::Disconnected;
+            *state.connection_state.lock().await = ConnectionState::Disconnected;
             let (status, response) = unpause_battery(State(state.clone())).await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
             assert_eq!(response["ok"], json!(false));
@@ -7998,8 +8012,7 @@ mod tests {
         // accepted, the endpoint returns 200 with the resume message.
         with_isolated_config_dir_async(|| async {
             let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
-            let (status, response) =
-                drive_unpause_battery_completion(&state).await;
+            let (status, response) = drive_unpause_battery_completion(&state).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(response["ok"], json!(true));
             assert!(
