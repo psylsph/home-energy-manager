@@ -349,6 +349,7 @@ export default function SettingsPage() {
     inverter_temp_min: 8, inverter_temp_max: 60,
     soc_min: 4, soc_max: 100,
     grid_offline_enabled: false, inverter_trip_enabled: false, battery_over_temp_enabled: false,
+    battery_connection_lost_enabled: true,
     connection_lost_enabled: false,
     solar_clipping_enabled: false, solar_clipping_ceiling_w: 0,
     ntfy_topic: '',
@@ -2112,6 +2113,18 @@ export default function SettingsPage() {
                   />
                 </label>
               )}
+              <div className="flex items-center justify-between">
+                <span className="text-text-primary text-sm font-sans">
+                  Battery Connection Lost
+                  <span className="block text-text-secondary text-xs font-sans">
+                    Notify when a battery stops responding (e.g. tripped breaker) and reconnects
+                  </span>
+                </span>
+                <Toggle
+                  checked={alertsConfig.battery_connection_lost_enabled}
+                  onChange={(v) => setAlertsConfig((p) => ({ ...p, battery_connection_lost_enabled: v }))}
+                />
+              </div>
               <div className="flex items-center justify-between">
                 <span className="text-text-primary text-sm font-sans">
                   Connection Lost

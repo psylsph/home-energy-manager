@@ -1389,6 +1389,12 @@ pub struct AlertsConfig {
     pub connection_lost_enabled: bool,
     /// Alert on battery over-temperature flag.
     pub battery_over_temp_enabled: bool,
+    /// Notify when a known battery stops answering BMS reads for several
+    /// consecutive poll cycles (issue #272) — e.g. a tripped battery
+    /// breaker — and again when it comes back. Defaults to enabled; older
+    /// settings files written before this field existed get the default.
+    #[serde(default = "default_true")]
+    pub battery_connection_lost_enabled: bool,
     /// Alert when solar generation sustains above the clipping ceiling.
     #[serde(default)]
     pub solar_clipping_enabled: bool,
@@ -1453,6 +1459,7 @@ impl Default for AlertsConfig {
             inverter_trip_enabled: false,
             connection_lost_enabled: false,
             battery_over_temp_enabled: false,
+            battery_connection_lost_enabled: true,
             solar_clipping_enabled: false,
             solar_clipping_ceiling_w: 0,
             ntfy_topic: String::new(),
@@ -1924,6 +1931,7 @@ mod tests {
             "soc_max": 100,
             "grid_offline_enabled": false,
             "battery_over_temp_enabled": false,
+            "battery_connection_lost_enabled": true,
             "solar_clipping_enabled": false,
             "solar_clipping_ceiling_w": 0,
             "ntfy_topic": "",

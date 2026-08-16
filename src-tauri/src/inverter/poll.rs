@@ -522,6 +522,51 @@ impl AppState {
 // Poll-cycle decision helpers
 // ---------------------------------------------------------------------------
 
+/// Feed one battery BMS-read outcome into the alert debounce and fire the
+/// connection-lost / connection-restored notifications at the right
+/// transitions (issue #272).
+///
+/// `read_ok` is the outcome of this cycle's BMS read for the battery at
+/// `slave_addr` (`battery_number` is 1-based, for the notification text).
+/// The debounce requires `BATTERY_CONNECTION_LOST_CONFIRM_CYCLES`
+/// consecutive failures before the lost-notification fires, and the
+/// restored-notification fires on the first successful read after a
+/// confirmed loss.
+async fn track_battery_conn(
+    state: &Arc<AppState>,
+    battery_number: usize,
+    slave_addr: u8,
+    read_ok: bool,
+) {
+    let (lost, restored) = {
+        let mut debounce = state.alert_debounce.lock().await;
+        let was_confirmed = debounce.battery_connection_lost_confirmed(slave_addr);
+        let confirmed_now = debounce.confirm_battery_connection_lost(slave_addr, read_ok);
+        (confirmed_now && !was_confirmed, was_confirmed && read_ok)
+    };
+    if lost {
+        tracing::warn!(
+            "Battery #{battery_number} (0x{slave_addr:02X}) not responding for \
+             {} consecutive cycles — connection lost",
+            crate::alerts::BATTERY_CONNECTION_LOST_CONFIRM_CYCLES,
+        );
+        crate::alerts::send_battery_connection_lost_notification(
+            state, battery_number, slave_addr,
+        )
+        .await;
+    }
+    if restored {
+        tracing::info!(
+            "Battery #{battery_number} (0x{slave_addr:02X}) responding again — \
+             connection restored",
+        );
+        crate::alerts::send_battery_connection_restored_notification(
+            state, battery_number, slave_addr,
+        )
+        .await;
+    }
+}
+
 /// Whether the first successful model-detection poll should immediately
 /// re-poll with the model-specific configuration.
 ///
@@ -1837,6 +1882,9 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                 &data, 0, &mut snapshot, "",
                                             );
                                             tracing::debug!("Battery #1 BMS read OK");
+                                            track_battery_conn(
+                                                &state, 1, 0x32, true,
+                                            ).await;
 
                                             // Override SOC with BMS module SOC (IR 100) only when
                                             // When inverter IR(59) returns 0 (corrupted), calculate
@@ -1854,6 +1902,9 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         }
                                         Err(e) => {
                                             tracing::debug!("Battery #1 BMS read skipped: {e}");
+                                            track_battery_conn(
+                                                &state, 1, 0x32, false,
+                                            ).await;
                                         }
                                     }
 
@@ -1874,6 +1925,9 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                     crate::inverter::decoder::decode_battery_block_into(
                                                         &data, i + 1, &mut snapshot, "",
                                                     );
+                                                    track_battery_conn(
+                                                        &state, i + 2, addr, true,
+                                                    ).await;
                                                     if !known_battery_addrs.contains(&addr) {
                                                         tracing::info!(
                                                             "Battery #{} detected at addr 0x{:02X} (SOC={}%)",
@@ -1891,6 +1945,14 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                         "Battery addr 0x{:02X}: SOC={} - not present",
                                                         addr, soc
                                                     );
+                                                    // Known battery answering with invalid data —
+                                                    // count it as a failed read only for addresses
+                                                    // we have seen answer before.
+                                                    if known_battery_addrs.contains(&addr) {
+                                                        track_battery_conn(
+                                                            &state, i + 2, addr, false,
+                                                        ).await;
+                                                    }
                                                     break;
                                                 }
                                             }
@@ -1899,6 +1961,11 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                     "Battery addr 0x{:02X}: no response: {e}",
                                                     addr
                                                 );
+                                                if known_battery_addrs.contains(&addr) {
+                                                    track_battery_conn(
+                                                        &state, i + 2, addr, false,
+                                                    ).await;
+                                                }
                                                 break;
                                             }
                                         }

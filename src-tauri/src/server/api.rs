@@ -3754,6 +3754,12 @@ pub async fn set_alerts(
     {
         config.battery_over_temp_enabled = v;
     }
+    if let Some(v) = body
+        .get("battery_connection_lost_enabled")
+        .and_then(|v| v.as_bool())
+    {
+        config.battery_connection_lost_enabled = v;
+    }
     if let Some(v) = body.get("solar_clipping_enabled").and_then(|v| v.as_bool()) {
         config.solar_clipping_enabled = v;
     }

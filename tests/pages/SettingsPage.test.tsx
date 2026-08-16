@@ -83,6 +83,7 @@ function alertConfig(overrides: SettingsShape = {}): SettingsShape {
     grid_offline_enabled: false,
     inverter_trip_enabled: false,
     battery_over_temp_enabled: false,
+    battery_connection_lost_enabled: true,
     connection_lost_enabled: false,
     solar_clipping_enabled: false,
     solar_clipping_ceiling_w: 0,

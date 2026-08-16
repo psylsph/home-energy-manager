@@ -52,6 +52,12 @@ pub enum AlertType {
     /// rather than a snapshot-derived alert, so it is fired by the poll
     /// loop directly rather than by [`evaluate_alerts`].
     ConnectionLost,
+    /// A known battery has stopped answering BMS reads for several
+    /// consecutive poll cycles (issue #272) — e.g. its breaker has tripped.
+    /// Like [`ConnectionLost`] this is a connection-state event fired by the
+    /// poll loop, not by [`evaluate_alerts`], because the sanitizer carries
+    /// stale module data forward and the snapshot looks healthy.
+    BatteryConnectionLost,
 }
 
 impl AlertType {
@@ -74,6 +80,7 @@ impl AlertType {
             Self::BatteryOverTemp => "Inverter Battery Warning",
             Self::SolarClipping => "Solar Clipping",
             Self::ConnectionLost => "Inverter Connection Lost",
+            Self::BatteryConnectionLost => "Battery Connection Lost",
         }
     }
 }
@@ -97,6 +104,27 @@ pub(crate) const BATTERY_WARNING_CONFIRM_CYCLES: u32 = 3;
 /// [`AlertDebounce::confirm_solar_clipping`].
 pub(crate) const SOLAR_CLIPPING_CONFIRM_CYCLES: u32 = 3;
 
+/// Number of consecutive poll cycles a known battery's BMS read must fail
+/// before the [`AlertType::BatteryConnectionLost`] alert is allowed to fire
+/// (issue #272). The GivEnergy data adapter returns transient timeouts on
+/// battery slaves during busy poll cycles, and the sanitizer deliberately
+/// carries module data forward on a missed read — only a sustained failure
+/// means the battery has physically disconnected (e.g. tripped breaker).
+pub(crate) const BATTERY_CONNECTION_LOST_CONFIRM_CYCLES: u32 = 3;
+
+/// Per-battery connection-loss tracking state inside [`AlertDebounce`].
+///
+/// `streak` counts consecutive failed BMS reads; `confirmed` latches once
+/// the streak reaches [`BATTERY_CONNECTION_LOST_CONFIRM_CYCLES`] so the
+/// lost-notification fires exactly once, and clears on the first
+/// successful read afterwards (which is when the restored-notification
+/// fires).
+#[derive(Debug, Default, Clone, Copy)]
+struct BatteryConnState {
+    streak: u32,
+    confirmed: bool,
+}
+
 #[derive(Debug)]
 pub struct AlertDebounce {
     /// Map from alert type to the last time it was sent.
@@ -112,6 +140,10 @@ pub struct AlertDebounce {
     /// solar drops back below the ceiling. The `SolarClipping` alert is only
     /// confirmed once this reaches [`SOLAR_CLIPPING_CONFIRM_CYCLES`].
     solar_clipping_streak: u32,
+    /// Per-battery-address connection-loss state (issue #272). Keyed by the
+    /// battery's Modbus slave address (0x32 for battery #1, 0x33+ for
+    /// additional LV batteries / HV BMUs).
+    battery_conn: HashMap<u8, BatteryConnState>,
 }
 
 impl AlertDebounce {
@@ -121,6 +153,7 @@ impl AlertDebounce {
             active: std::collections::HashSet::new(),
             battery_warning_streak: 0,
             solar_clipping_streak: 0,
+            battery_conn: HashMap::new(),
         }
     }
 
@@ -159,6 +192,30 @@ impl AlertDebounce {
             self.solar_clipping_streak = 0;
             false
         }
+    }
+
+    /// Feed this cycle's BMS-read outcome for the battery at `slave_addr`
+    /// and return `true` only if the connection-loss has *newly* been
+    /// confirmed (issue #272). A successful read resets the failure streak
+    /// and clears any previously-confirmed state — the caller fires the
+    /// restored-notification when a previously-confirmed battery reads OK.
+    pub fn confirm_battery_connection_lost(&mut self, slave_addr: u8, read_ok: bool) -> bool {
+        let state = self.battery_conn.entry(slave_addr).or_default();
+        if read_ok {
+            state.streak = 0;
+            state.confirmed = false;
+            false
+        } else {
+            state.streak = state.streak.saturating_add(1);
+            state.confirmed = state.streak >= BATTERY_CONNECTION_LOST_CONFIRM_CYCLES;
+            state.confirmed
+        }
+    }
+
+    /// Whether the battery at `slave_addr` is currently confirmed as
+    /// disconnected (sustained read failures past the threshold).
+    pub fn battery_connection_lost_confirmed(&self, slave_addr: u8) -> bool {
+        self.battery_conn.get(&slave_addr).is_some_and(|s| s.confirmed)
     }
 
     /// Returns `true` if this alert type should fire (cooldown has elapsed).
@@ -203,6 +260,7 @@ impl AlertDebounce {
         self.active.clear();
         self.battery_warning_streak = 0;
         self.solar_clipping_streak = 0;
+        self.battery_conn.clear();
     }
 
     pub fn len(&self) -> usize {
@@ -380,6 +438,34 @@ pub fn build_connection_restored_message(host: &str) -> String {
     msg
 }
 
+/// Build a "battery connection lost" notification message (issue #272).
+/// `battery_number` is 1-based (battery #1 = primary LV pack / first HV
+/// BMU); `slave_addr` is the Modbus address it was last seen at.
+pub fn build_battery_connection_lost_message(battery_number: usize, slave_addr: u8) -> String {
+    let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let mut msg = format!("🔋 HEM Battery Connection Lost — {}\n", time);
+    msg.push_str("━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    msg.push_str(&format!(
+        "Battery <b>#{battery_number}</b> (Modbus 0x{slave_addr:02X}) is not responding.\n",
+    ));
+    msg.push_str(
+        "The inverter is still reachable — check the battery breaker/fuse.\n\
+         Charging and solar self-consumption may be impacted.",
+    );
+    msg
+}
+
+/// Build a "battery connection restored" notification message (issue #272).
+pub fn build_battery_connection_restored_message(battery_number: usize, slave_addr: u8) -> String {
+    let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let mut msg = format!("✅ HEM Battery Connection Restored — {}\n", time);
+    msg.push_str("━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    msg.push_str(&format!(
+        "Battery <b>#{battery_number}</b> (Modbus 0x{slave_addr:02X}) is responding again.",
+    ));
+    msg
+}
+
 /// Send a connection-lost notification to all configured channels. Called
 /// from the poll loop's disconnect path. Honours the `connection_lost_enabled`
 /// toggle and the standard channel-config gates.
@@ -450,6 +536,71 @@ pub async fn send_connection_restored_notification(
         if !pushover_token.is_empty() && !pushover_key.is_empty() {
             if let Err(e) = send_pushover_message(&pushover_token, &pushover_key, &text_clone) {
                 tracing::warn!("Pushover connection-restored notification failed: {e}");
+            }
+        }
+    })
+    .await;
+}
+
+/// Send a battery connection-lost notification to all configured channels
+/// (issue #272). Honours the `battery_connection_lost_enabled` toggle and
+/// the standard channel-config gates.
+pub async fn send_battery_connection_lost_notification(
+    state: &std::sync::Arc<crate::inverter::poll::AppState>,
+    battery_number: usize,
+    slave_addr: u8,
+) {
+    let config = state.alert_config.lock().await.clone();
+    if !config.enabled || !config.battery_connection_lost_enabled {
+        return;
+    }
+    let text = build_battery_connection_lost_message(battery_number, slave_addr);
+    dispatch_alert_text(&config, &text, "battery-connection-lost").await;
+}
+
+/// Send a battery connection-restored notification to all configured
+/// channels (issue #272).
+pub async fn send_battery_connection_restored_notification(
+    state: &std::sync::Arc<crate::inverter::poll::AppState>,
+    battery_number: usize,
+    slave_addr: u8,
+) {
+    let config = state.alert_config.lock().await.clone();
+    if !config.enabled || !config.battery_connection_lost_enabled {
+        return;
+    }
+    let text = build_battery_connection_restored_message(battery_number, slave_addr);
+    dispatch_alert_text(&config, &text, "battery-connection-restored").await;
+}
+
+/// Fan a pre-built alert message out to every configured channel.
+/// Shared by the battery connection-lost/restored senders above.
+async fn dispatch_alert_text(
+    config: &crate::settings::AlertsConfig,
+    text: &str,
+    kind: &'static str,
+) {
+    let token = config.telegram_bot_token.clone();
+    let chat_id = config.telegram_chat_id.clone();
+    let ntfy_topic = config.ntfy_topic.clone();
+    let ntfy_server = config.ntfy_server.clone();
+    let pushover_token = config.pushover_app_token.clone();
+    let pushover_key = config.pushover_user_key.clone();
+    let text_clone = text.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        if !token.is_empty() && !chat_id.is_empty() {
+            if let Err(e) = send_telegram_message(&token, &chat_id, &text_clone) {
+                tracing::warn!("Telegram {kind} notification failed: {e}");
+            }
+        }
+        if !ntfy_topic.is_empty() {
+            if let Err(e) = send_ntfy_message(&ntfy_topic, &ntfy_server, &text_clone) {
+                tracing::warn!("ntfy {kind} notification failed: {e}");
+            }
+        }
+        if !pushover_token.is_empty() && !pushover_key.is_empty() {
+            if let Err(e) = send_pushover_message(&pushover_token, &pushover_key, &text_clone) {
+                tracing::warn!("Pushover {kind} notification failed: {e}");
             }
         }
     })
@@ -1408,6 +1559,7 @@ mod tests {
             grid_offline_enabled: false,
             inverter_trip_enabled: false,
             battery_over_temp_enabled: false,
+            battery_connection_lost_enabled: true,
             connection_lost_enabled: false,
             solar_clipping_enabled: false,
             solar_clipping_ceiling_w: 0,
@@ -1758,6 +1910,97 @@ mod tests {
         }
         d.clear();
         assert!(!d.confirm_battery_warning(true));
+    }
+
+    // ================================================================
+    // Battery connection loss confirmation (issue #272)
+    // ================================================================
+
+    #[test]
+    fn test_battery_conn_not_confirmed_below_threshold() {
+        // A blip of 1-2 failed reads must NOT confirm — dongle transients
+        // are common and the sanitizer carries module data forward, so
+        // only a sustained failure means the battery is really gone.
+        let mut d = AlertDebounce::new();
+        for _ in 0..(BATTERY_CONNECTION_LOST_CONFIRM_CYCLES - 1) {
+            assert!(!d.confirm_battery_connection_lost(0x32, false));
+        }
+        // Still not confirmed; the streak has not reached the threshold.
+        assert!(!d.battery_connection_lost_confirmed(0x32));
+    }
+
+    #[test]
+    fn test_battery_conn_confirmed_after_threshold_cycles() {
+        let mut d = AlertDebounce::new();
+        // Feed failures up to (but not including) the threshold.
+        for _ in 0..(BATTERY_CONNECTION_LOST_CONFIRM_CYCLES - 1) {
+            d.confirm_battery_connection_lost(0x32, false);
+        }
+        // The Nth consecutive failure confirms.
+        assert!(d.confirm_battery_connection_lost(0x32, false));
+        // And stays confirmed while failures continue.
+        assert!(d.confirm_battery_connection_lost(0x32, false));
+    }
+
+    #[test]
+    fn test_battery_conn_streak_resets_on_successful_read() {
+        let mut d = AlertDebounce::new();
+        for _ in 0..(BATTERY_CONNECTION_LOST_CONFIRM_CYCLES - 1) {
+            d.confirm_battery_connection_lost(0x32, false);
+        }
+        // A single successful read resets the streak — a battery that
+        // answers intermittently must not accumulate to a false positive.
+        assert!(!d.confirm_battery_connection_lost(0x32, true));
+        assert!(!d.battery_connection_lost_confirmed(0x32));
+        // One more failure is not enough to re-confirm.
+        assert!(!d.confirm_battery_connection_lost(0x32, false));
+    }
+
+    #[test]
+    fn test_battery_conn_recovery_after_confirmed() {
+        // Once confirmed, a successful read must clear the confirmed state
+        // so the cleared-notification fires exactly once and a subsequent
+        // failure sequence can re-alert.
+        let mut d = AlertDebounce::new();
+        while !d.confirm_battery_connection_lost(0x32, false) {}
+        assert!(d.battery_connection_lost_confirmed(0x32));
+        // Successful read — no longer confirmed.
+        assert!(!d.confirm_battery_connection_lost(0x32, true));
+        assert!(!d.battery_connection_lost_confirmed(0x32));
+        // A fresh failure streak re-confirms (breaker tripped again).
+        while !d.confirm_battery_connection_lost(0x32, false) {}
+        assert!(d.battery_connection_lost_confirmed(0x32));
+    }
+
+    #[test]
+    fn test_battery_conn_tracks_addresses_independently() {
+        // Two batteries: #1 at 0x32 keeps answering, #2 at 0x33 fails.
+        // The failure of one must not affect the other's state.
+        let mut d = AlertDebounce::new();
+        for _ in 0..(BATTERY_CONNECTION_LOST_CONFIRM_CYCLES - 1) {
+            d.confirm_battery_connection_lost(0x32, true);
+            d.confirm_battery_connection_lost(0x33, false);
+        }
+        assert!(!d.battery_connection_lost_confirmed(0x32));
+        assert!(!d.battery_connection_lost_confirmed(0x33));
+        // Nth failure for 0x33 only.
+        assert!(d.confirm_battery_connection_lost(0x33, false));
+        assert!(d.battery_connection_lost_confirmed(0x33));
+        assert!(!d.battery_connection_lost_confirmed(0x32));
+    }
+
+    #[test]
+    fn test_battery_conn_clear_wipes_all_addresses() {
+        // clear() (settings save) must forget every address's streak and
+        // confirmed state, not just a single one.
+        let mut d = AlertDebounce::new();
+        while !d.confirm_battery_connection_lost(0x32, false) {}
+        d.confirm_battery_connection_lost(0x33, false);
+        d.clear();
+        assert!(!d.battery_connection_lost_confirmed(0x32));
+        assert!(!d.battery_connection_lost_confirmed(0x33));
+        // Post-clear, a single failure does not confirm.
+        assert!(!d.confirm_battery_connection_lost(0x32, false));
     }
 
     // ================================================================
@@ -2289,6 +2532,22 @@ mod tests {
         let msg = build_connection_restored_message("inverter.local");
         assert!(msg.contains("Connection Restored"));
         assert!(msg.contains("inverter.local"));
+    }
+
+    #[test]
+    fn test_build_battery_conn_lost_message_mentions_battery() {
+        let msg = build_battery_connection_lost_message(2, 0x33);
+        assert!(msg.contains("Battery Connection Lost"));
+        assert!(msg.contains("#2"));
+        assert!(msg.contains("0x33"));
+    }
+
+    #[test]
+    fn test_build_battery_conn_restored_message_mentions_battery() {
+        let msg = build_battery_connection_restored_message(1, 0x32);
+        assert!(msg.contains("Battery Connection Restored"));
+        assert!(msg.contains("#1"));
+        assert!(msg.contains("0x32"));
     }
 
     #[test]
