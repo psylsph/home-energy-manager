@@ -100,6 +100,7 @@ describe('<PowerPage/> — stats, ranges, navigation, states', () => {
       snapshot: null,
       chartRange: '24h',
       gridLineWeight: 'normal',
+      visualNoiseThreshold: 20,
     });
   });
 
@@ -115,6 +116,58 @@ describe('<PowerPage/> — stats, ranges, navigation, states', () => {
 
       expect(screen.getByText('Generating', { exact: true })).toBeDefined();
       expect(screen.queryByText('Generation', { exact: true })).toBeNull();
+    });
+
+    it('shows Idle instead of Generating when PV output is zero', () => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ solar_power: 0, pv1_power: 0, pv2_power: 0 }),
+      });
+      render(<PowerPage />);
+
+      expect(screen.queryByText('Generating', { exact: true })).toBeNull();
+      expect(screen.getByText('Idle', { exact: true })).toBeDefined();
+    });
+
+    it('treats sub-threshold PV standby draw as Idle, not Generating (issue #273)', () => {
+      // At night the PV meters read the inverter's own self-consumption
+      // (the reporter's meter showed 16W) — below the default 20W visual
+      // noise threshold this must read as a dark Idle 0W tile.
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ solar_power: 16, pv1_power: 16, pv2_power: 0 }),
+      });
+      const { container } = render(<PowerPage />);
+
+      expect(screen.queryByText('Generating', { exact: true })).toBeNull();
+      expect(screen.getAllByText('Idle').length).toBeGreaterThan(0);
+      expect(container.textContent).toContain('0W');
+    });
+
+    it('shows Generating when PV output rises above the noise threshold', () => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ solar_power: 25, pv1_power: 25, pv2_power: 0 }),
+        visualNoiseThreshold: 20,
+      });
+      render(<PowerPage />);
+
+      expect(screen.getByText('Generating', { exact: true })).toBeDefined();
+    });
+
+    it('follows a raised noise threshold: 30W reads Idle at 50W, Generating at 60W', () => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ solar_power: 30, pv1_power: 30, pv2_power: 0 }),
+        visualNoiseThreshold: 50,
+      });
+      const idleRender = render(<PowerPage />);
+      expect(idleRender.container.textContent).toContain('Idle');
+      expect(idleRender.container.textContent).not.toContain('Generating');
+      cleanup();
+
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ solar_power: 60, pv1_power: 60, pv2_power: 0 }),
+        visualNoiseThreshold: 50,
+      });
+      const genRender = render(<PowerPage />);
+      expect(genRender.container.textContent).toContain('Generating');
     });
 
     it('shows Waiting for data when no snapshot', async () => {

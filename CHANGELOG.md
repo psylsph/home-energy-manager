@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.72.1] - 2026-08-16
+
+### Fixed
+
+- **The Power page no longer says "Generating" when the panels are producing nothing.** The Combined PV tile's status word was fixed text rather than being derived from the live reading, so it read "Generating" even at night. At dusk the PV meters pick up a few watts of the inverter's own standby draw (a 16W reading in the report), which also lit the tile up as if the panels were working. The tile now follows the same noise threshold as the energy-flow diagram: real production says "Generating", standby draw and darkness say "Idle" with the value shown as 0W. (issue #273)
+
 ## [0.71.11] - 2026-08-14
 
 ### Fixed

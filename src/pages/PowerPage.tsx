@@ -717,6 +717,7 @@ function exportPowerPDF(report: PowerReport, rows: PowerRow[]): 'opened' | 'down
 
 export default function PowerPage() {
   const snapshot = useInverterStore((state) => state.snapshot);
+  const noise = useInverterStore((state) => state.visualNoiseThreshold);
   const range = useInverterStore((state) => state.chartRange);
   const setRange = useInverterStore((state) => state.setChartRange);
   const gridLineWeight = useInverterStore((state) => state.gridLineWeight);
@@ -918,6 +919,14 @@ export default function PowerPage() {
   const currentBattery = snapshot?.battery_power ?? 0;
   const currentGrid = snapshot?.grid_power ?? 0;
   const currentHome = Math.max(snapshot?.home_power ?? 0, 0);
+  // Solar direction + value honour the visual noise threshold (same rule as
+  // the orbit diagram): the PV meters read a few tens of watts of inverter
+  // self-consumption at night, and that standby draw must not light up the
+  // tile as "Generating" (issue #273).
+  const solarGenerating = currentSolar > noise;
+  const solarDirection = solarGenerating ? 'Generating' : 'Idle';
+  const solarColor = solarGenerating ? '#F59E0B' : '#8B949E';
+  const solarDisplay = solarGenerating ? currentSolar : 0;
   const batteryDirection = currentBattery > 0 ? 'Discharging' : currentBattery < 0 ? 'Charging' : 'Idle';
   const batteryColor = currentBattery > 0 ? '#22C55E' : currentBattery < 0 ? '#6366F1' : '#8B949E';
   const gridDirection = currentGrid < 0 ? 'Importing' : currentGrid > 0 ? 'Exporting' : 'Idle';
@@ -940,9 +949,9 @@ export default function PowerPage() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <PowerStat
           label="Combined PV"
-          value={currentSolar}
-          color="#F59E0B"
-          direction="Generating"
+          value={solarDisplay}
+          color={solarColor}
+          direction={solarDirection}
           waiting={waitingForLiveData}
         />
         <PowerStat
