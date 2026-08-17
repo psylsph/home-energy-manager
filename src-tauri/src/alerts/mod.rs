@@ -125,6 +125,83 @@ struct BatteryConnState {
     confirmed: bool,
 }
 
+/// Transition flags returned by [`AlertDebounce::confirm_battery_voltage_mismatch`]:
+/// `lost` is `true` only on the cycle the sustained mismatch is newly
+/// confirmed, `restored` is `true` only on the first healthy cycle after a
+/// confirmed loss. Both are `false` otherwise, so each notification fires
+/// exactly once per episode.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BatteryConnTransition {
+    pub lost: bool,
+    pub restored: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Battery voltage mismatch (breaker-trip detection, issue #272)
+// ---------------------------------------------------------------------------
+
+/// Fraction of the healthiest module voltage below which the inverter-side
+/// battery voltage counts as a mismatch (issue #272). Calibrated against
+/// the reporter's field evidence:
+///
+/// - Normal operation: inverter-side 53.4 V vs modules 53.3 / 53.0 V (~100%).
+/// - Breaker tripped: inverter-side 7.0–7.1 V vs modules 53.2 / 52.9 V
+///   (~13%).
+///
+/// 50% sits safely between the two and tolerates sensor drift, load sag
+/// and cable drop without firing on healthy systems. The comparison is
+/// deliberately *relative* — no hard-coded pack voltage — so other LV pack
+/// nominal voltages and future systems behave identically. See
+/// [`battery_voltage_mismatch`].
+pub(crate) const BATTERY_VOLTAGE_MISMATCH_RATIO: f32 = 0.5;
+
+/// Pure decision helper: does the inverter-side battery voltage indicate a
+/// tripped battery breaker / open DC path (issue #272)?
+///
+/// When the battery breaker trips the battery keeps powering its own BMS
+/// (which therefore still answers Modbus reads with healthy pack
+/// voltages), but the inverter-side battery voltage collapses. This
+/// function compares the two ends of the DC path:
+///
+/// - `module_voltages` are the BMS-reported pack voltages
+///   (`BatteryModule::voltage`); readings that are non-finite or ≤ 0 are
+///   discarded as garbage.
+/// - The reference is the **healthiest (max) valid module voltage** — a
+///   single healthy pack alongside a sagging one still proves the stack is
+///   alive.
+/// - A mismatch is reported only when `inverter_voltage` is finite **and**
+///   below [`BATTERY_VOLTAGE_MISMATCH_RATIO`] × reference. An inverter
+///   voltage of exactly `0.0` is a valid reading (complete disconnect) and
+///   counts as a mismatch.
+///
+/// If no valid module reading remains (empty list or all garbage) the
+/// function returns `false` — there is no trustworthy reference to judge
+/// against. Note the sanitizer deliberately carries stale module data
+/// forward on missed BMS reads; gating on *fresh* module data is the poll
+/// loop's job (see the battery-connection-lost tracking), not this pure
+/// helper's.
+pub fn battery_voltage_mismatch(inverter_voltage: f32, module_voltages: &[f32]) -> bool {
+    // Garbage inverter reading — cannot judge. Negative values are corrupt
+    // (mirrors the sanitizer's battery-voltage range check, which treats
+    // < 0.0 as an out-of-range register), while 0.0 is a valid reading.
+    if !inverter_voltage.is_finite() || inverter_voltage < 0.0 {
+        return false;
+    }
+    // Healthiest valid module voltage is the reference for the stack.
+    let Some(reference) = module_voltages
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .max_by(|a, b| a.total_cmp(b))
+    else {
+        // No valid module readings — no trustworthy reference.
+        return false;
+    };
+    // Drastically below the healthy stack → breaker / DC-path fault.
+    // 0.0 is a valid reading here (complete disconnect).
+    inverter_voltage < reference * BATTERY_VOLTAGE_MISMATCH_RATIO
+}
+
 #[derive(Debug)]
 pub struct AlertDebounce {
     /// Map from alert type to the last time it was sent.
@@ -144,6 +221,12 @@ pub struct AlertDebounce {
     /// battery's Modbus slave address (0x32 for battery #1, 0x33+ for
     /// additional LV batteries / HV BMUs).
     battery_conn: HashMap<u8, BatteryConnState>,
+    /// System-level voltage-mismatch state (issue #272, breaker-trip case).
+    /// Unlike `battery_conn` this cannot attribute a slave address — the
+    /// inverter-side voltage is a single reading for the whole battery
+    /// stack — so it is tracked standalone rather than in the per-battery
+    /// map.
+    battery_voltage_mismatch_state: BatteryConnState,
 }
 
 impl AlertDebounce {
@@ -154,6 +237,7 @@ impl AlertDebounce {
             battery_warning_streak: 0,
             solar_clipping_streak: 0,
             battery_conn: HashMap::new(),
+            battery_voltage_mismatch_state: BatteryConnState::default(),
         }
     }
 
@@ -218,6 +302,38 @@ impl AlertDebounce {
         self.battery_conn.get(&slave_addr).is_some_and(|s| s.confirmed)
     }
 
+    /// Feed this cycle's system-level voltage-mismatch flag (issue #272,
+    /// breaker-trip case) and return the transitions that fire this cycle.
+    ///
+    /// `mismatch` is the output of [`battery_voltage_mismatch`] — the
+    /// inverter-side battery voltage has collapsed while the BMS still
+    /// reports healthy module voltages. Like the per-battery tracker, the
+    /// streak must reach [`BATTERY_CONNECTION_LOST_CONFIRM_CYCLES`]
+    /// consecutive cycles before the loss is confirmed, `lost` fires only
+    /// on the transition into confirmed, and `restored` fires exactly once
+    /// on the first healthy cycle after a confirmed loss.
+    pub fn confirm_battery_voltage_mismatch(&mut self, mismatch: bool) -> BatteryConnTransition {
+        let was_confirmed = self.battery_voltage_mismatch_state.confirmed;
+        let state = &mut self.battery_voltage_mismatch_state;
+        if mismatch {
+            state.streak = state.streak.saturating_add(1);
+            state.confirmed = state.streak >= BATTERY_CONNECTION_LOST_CONFIRM_CYCLES;
+        } else {
+            state.streak = 0;
+            state.confirmed = false;
+        }
+        BatteryConnTransition {
+            lost: state.confirmed && !was_confirmed,
+            restored: was_confirmed && !state.confirmed,
+        }
+    }
+
+    /// Whether the system-level battery voltage mismatch is currently
+    /// confirmed (sustained for [`BATTERY_CONNECTION_LOST_CONFIRM_CYCLES`]).
+    pub fn battery_voltage_mismatch_confirmed(&self) -> bool {
+        self.battery_voltage_mismatch_state.confirmed
+    }
+
     /// Returns `true` if this alert type should fire (cooldown has elapsed).
     pub fn should_fire(&mut self, alert_type: AlertType, cooldown_minutes: u32) -> bool {
         let cooldown = std::time::Duration::from_secs(cooldown_minutes as u64 * 60);
@@ -261,6 +377,7 @@ impl AlertDebounce {
         self.battery_warning_streak = 0;
         self.solar_clipping_streak = 0;
         self.battery_conn.clear();
+        self.battery_voltage_mismatch_state = BatteryConnState::default();
     }
 
     pub fn len(&self) -> usize {
@@ -2001,6 +2118,132 @@ mod tests {
         assert!(!d.battery_connection_lost_confirmed(0x33));
         // Post-clear, a single failure does not confirm.
         assert!(!d.confirm_battery_connection_lost(0x32, false));
+    }
+
+    // ================================================================
+    // battery_voltage_mismatch (issue #272, breaker-trip detection)
+    // ================================================================
+
+    #[test]
+    fn test_voltage_mismatch_normal_readings() {
+        // Reporter's "normal" field evidence: inverter-side 53.4 V vs
+        // module voltages 53.3 / 53.0 V — same pack seen from both ends.
+        assert!(!battery_voltage_mismatch(53.4, &[53.3, 53.0]));
+    }
+
+    #[test]
+    fn test_voltage_mismatch_debounce_requires_three_cycles() {
+        let mut d = AlertDebounce::new();
+        // Cycle 1 and 2: not confirmed, no transition.
+        assert!(!d.confirm_battery_voltage_mismatch(true).lost);
+        assert!(!d.confirm_battery_voltage_mismatch(true).lost);
+        // Cycle 3: newly confirmed — exactly one lost transition.
+        assert!(d.confirm_battery_voltage_mismatch(true).lost);
+        // Cycle 4+: still mismatching, but no repeat notification.
+        assert!(!d.confirm_battery_voltage_mismatch(true).lost);
+        assert!(!d.confirm_battery_voltage_mismatch(true).lost);
+    }
+
+    #[test]
+    fn test_voltage_mismatch_debounce_restored_exactly_once() {
+        let mut d = AlertDebounce::new();
+        for _ in 0..BATTERY_CONNECTION_LOST_CONFIRM_CYCLES {
+            d.confirm_battery_voltage_mismatch(true);
+        }
+        assert!(d.battery_voltage_mismatch_confirmed());
+        // First healthy cycle after confirmation: restored fires exactly once.
+        let t = d.confirm_battery_voltage_mismatch(false);
+        assert!(t.restored);
+        assert!(!t.lost);
+        assert!(!d.battery_voltage_mismatch_confirmed());
+        // Subsequent healthy cycles: nothing.
+        let t = d.confirm_battery_voltage_mismatch(false);
+        assert!(!t.restored && !t.lost);
+    }
+
+    #[test]
+    fn test_voltage_mismatch_debounce_false_resets_streak() {
+        let mut d = AlertDebounce::new();
+        // Build up almost to the threshold, then a healthy cycle resets.
+        for _ in 0..(BATTERY_CONNECTION_LOST_CONFIRM_CYCLES - 1) {
+            assert!(!d.confirm_battery_voltage_mismatch(true).lost);
+        }
+        assert!(!d.confirm_battery_voltage_mismatch(false).lost);
+        // One mismatch afterwards is not enough again.
+        assert!(!d.confirm_battery_voltage_mismatch(true).lost);
+        assert!(!d.battery_voltage_mismatch_confirmed());
+    }
+
+    #[test]
+    fn test_voltage_mismatch_debounce_clear_resets() {
+        let mut d = AlertDebounce::new();
+        for _ in 0..BATTERY_CONNECTION_LOST_CONFIRM_CYCLES {
+            d.confirm_battery_voltage_mismatch(true);
+        }
+        assert!(d.battery_voltage_mismatch_confirmed());
+        d.clear();
+        assert!(!d.battery_voltage_mismatch_confirmed());
+        // Streak was reset too: two mismatches after clear are not enough.
+        assert!(!d.confirm_battery_voltage_mismatch(true).lost);
+        assert!(!d.confirm_battery_voltage_mismatch(true).lost);
+    }
+
+    #[test]
+    fn test_voltage_mismatch_reporter_tripped_case() {
+        // Reporter's "breaker tripped" evidence: inverter-side collapsed to
+        // ~7.0 V while both modules still read healthy (53.2 / 52.9 V).
+        assert!(battery_voltage_mismatch(7.0, &[53.2, 52.9]));
+    }
+
+    #[test]
+    fn test_voltage_mismatch_small_difference() {
+        // A few volts of sag/cable drop is normal under load — must not fire.
+        assert!(!battery_voltage_mismatch(51.0, &[53.0]));
+    }
+
+    #[test]
+    fn test_voltage_mismatch_empty_module_list() {
+        // No module readings → cannot judge → no alert.
+        assert!(!battery_voltage_mismatch(53.4, &[]));
+    }
+
+    #[test]
+    fn test_voltage_mismatch_non_finite_inverter_voltage() {
+        // NaN/inf inverter reading is garbage, not evidence of a breaker.
+        assert!(!battery_voltage_mismatch(f32::NAN, &[53.0, 52.9]));
+        assert!(!battery_voltage_mismatch(f32::INFINITY, &[53.0, 52.9]));
+    }
+
+    #[test]
+    fn test_voltage_mismatch_non_positive_inverter_voltage() {
+        // The helper only refuses to judge *garbage* readings; a hard 0.0 V
+        // is a valid reading. Zero with healthy modules is a complete
+        // disconnect and counts as a mismatch. (Stale module data carried
+        // forward by the sanitizer is gated by the poll loop, not here.)
+        assert!(!battery_voltage_mismatch(-1.0, &[53.0]));
+        assert!(battery_voltage_mismatch(0.0, &[53.0, 52.9]));
+    }
+
+    #[test]
+    fn test_voltage_mismatch_ignores_invalid_module_readings() {
+        // One corrupted module reading (0.0 / NaN) must not poison the
+        // reference — judgement is on the valid reading(s) only.
+        assert!(battery_voltage_mismatch(7.0, &[0.0, 53.2]));
+        assert!(!battery_voltage_mismatch(7.0, &[f32::NAN]));
+        // All-invalid module list → no valid reference → cannot judge.
+        assert!(!battery_voltage_mismatch(7.0, &[0.0, f32::NAN, -5.0]));
+    }
+
+    #[test]
+    fn test_voltage_mismatch_uses_healthiest_module_as_reference() {
+        // Mixed stack (e.g. one module reporting sag): the healthiest pack
+        // is the reference, so a healthy module alongside a sagging one
+        // still flags the inverter-side collapse.
+        assert!(battery_voltage_mismatch(20.0, &[53.0, 45.0]));
+        // 30.0 V is above 50% of the healthiest module (26.5) — conservative
+        // threshold says NOT a mismatch even though it's below the sagging
+        // module's own 50% point. The rule fires only on drastic collapse.
+        assert!(!battery_voltage_mismatch(30.0, &[53.0, 45.0]));
     }
 
     // ================================================================
