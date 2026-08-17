@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.73.0] - 2026-08-17
+
+### Added
+
+- **A tripped battery breaker now raises the Battery Connection Lost alert.** When the DC breaker between battery and inverter trips, the battery keeps talking to the app and state of charge stays put, so until now nothing looked wrong. The app now compares the voltage the inverter sees against the voltage the battery itself reports: if the inverter-side reading collapses while the battery's own stays healthy, you get an alert naming the suspected breaker and another when voltage returns. It rides the existing Battery Connection Lost toggle, needs no new settings, and stays quiet when the whole battery stack goes offline (the per-battery alert already covers that). (issue #272)
+
+## [0.72.0] - 2026-08-16
+
+### Added
+
+- **The app now tells you when a battery drops off the network.** If a battery stops answering — switched off at the unit, comms unplugged — you get a Battery Connection Lost alert, and another when it comes back. Works per battery, rides the existing alert channels, and is on by default under the Battery Connection Lost toggle in Settings. (issue #272)
+
 ## [0.72.1] - 2026-08-16
 
 ### Fixed
