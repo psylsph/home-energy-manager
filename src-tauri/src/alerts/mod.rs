@@ -188,18 +188,38 @@ pub fn battery_voltage_mismatch(inverter_voltage: f32, module_voltages: &[f32]) 
         return false;
     }
     // Healthiest valid module voltage is the reference for the stack.
-    let Some(reference) = module_voltages
-        .iter()
-        .copied()
-        .filter(|v| v.is_finite() && *v > 0.0)
-        .max_by(|a, b| a.total_cmp(b))
-    else {
+    let Some(reference) = healthiest_module_voltage(module_voltages) else {
         // No valid module readings — no trustworthy reference.
         return false;
     };
     // Drastically below the healthy stack → breaker / DC-path fault.
     // 0.0 is a valid reading here (complete disconnect).
     inverter_voltage < reference * BATTERY_VOLTAGE_MISMATCH_RATIO
+}
+
+/// The healthiest (max) valid module voltage in `module_voltages`, after
+/// discarding non-finite and non-positive garbage readings. This is the
+/// reference the mismatch comparison judges the inverter-side voltage
+/// against, and the value quoted in the notification text. Returns `None`
+/// when no reading is trustworthy.
+pub fn healthiest_module_voltage(module_voltages: &[f32]) -> Option<f32> {
+    module_voltages
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .max_by(|a, b| a.total_cmp(b))
+}
+
+/// Whether a system-level voltage-mismatch notification should actually be
+/// sent this cycle (issue #272). Suppressed when the per-battery detector
+/// already has any battery confirmed lost: the per-battery notifications
+/// have already fired for that episode (e.g. the whole stack went silent),
+/// so a system-level message would only duplicate them.
+pub fn mismatch_notification_due(
+    transition: BatteryConnTransition,
+    any_battery_conn_lost: bool,
+) -> bool {
+    (transition.lost || transition.restored) && !any_battery_conn_lost
 }
 
 #[derive(Debug)]
@@ -300,6 +320,14 @@ impl AlertDebounce {
     /// disconnected (sustained read failures past the threshold).
     pub fn battery_connection_lost_confirmed(&self, slave_addr: u8) -> bool {
         self.battery_conn.get(&slave_addr).is_some_and(|s| s.confirmed)
+    }
+
+    /// Whether ANY battery is currently confirmed lost via the per-battery
+    /// BMS-read tracker. Used to suppress the system-level voltage-mismatch
+    /// notification when the per-battery notifications have already fired
+    /// for the same episode (issue #272).
+    pub fn any_battery_connection_lost(&self) -> bool {
+        self.battery_conn.values().any(|s| s.confirmed)
     }
 
     /// Feed this cycle's system-level voltage-mismatch flag (issue #272,
@@ -583,6 +611,36 @@ pub fn build_battery_connection_restored_message(battery_number: usize, slave_ad
     msg
 }
 
+/// Build the system-level voltage-mismatch "connection lost" message
+/// (issue #272, breaker-trip case). Same heading as the per-battery
+/// variant so users see one alert family; the body explains the
+/// inverter-versus-BMS voltage evidence.
+pub fn build_battery_voltage_mismatch_message(inverter_v: f32, module_v: f32) -> String {
+    let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let mut msg = format!("🔋 HEM Battery Connection Lost — {}\n", time);
+    msg.push_str("━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    msg.push_str(&format!(
+        "Inverter battery voltage has collapsed to <b>{inverter_v:.1} V</b> while the battery still reports <b>{module_v:.1} V</b>.\n",
+    ));
+    msg.push_str(
+        "The battery is communicating normally — check the battery breaker/fuse on the DC path.\n\
+         Charging and solar self-consumption may be impacted.",
+    );
+    msg
+}
+
+/// Build the system-level voltage-mismatch "connection restored" message
+/// (issue #272, breaker-trip case).
+pub fn build_battery_voltage_mismatch_restored_message(inverter_v: f32) -> String {
+    let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let mut msg = format!("✅ HEM Battery Connection Restored — {}\n", time);
+    msg.push_str("━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    msg.push_str(&format!(
+        "Inverter battery voltage has returned to normal ({inverter_v:.1} V).",
+    ));
+    msg
+}
+
 /// Send a connection-lost notification to all configured channels. Called
 /// from the poll loop's disconnect path. Honours the `connection_lost_enabled`
 /// toggle and the standard channel-config gates.
@@ -688,6 +746,38 @@ pub async fn send_battery_connection_restored_notification(
     }
     let text = build_battery_connection_restored_message(battery_number, slave_addr);
     dispatch_alert_text(&config, &text, "battery-connection-restored").await;
+}
+
+/// Send the system-level voltage-mismatch "connection lost" notification
+/// (issue #272, breaker-trip case: inverter-side voltage collapsed while
+/// the BMS still reports healthy module voltages). Same toggles as the
+/// per-battery variant; the poll loop additionally suppresses it when any
+/// battery is already confirmed lost via the per-battery path.
+pub async fn send_battery_voltage_mismatch_notification(
+    state: &std::sync::Arc<crate::inverter::poll::AppState>,
+    inverter_v: f32,
+    module_v: f32,
+) {
+    let config = state.alert_config.lock().await.clone();
+    if !config.enabled || !config.battery_connection_lost_enabled {
+        return;
+    }
+    let text = build_battery_voltage_mismatch_message(inverter_v, module_v);
+    dispatch_alert_text(&config, &text, "battery-voltage-mismatch").await;
+}
+
+/// Send the system-level voltage-mismatch "connection restored"
+/// notification (issue #272, breaker-trip case).
+pub async fn send_battery_voltage_mismatch_restored_notification(
+    state: &std::sync::Arc<crate::inverter::poll::AppState>,
+    inverter_v: f32,
+) {
+    let config = state.alert_config.lock().await.clone();
+    if !config.enabled || !config.battery_connection_lost_enabled {
+        return;
+    }
+    let text = build_battery_voltage_mismatch_restored_message(inverter_v);
+    dispatch_alert_text(&config, &text, "battery-voltage-mismatch-restored").await;
 }
 
 /// Fan a pre-built alert message out to every configured channel.
@@ -2172,6 +2262,66 @@ mod tests {
         // One mismatch afterwards is not enough again.
         assert!(!d.confirm_battery_voltage_mismatch(true).lost);
         assert!(!d.battery_voltage_mismatch_confirmed());
+    }
+
+    // ================================================================
+    // System-level mismatch notifications (issue #272, Task 3)
+    // ================================================================
+
+    #[test]
+    fn test_voltage_mismatch_message_contains_evidence_and_advice() {
+        // Reporter's field evidence: inverter collapsed to 7.0 V while the
+        // BMS still reported 53.2 V (breaker tripped, battery healthy).
+        let msg = build_battery_voltage_mismatch_message(7.0, 53.2);
+        assert!(msg.contains("HEM Battery Connection Lost"));
+        assert!(msg.contains("7.0 V"));
+        assert!(msg.contains("53.2 V"));
+        assert!(msg.contains("breaker"));
+    }
+
+    #[test]
+    fn test_voltage_mismatch_restored_message_contains_voltage() {
+        let msg = build_battery_voltage_mismatch_restored_message(53.1);
+        assert!(msg.contains("HEM Battery Connection Restored"));
+        assert!(msg.contains("53.1 V"));
+    }
+
+    #[test]
+    fn test_any_battery_connection_lost() {
+        let mut d = AlertDebounce::new();
+        // No per-battery state at all → false.
+        assert!(!d.any_battery_connection_lost());
+        // Battery #1 (0x32) confirmed lost → true.
+        for _ in 0..BATTERY_CONNECTION_LOST_CONFIRM_CYCLES {
+            d.confirm_battery_connection_lost(0x32, false);
+        }
+        assert!(d.any_battery_connection_lost());
+    }
+
+    #[test]
+    fn test_mismatch_notification_suppressed_when_battery_conn_lost() {
+        // The whole-stack dropout case: the per-battery detector already
+        // fired, so the system-level mismatch notification must not send.
+        let transition = BatteryConnTransition {
+            lost: true,
+            restored: false,
+        };
+        assert!(!mismatch_notification_due(transition, true));
+        // Breaker-trip case: no per-battery loss confirmed → sends.
+        assert!(mismatch_notification_due(transition, false));
+        // No transition at all → never sends.
+        assert!(!mismatch_notification_due(
+            BatteryConnTransition::default(),
+            false
+        ));
+    }
+
+    #[test]
+    fn test_healthiest_module_voltage_filters_garbage() {
+        // NaN and 0.0 readings are discarded; the max valid wins.
+        assert_eq!(healthiest_module_voltage(&[f32::NAN, 0.0, 53.2, 52.9]), Some(53.2));
+        assert_eq!(healthiest_module_voltage(&[]), None);
+        assert_eq!(healthiest_module_voltage(&[0.0, f32::NAN]), None);
     }
 
     #[test]

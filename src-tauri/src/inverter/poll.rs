@@ -2985,6 +2985,18 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 // Evaluate the sanitized snapshot against user-
                                 // configured thresholds and send email via Brevo
                                 // if any alerts are triggered (debounced).
+                                //
+                                // System-level battery voltage mismatch
+                                // (issue #272, breaker-trip case): the
+                                // transition is computed inside the alert
+                                // block below (where the debounce is locked)
+                                // and notified after it (where the config
+                                // lock is free for the senders).
+                                let mut mismatch_transition =
+                                    crate::alerts::BatteryConnTransition::default();
+                                let mut mismatch_suppressed = false;
+                                let mut mismatch_inverter_v: f32 = 0.0;
+                                let mut mismatch_module_v: Option<f32> = None;
                                 {
                                     let settings_cfg = state.alert_config.lock().await;
                                     let config = settings_cfg.clone();
@@ -3031,6 +3043,42 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                     && snapshot.solar_power
                                                         > config.solar_clipping_ceiling_w as i32,
                                             );
+                                        // System-level battery voltage mismatch
+                                        // (issue #272, breaker-trip case): feed
+                                        // the inverter-vs-BMS mismatch flag
+                                        // through the debounce's consecutive-
+                                        // cycle counter. Only fed when the
+                                        // Battery Connection Lost alert is
+                                        // enabled, so a disabled alert cannot
+                                        // accumulate a streak. Suppressed when
+                                        // the per-battery detector already
+                                        // confirmed a loss (its notifications
+                                        // have fired for this episode).
+                                        let module_voltages: Vec<f32> = snapshot
+                                            .battery_modules
+                                            .iter()
+                                            .map(|m| m.voltage)
+                                            .collect();
+                                        let mismatch =
+                                            config.battery_connection_lost_enabled
+                                                && crate::alerts::battery_voltage_mismatch(
+                                                    snapshot.battery_voltage,
+                                                    &module_voltages,
+                                                );
+                                        let transition = debounce
+                                            .confirm_battery_voltage_mismatch(mismatch);
+                                        let any_conn_lost =
+                                            debounce.any_battery_connection_lost();
+                                        mismatch_transition = transition;
+                                        mismatch_suppressed = (transition.lost
+                                            || transition.restored)
+                                            && any_conn_lost;
+                                        if transition.lost || transition.restored {
+                                            mismatch_inverter_v = snapshot.battery_voltage;
+                                            mismatch_module_v = crate::alerts::healthiest_module_voltage(
+                                                &module_voltages,
+                                            );
+                                        }
                                         let confirmed_triggered: Vec<AlertType> = triggered
                                             .iter()
                                             .copied()
@@ -3198,6 +3246,42 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         }
                                     }
                                     drop(settings_cfg);
+                                }
+
+                                // ---- Battery voltage mismatch notifications ----
+                                // (issue #272, breaker-trip case). Sent after the
+                                // alert block so the config lock is free for the
+                                // senders. Suppressed when the per-battery
+                                // detector already fired for this episode.
+                                if (mismatch_transition.lost || mismatch_transition.restored)
+                                    && !mismatch_suppressed
+                                {
+                                    if let Some(module_v) = mismatch_module_v {
+                                        if mismatch_transition.lost {
+                                            tracing::warn!(
+                                                "Battery voltage mismatch: inverter \
+                                                 {mismatch_inverter_v:.1} V vs module \
+                                                 {module_v:.1} V — DC path fault \
+                                                 suspected (breaker?)"
+                                            );
+                                            crate::alerts::send_battery_voltage_mismatch_notification(
+                                                &state,
+                                                mismatch_inverter_v,
+                                                module_v,
+                                            )
+                                            .await;
+                                        } else {
+                                            tracing::info!(
+                                                "Battery voltage mismatch resolved: \
+                                                 inverter back to {mismatch_inverter_v:.1} V"
+                                            );
+                                            crate::alerts::send_battery_voltage_mismatch_restored_notification(
+                                                &state,
+                                                mismatch_inverter_v,
+                                            )
+                                            .await;
+                                        }
+                                    }
                                 }
 
                                 // ---- Daily consumption report ----
