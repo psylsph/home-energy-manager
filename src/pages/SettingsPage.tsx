@@ -2117,7 +2117,7 @@ export default function SettingsPage() {
                 <span className="text-text-primary text-sm font-sans">
                   Battery Connection Lost
                   <span className="block text-text-secondary text-xs font-sans">
-                    Notify when a battery stops responding (e.g. tripped breaker) and reconnects
+                    Notify when a battery stops responding or its DC breaker trips (inverter voltage collapses while the battery stays online), and when it reconnects
                   </span>
                 </span>
                 <Toggle
