@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.74.1] - 2026-08-18
+
+### Fixed
+
+- **The History page's Today import cost is now accurate.** The cost engine builds each day's import cost by walking the daily import counter reading-by-reading and pricing every increment at the tariff rate in effect at that moment. The earlier fix (0.71.10) corrected multi-day ranges, but a single-day range — most visibly "Today" — still dropped whatever energy was imported between local midnight and the app's first reading of the day (a short overnight gap while the app wasn't polling). That overnight import is now credited at the reading's tariff slot when the gap is four hours or less, so a day-only view matches what a multi-day window contributes for the same day. Longer gaps still get zero credit, so the safety net for genuine outages is unchanged. (issue #269)
+
 ## [0.74.0] - 2026-08-18
 
 ### Added
