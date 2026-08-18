@@ -1865,8 +1865,36 @@ impl HistoryDb {
 
             match baseline {
                 None => {
-                    // First reading establishes the baseline; nothing to credit
-                    // (we only count energy accumulated *within* the window).
+                    // First reading establishes the baseline. We only count
+                    // energy accumulated *within* the window, so by default
+                    // nothing is credited here. Exception (issue #269): when
+                    // the window opens exactly at a local midnight — the
+                    // "Today" / single-day ranges — the counter at the first
+                    // reading is precisely the energy imported from midnight
+                    // to that reading, i.e. the same short overnight gap the
+                    // internal-midnight branch credits. If that gap is short,
+                    // credit it at the reading's tariff slot so a day-only
+                    // window matches what a multi-day window contributes for
+                    // that same day. Windows that open mid-day (rolling 24h,
+                    // custom date ranges) still drop it: there the counter
+                    // holds pre-window energy that must not be counted.
+                    let leading_gap_secs = ts - start_ts;
+                    if local_minutes_of_day(start_ts) == 0
+                        && leading_gap_secs > 0
+                        && leading_gap_secs <= MIDNIGHT_GAP_CREDIT_THRESHOLD_SECS
+                        && raw > 0.0
+                    {
+                        let elapsed_h = (leading_gap_secs as f64) / 3600.0;
+                        let ceiling = MAX_PLAUSIBLE_POWER_KW * elapsed_h.max(1.0 / 60.0);
+                        if raw <= ceiling {
+                            let rate = crate::settings::rate_for_parsed_minutes(
+                                &parsed_slots,
+                                local_minutes_of_day(ts),
+                            )
+                            .unwrap_or(flat_fallback);
+                            acc += raw * rate;
+                        }
+                    }
                     baseline = Some(raw);
                 }
                 Some(base) => {
@@ -6710,15 +6738,13 @@ mod tests {
             )
             .unwrap(),
         );
-        // The first day's gap energy is NOT credited because there's no
-        // pre-midnight reading inside the query window (the 22:30 reading
-        // belongs to the day before the window starts, so it's excluded by
-        // the SQL WHERE clause). The remaining 2 days each have their gap
-        // energy credited. Total = 3 × 10 × 0.25 + 2 × 0.4 × 0.25 = £7.70.
-        let expected = 3.0 * daily_kwh as f64 * 0.25 + 2.0 * gap_energy as f64 * 0.25;
+        // The window opens at a local midnight, so the leading overnight gap
+        // on the window-open day IS credited too (issue #269), matching the
+        // internal-midnight gaps. Total = 3 × 10 × 0.25 + 3 × 0.4 × 0.25 = £7.80.
+        let expected = 3.0 * daily_kwh as f64 * 0.25 + 3.0 * gap_energy as f64 * 0.25;
         assert!(
             (total - expected).abs() < 0.01,
-            "3-day overnight-gap: expected £{expected:.2} (2 of 3 gap energies credited), got £{total:.4}"
+            "3-day overnight-gap: expected £{expected:.2} (3 of 3 gap energies credited), got £{total:.4}"
         );
     }
 
@@ -6747,13 +6773,13 @@ mod tests {
             )
             .unwrap(),
         );
-        // The first day's gap energy is not credited (no pre-midnight reading
-        // inside the query window). The remaining 6 days each have their gap
-        // energy credited. Total = 7 × 12 × 0.25 + 6 × 0.5 × 0.25 = £21.75.
-        let expected = 7.0 * daily_kwh as f64 * 0.25 + 6.0 * gap_energy as f64 * 0.25;
+        // All 7 days' gaps are credited, including the window-open day's
+        // leading gap (the window opens at local midnight). Total =
+        // 7 × 12 × 0.25 + 7 × 0.5 × 0.25 = £21.875.
+        let expected = 7.0 * daily_kwh as f64 * 0.25 + 7.0 * gap_energy as f64 * 0.25;
         assert!(
             (total - expected).abs() < 0.02,
-            "7-day window: expected £{expected:.4} (6 of 7 gap energies credited), got £{total:.4}"
+            "7-day window: expected £{expected:.4} (7 of 7 gap energies credited), got £{total:.4}"
         );
     }
 
@@ -6839,15 +6865,15 @@ mod tests {
             )
             .unwrap(),
         );
-        // The counter goes from 0.4 (baseline, not credited — no pre-midnight
-        // reading inside this day-only window) then 0.4→10.4 (observed) = 10.0 kWh.
-        // 10.0 kWh × £0.25 = £2.50. The gap energy (0.4 kWh) is not credited
-        // here because there's no reading from the previous evening inside the
-        // query window. In a multi-day window the gap IS credited because the
-        // previous day's evening reading is in-window.
+        // The counter opens at 0.4 (energy imported from midnight to the 01:00
+        // first reading). Issue #269: because this day-only window opens
+        // exactly at local midnight, that leading overnight gap is now
+        // credited (mirroring what a multi-day window contributes for the same
+        // day). So the total is 0.4 (leading) + 0.4→10.4 observed = 10.4 kWh.
+        // 10.4 kWh × £0.25 = £2.60.
         assert!(
-            (total - 2.50).abs() < 0.01,
-            "past day with gap in day-only window: expected £2.50, got £{total:.4}"
+            (total - 2.60).abs() < 0.01,
+            "past day with gap in day-only window: expected £2.60, got £{total:.4}"
         );
     }
 
@@ -6887,6 +6913,118 @@ mod tests {
         assert!(
             (total - 0.25).abs() < 0.01,
             "long gap (>4h) must still drop energy: expected £0.25, got £{total:.4}"
+        );
+    }
+
+    #[test]
+    fn cost_series_today_window_credits_leading_overnight_gap() {
+        // Issue #269 (remaining): the "Today" / single-day window opens exactly
+        // at local midnight. If the app wasn't polling overnight, the first
+        // reading of the day already holds the energy imported from midnight to
+        // that reading — the same short overnight gap the multi-day walk credits
+        // at its internal midnights. A day-only window silently dropped it, so
+        // "Today" under-counted while 7d/30d totals (whose midnights are
+        // internal) were accurate — exactly what Pete reported on #269.
+        //
+        // Magnitude mirrors Pete's attached CSV: ~£0.84 of overnight import at
+        // £0.25/kWh (his data shows roughly a 3.36 kWh jump across the
+        // local-midnight boundary on the 13th).
+        let db = test_db();
+        let daily_kwh = 10.0_f32;
+        let leading_kwh = 3.36_f32; // ≈ £0.84 of overnight import at £0.25/kWh
+        insert_import_day_with_overnight_gap(&db, 0, daily_kwh, leading_kwh);
+
+        let start = local_midnight_secs(0);
+        let end = local_midnight_secs(1);
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let total = series_total(
+            &db.query_cost_series(
+                &window(start, end),
+                3600,
+                "today_import_kwh",
+                &flat,
+                0.25,
+                0.0,
+            )
+            .unwrap(),
+        );
+        // 10 kWh observed during the day + 3.36 kWh leading overnight gap,
+        // both priced at £0.25 = £3.34. Previously the leading 3.36 was
+        // dropped, so Today showed only £2.50.
+        let expected = (daily_kwh as f64 + leading_kwh as f64) * 0.25;
+        assert!(
+            (total - expected).abs() < 0.01,
+            "today window must credit leading overnight gap: expected £{expected:.2}, got £{total:.4}"
+        );
+    }
+
+    #[test]
+    fn cost_series_midday_window_does_not_credit_pre_window_counter() {
+        // Issue #269 guard: crediting the leading counter value is only valid
+        // when the window opens exactly at local midnight (so the counter holds
+        // exactly [midnight, first-reading) energy). A window that opens mid-day
+        // must NOT credit the first reading's counter — it holds energy that
+        // accumulated before the window opened.
+        let db = test_db();
+        let m = local_midnight_secs(0);
+        // Window opens at 14:00 — NOT a midnight boundary.
+        let start = m + 14 * 3600;
+        // First reading at 14:05, counter already at 3.0 (accumulated since
+        // midnight, i.e. before the window opened). Second at 14:10, counter 4.0.
+        db.insert_reading(&make_snapshot_with_kwh(start + 300, 3.0, 0.0));
+        db.insert_reading(&make_snapshot_with_kwh(start + 600, 4.0, 0.0));
+
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let total = series_total(
+            &db.query_cost_series(
+                &window(start, start + 3600),
+                300,
+                "today_import_kwh",
+                &flat,
+                0.25,
+                0.0,
+            )
+            .unwrap(),
+        );
+        // Only the within-window delta 3.0→4.0 = 1.0 kWh is counted. The leading
+        // 3.0 kWh must NOT be credited (it predates the window). £0.25 total.
+        assert!(
+            (total - 0.25).abs() < 1e-6,
+            "midday window must not credit pre-window counter: expected £0.25, got £{total:.4}"
+        );
+    }
+
+    #[test]
+    fn cost_series_today_window_long_leading_gap_still_dropped() {
+        // Issue #269 safeguard on the leading boundary: a leading overnight
+        // gap LONGER than MIDNIGHT_GAP_CREDIT_THRESHOLD_SECS must still NOT
+        // credit the energy accumulated before the first reading — it was
+        // produced at unknown tariff slots across most of the morning. This is
+        // the today-window analogue of `cost_series_long_gap_still_drops_energy`.
+        let db = test_db();
+        let m = local_midnight_secs(0);
+        // App off from midnight to 10:00. First reading at 10:00 with the
+        // counter already at 8.0 (overnight + morning import, unknown slots).
+        db.insert_reading(&make_snapshot_with_kwh(m + 10 * 3600, 8.0, 0.0));
+        db.insert_reading(&make_snapshot_with_kwh(m + 11 * 3600, 9.0, 0.0));
+
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let total = series_total(
+            &db.query_cost_series(
+                &window(m, m + 24 * 3600),
+                3600,
+                "today_import_kwh",
+                &flat,
+                0.25,
+                0.0,
+            )
+            .unwrap(),
+        );
+        // The 8 kWh before the first reading must NOT be credited (10h gap >
+        // 4h). Only the observed 8→9 = 1 kWh is counted. £0.25.
+        assert!(
+            (total - 0.25).abs() < 0.01,
+            "long leading gap (>4h) on today window must still drop energy: expected £0.25, got £{total:.4}"
         );
     }
 }
