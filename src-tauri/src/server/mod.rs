@@ -73,10 +73,6 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/control/charge-slot", post(api::set_charge_slot))
         .route("/api/control/discharge-slot", post(api::set_discharge_slot))
         .route("/api/control/reserve", post(api::set_reserve))
-        .route(
-            "/api/control/discharge-cutoff",
-            post(api::set_discharge_cutoff),
-        )
         .route("/api/control/charge-rate", post(api::set_charge_rate))
         .route("/api/control/discharge-rate", post(api::set_discharge_rate))
         .route("/api/control/eps", post(api::set_eps))
@@ -142,6 +138,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/temperature-limiter",
             get(api::get_temperature_limiter).post(api::set_temperature_limiter),
+        )
+        // Discharge floor guard (developer mode only)
+        .route(
+            "/api/discharge-floor",
+            get(api::get_discharge_floor).post(api::set_discharge_floor),
         )
         // Email alerts
         .route("/api/alerts", get(api::get_alerts).post(api::set_alerts))

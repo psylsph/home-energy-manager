@@ -1684,6 +1684,97 @@ interface LoadLimiterConfig {
   end_minute: number;
 }
 
+interface DischargeFloorConfig {
+  enabled: boolean;
+  floor_soc: number;
+}
+
+/**
+ * Developer-only experiment for the AC-coupled / no-Timed-Discharge case.
+ * During an inverter Discharge Schedule window the backend raises HR110 to
+ * this value, then restores the ordinary Minimum SOC when the window ends.
+ */
+function DischargeFloorSection({ refreshKey = 0 }: { refreshKey?: number }) {
+  const [enabled, setEnabled] = useState(false);
+  const [floorSoc, setFloorSoc] = useState(50);
+  const [saving, setSaving] = useState(false);
+  const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await apiGet<{ ok: boolean; data: { config: DischargeFloorConfig } }>('/api/discharge-floor');
+        if (res.ok) {
+          setEnabled(res.data.config.enabled);
+          setFloorSoc(res.data.config.floor_soc);
+        }
+      } catch { /* use defaults */ }
+    })();
+  }, [refreshKey]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setSaveFeedback(null);
+    try {
+      await apiPost('/api/discharge-floor', { enabled, floor_soc: floorSoc });
+      setSaveFeedback('saved');
+    } catch {
+      setSaveFeedback('error');
+    }
+    setSaving(false);
+    setTimeout(() => setSaveFeedback(null), 2000);
+  };
+
+  return (
+    <div className="space-y-3">
+      <h2 className="text-text-primary font-semibold text-lg">Discharge Schedule Minimum SOC</h2>
+      <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-text-primary">
+        Developer-only: while an inverter Discharge Schedule window is active,
+        temporarily raises the inverter&apos;s Minimum SOC reserve. The normal
+        reserve is restored when the window ends. This does not change battery mode.
+      </div>
+      <div className="bg-bg-surface rounded-xl p-4 space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <label htmlFor="discharge-floor-enabled" className="text-text-secondary text-sm">
+              Hold Minimum SOC during schedule
+            </label>
+            <p className="text-text-secondary/60 text-xs">Uses the inverter&apos;s configured discharge-slot times.</p>
+          </div>
+          <input
+            id="discharge-floor-enabled"
+            type="checkbox"
+            checked={enabled}
+            onChange={(event) => setEnabled(event.target.checked)}
+          />
+        </div>
+        <div className="flex items-center gap-3">
+          <label htmlFor="discharge-floor-soc" className="text-text-secondary text-sm whitespace-nowrap">
+            Floor: <span className="font-mono text-text-primary">{floorSoc}%</span>
+          </label>
+          <input
+            id="discharge-floor-soc"
+            type="range"
+            min={4}
+            max={100}
+            step={1}
+            value={floorSoc}
+            onChange={(event) => setFloorSoc(Number(event.target.value))}
+            className="flex-1"
+          />
+        </div>
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="w-full px-3 py-1.5 bg-accent/20 text-accent rounded-lg text-xs font-medium hover:bg-accent/30 transition disabled:opacity-50"
+        >
+          {saving ? '...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /**
  * Load Discharge Limiter — developer mode only.
  *
@@ -2122,7 +2213,6 @@ export default function ControlPage() {
 
   // Battery limits: local draft state while dragging, otherwise from snapshot
   const [draftReserve, setDraftReserve] = useState<number | null>(null);
-  const [draftDischargeCutoff, setDraftDischargeCutoff] = useState<number | null>(null);
   const [draftCharge, setDraftCharge] = useState<number | null>(null);
   const [draftDischarge, setDraftDischarge] = useState<number | null>(null);
   const [draftActivePower, setDraftActivePower] = useState<number | null>(null);
@@ -2327,12 +2417,6 @@ export default function ControlPage() {
     ? Math.max(RESERVE_SOC_MIN, Math.min(RESERVE_SOC_MAX, draftReserve))
     : Math.max(RESERVE_SOC_MIN, Math.min(RESERVE_SOC_MAX, snapshot?.battery_reserve ?? RESERVE_SOC_MIN));
   const isAcCoupled = snapshot?.device_type_code === '3001' || snapshot?.device_type_code === '3002';
-  const deviceCode = snapshot?.device_type_code ?? '';
-  const supportsDischargeCutoff = ['10', '20', '21', '22', '30', '80', '83']
-    .some((prefix) => deviceCode.startsWith(prefix));
-  const dischargeCutoffSoc = draftDischargeCutoff
-    ?? snapshot?.battery_discharge_cutoff_soc
-    ?? RESERVE_SOC_MIN;
 
   // Whether this inverter exposes the Emergency Power Supply enable register
   // at HR 317 — see lib/deviceCapabilities.ts. DC hybrids and pure
@@ -2473,7 +2557,6 @@ export default function ControlPage() {
     && inDischargeWindow;
   const forceDischargeActive = snapshotForceDischarge;
   const [reserveSaving, setReserveSaving] = useState(false);
-  const [dischargeCutoffSaving, setDischargeCutoffSaving] = useState(false);
   const [chargeRateSaving, setChargeRateSaving] = useState(false);
   const [dischargeRateSaving, setDischargeRateSaving] = useState(false);
   const [activePowerSaving, setActivePowerSaving] = useState(false);
@@ -2715,16 +2798,6 @@ export default function ControlPage() {
       await apiPost('/api/control/reserve', { soc: reserveSoc });
     } catch (e: unknown) { console.warn("Slot save failed:", e); }
     setReserveSaving(false);
-  };
-
-  const handleDischargeCutoffSave = async () => {
-    const soc = draftDischargeCutoff ?? snapshot?.battery_discharge_cutoff_soc;
-    if (soc == null) return;
-    setDischargeCutoffSaving(true);
-    try {
-      await apiPost('/api/control/discharge-cutoff', { soc });
-    } catch (e: unknown) { console.warn('Discharge cutoff save failed:', e); }
-    setDischargeCutoffSaving(false);
   };
 
   const handleChargeRateSave = async () => {
@@ -3310,41 +3383,6 @@ export default function ControlPage() {
             </div>
           </div>
 
-          {supportsDischargeCutoff && (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <div>
-                  <label htmlFor="discharge-cutoff-soc" className="text-text-secondary text-sm">
-                    Discharge Cutoff SOC
-                  </label>
-                  <p className="text-text-secondary/60 text-xs">
-                    Hard battery floor, including timed discharge modes.
-                  </p>
-                </div>
-                <span className="font-mono text-text-primary text-sm">{dischargeCutoffSoc}%</span>
-              </div>
-              <div className="flex items-center gap-3">
-                <input
-                  id="discharge-cutoff-soc"
-                  type="range"
-                  min={RESERVE_SOC_MIN}
-                  max={RESERVE_SOC_MAX}
-                  step={1}
-                  value={dischargeCutoffSoc}
-                  onChange={(event) => setDraftDischargeCutoff(Number(event.target.value))}
-                  className="flex-1"
-                />
-                <button
-                  onClick={handleDischargeCutoffSave}
-                  disabled={dischargeCutoffSaving}
-                  className="px-3 py-1.5 bg-accent/20 text-accent rounded-lg text-xs font-medium hover:bg-accent/30 transition disabled:opacity-50"
-                >
-                  {dischargeCutoffSaving ? '...' : 'Save'}
-                </button>
-              </div>
-            </div>
-          )}
-
           {/* Charge Power Limit */}
           <div className="space-y-1">
             <div className="flex items-center justify-between">
@@ -3431,6 +3469,7 @@ export default function ControlPage() {
             </div>
           </div>
         </div>
+        {developerMode && <DischargeFloorSection refreshKey={loadLimiterRefreshKey} />}
         {/* Load Discharge Limiter — always visible when battery is in Eco mode */}
         <LoadLimiterSection refreshKey={loadLimiterRefreshKey} />
         {/* Inverter Temperature Limiter */}

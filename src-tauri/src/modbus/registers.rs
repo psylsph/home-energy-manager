@@ -253,11 +253,6 @@ pub const HR_AC_BATTERY_DISCHARGE_LIMIT: u16 = 314;
 /// Enable EPS (Emergency Power Supply) mode (bool).
 pub const HR_ENABLE_EPS: u16 = 317;
 
-/// Battery discharge min power reserve percentage (4-100).
-/// Distinct from HR_BATTERY_SOC_RESERVE (110) — this prevents discharge
-/// below the reserve level even in timed modes.
-pub const HR_BATTERY_DISCHARGE_MIN_POWER_RESERVE: u16 = 114;
-
 /// Export power limit (W) — read from all single-phase / AC-coupled models.
 /// GivTCP `baseinverter.py:55` defines `grid_port_max_power_output` as HR(26).
 pub const HR_EXPORT_LIMIT: u16 = 26;
@@ -493,7 +488,7 @@ pub const HV_BCU_POLL_BLOCK: RegisterBlock = RegisterBlock {
 /// Sourced from the givenergy-modbus reference library's WRITE_SAFE_REGISTERS.
 pub const SAFE_WRITE_REGS: &[u16] = &[
     20, 27, 29, 31, 32, 35, 36, 37, 38, 39, 40, 44, 45, 50, 56, 57, 59, 94, 95, 96, 110, 111, 112,
-    114, 116, 163, 166,
+    116, 163, 166,
     // Battery heater controls (givenergy-modbus #167, confirmed via GE Android app)
     104, // ENABLE_BATTERY_SELF_HEATING — hardware/batch-gated
     172, // ENABLE_MANUAL_BATTERY_HEATER — likely hardware-gated like 104
@@ -933,7 +928,6 @@ mod tests {
         assert!(SAFE_WRITE_REGS.contains(&HR_ENABLE_DISCHARGE)); // 59
         assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_SLOT_1_START)); // 94
         assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_SOC_RESERVE)); // 110
-        assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_DISCHARGE_MIN_POWER_RESERVE)); // 114
         assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_TARGET_SOC)); // 116
         assert!(SAFE_WRITE_REGS.contains(&HR_INVERTER_REBOOT)); // 163
         assert!(SAFE_WRITE_REGS.contains(&HR_ENABLE_RTC)); // 166

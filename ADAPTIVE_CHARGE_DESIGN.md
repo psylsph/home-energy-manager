@@ -7,8 +7,7 @@ automatically changes the inverter's maximum battery charge rate according to
 time of day, battery state of charge (SOC), and user-configured hysteresis.
 
 Adaptive Charge is mutually exclusive with Cosy and every Agile mode. Discharge
-protection remains inverter-native through the existing per-slot Target SOC and
-a new global Discharge Cutoff SOC control using HR114 where supported.
+protection remains inverter-native through the existing per-slot Target SOC.
 
 Adaptive Charge changes only the maximum permitted charge rate. It does not
 force grid charging and cannot guarantee that solar power is available.
@@ -200,25 +199,15 @@ The Gen3 Discharge Schedule's existing Target SOC remains the preferred
 slot-specific protection. A discharge slot configured with a 25% target should
 stop scheduled discharge at 25%.
 
-### Global Discharge Cutoff SOC
+### Removed: Global Discharge Cutoff SOC (HR114)
 
-Add a **Discharge Cutoff SOC** control beside Minimum SOC:
-
-- Minimum SOC controls the Eco/self-consumption reserve.
-- Discharge Cutoff SOC is the hard battery floor intended to apply in timed
-  modes as well.
-
-For verified single-phase devices this writes HR114 through the existing
-`SetPowerReserve` command. The backend decodes HR114 into a nullable unified
-snapshot field, validates 4–100%, exposes a control endpoint, and capability
-gates the UI.
-
-Three-phase HR1078 has conflicting descriptions in reference code and is not
-treated as equivalent until its behaviour is confirmed on hardware.
-
-The cutoff is an inverter setting and is not restored when Adaptive Charge is
-disabled. Expected inverter behaviour is to stop at the floor and resume if
-charging raises SOC above it.
+The HR114 "Discharge Cutoff SOC" control was removed. HR114 semantics are
+undocumented and unverified: GivEnergy's own GivTCP reads the register but
+never enforces it — every floor behaviour (Eco self-consumption gating, mode
+transitions, "shallow charge") runs on HR110 instead. No confirmed functional
+difference between HR114 and the HR110 Minimum SOC could be established, so
+the control was removed rather than kept with an unverifiable "hard floor in
+timed modes" claim. Minimum SOC (HR110) is the one supported battery floor.
 
 ## Backend API
 
@@ -247,20 +236,6 @@ POST /api/adaptive-charge
 
 The response includes configuration and runtime status. Saving configuration
 wakes the poll loop for immediate re-evaluation.
-
-### Discharge cutoff
-
-```text
-POST /api/control/discharge-cutoff
-```
-
-Example request:
-
-```json
-{"soc":25}
-```
-
-Unsupported devices return a clear error.
 
 Existing Cosy and Agile APIs remain compatible but route mode changes through
 the central transition logic.
@@ -324,7 +299,6 @@ evaluations.
 - Auto Winter suspension and resumption
 - Crash recovery and inverter-identity protection
 - Device-specific normalized-rate conversion
-- HR114 decode, validation, and route selection
 - Charging-mode mutual exclusion and manual-rate conflict response
 
 ### Frontend
@@ -334,14 +308,11 @@ evaluations.
 - Rate/kW estimates
 - Disabled manual control while Adaptive owns it
 - Runtime and Auto Winter status
-- Discharge Cutoff capability gating
 
 ### Integration
 
 Use the simulator to verify HR111 transitions, period entry/exit, baseline
-restoration, restart recovery, and HR114 write/readback. The simulator does not
-currently enforce HR114 in battery physics, so physical cutoff behaviour must
-be confirmed on a real Gen3 inverter before release.
+restoration, and restart recovery.
 
 ## Acceptance scenario for issue #234
 

@@ -66,7 +66,6 @@ describe('adaptiveSocFieldCaption', () => {
     // not cap discharge, and must point them at the right controls.
     expect(caption).toMatch(/charge-rate trigger/i);
     expect(caption).toMatch(/does not stop discharge/i);
-    expect(caption).toMatch(/discharge cutoff soc/i);
     expect(caption).toMatch(/target soc/i);
   });
 

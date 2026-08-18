@@ -969,9 +969,6 @@ pub struct InverterSnapshot {
     /// Battery SOC reserve (HR 110 / HR 1109), clamped to min 4 to protect battery.
     #[serde(default = "default_soc_reserve")]
     pub battery_reserve: u8,
-    /// Hard discharge cutoff SOC (HR114) on supported single-phase devices.
-    #[serde(default)]
-    pub battery_discharge_cutoff_soc: Option<u8>,
     pub charge_rate: u8,
     pub discharge_rate: u8,
     /// Inverter max output active power rate (0-100%).

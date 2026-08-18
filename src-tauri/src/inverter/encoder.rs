@@ -28,7 +28,6 @@ use crate::modbus::registers::{
     HR_BATTERY_CALIBRATION_STAGE,
     HR_BATTERY_CHARGE_LIMIT,
     HR_BATTERY_DISCHARGE_LIMIT,
-    HR_BATTERY_DISCHARGE_MIN_POWER_RESERVE,
     HR_BATTERY_PAUSE_MODE,
     HR_BATTERY_PAUSE_SLOT_1_END,
     HR_BATTERY_PAUSE_SLOT_1_START,
@@ -236,8 +235,6 @@ pub enum ControlCommand {
     SetCalibrationStage { stage: u16 },
     /// Reboot the inverter (write 100 to HR 163).
     RebootInverter,
-    /// Set battery discharge min power reserve (HR 114, 4-100%).
-    SetPowerReserve { reserve: u16 },
     /// Enable or disable the Real Time Clock (HR 166, persists settings to EEPROM).
     SetRtc { enabled: bool },
     /// Set export priority for AC-coupled inverters (HR 311).
@@ -737,13 +734,6 @@ impl ControlCommand {
             }
             ControlCommand::RebootInverter => {
                 vec![rw(HR_INVERTER_REBOOT, 100)]
-            }
-            ControlCommand::SetPowerReserve { reserve } => {
-                // HR 114: battery discharge min power reserve (4-100%).
-                // Distinct from HR 110 (SOC reserve) — this prevents discharge
-                // below the reserve level even in timed modes.
-                validate_range(*reserve, 4, 100, "power reserve")?;
-                vec![rw(HR_BATTERY_DISCHARGE_MIN_POWER_RESERVE, *reserve)]
             }
             ControlCommand::SetRtc { enabled } => {
                 vec![rw(HR_ENABLE_RTC, if *enabled { 1 } else { 0 })]
@@ -1399,7 +1389,6 @@ mod tests {
             ControlCommand::ForceCharge { target_soc: 100 },
             ControlCommand::ForceDischarge,
             ControlCommand::SyncClock,
-            ControlCommand::SetPowerReserve { reserve: 10 },
             ControlCommand::SetRtc { enabled: true },
             ControlCommand::SetRtc { enabled: false },
             ControlCommand::SetExportPriority { priority: 0 },
@@ -2098,28 +2087,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // New command tests (items 3-9 from audit)
     // -----------------------------------------------------------------------
-
-    #[test]
-    fn set_power_reserve_encodes() {
-        let cmd = ControlCommand::SetPowerReserve { reserve: 10 };
-        let writes = cmd.encode().unwrap();
-        assert_eq!(writes.len(), 1);
-        assert_eq!(writes[0].address, HR_BATTERY_DISCHARGE_MIN_POWER_RESERVE);
-        assert_eq!(writes[0].value, 10);
-    }
-
-    #[test]
-    fn set_power_reserve_validates() {
-        assert!(ControlCommand::SetPowerReserve { reserve: 3 }
-            .encode()
-            .is_err());
-        assert!(ControlCommand::SetPowerReserve { reserve: 101 }
-            .encode()
-            .is_err());
-        assert!(ControlCommand::SetPowerReserve { reserve: 4 }
-            .encode()
-            .is_ok());
-    }
 
     #[test]
     fn set_rtc_encodes() {

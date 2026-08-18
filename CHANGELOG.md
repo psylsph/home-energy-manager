@@ -2,7 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.74.0] - 2026-08-18
+
+### Added
+
+- **Developer-only Discharge Schedule Minimum SOC guard.** When enabled in Developer Controls, the app temporarily raises HR110 (Minimum SOC) to a configured floor while any inverter discharge-slot window is active, then restores the previous reserve outside the window. It follows the inverter's existing schedule times, handles midnight-crossing and multiple slots, persists the pre-window reserve across restart, and never changes the selected battery mode.
+
+### Removed
+
+- **The Discharge Cutoff SOC control has been removed.** The setting wrote HR114, whose behaviour GivEnergy does not document and whose own GivTCP reference implementation never enforces — every battery floor behaviour (Eco self-consumption gating, mode transitions, "shallow charge") runs on HR110, the Minimum SOC. No confirmed functional difference between the two registers could be established, so the control — slider, `/api/control/discharge-cutoff` endpoint, HR114 decode and encoder command — was removed rather than kept with an unverifiable claim. Minimum SOC remains the one supported battery floor.
 
 ## [0.73.0] - 2026-08-17
 

@@ -73,15 +73,15 @@ use crate::inverter::sanitizer::{
 };
 use crate::inverter::state_machines::{
     build_force_discharge_auto_revert_writes, build_timed_export_disable_writes,
-    check_adaptive_charge, check_auto_winter, check_load_limiter_with_other_pause,
-    check_temperature_limiter_after_automation, clear_cosy_slot_registers,
-    cosy_slot_register_writes, persist_cosy_active, should_repair_timed_export,
-    write_registers_to_inverter, AgileSlotAction,
+    check_adaptive_charge, check_auto_winter, check_discharge_floor,
+    check_load_limiter_with_other_pause, check_temperature_limiter_after_automation,
+    clear_cosy_slot_registers, cosy_slot_register_writes, persist_cosy_active,
+    should_repair_timed_export, write_registers_to_inverter, AgileSlotAction,
 };
 pub use crate::inverter::state_machines::{
-    AdaptiveChargeState, AutoWinterConfig, AutoWinterSaved, AutoWinterState, LoadLimiterConfig,
-    LoadLimiterSaved, LoadLimiterState, PriceSlot, TemperatureLimiterConfig,
-    TemperatureLimiterState,
+    AdaptiveChargeState, AutoWinterConfig, AutoWinterSaved, AutoWinterState, DischargeFloorConfig,
+    DischargeFloorState, LoadLimiterConfig, LoadLimiterSaved, LoadLimiterState, PriceSlot,
+    TemperatureLimiterConfig, TemperatureLimiterState,
 };
 use crate::modbus::client::GatewayPollScope;
 use crate::modbus::client::ModbusClient;
@@ -362,6 +362,10 @@ pub struct AppState {
     pub temperature_limiter_config: Arc<Mutex<TemperatureLimiterConfig>>,
     /// Inverter-temperature discharge limiter runtime state.
     pub temperature_limiter_state: Arc<Mutex<TemperatureLimiterState>>,
+    /// Discharge floor guard configuration (developer mode only).
+    pub discharge_floor_config: Arc<Mutex<DischargeFloorConfig>>,
+    /// Discharge floor guard runtime state.
+    pub discharge_floor_state: Arc<Mutex<DischargeFloorState>>,
     /// Whether cosy charging is currently active (force-charging in a slot).
     pub cosy_active: Arc<Mutex<bool>>,
     /// Cached Octopus Agile prices for the current region.
@@ -437,6 +441,19 @@ impl AppState {
             load_limiter_saved: Arc::new(Mutex::new(None)),
             temperature_limiter_config: Arc::new(Mutex::new(TemperatureLimiterConfig::default())),
             temperature_limiter_state: Arc::new(Mutex::new(TemperatureLimiterState::default())),
+            discharge_floor_config: Arc::new(Mutex::new({
+                let s = crate::settings::Settings::load();
+                DischargeFloorConfig {
+                    enabled: s.discharge_floor_enabled,
+                    floor_soc: s.discharge_floor_soc,
+                }
+            })),
+            discharge_floor_state: Arc::new(Mutex::new(
+                crate::settings::Settings::load()
+                    .discharge_floor_saved_reserve
+                    .map(|saved_reserve| DischargeFloorState::HeldFromRestart { saved_reserve })
+                    .unwrap_or_default(),
+            )),
             cosy_active: Arc::new(Mutex::new(
                 crate::settings::Settings::load().cosy_active_persisted,
             )),
@@ -496,6 +513,19 @@ impl AppState {
             load_limiter_saved: Arc::new(Mutex::new(None)),
             temperature_limiter_config: Arc::new(Mutex::new(TemperatureLimiterConfig::default())),
             temperature_limiter_state: Arc::new(Mutex::new(TemperatureLimiterState::default())),
+            discharge_floor_config: Arc::new(Mutex::new({
+                let s = crate::settings::Settings::load();
+                DischargeFloorConfig {
+                    enabled: s.discharge_floor_enabled,
+                    floor_soc: s.discharge_floor_soc,
+                }
+            })),
+            discharge_floor_state: Arc::new(Mutex::new(
+                crate::settings::Settings::load()
+                    .discharge_floor_saved_reserve
+                    .map(|saved_reserve| DischargeFloorState::HeldFromRestart { saved_reserve })
+                    .unwrap_or_default(),
+            )),
             cosy_active: Arc::new(Mutex::new(
                 crate::settings::Settings::load().cosy_active_persisted,
             )),
@@ -2976,6 +3006,71 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                 tokio::time::sleep(Duration::from_millis(1500))
                                                     .await;
                                             }
+                                        }
+                                    }
+                                }
+
+                                // ---- Discharge floor guard (developer mode) ----
+                                // Time-driven Minimum SOC floor: raise HR110 to
+                                // the configured floor while any Discharge
+                                // Schedule window is active, restore afterwards.
+                                // Runs after the limiters so their pause
+                                // writes land first; the guard never touches
+                                // mode registers so it cannot fight them.
+                                {
+                                    let df_config = state.discharge_floor_config.lock().await;
+                                    let mut df_state = state.discharge_floor_state.lock().await;
+                                    let now = chrono::Local::now();
+                                    let now_minutes =
+                                        now.hour() as u16 * 60 + now.minute() as u16;
+                                    if let Some(writes) = check_discharge_floor(
+                                        &snapshot,
+                                        &df_config,
+                                        &mut df_state,
+                                        now_minutes,
+                                    ) {
+                                        let persisted = match &*df_state {
+                                            DischargeFloorState::FloorHeld { saved_reserve }
+                                            | DischargeFloorState::HeldFromRestart {
+                                                saved_reserve,
+                                            } => Some(*saved_reserve),
+                                            DischargeFloorState::Idle => None,
+                                        };
+                                        drop(df_config);
+                                        drop(df_state);
+
+                                        let mut app_settings =
+                                            crate::settings::Settings::load();
+                                        let changed = app_settings
+                                            .discharge_floor_saved_reserve
+                                            != persisted;
+                                        if changed {
+                                            app_settings.discharge_floor_saved_reserve =
+                                                persisted;
+                                            if let Err(e) = app_settings.save() {
+                                                tracing::warn!(
+                                                    "Failed to persist discharge floor state: {e}"
+                                                );
+                                            }
+                                        }
+
+                                        for write in &writes {
+                                            match client
+                                                .write_register(write.address, write.value)
+                                                .await
+                                            {
+                                                Ok(()) => tracing::info!(
+                                                    "Discharge floor guard: wrote reg {} = {}",
+                                                    write.address,
+                                                    write.value
+                                                ),
+                                                Err(e) => tracing::error!(
+                                                    "Discharge floor guard: write reg {} failed: {e}",
+                                                    write.address
+                                                ),
+                                            }
+                                            tokio::time::sleep(Duration::from_millis(1500))
+                                                .await;
                                         }
                                     }
                                 }

@@ -231,6 +231,6 @@ describe('<ControlPage/> — Adaptive Charge Low SOC caption', () => {
     expect(within(card).getByText('58%')).toBeDefined();
     // The caption steers the user away from treating Low SOC as a discharge floor.
     expect(within(card).getByText(/does not stop discharge/i)).toBeDefined();
-    expect(within(card).getByText(/discharge cutoff soc/i)).toBeDefined();
+    expect(within(card).getByText(/target soc/i)).toBeDefined();
   });
 });

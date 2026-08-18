@@ -1090,6 +1090,18 @@ pub struct Settings {
     #[serde(default)]
     pub temperature_limiter_active_persisted: bool,
 
+    // -- Discharge floor guard (developer mode only) --
+    /// Whether the discharge floor guard is enabled (dev mode feature).
+    #[serde(default)]
+    pub discharge_floor_enabled: bool,
+    /// Floor SOC (%) held while a Discharge Schedule window is active.
+    #[serde(default = "default_discharge_floor_soc")]
+    pub discharge_floor_soc: u8,
+    /// Persisted pre-guard reserve so a crash mid-window restores the exact
+    /// previous value rather than a hardcoded default.
+    #[serde(default)]
+    pub discharge_floor_saved_reserve: Option<u16>,
+
     /// Panels hidden from the bottom navigation bar (e.g. ["power", "battery", "solar", "meters", "history"]) .
     #[serde(default)]
     pub hidden_panels: Vec<String>,
@@ -1241,6 +1253,10 @@ fn default_ll_threshold() -> u32 {
 
 fn default_ll_trigger_delay() -> u32 {
     5
+}
+
+fn default_discharge_floor_soc() -> u8 {
+    50
 }
 
 fn default_temperature_limiter_high() -> f32 {
@@ -1511,6 +1527,9 @@ impl Default for Settings {
             temperature_limiter_recovery_threshold: default_temperature_limiter_recovery(),
             temperature_limiter_confirmation_readings: default_temperature_limiter_confirmations(),
             temperature_limiter_active_persisted: false,
+            discharge_floor_enabled: false,
+            discharge_floor_soc: default_discharge_floor_soc(),
+            discharge_floor_saved_reserve: None,
             import_tariff_config: None,
             export_tariff_config: None,
             agile_enabled: false,
@@ -1753,6 +1772,9 @@ mod tests {
             temperature_limiter_recovery_threshold: 56.0,
             temperature_limiter_confirmation_readings: 4,
             temperature_limiter_active_persisted: true,
+            discharge_floor_enabled: false,
+            discharge_floor_soc: 50,
+            discharge_floor_saved_reserve: None,
             evc_host: String::new(),
             evc_port: default_evc_port(),
             import_tariff_config: None,
@@ -2189,6 +2211,9 @@ mod tests {
             temperature_limiter_recovery_threshold: 55.0,
             temperature_limiter_confirmation_readings: 3,
             temperature_limiter_active_persisted: false,
+            discharge_floor_enabled: false,
+            discharge_floor_soc: 50,
+            discharge_floor_saved_reserve: None,
             evc_host: "192.168.1.200".to_string(),
             evc_port: 502,
             import_tariff_config: None,

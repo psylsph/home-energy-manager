@@ -227,6 +227,192 @@ impl Default for LoadLimiterConfig {
 }
 
 // ===========================================================================
+// Discharge Floor Guard: types + transition logic
+// ===========================================================================
+
+/// Configuration for the discharge floor guard (developer mode only).
+///
+/// While any configured Discharge Schedule slot window is active, the guard
+/// raises the Minimum SOC reserve (HR110) to `floor_soc`. When the last active
+/// window ends, the pre-guard reserve is restored. The guard never changes
+/// battery mode — Eco / Timed Demand / Timed Export behaviour is untouched;
+/// only the reserve floor moves. Windows are read from the inverter's own
+/// discharge slots so the guard follows manual and scheduled edits without
+/// duplicated configuration.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DischargeFloorConfig {
+    /// Master toggle (developer mode only feature).
+    pub enabled: bool,
+    /// Floor SOC (%) to hold while a discharge window is active (4-100).
+    pub floor_soc: u8,
+}
+
+impl Default for DischargeFloorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            floor_soc: 50,
+        }
+    }
+}
+
+/// Runtime state for the discharge floor guard.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
+pub enum DischargeFloorState {
+    /// Guard idle — no floor held.
+    #[default]
+    Idle,
+    /// Floor held; the pre-guard reserve is carried in the variant so a
+    /// crash mid-window can restore the exact previous value after restart.
+    FloorHeld {
+        /// The battery SOC reserve (%) before the guard raised the floor.
+        saved_reserve: u16,
+    },
+    /// Restored from persistence after a crash. The next poll re-evaluates:
+    /// inside a window the floor is re-armed keeping the persisted saved
+    /// reserve; outside a window the saved reserve is written back.
+    HeldFromRestart {
+        /// The pre-guard reserve persisted before the crash.
+        saved_reserve: u16,
+    },
+}
+
+/// Check whether any configured discharge slot window contains `now_minutes`.
+///
+/// Mirrors the load limiter window semantics: a window crossing midnight
+/// (end <= start) wraps; a slot that only differs from the load limiter's
+/// "all zeros means always" rule by requiring a configured window —
+/// `ScheduleSlot::is_configured()` already rejects zeroed slots.
+fn discharge_window_active(
+    slots: &[crate::inverter::model::ScheduleSlot],
+    now_minutes: u16,
+) -> bool {
+    slots.iter().any(|slot| {
+        if !slot.is_configured() {
+            return false;
+        }
+        let start_mins = slot.start_hour as u16 * 60 + slot.start_minute as u16;
+        let end_mins = slot.end_hour as u16 * 60 + slot.end_minute as u16;
+        if end_mins <= start_mins {
+            // Crosses midnight (or instantaneous — treat as active).
+            now_minutes >= start_mins || now_minutes < end_mins
+        } else {
+            now_minutes >= start_mins && now_minutes < end_mins
+        }
+    })
+}
+
+/// Evaluate the discharge floor guard. Returns register writes (if any) and
+/// the updated state. `saved_reserve` from the previous state is reused when
+/// re-arming after a restart so the original pre-guard value is never lost.
+pub(crate) fn check_discharge_floor(
+    snap: &InverterSnapshot,
+    config: &DischargeFloorConfig,
+    state: &mut DischargeFloorState,
+    now_minutes: u16,
+) -> Option<Vec<RegisterWrite>> {
+    if !config.enabled {
+        let saved_reserve = match *state {
+            DischargeFloorState::FloorHeld { saved_reserve }
+            | DischargeFloorState::HeldFromRestart { saved_reserve } => Some(saved_reserve),
+            DischargeFloorState::Idle => None,
+        };
+        if let Some(saved_reserve) = saved_reserve {
+            tracing::info!(
+                saved_reserve,
+                "Discharge floor guard: disabled while holding floor, restoring reserve"
+            );
+            *state = DischargeFloorState::Idle;
+            return Some(vec![RegisterWrite {
+                address: HR_BATTERY_SOC_RESERVE,
+                value: saved_reserve,
+            }]);
+        }
+        *state = DischargeFloorState::Idle;
+        return None;
+    }
+
+    let in_window = discharge_window_active(&snap.discharge_slots, now_minutes);
+
+    match *state {
+        DischargeFloorState::Idle => {
+            if in_window {
+                let saved_reserve = snap.battery_reserve as u16;
+                // Don't "raise" to a floor at or below the current reserve.
+                if (config.floor_soc as u16) <= saved_reserve {
+                    return None;
+                }
+                tracing::info!(
+                    saved_reserve,
+                    floor = config.floor_soc,
+                    "Discharge floor guard: window active, raising Minimum SOC"
+                );
+                *state = DischargeFloorState::FloorHeld { saved_reserve };
+                return Some(vec![RegisterWrite {
+                    address: HR_BATTERY_SOC_RESERVE,
+                    value: config.floor_soc as u16,
+                }]);
+            }
+            None
+        }
+        DischargeFloorState::FloorHeld { saved_reserve } => {
+            if in_window {
+                // Reassert the floor if something external lowered it
+                // mid-window. Skip the write when already at the floor to
+                // avoid duplicate-write churn every poll.
+                if snap.battery_reserve < config.floor_soc {
+                    return Some(vec![RegisterWrite {
+                        address: HR_BATTERY_SOC_RESERVE,
+                        value: config.floor_soc as u16,
+                    }]);
+                }
+                None
+            } else {
+                tracing::info!(
+                    saved_reserve,
+                    "Discharge floor guard: window ended, restoring Minimum SOC"
+                );
+                *state = DischargeFloorState::Idle;
+                Some(vec![RegisterWrite {
+                    address: HR_BATTERY_SOC_RESERVE,
+                    value: saved_reserve,
+                }])
+            }
+        }
+        DischargeFloorState::HeldFromRestart { saved_reserve } => {
+            if in_window {
+                // Re-arm keeping the persisted pre-guard reserve so the
+                // eventual restore writes back the original value, not the
+                // raised floor.
+                tracing::info!(
+                    saved_reserve,
+                    floor = config.floor_soc,
+                    "Discharge floor guard: restart inside window, re-arming floor"
+                );
+                *state = DischargeFloorState::FloorHeld { saved_reserve };
+                if snap.battery_reserve < config.floor_soc {
+                    return Some(vec![RegisterWrite {
+                        address: HR_BATTERY_SOC_RESERVE,
+                        value: config.floor_soc as u16,
+                    }]);
+                }
+                None
+            } else {
+                tracing::info!(
+                    saved_reserve,
+                    "Discharge floor guard: restart outside window, restoring saved reserve"
+                );
+                *state = DischargeFloorState::Idle;
+                Some(vec![RegisterWrite {
+                    address: HR_BATTERY_SOC_RESERVE,
+                    value: saved_reserve,
+                }])
+            }
+        }
+    }
+}
+
+// ===========================================================================
 // Inverter temperature limiter: types + transition logic
 // ===========================================================================
 
@@ -3745,5 +3931,226 @@ mod tests {
             crate::modbus::registers::HR_CHARGE_TARGET_SOC_1
         );
         assert_eq!(writes[5].value, 100);
+    }
+
+    // -----------------------------------------------------------------------
+    // Discharge Floor Guard
+    // -----------------------------------------------------------------------
+
+    fn df_config(enabled: bool, floor_soc: u8) -> DischargeFloorConfig {
+        DischargeFloorConfig { enabled, floor_soc }
+    }
+
+    fn df_slot(start: (u8, u8), end: (u8, u8)) -> crate::inverter::model::ScheduleSlot {
+        crate::inverter::model::ScheduleSlot {
+            enabled: true,
+            start_hour: start.0,
+            start_minute: start.1,
+            end_hour: end.0,
+            end_minute: end.1,
+            target_soc: 4,
+        }
+    }
+
+    fn df_snap(slots: Vec<crate::inverter::model::ScheduleSlot>, reserve: u8) -> InverterSnapshot {
+        let mut discharge_slots = std::array::from_fn(|_| crate::inverter::model::ScheduleSlot {
+            enabled: false,
+            start_hour: 0,
+            start_minute: 0,
+            end_hour: 0,
+            end_minute: 0,
+            target_soc: 4,
+        });
+        for (dest, src) in discharge_slots.iter_mut().zip(slots) {
+            *dest = src;
+        }
+        InverterSnapshot {
+            discharge_slots,
+            battery_reserve: reserve,
+            ..Default::default()
+        }
+    }
+
+    /// 19:00–22:00 discharge window.
+    fn evening_window() -> Vec<crate::inverter::model::ScheduleSlot> {
+        vec![df_slot((19, 0), (22, 0))]
+    }
+
+    #[test]
+    fn discharge_floor_raises_reserve_when_window_becomes_active() {
+        let config = df_config(true, 50);
+        let mut state = DischargeFloorState::Idle;
+        // 20:00 inside the 19:00–22:00 window, current reserve 4%.
+        let snap = df_snap(evening_window(), 4);
+
+        let writes = check_discharge_floor(&snap, &config, &mut state, 20 * 60);
+        let writes = writes.expect("floor raise writes");
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].address, HR_BATTERY_SOC_RESERVE);
+        assert_eq!(writes[0].value, 50);
+        assert_eq!(state, DischargeFloorState::FloorHeld { saved_reserve: 4 });
+    }
+
+    #[test]
+    fn discharge_floor_ignores_unconfigured_slots() {
+        let config = df_config(true, 50);
+        let mut state = DischargeFloorState::Idle;
+        let mut slot = df_slot((19, 0), (22, 0));
+        slot.enabled = false;
+        let snap = df_snap(vec![slot], 4);
+
+        let writes = check_discharge_floor(&snap, &config, &mut state, 20 * 60);
+        assert!(writes.is_none());
+        assert_eq!(state, DischargeFloorState::Idle);
+    }
+
+    #[test]
+    fn discharge_floor_skips_raise_when_reserve_already_at_or_above_floor() {
+        let config = df_config(true, 50);
+        let mut state = DischargeFloorState::Idle;
+        // Reserve 60 already above the 50 floor — must not be lowered or held.
+        let snap = df_snap(evening_window(), 60);
+
+        let writes = check_discharge_floor(&snap, &config, &mut state, 20 * 60);
+        assert!(writes.is_none());
+        assert_eq!(state, DischargeFloorState::Idle);
+    }
+
+    #[test]
+    fn discharge_floor_restores_reserve_when_window_ends() {
+        let config = df_config(true, 50);
+        let mut state = DischargeFloorState::FloorHeld { saved_reserve: 4 };
+        // 22:30 outside the window; snapshot reflects the raised floor.
+        let snap = df_snap(evening_window(), 50);
+
+        let writes = check_discharge_floor(&snap, &config, &mut state, 22 * 60 + 30);
+        let writes = writes.expect("restore writes");
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].address, HR_BATTERY_SOC_RESERVE);
+        assert_eq!(writes[0].value, 4);
+        assert_eq!(state, DischargeFloorState::Idle);
+    }
+
+    #[test]
+    fn discharge_floor_reasserts_floor_when_lowered_mid_window() {
+        let config = df_config(true, 50);
+        let mut state = DischargeFloorState::FloorHeld { saved_reserve: 4 };
+        // User (or another automation) dropped the reserve mid-window.
+        let snap = df_snap(evening_window(), 10);
+
+        let writes = check_discharge_floor(&snap, &config, &mut state, 20 * 60);
+        let writes = writes.expect("reassert writes");
+        assert_eq!(writes[0].address, HR_BATTERY_SOC_RESERVE);
+        assert_eq!(writes[0].value, 50);
+        assert_eq!(state, DischargeFloorState::FloorHeld { saved_reserve: 4 });
+    }
+
+    #[test]
+    fn discharge_floor_no_duplicate_write_when_already_at_floor() {
+        let config = df_config(true, 50);
+        let mut state = DischargeFloorState::FloorHeld { saved_reserve: 4 };
+        let snap = df_snap(evening_window(), 50);
+
+        let writes = check_discharge_floor(&snap, &config, &mut state, 20 * 60);
+        assert!(writes.is_none(), "no churn while floor confirmed");
+        assert_eq!(state, DischargeFloorState::FloorHeld { saved_reserve: 4 });
+    }
+
+    #[test]
+    fn discharge_floor_disable_mid_window_restores_saved_reserve() {
+        let config = df_config(false, 50);
+        let mut state = DischargeFloorState::FloorHeld { saved_reserve: 6 };
+        let snap = df_snap(evening_window(), 50);
+
+        let writes = check_discharge_floor(&snap, &config, &mut state, 20 * 60);
+        let writes = writes.expect("disable restore writes");
+        assert_eq!(writes[0].address, HR_BATTERY_SOC_RESERVE);
+        assert_eq!(writes[0].value, 6);
+        assert_eq!(state, DischargeFloorState::Idle);
+    }
+
+    #[test]
+    fn discharge_floor_midnight_crossing_window_wraps() {
+        let config = df_config(true, 50);
+        let mut state = DischargeFloorState::Idle;
+        // 21:00–06:00 window crosses midnight.
+        let slots = vec![df_slot((21, 0), (6, 0))];
+
+        // 23:00 → inside.
+        let snap = df_snap(slots.clone(), 4);
+        let writes = check_discharge_floor(&snap, &config, &mut state, 23 * 60);
+        assert!(writes.is_some());
+        assert_eq!(state, DischargeFloorState::FloorHeld { saved_reserve: 4 });
+
+        // 03:00 → still inside (wrapped).
+        let mut state2 = DischargeFloorState::FloorHeld { saved_reserve: 4 };
+        let snap = df_snap(slots.clone(), 50);
+        assert!(check_discharge_floor(&snap, &config, &mut state2, 3 * 60).is_none());
+
+        // 07:00 → outside, restores.
+        let snap = df_snap(slots, 50);
+        let writes = check_discharge_floor(&snap, &config, &mut state2, 7 * 60);
+        let writes = writes.expect("restore after midnight window");
+        assert_eq!(writes[0].value, 4);
+        assert_eq!(state2, DischargeFloorState::Idle);
+    }
+
+    #[test]
+    fn discharge_floor_honours_multiple_slots_any_active() {
+        let config = df_config(true, 50);
+        let mut state = DischargeFloorState::Idle;
+        // 02:00–05:00 and 19:00–22:00; 03:00 falls in the first.
+        let slots = vec![df_slot((2, 0), (5, 0)), df_slot((19, 0), (22, 0))];
+        let snap = df_snap(slots, 4);
+
+        let writes = check_discharge_floor(&snap, &config, &mut state, 3 * 60);
+        assert!(writes.is_some());
+        assert_eq!(state, DischargeFloorState::FloorHeld { saved_reserve: 4 });
+    }
+
+    #[test]
+    fn discharge_floor_restart_inside_window_rearms_keeping_saved_reserve() {
+        let config = df_config(true, 50);
+        let mut state = DischargeFloorState::HeldFromRestart { saved_reserve: 4 };
+        // Live reserve shows the raised floor (crash happened mid-window).
+        let snap = df_snap(evening_window(), 50);
+
+        let writes = check_discharge_floor(&snap, &config, &mut state, 20 * 60);
+        assert!(writes.is_none(), "floor already held, no write needed");
+        assert_eq!(
+            state,
+            DischargeFloorState::FloorHeld { saved_reserve: 4 },
+            "original pre-guard reserve must survive the restart"
+        );
+
+        // And when the window later ends, the original 4% is restored.
+        let snap = df_snap(evening_window(), 50);
+        let writes = check_discharge_floor(&snap, &config, &mut state, 23 * 60);
+        assert_eq!(writes.unwrap()[0].value, 4);
+    }
+
+    #[test]
+    fn discharge_floor_restart_outside_window_restores_saved_reserve() {
+        let config = df_config(true, 50);
+        let mut state = DischargeFloorState::HeldFromRestart { saved_reserve: 6 };
+        // 23:00 outside the window; the inverter may still be at the floor.
+        let snap = df_snap(evening_window(), 50);
+
+        let writes = check_discharge_floor(&snap, &config, &mut state, 23 * 60);
+        let writes = writes.expect("restart restore writes");
+        assert_eq!(writes[0].address, HR_BATTERY_SOC_RESERVE);
+        assert_eq!(writes[0].value, 6);
+        assert_eq!(state, DischargeFloorState::Idle);
+    }
+
+    #[test]
+    fn discharge_floor_disabled_while_idle_writes_nothing() {
+        let config = df_config(false, 50);
+        let mut state = DischargeFloorState::Idle;
+        let snap = df_snap(evening_window(), 4);
+
+        let writes = check_discharge_floor(&snap, &config, &mut state, 20 * 60);
+        assert!(writes.is_none());
+        assert_eq!(state, DischargeFloorState::Idle);
     }
 }

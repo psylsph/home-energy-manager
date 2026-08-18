@@ -2200,51 +2200,6 @@ pub async fn set_reserve(
     }
 }
 
-fn supports_discharge_cutoff(device_type: DeviceType) -> bool {
-    matches!(
-        device_type,
-        DeviceType::Gen1Hybrid
-            | DeviceType::Gen2Hybrid
-            | DeviceType::Gen3Hybrid
-            | DeviceType::PolarHybrid
-            | DeviceType::Gen3PlusHybrid
-            | DeviceType::ACCoupled
-            | DeviceType::ACCoupledMk2
-            | DeviceType::AllInOne6kW
-            | DeviceType::AllInOne3_6kW
-            | DeviceType::AllInOne5kW
-            | DeviceType::Gen4Hybrid
-    )
-}
-
-/// POST /api/control/discharge-cutoff — set the hard timed-mode SOC floor.
-pub async fn set_discharge_cutoff(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<serde_json::Value>,
-) -> (StatusCode, Json<Value>) {
-    let Some(soc) = body.get("soc").and_then(|value| value.as_u64()) else {
-        return error_response("Missing 'soc' field (4-100)");
-    };
-    if soc > u16::MAX as u64 {
-        return error_response("Discharge cutoff must be 4-100%");
-    }
-    let device_type = latest_device_type(&state).await;
-    if !supports_discharge_cutoff(device_type) {
-        return error_response("Discharge cutoff is not supported by this inverter");
-    }
-    match (ControlCommand::SetPowerReserve {
-        reserve: soc as u16,
-    })
-    .encode()
-    {
-        Ok(writes) => {
-            queue_writes(&state, writes).await;
-            ok_response(&format!("Discharge cutoff set to {soc}%"))
-        }
-        Err(e) => error_response(&format!("Validation error: {e}")),
-    }
-}
-
 /// POST /api/control/charge-rate — set battery charge limit percentage.
 pub async fn set_charge_rate(
     State(state): State<Arc<AppState>>,
@@ -4657,6 +4612,60 @@ pub async fn set_load_limiter(
 }
 
 // ---------------------------------------------------------------------------
+// Discharge floor guard (developer mode only) endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /api/discharge-floor — current config and runtime state.
+pub async fn get_discharge_floor(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let config = state.discharge_floor_config.lock().await.clone();
+    let df_state = state.discharge_floor_state.lock().await.clone();
+    (
+        StatusCode::OK,
+        Json(json!({
+        "ok": true,
+        "data": {
+            "config": config,
+            "state": df_state,
+        }
+        })),
+    )
+}
+
+/// POST /api/discharge-floor — update the discharge floor guard config.
+///
+/// Body fields are optional — only provided fields are updated.
+/// Fields: `enabled` (bool), `floor_soc` (4-100).
+pub async fn set_discharge_floor(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<Value>) {
+    let mut config = state.discharge_floor_config.lock().await;
+
+    if let Some(v) = body.get("enabled").and_then(|v| v.as_bool()) {
+        config.enabled = v;
+    }
+    if let Some(v) = body.get("floor_soc").and_then(|v| v.as_u64()) {
+        if !(4..=100).contains(&v) {
+            return error_response("floor_soc must be 4-100");
+        }
+        config.floor_soc = v as u8;
+    }
+
+    tracing::info!("Discharge floor guard config updated: {:?}", config);
+
+    let mut app_settings = crate::settings::Settings::load();
+    app_settings.discharge_floor_enabled = config.enabled;
+    app_settings.discharge_floor_soc = config.floor_soc;
+    drop(config);
+    if let Err(e) = app_settings.save() {
+        tracing::warn!("Failed to persist discharge floor config: {e}");
+        return server_error(&format!("Failed to save: {e}"));
+    }
+
+    ok_response("Discharge floor guard config updated")
+}
+
+// ---------------------------------------------------------------------------
 // Inverter temperature limiter endpoints
 // ---------------------------------------------------------------------------
 
@@ -4900,6 +4909,48 @@ mod tests {
     /// config dir (see `with_isolated_config_dir_async`).
     fn test_state() -> Arc<crate::AppState> {
         Arc::new(crate::AppState::new())
+    }
+
+    #[tokio::test]
+    async fn discharge_floor_config_round_trips_and_validates_floor_soc() {
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+
+            // Enable with a valid floor.
+            let (status, body) = set_discharge_floor(
+                State(state.clone()),
+                Json(json!({ "enabled": true, "floor_soc": 50 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["ok"], true);
+            {
+                let config = state.discharge_floor_config.lock().await;
+                assert!(config.enabled);
+                assert_eq!(config.floor_soc, 50);
+            }
+            // Persisted to settings.json.
+            let settings = crate::settings::Settings::load();
+            assert!(settings.discharge_floor_enabled);
+            assert_eq!(settings.discharge_floor_soc, 50);
+
+            // Out-of-range floor is rejected.
+            let (status, body) =
+                set_discharge_floor(State(state.clone()), Json(json!({ "floor_soc": 3 }))).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["ok"], false);
+            let (status, _) =
+                set_discharge_floor(State(state.clone()), Json(json!({ "floor_soc": 101 }))).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+
+            // GET returns the live config and state.
+            let (status, body) = get_discharge_floor(State(state)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["data"]["config"]["enabled"], true);
+            assert_eq!(body["data"]["config"]["floor_soc"], 50);
+            assert_eq!(body["data"]["state"], "Idle");
+        })
+        .await;
     }
 
     #[test]
@@ -11725,35 +11776,6 @@ mod tests {
                 body["error"],
                 "Adaptive Charge is restoring the previous charge rate"
             );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn discharge_cutoff_routes_hr114_and_rejects_unsupported_devices() {
-        with_isolated_config_dir_async(|| async {
-            let state = test_state();
-            *state.latest_snapshot.lock().await = Some(InverterSnapshot {
-                device_type: DeviceType::Gen3Hybrid,
-                ..Default::default()
-            });
-            let (status, _) =
-                set_discharge_cutoff(State(state.clone()), Json(json!({ "soc": 25 }))).await;
-            assert_eq!(status, StatusCode::OK);
-            let queued = state.pending_writes.lock().await;
-            assert_eq!(
-                queued[0].writes[0].address,
-                crate::modbus::registers::HR_BATTERY_DISCHARGE_MIN_POWER_RESERVE
-            );
-            assert_eq!(queued[0].writes[0].value, 25);
-            drop(queued);
-
-            *state.latest_snapshot.lock().await = Some(InverterSnapshot {
-                device_type: DeviceType::ThreePhase,
-                ..Default::default()
-            });
-            let (status, _) = set_discharge_cutoff(State(state), Json(json!({ "soc": 25 }))).await;
-            assert_eq!(status, StatusCode::BAD_REQUEST);
         })
         .await;
     }

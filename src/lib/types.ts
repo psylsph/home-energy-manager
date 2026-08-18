@@ -69,8 +69,6 @@ export interface InverterSnapshot {
   /** Raw Eco / self-consumption register HR27: 1 = Eco, 0 = export/max-power mode. */
   battery_power_mode?: number;
   battery_reserve: number;
-  /** Hard discharge cutoff SOC (HR114) on supported single-phase devices. */
-  battery_discharge_cutoff_soc?: number | null;
   charge_rate: number;
   discharge_rate: number;
   active_power_rate: number;

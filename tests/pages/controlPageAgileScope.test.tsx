@@ -278,6 +278,11 @@ describe('<ControlPage/> — Agile scope UI', () => {
             },
           },
         };
+      if (path === '/api/discharge-floor')
+        return {
+          ok: true,
+          data: { config: { enabled: false, floor_soc: 50 } },
+        };
       return { ok: true };
     });
     vi.mocked(apiPost).mockReset();
@@ -306,7 +311,7 @@ describe('<ControlPage/> — Agile scope UI', () => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     cleanup();
-    useInverterStore.setState({ snapshot: null, connectionState: 'disconnected' });
+    useInverterStore.setState({ snapshot: null, connectionState: 'disconnected', developerMode: false });
   });
 
   // ---------------------------------------------------------------
@@ -318,6 +323,7 @@ describe('<ControlPage/> — Agile scope UI', () => {
     const { default: ControlPage } = await import('../../src/pages/ControlPage');
     render(<ControlPage />);
 
+    expect(screen.queryByText('Discharge Schedule Minimum SOC')).toBeNull();
     const allCombos = await screen.findAllByRole('combobox');
     const select = allCombos[0] as HTMLSelectElement;
 
@@ -328,6 +334,28 @@ describe('<ControlPage/> — Agile scope UI', () => {
     expect(optionValues).toContain('agile');
     expect(optionValues).toContain('agile_charge');
     expect(optionValues).toContain('agile_discharge');
+  });
+
+  it('shows the discharge-schedule Minimum SOC control only in developer mode and saves it', async () => {
+    useInverterStore.setState({ snapshot: makeSnapshot(), developerMode: true });
+    const { default: ControlPage } = await import('../../src/pages/ControlPage');
+    render(<ControlPage />);
+
+    const toggle = await screen.findByLabelText('Hold Minimum SOC during schedule');
+    expect(toggle).toBeDefined();
+    fireEvent.click(toggle);
+    const floor = screen.getByRole('slider', { name: /floor/i }) as HTMLInputElement;
+    fireEvent.change(floor, { target: { value: '55' } });
+    const section = screen.getByText('Discharge Schedule Minimum SOC').parentElement;
+    expect(section).not.toBeNull();
+    fireEvent.click(within(section!).getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(apiPost).toHaveBeenCalledWith('/api/discharge-floor', {
+        enabled: true,
+        floor_soc: 55,
+      });
+    });
   });
 
   // ---------------------------------------------------------------
@@ -575,23 +603,6 @@ describe('<ControlPage/> — Agile scope UI', () => {
 
     expect(within(epsCard).getByText('Emergency Power Supply (EPS)')).toBeDefined();
     expect(within(epsCard).queryByText('Quick Action Duration')).toBeNull();
-  });
-
-  it('saves the inverter-native Discharge Cutoff SOC', async () => {
-    useInverterStore.setState({
-      snapshot: makeSnapshot({ battery_discharge_cutoff_soc: 25 }),
-    });
-    const { default: ControlPage } = await import('../../src/pages/ControlPage');
-    render(<ControlPage />);
-
-    const slider = screen.getByLabelText('Discharge Cutoff SOC') as HTMLInputElement;
-    fireEvent.change(slider, { target: { value: '30' } });
-    const saveButton = slider.parentElement?.querySelector('button');
-    expect(saveButton).not.toBeNull();
-    fireEvent.click(saveButton!);
-    await waitFor(() => {
-      expect(apiPost).toHaveBeenCalledWith('/api/control/discharge-cutoff', { soc: 30 });
-    });
   });
 
   // ---------------------------------------------------------------
