@@ -847,4 +847,97 @@ describe('EnergyOrbitDiagram', () => {
     // The animateMotion element is conditionally omitted for reduced-motion users.
     expect(container.querySelectorAll('animateMotion').length).toBe(0);
   });
+
+  describe('dot wrap fade (issue #276)', () => {
+    it('fades the dot out at path end and back in at path start', () => {
+      // The moving dot teleports from path end to path start every cycle
+      // (repeatCount="indefinite"). To hide the jump, each moving circle
+      // carries an <animate opacity> that ramps 0 → full over the first
+      // 200 ms, holds full, then ramps back to 0 over the last 200 ms —
+      // synchronised with the motion via the same dur.
+      const { container } = render(
+        <EnergyOrbitDiagram snapshot={makeSnapshot({ solar_power: 5000, home_power: 500 })} />,
+      );
+      const dot = container.querySelector('[data-flow-id="solar"]');
+      expect(dot).not.toBeNull();
+      const motion = dot?.querySelector('animateMotion');
+      const fades = Array.from(dot?.querySelectorAll('animate') ?? []);
+      expect(fades.length).toBe(2); // one per circle: dot + glow
+      const dur = motion?.getAttribute('dur');
+      for (const fade of fades) {
+        expect(fade.getAttribute('attributeName')).toBe('opacity');
+        // Same clock as the motion so the fades stay locked to travel.
+        expect(fade.getAttribute('dur')).toBe(dur);
+        expect(fade.getAttribute('repeatCount')).toBe('indefinite');
+        const values = (fade.getAttribute('values') ?? '').split(';').map(Number);
+        expect(values).toHaveLength(4);
+        expect(values[0]).toBe(0); // invisible at cycle start
+        expect(values[3]).toBe(0); // invisible at cycle end
+        expect(values[1]).toBeGreaterThan(0); // fully lit shortly after start
+        expect(values[2]).toBe(values[1]); // still lit until the end fade
+      }
+    });
+
+    it('scales the fade window with the cycle duration', () => {
+      // keyTimes are fractions of dur: the fade ramps take 200 ms each,
+      // clamped to at most 45 % of the cycle so a short (1 s) spoke still
+      // spends its middle fully lit.
+      const { container } = render(
+        <EnergyOrbitDiagram snapshot={makeSnapshot({ solar_power: 5000, home_power: 500 })} />,
+      );
+      const dot = container.querySelector('[data-flow-id="solar"]');
+      const fade = dot?.querySelector('animate');
+      const durSeconds = parseFloat(
+        dot?.querySelector('animateMotion')?.getAttribute('dur')?.replace('s', '') ?? '0',
+      );
+      const keyTimes = (fade?.getAttribute('keyTimes') ?? '').split(';').map(Number);
+      const expected = Math.min(0.45, 0.2 / durSeconds);
+      expect(keyTimes).toHaveLength(4);
+      expect(keyTimes[0]).toBe(0);
+      expect(keyTimes[3]).toBe(1);
+      // fadeIn end ≈ 200 ms into the cycle (fractional)
+      expect(keyTimes[1]).toBeCloseTo(expected, 3);
+      // fadeOut start ≈ 200 ms before the cycle end
+      expect(keyTimes[2]).toBeCloseTo(1 - expected, 3);
+      // And the fade window never swallows more than 45 % of the cycle.
+      expect(keyTimes[1]).toBeLessThanOrEqual(0.45);
+    });
+
+    it('omits the fade animations under prefers-reduced-motion', () => {
+      mockMatchMedia({ '(prefers-reduced-motion: reduce)': true });
+      const { container } = render(
+        <EnergyOrbitDiagram snapshot={makeSnapshot({ solar_power: 5000, home_power: 500 })} />,
+      );
+      // No animation elements at all for reduced-motion users — the dot is
+      // parked at the path midpoint.
+      expect(container.querySelectorAll('animate').length).toBe(0);
+      expect(container.querySelectorAll('animateMotion').length).toBe(0);
+    });
+
+    it('runs direct centre spokes at reduced speed (issue #276 follow-up)', () => {
+      // Direct spokes into/out of the home node are the shortest paths on
+      // the wheel, so at a uniform px/s they feel rushed compared with the
+      // long outer arcs. They now run at two-thirds speed: for a
+      // strength=1 flow the effective speed is 30 × 1.45 × ⅔ ≈ 29 px/s
+      // rather than ≈ 43.5 px/s. The direct path is a straight line, so its
+      // length can be measured straight from the `M x y L x y` path data.
+      const { container } = render(
+        <EnergyOrbitDiagram snapshot={makeSnapshot({ solar_power: 5000, home_power: 500 })} />,
+      );
+      const dot = container.querySelector('[data-flow-id="solar"]');
+      expect(dot?.getAttribute('data-route')).toBe('direct');
+      const pathData = dot?.querySelector('animateMotion')?.getAttribute('path') ?? '';
+      const nums = pathData.match(/-?\d+(?:\.\d+)?/g)?.map(Number) ?? [];
+      const length = Math.hypot(nums[2] - nums[0], nums[3] - nums[1]);
+      const durSeconds = parseFloat(
+        dot?.querySelector('animateMotion')?.getAttribute('dur')?.replace('s', '') ?? '0',
+      );
+      expect(durSeconds).toBeGreaterThan(0);
+      const pxPerS = length / durSeconds;
+      // Two-thirds of the full-strength speed (≈ 29 px/s), comfortably below
+      // the un-slowed ≈ 43.5 px/s.
+      expect(pxPerS).toBeLessThan(35);
+      expect(pxPerS).toBeGreaterThan(22);
+    });
+  });
 });

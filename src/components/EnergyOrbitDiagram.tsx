@@ -368,13 +368,33 @@ function FlowDot({ flow, flows, posOf, maxW, reduced }: DotProps) {
   // battery→grid outer arc traverse at a comparable visual pace. Higher-
   // energy flows get a modest speed boost (≈2× at full strength vs idle)
   // so a 5 kW export still feels more energetic than a 200 W trickle, but
-  // neither flies across the screen. The base speed (45 px/s) was halved
-  // from 90 px/s after the user asked for a calmer, slower animation in
-  // the energy-flow diagram (issue #170).
-  const BASE_SPEED_PX_PER_S = 45;
-  const speed = BASE_SPEED_PX_PER_S * (0.55 + strength * 0.9);
+  // neither flies across the screen. The base speed was halved from 90 to
+  // 45 px/s after the user asked for a calmer, slower animation (issue
+  // #170), then dropped again to 30 px/s when the fade-out wrap fix still
+  // felt busy (issue #276). Direct spokes into/out of the home node are
+  // shorter than the outer arcs, which makes them feel rushed — they run
+  // at two-thirds speed so the centre of the wheel reads calmer than the
+  // rim.
+  const BASE_SPEED_PX_PER_S = 30;
+  const speed = BASE_SPEED_PX_PER_S * (0.55 + strength * 0.9) * (routed.route === 'direct' ? 2 / 3 : 1);
   const durSeconds = Math.min(8, Math.max(1.0, routed.length / speed));
   const dur = `${durSeconds.toFixed(2)}s`;
+  // The dot wraps from path end to path start on every cycle — a hard
+  // teleport inherent to repeatCount="indefinite". Fading the dot out over
+  // the last 200 ms of travel and back in over the first 200 ms hides the
+  // jump (issue #276). The #271 endpoint clearance moved the wrap out of
+  // the node circles into open space, which is what made it jarring.
+  // durSeconds is clamped to ≥ 1 s, so the 200 ms window is always well
+  // under half the cycle and the dot stays fully lit for the middle of the
+  // journey. Both animations share dur and begin, so their cycles stay
+  // locked together.
+  const DOT_OPACITY = 0.95;
+  const GLOW_OPACITY = 0.12;
+  const FADE_S = 0.2;
+  const fadeFrac = Math.min(0.45, FADE_S / durSeconds);
+  const keyTimes = `0;${fadeFrac.toFixed(4)};${(1 - fadeFrac).toFixed(4)};1`;
+  const dotValues = `0;${DOT_OPACITY};${DOT_OPACITY};0`;
+  const glowValues = `0;${GLOW_OPACITY};${GLOW_OPACITY};0`;
 
   if (reduced) {
     return (
@@ -386,18 +406,32 @@ function FlowDot({ flow, flows, posOf, maxW, reduced }: DotProps) {
         cy={routed.my}
         r={r}
         fill={routed.color}
-        opacity={0.95}
+        opacity={DOT_OPACITY}
       />
     );
   }
 
   return (
     <g data-flow-id={flow.id} data-route={routed.route} data-duration={dur}>
-      <circle r={r} fill={routed.color} opacity={0.95}>
+      <circle r={r} fill={routed.color} opacity={DOT_OPACITY}>
         <animateMotion path={routed.path} dur={dur} repeatCount="indefinite" />
+        <animate
+          attributeName="opacity"
+          values={dotValues}
+          keyTimes={keyTimes}
+          dur={dur}
+          repeatCount="indefinite"
+        />
       </circle>
-      <circle r={r + 6} fill={routed.color} opacity={0.12}>
+      <circle r={r + 6} fill={routed.color} opacity={GLOW_OPACITY}>
         <animateMotion path={routed.path} dur={dur} repeatCount="indefinite" />
+        <animate
+          attributeName="opacity"
+          values={glowValues}
+          keyTimes={keyTimes}
+          dur={dur}
+          repeatCount="indefinite"
+        />
       </circle>
     </g>
   );
