@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.74.4] - 2026-08-19
+
+### Fixed
+
+- **The Status page's distribution wheel now adds up.** When solar was feeding both the home and the battery at the same time, the spokes left solar summing to more than the inverter's solar reading — 8 kW of spokes for 5 kW of generation. The home-direct `solar` spoke is now reduced by whatever the battery is taking from solar, the battery discharge's home-direct portion is the residual after solar covers what it can, and the export spoke is computed off the uncapped solar surplus so it still fires correctly. Idle-house carve-outs keep the existing full-wattage `solar → home` spoke when the house is genuinely idle. (issue #275)
+
 ## [0.74.3] - 2026-08-19
 
 ### Fixed
