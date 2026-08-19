@@ -1569,7 +1569,7 @@ dependencies = [
 
 [[package]]
 name = "givenergy-local"
-version = "0.74.1"
+version = "0.74.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -1596,6 +1596,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tokio-modbus",
+ "tokio-tungstenite",
  "tower",
  "tower-http 0.7.0",
  "tracing",

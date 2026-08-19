@@ -93,6 +93,41 @@ pub async fn ws_handler(
         .into_response()
 }
 
+/// Probe a quiet WebSocket connection before dropping it (issue #274).
+///
+/// Returns `true` when the connection is proven alive (any frame arrived
+/// within the grace window), `false` when it stayed silent — half-open,
+/// safe to disconnect. A failed Ping *send* means the socket is already
+/// broken, so it also returns `false`.
+async fn probe_alive(socket: &mut WebSocket, peer: std::net::SocketAddr) -> bool {
+    const PROBE_GRACE: tokio::time::Duration = tokio::time::Duration::from_secs(10);
+    tracing::debug!("WebSocket client {peer} quiet for keepalive — probing with Ping");
+    if socket.send(Message::Ping(vec![].into())).await.is_err() {
+        tracing::debug!("WebSocket client {peer} probe send failed — disconnecting");
+        return false;
+    }
+    tokio::select! {
+        msg = socket.recv() => {
+            match msg {
+                // Pong (or any other frame) proves the connection is live.
+                // Close/None/error genuinely ended it.
+                Some(Ok(Message::Close(_))) | None => false,
+                Some(Ok(_)) => true,
+                Some(Err(e)) => {
+                    tracing::debug!("WebSocket probe error from {peer}: {e}");
+                    false
+                }
+            }
+        }
+        _ = tokio::time::sleep(PROBE_GRACE) => {
+            tracing::debug!(
+                "WebSocket client {peer} timed out — no response to probe — disconnecting"
+            );
+            false
+        }
+    }
+}
+
 /// Inner WebSocket loop — runs for the lifetime of a single connection.
 async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, peer: std::net::SocketAddr) {
     // Register this client
@@ -182,13 +217,19 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, peer: std::net::
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
-            // Timeout — no broadcast and no client message. Treat as
-            // half-open connection and disconnect.
+            // Timeout — no broadcast and no client message. The client may
+            // simply be quiet (browsers never send unsolicited frames, and
+            // snapshot broadcasts may be less frequent than this timeout on
+            // slow poll intervals or remote links). RFC 6455 requires every
+            // WebSocket stack to answer a Ping with a Pong automatically,
+            // so probe before dropping: send a Ping and allow a short
+            // grace window for ANY frame. A live client's stack replies
+            // even if the page is idle (issue #274); a half-open
+            // connection stays silent and is disconnected here.
             _ = tokio::time::sleep(keepalive) => {
-                tracing::debug!(
-                    "WebSocket client {peer} timed out after {keepalive:?} — disconnecting"
-                );
-                break;
+                if !probe_alive(&mut socket, peer).await {
+                    break;
+                }
             }
         }
     }
