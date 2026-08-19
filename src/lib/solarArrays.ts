@@ -24,25 +24,31 @@ export function percentOfRated(powerW: number, ratedKw: number): number | null {
 }
 
 /**
- * Overall solar production as a percentage of total configured DC-string
- * capacity (issue #192): the energy-flow wheel shows this next to the Solar
+ * Overall solar production as a percentage of configured capacity
+ * (issues #192, #277): the energy-flow wheel shows this next to the Solar
  * kW value so the user can see "how much more is possible".
  *
- * Only DC strings (`pv1` / `pv2`) count toward the denominator, matching the
- * `solar_power` the wheel displays (pv1 + pv2) — external CT-meter arrays
- * aren't part of that reading, so including their capacity would understate
- * the %. Returns `null` when no DC-string capacity is configured so the
- * caller omits the % entirely. Can exceed 100% on a bright edge-of-cloud
- * moment, mirroring `percentOfRated`.
+ * When external CT-meter arrays are configured the CT clamp is the
+ * authoritative solar measurement (issue #277) and `solar_power` is the
+ * sum of the meter arrays only — so the denominator is the meter arrays'
+ * rated kWp. Otherwise (default hybrid install) the reading is pv1 + pv2
+ * and the denominator is the configured DC-string capacity; external
+ * CT-meter arrays aren't part of that reading, so including their capacity
+ * would understate the %. Returns `null` when no matching capacity is
+ * configured so the caller omits the % entirely. Can exceed 100% on a
+ * bright edge-of-cloud moment, mirroring `percentOfRated`.
  */
 export function solarOverallPercent(
   solarPowerW: number,
   arrays: SolarArraySummary[] | undefined | null,
 ): number | null {
   if (!arrays) return null;
+  const hasMeterArray = arrays.some((a) => a.source === 'meter');
   let totalKw = 0;
   for (const a of arrays) {
-    if ((a.source === 'pv1' || a.source === 'pv2') && a.rated_kw > 0) {
+    const counts =
+      a.rated_kw > 0 && (hasMeterArray ? a.source === 'meter' : a.source === 'pv1' || a.source === 'pv2');
+    if (counts) {
       totalKw += a.rated_kw;
     }
   }

@@ -211,7 +211,34 @@ describe('SolarPage — solar arrays "% of max" section (issue #110)', () => {
     expect(within(section).getByText('6 kWp')).toBeDefined();
   });
 
-  it('CT meter array shows power without today_kwh or % bar when rated_kw is 0', () => {
+  it('CT meter array shows power, % and CT-derived today energy (issue #277)', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({
+        solar_arrays: [
+          { source: 'meter', name: 'AC panel', power_w: 2500, rated_kw: 9.48,
+            today_kwh: 12.4, meter_address: 4 },
+        ],
+      }),
+      connectionState: 'connected',
+    });
+    render(<SolarPage />);
+    const section = screen.getByTestId('solar-arrays');
+    // Power is shown.
+    expect(within(section).getByText('AC panel')).toBeDefined();
+    expect(within(section).getByText('2.5kW')).toBeDefined();
+    // % of max with a rated kWp.
+    expect(within(section).getByText(/of max/)).toBeDefined();
+    // CT-derived today energy (issue #277) now surfaces on the card.
+    // (Function matcher + getAllByText: the card's <p> and its containers
+    // all contain the text, and exact-string regexes trip over escaping.)
+    expect(
+      within(section).getAllByText((_, el) =>
+        (el?.textContent ?? '').replace(/\s+/g, ' ').includes('Today: 12.4kWh'),
+      ).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it('CT meter array with rated_kw 0 shows power only (no % bar, no today)', () => {
     useInverterStore.setState({
       snapshot: makeSnapshot({
         solar_arrays: [
@@ -223,14 +250,52 @@ describe('SolarPage — solar arrays "% of max" section (issue #110)', () => {
     });
     render(<SolarPage />);
     const section = screen.getByTestId('solar-arrays');
-    // Power is shown.
     expect(within(section).getByText('AC panel')).toBeDefined();
-    // No "of max" since rated is 0.
     expect(within(section).queryByText(/of max/)).toBeNull();
-    // No progress bar without a denominator.
     expect(within(section).queryByRole('progressbar')).toBeNull();
-    // CT meters have no per-day counter, so no "Today:" label.
     expect(within(section).queryByText(/Today:/)).toBeNull();
+  });
+
+  it('hides the Overview (PV1 · PV2) breakdown when a solar CT is authoritative (issue #277)', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({
+        today_pv1_kwh: 28.1,
+        today_pv2_kwh: 0,
+        solar_arrays: [
+          { source: 'meter', name: 'Roof', power_w: 3800, rated_kw: 9.48,
+            today_kwh: 26.2, meter_address: 1 },
+        ],
+      }),
+      connectionState: 'connected',
+    });
+    render(<SolarPage />);
+    // The Overview total comes from the CT; the per-string register
+    // breakdown (which mirrors the same generation) is hidden so the two
+    // can't contradict each other.
+    expect(screen.queryByText((_, el) =>
+      (el?.textContent ?? '').replace(/\s+/g, ' ').includes('PV1 28.1kWh · PV2 0.0kWh'),
+    )).toBeNull();
+  });
+
+  it('shows the Overview (PV1 · PV2) breakdown on a pure hybrid (no solar CT)', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({
+        today_pv1_kwh: 18.5,
+        today_pv2_kwh: 7.5,
+        solar_arrays: [
+          { source: 'pv1', name: '', power_w: 4200, rated_kw: 6,
+            today_kwh: 18.5, meter_address: null },
+        ],
+      }),
+      connectionState: 'connected',
+    });
+    render(<SolarPage />);
+    // The <span> and its parent <p> both contain the text; assert presence.
+    expect(
+      screen.getAllByText((_, el) =>
+        (el?.textContent ?? '').replace(/\s+/g, ' ').includes('PV1 18.5kWh · PV2 7.5kWh'),
+      ).length,
+    ).toBeGreaterThan(0);
   });
 
   it('colours each array card to match the PV Power graph (PV1 amber, PV2 blue) (issue #192)', () => {

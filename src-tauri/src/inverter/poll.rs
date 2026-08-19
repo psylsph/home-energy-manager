@@ -2334,6 +2334,44 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     None
                                 };
 
+                                // ---- CT-meter solar authority (issue #277) ----
+                                // When any external CT meter is labelled as a
+                                // solar array, the CT clamp is the authoritative
+                                // solar measurement (the inverter's PV registers
+                                // only mirror it with their own refresh cadence).
+                                // Override solar_power / today_solar_kwh from the
+                                // meters so Overview, wheel, history and alerts
+                                // all agree by construction. Baselines for the
+                                // per-meter "today" energy deltas persist in
+                                // settings; persist whenever they change.
+                                {
+                                    let mut solar_baselines =
+                                        poll_settings.solar_meter_baselines.clone();
+                                    let reseeded = apply_ct_solar_authority(
+                                        &mut snapshot,
+                                        &mut solar_baselines,
+                                        chrono::Local::now().date_naive(),
+                                    );
+                                    if reseeded || solar_baselines
+                                        != poll_settings.solar_meter_baselines
+                                    {
+                                        // Reload before the narrow persistence
+                                        // update so a concurrent settings save
+                                        // cannot be overwritten by this poll's
+                                        // older snapshot (same pattern as the
+                                        // Adaptive Charge baseline above).
+                                        let mut app_settings =
+                                            crate::settings::Settings::load();
+                                        app_settings.solar_meter_baselines =
+                                            solar_baselines;
+                                        if let Err(e) = app_settings.save() {
+                                            tracing::warn!(
+                                                "Failed to persist solar meter baselines: {e}"
+                                            );
+                                        }
+                                    }
+                                }
+
                                 // Track same-cycle writes that can enable discharge. The
                                 // temperature limiter runs last and reasserts its pause when
                                 // the current snapshot cannot yet reflect one of these writes.
@@ -3951,6 +3989,169 @@ pub(crate) fn compute_solar_arrays(
     out
 }
 
+/// Threshold (kWh) for a solar CT meter's cumulative energy counter to be
+/// considered "new day" rather than a stale baseline carried across a
+/// reboot: if the current counter is more than this far *below* the stored
+/// baseline, the meter (or dongle) has been swapped/reset and the baseline
+/// must be reseeded from the current reading instead of producing a
+/// negative "today" energy.
+pub(crate) const SOLAR_METER_BASELINE_RESEED_DELTA_KWH: f64 = 1.0;
+
+/// Apply CT-meter solar authority (issue #277).
+///
+/// On AC-coupled systems the inverter's own PV registers mirror the AC
+/// output of the (separate) solar inverter with its own refresh cadence,
+/// so the Overview "Solar" figure and the CT-meter array card disagree for
+/// a minute at a time. When the user has labelled any external CT meter
+/// (1–8) as a solar array, the CT clamp is treated as the authoritative
+/// measurement of solar: every downstream consumer (wheel, Overview,
+/// history, alerts) reads the same CT-derived figures by construction.
+///
+/// This mutates `snapshot`:
+/// - `solar_power` becomes Σ meter arrays' `power_w` + Σ DC strings'
+///   power, **replacing** the inverter's own PV-register sum (on a pure
+///   AC-coupled box the registers mirror the same solar the CT measures,
+///   so keeping them would double-count).
+/// - `today_solar_kwh` becomes Σ per-meter counter deltas since the
+///   persisted midnight baseline + Σ DC strings' today counters. The
+///   baseline map (in `baselines`) is reseeded at local midnight and on
+///   counter resets; reseeded entries are returned so the caller can
+///   persist them.
+/// - Per-array `today_kwh` is stamped onto the meter entries in
+///   `snapshot.solar_arrays` (they ship `None` today, issue #110).
+///
+/// No-op when no meter-backed solar arrays are configured — hybrid /
+/// DC-coupled installs keep the inverter-register path untouched.
+///
+/// Returns `(updated_baselines, today_kwh_by_meter)` so the poll loop can
+/// persist baselines and tests can assert without touching disk.
+pub(crate) fn apply_ct_solar_authority(
+    snapshot: &mut InverterSnapshot,
+    baselines: &mut std::collections::BTreeMap<String, crate::settings::SolarMeterBaseline>,
+    today_local: chrono::NaiveDate,
+) -> bool {
+    // Split snapshot borrows: solar_arrays (immutable first pass), then
+    // solar_power / today_solar_kwh / per-array today_kwh writes.
+    let meter_entries: Vec<(u8, i32)> = snapshot
+        .solar_arrays
+        .iter()
+        .filter(|a| a.source == SolarArraySource::Meter)
+        .filter_map(|a| a.meter_address)
+        .filter(|&addr| (1..=8).contains(&addr))
+        .map(|addr| {
+            let p = snapshot
+                .meters
+                .iter()
+                .find(|m| m.address == addr)
+                .map(|m| m.p_active_total)
+                .unwrap_or(0);
+            (addr, p)
+        })
+        .collect();
+
+    if meter_entries.is_empty() {
+        return false; // no meter-backed arrays: nothing to do
+    }
+
+    let day_str = today_local.format("%Y-%m-%d").to_string();
+    let mut any_reseeded = false;
+
+    // Power override: when a solar CT is configured, the CT is the sole
+    // authority — the inverter's own PV registers on an AC-coupled box
+    // mirror the same generation the clamp measures (refreshed on the
+    // dongle's own cadence), so keeping them would double-count. Any
+    // DC-string arrays surfaced by compute_solar_arrays stay visible as
+    // cards but do not contribute to the aggregate.
+    let ct_power_w: i64 = snapshot
+        .solar_arrays
+        .iter()
+        .filter(|a| a.source == SolarArraySource::Meter)
+        .map(|a| a.power_w as i64)
+        .sum();
+    snapshot.solar_power = ct_power_w as i32;
+
+    // Today energy: Σ max(Δimport, Δexport) per meter + Σ DC today counters.
+    let mut ct_today_kwh: f64 = 0.0;
+    let mut today_by_meter: std::collections::BTreeMap<u8, f64> = std::collections::BTreeMap::new();
+    for &(addr, _p) in &meter_entries {
+        let Some(meter) = snapshot.meters.iter().find(|m| m.address == addr) else {
+            continue;
+        };
+        let key = addr.to_string();
+        let current_import = meter.e_import_active_kwh as f64;
+        let current_export = meter.e_export_active_kwh as f64;
+
+        let mut force_reseed = false;
+        let today_kwh = match baselines.get(&key) {
+            Some(b) if b.day == day_str => {
+                // Same day: delta from baseline. Take the larger of the
+                // import/export deltas — the solar CT's generation flows
+                // one way, whichever the clamp orientation records.
+                let d_import = (current_import - b.e_import_kwh).max(0.0);
+                let d_export = (current_export - b.e_export_kwh).max(0.0);
+                // Meter swap / counter reset: both counters fell far below
+                // the stored baseline. The deltas read as 0 (clamped), but
+                // keeping the stale baseline would freeze "today" at its
+                // pre-reset value — reseed instead.
+                if current_import < b.e_import_kwh - SOLAR_METER_BASELINE_RESEED_DELTA_KWH
+                    && current_export < b.e_export_kwh - SOLAR_METER_BASELINE_RESEED_DELTA_KWH
+                {
+                    force_reseed = true;
+                    0.0
+                } else {
+                    d_import.max(d_export)
+                }
+            }
+            Some(_) | None => {
+                // New day / first run / meter swap: seed baseline from the
+                // current counters. Today starts at 0 and accumulates from
+                // here.
+                0.0
+            }
+        };
+
+        // Insert a baseline only when it's actually new (first read of a
+        // new day / first run / reseed after a counter reset). Re-writing
+        // it every poll with the *current* counters would collapse
+        // "today" to the last poll's delta instead of accumulating since
+        // midnight, so the same-day case never touches the map.
+        let needs_persist = match baselines.get(&key) {
+            Some(b) => b.day != day_str || force_reseed,
+            None => true,
+        };
+        if needs_persist {
+            let entry = crate::settings::SolarMeterBaseline {
+                day: day_str.clone(),
+                e_import_kwh: current_import,
+                e_export_kwh: current_export,
+            };
+            baselines.insert(key, entry);
+            any_reseeded = true;
+        }
+        today_by_meter.insert(addr, today_kwh);
+        ct_today_kwh += today_kwh;
+    }
+
+    // Today energy follows the same rule: the CT counters are the sole
+    // authority for the aggregate. DC-string cards keep their own
+    // per-array figures but don't add into the total (their register
+    // energy mirrors the same generation on an AC-coupled box).
+    snapshot.today_solar_kwh = ct_today_kwh as f32;
+
+    // Stamp per-array today_kwh onto meter entries.
+    for arr in snapshot.solar_arrays.iter_mut() {
+        if arr.source == SolarArraySource::Meter {
+            if let Some(addr) = arr.meter_address {
+                if let Some(kwh) = today_by_meter.get(&addr) {
+                    arr.today_kwh = Some(*kwh);
+                }
+            }
+        }
+    }
+
+    any_reseeded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3982,6 +4183,16 @@ mod tests {
             frequency: 50.0,
             e_import_active_kwh: 0.0,
             e_export_active_kwh: 0.0,
+        }
+    }
+
+    /// Variant of [`meter`] with cumulative energy counters set, for the
+    /// CT-solar "today" baseline tests (issue #277).
+    fn meter_with_energy(address: u8, p_active_total: i32, e_import: f32, e_export: f32) -> MeterData {
+        MeterData {
+            e_import_active_kwh: e_import,
+            e_export_active_kwh: e_export,
+            ..meter(address, p_active_total)
         }
     }
 
@@ -4176,6 +4387,173 @@ mod tests {
         assert_eq!(arrays[1].source, SolarArraySource::Pv2);
         assert_eq!(arrays[2].source, SolarArraySource::Meter);
         assert_eq!(arrays[2].meter_address, Some(4));
+    }
+
+    // -- apply_ct_solar_authority (issue #277) --------------------------------
+
+    /// Build a snapshot pre-stamped with CT + DC arrays the way the poll
+    /// loop does, so `apply_ct_solar_authority` tests exercise the real
+    /// input shape.
+    fn ct_snapshot(meters: Vec<MeterData>, pv1_w: i32, today_pv1: f32) -> InverterSnapshot {
+        let settings = Settings {
+            pv1_rated_kw: 5.0,
+            solar_arrays: vec![SolarArrayConfig {
+                meter_address: 1,
+                name: "Roof".into(),
+                rated_kw: 9.48,
+            }],
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            pv1_power: pv1_w,
+            today_pv1_kwh: today_pv1,
+            solar_power: pv1_w, // inverter register sum pre-override
+            today_solar_kwh: today_pv1,
+            meters,
+            ..Default::default()
+        };
+        snap.solar_arrays = compute_solar_arrays(&snap, &settings);
+        snap
+    }
+
+    fn day(n: i64) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap() + chrono::Duration::days(n)
+    }
+
+    #[test]
+    fn ct_authority_overrides_solar_power_from_meters() {
+        // The reporter's scenario (issue #277): inverter PV registers say
+        // 1.8 kW while the CT clamp on the solar inverter output says
+        // 3.8 kW. With a meter-backed array configured, the CT wins.
+        let mut snap = ct_snapshot(vec![meter_with_energy(1, 3800, 100.0, 500.0)], 1800, 28.1);
+        let mut baselines = std::collections::BTreeMap::new();
+        apply_ct_solar_authority(&mut snap, &mut baselines, day(0));
+        assert_eq!(snap.solar_power, 3800, "CT replaces inverter PV registers");
+        // Baseline seeded on first sight of the meter.
+        assert_eq!(baselines.len(), 1);
+        assert_eq!(baselines["1"].day, "2026-08-19");
+        assert_eq!(baselines["1"].e_export_kwh, 500.0);
+    }
+
+    #[test]
+    fn ct_authority_accumulates_today_energy_since_midnight() {
+        // First poll of the day: baseline seeded, today = 0.
+        let mut baselines = std::collections::BTreeMap::new();
+        let mut snap = ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 500.0)], 0, 0.0);
+        apply_ct_solar_authority(&mut snap, &mut baselines, day(0));
+        assert_eq!(snap.today_solar_kwh, 0.0);
+        // First read of the day: today starts at 0 (baseline seeded at the
+        // current counters), and the meter card shows 0 rather than hiding
+        // the row.
+        let meter_arr = snap.solar_arrays.iter().find(|a| a.source == SolarArraySource::Meter).unwrap();
+        assert_eq!(meter_arr.today_kwh, Some(0.0));
+
+        // Later same day: export counter advanced 12.4 kWh → today = 12.4.
+        let mut snap2 = ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 512.4)], 0, 0.0);
+        let reseeded = apply_ct_solar_authority(&mut snap2, &mut baselines, day(0));
+        assert!(!reseeded, "same-day accumulation must not reseed");
+        assert!((snap2.today_solar_kwh - 12.4).abs() < 0.01);
+        // Per-array card gets its own today figure.
+        let meter_arr = snap2.solar_arrays.iter().find(|a| a.source == SolarArraySource::Meter).unwrap();
+        assert!((meter_arr.today_kwh.unwrap() - 12.4).abs() < 0.01);
+        // Baseline untouched mid-day.
+        assert_eq!(baselines["1"].e_export_kwh, 500.0);
+    }
+
+    #[test]
+    fn ct_authority_resets_at_midnight() {
+        // Day 0 accumulates 12.4 kWh; first poll of day 1 reseeds and
+        // today restarts at 0.
+        let mut baselines = std::collections::BTreeMap::new();
+        let mut snap = ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 500.0)], 0, 0.0);
+        apply_ct_solar_authority(&mut snap, &mut baselines, day(0));
+        let mut snap2 = ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 512.4)], 0, 0.0);
+        apply_ct_solar_authority(&mut snap2, &mut baselines, day(0));
+
+        let mut snap3 = ct_snapshot(vec![meter_with_energy(1, 1000, 100.0, 513.0)], 0, 0.0);
+        let reseeded = apply_ct_solar_authority(&mut snap3, &mut baselines, day(1));
+        assert!(reseeded, "new day must reseed the baseline");
+        assert_eq!(snap3.today_solar_kwh, 0.0, "today restarts at midnight");
+        assert_eq!(baselines["1"].e_export_kwh, 513.0);
+    }
+
+    #[test]
+    fn ct_authority_reseeds_on_counter_reset() {
+        // Both counters fell far below the stored baseline (meter swap /
+        // factory reset): reseed instead of freezing today at the stale
+        // value.
+        let mut baselines = std::collections::BTreeMap::new();
+        let mut snap = ct_snapshot(vec![meter_with_energy(1, 3000, 1000.0, 500.0)], 0, 0.0);
+        apply_ct_solar_authority(&mut snap, &mut baselines, day(0));
+        let mut snap2 = ct_snapshot(vec![meter_with_energy(1, 3000, 1005.0, 512.4)], 0, 0.0);
+        apply_ct_solar_authority(&mut snap2, &mut baselines, day(0));
+        assert!((snap2.today_solar_kwh - 12.4).abs() < 0.01);
+
+        // Counter reset: import 1005 → 2, export 512.4 → 1.
+        let mut snap3 = ct_snapshot(vec![meter_with_energy(1, 500, 2.0, 1.0)], 0, 0.0);
+        let reseeded = apply_ct_solar_authority(&mut snap3, &mut baselines, day(0));
+        assert!(reseeded);
+        assert_eq!(snap3.today_solar_kwh, 0.0);
+        assert_eq!(baselines["1"].e_import_kwh, 2.0);
+    }
+
+    #[test]
+    fn ct_authority_noop_without_meter_arrays() {
+        // Pure hybrid (Stuart's own install): no CT arrays configured →
+        // the inverter-register path must be untouched.
+        let mut snap = ct_snapshot(vec![meter_with_energy(1, 3800, 100.0, 500.0)], 1800, 28.1);
+        // Re-stamp arrays WITHOUT the meter entry.
+        let settings = Settings {
+            pv1_rated_kw: 5.0,
+            ..Default::default()
+        };
+        snap.solar_arrays = compute_solar_arrays(&snap, &settings);
+        let before_power = snap.solar_power;
+        let before_today = snap.today_solar_kwh;
+        let mut baselines = std::collections::BTreeMap::new();
+        let reseeded = apply_ct_solar_authority(&mut snap, &mut baselines, day(0));
+        assert!(!reseeded);
+        assert_eq!(snap.solar_power, before_power, "hybrid untouched");
+        assert_eq!(snap.today_solar_kwh, before_today, "hybrid today untouched");
+        assert!(baselines.is_empty());
+    }
+
+    #[test]
+    fn ct_authority_mixes_ct_and_dc_generation() {
+        // Hybrid with DC strings PLUS a CT-metered array: when a solar CT
+        // is configured it is the sole authority for the aggregate — the
+        // DC registers on an AC-coupled box mirror the same generation
+        // (issue #277's double-count guard). The DC card keeps its own
+        // per-array figures for display.
+        let settings = Settings {
+            pv1_rated_kw: 5.0,
+            solar_arrays: vec![SolarArrayConfig {
+                meter_address: 1,
+                name: "Garage".into(),
+                rated_kw: 4.0,
+            }],
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            pv1_power: 2000,
+            today_pv1_kwh: 10.0,
+            solar_power: 2000,
+            today_solar_kwh: 10.0,
+            meters: vec![meter_with_energy(1, 3200, 100.0, 500.0)],
+            ..Default::default()
+        };
+        snap.solar_arrays = compute_solar_arrays(&snap, &settings);
+        let mut baselines = std::collections::BTreeMap::new();
+        apply_ct_solar_authority(&mut snap, &mut baselines, day(0));
+        // Power = CT only (3200), not CT + DC (5200): the registers
+        // mirror the same generation.
+        assert_eq!(snap.solar_power, 3200);
+        // Today = CT only (0 on first read); the DC register figure is
+        // not added in.
+        assert!((snap.today_solar_kwh - 0.0).abs() < 0.01);
+        // DC string's per-array today is preserved for its card.
+        let pv1_arr = snap.solar_arrays.iter().find(|a| a.source == SolarArraySource::Pv1).unwrap();
+        assert_eq!(pv1_arr.today_kwh, Some(10.0));
     }
 
     #[test]

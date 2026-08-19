@@ -104,15 +104,25 @@ describe('solarOverallPercent', () => {
     expect(solarOverallPercent(6000, arrays)).toBe(75);
   });
 
-  it('sums only the DC strings (pv1/pv2), ignoring external CT meters', () => {
-    // The wheel's solar_power reading (pv1 + pv2) doesn't include an external
-    // AC-coupled array, so its 10 kWp must not dilute the denominator.
+  it('uses meter-array kWp when a solar CT is configured (issue #277)', () => {
+    // With a solar CT labelled as an array, solar_power IS the CT reading —
+    // the denominator becomes the meter arrays' kWp (the inverter's DC
+    // registers mirror the same generation and don't count).
     const arrays = [array('pv1', { rated_kw: 6 }), array('meter', { rated_kw: 10, meter_address: 1 })];
+    expect(solarOverallPercent(3000, arrays)).toBe(30); // 3 kW / 10 kWp
+  });
+
+  it('sums only the DC strings (pv1/pv2) when no meter arrays exist', () => {
+    // No solar CT configured: the wheel's solar_power reading (pv1 + pv2)
+    // doesn't include an external AC-coupled array, so an array's kWp
+    // must not dilute the denominator. (Defensive: this shape only arises
+    // when a meter array is configured alongside DC strings.)
+    const arrays = [array('pv1', { rated_kw: 6 })];
     expect(solarOverallPercent(3000, arrays)).toBe(50); // 3 kW / 6 kWp
   });
 
-  it('is null when no DC-string capacity is configured', () => {
-    expect(solarOverallPercent(3000, [array('meter', { rated_kw: 10, meter_address: 1 })])).toBeNull();
+  it('is null when no rated capacity is configured', () => {
+    expect(solarOverallPercent(3000, [array('meter', { rated_kw: 0, meter_address: 1 })])).toBeNull();
     expect(solarOverallPercent(3000, [])).toBeNull();
     expect(solarOverallPercent(3000, undefined)).toBeNull();
     expect(solarOverallPercent(3000, null)).toBeNull();

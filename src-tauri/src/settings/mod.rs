@@ -926,6 +926,22 @@ pub struct SolarArrayConfig {
     pub rated_kw: f64,
 }
 
+/// Midnight baseline for a solar CT meter's cumulative energy counters
+/// (issue #277). "Today's" generation for a meter-backed solar array is
+/// the delta of the meter's cumulative import/export counters since this
+/// baseline, so it resets at local midnight and survives app restarts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SolarMeterBaseline {
+    /// Local calendar day this baseline was captured ("YYYY-MM-DD").
+    /// A different day means midnight passed: reseed from the current
+    /// counters so "today" restarts at zero.
+    pub day: String,
+    /// Cumulative import counter at baseline (kWh).
+    pub e_import_kwh: f64,
+    /// Cumulative export counter at baseline (kWh).
+    pub e_export_kwh: f64,
+}
+
 /// Application settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -1237,6 +1253,13 @@ pub struct Settings {
     /// [`SolarArrayConfig`]. Empty by default.
     #[serde(default)]
     pub solar_arrays: Vec<SolarArrayConfig>,
+    /// Midnight baselines for solar CT meters' cumulative energy counters
+    /// (issue #277), keyed by meter address as a decimal string ("1"-"8").
+    /// Written by the poll loop whenever a baseline is (re)seeded. Empty by
+    /// default; old settings files decode with no baselines and get seeded
+    /// on the first poll.
+    #[serde(default)]
+    pub solar_meter_baselines: std::collections::BTreeMap<String, SolarMeterBaseline>,
 }
 
 fn default_http_port() -> u16 {
@@ -1569,6 +1592,7 @@ impl Default for Settings {
             pv1_rated_kw: 0.0,
             pv2_rated_kw: 0.0,
             solar_arrays: Vec::new(),
+            solar_meter_baselines: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -1851,6 +1875,18 @@ mod tests {
                     rated_kw: 4.2,
                 },
             ],
+            // Issue #277: solar meter midnight baselines round-trip keyed
+            // by decimal meter address.
+            solar_meter_baselines: [(
+                "1".to_string(),
+                SolarMeterBaseline {
+                    day: "2026-08-19".to_string(),
+                    e_import_kwh: 100.5,
+                    e_export_kwh: 88.25,
+                },
+            )]
+            .into_iter()
+            .collect(),
         };
         let json = serde_json::to_string(&s).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
@@ -1915,6 +1951,14 @@ mod tests {
         assert_eq!(decoded.solar_arrays[1].meter_address, 2);
         assert!(decoded.solar_arrays[1].name.is_empty());
         assert_eq!(decoded.solar_arrays[1].rated_kw, 4.2);
+        // Issue #277: baselines round-trip with day + counters intact.
+        let baseline = decoded
+            .solar_meter_baselines
+            .get("1")
+            .expect("baseline must round-trip");
+        assert_eq!(baseline.day, "2026-08-19");
+        assert_eq!(baseline.e_import_kwh, 100.5);
+        assert_eq!(baseline.e_export_kwh, 88.25);
     }
 
     /// AlertsConfig pushover fields must survive a full JSON round-trip and
@@ -2252,6 +2296,7 @@ mod tests {
             pv1_rated_kw: 0.0,
             pv2_rated_kw: 0.0,
             solar_arrays: Vec::new(),
+            solar_meter_baselines: std::collections::BTreeMap::new(),
         };
 
         // We can't easily override the settings path for testing,

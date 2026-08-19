@@ -20,6 +20,13 @@ export default function SolarPage() {
 
   const hasPv2 = snapshot.pv2_power > 0 || snapshot.pv2_current > 0;
 
+  // Issue #277: when any external CT meter is labelled as a solar array,
+  // the CT clamp is the authoritative solar measurement. The inverter's
+  // per-string registers then mirror the same generation the clamp
+  // measures, so the Overview hides the "(PV1 · PV2)" breakdown (it would
+  // contradict the CT-derived total).
+  const hasMeterSolarArray = (snapshot.solar_arrays ?? []).some((a) => a.source === 'meter');
+
   return (
     <div className="flex flex-col gap-4 max-w-4xl mx-auto">
 
@@ -30,7 +37,11 @@ export default function SolarPage() {
         <p className="text-text-secondary text-xs">Total Solar Power</p>
         <p className="text-text-primary font-mono text-sm mt-2">
           Today: {formatEnergy(snapshot.today_solar_kwh ?? 0)}
-          {snapshot.today_pv1_kwh != null && snapshot.today_pv2_kwh != null && (
+          {/* Per-string breakdown only when the inverter's PV registers are
+              the solar source — with a solar CT configured (issue #277) the
+              registers mirror the same generation the clamp measures, so the
+              breakdown would contradict the CT-derived total. */}
+          {!hasMeterSolarArray && snapshot.today_pv1_kwh != null && snapshot.today_pv2_kwh != null && (
             <span className="text-text-secondary text-xs ml-2">
               (PV1 {formatEnergy(snapshot.today_pv1_kwh)} · PV2 {formatEnergy(snapshot.today_pv2_kwh)})
             </span>
