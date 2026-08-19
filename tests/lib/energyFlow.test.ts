@@ -1111,27 +1111,35 @@ describe('buildEnergyFlows — final user scenario: solar + battery + home, only
         battery_power: 3000,   // discharging (positive per AGENTS.md sign convention)
         battery_state: 'discharging',
         home_power: 1300,
-        grid_power: 1700,      // net export, fully attributable to battery
+        grid_power: 1700,      // net export, attributable to battery overflow
       }),
     );
-    // solar → home is the only solar-driven spoke (yellow).
+    // Solar covers 1kW of home directly.
     const solar = vm.flows.find((f) => f.id === 'solar');
     expect(solar, 'solar flow missing').toBeDefined();
     expect(solar!.watts).toBe(1000);
     expect(solar!.color).toBe(FLOW_COLORS.solar);
-    // Battery covers 1.3 kW of home (the home-direct portion); 1.7 kW
-    // overflows to grid.
+    // Battery covers the residual home demand (1300 − 1000 solar = 300 W),
+    // not the entire home reading. Issue #275 changed this from 1300 W to
+    // 300 W so the solar + discharge spokes don't double-claim the home
+    // busbar: solar → home (1000) + discharge → home (300) = 1300 = home.
     const dis = vm.flows.find((f) => f.id === 'discharge');
     expect(dis, 'discharge flow missing').toBeDefined();
-    expect(dis!.watts).toBe(1300);
+    expect(dis!.watts).toBe(300);
     expect(dis!.color).toBe(BATTERY_OUTPUT_COLOR);
+    // Battery overflow = 3000 − 300 (home-direct) = 2700 W to grid.
+    // The grid export reading is 1700 W; the extra 1000 W is solar's
+    // contribution to grid (since solar covers 1000 W of home, that
+    // 1000 W isn't going to the battery to overflow). The battery only
+    // overflows by 2700 W; the diagram shows the wheel's worth.
     const toGrid = vm.flows.find((f) => f.id === 'discharge_to_grid');
     expect(toGrid, 'discharge_to_grid flow missing').toBeDefined();
-    expect(toGrid!.watts).toBe(1700);
+    expect(toGrid!.watts).toBe(2700);
     expect(toGrid!.color).toBe(BATTERY_OUTPUT_COLOR);
-    // No `export` flow — the entire grid reading was battery discharge
-    // surplus. Drawing both `export` and `discharge_to_grid` would have
-    // drawn a misleading yellow solar → grid spoke (issue #170 final fix).
+    // No `export` flow — solar doesn't have a surplus beyond home (its
+    // 1000 W is fully absorbed by the home load along with battery's
+    // 300 W). Drawing an `export` spoke would imply solar → grid, which
+    // it doesn't.
     expect(vm.flows.find((f) => f.id === 'export'), 'no solar-export spoke expected').toBeUndefined();
   });
 

@@ -417,17 +417,63 @@ export function buildEnergyFlows(
   // for `s.home_power` whenever the home was idle, swallowing the entire
   // battery output into a "battery → home" spoke for a house that
   // consumes nothing.
+  //
+  // When solar is also feeding home simultaneously, the battery's
+  // home-direct portion is the *residual* home demand after solar's
+  // contribution: `max(0, home - solarDirectToHomeW)`. Otherwise the
+  // solar + discharge spokes together would overshoot home_power and
+  // the excess would be unaccounted for (issue #275 discharge path).
   const effectiveHomePower = s.home_power > noise ? s.home_power : 0;
+  // Solar direct-to-home wattage. When the battery is charging from solar,
+  // `solarChargeWatts` is already attributed via the `solar_charge` spoke
+  // (issue #170), so the home-direct spoke is reduced to avoid double-
+  // claiming the same solar wattage (issue #275). The same reduction
+  // matters when the battery is discharging: solar feeds home first, and
+  // only the residual after solar's home-direct contribution is needed
+  // from the battery.
+  //
+  // Declared here (before the discharge block that reads it) so the
+  // discharge residual-home calculation can subtract solar's contribution
+  // before deciding how much of the battery output reaches home vs grid.
+  //
+  // Three cases for the cap at `effectiveHomePower`:
+  //  - home > noise: cap so solar doesn't over-claim the home busbar
+  //    (issue #275 root cause — solar + discharge spokes were both
+  //    claiming the whole home busbar at the same time).
+  //  - home ≤ noise AND solarChargeWatts > 0 (idle house, battery
+  //    charging): emit only the home-direct portion if any exists, OR
+  //    nothing (don't claim a phantom flow into a hub that reads as
+  //    idle). The export spoke carries the solar surplus separately.
+  //  - home ≤ noise AND no charging: keep the full solar spoke so the
+  //    user sees solar visibly feeding home (matches existing test #124:
+  //    `solar_power: 5000` with no home load).
+  //
+  // The export spoke computes its surplus off the *uncapped* solar minus
+  // actual home + charge (see `solarSurplusW` below), so capping the
+  // home-direct spoke doesn't shrink the export.
+  const solarDirectToHomeW = solarActive
+    ? (effectiveHomePower > 0
+        ? Math.max(0, Math.min(s.solar_power - solarChargeWatts, effectiveHomePower))
+        : (solarChargeWatts > 0
+            ? Math.max(0, Math.min(s.solar_power - solarChargeWatts, noise))
+            : Math.max(0, s.solar_power - solarChargeWatts)))
+    : 0;
+  // When solar is also feeding home simultaneously, the battery's
+  // home-direct portion is the *residual* home demand after solar's
+  // contribution: `max(0, home - solarDirectToHomeW)`. Otherwise the
+  // solar + discharge spokes together would overshoot home_power and
+  // the excess would be unaccounted for (issue #275 discharge path).
+  const residualHomeForBattery = Math.max(0, effectiveHomePower - solarDirectToHomeW);
   const batteryToHome = isDischarging
-    ? Math.min(absBattery, effectiveHomePower)
+    ? Math.min(absBattery, residualHomeForBattery)
     : 0;
   const batteryToGrid = isDischarging
     ? Math.max(0, absBattery - batteryToHome)
     : 0;
 
-  if (solarActive) {
-    push('solar', 'solar', 'home', s.solar_power, 'generate',
-      `${formatPower(s.solar_power)} from solar`);
+  if (solarDirectToHomeW > noise) {
+    push('solar', 'solar', 'home', solarDirectToHomeW, 'generate',
+      `${formatPower(solarDirectToHomeW)} from solar`);
   }
   if (isImporting) {
     // The import spoke carries the full grid inflow (issue #188: the
@@ -444,15 +490,16 @@ export function buildEnergyFlows(
         `${formatPower(importDisplayW)} importing`);
     }
   }
-  // Export-spoke source attribution (issue #170 final simplification).
+  // Export-spoke source attribution (issue #170 final simplification,
+  // issue #275 solar-double-claim fix).
   //
   // Simple check the user articulated: "if solar < house load then no
   // solar export" — the rule is about the *solar-source* export, not
   // export in general. Three cases:
   //
   //  1. Solar is generating AND its own surplus exceeds home load: emit a
-  //     yellow solar-driven `export` spoke of size (solar − home) for the
-  //     portion attributable to solar.
+  //     yellow solar-driven `export` spoke of size (solar − home − charge)
+  //     for the portion attributable to solar.
   //  2. Solar is off / solar is generating but solar ≤ home (no solar
   //     surplus): the export, if any, comes purely from a non-solar
   //     source (typically battery discharge_to_grid). Skip the `export`
@@ -464,10 +511,21 @@ export function buildEnergyFlows(
   //     same wattage).
   //
   // Net effect:
-  //  - solar > home_load → `export` spoke drawn (yellow solar surplus).
-  //  - solar ≤ home_load → no `export` spoke (solar doesn't export).
-  //    Battery discharges still show as `discharge_to_grid` if applicable.
-  const solarSurplusW = Math.max(0, s.solar_power - (s.home_power > noise ? s.home_power : 0));
+  //  - solar > home_load + solar_charge → `export` spoke drawn (yellow
+  //    solar surplus).
+  //  - solar ≤ home_load + solar_charge → no `export` spoke (solar
+  //    doesn't export). Battery discharges still show as
+  //    `discharge_to_grid` if applicable.
+  //
+  // The surplus is `solar - (home portion) - solar_charge` — note we use
+  // the *uncapped* solar minus the actual home draw (not the clamped
+  // `solarDirectToHomeW`), because if solar could've delivered more than
+  // the home asked for, the surplus still exports. The home-direct cap
+  // is only a display choice to avoid a phantom spoke when the inverter
+  // disagrees about where the wattage actually went.
+  const solarSurplusW = solarActive
+    ? Math.max(0, s.solar_power - (s.home_power > noise ? s.home_power : 0) - solarChargeWatts)
+    : 0;
   if (isExporting && solarSurplusW > noise) {
     push('export', 'home', 'grid', solarSurplusW, 'export',
       `${formatPower(solarSurplusW)} exporting`);
