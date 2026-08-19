@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.74.5] - 2026-08-19
+
+### Fixed
+
+- **The distribution wheel's moving dots no longer snap back to their start.** The dot always jumped from the end of its path back to the beginning between loops — harmless while the endpoints hid behind the node circles, but the recent spacing fix moved that jump into open space where it flickered visibly. The dot now fades out over the last 200 ms of its travel and fades back in over the first 200 ms, so the loop closes while it's invisible. The whole wheel also runs at a calmer pace: base speed is down by a third, and the short spokes into and out of the Home node run slower still so the centre no longer reads as rushed. (issue #276)
+
 ## [0.74.4] - 2026-08-19
 
 ### Fixed
