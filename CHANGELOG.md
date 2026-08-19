@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.74.3] - 2026-08-19
+
+### Fixed
+
+- **Remote connections no longer drop every ~30 seconds.** The WebSocket keepalive treated a client that had sent nothing for 30 seconds as dead and disconnected it — but a browser never sends anything on its own, it only receives updates, so a remote session (where broadcasts can be sparse) was being kicked to a reconnect roughly every 30 seconds, briefly blanking the page. The server now sends a WebSocket Ping first and waits ten seconds for a reply before giving up: every WebSocket stack answers Pings automatically, so a live-but-quiet connection stays open, while genuinely dead connections are still cleaned up. (issue #274)
+
 ## [0.74.2] - 2026-08-19
 
 ### Fixed
