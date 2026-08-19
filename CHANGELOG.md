@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.74.2] - 2026-08-19
+
+### Fixed
+
+- **Overnight phantom generation on the Solar page for CT-metered arrays.** On AC-coupled systems where the panels are measured by a CT clamp, a few watts of the inverter's own standby draw after dusk (one reporter saw 16 W) was being shown as generation on the Solar page's array cards. Meter-sourced arrays now use the same 20 W noise floor as the Power page, so darkness and standby draw read as 0 W. A reversed clamp reading negative is still shown as positive output. (issue #273)
+
 ## [0.74.1] - 2026-08-18
 
 ### Fixed
