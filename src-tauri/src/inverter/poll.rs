@@ -3874,6 +3874,13 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 /// hybrid install sees no change until the user opts in. Meter entries
 /// with `rated_kw == 0` are still surfaced (power-only); the FE hides
 /// the % when the rating is zero.
+/// Noise floor for meter-sourced solar arrays (AC-coupled CT clamps),
+/// in watts. Mirrors the frontend's `DEFAULT_NOISE_THRESHOLD_W` in
+/// `src/lib/energyFlow.ts`: after dusk a CT on a solar inverter's AC
+/// output picks up a few watts of the inverter's own standby draw, and
+/// that must not surface as overnight "generation" (issue #273).
+pub(crate) const SOLAR_METER_NOISE_THRESHOLD_W: u32 = 20;
+
 pub(crate) fn compute_solar_arrays(
     snapshot: &InverterSnapshot,
     settings: &crate::settings::Settings,
@@ -3923,7 +3930,17 @@ pub(crate) fn compute_solar_arrays(
                 // A CT on a solar inverter's AC output reads generation
                 // flowing out to the bus; take the absolute value so a
                 // physically reversed clamp still shows as positive output.
-                power_w: meter.p_active_total.unsigned_abs(),
+                // Below the noise floor the reading is standby draw /
+                // clamp noise, not generation — report 0 W so the Solar
+                // page doesn't show overnight "generating" (issue #273).
+                power_w: {
+                    let magnitude = meter.p_active_total.unsigned_abs();
+                    if magnitude > SOLAR_METER_NOISE_THRESHOLD_W {
+                        magnitude
+                    } else {
+                        0
+                    }
+                },
                 rated_kw: arr.rated_kw,
                 today_kwh: None,
                 meter_address: Some(arr.meter_address),
@@ -4061,6 +4078,31 @@ mod tests {
         assert_eq!(arrays[1].power_w, 2600);
         assert_eq!(arrays[1].meter_address, Some(2));
         assert!(arrays[1].name.is_empty());
+    }
+
+    #[test]
+    fn solar_arrays_meter_below_noise_floor_reports_zero() {
+        // Issue #273: after dusk a solar CT clamp picks up the inverter's
+        // standby draw (reporter saw ~16 W). That magnitude must not surface
+        // as overnight generation on the Solar page — it reads as 0 W until
+        // it clears the same 20 W noise floor the Power page tile uses.
+        let snap = InverterSnapshot {
+            meters: vec![meter(1, 16), meter(2, -18), meter(3, 21)],
+            ..Default::default()
+        };
+        let settings = Settings {
+            solar_arrays: vec![
+                SolarArrayConfig { meter_address: 1, name: String::new(), rated_kw: 6.0 },
+                SolarArrayConfig { meter_address: 2, name: String::new(), rated_kw: 6.0 },
+                SolarArrayConfig { meter_address: 3, name: String::new(), rated_kw: 6.0 },
+            ],
+            ..Default::default()
+        };
+        let arrays = compute_solar_arrays(&snap, &settings);
+        assert_eq!(arrays.len(), 3);
+        assert_eq!(arrays[0].power_w, 0, "+16 W standby draw → 0 W");
+        assert_eq!(arrays[1].power_w, 0, "-18 W reversed-clamp noise → 0 W");
+        assert_eq!(arrays[2].power_w, 21, "above the 20 W floor still reads through");
     }
 
     #[test]
