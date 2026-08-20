@@ -270,6 +270,15 @@ export function buildEnergyFlows(
   // battery_state is the authoritative signal; sign is a cross-check.
   const isCharging = s.battery_state === 'charging' && absBattery > noise;
   const isDischarging = s.battery_state === 'discharging' && absBattery > noise;
+  // Home hub activeness follows the snapshot reading directly. The
+  // home value is what the inverter reports for the busbar — even if
+  // the spokes can't explain it (AC-coupled CT under-count, meter
+  // inconsistency, etc.), the hub should surface the reading rather
+  // than suppress it. The user's "the spokes don't sum to solar"
+  // complaint on issue #275 is precisely a case where the snapshot
+  // is the source of truth and the spokes are derived from it; we
+  // do NOT refine `homeActive` to follow the spokes, because doing
+  // so would hide the very signal the user wants to see.
   const homeActive = s.home_power > noise;
   const evcPower = opts.evcPowerW ?? 0;
   const evcActive = !!opts.showEvc && evcPower > noise;
@@ -441,12 +450,15 @@ export function buildEnergyFlows(
   //    (issue #275 root cause — solar + discharge spokes were both
   //    claiming the whole home busbar at the same time).
   //  - home ≤ noise AND solarChargeWatts > 0 (idle house, battery
-  //    charging): emit only the home-direct portion if any exists, OR
-  //    nothing (don't claim a phantom flow into a hub that reads as
-  //    idle). The export spoke carries the solar surplus separately.
+  //    charging): emit nothing into the idle hub — don't synthesise a
+  //    noise-clamped spoke carrying wattage the meter denies exists
+  //    (Jet-bundle report, issue #275 follow-up). The export spoke
+  //    carries the solar surplus separately.
   //  - home ≤ noise AND no charging: keep the full solar spoke so the
   //    user sees solar visibly feeding home (matches existing test #124:
-  //    `solar_power: 5000` with no home load).
+  //    `solar_power: 5000` with no home load). This branch does NOT
+  //    over-claim because there's no battery charge already using the
+  //    solar wattage.
   //
   // The export spoke computes its surplus off the *uncapped* solar minus
   // actual home + charge (see `solarSurplusW` below), so capping the
@@ -455,7 +467,12 @@ export function buildEnergyFlows(
     ? (effectiveHomePower > 0
         ? Math.max(0, Math.min(s.solar_power - solarChargeWatts, effectiveHomePower))
         : (solarChargeWatts > 0
-            ? Math.max(0, Math.min(s.solar_power - solarChargeWatts, noise))
+            // Bug fix (Jet-bundle report, issue #275 follow-up):
+            // previously clamped to `noise` here, which could synthesise
+            // up to `noise` watts of spoke that the meter denies exists.
+            // The home is idle by definition (`effectiveHomePower = 0`);
+            // route all remaining solar to the export spoke instead.
+            ? 0
             : Math.max(0, s.solar_power - solarChargeWatts)))
     : 0;
   // When solar is also feeding home simultaneously, the battery's
@@ -617,6 +634,9 @@ export function buildEnergyFlows(
     const v = visualEndpoints(f, flows);
     f.color = spokeColor(v.from, v.to);
   }
+
+  // (Hub-refinement removed — see the declaration of `homeActive`
+  // above. The hub value follows the snapshot reading, not the spokes.)
 
   // Overall solar production as % of configured DC-string capacity (issue
   // #192): appended next to the Solar kW value so the user can see "how much

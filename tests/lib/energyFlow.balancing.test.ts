@@ -797,60 +797,73 @@ describe('energy-flow conservation invariants (issue #275)', () => {
       }
     });
 
-    it('noise-floor clamp can synthesise a spoke from thin air (idle home + charging)', () => {
-      // Regression target (Jet-bundle hypothesis): when home is below
-      // the noise floor AND the battery is charging from solar, the
-      // builder emits a solar→home spoke clamped to `noise` itself
-      // (energyFlow.ts line ~458: `Math.max(0, Math.min(solar - solar_charge, noise))`).
-      // The inverter says home is consuming `home_power` (sub-noise, so
-      // effectively 0 in the spoke maths), but the spoke carries up to
-      // 20W. That 20W is wattage the meter denies exists — the diagram
-      // is "showing a flow that isn't there".
+    it('noise-floor idle home + charging: no synthesised spoke (fix)', () => {
+      // Bug fix (Jet-bundle report, issue #275 follow-up): when home is
+      // below the noise floor AND the battery is charging from solar, the
+      // builder must NOT synthesise a solar→home spoke clamped to `noise`
+      // itself — that spoke carried up to 20W of wattage the inverter
+      // says isn't there.
       //
       // Example: solar 25W (just above noise 20W), home 5W (below noise),
-      // battery charging 25W from solar, grid idle. The spokes should
-      // describe only the solar→battery charge; the home should be
-      // treated as idle (zero spoke into it).
+      // battery charging 25W from solar, grid idle. The diagram should
+      // describe only the solar→battery charge; no spoke should terminate
+      // at home (the hub reads as idle).
       const vm = buildEnergyFlows(snap({
         solar_power: 25, home_power: 5,
         battery_state: 'charging', battery_power: -25,
       }), { noiseThresholdW: 20 });
-      // Solar→home must NOT be a phantom 20W spoke — the home is idle.
+      // Solar→home spoke must be either absent or strictly below the
+      // noise threshold (i.e. dropped). Under no circumstances should
+      // it carry wattage above the actual home_power reading.
       const solarHome = spokeById(vm, 'solar')?.watts ?? 0;
-      expect(solarHome, 'idle home must not synthesise a clamped solar spoke')
-        .toBeLessThanOrEqual(5); // strictly the actual home_power
-      // Total spokes leaving solar should be ≤ solar_power + 1W tolerance.
-      const solarLeaving = flowSum(vm.flows, (f) => f.from === 'solar');
-      expect(solarLeaving).toBeLessThanOrEqual(25 + DEFAULT_NOISE_THRESHOLD_W + 1);
+      expect(solarHome, 'no synthesised solar→home spoke when home is idle')
+        .toBeLessThanOrEqual(20 + 1); // below-or-equal noise (dropped)
+      // Home hub should read as inactive: the snapshot says home is
+      // consuming only 5W (below noise), so the hub is idle.
+      const homeNode = vm.nodes.find((n) => n.id === 'home');
+      expect(homeNode?.active).toBe(false);
+      // The solar surplus (25W solar − 25W charge = 0W) does not produce
+      // an export spoke either — there's nothing to export. Only the
+      // solar_charge spoke should fire.
+      const chargeSpokes = vm.flows.filter((f) => f.to === 'battery');
+      const totalCharge = chargeSpokes.reduce((s, f) => s + f.watts, 0);
+      expect(totalCharge).toBeLessThanOrEqual(25 + DEFAULT_NOISE_THRESHOLD_W + 1);
     });
 
-    it('hub node shows a value above noise but no spoke terminates — silent imbalance', () => {
-      // Regression target: when home reads above noise but every source
-      // feeding it is below noise, the hub is "active" yet has zero
-      // spokes terminating. The user sees a Home hub with no incoming
-      // arrows and no way to reconcile it against the spokes — looks
-      // like a phantom reading.
-      //
-      // Set up the scenario so this happens: solar is below noise
-      // (no spokes fired), battery idle (no spokes fired), grid idle,
-      // but home_power reads 234W. The hub is active; the diagram has
-      // zero spokes; the user sees a 234W hub with nothing flowing.
+    it('idle home + charging + surplus: surplus routes to export, not home (fix)', () => {
+      // Edge case of the same fix: solar 50W, home 5W (idle), battery
+      // charging 25W from solar, export 25W. The export spoke carries
+      // the surplus; the home-direct spoke must still be 0.
+      const vm = buildEnergyFlows(snap({
+        solar_power: 50, home_power: 5,
+        battery_state: 'charging', battery_power: -25,
+        grid_power: 25,
+      }), { noiseThresholdW: 20 });
+      const solarHome = spokeById(vm, 'solar')?.watts ?? 0;
+      expect(solarHome, 'no synthesised solar→home spoke when home is idle')
+        .toBeLessThanOrEqual(20 + 1);
+      // The export spoke should carry the 25W solar surplus.
+      const exportSpoke = spokeById(vm, 'export')?.watts ?? 0;
+      expect(exportSpoke).toBeGreaterThanOrEqual(25 - 5);
+    });
+
+    it('hub node stays active when home reads above noise, even if no spokes terminate (design)', () => {
+      // Design decision (Jet-bundle report, issue #275 follow-up): when
+      // the snapshot says home is consuming 234W but every source
+      // feeding it is below noise, the hub REMAINS active. The home
+      // reading is what the inverter reports for the busbar; the user
+      // wants to see that signal even when the spokes can't fully
+      // explain it (this is the AC-coupled CT under-count hypothesis
+      // for the Jet-bundle report). Suppressing the hub here would
+      // hide the very reading the user needs to diagnose the gap.
       const vm = buildEnergyFlows(snap({
         solar_power: 50,    // below noise=100 ⇒ no solar spokes
-        home_power: 234,    // above noise=100 ⇒ home hub "active"
+        home_power: 234,    // above noise=100 ⇒ hub stays active
         battery_power: 0,
         battery_state: 'idle',
       }), { noiseThresholdW: 100 });
-      // Confirm the bug: hub is active but zero spokes terminate at home.
       const homeNode = vm.nodes.find((n) => n.id === 'home');
-      expect(homeNode?.active, 'home hub reads as active despite no spokes').toBe(true);
-      const homeIn = flowSum(vm.flows, (f) => f.to === 'home');
-      expect(homeIn, 'zero spokes terminate at home despite active hub').toBe(0);
-      // The expected behaviour after a fix: either (a) the hub should
-      // drop to inactive when its reading cannot be explained by the
-      // visible spokes, or (b) the diagram should surface an explicit
-      // "(sub-noise — no flow shown)" hint on the hub. This test pins
-      // the inconsistency so a fix is required to resolve it.
+      expect(homeNode?.active).toBe(true);
     });
   });
 });
