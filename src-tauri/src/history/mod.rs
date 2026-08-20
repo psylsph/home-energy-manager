@@ -3309,6 +3309,268 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Walk-level energy matrix (issue #269 exhaustive): exact £ totals for
+    // every combination of {import, export, both, neither} × {gap, no gap} ×
+    // {midnight-aligned 1-day, 2-day, rolling midday} windows.
+    // -----------------------------------------------------------------------
+
+    /// Insert one local day with BOTH the import and export counters
+    /// ramping 0 → `import_kwh` / `export_kwh` between 06:00 and 18:00 —
+    /// the "normal mixed day" shape for the walk-matrix tests.
+    fn insert_both_counters_day(db: &HistoryDb, day_offset: i64, import_kwh: f32, export_kwh: f32) {
+        let midnight = local_midnight_secs(day_offset);
+        for step in 0..48i64 {
+            let ts = midnight + step * 1800;
+            let min_of_day = step * 30;
+            let frac = if min_of_day <= 6 * 60 {
+                0.0
+            } else if min_of_day >= 18 * 60 {
+                1.0
+            } else {
+                (min_of_day - 6 * 60) as f64 / (18 * 60 - 6 * 60) as f64
+            };
+            db.insert_reading(&make_snapshot_with_kwh(
+                ts,
+                (import_kwh as f64 * frac) as f32,
+                (export_kwh as f64 * frac) as f32,
+            ));
+        }
+    }
+
+    /// Run query_cost_breakdown for both counters and return
+    /// (import_energy_£, import_standing_£, export_income_£).
+    fn cost_totals(db: &HistoryDb, start: i64, end: i64) -> (f64, f64, f64) {
+        let flat_imp = crate::settings::TariffConfig::flat(0.30);
+        let flat_exp = crate::settings::TariffConfig::flat(0.15);
+        let imp = db
+            .query_cost_breakdown(
+                &window(start, end),
+                1800,
+                "today_import_kwh",
+                &flat_imp,
+                0.30,
+                60.0,
+            )
+            .unwrap();
+        let exp = db
+            .query_cost_breakdown(
+                &window(start, end),
+                1800,
+                "today_export_kwh",
+                &flat_exp,
+                0.15,
+                0.0,
+            )
+            .unwrap();
+        let i_e = imp.last().map(|p| p.energy_gbp).unwrap_or(0.0);
+        let i_s = imp.last().map(|p| p.standing_gbp).unwrap_or(0.0);
+        let e_e = exp.last().map(|p| p.energy_gbp).unwrap_or(0.0);
+        (i_e, i_s, e_e)
+    }
+
+    fn assert_close(actual: f64, expected: f64, what: &str) {
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "{what}: got £{actual:.6}, expected £{expected:.6}"
+        );
+    }
+
+    #[test]
+    fn walk_matrix_import_only_no_gap_single_day() {
+        // 10 kWh imported 06:00–18:00 at flat £0.30 → £3.00 energy,
+        // 1 day standing (60p).
+        let db = test_db();
+        insert_import_day(&db, 0, 10.0, 6 * 60, 18 * 60);
+        let m = local_midnight_secs(0);
+        let (ie, is_, ee) = cost_totals(&db, m, local_midnight_secs(1));
+        assert_close(ie, 3.0, "import energy");
+        assert_close(is_, 0.60, "standing");
+        assert_close(ee, 0.0, "export income");
+    }
+
+    #[test]
+    fn walk_matrix_export_only_no_gap_single_day() {
+        // 20 kWh exported 09:00–15:00 at flat £0.15 → £3.00 income,
+        // standing applies to import series only.
+        let db = test_db();
+        insert_export_day(&db, 0, 20.0, 9 * 60, 15 * 60);
+        let m = local_midnight_secs(0);
+        let (ie, is_, ee) = cost_totals(&db, m, local_midnight_secs(1));
+        assert_close(ie, 0.0, "import energy");
+        assert_close(is_, 0.60, "standing");
+        assert_close(ee, 3.0, "export income");
+    }
+
+    #[test]
+    fn walk_matrix_import_and_export_same_day() {
+        // Both counters active on the same day: import £3.00 + standing,
+        // export £3.00 income. Neither contaminates the other.
+        let db = test_db();
+        insert_both_counters_day(&db, 0, 10.0, 20.0);
+        let m = local_midnight_secs(0);
+        let (ie, is_, ee) = cost_totals(&db, m, local_midnight_secs(1));
+        assert_close(ie, 3.0, "import energy");
+        assert_close(is_, 0.60, "standing");
+        assert_close(ee, 3.0, "export income");
+    }
+
+    #[test]
+    fn walk_matrix_neither_import_nor_export() {
+        // Zero counters all day (genuinely no grid use): energy £0, but
+        // standing still £0.60 — the user pays the standing charge anyway.
+        let db = test_db();
+        insert_both_counters_day(&db, 0, 0.0, 0.0);
+        let m = local_midnight_secs(0);
+        let (ie, is_, ee) = cost_totals(&db, m, local_midnight_secs(1));
+        assert_close(ie, 0.0, "import energy");
+        assert_close(is_, 0.60, "standing");
+        assert_close(ee, 0.0, "export income");
+    }
+
+    #[test]
+    fn walk_matrix_export_larger_than_import() {
+        // 20 kWh export / 5 kWh import on the same day. Export income
+        // (£3.00) exceeds import energy cost (£1.50) — net credit. Both
+        // series independent; standing unaffected by direction mix.
+        let db = test_db();
+        insert_both_counters_day(&db, 0, 5.0, 20.0);
+        let m = local_midnight_secs(0);
+        let (ie, is_, ee) = cost_totals(&db, m, local_midnight_secs(1));
+        assert_close(ie, 1.5, "import energy");
+        assert_close(is_, 0.60, "standing");
+        assert_close(ee, 3.0, "export income");
+    }
+
+    #[test]
+    fn walk_matrix_import_equals_export_same_day() {
+        // Exactly equal volumes: import £3.00 / export £3.00.
+        let db = test_db();
+        insert_both_counters_day(&db, 0, 10.0, 10.0);
+        let m = local_midnight_secs(0);
+        let (ie, is_, ee) = cost_totals(&db, m, local_midnight_secs(1));
+        assert_close(ie, 3.0, "import energy");
+        assert_close(is_, 0.60, "standing");
+        assert_close(ee, 1.5, "export income");
+    }
+
+    #[test]
+    fn walk_matrix_two_days_import_with_short_overnight_gap() {
+        // Day 1: 10 kWh, last reading 23:30. Day 2's first reading lands
+        // 01:30 (2 h gap ≤ 4 h threshold) with the counter already at 0.5 —
+        // the short-gap branch credits that chunk. Day-2 readings run
+        // 01:30→21:30, ramping the counter to 0.5 + 5.5×40/47 ≈ 5.181.
+        // Telescoping: day 2 contributes its final counter value, so
+        // total = (10 + 5.181) × £0.30 ≈ £4.554.
+        let db = test_db();
+        insert_both_counters_day(&db, 0, 10.0, 0.0);
+        let m1 = local_midnight_secs(0);
+        let m2 = local_midnight_secs(1);
+        let day2_final = 0.5 + 5.5 * (40.0 / 47.0);
+        for step in 0..48i64 {
+            let ts = m2 + (90 * 60) + step * 1800;
+            if ts >= m2 + 22 * 3600 {
+                break;
+            }
+            let frac = (step as f64) / 47.0;
+            db.insert_reading(&make_snapshot_with_kwh(ts, (0.5 + 5.5 * frac) as f32, 0.0));
+        }
+        let (ie, is_, _ee) = cost_totals(&db, m1, local_midnight_secs(2));
+        let expected = (10.0 + day2_final) * 0.30;
+        assert!(
+            (ie - expected).abs() < 0.05,
+            "import energy {ie} != ~£{expected:.3} (short gap credits the chunk)"
+        );
+        assert_close(is_, 1.20, "two-day standing");
+    }
+
+    #[test]
+    fn walk_matrix_two_days_import_with_long_overnight_gap() {
+        // Day 2's first reading lands 06:00 — 6.5 h after the last day-1
+        // reading (23:30), beyond the 4 h threshold — so the unknown
+        // pre-reading chunk (0.5 kWh) is dropped (delta 0, baseline
+        // resynced to 0.5). Day-2 readings run 06:00→21:30, counter ends
+        // at 0.5 + 5.5×31/47 ≈ 4.128; day 2 contributes 4.128 − 0.5.
+        // Total = (10 + 3.628) × £0.30 ≈ £4.088.
+        let db = test_db();
+        insert_both_counters_day(&db, 0, 10.0, 0.0);
+        let m1 = local_midnight_secs(0);
+        let m2 = local_midnight_secs(1);
+        let day2_final = 0.5 + 5.5 * (31.0 / 47.0);
+        for step in 0..48i64 {
+            let ts = m2 + (6 * 3600) + step * 1800;
+            if ts >= m2 + 22 * 3600 {
+                break;
+            }
+            let frac = (step as f64) / 47.0;
+            db.insert_reading(&make_snapshot_with_kwh(ts, (0.5 + 5.5 * frac) as f32, 0.0));
+        }
+        let (ie, _is, _ee) = cost_totals(&db, m1, local_midnight_secs(2));
+        let expected = (10.0 + (day2_final - 0.5)) * 0.30;
+        assert!(
+            (ie - expected).abs() < 0.05,
+            "import energy {ie} != ~£{expected:.3} (long gap drops the chunk)"
+        );
+    }
+
+    #[test]
+    fn walk_matrix_rolling_midday_window_drops_leading_energy() {
+        // Rolling window [12:00, 12:00): the first in-window reading's
+        // counter value (5 kWh accumulated before noon) is pre-window
+        // energy — must NOT be credited. Only 12:00→18:00 deltas (5 kWh)
+        // count. Standing: window touches 2 local days → £1.20.
+        let db = test_db();
+        insert_import_day(&db, 0, 10.0, 6 * 60, 18 * 60);
+        let m = local_midnight_secs(0);
+        let start = m + 12 * 3600;
+        let end = m + 36 * 3600;
+        let (ie, is_, _ee) = cost_totals(&db, start, end);
+        assert!(
+            (ie - 1.5).abs() < 0.1,
+            "import energy {ie} != ~£1.50 (rolling window drops pre-window energy)"
+        );
+        assert_close(is_, 1.20, "rolling window standing (2 days)");
+    }
+
+    #[test]
+    fn walk_matrix_zero_standing_charge_leaves_pure_energy() {
+        // Standing 0: totals are pure energy regardless of window shape.
+        let db = test_db();
+        insert_both_counters_day(&db, 0, 10.0, 20.0);
+        let (ie, is_, ee) = {
+            let flat_imp = crate::settings::TariffConfig::flat(0.30);
+            let flat_exp = crate::settings::TariffConfig::flat(0.15);
+            let imp = db
+                .query_cost_breakdown(
+                    &window(local_midnight_secs(0), local_midnight_secs(1)),
+                    1800,
+                    "today_import_kwh",
+                    &flat_imp,
+                    0.30,
+                    0.0,
+                )
+                .unwrap();
+            let exp = db
+                .query_cost_breakdown(
+                    &window(local_midnight_secs(0), local_midnight_secs(1)),
+                    1800,
+                    "today_export_kwh",
+                    &flat_exp,
+                    0.15,
+                    0.0,
+                )
+                .unwrap();
+            (
+                imp.last().map(|p| p.energy_gbp).unwrap_or(0.0),
+                imp.last().map(|p| p.standing_gbp).unwrap_or(0.0),
+                exp.last().map(|p| p.energy_gbp).unwrap_or(0.0),
+            )
+        };
+        assert_close(ie, 3.0, "energy with zero standing");
+        assert_close(is_, 0.0, "zero standing");
+        assert_close(ee, 3.0, "export income with zero standing");
+    }
+
     #[test]
     fn octopus_consumption_upserts_and_aggregates_separate_streams() {
         let db = test_db();
