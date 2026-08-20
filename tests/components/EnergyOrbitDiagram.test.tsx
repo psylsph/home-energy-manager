@@ -878,10 +878,11 @@ describe('EnergyOrbitDiagram', () => {
       }
     });
 
-    it('scales the fade window with the cycle duration', () => {
-      // keyTimes are fractions of dur: the fade ramps take 200 ms each,
-      // clamped to at most 45 % of the cycle so a short (1 s) spoke still
-      // spends its middle fully lit.
+    it('scales the fade windows with the cycle duration', () => {
+      // keyTimes are fractions of dur: fade-in ramp is 400 ms, fade-out is
+      // 200 ms (longer fade-in stops the reappearance reading as a pop),
+      // each clamped to at most 45 % of the cycle so a short (1 s) spoke
+      // still spends its middle fully lit.
       const { container } = render(
         <EnergyOrbitDiagram snapshot={makeSnapshot({ solar_power: 5000, home_power: 500 })} />,
       );
@@ -891,16 +892,18 @@ describe('EnergyOrbitDiagram', () => {
         dot?.querySelector('animateMotion')?.getAttribute('dur')?.replace('s', '') ?? '0',
       );
       const keyTimes = (fade?.getAttribute('keyTimes') ?? '').split(';').map(Number);
-      const expected = Math.min(0.45, 0.2 / durSeconds);
+      const expectedIn = Math.min(0.45, 0.4 / durSeconds);
+      const expectedOut = Math.min(0.45, 0.2 / durSeconds);
       expect(keyTimes).toHaveLength(4);
       expect(keyTimes[0]).toBe(0);
       expect(keyTimes[3]).toBe(1);
-      // fadeIn end ≈ 200 ms into the cycle (fractional)
-      expect(keyTimes[1]).toBeCloseTo(expected, 3);
-      // fadeOut start ≈ 200 ms before the cycle end
-      expect(keyTimes[2]).toBeCloseTo(1 - expected, 3);
-      // And the fade window never swallows more than 45 % of the cycle.
+      // fade-in end ≈ 400 ms into the cycle (fractional)
+      expect(keyTimes[1]).toBeCloseTo(expectedIn, 3);
+      // fade-out start ≈ 200 ms before the cycle end
+      expect(keyTimes[2]).toBeCloseTo(1 - expectedOut, 3);
+      // And neither fade window swallows more than 45 % of the cycle.
       expect(keyTimes[1]).toBeLessThanOrEqual(0.45);
+      expect(1 - keyTimes[2]).toBeLessThanOrEqual(0.45);
     });
 
     it('omits the fade animations under prefers-reduced-motion', () => {

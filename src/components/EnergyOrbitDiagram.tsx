@@ -381,18 +381,21 @@ function FlowDot({ flow, flows, posOf, maxW, reduced }: DotProps) {
   const dur = `${durSeconds.toFixed(2)}s`;
   // The dot wraps from path end to path start on every cycle — a hard
   // teleport inherent to repeatCount="indefinite". Fading the dot out over
-  // the last 200 ms of travel and back in over the first 200 ms hides the
-  // jump (issue #276). The #271 endpoint clearance moved the wrap out of
-  // the node circles into open space, which is what made it jarring.
-  // durSeconds is clamped to ≥ 1 s, so the 200 ms window is always well
-  // under half the cycle and the dot stays fully lit for the middle of the
-  // journey. Both animations share dur and begin, so their cycles stay
-  // locked together.
+  // the last 200 ms of travel and back in at the start hides the jump
+  // (issue #276). The fade-in window is deliberately longer (400 ms) than
+  // the fade-out (200 ms): a reappearing dot near a node reads as a "pop"
+  // to the eye even with a symmetric linear ramp — perception catches
+  // appearances faster than disappearances.
+  // durSeconds is clamped to ≥ 1 s, so both windows stay small and the dot
+  // stays fully lit for the middle of the journey. Both animations share
+  // dur and begin, so their cycles stay locked together.
   const DOT_OPACITY = 0.95;
   const GLOW_OPACITY = 0.12;
-  const FADE_S = 0.2;
-  const fadeFrac = Math.min(0.45, FADE_S / durSeconds);
-  const keyTimes = `0;${fadeFrac.toFixed(4)};${(1 - fadeFrac).toFixed(4)};1`;
+  const FADE_OUT_S = 0.2;
+  const FADE_IN_S = 0.4;
+  const fadeOutFrac = Math.min(0.45, FADE_OUT_S / durSeconds);
+  const fadeInFrac = Math.min(0.45, FADE_IN_S / durSeconds);
+  const keyTimes = `0;${fadeInFrac.toFixed(4)};${(1 - fadeOutFrac).toFixed(4)};1`;
   const dotValues = `0;${DOT_OPACITY};${DOT_OPACITY};0`;
   const glowValues = `0;${GLOW_OPACITY};${GLOW_OPACITY};0`;
 
