@@ -439,12 +439,18 @@ fn local_minutes_of_day(ts_secs: i64) -> u16 {
 /// days touched. The set of step times (one local midnight per day after
 /// the first) is computed separately by [`local_midnight_steps_after`].
 pub(crate) fn days_in_local_window(start_ts: i64, end_ts: i64) -> u32 {
+    days_in_local_window_tz(start_ts, end_ts, &chrono::Local)
+}
+
+/// Timezone-parameterised core of [`days_in_local_window`], so tests can pin
+/// DST transitions to `chrono_tz::Europe::London` instead of trusting the
+/// host's timezone.
+fn days_in_local_window_tz<TZ: chrono::TimeZone>(start_ts: i64, end_ts: i64, tz: &TZ) -> u32 {
     if end_ts <= start_ts {
         return 0;
     }
-    let to_local =
-        |s: i64| chrono::DateTime::from_timestamp(s, 0).map(|dt| dt.with_timezone(&chrono::Local));
-    match (to_local(start_ts), to_local(end_ts)) {
+    let to_tz = |s: i64| chrono::DateTime::from_timestamp(s, 0).map(|dt| dt.with_timezone(tz));
+    match (to_tz(start_ts), to_tz(end_ts)) {
         (Some(s), Some(e)) => {
             let day_span = (e.date_naive() - s.date_naive()).num_days().max(0) as u32;
             // The window is half-open: it contains no time from its end
@@ -470,33 +476,49 @@ pub(crate) fn days_in_local_window(start_ts: i64, end_ts: i64) -> u32 {
 /// `standing_charge_days_credited` at function entry, so this list excludes
 /// the window-open day entirely.
 fn local_midnight_steps_after(start_ts: i64, end_ts: i64) -> Vec<i64> {
+    local_midnight_steps_after_tz(start_ts, end_ts, &chrono::Local)
+}
+
+/// Timezone-parameterised core of [`local_midnight_steps_after`], so tests
+/// can pin DST transitions to `chrono_tz::Europe::London`.
+fn local_midnight_steps_after_tz<TZ: chrono::TimeZone>(
+    start_ts: i64,
+    end_ts: i64,
+    tz: &TZ,
+) -> Vec<i64> {
     if end_ts <= start_ts {
         return Vec::new();
     }
-    let start_local_date = chrono::DateTime::from_timestamp(start_ts, 0)
-        .map(|dt| dt.with_timezone(&chrono::Local).date_naive());
-    let Some(start_local_date) = start_local_date else {
+    let Some(start_local_date) =
+        chrono::DateTime::from_timestamp(start_ts, 0).map(|dt| dt.with_timezone(tz).date_naive())
+    else {
         return Vec::new();
     };
-    // The first step is the local midnight that opens `start_local_date +
-    // 1`, regardless of whether start_ts itself was at local midnight.
-    // Walking by 86 400s thereafter is safe across DST transitions: the
-    // local-midnight check at each step self-corrects within at most one
-    // hour.
-    let mut cursor = match start_local_date.succ_opt() {
-        Some(d) => match chrono::Local
-            .from_local_datetime(&d.and_hms_opt(0, 0, 0).unwrap())
-            .earliest()
-        {
-            Some(dt) => dt.timestamp(),
-            None => return Vec::new(),
-        },
-        None => return Vec::new(),
-    };
+    // Walk by calendar date, converting each day's local midnight
+    // individually. Raw +86 400s stepping drifts an hour out of alignment
+    // across a DST spring-forward (the local day is 23 h there): the step
+    // lands at 01:00 local instead of midnight, and a window ending between
+    // the true midnight and the drifted step then misses that day's
+    // standing-charge debit entirely — making the chart walk disagree with
+    // `days_in_local_window` (issue #269's symptom, seasonally). Per-date
+    // conversion is exact across both DST directions.
     let mut out = Vec::new();
-    while cursor < end_ts {
-        out.push(cursor);
-        cursor += 86_400;
+    let mut date = start_local_date.succ_opt();
+    while let Some(d) = date {
+        // If a timezone ever skips a local midnight outright (the UK's
+        // transitions are at 01:00/02:00 so this never happens there),
+        // skip that date rather than abandoning the remaining days.
+        if let Some(midnight) = d
+            .and_hms_opt(0, 0, 0)
+            .and_then(|naive| tz.from_local_datetime(&naive).earliest())
+        {
+            let ts = midnight.timestamp();
+            if ts >= end_ts {
+                break;
+            }
+            out.push(ts);
+        }
+        date = d.succ_opt();
     }
     out
 }
@@ -3004,6 +3026,287 @@ mod tests {
         let start = local_midnight_of(d);
         let end = local_midnight_of(d.succ_opt().unwrap()) + 60;
         assert_eq!(days_in_local_window(start, end), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #269 exhaustive verification: chart walk vs days_in_local_window
+    //
+    // Pete's bug was that the period-totals box (days_in_local_window ×
+    // per-day) and the chart series (walk: seed 1 + one step per local
+    // midnight strictly inside the window) disagreed. The master invariant
+    // is: **for any window, chart standing total == days_in_local_window ×
+    // per-day amount.** Every combination below pins it.
+    // -----------------------------------------------------------------------
+
+    /// Standing-charge £ the chart walk credits for a window, from an
+    /// explicit-start `query_cost_breakdown` run (no readings — the walk's
+    /// no-readings path is itself part of the surface under test).
+    fn chart_standing_total(start: i64, end: i64) -> f64 {
+        let db = test_db();
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let series = db
+            .query_cost_breakdown(
+                &window(start, end),
+                3600,
+                "today_import_kwh",
+                &flat,
+                0.25,
+                100.0,
+            )
+            .unwrap();
+        series.last().map(|p| p.standing_gbp).unwrap_or(0.0)
+    }
+
+    fn assert_chart_matches_days_in_window(start: i64, end: i64) {
+        let days = days_in_local_window(start, end);
+        let chart = chart_standing_total(start, end);
+        assert!(
+            (chart - days as f64 * 1.0).abs() < 1e-6,
+            "chart standing {chart} != days_in_local_window {days} × £1 for window [{start}, {end})"
+        );
+    }
+
+    #[test]
+    fn chart_vs_days_invariant_midnight_aligned_single_day() {
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
+        assert_chart_matches_days_in_window(
+            local_midnight_of(d),
+            local_midnight_of(d.succ_opt().unwrap()),
+        );
+    }
+
+    #[test]
+    fn chart_vs_days_invariant_midnight_aligned_two_days() {
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 18).unwrap();
+        assert_chart_matches_days_in_window(
+            local_midnight_of(d),
+            local_midnight_of(d.succ_opt().unwrap().succ_opt().unwrap()),
+        );
+    }
+
+    #[test]
+    fn chart_vs_days_invariant_midnight_aligned_seven_days() {
+        // The "7d" range shape (aligned version).
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 14).unwrap();
+        let end = local_midnight_of(chrono::NaiveDate::from_ymd_opt(2026, 8, 21).unwrap());
+        assert_chart_matches_days_in_window(local_midnight_of(d), end);
+    }
+
+    #[test]
+    fn chart_vs_days_invariant_rolling_midday_to_midday() {
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
+        let start = local_midnight_of(d) + 12 * 3600;
+        let end = local_midnight_of(d.succ_opt().unwrap()) + 12 * 3600;
+        assert_chart_matches_days_in_window(start, end);
+    }
+
+    #[test]
+    fn chart_vs_days_invariant_rolling_end_just_past_midnight() {
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
+        let start = local_midnight_of(d);
+        let end = local_midnight_of(d.succ_opt().unwrap()) + 60;
+        assert_chart_matches_days_in_window(start, end);
+    }
+
+    #[test]
+    fn chart_vs_days_invariant_sub_day_window_within_one_day() {
+        // 6h window entirely inside one local day: 1 day touched.
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
+        let start = local_midnight_of(d) + 9 * 3600;
+        let end = start + 6 * 3600;
+        assert_eq!(days_in_local_window(start, end), 1);
+        assert_chart_matches_days_in_window(start, end);
+    }
+
+    #[test]
+    fn chart_vs_days_invariant_straddling_midnight_no_readings() {
+        // 2h window [23:00, 01:00) crosses one midnight: 2 days touched,
+        // verified through the chart's no-readings trailing path.
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
+        let start = local_midnight_of(d) + 23 * 3600;
+        let end = local_midnight_of(d.succ_opt().unwrap()) + 3600;
+        assert_eq!(days_in_local_window(start, end), 2);
+        assert_chart_matches_days_in_window(start, end);
+    }
+
+    #[test]
+    fn chart_vs_days_invariant_with_data_gap_swallowing_a_midnight() {
+        // Readings stop before midnight; window ends well into the next
+        // day. The chart's trailing logic must still credit the swallowed
+        // day's standing charge, matching days_in_local_window.
+        let db = test_db();
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
+        let start = local_midnight_of(d);
+        let end = local_midnight_of(d.succ_opt().unwrap().succ_opt().unwrap());
+        // One reading at 22:00 on day 1, nothing after.
+        db.insert_reading(&make_snapshot_with_kwh(
+            local_midnight_of(d) + 22 * 3600,
+            1.0,
+            0.0,
+        ));
+        let flat = crate::settings::TariffConfig::flat(0.25);
+        let series = db
+            .query_cost_breakdown(
+                &window(start, end),
+                3600,
+                "today_import_kwh",
+                &flat,
+                0.25,
+                100.0,
+            )
+            .unwrap();
+        let chart = series.last().map(|p| p.standing_gbp).unwrap_or(0.0);
+        let days = days_in_local_window(start, end);
+        assert_eq!(days, 2);
+        assert!(
+            (chart - days as f64 * 1.0).abs() < 1e-6,
+            "gap-swallowed midnight: chart {chart} != {days} days"
+        );
+    }
+
+    #[test]
+    fn chart_vs_days_invariant_empty_window() {
+        // Degenerate: end == start. Zero days, zero standing, no panic.
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
+        let m = local_midnight_of(d);
+        assert_eq!(days_in_local_window(m, m), 0);
+        assert_eq!(days_in_local_window(m + 100, m), 0); // inverted
+    }
+
+    #[test]
+    fn chart_vs_days_invariant_second_long_window() {
+        // Smallest possible non-empty window: 1 second before midnight.
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
+        let start = local_midnight_of(d.succ_opt().unwrap()) - 1;
+        let end = local_midnight_of(d.succ_opt().unwrap());
+        assert_eq!(days_in_local_window(start, end), 1);
+        assert_chart_matches_days_in_window(start, end);
+    }
+
+    // -----------------------------------------------------------------------
+    // Master invariant, exhaustive: seed(1) + steps == days_in_local_window
+    // for EVERY window, across a full year including both DST transitions,
+    // pinned to Europe/London so the test is deterministic on any host.
+    // -----------------------------------------------------------------------
+
+    /// Local-midnight unix seconds for a London date.
+    fn london_midnight(date: chrono::NaiveDate) -> i64 {
+        use chrono_tz::Europe::London;
+        London
+            .from_local_datetime(&date.and_hms_opt(0, 0, 0).unwrap())
+            .earliest()
+            .unwrap()
+            .timestamp()
+    }
+
+    /// Assert the master invariant — `1 + midnight_steps_after(start, end) ==
+    /// days_in_local_window(start, end)` — for a London window.
+    fn assert_master_invariant_london(start: i64, end: i64) {
+        let steps = local_midnight_steps_after_tz(start, end, &chrono_tz::Europe::London);
+        let days = days_in_local_window_tz(start, end, &chrono_tz::Europe::London);
+        assert_eq!(
+            steps.len() as u32 + 1,
+            days,
+            "master invariant broken for London window [{start}, {end}): steps {} + 1 != days {days}",
+            steps.len()
+        );
+    }
+
+    #[test]
+    fn master_invariant_exhaustive_full_year_every_day_offset_combo() {
+        // Every day of a DST-transition year, crossed with every end-ofset
+        // 0..=3 days and four sub-day end offsets. Windows span 1–4 days.
+        // That's ~365 × 4 × 4 ≈ 5.8k invariant checks covering both DST
+        // transitions (29 Mar 2026 spring-forward, 25 Oct 2026 fall-back).
+        let base = chrono::NaiveDate::from_ymd_opt(2025, 12, 1).unwrap();
+        for day_idx in 0..400i64 {
+            let d = base + chrono::Duration::days(day_idx);
+            let m = london_midnight(d);
+            for span in 1..=4i64 {
+                let span_end_m = london_midnight(d + chrono::Duration::days(span));
+                for end_offset in [0, 1, 3600, 12 * 3600] {
+                    let end = span_end_m + end_offset;
+                    assert_master_invariant_london(m, end);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn master_invariant_dst_spring_forward_window_ending_before_drifted_step() {
+        // 29 Mar 2026: London springs forward at 01:00 → local day is 23 h.
+        // The old +86 400s stepping put the 30-Mar midnight step at 01:00
+        // local; a window ending at true midnight +1s would have missed
+        // that day's debit. True midnight must be used.
+        let spring = chrono::NaiveDate::from_ymd_opt(2026, 3, 29).unwrap();
+        let start = london_midnight(spring);
+        let next = london_midnight(spring.succ_opt().unwrap());
+        // 23-hour day: next - start == 83 400, not 86 400.
+        assert_eq!(next - start, 23 * 3600);
+        let end = next + 1;
+        let steps = local_midnight_steps_after_tz(start, end, &chrono_tz::Europe::London);
+        assert_eq!(
+            steps.len(),
+            1,
+            "30 Mar step must be credited at true midnight"
+        );
+        assert_eq!(steps[0], next);
+        assert_master_invariant_london(start, end);
+    }
+
+    #[test]
+    fn master_invariant_dst_fall_back_window_includes_extra_hour() {
+        // 25 Oct 2026: London falls back at 02:00 → local day is 25 h.
+        let fall = chrono::NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
+        let start = london_midnight(fall);
+        let next = london_midnight(fall.succ_opt().unwrap());
+        assert_eq!(next - start, 25 * 3600);
+        // Window ending exactly at the 26-Oct midnight: 2 days.
+        assert_master_invariant_london(start, next);
+        // And ending at 26-Oct 12:00: still 2 days.
+        assert_master_invariant_london(start, next + 12 * 3600);
+    }
+
+    #[test]
+    fn master_invariant_dst_fall_back_midnight_within_extra_hour() {
+        // The fall-back day is 25 h; a window [26-Oct 00:30, 26-Oct 00:30+1h)
+        // sits entirely inside 26 Oct. One day only.
+        let d26 = chrono::NaiveDate::from_ymd_opt(2026, 10, 26).unwrap();
+        let start = london_midnight(d26) + 1800;
+        let end = start + 3600;
+        assert_master_invariant_london(start, end);
+    }
+
+    #[test]
+    fn master_invariant_utc_positive_and_negative_offsets_host_equivalent() {
+        // The production wrappers use chrono::Local; on any host timezone the
+        // invariant must hold. Verified here for UTC and a positive-offset
+        // zone (Pacific/Kiritimati, UTC+14) and negative (Pacific/Pago_Pago,
+        // UTC-11) via the tz-parameterised cores directly.
+        use chrono_tz::Pacific::{Kiritimati, Pago_Pago};
+        use chrono_tz::UTC;
+        for tz in [&UTC, &Kiritimati, &Pago_Pago] {
+            // 30-day sweep with mixed end offsets.
+            let base = chrono::NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
+            for i in 0..30i64 {
+                let d = base + chrono::Duration::days(i);
+                let naive = d.and_hms_opt(0, 0, 0).unwrap();
+                let m = tz
+                    .from_local_datetime(&naive)
+                    .earliest()
+                    .unwrap()
+                    .timestamp();
+                for (span, off) in [(1, 0i64), (2, 0), (3, 3600), (7, 12 * 3600)] {
+                    let steps = local_midnight_steps_after_tz(m, m + span * 86400 + off, tz);
+                    let days = days_in_local_window_tz(m, m + span * 86400 + off, tz);
+                    assert_eq!(
+                        steps.len() as u32 + 1,
+                        days,
+                        "invariant broken in tz {tz:?} for window starting {m}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
