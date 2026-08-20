@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.74.6] - 2026-08-20
+
+### Fixed
+
+- **Solar readings now come from the CT meters everywhere.** Overview, the Status wheel, and Solar Arrays all showed "solar power", but measured it at different points — the inverter's own PV telemetry versus the CT meter — so they could drift apart for a minute before agreeing again. On AC-coupled setups the CT clamp is the authoritative reading (it matches the inverter's own display), so all solar figures now take their value from the solar CT meters and agree by construction. (fixes #277)
+- **The distribution wheel's dots no longer pop back in at path start.** Fading the dots at the wrap point fixed the visible jump, but the reappearance could still read as sudden — the eye catches appearances faster than disappearances, so a symmetric fade ramp doesn't look symmetric. The fade-in window is now 400 ms (double the 200 ms fade-out), which smooths the restart. (issue #276)
+
 ## [0.74.5] - 2026-08-19
 
 ### Fixed
