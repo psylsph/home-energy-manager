@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.74.7] - 2026-08-20
+
+### Fixed
+
+- **The Status page's distribution wheel no longer emits phantom spokes when the home busbar is idle.** When the home was reading below the noise floor (sub-20 W) but the battery was charging from solar, the diagram clamped the solar→home spoke to the noise value itself — emitting up to 20 W of spoke that the inverter says isn't there. On AC-coupled systems with a CT-mismatch the spoke would visibly overshoot the solar reading (e.g. 234 W + 160 W of spokes for a 370 W solar value, as @Jet-bundle reported on issue #275). When home is idle the diagram now emits no home-direct spoke at all; any solar surplus routes through the export spoke instead.
+
+### Internal
+
+- Frontend build stage and CI moved to Node 24 (Dockerfile + ci.yml).
+- Resolved Dependabot advisories: dompurify 3.4.12 → 3.4.14, js-yaml 4.3.0 → 4.3.1, plus brace-expansion 5.0.9 and nanoid 3.3.18.
+
 ## [0.74.6] - 2026-08-20
 
 ### Fixed
