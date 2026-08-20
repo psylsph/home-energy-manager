@@ -1,7 +1,7 @@
 # =============================================================================
 # Stage 1: Build frontend (React + Vite)
 # =============================================================================
-FROM node:22-bookworm AS frontend
+FROM node:24-bookworm AS frontend
 
 WORKDIR /app
 
