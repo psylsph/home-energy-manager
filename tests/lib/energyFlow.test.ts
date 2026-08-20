@@ -220,8 +220,14 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
     //    the battery is overflowing to grid, the old code emitted both
     //    a `discharge` of the full battery wattage AND an `export` of the
     //    surplus, which drew a misleading yellow solar → grid spoke.
+    //
+    // Issue #281: grid_power must be set above the noise threshold so the
+    // discharge_to_grid spoke's isExporting gate fires. The physical
+    // scenario is "battery genuinely overflowing to grid"; without
+    // grid_power the inverter wouldn't be reporting any export at all,
+    // and the diagram would (correctly, post-#281) suppress the spoke.
     const dis = buildEnergyFlows(
-      snap({ battery_state: 'discharging', battery_power: 1400, home_power: 800 }),
+      snap({ battery_state: 'discharging', battery_power: 1400, home_power: 800, grid_power: 600 }),
     );
     const df = flowById(dis, 'discharge');
     expect(df).toBeDefined();
@@ -270,8 +276,10 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
   it('emits a battery→grid discharge_to_grid flow when discharge exceeds the house load (issue #155)', () => {
     // Battery 2 kW, house 500 W. Excess 1.5 kW flows battery→grid directly,
     // so the moving dot ends at the grid as the GivEnergy app shows.
+    // Issue #281: grid_power must be set above the noise threshold so the
+    // discharge_to_grid spoke's isExporting gate fires (physical export).
     const vm = buildEnergyFlows(
-      snap({ battery_state: 'discharging', battery_power: 2000, home_power: 500 }),
+      snap({ battery_state: 'discharging', battery_power: 2000, home_power: 500, grid_power: 1500 }),
     );
     const excess = vm.flows.find((f) => f.id === 'discharge_to_grid');
     expect(excess).toBeDefined();
@@ -289,6 +297,47 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
       snap({ battery_state: 'discharging', battery_power: 500, home_power: 800 }),
     );
     expect(vm.flows.find((f) => f.id === 'discharge_to_grid')).toBeUndefined();
+  });
+
+  it('does not emit a battery→grid flow when the grid node is clamped to 0W by the noise threshold (issue #281)', () => {
+    // Battery 2.5 kW discharging, home 2.8 kW (solar covers 337 W of that),
+    // so the discharge overflows to grid by ~37 W. grid_power reads +17 W
+    // — below the 20 W noise floor, so the grid node display clamps to 0W.
+    // The diagram must not emit a battery→grid spoke in this state, because
+    // doing so draws a flow the grid node just told the user doesn't exist.
+    // The other grid-touching spokes (solar→grid export, grid→home import,
+    // grid→battery charge) are already gated on isExporting/isImporting;
+    // this is the lone holdout.
+    const vm = buildEnergyFlows(
+      snap({
+        battery_state: 'discharging',
+        battery_power: 2500,
+        home_power: 2800,
+        solar_power: 337,
+        grid_power: 17, // below DEFAULT_NOISE_THRESHOLD_W = 20
+      }),
+    );
+    expect(vm.flows.find((f) => f.id === 'discharge_to_grid')).toBeUndefined();
+    // Sanity check: the grid node should be reported as Idle (not Exporting)
+    // because grid_power is below the noise floor.
+    expect(vm.nodes.find((n) => n.id === 'grid')!.status).toBe('Idle');
+  });
+
+  it('still emits a battery→grid flow when the grid is genuinely exporting (issue #281 — non-regression)', () => {
+    // The fix must not regress the genuine-export case: battery overflowing
+    // home while grid is well above the noise floor must still draw the
+    // battery→grid spoke.
+    const vm = buildEnergyFlows(
+      snap({
+        battery_state: 'discharging',
+        battery_power: 2000,
+        home_power: 500, // → overflow 1500 W to grid
+        grid_power: 1500,
+      }),
+    );
+    const excess = vm.flows.find((f) => f.id === 'discharge_to_grid');
+    expect(excess).toBeDefined();
+    expect(excess!.watts).toBe(1500);
   });
 
   it('routes the full discharge to grid when the house is idle (issue #172)', () => {
@@ -728,9 +777,10 @@ describe('buildEnergyFlows — spoke colours follow battery / grid / solar ident
     // destination here, and the colour rule only checks literal endpoints).
     // Spoke is green — battery "to all destinations" wins over the
     // weaker "grid destination" case for forced-discharge exports.
+    // Issue #281: grid_power set above noise so the isExporting gate fires.
     for (const soc of [5, 19, 30, 50, 80]) {
       const vm = buildEnergyFlows(
-        snap({ soc, battery_state: 'discharging', battery_power: 2000, home_power: 500 }),
+        snap({ soc, battery_state: 'discharging', battery_power: 2000, home_power: 500, grid_power: 1500 }),
       );
       const excess = vm.flows.find((f) => f.id === 'discharge_to_grid');
       expect(excess, `soc=${soc}: discharge_to_grid missing`).toBeDefined();
@@ -808,7 +858,8 @@ describe('buildEnergyFlows — spoke colour = solar > grid-source > battery prio
     },
     {
       name: 'battery → grid (overflow export) is GREEN — battery wins over grid (issue #170 user ruling)',
-      snap: { battery_state: 'discharging', battery_power: 2000, home_power: 500 },
+      // Issue #281: grid_power above noise so the isExporting gate fires.
+      snap: { battery_state: 'discharging', battery_power: 2000, home_power: 500, grid_power: 1500 },
       expected: [
         { flowId: 'discharge', color: BATTERY_OUTPUT_COLOR, rationale: 'battery source only' },
         { flowId: 'discharge_to_grid', color: BATTERY_OUTPUT_COLOR, rationale: 'battery wins over grid (issue #170)' },
@@ -851,9 +902,10 @@ describe('buildEnergyFlows — spoke colour = solar > grid-source > battery prio
     // The colour collision between spoke = green and node = red is
     // intentional: the spoke is meant to be readable as "battery
     // outputting power"; the node shows stored-charge state.
+    // Issue #281: grid_power above noise so the isExporting gate fires.
     for (const soc of [1, 10, 19, 25, 50, 75, 99]) {
       const vm = buildEnergyFlows(
-        snap({ soc, battery_state: 'discharging', battery_power: 2000, home_power: 500 }),
+        snap({ soc, battery_state: 'discharging', battery_power: 2000, home_power: 500, grid_power: 1500 }),
       );
       const excess = vm.flows.find((f) => f.id === 'discharge_to_grid');
       expect(excess, `soc=${soc}`).toBeDefined();

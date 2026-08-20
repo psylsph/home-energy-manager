@@ -607,7 +607,16 @@ export function buildEnergyFlows(
   // directly battery→grid so the dot ends at the grid instead of the
   // house. Source is battery → the spoke stays BATTERY_OUTPUT_COLOR green
   // (issue #170, priority solar > grid-as-source > battery).
-  if (batteryToGrid > noise) {
+  //
+  // Issue #281: gate on `isExporting` as well as the spoke magnitude, so
+  // the diagram is self-consistent with the grid node display. When
+  // `grid_power` is below the noise floor (e.g. 17W with a 20W threshold)
+  // the grid node clamps to 0W; emitting a battery→grid spoke in that
+  // state would draw a flow the user is told doesn't exist. The other
+  // grid-touching spokes (solar→grid export, grid→home import,
+  // grid→battery charge) are already gated on isExporting/isImporting;
+  // this spoke was the lone holdout.
+  if (isExporting && batteryToGrid > noise) {
     push('discharge_to_grid', 'battery', 'grid',
       batteryToGrid, 'export',
       `${formatPower(batteryToGrid)} exporting`);

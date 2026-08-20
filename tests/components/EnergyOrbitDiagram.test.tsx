@@ -477,14 +477,17 @@ describe('EnergyOrbitDiagram', () => {
     // Battery 2 kW discharging, house 500 W. The battery outflow exceeds the
     // house load, so a battery→grid dot is drawn for the excess (1.5 kW),
     // matching the GivEnergy app.
+    // Issue #281: grid_power set above the noise threshold so the
+    // discharge_to_grid spoke's isExporting gate fires (physical export).
     const { container } = render(
       <EnergyOrbitDiagram
         snapshot={makeSnapshot({
           home_power: 500,
           battery_power: 2000,
           battery_state: 'discharging',
+          grid_power: 1500,
         })}
-      />,
+      />
     );
     const discharge = container.querySelector('[data-flow-id="discharge"]');
     const toGrid = container.querySelector('[data-flow-id="discharge_to_grid"]');
@@ -522,12 +525,14 @@ describe('EnergyOrbitDiagram', () => {
   });
 
   it('keeps the battery export dot and glow clear of the grid node', () => {
+    // Issue #281: grid_power above noise so the discharge_to_grid spoke fires.
     const { container } = render(
       <EnergyOrbitDiagram
         snapshot={makeSnapshot({
           home_power: 500,
           battery_power: 2000,
           battery_state: 'discharging',
+          grid_power: 1500,
         })}
       />,
     );
@@ -615,12 +620,14 @@ describe('EnergyOrbitDiagram', () => {
     // battery→grid outer arc are both drawn. The arc length (~¼ orbit,
     // ~317 px) is ~2.3× the spoke length (~140 px), so the arc must take
     // a proportionally longer duration — not the same speed as the spoke.
+    // Issue #281: grid_power above noise so the discharge_to_grid spoke fires.
     const { container } = render(
       <EnergyOrbitDiagram
         snapshot={makeSnapshot({
           home_power: 200,
           battery_power: 2000,
           battery_state: 'discharging',
+          grid_power: 1800,
         })}
       />,
     );
