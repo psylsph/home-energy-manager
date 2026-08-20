@@ -123,6 +123,12 @@ src-tauri/src/
 
 Key: when the API queues writes, `write_notify.notify_one()` wakes the sleep immediately. Writes are drained before reads on each cycle.
 
+After decoding, **external solar CT meters** are merged into the snapshot. Each configured `SolarArrayConfig` (settings `solar_arrays`) reads its CT clamp by device address (1–8; 0x00 is the synthetic grid CT). For AC-coupled setups the solar CT clamp is the **authoritative solar reading** — the inverter's PV registers aren't used for solar, so Overview, the Status wheel, and Solar Arrays all report the same figure by construction (issue #277). Midnight baselines track cumulative CT energy counters per meter address.
+
+### Adaptive Charge state machine
+
+Adaptive Charge runs a state machine (`src-tauri/src/inverter/state_machines.rs`) driven from the poll loop. A **minimum SOC guard** on discharge schedules holds the battery at the configured floor: when a discharge slot would take SOC below the floor, discharging pauses and resumes once SOC recovers.
+
 ### Shared state (AppState)
 
 ```rust
