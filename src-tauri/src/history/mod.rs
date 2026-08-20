@@ -428,9 +428,13 @@ fn local_minutes_of_day(ts_secs: i64) -> u16 {
     }
 }
 
-/// Number of distinct local calendar days the window `(start_ts, end_ts)`
-/// touches. A window that starts at 23:59 on day N and ends at 00:01 on
-/// day N+2 touches 3 days (N, N+1, N+2). Used to compute the total
+/// Number of distinct local calendar days the half-open window
+/// `[start_ts, end_ts)` touches. A window that starts at 23:59 on day N and
+/// ends at 00:01 on day N+2 touches 3 days (N, N+1, N+2). A window that ends
+/// exactly at local midnight — e.g. the "today" range `[N 00:00, N+1 00:00)`
+/// — contains zero seconds of day N+1, so that day is NOT touched and the
+/// count is the day span, not the day span + 1 (issue #269: one day's
+/// Standing Charge for one day's window). Used to compute the total
 /// standing-charge debit for issue #131: the per-day amount × number of
 /// days touched. The set of step times (one local midnight per day after
 /// the first) is computed separately by [`local_midnight_steps_after`].
@@ -438,12 +442,23 @@ pub(crate) fn days_in_local_window(start_ts: i64, end_ts: i64) -> u32 {
     if end_ts <= start_ts {
         return 0;
     }
-    let to_date = |s: i64| {
-        chrono::DateTime::from_timestamp(s, 0)
-            .map(|dt| dt.with_timezone(&chrono::Local).date_naive())
-    };
-    match (to_date(start_ts), to_date(end_ts)) {
-        (Some(s), Some(e)) if e >= s => (e - s).num_days() as u32 + 1,
+    let to_local =
+        |s: i64| chrono::DateTime::from_timestamp(s, 0).map(|dt| dt.with_timezone(&chrono::Local));
+    match (to_local(start_ts), to_local(end_ts)) {
+        (Some(s), Some(e)) => {
+            let day_span = (e.date_naive() - s.date_naive()).num_days().max(0) as u32;
+            // The window is half-open: it contains no time from its end
+            // timestamp onward. When the end lands exactly on local
+            // midnight, that date contributes zero seconds, so only the
+            // day span counts. Any end strictly after midnight does touch
+            // its own date.
+            let secs_into_end_day = e.hour() * 3600 + e.minute() * 60 + e.second();
+            if secs_into_end_day > 0 {
+                day_span + 1
+            } else {
+                day_span
+            }
+        }
         _ => 0,
     }
 }
@@ -2941,6 +2956,54 @@ mod tests {
         let dir = unique_test_dir("givenergy-history-test");
         let path = dir.join("test_history.db");
         HistoryDb::open(&path).unwrap()
+    }
+
+    /// Local-midnight unix seconds for a `YYYY-MM-DD` local date, so tests
+    /// can build calendar-aligned windows without hardcoding offsets.
+    fn local_midnight_of(date: chrono::NaiveDate) -> i64 {
+        Local
+            .from_local_datetime(&date.and_hms_opt(0, 0, 0).unwrap())
+            .earliest()
+            .unwrap()
+            .timestamp()
+    }
+
+    #[test]
+    fn days_in_local_window_counts_single_calendar_day_window_as_one() {
+        // The "today" range: [midnight N, midnight N+1). Exactly one local
+        // day's worth of standing charge (issue #269).
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
+        let start = local_midnight_of(d);
+        let end = local_midnight_of(d.succ_opt().unwrap());
+        assert_eq!(days_in_local_window(start, end), 1);
+    }
+
+    #[test]
+    fn days_in_local_window_midnight_aligned_multi_day_window_counts_span() {
+        // [midnight N, midnight N+3) covers exactly three local days.
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 17).unwrap();
+        let start = local_midnight_of(d);
+        let end = local_midnight_of(chrono::NaiveDate::from_ymd_opt(2026, 8, 20).unwrap());
+        assert_eq!(days_in_local_window(start, end), 3);
+    }
+
+    #[test]
+    fn days_in_local_window_midday_to_midday_counts_both_partial_days() {
+        // Rolling-style window ending mid-day: both calendar days touched.
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
+        let start = local_midnight_of(d) + 12 * 3600;
+        let end = local_midnight_of(d.succ_opt().unwrap()) + 12 * 3600;
+        assert_eq!(days_in_local_window(start, end), 2);
+    }
+
+    #[test]
+    fn days_in_local_window_window_ending_just_past_midnight_counts_both() {
+        // 00:01 past midnight means the new day genuinely has one minute in
+        // the window, so it counts.
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
+        let start = local_midnight_of(d);
+        let end = local_midnight_of(d.succ_opt().unwrap()) + 60;
+        assert_eq!(days_in_local_window(start, end), 2);
     }
 
     #[test]
@@ -6381,8 +6444,8 @@ mod tests {
         // A query over a stretch with no readings must still surface the
         // standing-charge value — otherwise a quiet day would show as £0
         // in the History cost graph even though the user is paying for a
-        // daily standing fee. The 24h window crosses one local midnight
-        // (m+24h opens day 1), so we credit 2 days × £0.5486 = £1.0972.
+        // daily standing fee. The 24h window [m, m+24h) is exactly one
+        // local calendar day (issue #269), so we credit 1 day × £0.5486.
         let db = test_db();
         let m = local_midnight_secs(0);
         let start = m;
@@ -6404,8 +6467,8 @@ mod tests {
         );
         let first = series.first().map(|p| p.v).unwrap_or(0.0);
         assert!(
-            (first - 2.0 * 0.5486).abs() < 1e-3,
-            "empty-window first bucket should carry 2 days of Standing Charge (got {first})"
+            (first - 0.5486).abs() < 1e-3,
+            "empty-window first bucket should carry 1 day of Standing Charge (got {first})"
         );
     }
 

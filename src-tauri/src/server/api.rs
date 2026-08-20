@@ -10631,8 +10631,9 @@ mod tests {
             )
             .await;
             assert_eq!(status, StatusCode::OK);
-            // 24h window touches 2 local days, so Standing Charge = 2 ×
-            // 54.86p = £1.0972. No import kWh data, so import_cost_gbp
+            // Non-rolling 24h aligns to [local midnight, local midnight) —
+            // exactly one calendar day (issue #269), so Standing Charge is
+            // one day's 54.86p. No import kWh data, so import_cost_gbp
             // equals standing_charge_gbp exactly.
             let standing = json["standing_charge_gbp"].as_f64().unwrap();
             let import_cost = json["import_cost_gbp"].as_f64().unwrap();
@@ -10640,11 +10641,11 @@ mod tests {
             let net_cost = json["net_cost_gbp"].as_f64().unwrap();
             let days = json["days_in_range"].as_u64().unwrap();
             assert!(
-                (standing - 1.0972).abs() < 1e-3,
-                "24h window must credit 2 days of Standing Charge (£1.0972); got {standing}"
+                (standing - 0.5486).abs() < 1e-3,
+                "24h aligned window must credit 1 day of Standing Charge (£0.5486); got {standing}"
             );
             assert!(
-                (import_cost - 1.0972).abs() < 1e-3,
+                (import_cost - 0.5486).abs() < 1e-3,
                 "import cost must equal Standing Charge when there are no kWh readings; got {import_cost}"
             );
             assert!(
@@ -10652,10 +10653,10 @@ mod tests {
                 "export income must be zero with no readings; got {export_income}"
             );
             assert!(
-                (net_cost - 1.0972).abs() < 1e-3,
+                (net_cost - 0.5486).abs() < 1e-3,
                 "net cost must equal Standing Charge (no kWh to offset); got {net_cost}"
             );
-            assert_eq!(days, 2, "24h window must report 2 distinct local days");
+            assert_eq!(days, 1, "24h aligned window must report 1 distinct local day");
 
             // Clean up the temp db.
         })
