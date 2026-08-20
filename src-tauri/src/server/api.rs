@@ -10909,6 +10909,293 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Issue #269 exhaustive: period-totals box vs chart series equivalence
+    // through the real endpoints, for every scenario combination. The box
+    // comes from get_history_summary; the chart's final value comes from
+    // get_history's `_import_cost` series. They must agree in every case
+    // where the import counter is populated — the box may only exceed the
+    // chart through the grid-power fallback when the counter is empty.
+    // -----------------------------------------------------------------------
+
+    /// Local-midnight unix seconds (local time) for a day offset.
+    fn api_test_midnight(day_offset: i64) -> i64 {
+        let date = chrono::Local::now().date_naive() + chrono::Duration::days(day_offset);
+        chrono::Local
+            .from_local_datetime(&date.and_hms_opt(0, 0, 0).unwrap())
+            .earliest()
+            .unwrap()
+            .timestamp()
+    }
+
+    /// Insert a full local day of both counters ramping 06:00→18:00 and a
+    /// flat `grid_power` (import-positive) across the same span, so both
+    /// the counter path and the fallback path have data.
+    async fn api_seed_day(
+        state: &std::sync::Arc<AppState>,
+        day_offset: i64,
+        import_kwh: f64,
+        export_kwh: f64,
+        grid_power_w: i32,
+    ) {
+        let guard = state.history.lock().await;
+        let db = guard.as_ref().unwrap();
+        let midnight = api_test_midnight(day_offset);
+        for step in 0..48i64 {
+            let ts = midnight + step * 1800;
+            let min_of_day = step * 30;
+            let frac = if min_of_day <= 6 * 60 {
+                0.0
+            } else if min_of_day >= 18 * 60 {
+                1.0
+            } else {
+                (min_of_day - 6 * 60) as f64 / (18 * 60 - 6 * 60) as f64
+            };
+            db.insert_reading(&crate::inverter::model::InverterSnapshot {
+                timestamp: ts,
+                today_import_kwh: (import_kwh * frac) as f32,
+                today_export_kwh: (export_kwh * frac) as f32,
+                grid_power: if grid_power_w == 0 {
+                    0
+                } else {
+                    ((grid_power_w as f64 * frac) as i32).max(0)
+                },
+                ..Default::default()
+            });
+        }
+    }
+
+    /// Chart `_import_cost` final value and box `import_cost_gbp` for a
+    /// window, via the real endpoints (start_ms/end_ms form so the window
+    /// is exactly [midnight N, midnight N+1)).
+    async fn box_and_chart_totals(
+        state: &std::sync::Arc<AppState>,
+        start: i64,
+        end: i64,
+    ) -> ((f64, f64), f64) {
+        let (status, Json(json)) = get_history_summary(
+            State(state.clone()),
+            Query(HistoryQuery {
+                range: Some("today".to_string()),
+                fields: None,
+                offset: Some(0),
+                rolling: Some(false),
+                start_ms: Some(start * 1000),
+                end_ms: Some(end * 1000),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "summary endpoint failed");
+        let import_cost = json["data"]["import_cost_gbp"].as_f64().unwrap();
+        let export_income = json["data"]["export_income_gbp"].as_f64().unwrap();
+
+        let (status, Json(chart)) = get_history(
+            State(state.clone()),
+            Query(HistoryQuery {
+                range: Some("today".to_string()),
+                fields: Some("_import_cost".to_string()),
+                offset: Some(0),
+                rolling: Some(false),
+                start_ms: Some(start * 1000),
+                end_ms: Some(end * 1000),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "history endpoint failed");
+        let points = chart["data"]["_import_cost"].as_array().unwrap();
+        let chart_total = points.last().and_then(|p| p["v"].as_f64()).unwrap_or(0.0);
+        ((import_cost, export_income), chart_total)
+    }
+
+    #[tokio::test]
+    async fn api269_box_matches_chart_import_only() {
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.30, 0.15, 57.35);
+            api_seed_day(&state, 0, 10.0, 0.0, 2000).await;
+            let (box_vals, chart) =
+                box_and_chart_totals(&state, api_test_midnight(0), api_test_midnight(1)).await;
+            // Chart: 10 kWh × £0.30 + 57.35p standing = £3.5735.
+            assert!((chart - 3.5735).abs() < 0.02, "chart {chart} != ~£3.5735");
+            assert!(
+                (box_vals.0 - chart).abs() < 0.02,
+                "box {box_vals:?} != chart {chart}: import-only day must agree"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn api269_box_matches_chart_export_only() {
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.30, 0.15, 26.02);
+            api_seed_day(&state, 0, 0.0, 20.0, -1500).await;
+            let (box_vals, chart) =
+                box_and_chart_totals(&state, api_test_midnight(0), api_test_midnight(1)).await;
+            // The `_import_cost` chart on an export-only day is standing
+            // only (£0.2602) — the export income shows on the box side.
+            assert!(
+                (chart - 0.2602).abs() < 0.02,
+                "import-cost chart {chart} != standing-only £0.2602"
+            );
+            assert!(
+                (box_vals.0 - chart).abs() < 0.02,
+                "box {box_vals:?} != chart {chart}: export-only day must agree"
+            );
+            // Export income matches on both sides too.
+            assert!(
+                (box_vals.1 - 3.0).abs() < 0.02,
+                "export income {} != ~£3.00",
+                box_vals.1
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn api269_box_matches_chart_both_counters() {
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.30, 0.15, 57.35);
+            api_seed_day(&state, 0, 10.0, 20.0, 0).await;
+            let (box_vals, chart) =
+                box_and_chart_totals(&state, api_test_midnight(0), api_test_midnight(1)).await;
+            assert!(
+                (box_vals.0 - chart).abs() < 0.02,
+                "box {box_vals:?} != chart {chart}: mixed day must agree"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn api269_box_matches_chart_zero_counters_zero_grid() {
+        // Genuinely nothing happening: standing charge only, both sides.
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.30, 0.15, 57.35);
+            api_seed_day(&state, 0, 0.0, 0.0, 0).await;
+            let (box_vals, chart) =
+                box_and_chart_totals(&state, api_test_midnight(0), api_test_midnight(1)).await;
+            assert!(
+                (chart - 0.5735).abs() < 0.02,
+                "chart {chart} != standing-only £0.5735"
+            );
+            assert!(
+                (box_vals.0 - chart).abs() < 0.02,
+                "box {box_vals:?} != chart {chart}: quiet day must agree"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn api269_counter_populated_fallback_must_not_fire() {
+        // Pete's exact case shape: counter has real data, so the box must
+        // use the counter path even though grid_power suggests more import
+        // than the counter admits. The fallback is for EMPTY counters only.
+        // If it fired here, the box would exceed the chart by the
+        // trapezoid-minus-counter difference — the £2.86-vs-£1.14 bug.
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.30, 0.15, 57.35);
+            // Counter says 4 kWh; grid_power trapezoid would say ~5.8 kWh.
+            api_seed_day(&state, 0, 4.0, 0.0, 2400).await;
+            let (box_vals, chart) =
+                box_and_chart_totals(&state, api_test_midnight(0), api_test_midnight(1)).await;
+            let expected_chart = 4.0 * 0.30 + 0.5735;
+            assert!(
+                (chart - expected_chart).abs() < 0.02,
+                "chart {chart} != counter-based £{expected_chart}"
+            );
+            assert!(
+                (box_vals.0 - chart).abs() < 0.02,
+                "box {box_vals:?} != chart {chart}: fallback must not fire when counter is populated"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn api269_empty_counter_uses_grid_fallback() {
+        // The legit fallback case: counters never populated (firmware
+        // leaves them 0), real grid power. Box should exceed the standing
+        // charge via the trapezoid; chart stays at standing-only.
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.30, 0.15, 57.35);
+            api_seed_day(&state, 0, 0.0, 0.0, 2000).await;
+            let (box_vals, chart) =
+                box_and_chart_totals(&state, api_test_midnight(0), api_test_midnight(1)).await;
+            // Chart: no counter deltas → standing only.
+            assert!(
+                (chart - 0.5735).abs() < 0.02,
+                "chart {chart} != standing-only £0.5735"
+            );
+            // Box: fallback fires, trapezoid integrates ~2.4 kWh average ×
+            // 12 h effective ≈ over £0.60. Must clearly exceed the chart.
+            assert!(
+                box_vals.0 > chart + 0.30,
+                "box {box_vals:?} should exceed chart {chart} via fallback"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn api269_export_larger_than_import_net_credit() {
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.30, 0.15, 57.35);
+            api_seed_day(&state, 0, 5.0, 25.0, 0).await;
+            let (box_vals, chart) =
+                box_and_chart_totals(&state, api_test_midnight(0), api_test_midnight(1)).await;
+            // Import: 5 × 0.30 + 0.5735 = £2.0735; income 25 × 0.15 = £3.75.
+            assert!((chart - 2.0735).abs() < 0.02, "chart {chart} != ~£2.0735");
+            assert!(
+                (box_vals.0 - chart).abs() < 0.02,
+                "box {box_vals:?} != chart {chart}"
+            );
+            assert!(
+                (box_vals.1 - 3.75).abs() < 0.05,
+                "export income {} != ~£3.75",
+                box_vals.1
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn api269_report_endpoint_agrees_across_ranges() {
+        // /api/report must agree with the summary box for every range it
+        // shares. This pins the "days_in_range" fix at the third consumer.
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.30, 0.15, 57.35);
+            api_seed_day(&state, 0, 10.0, 0.0, 1000).await;
+            api_seed_day(&state, -1, 8.0, 0.0, 1000).await;
+            for (range, expected_days) in [("today", 1u64), ("24h", 1), ("7d", 7)] {
+                let (status, json) = get_report(
+                    State(state.clone()),
+                    Query(HistoryQuery {
+                        range: Some(range.to_string()),
+                        fields: None,
+                        offset: Some(0),
+                        rolling: Some(false),
+                        start_ms: None,
+                        end_ms: None,
+                    }),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK);
+                let days = json["days_in_range"].as_u64().unwrap();
+                let standing = json["standing_charge_gbp"].as_f64().unwrap();
+                assert_eq!(
+                    days, expected_days,
+                    "{range}: got {days} days, expected {expected_days}"
+                );
+                assert!(
+                    (standing - 0.5735 * expected_days as f64).abs() < 1e-3,
+                    "{range}: standing {standing} != {expected_days} × £0.5735"
+                );
+            }
+        })
+        .await;
+    }
+
+    // -----------------------------------------------------------------------
     // Log-message format for POST /api/settings
     //
     // The previous hard-coded log always printed host/port/serial/interval_secs
