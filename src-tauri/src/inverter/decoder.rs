@@ -1665,7 +1665,13 @@ pub fn decode_meter_data(data: &[u16], address: u8) -> MeterData {
     let p_active_phase_2 = signed(9);
     let p_active_phase_3 = signed(10);
     let reported_active_total = signed(11);
-    let p_active_total = if reported_active_total == 0 {
+    // The #243 derivation fallback (derive the total from the phase powers
+    // when the meter reports 0) is only valid for a live meter: garbage
+    // per-phase values with no live voltage must not override a legitimate
+    // 0 total (the dongle's small-garbage failure mode). A meter genuinely
+    // producing phase power also reports phase voltage, so require it.
+    let phase_voltage_live = get(0) != 0 || get(1) != 0 || get(2) != 0;
+    let p_active_total = if reported_active_total == 0 && phase_voltage_live {
         p_active_phase_1 + p_active_phase_2 + p_active_phase_3
     } else {
         reported_active_total
@@ -2469,13 +2475,55 @@ mod tests {
     fn decode_meter_data_derives_missing_active_total_from_phases() {
         let mut data = vec![0u16; 30];
         // Some single-phase EM115 meters populate IR(68) but leave the
-        // nominal total register IR(71) at zero (issue #243).
+        // nominal total register IR(71) at zero (issue #243). A meter
+        // genuinely producing phase power also reports voltage, so model
+        // the live meter the fallback is for.
         data[8] = 4332;
         data[11] = 0;
+        data[0] = 2410; // v_phase_1 = 241.0 V — live meter
 
         let meter = decode_meter_data(&data, 0x02);
 
         assert_eq!(meter.p_active_phase_1, 4332);
+        assert_eq!(meter.p_active_total, 4332);
+    }
+
+    #[test]
+    fn decode_meter_data_does_not_derive_total_from_garbage_phases() {
+        // Review finding #4: when the meter reports a legitimate total of 0
+        // but the per-phase registers carry garbage (the dongle's known
+        // failure mode — small random values that pass the sanitizer's
+        // spike checks), the derived sum must NOT replace the legitimate 0.
+        // The derivation fallback (issue #243) is only for meters that
+        // genuinely populate phase power, which also carry live voltage —
+        // require plausible phase telemetry (non-zero voltage) before
+        // substituting a derived total.
+        let mut data = vec![0u16; 30];
+        data[8] = 17; // garbage phase power (tens of W)
+        data[9] = 23;
+        data[10] = 11;
+        data[11] = 0; // legitimate reported total: 0
+        data[0] = 0; // v_phase_1 = 0 — no live voltage, phases are noise
+
+        let meter = decode_meter_data(&data, 0x01);
+
+        assert_eq!(
+            meter.p_active_total, 0,
+            "garbage phase registers with no live voltage must not override a legitimate 0 total"
+        );
+    }
+
+    #[test]
+    fn decode_meter_data_still_derives_total_with_live_voltage() {
+        // The #243 fallback must keep working when the meter is live:
+        // non-zero phase power AND non-zero phase voltage.
+        let mut data = vec![0u16; 30];
+        data[8] = 4332;
+        data[11] = 0;
+        data[0] = 2410; // v_phase_1 = 241.0 V — live
+
+        let meter = decode_meter_data(&data, 0x02);
+
         assert_eq!(meter.p_active_total, 4332);
     }
 
