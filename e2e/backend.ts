@@ -43,11 +43,80 @@ let backendProcess: ChildProcess | null = null;
 let settingsFixture: TestSettingsFixture | null = null;
 
 function killPort(port: number): void {
+  // Best-effort safety net for a lost backend process handle. Avoids a hard
+  // dependency on psmisc (`fuser`): prefer `lsof` (present on virtually every
+  // Linux/macOS base install), then fall back to a self-contained /proc scan
+  // so the suite runs even on minimal containers with neither installed.
   try {
-    execSync(`fuser -k ${port}/tcp 2>/dev/null || true`, { stdio: 'ignore' });
+    execSync(`lsof -ti tcp:${port} 2>/dev/null | xargs -r kill 2>/dev/null || true`, {
+      stdio: 'ignore',
+    });
+    return;
+  } catch {
+    /* lsof missing or no match — try /proc fallback */
+  }
+  try {
+    const pids = pidsListeningOn(port);
+    for (const pid of pids) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
   } catch {
     /* ignore — best effort */
   }
+}
+
+/** Find PIDs listening on `port` by scanning /proc (Linux only, no deps). */
+function pidsListeningOn(port: number): number[] {
+  const pids: number[] = [];
+  const hexPort = port.toString(16).toUpperCase().padStart(4, '0');
+  const netDirs = ['/proc/net/tcp', '/proc/net/tcp6'];
+  for (const netFile of netDirs) {
+    let content: string;
+    try {
+      content = fs.readFileSync(netFile, 'utf8');
+    } catch {
+      continue;
+    }
+    const inodes = new Set<string>();
+    for (const line of content.split('\n').slice(1)) {
+      const fields = line.trim().split(/\s+/);
+      if (fields.length < 10) continue;
+      const localAddr = fields[1];
+      const inode = fields[9];
+      if (localAddr.endsWith(`:${hexPort}`)) inodes.add(inode);
+    }
+    if (inodes.size === 0) continue;
+    for (const entry of fs.readdirSync('/proc')) {
+      if (!/^\d+$/.test(entry)) continue;
+      const fdDir = `/proc/${entry}/fd`;
+      let fds: string[];
+      try {
+        fds = fs.readdirSync(fdDir);
+      } catch {
+        continue;
+      }
+      for (const fd of fds) {
+        let link: string;
+        try {
+          link = fs.readlinkSync(`${fdDir}/${fd}`);
+        } catch {
+          continue;
+        }
+        // A listening socket's fd symlink is `socket:[<inode>]`; the inode
+        // column in /proc/net/tcp is the bare number.
+        const match = /^socket:\[(\d+)\]$/.exec(link);
+        if (match && inodes.has(match[1])) {
+          pids.push(Number(entry));
+          break;
+        }
+      }
+    }
+  }
+  return [...new Set(pids)];
 }
 
 async function stopBackendProcess(): Promise<void> {
