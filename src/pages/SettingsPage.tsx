@@ -241,6 +241,7 @@ export default function SettingsPage() {
     setGridMeterAddress,
     snapshot,
     latestVersionInfo,
+    setLatestVersionInfo,
   } = useInverterStore();
 
   // External CT clamps (address >= 0x01) — used to offer a grid-CT source
@@ -965,6 +966,11 @@ export default function SettingsPage() {
     setCheckForUpdates(next);
     try {
       await apiPost('/api/settings', { check_for_updates: next });
+      if (!next) {
+        // Hide the banner immediately — the cached info is repopulated by a
+        // fresh check if update checking is re-enabled later.
+        setLatestVersionInfo(null);
+      }
       flash(
         next
           ? 'Will check for new releases'

@@ -501,4 +501,46 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       });
     });
   });
+
+  describe('update-check toggle — clears cached banner info (review #10)', () => {
+    it('clears latestVersionInfo in the store when updates are turned off', async () => {
+      mountApiMocks({ check_for_updates: true });
+      useInverterStore.setState({
+        latestVersionInfo: {
+          current_version: '1.2.2',
+          latest_version: '1.2.3',
+          release_url: 'https://example.com/release',
+          update_available: true,
+        },
+      });
+      render(<SettingsPage />);
+      const toggle = await screen.findByRole('switch', { name: 'Check for new releases' });
+      expect(toggle.getAttribute('aria-checked')).toBe('true');
+      fireEvent.click(toggle); // turn OFF
+      await waitFor(() => {
+        expect(apiPostMock).toHaveBeenCalledWith('/api/settings', { check_for_updates: false });
+      });
+      await waitFor(() => {
+        expect(useInverterStore.getState().latestVersionInfo).toBeNull();
+      });
+    });
+
+    it('keeps latestVersionInfo when updates are turned on', async () => {
+      mountApiMocks({ check_for_updates: false });
+      const info = {
+        current_version: '1.2.2',
+        latest_version: null,
+        release_url: 'https://example.com/release',
+        update_available: false,
+      };
+      useInverterStore.setState({ latestVersionInfo: info });
+      render(<SettingsPage />);
+      const toggle = await screen.findByRole('switch', { name: 'Check for new releases' });
+      fireEvent.click(toggle); // turn ON
+      await waitFor(() => {
+        expect(apiPostMock).toHaveBeenCalledWith('/api/settings', { check_for_updates: true });
+      });
+      expect(useInverterStore.getState().latestVersionInfo).toEqual(info);
+    });
+  });
 });
