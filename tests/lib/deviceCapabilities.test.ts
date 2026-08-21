@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { deviceSupportsEps, deviceSupportsTimedDischarge } from '../../src/lib/deviceCapabilities';
+import {
+  deviceSupportsEps,
+  deviceSupportsTimedDischarge,
+  isAcCoupledDevice,
+  isThreePhaseLimitModel,
+  usesDirectChargeLimit,
+} from '../../src/lib/deviceCapabilities';
 
 /**
  * The EPS-supporting set mirrors the backend's `DeviceType::supports_eps`
@@ -53,6 +59,100 @@ describe('deviceSupportsEps', () => {
     expect(deviceSupportsEps(null)).toBe(false);
     expect(deviceSupportsEps(undefined)).toBe(false);
     expect(deviceSupportsEps({} as never)).toBe(false);
+  });
+});
+
+/**
+ * AC-coupled classification. The backend (`model.rs` `DeviceType::from_register`)
+ * maps 0x3001 -> ACCoupled, 0x3002 -> ACCoupledMk2, and falls back to
+ * ACCoupled for any other 0x30xx code — so the whole 0x30xx family is
+ * AC-coupled, not just the two listed codes.
+ */
+describe('isAcCoupledDevice', () => {
+  it.each([
+    ['3001', 'AC-coupled (legacy)'],
+    ['3002', 'AC-coupled Mk2'],
+    ['3050', 'unlisted 30xx falls back to ACCoupled in the backend'],
+  ])('returns true for %s (%s)', (code) => {
+    expect(isAcCoupledDevice(code)).toBe(true);
+  });
+
+  it.each([
+    ['2001', 'Gen hybrid'],
+    ['4001', 'three-phase'],
+    ['6001', 'AC three-phase'],
+    ['8001', 'AIO'],
+  ])('returns false for %s (%s)', (code) => {
+    expect(isAcCoupledDevice(code)).toBe(false);
+  });
+
+  it('returns false when the code is missing', () => {
+    expect(isAcCoupledDevice(undefined)).toBe(false);
+    expect(isAcCoupledDevice(null)).toBe(false);
+    expect(isAcCoupledDevice('')).toBe(false);
+  });
+});
+
+/**
+ * Three-phase-bank charge/discharge limit register models: 0x40/41/60/70/81/82.
+ */
+describe('isThreePhaseLimitModel', () => {
+  it.each([
+    ['4001', 'ThreePhase'],
+    ['4101', 'AIO Commercial'],
+    ['6001', 'AC three-phase'],
+    ['7001', 'Gateway'],
+    ['8101', 'Hybrid HV Gen3'],
+    ['8201', 'AIO Hybrid'],
+  ])('returns true for %s (%s)', (code) => {
+    expect(isThreePhaseLimitModel(code)).toBe(true);
+  });
+
+  it.each([
+    ['3001', 'AC-coupled uses AC-config block, not three-phase bank'],
+    ['2001', 'Gen hybrid'],
+    ['8001', 'AIO'],
+  ])('returns false for %s (%s)', (code) => {
+    expect(isThreePhaseLimitModel(code)).toBe(false);
+  });
+
+  it('returns false when the code is missing', () => {
+    expect(isThreePhaseLimitModel(undefined)).toBe(false);
+    expect(isThreePhaseLimitModel(null)).toBe(false);
+  });
+});
+
+/**
+ * usesDirectChargeLimit = AC-coupled OR three-phase-limit families: the
+ * charge/discharge power limit registers are already 1-100% for these.
+ */
+describe('usesDirectChargeLimit', () => {
+  it.each([
+    ['3001', 'AC-coupled (legacy)'],
+    ['3002', 'AC-coupled Mk2'],
+    ['3050', 'unlisted 30xx AC-coupled'],
+    ['4001', 'ThreePhase'],
+    ['4101', 'AIO Commercial'],
+    ['6001', 'AC three-phase'],
+    ['7001', 'Gateway'],
+    ['8101', 'Hybrid HV Gen3'],
+    ['8201', 'AIO Hybrid'],
+  ])('returns true for %s (%s)', (code) => {
+    expect(usesDirectChargeLimit(code)).toBe(true);
+  });
+
+  it.each([
+    ['1001', 'Gen1 hybrid'],
+    ['2001', 'Gen hybrid (HR111/112 are 0-50)'],
+    ['8001', 'AIO'],
+    ['8301', 'Gen4 hybrid'],
+  ])('returns false for %s (%s)', (code) => {
+    expect(usesDirectChargeLimit(code)).toBe(false);
+  });
+
+  it('returns false when the code is missing', () => {
+    expect(usesDirectChargeLimit(undefined)).toBe(false);
+    expect(usesDirectChargeLimit(null)).toBe(false);
   });
 });
 

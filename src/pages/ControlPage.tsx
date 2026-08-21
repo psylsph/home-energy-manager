@@ -2,7 +2,13 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { useInverterStore } from '../store/useInverterStore';
 import { useAction } from '../hooks/useAction';
 import { apiPost, apiGet } from '../lib/api';
-import { deviceSupportsEps, deviceSupportsTimedDischarge } from '../lib/deviceCapabilities';
+import {
+  deviceSupportsEps,
+  deviceSupportsTimedDischarge,
+  isAcCoupledDevice,
+  isThreePhaseLimitModel,
+  usesDirectChargeLimit,
+} from '../lib/deviceCapabilities';
 import type { ScheduleSlot } from '../lib/types';
 import {
   DEFAULT_ADAPTIVE_PERIOD,
@@ -534,14 +540,9 @@ function AdaptiveChargeSection() {
     }));
   };
 
-  const usesDirectLimit = snapshot?.device_type_code != null
-    && (snapshot.device_type_code.startsWith('30')
-      || snapshot.device_type_code.startsWith('40')
-      || snapshot.device_type_code.startsWith('41')
-      || snapshot.device_type_code.startsWith('60')
-      || snapshot.device_type_code.startsWith('70')
-      || snapshot.device_type_code.startsWith('81')
-      || snapshot.device_type_code.startsWith('82'));
+  // Whether the charge-rate registers are a direct 1-100% percentage for this
+  // device family — see lib/deviceCapabilities.ts (single source of truth).
+  const usesDirectLimit = usesDirectChargeLimit(snapshot?.device_type_code);
   const estimatedWatts = (percent: number) => {
     const maxPower = snapshot?.max_battery_power_w ?? 0;
     if (usesDirectLimit) return Math.round(percent / 100 * maxPower);
@@ -767,9 +768,22 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
     })();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Latest mode this section has requested via onModeChange. The failure
+  // handler below reverts the dropdown, but only to the mode that was
+  // persisted before the failing request *if* the user hasn't chosen a
+  // newer mode since — otherwise a slow-failing request would clobber
+  // the newer selection with a stale pre-change value.
+  const lastRequestedModeRef = useRef<ChargeMode | null>(null);
+  const revertTargetRef = useRef<ChargeMode | null>(null);
+
   const handleModeChange = async (newMode: ChargeMode) => {
     // Don't switch until slots have loaded
     if (!loaded || slots.length === 0) return;
+    // If a previous request is still in flight, its failure must not
+    // revert past this newer selection.
+    if (lastRequestedModeRef.current !== null) revertTargetRef.current = null;
+    lastRequestedModeRef.current = newMode;
+    revertTargetRef.current = mode;
     onModeChange(newMode);
     setSaving(true);
     try {
@@ -778,8 +792,12 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
     } catch {
       // The dropdown is optimistic, so restore the last persisted mode if the
       // backend rejects or cannot save the change. Otherwise it looks saved
-      // until a restart reloads the real setting.
-      onModeChange(mode);
+      // until a restart reloads the real setting. Only revert when this is
+      // still the user's latest selection — a newer choice has since replaced
+      // it and must not be clobbered by the stale pre-change mode.
+      if (lastRequestedModeRef.current === newMode && revertTargetRef.current !== null) {
+        onModeChange(revertTargetRef.current);
+      }
       setSaveFeedback('error');
     }
     setSaving(false);
@@ -2416,7 +2434,9 @@ export default function ControlPage() {
   const reserveSoc = (draftReserve != null && snapshot?.battery_reserve !== draftReserve)
     ? Math.max(RESERVE_SOC_MIN, Math.min(RESERVE_SOC_MAX, draftReserve))
     : Math.max(RESERVE_SOC_MIN, Math.min(RESERVE_SOC_MAX, snapshot?.battery_reserve ?? RESERVE_SOC_MIN));
-  const isAcCoupled = snapshot?.device_type_code === '3001' || snapshot?.device_type_code === '3002';
+  // AC-coupled family (0x30xx, per backend DeviceType::from_register) —
+  // see lib/deviceCapabilities.ts.
+  const isAcCoupled = isAcCoupledDevice(snapshot?.device_type_code);
 
   // Whether this inverter exposes the Emergency Power Supply enable register
   // at HR 317 — see lib/deviceCapabilities.ts. DC hybrids and pure
@@ -2458,17 +2478,11 @@ export default function ControlPage() {
   // the dongle returns stale or garbage values, which can show up as phantom
   // schedules or wrong target SOCs. See issue #41.
   const isLegacyGen3Fw = isHybrid && !Number.isNaN(armFwNum) && armFwNum > 0 && armFwNum <= 302;
-  const isThreePhaseLimitModel = snapshot?.device_type_code != null
-    && (snapshot.device_type_code.startsWith('40')
-      || snapshot.device_type_code.startsWith('41')
-      || snapshot.device_type_code.startsWith('60')
-      || snapshot.device_type_code.startsWith('70')
-      || snapshot.device_type_code.startsWith('81')
-      || snapshot.device_type_code.startsWith('82'));
+  const isThreePhaseLimitModelDevice = isThreePhaseLimitModel(snapshot?.device_type_code);
   // Three-phase-bank models use HR1113-1121 for charge/discharge schedules;
   // the backend now selects that register map automatically.
   const schedulesUnsupported = false;
-  const usesDirectPowerLimit = isAcCoupled || isThreePhaseLimitModel;
+  const usesDirectPowerLimit = isAcCoupled || isThreePhaseLimitModelDevice;
   // DC-coupled hybrid registers HR111/112 are 0-50 and are displayed as 0-100%.
   // AC-coupled HR313/314 and three-phase HR1110/1108 are already 1-100%, so display directly.
   const rateRegisterMax = usesDirectPowerLimit ? 100 : 50;
@@ -3386,7 +3400,7 @@ export default function ControlPage() {
           {/* Charge Power Limit */}
           <div className="space-y-1">
             <div className="flex items-center justify-between">
-              <span className="text-text-secondary text-sm">{isThreePhaseLimitModel ? 'Three-phase Charge Power Limit' : isAcCoupled ? 'AC Charge Power Limit' : 'Battery Charge Power Limit'}</span>
+              <span className="text-text-secondary text-sm">{isThreePhaseLimitModelDevice ? 'Three-phase Charge Power Limit' : isAcCoupled ? 'AC Charge Power Limit' : 'Battery Charge Power Limit'}</span>
               <span className="font-mono text-text-primary text-sm">{chargeRate ?? '—'}%{chargeWatts != null && chargeWatts > 0 ? ` (${(chargeWatts / 1000).toFixed(1)} kW)` : ''}</span>
             </div>
             <div className="flex items-center gap-3">
@@ -3420,7 +3434,7 @@ export default function ControlPage() {
           {/* Discharge Power Limit */}
           <div className="space-y-1">
             <div className="flex items-center justify-between">
-              <span className="text-text-secondary text-sm">{isThreePhaseLimitModel ? 'Three-phase Discharge Power Limit' : isAcCoupled ? 'AC Discharge Power Limit' : 'Battery Discharge Power Limit'}</span>
+              <span className="text-text-secondary text-sm">{isThreePhaseLimitModelDevice ? 'Three-phase Discharge Power Limit' : isAcCoupled ? 'AC Discharge Power Limit' : 'Battery Discharge Power Limit'}</span>
               <span className="font-mono text-text-primary text-sm">{dischargeRate ?? '—'}%{dischargeWatts != null && dischargeWatts > 0 ? ` (${(dischargeWatts / 1000).toFixed(1)} kW)` : ''}</span>
             </div>
             <div className="flex items-center gap-3">

@@ -1,6 +1,46 @@
 import type { InverterSnapshot } from './types';
 
 /**
+ * Whether the device is an AC-coupled battery inverter (0x30xx family).
+ *
+ * The backend (`model.rs` `DeviceType::from_register`) maps 0x3001 ->
+ * ACCoupled, 0x3002 -> ACCoupledMk2, and falls back to ACCoupled for any
+ * other 0x30xx code — so the whole family is classified broadly, not just
+ * the two explicitly listed codes. Single source of truth for AC-coupled
+ * classification: ControlPage's charge/discharge power-limit routing and
+ * the Adaptive charge section both consume this.
+ */
+export function isAcCoupledDevice(code: string | null | undefined): boolean {
+  return !!code && code.startsWith('30');
+}
+
+/**
+ * Whether the device uses the three-phase-bank charge/discharge power limit
+ * registers (already 1-100%): 0x40/41/60/70/81/82 families.
+ */
+export function isThreePhaseLimitModel(code: string | null | undefined): boolean {
+  return !!code
+    && (code.startsWith('40')
+      || code.startsWith('41')
+      || code.startsWith('60')
+      || code.startsWith('70')
+      || code.startsWith('81')
+      || code.startsWith('82'));
+}
+
+/**
+ * Whether the charge/discharge power limit registers for this device are
+ * already a direct 1-100% percentage (AC-coupled HR313/314 and three-phase
+ * HR1110/1108), rather than the 0-50 DC-hybrid HR111/112 scale that the UI
+ * doubles for display. Used by ControlPage's rate sliders and the Adaptive
+ * charge section's kW estimates so both agree with the registers the
+ * backend actually writes.
+ */
+export function usesDirectChargeLimit(code: string | null | undefined): boolean {
+  return isAcCoupledDevice(code) || isThreePhaseLimitModel(code);
+}
+
+/**
  * Whether the inverter exposes a confirmed, safely writable Emergency Power
  * Supply (EPS) enable register at HR 317.
  *
