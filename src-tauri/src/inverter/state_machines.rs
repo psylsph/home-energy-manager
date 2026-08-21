@@ -302,6 +302,20 @@ fn discharge_window_active(
     })
 }
 
+/// SOC-reserve register write that targets the correct register for the
+/// device type: three-phase devices use the 3-phase SOC reserve register,
+/// everything else uses the single-phase one.
+fn soc_reserve_write(device_type: DeviceType, reserve: u16) -> RegisterWrite {
+    RegisterWrite {
+        address: if device_type.uses_three_phase_schedule_slots() {
+            HR_3PH_BATTERY_SOC_RESERVE
+        } else {
+            HR_BATTERY_SOC_RESERVE
+        },
+        value: reserve,
+    }
+}
+
 /// Evaluate the discharge floor guard. Returns register writes (if any) and
 /// the updated state. `saved_reserve` from the previous state is reused when
 /// re-arming after a restart so the original pre-guard value is never lost.
@@ -323,10 +337,10 @@ pub(crate) fn check_discharge_floor(
                 "Discharge floor guard: disabled while holding floor, restoring reserve"
             );
             *state = DischargeFloorState::Idle;
-            return Some(vec![RegisterWrite {
-                address: HR_BATTERY_SOC_RESERVE,
-                value: saved_reserve,
-            }]);
+            return Some(vec![soc_reserve_write(
+                snap.device_type,
+                saved_reserve,
+            )]);
         }
         *state = DischargeFloorState::Idle;
         return None;
@@ -348,10 +362,10 @@ pub(crate) fn check_discharge_floor(
                     "Discharge floor guard: window active, raising Minimum SOC"
                 );
                 *state = DischargeFloorState::FloorHeld { saved_reserve };
-                return Some(vec![RegisterWrite {
-                    address: HR_BATTERY_SOC_RESERVE,
-                    value: config.floor_soc as u16,
-                }]);
+                return Some(vec![soc_reserve_write(
+                    snap.device_type,
+                    config.floor_soc as u16,
+                )]);
             }
             None
         }
@@ -361,10 +375,10 @@ pub(crate) fn check_discharge_floor(
                 // mid-window. Skip the write when already at the floor to
                 // avoid duplicate-write churn every poll.
                 if snap.battery_reserve < config.floor_soc {
-                    return Some(vec![RegisterWrite {
-                        address: HR_BATTERY_SOC_RESERVE,
-                        value: config.floor_soc as u16,
-                    }]);
+                    return Some(vec![soc_reserve_write(
+                        snap.device_type,
+                        config.floor_soc as u16,
+                    )]);
                 }
                 None
             } else {
@@ -373,10 +387,10 @@ pub(crate) fn check_discharge_floor(
                     "Discharge floor guard: window ended, restoring Minimum SOC"
                 );
                 *state = DischargeFloorState::Idle;
-                Some(vec![RegisterWrite {
-                    address: HR_BATTERY_SOC_RESERVE,
-                    value: saved_reserve,
-                }])
+                Some(vec![soc_reserve_write(
+                    snap.device_type,
+                    saved_reserve,
+                )])
             }
         }
         DischargeFloorState::HeldFromRestart { saved_reserve } => {
@@ -391,10 +405,10 @@ pub(crate) fn check_discharge_floor(
                 );
                 *state = DischargeFloorState::FloorHeld { saved_reserve };
                 if snap.battery_reserve < config.floor_soc {
-                    return Some(vec![RegisterWrite {
-                        address: HR_BATTERY_SOC_RESERVE,
-                        value: config.floor_soc as u16,
-                    }]);
+                    return Some(vec![soc_reserve_write(
+                        snap.device_type,
+                        config.floor_soc as u16,
+                    )]);
                 }
                 None
             } else {
@@ -403,10 +417,10 @@ pub(crate) fn check_discharge_floor(
                     "Discharge floor guard: restart outside window, restoring saved reserve"
                 );
                 *state = DischargeFloorState::Idle;
-                Some(vec![RegisterWrite {
-                    address: HR_BATTERY_SOC_RESERVE,
-                    value: saved_reserve,
-                }])
+                Some(vec![soc_reserve_write(
+                    snap.device_type,
+                    saved_reserve,
+                )])
             }
         }
     }
@@ -3989,6 +4003,36 @@ mod tests {
         assert_eq!(writes[0].address, HR_BATTERY_SOC_RESERVE);
         assert_eq!(writes[0].value, 50);
         assert_eq!(state, DischargeFloorState::FloorHeld { saved_reserve: 4 });
+    }
+
+    #[test]
+    fn discharge_floor_three_phase_device_writes_3ph_soc_reserve_register() {
+        let config = df_config(true, 50);
+        let mut state = DischargeFloorState::Idle;
+        let mut snap = df_snap(evening_window(), 4);
+        snap.device_type = crate::inverter::model::DeviceType::ThreePhase;
+
+        let writes = check_discharge_floor(&snap, &config, &mut state, 20 * 60);
+        let writes = writes.expect("floor raise writes");
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].address, HR_3PH_BATTERY_SOC_RESERVE);
+        assert_eq!(writes[0].value, 50);
+        assert_eq!(state, DischargeFloorState::FloorHeld { saved_reserve: 4 });
+    }
+
+    #[test]
+    fn discharge_floor_three_phase_restore_uses_3ph_register() {
+        let config = df_config(true, 50);
+        let mut state = DischargeFloorState::FloorHeld { saved_reserve: 4 };
+        let mut snap = df_snap(evening_window(), 50);
+        snap.device_type = crate::inverter::model::DeviceType::ThreePhase;
+
+        let writes = check_discharge_floor(&snap, &config, &mut state, 22 * 60 + 30);
+        let writes = writes.expect("restore writes");
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].address, HR_3PH_BATTERY_SOC_RESERVE);
+        assert_eq!(writes[0].value, 4);
+        assert_eq!(state, DischargeFloorState::Idle);
     }
 
     #[test]
