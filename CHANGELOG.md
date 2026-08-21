@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.74.8] - 2026-08-21
+
+### Fixed
+
+- **Solar readings no longer drop to zero when a configured solar CT meter stops responding for a cycle.** The CT-authority path previously treated an unreadable meter as a reading of 0 W, discarding the inverter's own valid PV registers for the duration of the transient outage. Now the CT sum only overrides the register-derived solar when every configured meter was actually read that cycle; a genuine meter zero still applies.
+- **The discharge floor guard now writes the correct SOC-reserve register on three-phase devices.** It wrote the single-phase register (HR 110) unconditionally, so on three-phase/HV hardware the floor guard's writes were silently misapplied. All floor-guard writes now go through the same device-type-aware selection every other pause path uses.
+- **Timed Export no longer loses your saved discharge schedule if the restore writes are rejected.** Enabling Timed Export with a backed-up schedule used to consume and clear the backup before the restore writes were confirmed — an inverter rejection destroyed the backup. The restore batch is now awaited: the backup is only cleared after the inverter accepts the writes, a rejection returns a clear error with the backup kept, and enabling without any inverter data yet returns an error instead of guessing the register layout.
+- **Snapshots can no longer freeze for minutes when many control operations queue at once.** The poll loop's write drain took the entire pending queue every cycle despite a comment promising a bounded drain; each batch costs seconds of write gaps, so a burst of queued operations froze live updates. The drain is now capped at 8 batches per cycle, bounding the freeze to roughly a minute while still making progress.
+- **Concurrent update checks no longer trigger parallel GitHub API calls.** The on-demand refresh decision was made outside the lock, so a burst of simultaneous requests each spawned its own fetch — risking the unauthenticated 60/hr rate limit. Exactly one concurrent request now wins.
+- **Turning off update checks now hides the release banner immediately** instead of keeping the cached version info until the next reload.
+- **Discharge floor settings can no longer diverge from the saved file on a failed write.** The endpoint mutated the live config before persisting; the save now happens first and the live state only swaps in on success.
+- **A failed Cosy mode change no longer reverts a newer selection.** If you changed the mode again while the first request was in flight, the failure handler used to snap the dropdown back to the pre-first-change mode. A failure now only reverts when you haven't chosen a newer mode since.
+
+### Changed
+
+- Device classification (AC-coupled / direct charge limit / three-phase limit models) is now a single source of truth in `deviceCapabilities.ts`, shared by all Control page sections — the adaptive-charge sliders and the charge-limit registers can no longer disagree for unlisted device codes.
+
+### Internal
+
+- Regression tests for the battery breaker voltage-collapse alert (#272): trigger signature, non-trigger paths, and debounce/reset behaviour.
+- INSTALL.md Dockerfile example updated to `node:24` to match the real Dockerfile and CI.
+
 ## [0.74.7] - 2026-08-20
 
 ### Fixed
