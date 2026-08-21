@@ -1729,6 +1729,10 @@ pub async fn set_timed_export(
 ) -> (StatusCode, Json<Value>) {
     let enabled = body["enabled"].as_bool().unwrap_or(true);
     let mut writes = Vec::new();
+    // Set when a #137 discharge-slot backup is being restored as part of this
+    // enable: the write batch must then be confirmed before the backup is
+    // consumed (see the queue/await at the end of the handler).
+    let mut restoring_backup = false;
 
     if enabled {
         // HR59 is only safe when at least one real discharge window exists.
@@ -1744,13 +1748,33 @@ pub async fn set_timed_export(
                         .iter()
                         .any(crate::inverter::model::ScheduleSlot::is_configured),
                 ),
-                None => (DeviceType::Gen2Hybrid, false),
+                // Without a snapshot the device type — and therefore the
+                // register layout the restore writes target — is unknown.
+                // Refuse rather than guess (a wrong guess could restore the
+                // backup into the wrong registers on non-Gen2Hybrid models).
+                None => {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(json!({
+                            "ok": false,
+                            "error": "No inverter data yet — wait for the first poll before enabling Timed Export"
+                        })),
+                    );
+                }
             }
         };
 
+        // When a #137 backup needs restoring, the whole enable batch is
+        // queued with completion and awaited: the backup must only be
+        // consumed after the inverter has actually accepted the slot-restore
+        // writes. On rejection the backup stays persisted so a retry can
+        // restore it again, and the failure is surfaced to the caller.
+        // (Note: assigns the handler-scope `restoring_backup` declared at
+        // the top — do NOT shadow it with a new `let`, the trailing queue/
+        // await branch reads that outer flag.)
         if !has_live_slot {
-            let mut settings = crate::settings::Settings::load();
-            let Some(backup) = settings.discharge_slots_backup.take() else {
+            let settings = crate::settings::Settings::load();
+            let Some(backup) = settings.discharge_slots_backup.clone() else {
                 return (
                     StatusCode::CONFLICT,
                     Json(json!({
@@ -1770,11 +1794,7 @@ pub async fn set_timed_export(
                 );
             };
             writes.extend(slot_writes);
-            if let Err(e) = settings.save() {
-                tracing::warn!(
-                    "Failed to clear discharge-slot backup after Timed Export restore: {e}"
-                );
-            }
+            restoring_backup = true;
         }
 
         // Any restored slot writes must precede HR59=1. With a live slot no
@@ -1806,12 +1826,41 @@ pub async fn set_timed_export(
     }
 
     tracing::info!("SetTimedExport encoded: {:?}", writes);
-    queue_writes(&state, writes).await;
-    ok_response(if enabled {
-        "Timed Export enabled"
+    if enabled && restoring_backup {
+        // Await confirmation before consuming the #137 backup (see above).
+        let rx = queue_writes_with_completion(&state, writes).await;
+        match await_write_outcome(rx).await {
+            Ok(()) => {
+                let mut settings = crate::settings::Settings::load();
+                settings.discharge_slots_backup = None;
+                if let Err(e) = settings.save() {
+                    tracing::warn!(
+                        "Failed to clear discharge-slot backup after Timed Export restore: {e}"
+                    );
+                }
+                ok_response("Timed Export enabled")
+            }
+            Err(msg) => {
+                tracing::warn!("Timed Export slot restore rejected: {msg}");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({
+                        "ok": false,
+                        "error": format!(
+                            "Timed Export could not be enabled — restoring the saved discharge schedule failed ({msg}). The schedule backup has been kept; please try again."
+                        )
+                    })),
+                )
+            }
+        }
     } else {
-        "Timed Export disabled"
-    })
+        queue_writes(&state, writes).await;
+        ok_response(if enabled {
+            "Timed Export enabled"
+        } else {
+            "Timed Export disabled"
+        })
+    }
 }
 
 /// POST /api/control/timed-discharge — configure/toggle the portal-style
@@ -5322,6 +5371,34 @@ mod tests {
         handle.await.unwrap()
     }
 
+    /// Like [`drive_pause_battery_completion_with`] but for
+    /// [`set_timed_export`]. The handler awaits write confirmation when a
+    /// discharge-slot backup is restored, so the test must drive the
+    /// completion channel the poll loop would normally resolve.
+    async fn drive_set_timed_export_completion_with(
+        state: &Arc<AppState>,
+        body: serde_json::Value,
+        outcome: WriteOutcome,
+    ) -> (StatusCode, Json<Value>) {
+        let handle = tokio::spawn(set_timed_export(State(state.clone()), Json(body)));
+        loop {
+            if handle.is_finished() {
+                break;
+            }
+            let mut pw = state.pending_writes.lock().await;
+            if let Some(batch) = pw.first_mut() {
+                if let Some(tx) = batch.completion.take() {
+                    let _ = tx.send(outcome.clone());
+                    drop(pw);
+                    break;
+                }
+            }
+            drop(pw);
+            tokio::task::yield_now().await;
+        }
+        handle.await.unwrap()
+    }
+
     fn assert_all_whitelisted(writes: &[RegisterWrite]) {
         use crate::modbus::registers::SAFE_WRITE_REGS;
         assert!(
@@ -6311,9 +6388,12 @@ mod tests {
             }]);
             settings.save().unwrap();
 
-            let (status, _) = set_timed_export(
-                State(state.clone()),
-                Json(serde_json::json!({ "enabled": true })),
+            // The restore path awaits write confirmation; drive the
+            // completion channel the poll loop would normally resolve.
+            let (status, _) = drive_set_timed_export_completion_with(
+                &state,
+                serde_json::json!({ "enabled": true }),
+                WriteOutcome::Ok,
             )
             .await;
             assert_eq!(status, StatusCode::OK);
@@ -6333,6 +6413,121 @@ mod tests {
             assert!(slot_start_index < hr59_index, "slot must precede HR59=1");
             assert_eq!(writes[hr59_index].value, 1);
             assert!(Settings::load().discharge_slots_backup.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn timed_export_restore_rejection_keeps_backup_and_errors() {
+        // Review finding #7: the restored backup discharge-slot writes were
+        // queued fire-and-forget while the #137 backup was consumed and
+        // persist-cleared up front. If the inverter rejects the slot-restore
+        // writes the user's discharge schedule backup is already gone. The
+        // backup must survive a rejection and the endpoint must surface the
+        // failure instead of reporting success.
+        with_isolated_config_dir_async(|| async {
+            use crate::settings::{DischargeSlotBackup, Settings};
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            let mut settings = Settings::load();
+            settings.discharge_slots_backup = Some(vec![DischargeSlotBackup {
+                enabled: true,
+                start_hour: 16,
+                start_minute: 0,
+                end_hour: 19,
+                end_minute: 0,
+                target_soc: 4,
+            }]);
+            settings.save().unwrap();
+
+            let (status, response) = drive_set_timed_export_completion_with(
+                &state,
+                serde_json::json!({ "enabled": true }),
+                WriteOutcome::Failed {
+                    address: crate::modbus::registers::HR_DISCHARGE_SLOT_1_START,
+                    value: 960,
+                    error: "rejected by inverter".to_string(),
+                },
+            )
+            .await;
+
+            assert_eq!(
+                status,
+                StatusCode::BAD_GATEWAY,
+                "rejected restore writes must surface an error"
+            );
+            assert_eq!(response.0["ok"], json!(false));
+            let restored = Settings::load()
+                .discharge_slots_backup
+                .expect("backup must survive a rejected slot restore");
+            assert_eq!(restored[0].start_hour, 16);
+            assert_eq!(restored[0].end_hour, 19);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn timed_export_restore_success_consumes_backup() {
+        // Happy-path counterpart: when the inverter accepts the restore
+        // writes the backup is consumed and persist-cleared exactly once.
+        with_isolated_config_dir_async(|| async {
+            use crate::settings::{DischargeSlotBackup, Settings};
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            let mut settings = Settings::load();
+            settings.discharge_slots_backup = Some(vec![DischargeSlotBackup {
+                enabled: true,
+                start_hour: 16,
+                start_minute: 0,
+                end_hour: 19,
+                end_minute: 0,
+                target_soc: 4,
+            }]);
+            settings.save().unwrap();
+
+            let (status, _) = drive_set_timed_export_completion_with(
+                &state,
+                serde_json::json!({ "enabled": true }),
+                WriteOutcome::Ok,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(Settings::load().discharge_slots_backup.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn timed_export_enable_without_snapshot_returns_error() {
+        // Without a snapshot the register layout (device type) is unknown, so
+        // restoring the backup could target the wrong registers. The endpoint
+        // must refuse instead of silently assuming Gen2Hybrid.
+        with_isolated_config_dir_async(|| async {
+            use crate::settings::{DischargeSlotBackup, Settings};
+            let state = Arc::new(AppState::new());
+            let mut settings = Settings::load();
+            settings.discharge_slots_backup = Some(vec![DischargeSlotBackup {
+                enabled: true,
+                start_hour: 16,
+                start_minute: 0,
+                end_hour: 19,
+                end_minute: 0,
+                target_soc: 4,
+            }]);
+            settings.save().unwrap();
+
+            let (status, response) = set_timed_export(
+                State(state.clone()),
+                Json(serde_json::json!({ "enabled": true })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(response.0["ok"], json!(false));
+            assert!(response.0["error"]
+                .as_str()
+                .unwrap()
+                .contains("inverter data"));
+            assert!(drain_pending_writes(&state).await.is_empty());
+            // The backup must not be consumed by the refused operation.
+            assert!(Settings::load().discharge_slots_backup.is_some());
         })
         .await;
     }
