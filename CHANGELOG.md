@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.74.9] - 2026-08-21
+
+### Fixed
+
+- **Concurrent settings saves can no longer silently drop each other's changes.** The poll loop and the API both read-modify-write the settings file, and a save from one could overwrite a field another had just written — e.g. an adaptive-charge baseline or a discharge-limiter state could be lost when a control request saved at the same moment. Settings writes are now transactional: the whole read-modify-write happens under one lock, so concurrent writers can't clobber each other's fields.
+
+### Internal
+
+- The Proxmox LXC helper's pinned installer digest is now checked in CI, so a change to `install.sh` without updating the digest fails the build instead of failing at container-creation time.
+- The E2E suite's port-cleanup no longer depends on `psmisc` (`fuser`); it falls back to a self-contained `/proc` scan on minimal containers.
+- Two E2E specs replaced hand-rolled wall-clock deadline loops with Playwright's `expect.poll`, removing a CI flake source.
+- AGENTS.md now documents the TDD workflow (RED test first, concurrent tests for race bugs, never neuter a RED test).
+
 ## [0.74.8] - 2026-08-21
 
 ### Fixed
