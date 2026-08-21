@@ -125,6 +125,14 @@ run_create() {
 
 echo "tests/scripts/proxmox-lxc.test.sh"
 echo
+
+echo "0. pinned installer digest in create-lxc.sh matches the real install.sh"
+PINNED_DIGEST="$(grep -oP 'INSTALLER_SHA256="\K[0-9a-f]{64}' "$CREATE")"
+ACTUAL_DIGEST="$(sha256sum "$REPO_ROOT/scripts/proxmox/install.sh" | awk '{ print $1 }')"
+assert_eq "pinned digest is present" "64" "${#PINNED_DIGEST}"
+assert_eq "pinned digest matches install.sh" "$ACTUAL_DIGEST" "$PINNED_DIGEST"
+
+echo
 echo "1. creates an unprivileged Debian 13 LXC and runs the installer"
 STAGE="$(mktemp -d)"
 stage_proxmox_mocks "$STAGE"
