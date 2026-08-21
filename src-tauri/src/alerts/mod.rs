@@ -2396,6 +2396,95 @@ mod tests {
         assert!(!battery_voltage_mismatch(30.0, &[53.0, 45.0]));
     }
 
+    #[test]
+    fn test_voltage_mismatch_boundary_exactly_half_is_not_mismatch() {
+        // The comparison is strictly `<`: inverter-side exactly at 50% of the
+        // healthiest module (26.5 V for a 53.0 V stack) must NOT fire.
+        assert!(!battery_voltage_mismatch(26.5, &[53.0, 52.9]));
+        // One float step below the boundary fires.
+        assert!(battery_voltage_mismatch(26.499, &[53.0, 52.9]));
+        // Just above the boundary is comfortably healthy.
+        assert!(!battery_voltage_mismatch(26.6, &[53.0, 52.9]));
+    }
+
+    #[test]
+    fn test_voltage_mismatch_slow_decline_never_fires() {
+        // A gradual decline of BOTH ends of the DC path (e.g. discharging
+        // pack drifting down together) is normal: the relative comparison
+        // never crosses the 50% threshold at any point.
+        let mut module = 53.0_f32;
+        let mut inverter = 52.9_f32;
+        for _ in 0..20 {
+            module -= 0.2;
+            inverter -= 0.2;
+            assert!(!battery_voltage_mismatch(inverter, &[module]));
+        }
+        // The whole journey stayed proportionate.
+        assert!((inverter / module - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_voltage_mismatch_pipeline_fires_once_and_recovers() {
+        // End-to-end pure pipeline: helper → debounce → notification gate,
+        // mirroring the poll loop's wiring (issue #272 breaker-trip case).
+        // Reporter's field evidence: collapse to 7.0 V, modules healthy.
+        let modules = [53.2_f32, 52.9_f32];
+        let mut d = AlertDebounce::new();
+        let mut notifications = 0;
+
+        // 5 poll cycles with the breaker tripped.
+        for cycle in 0..5 {
+            let mismatch = battery_voltage_mismatch(7.0, &modules);
+            let t = d.confirm_battery_voltage_mismatch(mismatch);
+            if mismatch_notification_due(t, d.any_battery_connection_lost()) {
+                notifications += 1;
+            }
+            // Confirmed from cycle 3 (BATTERY_CONNECTION_LOST_CONFIRM_CYCLES).
+            assert_eq!(d.battery_voltage_mismatch_confirmed(), cycle >= 2);
+        }
+        // Exactly one lost notification for the whole episode.
+        assert_eq!(notifications, 1);
+
+        // Breaker reset: inverter-side back at the pack voltage. Exactly one
+        // restored notification on the first healthy cycle.
+        for cycle in 0..3 {
+            let mismatch = battery_voltage_mismatch(53.1, &modules);
+            let t = d.confirm_battery_voltage_mismatch(mismatch);
+            if mismatch_notification_due(t, d.any_battery_connection_lost()) {
+                notifications += 1;
+            }
+            assert!(!d.battery_voltage_mismatch_confirmed());
+        }
+        assert_eq!(notifications, 2);
+
+        // A second collapse episode re-fires after rebuilding the streak.
+        for cycle in 0..3 {
+            let t = d.confirm_battery_voltage_mismatch(battery_voltage_mismatch(0.0, &modules));
+            if mismatch_notification_due(t, d.any_battery_connection_lost()) {
+                notifications += 1;
+            }
+            assert_eq!(d.battery_voltage_mismatch_confirmed(), cycle >= 2);
+        }
+        assert_eq!(notifications, 3);
+    }
+
+    #[test]
+    fn test_voltage_mismatch_pipeline_transient_sag_does_not_notify() {
+        // One or two cycles of transient collapse (e.g. register glitch)
+        // never reach the confirm threshold, so nothing notifies.
+        let modules = [53.0_f32];
+        let mut d = AlertDebounce::new();
+        let mut notifications = 0;
+        for v in [53.0, 7.0, 53.0, 7.0, 53.0] {
+            let t = d.confirm_battery_voltage_mismatch(battery_voltage_mismatch(v, &modules));
+            if mismatch_notification_due(t, d.any_battery_connection_lost()) {
+                notifications += 1;
+            }
+        }
+        assert_eq!(notifications, 0);
+        assert!(!d.battery_voltage_mismatch_confirmed());
+    }
+
     // ================================================================
     // Solar clipping
     // ================================================================
