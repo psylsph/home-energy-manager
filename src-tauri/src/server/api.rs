@@ -4688,29 +4688,31 @@ pub async fn set_discharge_floor(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
-    let mut config = state.discharge_floor_config.lock().await;
+    let mut candidate = state.discharge_floor_config.lock().await.clone();
 
     if let Some(v) = body.get("enabled").and_then(|v| v.as_bool()) {
-        config.enabled = v;
+        candidate.enabled = v;
     }
     if let Some(v) = body.get("floor_soc").and_then(|v| v.as_u64()) {
         if !(4..=100).contains(&v) {
             return error_response("floor_soc must be 4-100");
         }
-        config.floor_soc = v as u8;
+        candidate.floor_soc = v as u8;
     }
 
-    tracing::info!("Discharge floor guard config updated: {:?}", config);
+    tracing::info!("Discharge floor guard config updated: {:?}", candidate);
 
+    // Persist first — on failure the live config must stay untouched so it
+    // can't diverge from the saved settings.
     let mut app_settings = crate::settings::Settings::load();
-    app_settings.discharge_floor_enabled = config.enabled;
-    app_settings.discharge_floor_soc = config.floor_soc;
-    drop(config);
+    app_settings.discharge_floor_enabled = candidate.enabled;
+    app_settings.discharge_floor_soc = candidate.floor_soc;
     if let Err(e) = app_settings.save() {
         tracing::warn!("Failed to persist discharge floor config: {e}");
         return server_error(&format!("Failed to save: {e}"));
     }
 
+    *state.discharge_floor_config.lock().await = candidate;
     ok_response("Discharge floor guard config updated")
 }
 
@@ -4998,6 +5000,44 @@ mod tests {
             assert_eq!(body["data"]["config"]["enabled"], true);
             assert_eq!(body["data"]["config"]["floor_soc"], 50);
             assert_eq!(body["data"]["state"], "Idle");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn discharge_floor_config_not_mutated_when_save_fails() {
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            let config_before = state.discharge_floor_config.lock().await.clone();
+
+            // Make the settings save fail by making the config dir read-only
+            // (the temp-file write inside `Settings::save` needs write access).
+            let dir = crate::settings::Settings::settings_dir();
+            let perms = std::fs::metadata(&dir)
+                .expect("isolated config dir exists")
+                .permissions();
+            let mut readonly = perms.clone();
+            std::os::unix::fs::PermissionsExt::set_mode(&mut readonly, 0o500);
+            std::fs::set_permissions(&dir, readonly).expect("make config dir read-only");
+
+            let (status, body) = set_discharge_floor(
+                State(state.clone()),
+                Json(json!({ "enabled": true, "floor_soc": 50 })),
+            )
+            .await;
+
+            // Restore write access so the isolation guard can clean up.
+            std::fs::set_permissions(&dir, perms).expect("restore config dir permissions");
+
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(body["ok"], false);
+            // The live config must NOT have diverged from the persisted settings.
+            let config_after = state.discharge_floor_config.lock().await.clone();
+            assert_eq!(config_after.enabled, config_before.enabled);
+            assert_eq!(config_after.floor_soc, config_before.floor_soc);
+            let settings = crate::settings::Settings::load();
+            assert_eq!(settings.discharge_floor_enabled, config_before.enabled);
+            assert_eq!(settings.discharge_floor_soc, config_before.floor_soc);
         })
         .await;
     }
