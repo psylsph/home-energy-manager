@@ -38,17 +38,20 @@ async function getSnapshot(baseUrl: string): Promise<Record<string, any>> {
 async function resetToEco(baseUrl: string): Promise<void> {
   // Precondition: the poll must be broadcasting fresh snapshots (not stuck
   // draining a deep write queue), otherwise the Eco writes below would sit
-  // behind the backlog indefinitely.
-  const freshDeadline = Date.now() + 120_000;
-  for (;;) {
-    const snapshot = await getSnapshot(baseUrl);
-    const ts = snapshot.timestamp as number | undefined;
-    if (typeof ts === 'number' && Math.abs(Date.now() / 1000 - ts) < 15) break;
-    if (Date.now() > freshDeadline) {
-      throw new Error(`Timed out waiting for a fresh snapshot (last timestamp: ${ts})`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
-  }
+  // behind the backlog indefinitely. Use expect.poll (idiomatic Playwright)
+  // rather than a hand-rolled Date.now() deadline loop — the latter is a
+  // CI flake candidate because it burns real wall-clock time and has no
+  // backoff.
+  await expect
+    .poll(
+      async () => {
+        const snapshot = await getSnapshot(baseUrl);
+        const ts = snapshot.timestamp as number | undefined;
+        return typeof ts === 'number' && Math.abs(Date.now() / 1000 - ts) < 15;
+      },
+      { timeout: 120_000, intervals: [1_000] },
+    )
+    .toBe(true);
 
   const response = await fetch(`${baseUrl}/api/control/eco`, {
     method: 'POST',
@@ -56,35 +59,31 @@ async function resetToEco(baseUrl: string): Promise<void> {
     body: JSON.stringify({ enabled: true }),
   });
   expect(response.ok).toBe(true);
-  const deadline = Date.now() + 90_000;
-  for (;;) {
-    const snapshot = await getSnapshot(baseUrl);
-    const slots = (snapshot.discharge_slots ?? []) as Array<{
-      enabled: boolean;
-      start_hour: number;
-      start_minute: number;
-      end_hour: number;
-      end_minute: number;
-    }>;
-    const noneConfigured = slots.every(
-      (s) =>
-        !s.enabled &&
-        s.start_hour === 0 &&
-        s.start_minute === 0 &&
-        s.end_hour === 0 &&
-        s.end_minute === 0,
-    );
-    if (snapshot.enable_discharge === false && noneConfigured) return;
-    if (Date.now() > deadline) {
-      throw new Error(
-        `Timed out waiting for clean Eco snapshot: ${JSON.stringify({
-          enable_discharge: snapshot.enable_discharge,
-          discharge_slots: slots,
-        })}`,
-      );
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
-  }
+
+  await expect
+    .poll(
+      async () => {
+        const snapshot = await getSnapshot(baseUrl);
+        const slots = (snapshot.discharge_slots ?? []) as Array<{
+          enabled: boolean;
+          start_hour: number;
+          start_minute: number;
+          end_hour: number;
+          end_minute: number;
+        }>;
+        const noneConfigured = slots.every(
+          (s) =>
+            !s.enabled &&
+            s.start_hour === 0 &&
+            s.start_minute === 0 &&
+            s.end_hour === 0 &&
+            s.end_minute === 0,
+        );
+        return snapshot.enable_discharge === false && noneConfigured;
+      },
+      { timeout: 90_000, intervals: [1_000] },
+    )
+    .toBe(true);
 }
 
 test.describe('Real simulator — Timed Export/discharge-slot guard', () => {
