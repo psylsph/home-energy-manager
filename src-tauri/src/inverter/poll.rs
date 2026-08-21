@@ -805,6 +805,33 @@ fn next_gateway_detail_countdown(current: u8) -> u8 {
 /// one. Extracted from `run_poll_loop` so the capture / completion / trailing-
 /// sleep logic can be unit-tested directly against a mock TCP server (issue
 /// #245) rather than only through the full poll loop.
+/// Maximum number of pending write-batches drained per poll cycle.
+///
+/// Each write is a real ~1.5 s Modbus round-trip (inter-write gap), so a
+/// typical batch of a few writes costs several seconds. Capping the drain at
+/// 8 batches bounds the poll-cycle write-drain to roughly a minute even when
+/// many batches are queued, keeping the snapshot/broadcast cycle alive while
+/// still making net progress (untaken batches drain on subsequent cycles).
+pub const MAX_WRITE_BATCHES_PER_CYCLE: usize = 8;
+
+/// Take at most `cap` batches (the oldest first) out of the pending-writes
+/// queue, leaving the rest queued for subsequent poll cycles. Extracted from
+/// the poll loop so the per-cycle cap is unit-testable without a full poll
+/// loop (the completion channels of untaken batches are simply left queued —
+/// their `await_write_outcome` callers keep waiting, which is correct).
+fn take_pending_writes(
+    queue: &mut Vec<PendingWriteBatch>,
+    cap: usize,
+) -> Vec<PendingWriteBatch> {
+    if queue.len() <= cap {
+        return std::mem::take(queue);
+    }
+    let remainder = queue.split_off(cap);
+    let taken = std::mem::take(queue);
+    *queue = remainder;
+    taken
+}
+
 async fn drain_write_batches(client: &mut ModbusClient, pending: Vec<PendingWriteBatch>) {
     drain_write_batches_with_gap(client, pending, Duration::from_millis(1500)).await
 }
@@ -1210,7 +1237,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     // batches drain on the next cycles).
                     let pending: Vec<PendingWriteBatch> = {
                         let mut pw = state.pending_writes.lock().await;
-                        std::mem::take(&mut *pw)
+                        take_pending_writes(&mut pw, MAX_WRITE_BATCHES_PER_CYCLE)
                     };
                     if !pending.is_empty() {
                         drain_write_batches(&mut client, pending).await;
@@ -5447,6 +5474,71 @@ mod tests {
         payload.extend_from_slice(&register.to_be_bytes());
         payload.extend_from_slice(&value.to_be_bytes());
         crate::modbus::framer::encode_frame("TEST123456", 0x11, 0x06, &payload)
+    }
+
+    #[test]
+    fn take_pending_writes_caps_drain_at_max_batches_per_cycle() {
+        use crate::inverter::encoder::RegisterWrite;
+        use super::{take_pending_writes, MAX_WRITE_BATCHES_PER_CYCLE};
+
+        // Queue MORE batches than the cap, tagged by address so we can check
+        // which ones were taken. Completion channels stay intact for the
+        // untaken batches (callers just wait longer).
+        let make = |addr| PendingWriteBatch {
+            writes: vec![RegisterWrite {
+                address: addr,
+                value: 1,
+            }],
+            completion: None,
+        };
+        let mut queue: Vec<PendingWriteBatch> =
+            (0..MAX_WRITE_BATCHES_PER_CYCLE + 5).map(|i| make(i as u16)).collect();
+
+        let taken = take_pending_writes(&mut queue, MAX_WRITE_BATCHES_PER_CYCLE);
+
+        assert_eq!(
+            taken.len(),
+            MAX_WRITE_BATCHES_PER_CYCLE,
+            "one poll-cycle drain must take only the capped number of batches"
+        );
+        assert_eq!(queue.len(), 5, "remainder must stay queued for later cycles");
+        // Oldest-first: the taken batches must be the first N queued.
+        assert_eq!(taken[0].writes[0].address, 0);
+        assert_eq!(taken[MAX_WRITE_BATCHES_PER_CYCLE - 1].writes[0].address,
+            (MAX_WRITE_BATCHES_PER_CYCLE - 1) as u16);
+        // And the queue now holds the newest batches in order.
+        assert_eq!(queue[0].writes[0].address, MAX_WRITE_BATCHES_PER_CYCLE as u16);
+        assert_eq!(queue[4].writes[0].address, (MAX_WRITE_BATCHES_PER_CYCLE + 4) as u16);
+
+        // Draining repeatedly empties the queue without losing batches.
+        let mut total = taken.len();
+        while !queue.is_empty() {
+            total += take_pending_writes(&mut queue, MAX_WRITE_BATCHES_PER_CYCLE).len();
+        }
+        assert_eq!(total, MAX_WRITE_BATCHES_PER_CYCLE + 5);
+    }
+
+    #[test]
+    fn take_pending_writes_returns_all_when_at_or_below_cap() {
+        use crate::inverter::encoder::RegisterWrite;
+        use super::{take_pending_writes, MAX_WRITE_BATCHES_PER_CYCLE};
+
+        let make = |addr| PendingWriteBatch {
+            writes: vec![RegisterWrite {
+                address: addr,
+                value: 1,
+            }],
+            completion: None,
+        };
+        // Exactly at the cap (boundary) and below it: everything is taken,
+        // matching the old drain-everything behaviour for small queues.
+        for n in [0, 1, MAX_WRITE_BATCHES_PER_CYCLE] {
+            let mut queue: Vec<PendingWriteBatch> =
+                (0..n).map(|i| make(i as u16)).collect();
+            let taken = take_pending_writes(&mut queue, MAX_WRITE_BATCHES_PER_CYCLE);
+            assert_eq!(taken.len(), n, "queue of {n} batches should drain fully");
+            assert!(queue.is_empty());
+        }
     }
 
     #[tokio::test]
