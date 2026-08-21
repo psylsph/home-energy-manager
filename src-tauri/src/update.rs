@@ -252,6 +252,28 @@ fn should_trigger_on_demand_refresh(cached: &UpdateState) -> bool {
     }
 }
 
+/// Atomically decide whether an on-demand refresh should start AND claim it.
+///
+/// The decision and the `checking = true` claim happen inside a single lock
+/// scope, so of N concurrent pokes of `GET /api/latest-version` exactly one
+/// caller wins and spawns a fetch — the losers observe `checking` (or the
+/// freshly-updated `last_checked_at`) and back off. Without the combined
+/// lock scope, every concurrent caller would clone the same stale cache,
+/// each decide "refresh needed", and each spawn a fetch (GitHub's
+/// unauthenticated limit is 60/hour/IP).
+///
+/// On success also stamps `last_checked_at` immediately, so a delayed spawn
+/// can't slip past the rate-limit guard once `checking` is cleared.
+async fn try_begin_on_demand_refresh(state: &std::sync::Arc<AppState>) -> bool {
+    let mut guard = state.update.lock().await;
+    if !should_trigger_on_demand_refresh(&guard) {
+        return false;
+    }
+    guard.checking = true;
+    guard.last_checked_at = Some(Utc::now());
+    true
+}
+
 /// `GET /api/latest-version` — current vs latest version, read from the
 /// cache. Also triggers a background refresh when the cache is stale, so
 /// poking the endpoint forces a fresh check without waiting for the 6-hour
@@ -279,11 +301,14 @@ pub async fn get_latest_version(
 
     let cached = state.update.lock().await.clone();
 
-    // Trigger a background refresh when the cache is stale. Non-blocking:
-    // the response below returns the current cache immediately; the
-    // frontend's retry (or the next endpoint hit) picks up the refreshed
-    // data once the fetch completes.
-    if should_trigger_on_demand_refresh(&cached) {
+    // Trigger a background refresh when the cache is stale. The claim
+    // (`checking = true` + `last_checked_at` stamp) happens atomically inside
+    // `try_begin_on_demand_refresh`, so N concurrent pokes of this endpoint
+    // result in exactly one fetch — the rate-limit guards actually bound
+    // concurrent traffic. Non-blocking: the response below returns the
+    // current cache immediately; the frontend's retry (or the next endpoint
+    // hit) picks up the refreshed data once the fetch completes.
+    if try_begin_on_demand_refresh(&state).await {
         let state_clone = state.clone();
         tokio::spawn(async move {
             refresh(&state_clone).await;
@@ -385,6 +410,61 @@ mod tests {
         };
         assert_eq!(cached.version, "0.70.3");
         assert!(cached.release_url.starts_with("https://"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_pokes_trigger_exactly_one_on_demand_refresh() {
+        // Regression test for the on-demand refresh race: the decision and
+        // the `checking = true` claim must happen inside one lock scope, so
+        // a burst of N simultaneous pokes of GET /api/latest-version results
+        // in exactly one background fetch instead of N (GitHub's
+        // unauthenticated limit is 60/hour/IP).
+        let state = std::sync::Arc::new(AppState::new());
+        state.update.lock().await.loop_registered = true;
+
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let state = state.clone();
+            handles.push(tokio::spawn(async move {
+                try_begin_on_demand_refresh(&state).await
+            }));
+        }
+        let mut winners = 0usize;
+        for handle in handles {
+            winners += handle.await.unwrap() as usize;
+        }
+        assert_eq!(winners, 1, "exactly one concurrent poke must win the fetch");
+        // The winner left `checking` set so losers (and later pokes) back off.
+        assert!(state.update.lock().await.checking);
+    }
+
+    #[tokio::test]
+    async fn sequential_pokes_respect_min_interval_then_retrigger() {
+        // After a fetch completes (checking cleared, last_checked_at = now),
+        // further pokes within ON_DEMAND_MIN_INTERVAL must not re-fetch —
+        // but once the interval expires, a poke triggers again.
+        let state = std::sync::Arc::new(AppState::new());
+        state.update.lock().await.loop_registered = true;
+
+        // First poke on a cold cache wins and claims `checking`.
+        assert!(try_begin_on_demand_refresh(&state).await);
+        // Simulate the fetch completing.
+        {
+            let mut guard = state.update.lock().await;
+            guard.checking = false;
+            guard.last_checked_at = Some(Utc::now());
+        }
+        // Pokes within the interval are rate-limited out.
+        assert!(!try_begin_on_demand_refresh(&state).await);
+        assert!(!try_begin_on_demand_refresh(&state).await);
+        // Once the cache is older than the interval, a poke triggers again.
+        {
+            let mut guard = state.update.lock().await;
+            guard.last_checked_at = Some(
+                Utc::now() - chrono::Duration::seconds(ON_DEMAND_MIN_INTERVAL.as_secs() as i64 + 1),
+            );
+        }
+        assert!(try_begin_on_demand_refresh(&state).await);
     }
 
     // -----------------------------------------------------------------------
