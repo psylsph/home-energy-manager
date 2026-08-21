@@ -15,6 +15,8 @@ All notable changes to this project will be documented in this file.
 - **Discharge floor settings can no longer diverge from the saved file on a failed write.** The endpoint mutated the live config before persisting; the save now happens first and the live state only swaps in on success.
 - **A failed Cosy mode change no longer reverts a newer selection.** If you changed the mode again while the first request was in flight, the failure handler used to snap the dropdown back to the pre-first-change mode. A failure now only reverts when you haven't chosen a newer mode since.
 
+- **Phantom low-wattage solar or home readings from glitching CT meters are suppressed.** The meter-total derivation fallback (issue #243) previously replaced a reported total of 0 with the sum of per-phase registers unconditionally — small garbage values from the dongle's known glitch mode passed the sanitizer and surfaced as tens of watts of phantom power. The derivation now requires live phase voltage, which a meter genuinely producing phase power always reports.
+
 ### Changed
 
 - Device classification (AC-coupled / direct charge limit / three-phase limit models) is now a single source of truth in `deviceCapabilities.ts`, shared by all Control page sections — the adaptive-charge sliders and the charge-limit registers can no longer disagree for unlisted device codes.

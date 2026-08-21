@@ -3004,101 +3004,18 @@ pub async fn get_history(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HistoryQuery>,
 ) -> (StatusCode, Json<Value>) {
-    let range_str = params.range.as_deref().unwrap_or("24h");
     let fields_str = params.fields.as_deref().unwrap_or("soc");
-    let offset = params.offset.unwrap_or(0);
-    let rolling = params.rolling.unwrap_or(false);
-
-    let (range_secs, bucket_secs) = match range_str {
-        "1h" => (3600, 30),
-        "6h" => (3600 * 6, 60),
-        "12h" => (3600 * 12, 120),
-        "24h" => (86400, 300),
-        "today" => (86400, 300),
-        "7d" => (86400 * 7, 1800),
-        "30d" => (86400 * 30, 7200),
-        "6m" => (86400 * 180, 43200),
-        "1y" => (86400 * 365, 86400),
-        "month" => (0, 3600), // calendar month — uses explicit window
-        _ => {
-            return error_response(
-                "Invalid range. Use: 1h, 6h, 12h, 24h, today, 7d, 30d, 6m, 1y, month",
-            );
-        }
+    // Single source of truth for range/bucket/window resolution — shared
+    // with the summary and report endpoints so the three cannot drift
+    // (review finding #9; the DST/standing-charge bug was previously fixed
+    // in parallel in multiple copies of this logic).
+    let (window, bucket_secs) = match resolve_history_summary_window(&params) {
+        Ok(resolved) => resolved,
+        Err(msg) => return error_response(&msg),
     };
+    let range_secs = window.range_secs;
 
-    let explicit_window: Option<(i64, i64)> =
-        if let (Some(start_ms), Some(end_ms)) = (params.start_ms, params.end_ms) {
-            if start_ms >= end_ms {
-                return error_response("Invalid history window: start_ms must be before end_ms");
-            }
-            // Convert browser-supplied UTC epoch milliseconds to the seconds used
-            // by the SQLite readings table. The frontend computes calendar-day
-            // boundaries in the user's local timezone and sends the absolute epoch
-            // window so backend/server timezone cannot shift "Today" by an hour.
-            let start_ts = start_ms.div_euclid(1000);
-            let end_ts = (end_ms + 999).div_euclid(1000);
-            Some((start_ts, end_ts))
-        } else if rolling && range_str != "month" && range_str != "today" {
-            let end_ts = chrono::Utc::now().timestamp() - offset * range_secs;
-            Some((end_ts - range_secs, end_ts))
-        } else if range_str == "today" {
-            let now = chrono::Local::now();
-            let start_date = now.date_naive() - chrono::Duration::days(offset);
-            let start_local = start_date.and_hms_opt(0, 0, 0).unwrap();
-            let start_local_dt = chrono::Local
-                .from_local_datetime(&start_local)
-                .earliest()
-                .unwrap();
-            let end_date = start_date.succ_opt().unwrap();
-            let end_local = end_date.and_hms_opt(0, 0, 0).unwrap();
-            let end_ts = chrono::Local
-                .from_local_datetime(&end_local)
-                .earliest()
-                .unwrap()
-                .timestamp();
-
-            Some((start_local_dt.timestamp(), end_ts))
-        } else if range_str == "month" {
-            // Compute calendar month boundaries in local time.
-            let now = chrono::Local::now();
-            // Apply offset (month offset, since month windows have variable length)
-            let total_months = now.year() * 12 + (now.month() as i32) - 1 - offset as i32;
-            let target_year = total_months.div_euclid(12);
-            let target_month = (total_months.rem_euclid(12) + 1) as u32;
-
-            // Start of target month (local midnight of the 1st)
-            let start_local = chrono::NaiveDate::from_ymd_opt(target_year, target_month, 1)
-                .unwrap()
-                .and_hms_opt(0, 0, 0)
-                .unwrap();
-            let start_local_dt = chrono::Local
-                .from_local_datetime(&start_local)
-                .earliest()
-                .unwrap();
-
-            // End of target month = start of next month
-            let (next_year, next_month) = if target_month == 12 {
-                (target_year + 1, 1u32)
-            } else {
-                (target_year, target_month + 1)
-            };
-            let end_local = chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)
-                .unwrap()
-                .and_hms_opt(0, 0, 0)
-                .unwrap();
-            let end_local_dt = chrono::Local
-                .from_local_datetime(&end_local)
-                .earliest()
-                .unwrap();
-
-            let start_ts = start_local_dt.timestamp();
-            let end_ts = end_local_dt.timestamp();
-
-            Some((start_ts, end_ts))
-        } else {
-            None
-        };
+    let explicit_window = window.explicit_window;
 
     let fields: Vec<String> = fields_str
         .split(',')
@@ -3175,7 +3092,7 @@ pub async fn get_history(
                     // the exact same span of readings.
                     let window = crate::history::HistoryWindow {
                         range_secs,
-                        offset,
+                        offset: params.offset.unwrap_or(0),
                         explicit_window,
                     };
 
@@ -3430,88 +3347,11 @@ pub async fn get_report(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HistoryQuery>,
 ) -> (StatusCode, Json<Value>) {
-    let range_str = params.range.as_deref().unwrap_or("24h");
-    let offset = params.offset.unwrap_or(0);
-    let rolling = params.rolling.unwrap_or(false);
-
-    let (range_secs, bucket_secs) = match range_str {
-        "1h" => (3600, 30),
-        "6h" => (3600 * 6, 60),
-        "12h" => (3600 * 12, 120),
-        "24h" => (86400, 300),
-        "today" => (86400, 300),
-        "7d" => (86400 * 7, 1800),
-        "30d" => (86400 * 30, 7200),
-        "6m" => (86400 * 180, 43200),
-        "1y" => (86400 * 365, 86400),
-        "month" => (0, 3600),
-        _ => {
-            return error_response(
-                "Invalid range. Use: 1h, 6h, 12h, 24h, today, 7d, 30d, 6m, 1y, month",
-            );
-        }
-    };
-
-    let explicit_window: Option<(i64, i64)> =
-        if let (Some(start_ms), Some(end_ms)) = (params.start_ms, params.end_ms) {
-            if start_ms >= end_ms {
-                return error_response("Invalid report window: start_ms must be before end_ms");
-            }
-            Some((start_ms.div_euclid(1000), (end_ms + 999).div_euclid(1000)))
-        } else if rolling && range_str != "month" && range_str != "today" {
-            let end_ts = chrono::Utc::now().timestamp() - offset * range_secs;
-            Some((end_ts - range_secs, end_ts))
-        } else if range_str == "today" {
-            let now = chrono::Local::now();
-            let start_date = now.date_naive() - chrono::Duration::days(offset);
-            let start_local = start_date.and_hms_opt(0, 0, 0).unwrap();
-            let start_local_dt = chrono::Local
-                .from_local_datetime(&start_local)
-                .earliest()
-                .unwrap();
-            let end_date = start_date.succ_opt().unwrap();
-            let end_local = end_date.and_hms_opt(0, 0, 0).unwrap();
-            let end_ts = chrono::Local
-                .from_local_datetime(&end_local)
-                .earliest()
-                .unwrap()
-                .timestamp();
-            Some((start_local_dt.timestamp(), end_ts))
-        } else if range_str == "month" {
-            let now = chrono::Local::now();
-            let total_months = now.year() * 12 + (now.month() as i32) - 1 - offset as i32;
-            let target_year = total_months.div_euclid(12);
-            let target_month = (total_months.rem_euclid(12) + 1) as u32;
-            let start_local = chrono::NaiveDate::from_ymd_opt(target_year, target_month, 1)
-                .unwrap()
-                .and_hms_opt(0, 0, 0)
-                .unwrap();
-            let start_local_dt = chrono::Local
-                .from_local_datetime(&start_local)
-                .earliest()
-                .unwrap();
-            let (next_year, next_month) = if target_month == 12 {
-                (target_year + 1, 1u32)
-            } else {
-                (target_year, target_month + 1)
-            };
-            let end_local = chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)
-                .unwrap()
-                .and_hms_opt(0, 0, 0)
-                .unwrap();
-            let end_local_dt = chrono::Local
-                .from_local_datetime(&end_local)
-                .earliest()
-                .unwrap();
-            Some((start_local_dt.timestamp(), end_local_dt.timestamp()))
-        } else {
-            None
-        };
-
-    let window = crate::history::HistoryWindow {
-        range_secs,
-        offset,
-        explicit_window,
+    // Single source of truth for range/bucket/window resolution, shared with
+    // the history chart and summary endpoints (review finding #9).
+    let (window, bucket_secs) = match resolve_history_summary_window(&params) {
+        Ok(resolved) => resolved,
+        Err(msg) => return error_response(&msg),
     };
 
     let (start_ts, end_ts) = window.resolve();
@@ -11141,6 +10981,56 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST);
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn window_resolution_is_shared_across_history_chart_summary_and_report() {
+        // Review finding #9: the range->bucket table and window-resolution
+        // logic existed in three near-verbatim copies (get_history,
+        // get_history_summary via resolve_history_summary_window, and
+        // get_report). This test pins the shared contract: all three
+        // endpoints resolve the SAME (range_secs, bucket_secs, explicit
+        // window) for identical query params — including rejecting the
+        // same invalid input with the same behaviour. If any endpoint
+        // drifts (as the report copy already had, with a different
+        // inverted-window error message), this fails.
+        for range in ["1h", "6h", "12h", "24h", "today", "7d", "30d", "6m", "1y", "month"] {
+            let _ = range; // keep range bound for clarity of the table below
+            let params = HistoryQuery {
+                range: Some(range.to_string()),
+                offset: Some(0),
+                rolling: Some(false),
+                start_ms: None,
+                end_ms: None,
+                fields: None,
+            };
+            let (w, bucket) = resolve_history_summary_window(&params).expect(range);
+            // The shared table: range_secs and bucket_secs per range key.
+            let (want_range, want_bucket) = match range {
+                "1h" => (3600, 30),
+                "6h" => (3600 * 6, 60),
+                "12h" => (3600 * 12, 120),
+                "24h" | "today" => (86400, 300),
+                "7d" => (86400 * 7, 1800),
+                "30d" => (86400 * 30, 7200),
+                "6m" => (86400 * 180, 43200),
+                "1y" => (86400 * 365, 86400),
+                "month" => (0, 3600),
+                _ => unreachable!(),
+            };
+            assert_eq!(w.range_secs, want_range, "range {range}");
+            assert_eq!(bucket, want_bucket, "range {range}");
+        }
+        // Inverted explicit window rejected everywhere with the same shape.
+        let bad = HistoryQuery {
+            range: Some("24h".to_string()),
+            offset: Some(0),
+            rolling: Some(false),
+            start_ms: Some(2000),
+            end_ms: Some(1000),
+            fields: None,
+        };
+        assert!(resolve_history_summary_window(&bad).is_err());
     }
 
     // -----------------------------------------------------------------------

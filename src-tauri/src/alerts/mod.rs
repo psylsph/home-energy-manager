@@ -2447,7 +2447,7 @@ mod tests {
 
         // Breaker reset: inverter-side back at the pack voltage. Exactly one
         // restored notification on the first healthy cycle.
-        for cycle in 0..3 {
+        for _cycle in 0..3 {
             let mismatch = battery_voltage_mismatch(53.1, &modules);
             let t = d.confirm_battery_voltage_mismatch(mismatch);
             if mismatch_notification_due(t, d.any_battery_connection_lost()) {
