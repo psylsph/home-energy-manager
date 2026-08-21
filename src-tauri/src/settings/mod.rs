@@ -1665,7 +1665,11 @@ impl Settings {
         let _lock = SETTINGS_LOCK
             .lock()
             .map_err(|e| format!("Lock error: {e}"))?;
+        self.save_unlocked()
+    }
 
+    /// Write settings to disk. Caller must hold `SETTINGS_LOCK`.
+    fn save_unlocked(&self) -> Result<(), String> {
         let path = Self::settings_path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -1698,6 +1702,28 @@ impl Settings {
 
         tracing::debug!("Settings saved to {}", path.display());
         Ok(())
+    }
+
+    /// Atomically load, mutate, and save settings under a single lock.
+    ///
+    /// The plain `load()` + mutate + `save()` pattern is racy: two callers
+    /// can each load the same baseline, mutate different fields, then both
+    /// save back — the second save overwrites the first's field change
+    /// (review finding #5). `update()` holds the global settings lock across
+    /// the whole read-modify-write so concurrent writers cannot clobber each
+    /// other's fields. The closure receives the freshly-loaded settings and
+    /// returns the mutated copy to persist.
+    pub fn update<F>(f: F) -> Result<(), String>
+    where
+        F: FnOnce(&mut Settings),
+    {
+        let _lock = SETTINGS_LOCK
+            .lock()
+            .map_err(|e| format!("Lock error: {e}"))?;
+
+        let mut settings = Self::load();
+        f(&mut settings);
+        settings.save_unlocked()
     }
 }
 
@@ -3347,10 +3373,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn two_poll_path_writers_preserves_both_field_updates() {
-        // Test A: simulate two poll-path writers (adaptive baseline + CT
-        // solar baseline) each loading settings, mutating a different field,
-        // and saving concurrently. Both updates must survive in the saved
-        // file. Currently one is lost.
+        // Test A: two poll-path writers (adaptive baseline + CT solar
+        // baseline) each update a different field via the transactional
+        // Settings::update(). Both updates must survive in the saved file.
         crate::test_util::with_isolated_config_dir_async(|| async {
             // Establish a baseline file so neither writer sees `load()`
             // return defaults (which would happen to be safe).
@@ -3372,26 +3397,28 @@ mod tests {
                 let barrier = barrier.clone();
                 tokio::spawn(async move {
                     barrier.wait();
-                    let mut s = Settings::load();
-                    s.adaptive_charge_saved_limit = Some(AdaptiveChargeSavedLimit {
-                        inverter_serial: "S1".to_string(),
-                        device_type_code: "0001".to_string(),
-                        register_address: 110,
-                        raw_value: 50,
-                    });
-                    s.save().unwrap();
+                    Settings::update(|s| {
+                        s.adaptive_charge_saved_limit = Some(AdaptiveChargeSavedLimit {
+                            inverter_serial: "S1".to_string(),
+                            device_type_code: "0001".to_string(),
+                            register_address: 110,
+                            raw_value: 2000,
+                        });
+                    })
+                    .unwrap();
                 })
             };
             let h2 = {
                 let barrier = barrier.clone();
                 tokio::spawn(async move {
                     barrier.wait();
-                    let mut s = Settings::load();
-                    s.solar_meter_baselines.insert(
-                        "address-1".to_string(),
-                        SolarMeterBaseline { day: "2026-08-21".to_string(), e_import_kwh: 5.5, e_export_kwh: 0.0 },
-                    );
-                    s.save().unwrap();
+                    Settings::update(|s| {
+                        s.solar_meter_baselines.insert(
+                            "address-1".to_string(),
+                            SolarMeterBaseline { day: "2026-08-21".to_string(), e_import_kwh: 5.5, e_export_kwh: 0.0 },
+                        );
+                    })
+                    .unwrap();
                 })
             };
             let _ = tokio::join!(h1, h2);
@@ -3424,23 +3451,25 @@ mod tests {
                 let barrier = barrier.clone();
                 tokio::spawn(async move {
                     barrier.wait();
-                    let mut s = Settings::load();
-                    s.adaptive_charge_saved_limit = Some(AdaptiveChargeSavedLimit {
-                        inverter_serial: "S1".to_string(),
-                        device_type_code: "0001".to_string(),
-                        register_address: 110,
-                        raw_value: 50,
-                    });
-                    s.save().unwrap();
+                    Settings::update(|s| {
+                        s.adaptive_charge_saved_limit = Some(AdaptiveChargeSavedLimit {
+                            inverter_serial: "S1".to_string(),
+                            device_type_code: "0001".to_string(),
+                            register_address: 110,
+                            raw_value: 1234,
+                        });
+                    })
+                    .unwrap();
                 })
             };
             let h_api = {
                 let barrier = barrier.clone();
                 tokio::spawn(async move {
                     barrier.wait();
-                    let mut s = Settings::load();
-                    s.load_limiter_saved_reserve = Some(42);
-                    s.save().unwrap();
+                    Settings::update(|s| {
+                        s.load_limiter_saved_reserve = Some(42);
+                    })
+                    .unwrap();
                 })
             };
             let _ = tokio::join!(h_poll, h_api);
@@ -3457,42 +3486,43 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    #[ignore = "deadlocks under current std-mutex design; un-ignore after settings-writer fix lands"]
     async fn many_concurrent_writers_of_disjoint_fields_all_survive() {
-        // Test C: N concurrent writers each touch a distinct field. After
-        // every save completes, the file must contain every field update —
-        // none lost, none clobbered. Today this fails intermittently.
+        // Test C: N concurrent writers each touch a DISTINCT field via
+        // Settings::update(). After every save completes, the file must
+        // contain every field update — none lost, none clobbered. (Writers
+        // touching the same field are last-writer-wins by design; the bug
+        // is when one writer's disjoint field is wiped by another's save.)
         crate::test_util::with_isolated_config_dir_async(|| async {
             Settings::default().save().unwrap();
             let n = 16;
-            let barrier = Arc::new(std::sync::Barrier::new(n));
             let mut handles = Vec::with_capacity(n);
             for i in 0..n {
-                let barrier = barrier.clone();
                 handles.push(tokio::spawn(async move {
-                    barrier.wait();
-                    let mut s = Settings::load();
-                    // Every writer touches a different slot of an array
-                    // field — disjoint writes, must all survive.
-                    s.adaptive_charge_saved_limit = Some(AdaptiveChargeSavedLimit {
-                        inverter_serial: "S1".to_string(),
-                        device_type_code: "0001".to_string(),
-                        register_address: 110,
-                        raw_value: 50 + i as u16,
-                    });
-                    s.save().unwrap();
+                    Settings::update(|s| {
+                        s.solar_meter_baselines.insert(
+                            format!("addr-{i}"),
+                            SolarMeterBaseline {
+                                day: "2026-08-21".to_string(),
+                                e_import_kwh: i as f64,
+                                e_export_kwh: 0.0,
+                            },
+                        );
+                    })
+                    .unwrap();
                 }));
             }
             for h in handles {
                 let _ = h.await;
             }
             let s = Settings::load();
-            assert_eq!(
-                s.adaptive_charge_saved_limit.as_ref().map(|l| l.raw_value).unwrap_or(0),
-                50u16 + (n - 1) as u16,
-                "the last writer's value must be in the file"
-            );
+            for i in 0..n {
+                assert!(
+                    s.solar_meter_baselines.contains_key(&format!("addr-{i}")),
+                    "writer {i}'s solar baseline must survive (got keys: {:?})",
+                    s.solar_meter_baselines.keys().collect::<Vec<_>>()
+                );
+            }
         })
         .await;
-}
+    }
 }

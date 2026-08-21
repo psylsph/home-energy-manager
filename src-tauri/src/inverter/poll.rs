@@ -2307,12 +2307,12 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     drop(adaptive_saved);
 
                                     if saved_before != saved_after {
-                                        // Reload before the narrow persistence update so a
-                                        // concurrent mode/config save cannot be overwritten by
-                                        // this poll's older settings snapshot.
-                                        let mut app_settings = crate::settings::Settings::load();
-                                        app_settings.adaptive_charge_saved_limit = saved_after;
-                                        if let Err(e) = app_settings.save() {
+                                        // Persist the adaptive baseline atomically so a
+                                        // concurrent mode/config save cannot be overwritten
+                                        // by this poll's older settings snapshot.
+                                        if let Err(e) = crate::settings::Settings::update(|s| {
+                                            s.adaptive_charge_saved_limit = saved_after.clone();
+                                        }) {
                                             tracing::warn!(
                                                 "Failed to persist Adaptive Charge baseline: {e}"
                                             );
@@ -3025,28 +3025,27 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     drop(temperature_state);
                                     drop(shared_saved);
 
-                                    let mut app_settings = crate::settings::Settings::load();
                                     let persisted_reserve =
                                         persist_saved.as_ref().map(|value| value.reserve);
-                                    let persistence_changed = app_settings
-                                        .load_limiter_saved_reserve
-                                        != persisted_reserve
-                                        || app_settings.load_limiter_active_persisted
-                                            != snapshot.load_limiter_active
-                                        || app_settings.temperature_limiter_active_persisted
-                                            != snapshot.temperature_limiter_active;
-                                    if persistence_changed {
-                                        app_settings.load_limiter_saved_reserve =
-                                            persisted_reserve;
-                                        app_settings.load_limiter_active_persisted =
-                                            snapshot.load_limiter_active;
-                                        app_settings.temperature_limiter_active_persisted =
-                                            snapshot.temperature_limiter_active;
-                                        if let Err(e) = app_settings.save() {
-                                            tracing::warn!(
-                                                "Failed to persist discharge limiter state: {e}"
-                                            );
+                                    let persistence_changed = crate::settings::Settings::update(|s| {
+                                        let changed = s.load_limiter_saved_reserve
+                                            != persisted_reserve
+                                            || s.load_limiter_active_persisted
+                                                != snapshot.load_limiter_active
+                                            || s.temperature_limiter_active_persisted
+                                                != snapshot.temperature_limiter_active;
+                                        if changed {
+                                            s.load_limiter_saved_reserve = persisted_reserve;
+                                            s.load_limiter_active_persisted =
+                                                snapshot.load_limiter_active;
+                                            s.temperature_limiter_active_persisted =
+                                                snapshot.temperature_limiter_active;
                                         }
+                                    });
+                                    if let Err(e) = persistence_changed {
+                                        tracing::warn!(
+                                            "Failed to persist discharge limiter state: {e}"
+                                        );
                                     }
 
                                     for (label, writes) in [
@@ -3834,10 +3833,10 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                             );
 
                             // Persist the new host to disk so it survives restart.
-                            let mut persist = crate::settings::Settings::load();
-                            persist.host = new.ip.clone();
-                            persist.port = new.port;
-                            if let Err(e) = persist.save() {
+                            if let Err(e) = crate::settings::Settings::update(|s| {
+                                s.host = new.ip.clone();
+                                s.port = new.port;
+                            }) {
                                 tracing::warn!("Auto-discovery: failed to persist new host: {e}");
                             }
 

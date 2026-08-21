@@ -844,12 +844,12 @@ pub(crate) fn persist_cosy_active(active: bool) {
 }
 
 pub(crate) fn persist_cosy_active_sync(active: bool) {
-    let mut settings = crate::settings::Settings::load();
-    if settings.cosy_active_persisted != active {
-        settings.cosy_active_persisted = active;
-        if let Err(e) = settings.save() {
-            tracing::warn!(active, "Failed to persist cosy_active flag: {e}");
+    if let Err(e) = crate::settings::Settings::update(|s| {
+        if s.cosy_active_persisted != active {
+            s.cosy_active_persisted = active;
         }
+    }) {
+        tracing::warn!(active, "Failed to persist cosy_active flag: {e}");
     }
 }
 
