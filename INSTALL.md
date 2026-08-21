@@ -663,7 +663,7 @@ nano Dockerfile
 Paste this:
 
 ```dockerfile
-FROM node:22-bookworm AS frontend
+FROM node:24-bookworm AS frontend
 WORKDIR /app
 COPY package*.json ./
 RUN npm install
