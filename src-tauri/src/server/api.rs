@@ -3565,15 +3565,21 @@ pub async fn set_auto_winter(
 
     tracing::info!("Auto winter config updated: {:?}", config);
 
-    // Persist to settings.json
-    let mut app_settings = crate::settings::Settings::load();
-    app_settings.auto_winter_enabled = config.enabled;
-    app_settings.auto_winter_cold_threshold = config.cold_threshold;
-    app_settings.auto_winter_recovery_threshold = config.recovery_threshold;
-    app_settings.auto_winter_target_soc = config.target_soc;
-    app_settings.auto_winter_debounce_readings = config.debounce_readings;
+    // Transactional save (review #1): the `Settings::update` helper holds
+    // the settings lock across the read-modify-write so a concurrent
+    // settings-save from another handler can't clobber this one's fields.
+    // Drop the in-memory config lock first — Settings::update takes its own
+    // settings lock; holding both at once would risk a deadlock if another
+    // path ever needed the two in the same order.
+    let snapshot = config.clone();
     drop(config);
-    if let Err(e) = app_settings.save() {
+    if let Err(e) = crate::settings::Settings::update(|app_settings| {
+        app_settings.auto_winter_enabled = snapshot.enabled;
+        app_settings.auto_winter_cold_threshold = snapshot.cold_threshold;
+        app_settings.auto_winter_recovery_threshold = snapshot.recovery_threshold;
+        app_settings.auto_winter_target_soc = snapshot.target_soc;
+        app_settings.auto_winter_debounce_readings = snapshot.debounce_readings;
+    }) {
         tracing::warn!("Failed to persist auto winter config: {e}");
         return server_error(&format!("Failed to save: {e}"));
     }
@@ -3702,11 +3708,14 @@ pub async fn set_alerts(
 
     tracing::info!("Alert config updated");
 
-    // Persist to settings.json
-    let mut app_settings = crate::settings::Settings::load();
-    app_settings.alerts_config = config.clone();
+    // Transactional save (review #1): see `set_auto_winter` for the
+    // reasoning. Drop the in-memory config lock before taking the settings
+    // lock to keep the lock order consistent across handlers.
+    let snapshot = config.clone();
     drop(config);
-    if let Err(e) = app_settings.save() {
+    if let Err(e) = crate::settings::Settings::update(|app_settings| {
+        app_settings.alerts_config = snapshot;
+    }) {
         tracing::warn!("Failed to persist alert config: {e}");
         return server_error(&format!("Failed to save: {e}"));
     }
