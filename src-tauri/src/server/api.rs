@@ -6147,6 +6147,65 @@ mod tests {
         .await;
     }
 
+    /// An omitted `target_soc` on a discharge slot POST must NOT reset the
+    /// slot's configured per-slot discharge floor to the inert 100 default.
+    ///
+    /// Same omit-default clobber class as the charge-slot fix: on
+    /// extended-slot models (Gen3/AIO) the handler defaulted an omitted
+    /// `target_soc` to 100 and wrote it to HR 272/275 — a slot that "never
+    /// discharges". A client re-posting the slot without the field silently
+    /// neutered the user's configured floor. The snapshot's per-slot target
+    /// must be preserved instead; an explicit value always wins.
+    #[tokio::test]
+    async fn discharge_slot_omitted_target_soc_preserves_configured_floor() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_DISCHARGE_SLOT_1_START;
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            {
+                let mut snap = state.latest_snapshot.lock().await;
+                let s = snap.get_or_insert_with(Default::default);
+                s.device_type = DeviceType::Gen3Hybrid;
+                s.discharge_slots[0] = crate::inverter::model::ScheduleSlot {
+                    enabled: true,
+                    start_hour: 16,
+                    start_minute: 0,
+                    end_hour: 19,
+                    end_minute: 0,
+                    target_soc: 20,
+                };
+            }
+
+            // POST the slot WITHOUT `target_soc` — the round-trip shape.
+            let body = serde_json::json!({
+                "slot": 1,
+                "start_hour": 16, "start_minute": 0,
+                "end_hour": 19, "end_minute": 0,
+                "enabled": true,
+            });
+            let _ = set_discharge_slot(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+
+            let start = writes
+                .iter()
+                .find(|w| w.address == HR_DISCHARGE_SLOT_1_START)
+                .expect("discharge slot must write HR 44");
+            assert_eq!(start.value, 1600);
+
+            // HR 272 (slot 1 discharge floor) must echo the configured 20%,
+            // not the old inert 100% omit-default.
+            let floor = writes
+                .iter()
+                .find(|w| w.address == 272)
+                .expect("extended-slot models must write the per-slot discharge floor (HR 272)");
+            assert_eq!(
+                floor.value, 20,
+                "omitted target_soc must preserve the configured 20% floor, not reset it to 100"
+            );
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn set_eco_mode_only_emits_whitelisted_writes() {
         with_isolated_config_dir_async(|| async {
