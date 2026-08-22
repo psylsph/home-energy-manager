@@ -3356,6 +3356,60 @@ mod tests {
     }
 
     #[test]
+    fn discharge_slots_fall_back_to_reserve_not_charge_target() {
+        // Sweep finding (2026-08-21 review): enabled discharge slots with no
+        // per-slot floor (extended block not polled, or HR 272/275 = 0) must
+        // NOT inherit the global CHARGE target as their display floor. With
+        // the charge-target flag off the global target is the effective 100
+        // ("no limit"), so the fallback displayed "100%" next to a discharge
+        // slot — reads as "discharge to 100%" and tempts writing HR 272 = 100
+        // (never discharge). The honest fallback for "discharge until" is the
+        // battery reserve (HR 110): discharge outside slots stops at the
+        // reserve, so a slot with nothing configured displays the same.
+        // Matches GivTCP's first-party model, where slots carry times only
+        // and the only discharge-floor entity is Battery_Power_Reserve.
+        let mut holding_0_data = vec![0u16; 60];
+        holding_0_data[0] = 0x3001; // HR(0): AC Coupled (flag-gated model)
+        holding_0_data[20] = 0; // HR(20): enable_charge_target = false
+        holding_0_data[56] = 1600; // HR(56): discharge slot 1 start 16:00
+        holding_0_data[57] = 1900; // HR(57): discharge slot 1 end 19:00
+
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[110 - 60] = 20; // HR(110): battery reserve 20%
+        holding_60_data[116 - 60] = 99; // HR(116): stale armed charge target
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_0_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+        ];
+        let snap = decode_snapshot(&blocks);
+
+        // Global charge target: flag off ⇒ effective 100 (v0.74.11 fix).
+        assert_eq!(snap.target_soc, 100);
+        assert_eq!(snap.battery_reserve, 20);
+        // The enabled discharge slot must show the reserve as its floor,
+        // not the charge target (100) nor the raw stale 99.
+        assert!(
+            snap.discharge_slots[0].enabled,
+            "non-zero HR 56/57 times mean slot 1 is enabled"
+        );
+        assert_eq!(
+            snap.discharge_slots[0].target_soc, 20,
+            "enabled discharge slot with no per-slot floor falls back to the reserve"
+        );
+        // Charge slots keep the global-target fallback — here none are
+        // enabled, so none should carry a target.
+        assert!(snap.charge_slots.iter().all(|s| !s.enabled));
+    }
+
+    #[test]
     fn ac_charge_target_flag_on_reports_hr116_value() {
         // Counterpart: flag armed (HR 20 = 1) and HR 116 = 99 — the snapshot
         // must keep reporting the real armed target, 99.
