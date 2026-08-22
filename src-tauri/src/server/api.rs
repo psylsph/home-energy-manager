@@ -4551,17 +4551,21 @@ pub async fn set_load_limiter(
 
     tracing::info!("Load limiter config updated: {:?}", config);
 
-    // Persist to settings.json
-    let mut app_settings = crate::settings::Settings::load();
-    app_settings.load_limiter_enabled = config.enabled;
-    app_settings.load_limiter_threshold_w = config.threshold_w;
-    app_settings.load_limiter_trigger_delay_minutes = config.trigger_delay_minutes;
-    app_settings.load_limiter_start_hour = config.start_hour;
-    app_settings.load_limiter_start_minute = config.start_minute;
-    app_settings.load_limiter_end_hour = config.end_hour;
-    app_settings.load_limiter_end_minute = config.end_minute;
+    // Transactional save (review #1 follow-up): see `set_alerts` for the
+    // pattern. Snapshot the merged config, drop the in-memory lock, then
+    // let Settings::update serialise the read-modify-write against any
+    // other handler's save.
+    let snapshot = config.clone();
     drop(config);
-    if let Err(e) = app_settings.save() {
+    if let Err(e) = crate::settings::Settings::update(|app_settings| {
+        app_settings.load_limiter_enabled = snapshot.enabled;
+        app_settings.load_limiter_threshold_w = snapshot.threshold_w;
+        app_settings.load_limiter_trigger_delay_minutes = snapshot.trigger_delay_minutes;
+        app_settings.load_limiter_start_hour = snapshot.start_hour;
+        app_settings.load_limiter_start_minute = snapshot.start_minute;
+        app_settings.load_limiter_end_hour = snapshot.end_hour;
+        app_settings.load_limiter_end_minute = snapshot.end_minute;
+    }) {
         tracing::warn!("Failed to persist load limiter config: {e}");
         return server_error(&format!("Failed to save: {e}"));
     }
@@ -4675,16 +4679,27 @@ pub async fn set_temperature_limiter(
         return error_response(&error);
     }
 
-    let mut app_settings = crate::settings::Settings::load();
-    app_settings.temperature_limiter_enabled = candidate.enabled;
-    app_settings.temperature_limiter_high_threshold = candidate.high_threshold;
-    app_settings.temperature_limiter_recovery_threshold = candidate.recovery_threshold;
-    app_settings.temperature_limiter_confirmation_readings = candidate.confirmation_readings;
-    if let Err(error) = app_settings.save() {
+    // Transactional save (review #1 follow-up): the old pattern mutated
+    // in-memory first then saved, so a failed save left live and persisted
+    // state diverged. Now Settings::update holds the lock across the
+    // read-modify-write (giving the same atomicity guarantee as the poll
+    // path writers in 78ba6fd). The live config swap is intentionally
+    // after the persist so a failed save leaves the live state untouched
+    // — the existing discharge-floor test
+    // `discharge_floor_config_not_mutated_when_save_fails` already pins
+    // this property for the parallel case, and the same pattern is
+    // upheld here.
+    let snapshot = candidate.clone();
+    if let Err(error) = crate::settings::Settings::update(|app_settings| {
+        app_settings.temperature_limiter_enabled = snapshot.enabled;
+        app_settings.temperature_limiter_high_threshold = snapshot.high_threshold;
+        app_settings.temperature_limiter_recovery_threshold = snapshot.recovery_threshold;
+        app_settings.temperature_limiter_confirmation_readings = snapshot.confirmation_readings;
+    }) {
         return server_error(&format!("Failed to save: {error}"));
     }
 
-    *state.temperature_limiter_config.lock().await = candidate;
+    *state.temperature_limiter_config.lock().await = snapshot;
     ok_response("Temperature limiter config updated")
 }
 
