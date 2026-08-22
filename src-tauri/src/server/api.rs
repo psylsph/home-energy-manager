@@ -2195,7 +2195,24 @@ pub async fn set_discharge_slot(
     let start_minute = body["start_minute"].as_u64().unwrap_or(0) as u8;
     let end_hour = body["end_hour"].as_u64().unwrap_or(0) as u8;
     let end_minute = body["end_minute"].as_u64().unwrap_or(0) as u8;
-    let target_soc = body["target_soc"].as_u64().unwrap_or(100) as u8;
+    // An omitted `target_soc` must preserve the snapshot's per-slot discharge
+    // floor rather than silently writing the inert 100 ("never discharge")
+    // default — same omit-default clobber class as the charge-slot fix. Only
+    // a real configured floor (4-99) is preserved; an explicit value always
+    // wins.
+    let target_soc = match body["target_soc"].as_u64() {
+        Some(v) => v as u8,
+        None => state
+            .latest_snapshot
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|s| s.discharge_slots.get(slot as usize - 1))
+            .filter(|slot| slot.enabled)
+            .map(|slot| slot.target_soc)
+            .filter(|t| (4..100).contains(t))
+            .unwrap_or(100),
+    };
 
     if start_hour > 23 || end_hour > 23 {
         return error_response("Hour must be 0-23");

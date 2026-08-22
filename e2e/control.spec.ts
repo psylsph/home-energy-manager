@@ -623,6 +623,58 @@ test.describe('API Control Endpoints', () => {
     expect(findWrite(writes, 57)!.value).toBe(1900);  // 19:00
   });
 
+  test('POST /api/control/discharge-slot omitting target_soc preserves configured floor', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await clearWrites(drainModbusWrites);
+
+    // Arm a real (non-default) discharge floor first.
+    const armResp = await fetch(`${baseUrl}/api/control/discharge-slot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        slot: 1,
+        enabled: true,
+        start_hour: 16,
+        start_minute: 0,
+        end_hour: 19,
+        end_minute: 0,
+        target_soc: 20,
+      }),
+    });
+    expect((await armResp.json()).ok).toBe(true);
+    await waitForWrite(peekModbusWrites, drainModbusWrites, 272, 20, 15_000);
+    await clearWrites(drainModbusWrites);
+    // The backend's snapshot only reflects the write on the next poll.
+    await waitForSnapshotValue(
+      baseUrl,
+      (s) => Array.isArray(s.discharge_slots) && s.discharge_slots[0]?.target_soc === 20,
+      20_000,
+    );
+
+    // Re-post the same slot WITHOUT target_soc — the round-trip shape.
+    const resp = await fetch(`${baseUrl}/api/control/discharge-slot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        slot: 1,
+        enabled: true,
+        start_hour: 16,
+        start_minute: 0,
+        end_hour: 19,
+        end_minute: 0,
+      }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    // HR 272 must echo the configured 20% floor, not the inert 100 default.
+    const writes = await waitForWrite(peekModbusWrites, drainModbusWrites, 272, 20, 15_000);
+    expect(findWrite(writes, 56)!.value).toBe(1600);  // 16:00
+    expect(findWrite(writes, 57)!.value).toBe(1900);  // 19:00
+  });
+
   test('POST /api/control/force-charge with minutes writes slot before enable', async ({
     baseUrl,
     drainModbusWrites,
