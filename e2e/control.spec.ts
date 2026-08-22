@@ -675,6 +675,41 @@ test.describe('API Control Endpoints', () => {
     expect(findWrite(writes, 57)!.value).toBe(1900);  // 19:00
   });
 
+  test('discharge slot with no configured floor displays the reserve, not the charge target', async ({
+    baseUrl,
+    setHoldingReg,
+  }) => {
+    // Decoder fallback regression (2026-08-22 sweep): an enabled discharge
+    // slot with no per-slot floor (HR 272/275 = 0) must display the battery
+    // reserve — not the global charge target, which the flag-off decoder
+    // fix reports as the effective 100 ("discharge to 100%" nonsense).
+    // Seed the mock registers directly: a control POST omitting target_soc
+    // would itself write HR 275 = 100 (preserve path only preserves ENABLED
+    // slots' floors) and arm the very trap under test.
+    await setHoldingReg(110, 25); // battery reserve 25%
+    await setHoldingReg(56, 1600); // discharge slot 1 start 16:00
+    await setHoldingReg(57, 1900); // discharge slot 1 end 19:00
+    await setHoldingReg(272, 0); // no per-slot floor (earlier tests may have armed one)
+    await setHoldingReg(275, 0);
+
+    // The snapshot reflects seeds on the next poll cycle. Absolute 25 (not a
+    // relative comparison) so a charge-target leak (100) or stale floor (20
+    // from the preserve test) both fail.
+    await waitForSnapshotValue(
+      baseUrl,
+      (s) =>
+        Array.isArray(s.discharge_slots) &&
+        s.discharge_slots[0]?.enabled === true &&
+        s.battery_reserve === 25 &&
+        s.discharge_slots[0]?.target_soc === 25,
+      20_000,
+    );
+
+    // Restore the reserve the rest of the file expects (tests before this
+    // one run with the mock default of 4).
+    await setHoldingReg(110, 4);
+  });
+
   test('POST /api/control/force-charge with minutes writes slot before enable', async ({
     baseUrl,
     drainModbusWrites,
