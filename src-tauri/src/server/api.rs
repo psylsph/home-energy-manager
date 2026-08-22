@@ -10679,6 +10679,59 @@ mod tests {
         .await;
     }
 
+    /// `update_settings` must validate the ENTIRE request before persisting
+    /// anything. The current `Settings::update` conversion (5ed53be) moved
+    /// validation inside the mutate closure, which cannot abort the save —
+    /// so a request with a valid `host` plus an invalid `octopus_gas_unit`
+    /// returns 400 but has ALREADY written the host change to disk.
+    /// A rejected request must be all-or-nothing: 400 and no mutation.
+    #[tokio::test]
+    async fn update_settings_rejected_request_leaves_disk_untouched() {
+        with_isolated_config_dir_async(|| async {
+            // Seed a known baseline host so we can detect any partial write.
+            let mut baseline = crate::settings::Settings::load();
+            baseline.host = "192.168.1.99".to_string();
+            baseline.save().unwrap();
+
+            let state = Arc::new(AppState::new());
+            {
+                let mut s = state.settings.lock().await;
+                s.host = baseline.host.clone();
+            }
+
+            // Valid host + invalid octopus_gas_unit in one request. The gas
+            // unit validation fails, so the whole request must be rejected.
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(serde_json::json!({
+                    "host": "10.0.0.5",
+                    "octopus_gas_unit": "cubic_furlongs",
+                })),
+            )
+            .await;
+
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "invalid octopus_gas_unit must be rejected with 400"
+            );
+            let saved = crate::settings::Settings::load();
+            assert_eq!(
+                saved.host, "192.168.1.99",
+                "a 400-rejected request must not partially persist the valid fields — disk untouched"
+            );
+            assert_ne!(
+                saved.octopus_gas_unit, "cubic_furlongs",
+                "the invalid value itself must not be persisted"
+            );
+            assert_eq!(
+                saved.octopus_gas_unit, "unknown",
+                "octopus_gas_unit stays at its default"
+            );
+        })
+        .await;
+    }
+
     /// `test_alerts` must short-circuit with a 400 BEFORE any HTTP call when
     /// no channel (Telegram, ntfy, or Pushover) is configured. This is the
     /// network-free path of the gate, so it's safe to assert without mocking.
