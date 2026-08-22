@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.74.13] - 2026-08-22
+
+### Fixed
+
+- **Discharge slots with no per-slot floor now display the battery reserve, not the charge target.** When a discharge slot was enabled but had no per-slot floor register value (HR 272/275 = 0, or the extended schedule block wasn't polled), the decoder fell back to the global charge target. Since the 0.74.11 fix reports the effective 100 ("no limit") when the charge-target flag is off, that made an unconfigured discharge slot display "100%" — reading as "discharge to 100%", and tempting a "correction" that writes the never-discharge floor on extended-slot models. An unconfigured slot now displays the battery reserve: discharge outside slots stops at the reserve, so that is the honest value for "discharge until". Matches GivTCP's first-party model, where slots carry times only and the only discharge-floor entity is the battery reserve. Configured per-slot floors are unaffected.
+
+### Internal
+
+- Decoder unit tests: the reserve-fallback regression (flag-off AC-coupled with stale HR 116) and a documentation pin for the three-phase path, where discharge slots 1-2 are wholesale re-decoded from HR 1118-1121 after the fallback (placeholder floor, pre-existing quirk — deliberately documented, not fixed).
+- E2E regression: seeding the mock registers directly (reserve 25, slot times set, per-slot floors zeroed) and asserting the snapshot reports the reserve as the slot's floor.
+
 ## [0.74.12] - 2026-08-22
 
 ### Fixed
