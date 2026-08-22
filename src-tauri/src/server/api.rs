@@ -10233,6 +10233,118 @@ mod tests {
         .await;
     }
 
+    /// Companion regression to
+    /// `concurrent_set_alerts_and_set_auto_winter_preserve_both_updates`:
+    /// `set_load_limiter` and `set_temperature_limiter` are a different
+    /// pair of API handlers that each `Settings::load` → mutate one field →
+    /// `Settings::save` disjoint fields. The same lost-update class would
+    /// apply if either handler is still on the old pattern.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_set_load_limiter_and_set_temperature_limiter_preserve_both_updates() {
+        use std::sync::Arc as StdArc;
+        with_isolated_config_dir_async(|| async {
+            // Seed baseline settings with non-default sentinels on every
+            // field we touch — the failure mode shows up as a sentinel
+            // surviving instead of the new value (or vice-versa).
+            let mut baseline = crate::settings::Settings::load();
+            baseline.load_limiter_enabled = false;
+            baseline.load_limiter_threshold_w = 2000;
+            baseline.load_limiter_start_hour = 7;
+            baseline.load_limiter_start_minute = 30;
+            baseline.temperature_limiter_enabled = false;
+            baseline.temperature_limiter_high_threshold = 50.0;
+            baseline.temperature_limiter_recovery_threshold = 40.0;
+            baseline.save().unwrap();
+
+            let state = Arc::new(AppState::new());
+            // Mirror the baseline into the AppState configs the handlers
+            // merge over (the handlers start from state.<config>.lock() and
+            // apply body fields on top — without the mirror, the body
+            // values would land on top of defaults rather than the seeded
+            // baseline).
+            {
+                let mut ll = state.load_limiter_config.lock().await;
+                ll.enabled = false;
+                ll.threshold_w = 2000;
+                ll.start_hour = 7;
+                ll.start_minute = 30;
+            }
+            {
+                let mut tl = state.temperature_limiter_config.lock().await;
+                tl.enabled = false;
+                tl.high_threshold = 50.0;
+                tl.recovery_threshold = 40.0;
+            }
+
+            let barrier = StdArc::new(std::sync::Barrier::new(3));
+
+            // set_load_limiter: bump threshold_w to 4000 + flip enabled.
+            let state_ll = state.clone();
+            let barrier_ll = barrier.clone();
+            let h_ll = tokio::spawn(async move {
+                barrier_ll.wait();
+                set_load_limiter(
+                    State(state_ll.clone()),
+                    Json(serde_json::json!({
+                        "enabled": true,
+                        "threshold_w": 4000,
+                    })),
+                )
+                .await
+            });
+
+            // set_temperature_limiter: bump high_threshold to 55.0 + flip
+            // enabled. The high_threshold and load_limiter_threshold_w
+            // are independent settings, so both updates must survive.
+            let state_tl = state.clone();
+            let barrier_tl = barrier.clone();
+            let h_tl = tokio::spawn(async move {
+                barrier_tl.wait();
+                set_temperature_limiter(
+                    State(state_tl.clone()),
+                    Json(serde_json::json!({
+                        "enabled": true,
+                        "high_threshold": 55.0,
+                    })),
+                )
+                .await
+            });
+
+            barrier.wait();
+            let (status_ll, _) = h_ll.await.unwrap();
+            let (status_tl, _) = h_tl.await.unwrap();
+            assert_eq!(status_ll, StatusCode::OK);
+            assert_eq!(status_tl, StatusCode::OK);
+
+            let saved = crate::settings::Settings::load();
+            assert!(
+                saved.load_limiter_enabled,
+                "load_limiter_enabled must be true after concurrent set_load_limiter"
+            );
+            assert_eq!(
+                saved.load_limiter_threshold_w, 4000,
+                "load_limiter_threshold_w must reflect the concurrent update"
+            );
+            assert!(
+                saved.temperature_limiter_enabled,
+                "temperature_limiter_enabled must be true after concurrent set_temperature_limiter"
+            );
+            assert!(
+                (saved.temperature_limiter_high_threshold - 55.0).abs() < 0.01,
+                "temperature_limiter_high_threshold must reflect the concurrent update"
+            );
+            // Sentinels for fields neither body supplied must remain at
+            // the seeded baseline (rules out accidental clobber).
+            assert_eq!(saved.load_limiter_start_hour, 7);
+            assert_eq!(saved.load_limiter_start_minute, 30);
+            assert!(
+                (saved.temperature_limiter_recovery_threshold - 40.0).abs() < 0.01,
+                "untouched temperature recovery_threshold must survive"
+            );
+        })
+        .await;
+    }
+
     /// `test_alerts` must short-circuit with a 400 BEFORE any HTTP call when
     /// no channel (Telegram, ntfy, or Pushover) is configured. This is the
     /// network-free path of the gate, so it's safe to assert without mocking.
