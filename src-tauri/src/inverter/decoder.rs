@@ -984,6 +984,24 @@ fn decode_holding_60_119(data: &[u16], snap: &mut InverterSnapshot, raw: &mut Ra
     // Charge target SOC: HR(116) → index 56
     snap.target_soc = (get_reg(data, 116 - 60) as u8).clamp(4, 100);
 
+    // On models that arm the charge target through the enable_charge_target
+    // flag (AC-coupled, Gen1/Gen2 hybrid — the non-extended-slot family), the
+    // flag OFF means "no limit": the inverter charges to 100% regardless of
+    // the stale value left in HR 116. The api.rs charge-slot handler encodes
+    // target 100 exactly this way (clears HR 20, leaves HR 116 untouched), so
+    // reporting the inert register value made the GUI show e.g. "99%" right
+    // after the user set 100, and re-saving the slot resurrected the stale
+    // value as an explicit target. Report the effective target instead.
+    // Extended-slot models (Gen3+/AIO/three-phase) are excluded: their
+    // handler arms HR 116 WITHOUT the flag (the AIO honours the global
+    // register directly), so the flag is not part of their target semantics.
+    if !snap.enable_charge_target
+        && !snap.device_type.uses_extended_schedule_slots()
+        && snap.target_soc != 100
+    {
+        snap.target_soc = 100;
+    }
+
     // Apply global charge_target_soc to each enabled charge slot
     let global_target = snap.target_soc;
     for slot in &mut snap.charge_slots {
