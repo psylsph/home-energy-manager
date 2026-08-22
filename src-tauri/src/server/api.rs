@@ -7245,6 +7245,100 @@ mod tests {
         .await;
     }
 
+    /// Regression test for `set_mode` consuming the #137 discharge-slot
+    /// backup BEFORE confirming the inverter accepted the slot-restore
+    /// writes. Same bug class as 2877466 fixed for `set_timed_export`,
+    /// which the author missed in the original sweep. Currently RED on
+    /// master: `set_mode` calls `queue_writes` (no completion channel)
+    /// AND `settings.save()` to clear the backup before any write
+    /// confirmation could possibly arrive, so a rejected register write
+    /// silently destroys the user's schedule.
+    ///
+    /// After the fix (queue_writes_with_completion + await_write_outcome),
+    /// the backup survives a rejected write and the handler returns a
+    /// 502 with the user's schedule intact for retry.
+    #[tokio::test]
+    async fn set_mode_timed_restore_keeps_backup_on_rejected_write() {
+        use crate::settings::{DischargeSlotBackup, Settings};
+        with_isolated_config_dir_async(|| async {
+            // Seed a non-empty backup that the inverter would restore on
+            // a Timed-mode entry without body slots.
+            let mut settings = Settings::load();
+            settings.discharge_slots_backup = Some(vec![DischargeSlotBackup {
+                enabled: true,
+                start_hour: 16,
+                start_minute: 0,
+                end_hour: 19,
+                end_minute: 30,
+                target_soc: 50,
+            }]);
+            settings.save().unwrap();
+
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let body = serde_json::json!({
+                "mode": "timed_demand",
+                "soc_reserve": 12,
+                // NOTE: no `discharge_slots` field — forces the backup-restore path.
+            });
+
+            // Drive the handler in a separate task so we can simulate the
+            // poll loop rejecting the slot-restore write.
+            let handle = tokio::spawn(set_mode(State(state.clone()), Json(body)));
+            // Try to drive the completion channel for the slot-restore
+            // write batch. With the current bug, set_mode uses
+            // `queue_writes` (no completion channel), so the handler
+            // completes immediately and we exit the loop. The backup is
+            // then gone from disk (RED).
+            let mut drained = false;
+            for _ in 0..100 {
+                if handle.is_finished() {
+                    break;
+                }
+                let mut pw = state.pending_writes.lock().await;
+                if let Some(batch) = pw.first_mut() {
+                    if let Some(tx) = batch.completion.take() {
+                        let _ = tx.send(WriteOutcome::Failed {
+                            address: 0,
+                            value: 0,
+                            error: "simulated reject".to_string(),
+                        });
+                        drained = true;
+                        break;
+                    }
+                }
+                drop(pw);
+                tokio::task::yield_now().await;
+            }
+            let (status, _) = handle.await.unwrap();
+
+            // RED on master: backup was cleared by settings.save() inside
+            // set_mode BEFORE the write was confirmed. GREEN after fix:
+            // backup survives because Settings::update only runs on Ok(()).
+            assert!(
+                Settings::load()
+                    .discharge_slots_backup
+                    .as_ref()
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false),
+                "discharge_slots_backup must survive a rejected slot-restore write so the user can retry"
+            );
+            // RED on master: handler returned 200 because it never
+            // awaited confirmation. GREEN after fix: returns 502.
+            assert_eq!(
+                status,
+                StatusCode::BAD_GATEWAY,
+                "handler must surface rejected slot-restore as 502 (BAD_GATEWAY), not 200"
+            );
+            // Sanity: we successfully drove the completion channel
+            // (test would be meaningless if it didn't engage the new code).
+            assert!(
+                drained,
+                "test couldn't drive the completion channel — set_mode may not use queue_writes_with_completion yet"
+            );
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn pause_battery_single_phase_uses_minimal_eco_paused_writes() {
         with_isolated_config_dir_async(|| async {
