@@ -1711,19 +1711,51 @@ impl Settings {
     /// save back — the second save overwrites the first's field change
     /// (review finding #5). `update()` holds the global settings lock across
     /// the whole read-modify-write so concurrent writers cannot clobber each
-    /// other's fields. The closure receives the freshly-loaded settings and
-    /// returns the mutated copy to persist.
-    pub fn update<F>(f: F) -> Result<(), String>
+    /// other's fields. The closure receives the freshly-loaded settings,
+    /// mutates it in place, and returns a payload for the caller (typically
+    /// a snapshot of the post-mutation state for logging or follow-up
+    /// actions) — captured under the lock, so it cannot race with a
+    /// concurrent writer the way a post-save `load()` can.
+    pub fn update<T, F>(f: F) -> Result<T, String>
     where
-        F: FnOnce(&mut Settings),
+        F: FnOnce(&mut Settings) -> T,
     {
         let _lock = SETTINGS_LOCK
             .lock()
             .map_err(|e| format!("Lock error: {e}"))?;
 
         let mut settings = Self::load();
-        f(&mut settings);
-        settings.save_unlocked()
+        let payload = f(&mut settings);
+        settings.save_unlocked()?;
+        Ok(payload)
+    }
+
+    /// Like [`Settings::update`], but the closure can REJECT the write.
+    ///
+    /// Validation-heavy callers (e.g. `update_settings`) need all-or-nothing
+    /// semantics: if any field in the request is invalid, nothing may be
+    /// persisted. A `FnOnce(&mut Settings)` closure cannot abort the save —
+    /// by the time the closure returns, the mutation has already happened
+    /// and `update()` will unconditionally save it. `try_update` runs the
+    /// closure as `FnOnce(&mut Settings) -> Result<T, String>`; on `Err`
+    /// the (partially-mutated) settings are DISCARDED and nothing is
+    /// written to disk, so a rejected request leaves settings untouched.
+    pub fn try_update<T, F>(f: F) -> Result<Result<T, String>, String>
+    where
+        F: FnOnce(&mut Settings) -> Result<T, String>,
+    {
+        let _lock = SETTINGS_LOCK
+            .lock()
+            .map_err(|e| format!("Lock error: {e}"))?;
+
+        let mut settings = Self::load();
+        match f(&mut settings) {
+            Ok(payload) => {
+                settings.save_unlocked()?;
+                Ok(Ok(payload))
+            }
+            Err(rejection) => Ok(Err(rejection)),
+        }
     }
 }
 

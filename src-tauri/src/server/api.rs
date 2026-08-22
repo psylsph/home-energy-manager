@@ -1027,25 +1027,13 @@ pub async fn update_settings(
     // concurrent callers serialise on the settings lock and both
     // disjoint updates land.
     //
-    // Validation that needs to reject (4xx) the request is captured in a
-    // local flag and checked after the closure returns — Settings::update
-    // can't propagate a Result from the closure itself (FnOnce -> ()),
-    // so we can't bail early from inside it. On a validation failure the
-    // mutation the closure ran before the error is still persisted to
-    // disk; the user sees a 400 response and can retry. This is a slight
-    // behavioural change from the old `return error_response(...)` mid-
-    // build (which left disk untouched on rejection), but the new behaviour
-    // matches the existing `discharge_floor_config_not_mutated_when_save_fails`
-    // pattern: the in-memory mirror is only swapped after the save
-    // succeeds, so a saved-with-validation-error state is recoverable by
-    // sending a corrected request.
-    let mut validation_error: Option<String> = None;
-    // Captured inside the closure under the settings lock, then used by
-    // the log/response block below. Re-reading disk after Settings::update
-    // would race with a concurrent writer between the save and the log
-    // (review #1 follow-up).
-    let mut persist_for_log: Option<crate::settings::Settings> = None;
-    let save_result = crate::settings::Settings::update(|persist| {
+    // Validation runs inside the closure and can REJECT the whole write:
+    // `try_update` discards the partially-mutated settings on Err, so a
+    // 400-rejected request leaves disk completely untouched (all-or-
+    // nothing). The closure returns the post-mutation snapshot for the
+    // log/response block below — captured under the lock, so it cannot
+    // race with a concurrent writer the way a post-save load() would.
+    let save_result = crate::settings::Settings::try_update(|persist| {
         if !incoming.host.is_empty() {
             persist.host = incoming.host.clone();
         }
@@ -1105,8 +1093,7 @@ pub async fn update_settings(
         }
         if let Some(unit) = body.get("octopus_gas_unit").and_then(|v| v.as_str()) {
             if !matches!(unit, "unknown" | "kwh" | "m3") {
-                validation_error = Some("octopus_gas_unit must be unknown, kwh, or m3".to_string());
-                return;
+                return Err("octopus_gas_unit must be unknown, kwh, or m3".to_string());
             }
             persist.octopus_gas_unit = unit.to_string();
         }
@@ -1120,27 +1107,24 @@ pub async fn update_settings(
         };
         if let Some(value) = body.get("octopus_economy7_start").and_then(|v| v.as_str()) {
             if !valid_hhmm(value) {
-                validation_error = Some(
+                return Err(
                     "octopus_economy7_start must be a valid HH:MM time".to_string(),
                 );
-                return;
             }
             persist.octopus_economy7_start = value.to_string();
         }
         if let Some(value) = body.get("octopus_economy7_end").and_then(|v| v.as_str()) {
             if !valid_hhmm(value) {
-                validation_error = Some(
+                return Err(
                     "octopus_economy7_end must be a valid HH:MM time".to_string(),
                 );
-                return;
             }
             persist.octopus_economy7_end = value.to_string();
         }
         if persist.octopus_economy7_start == persist.octopus_economy7_end {
-            validation_error = Some(
+            return Err(
                 "Octopus Economy 7 start and end times must differ".to_string(),
             );
-            return;
         }
         if let Some(hp) = body.get("hidden_panels").and_then(|v| v.as_array()) {
             let panels: Vec<String> = hp
@@ -1212,22 +1196,21 @@ pub async fn update_settings(
         // Capture the post-mutation settings for the log message below.
         // We must clone here because the closure's `persist` is dropped
         // when the lock is released at the end of Settings::update.
-        persist_for_log = Some(persist.clone());
+        Ok(persist.clone())
     });
-    if let Some(msg) = validation_error.take() {
-        return error_response(&msg);
-    }
-    if let Err(e) = save_result {
-        return server_error(&format!("Failed to save settings: {e}"));
-    }
+    // Outer Err = lock/save failure (500); inner Err = validation
+    // rejection (400, nothing persisted); Ok = saved, snapshot returned.
+    let persist_for_log = match save_result {
+        Err(e) => return server_error(&format!("Failed to save settings: {e}")),
+        Ok(Err(msg)) => return error_response(&msg),
+        Ok(Ok(snapshot)) => snapshot,
+    };
 
     // Build the log/response message from the just-persisted settings so
     // it reflects the values actually written to disk (not the raw
     // request body). The snapshot was captured inside the closure above
     // — no post-save Settings::load() that could race with a concurrent
     // writer (review #1 follow-up).
-    let persist_for_log = persist_for_log
-        .expect("closure always sets persist_for_log before returning");
     let fields = settings_log_fields(&body, &persist_for_log);
     let msg = if fields.is_empty() {
         "Settings updated: (no fields in request body)".to_string()
@@ -1236,7 +1219,6 @@ pub async fn update_settings(
     };
     tracing::info!("{}", msg);
     let response = ok_response(&msg);
-    drop(persist_for_log);
 
     // Now that disk is updated, apply changes to the in-memory state.
     // Lock is held briefly — no file I/O while holding it.
@@ -1260,13 +1242,13 @@ pub async fn update_settings(
     if incoming.interval_secs > 0 {
         settings.interval_secs = incoming.interval_secs;
     }
-    // Sync EVC settings + auto-discovery flag from persisted config to in-memory PollSettings
-    {
-        let disk = crate::settings::Settings::load();
-        settings.evc_host = disk.evc_host.clone();
-        settings.evc_port = disk.evc_port;
-        settings.disable_auto_discovery = disk.disable_auto_discovery;
-    }
+    // Sync EVC settings + auto-discovery flag from persisted config to in-memory PollSettings.
+    // Uses the closure-captured snapshot rather than re-reading disk: the
+    // snapshot is exactly what this request just wrote, so the in-memory
+    // mirror can't pick up a concurrent writer's EVC values mid-request.
+    settings.evc_host = persist_for_log.evc_host.clone();
+    settings.evc_port = persist_for_log.evc_port;
+    settings.disable_auto_discovery = persist_for_log.disable_auto_discovery;
 
     let connection_changed =
         settings.host != prev_host || settings.port != prev_port || settings.serial != prev_serial;
