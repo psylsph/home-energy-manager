@@ -6008,6 +6008,65 @@ mod tests {
         .await;
     }
 
+    /// AC-coupled: a charge-slot POST that omits `target_soc` must NOT
+    /// silently default to 100 ("no limit") and disarm an armed target.
+    ///
+    /// Regression test for the 0.74.x field report: an automated re-post of
+    /// the slot (e.g. schedule round-trip) without `target_soc` in the body
+    /// cleared HR 20 and left HR 116 inert, so an armed 99% target became
+    /// "charge to full" — the battery charged to 100% overnight. The armed
+    /// target from the latest snapshot must be preserved instead.
+    #[tokio::test]
+    async fn charge_slot_omitted_target_soc_preserves_armed_target() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE,
+                HR_ENABLE_CHARGE_TARGET,
+            };
+            // Seed a connected AC-coupled inverter with HR 116 armed at 99%.
+            let state = Arc::new(AppState::new());
+            {
+                let mut snap = state.latest_snapshot.lock().await;
+                let s = snap.get_or_insert_with(Default::default);
+                s.device_type = DeviceType::ACCoupled;
+                s.target_soc = 99;
+            }
+            *state.connection_state.lock().await = ConnectionState::Connected;
+
+            // POST the slot WITHOUT `target_soc` — the automated round-trip.
+            let body = serde_json::json!({
+                "slot": 1,
+                "start_hour": 23, "start_minute": 30,
+                "end_hour": 5, "end_minute": 30,
+                "enabled": true,
+            });
+            let _ = set_charge_slot(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+
+            let start = writes
+                .iter()
+                .find(|w| w.address == HR_CHARGE_SLOT_1_START)
+                .expect("charge slot must write HR 94");
+            assert_eq!(start.value, 2330);
+
+            let target = writes
+                .iter()
+                .find(|w| w.address == HR_CHARGE_TARGET_SOC)
+                .expect("omitted target_soc must preserve the armed HR 116 target");
+            assert_eq!(
+                target.value, 99,
+                "armed 99% target must be re-written, not clobbered to no-limit"
+            );
+            let flag = writes
+                .iter()
+                .find(|w| w.address == HR_ENABLE_CHARGE_TARGET)
+                .expect("charge target flag must be armed (HR 20 = 1)");
+            assert_eq!(flag.value, 1);
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn set_eco_mode_only_emits_whitelisted_writes() {
         with_isolated_config_dir_async(|| async {
