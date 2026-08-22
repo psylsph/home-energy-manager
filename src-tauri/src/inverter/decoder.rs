@@ -1009,14 +1009,19 @@ fn decode_holding_60_119(data: &[u16], snap: &mut InverterSnapshot, raw: &mut Ra
             slot.target_soc = global_target;
         }
     }
-    // Apply the same global fallback to enabled discharge slots — they have
-    // no separate global register, and per-slot SOCs (HR 272/275) only get
-    // read when the extended HR240-299 block is polled. Without this fallback
-    // discharge slots show 0% unless the extended block is available AND the
-    // per-slot register reads > 0.
+    // Enabled discharge slots with no per-slot floor (extended block not
+    // polled, or HR 272/275 read 0) fall back to the battery RESERVE, not
+    // the global charge target. Discharge outside slots stops at the
+    // reserve, so an unconfigured slot displays the honest value — the old
+    // charge-target fallback surfaced the effective 100 ("no limit") once
+    // the flag-off decoder fix landed, which read as "discharge to 100%"
+    // and tempted writing HR 272 = 100 (never discharge) on extended-slot
+    // models. Per-slot floors decoded later in holding_240_299 (>0) still
+    // overwrite this, so configured floors are unaffected.
+    let reserve_fallback = snap.battery_reserve;
     for slot in &mut snap.discharge_slots {
         if slot.enabled {
-            slot.target_soc = global_target;
+            slot.target_soc = reserve_fallback;
         }
     }
 }
