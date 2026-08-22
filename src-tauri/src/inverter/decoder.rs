@@ -3295,6 +3295,85 @@ mod tests {
     }
 
     #[test]
+    fn ac_charge_target_flag_off_reports_no_limit_100_not_stale_hr116() {
+        // Field report: user sets charge target 100 ("no limit") via the GUI.
+        // The encoder clears the charge-target flag (HR 20 = 0) and leaves
+        // HR 116 untouched — the register physically still holds the stale
+        // armed value (e.g. 99). Reporting that inert 99 makes the GUI show
+        // "99%" right after the user asked for 100, and re-saving the slot
+        // would resurrect the stale 99 as an explicit target. When the flag
+        // is off there is no limit: the effective target is 100.
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x3001; // AC Coupled
+
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[94 - 60] = 2330; // HR(94): slot 1 start 23:30
+        holding_60_data[95 - 60] = 530; // HR(95): slot 1 end 05:30
+        holding_60_data[116 - 60] = 99; // stale armed target still in the register
+
+        let mut holding_0_data = vec![0u16; 60];
+        holding_0_data[0] = 0x3001; // HR(0): AC Coupled
+        holding_0_data[20] = 0; // HR(20): enable_charge_target = false
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_0_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.device_type, DeviceType::ACCoupled);
+        assert!(!snap.enable_charge_target);
+        assert_eq!(
+            snap.target_soc, 100,
+            "flag off means no limit — must report 100, not the stale HR 116 value"
+        );
+        assert_eq!(
+            snap.charge_slots[0].target_soc, 100,
+            "enabled slots must inherit the effective no-limit target"
+        );
+    }
+
+    #[test]
+    fn ac_charge_target_flag_on_reports_hr116_value() {
+        // Counterpart: flag armed (HR 20 = 1) and HR 116 = 99 — the snapshot
+        // must keep reporting the real armed target, 99.
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x3001; // AC Coupled
+
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[94 - 60] = 2330; // HR(94): slot 1 start 23:30
+        holding_60_data[95 - 60] = 530; // HR(95): slot 1 end 05:30
+        holding_60_data[116 - 60] = 99;
+
+        let mut holding_0_data = vec![0u16; 60];
+        holding_0_data[0] = 0x3001; // HR(0): AC Coupled
+        holding_0_data[20] = 1; // HR(20): enable_charge_target = true
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_0_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.device_type, DeviceType::ACCoupled);
+        assert!(snap.enable_charge_target);
+        assert_eq!(snap.target_soc, 99);
+        assert_eq!(snap.charge_slots[0].target_soc, 99);
+    }
+
+    #[test]
     fn three_phase_uses_1000_range_limits() {
         let mut holding_data = vec![0u16; 60];
         holding_data[0] = 0x4001; // Three Phase
