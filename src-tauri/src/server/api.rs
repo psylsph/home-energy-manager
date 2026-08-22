@@ -10111,6 +10111,119 @@ mod tests {
         .await;
     }
 
+    /// Regression test for review finding #1 (week of 2026-08-22):
+    /// two API handlers that each do `Settings::load` → mutate one field →
+    /// `Settings::save` lose one of the two updates when they race on the
+    /// same baseline (the second save overwrites the first's field). The
+    /// poll-path writers were already converted to the transactional
+    /// `Settings::update` helper in 78ba6fd; this pins the same property for
+    /// the API handlers — `set_alerts` and `set_auto_winter` touch
+    /// disjoint fields, so both updates must survive.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_set_alerts_and_set_auto_winter_preserve_both_updates() {
+        use std::sync::Arc as StdArc;
+        with_isolated_config_dir_async(|| async {
+            // Seed the settings file so both handlers load a non-default
+            // baseline. Use distinct sentinel values for the two fields we
+            // expect to mutate, plus a few unrelated fields we expect to
+            // remain untouched (guards against accidental clobber).
+            let mut baseline = crate::settings::Settings::load();
+            baseline.auto_winter_enabled = false;
+            baseline.auto_winter_target_soc = 80;
+            baseline.auto_winter_cold_threshold = 5.0;
+            baseline.alerts_config.enabled = false;
+            baseline.alerts_config.cooldown_minutes = 30;
+            baseline.alerts_config.inverter_trip_enabled = false;
+            baseline.save().unwrap();
+
+            let state = Arc::new(AppState::new());
+            // The handlers under test use the in-memory config on AppState
+            // for field reads but write the *persisted* settings file. Seed
+            // AppState's mirror so the body fields actually apply (the
+            // handlers read current values from AppState before merging the
+            // body — without seeding, both bodies merge over defaults).
+            {
+                let mut aw = state.auto_winter_config.lock().await;
+                aw.enabled = false;
+                aw.target_soc = 80;
+                aw.cold_threshold = 5.0;
+            }
+            {
+                let mut cfg = state.alert_config.lock().await;
+                cfg.enabled = false;
+                cfg.cooldown_minutes = 30;
+                cfg.inverter_trip_enabled = false;
+            }
+
+            let barrier = StdArc::new(std::sync::Barrier::new(3));
+
+            // set_auto_winter: bump target_soc to 50 + flip enabled to true.
+            // The barrier must be hit BEFORE the handler runs — otherwise
+            // both handlers would complete sequentially and never race.
+            let state_aw = state.clone();
+            let barrier_aw = barrier.clone();
+            let h_aw = tokio::spawn(async move {
+                barrier_aw.wait();
+                set_auto_winter(
+                    State(state_aw.clone()),
+                    Json(serde_json::json!({
+                        "enabled": true,
+                        "target_soc": 50,
+                    })),
+                )
+                .await
+            });
+
+            // set_alerts: flip enabled to true and change cooldown.
+            let state_al = state.clone();
+            let barrier_al = barrier.clone();
+            let h_al = tokio::spawn(async move {
+                barrier_al.wait();
+                set_alerts(
+                    State(state_al.clone()),
+                    Json(serde_json::json!({
+                        "enabled": true,
+                        "cooldown_minutes": 17,
+                    })),
+                )
+                .await
+            });
+
+            // Release both handlers together so they race on the same
+            // settings baseline.
+            barrier.wait();
+            let (status_aw, _) = h_aw.await.unwrap();
+            let (status_al, _) = h_al.await.unwrap();
+            assert_eq!(status_aw, StatusCode::OK);
+            assert_eq!(status_al, StatusCode::OK);
+
+            // Both updates must survive. A lost-update bug shows up as one
+            // field here holding the baseline value (e.g. target_soc=80
+            // instead of 50) — the second save overwrote the first's field.
+            let saved = crate::settings::Settings::load();
+            assert!(
+                saved.auto_winter_enabled,
+                "auto_winter_enabled must be true after concurrent set_auto_winter"
+            );
+            assert_eq!(
+                saved.auto_winter_target_soc, 50,
+                "auto_winter_target_soc must reflect the concurrent update (not be clobbered by set_alerts' save)"
+            );
+            assert!(
+                saved.alerts_config.enabled,
+                "alerts_config.enabled must be true after concurrent set_alerts"
+            );
+            assert_eq!(
+                saved.alerts_config.cooldown_minutes, 17,
+                "alerts_config.cooldown_minutes must reflect the concurrent update (not be clobbered by set_auto_winter's save)"
+            );
+            // Untouched fields must remain at baseline.
+            assert_eq!(saved.auto_winter_cold_threshold, 5.0);
+            assert!(!saved.alerts_config.inverter_trip_enabled);
+        })
+        .await;
+    }
+
     /// `test_alerts` must short-circuit with a 400 BEFORE any HTTP call when
     /// no channel (Telegram, ntfy, or Pushover) is configured. This is the
     /// network-free path of the gate, so it's safe to assert without mocking.
