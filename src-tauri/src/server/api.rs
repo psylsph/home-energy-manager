@@ -6094,6 +6094,44 @@ mod tests {
         .await;
     }
 
+    /// An omitted `soc_reserve` must NOT reset the user's configured reserve.
+    ///
+    /// Same bug class as the 0.74.10 charge-slot fix: `set_mode` defaulted an
+    /// omitted `soc_reserve` to 4% and every mode command writes HR 110
+    /// unconditionally, so any client re-posting a mode without the field
+    /// silently dragged the battery reserve down to 4%. The snapshot's
+    /// configured reserve must be preserved instead; an explicit value still
+    /// wins (pinned by `set_eco_mode_only_emits_whitelisted_writes`).
+    #[tokio::test]
+    async fn set_mode_omitted_soc_reserve_preserves_configured_reserve() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_BATTERY_SOC_RESERVE;
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            {
+                let mut snap = state.latest_snapshot.lock().await;
+                let s = snap.get_or_insert_with(Default::default);
+                s.device_type = DeviceType::Gen2Hybrid;
+                s.battery_reserve = 30;
+            }
+
+            // POST the mode WITHOUT `soc_reserve` — the round-trip shape.
+            let body = serde_json::json!({ "mode": "eco" });
+            let _ = set_mode(State(state.clone()), Json(body)).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+
+            let reserve = writes
+                .iter()
+                .find(|w| w.address == HR_BATTERY_SOC_RESERVE)
+                .expect("mode command must write the SOC reserve (HR 110)");
+            assert_eq!(
+                reserve.value, 30,
+                "omitted soc_reserve must preserve the configured 30% reserve, not reset it to 4%"
+            );
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn set_eco_mode_only_emits_whitelisted_writes() {
         with_isolated_config_dir_async(|| async {
