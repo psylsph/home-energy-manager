@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.74.12] - 2026-08-22
+
+### Fixed
+
+- **Mode POSTs omitting `soc_reserve` no longer reset the battery reserve to 4%.** The mode endpoint defaulted an omitted `soc_reserve` to 4 and every mode command writes the SOC-reserve register (HR 110) unconditionally, so any client re-posting a mode without the field silently dragged the reserve down to 4% — same omit-default clobber class as the 0.74.10 charge-slot fix. An omitted field now preserves the snapshot's configured reserve; explicit values always win.
+
+- **Discharge-slot POSTs omitting `target_soc` no longer replace the configured floor with 100.** On extended-slot models (Gen3/AIO) the handler defaulted an omitted `target_soc` to 100 ("never discharge") and wrote it to the per-slot floor registers (HR 272/275), silently neutering a configured discharge floor when a client re-posted the slot without the field. An omitted field now preserves the snapshot's per-slot floor for enabled slots with a real configured value (4-99); explicit values always win, and the 100 default remains for slots with nothing configured.
+
+### Internal
+
+- E2E regression tests for both omit-preserve paths: arm a non-default value, re-post without the field, assert the register echoes the configured value (HR 110 / HR 272). Mode tests now send explicit `soc_reserve` so they are hermetic against reserve changes from other tests.
+
 ## [0.74.11] - 2026-08-22
 
 ### Fixed
