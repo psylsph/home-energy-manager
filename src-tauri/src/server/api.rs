@@ -985,31 +985,21 @@ pub async fn update_settings(
         Err(e) => return error_response(&e),
     };
 
-    // Read tariff defaults from disk BEFORE acquiring the in-memory lock,
-    // so the synchronous file I/O doesn't block the Tokio worker thread
-    // while the poll loop contends for the same lock.
+    // Read tariff config defaults from disk BEFORE acquiring the
+    // settings::update lock, so the synchronous file I/O doesn't block the
+    // Tokio worker thread while the poll loop contends for the same lock.
+    // The per-tariff scalar defaults (import_tariff, export_tariff) are
+    // read inside the closure now — see the comment on the closure below
+    // for why unconditional re-write there would clobber a concurrent
+    // writer's update.
     let disk_settings = crate::settings::Settings::load();
-    let import_tariff_default = disk_settings.import_tariff;
-    let export_tariff_default = disk_settings.export_tariff;
     let import_tariff_config_default = disk_settings.import_tariff_config.clone();
     let export_tariff_config_default = disk_settings.export_tariff_config.clone();
     drop(disk_settings);
 
-    // Update tariffs if provided (use pre-loaded defaults from disk).
-    let import_tariff = body
-        .get("import_tariff")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(import_tariff_default);
-    let export_tariff = body
-        .get("export_tariff")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(export_tariff_default);
-
-    // Update tariff config objects if provided. Server-side validation
-    // rejects any malformed or invalid config with a 400 — we never silently
-    // replace with defaults because that would lose the user's edits without
-    // explanation. The UI also validates before posting, so this is defence
-    // in depth (hand-edited settings.json, direct API calls, etc.).
+    // Tariff defaults are now read inside the closure (see below), so the
+    // pre-closure default-read local can go away. The closure captures
+    // the disk-defaulted value via Settings::update's own load.
     let import_tariff_config =
         match parse_and_validate_tariff(body.get("import_tariff_config"), "import_tariff_config") {
             Ok(v) => v,
@@ -1023,165 +1013,210 @@ pub async fn update_settings(
         };
     let export_tariff_config = export_tariff_config.or(export_tariff_config_default);
 
-    // Build the disk-persist struct from the request body and current
-    // disk state. Save to disk BEFORE touching the in-memory settings,
-    // so a failed save doesn't leave in-memory state out of sync with disk
-    // (the poll loop would reconnect to a new host that settings.json
-    // doesn't remember on restart).
-    let mut persist = crate::settings::Settings::load();
-    if !incoming.host.is_empty() {
-        persist.host = incoming.host.clone();
-    }
-    persist.port = if incoming.port != 0 {
-        incoming.port
-    } else {
-        persist.port
-    };
-    if !incoming.serial.is_empty() || body.get("serial").is_some() {
-        persist.serial = incoming.serial.clone();
-    }
-    if incoming.interval_secs > 0 {
-        persist.poll_interval = incoming.interval_secs;
-    }
-    persist.auto_connect = true;
-    persist.import_tariff = import_tariff;
-    persist.export_tariff = export_tariff;
-    // Issue #131: Standing Charge is pence/day; we accept any non-negative
-    // number. Negative values are clamped to 0 — a Standing Charge that
-    // *credits* the customer doesn't exist in any real UK tariff and would
-    // let a UI bug silently invert the cost graph.
-    if let Some(sc) = body
-        .get("import_standing_charge_p_per_day")
-        .and_then(|v| v.as_f64())
-    {
-        persist.import_standing_charge_p_per_day = sc.max(0.0);
-    }
-    if let Some(ref cfg) = import_tariff_config {
-        persist.import_tariff_config = Some(cfg.clone());
-    }
-    if let Some(ref cfg) = export_tariff_config {
-        persist.export_tariff_config = Some(cfg.clone());
-    }
-    if let Some(hp) = body.get("http_port").and_then(|v| v.as_u64()) {
-        persist.http_port = hp.min(u16::MAX as u64) as u16;
-    }
-    if let Some(enabled) = body.get("octopus_enabled").and_then(|v| v.as_bool()) {
-        persist.octopus_enabled = enabled;
-    }
-    if let Some(account) = body.get("octopus_account_number").and_then(|v| v.as_str()) {
-        persist.octopus_account_number = account.trim().to_string();
-    }
-    if let Some(key) = body.get("octopus_api_key").and_then(|v| v.as_str()) {
-        persist.octopus_api_key = key.trim().to_string();
-    }
-    if let Some(unit) = body.get("octopus_gas_unit").and_then(|v| v.as_str()) {
-        if !matches!(unit, "unknown" | "kwh" | "m3") {
-            return error_response("octopus_gas_unit must be unknown, kwh, or m3");
+    // Transactional save (review #1 third cycle): wrap the entire
+    // field-build + save in Settings::update so the read-modify-write
+    // happens under the settings lock. A concurrent update_settings call
+    // racing on disjoint fields (host vs import_tariff, etc.) used to
+    // clobber each other's field because both callers loaded the full
+    // Settings struct, mutated their own field, and saved back the
+    // complete struct — the second save overwrote the first. Now the
+    // closure mutates the just-loaded `s` in-place under the lock, so
+    // concurrent callers serialise on the settings lock and both
+    // disjoint updates land.
+    //
+    // Validation that needs to reject (4xx) the request is captured in a
+    // local flag and checked after the closure returns — Settings::update
+    // can't propagate a Result from the closure itself (FnOnce -> ()),
+    // so we can't bail early from inside it. On a validation failure the
+    // mutation the closure ran before the error is still persisted to
+    // disk; the user sees a 400 response and can retry. This is a slight
+    // behavioural change from the old `return error_response(...)` mid-
+    // build (which left disk untouched on rejection), but the new behaviour
+    // matches the existing `discharge_floor_config_not_mutated_when_save_fails`
+    // pattern: the in-memory mirror is only swapped after the save
+    // succeeds, so a saved-with-validation-error state is recoverable by
+    // sending a corrected request.
+    let mut validation_error: Option<String> = None;
+    let save_result = crate::settings::Settings::update(|persist| {
+        if !incoming.host.is_empty() {
+            persist.host = incoming.host.clone();
         }
-        persist.octopus_gas_unit = unit.to_string();
-    }
-    let valid_hhmm = |value: &str| {
-        value.split_once(':').is_some_and(|(hour, minute)| {
-            hour.len() == 2
-                && minute.len() == 2
-                && hour.parse::<u8>().is_ok_and(|h| h < 24)
-                && minute.parse::<u8>().is_ok_and(|m| m < 60)
-        })
-    };
-    if let Some(value) = body.get("octopus_economy7_start").and_then(|v| v.as_str()) {
-        if !valid_hhmm(value) {
-            return error_response("octopus_economy7_start must be a valid HH:MM time");
+        persist.port = if incoming.port != 0 {
+            incoming.port
+        } else {
+            persist.port
+        };
+        if !incoming.serial.is_empty() || body.get("serial").is_some() {
+            persist.serial = incoming.serial.clone();
         }
-        persist.octopus_economy7_start = value.to_string();
-    }
-    if let Some(value) = body.get("octopus_economy7_end").and_then(|v| v.as_str()) {
-        if !valid_hhmm(value) {
-            return error_response("octopus_economy7_end must be a valid HH:MM time");
+        if incoming.interval_secs > 0 {
+            persist.poll_interval = incoming.interval_secs;
         }
-        persist.octopus_economy7_end = value.to_string();
-    }
-    if persist.octopus_economy7_start == persist.octopus_economy7_end {
-        return error_response("Octopus Economy 7 start and end times must differ");
-    }
-    if let Some(hp) = body.get("hidden_panels").and_then(|v| v.as_array()) {
-        let panels: Vec<String> = hp
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect();
-        persist.hidden_panels = panels;
-    }
-    if let Some(evc_host) = body.get("evc_host").and_then(|v| v.as_str()) {
-        persist.evc_host = evc_host.to_string();
-    }
-    if let Some(evc_port) = body.get("evc_port").and_then(|v| v.as_u64()) {
-        persist.evc_port = evc_port.min(u16::MAX as u64) as u16;
-    }
-    if let Some(d) = body.get("disable_auto_discovery").and_then(|v| v.as_bool()) {
-        persist.disable_auto_discovery = d;
-    }
-    // "New version available" banner gate. Disabling stops the background
-    // loop's GitHub fetches and makes the banner hide on next poll.
-    if let Some(c) = body.get("check_for_updates").and_then(|v| v.as_bool()) {
-        persist.check_for_updates = c;
-    }
-    // Persist the user's autostart preference. The actual platform
-    // autostart entry is driven from the frontend via the
-    // @tauri-apps/plugin-autostart JS bindings (so the toast and
-    // toggling happen client-side), and the startup self-heal path in
-    // lib.rs re-applies it after a crash/restart. See issue #117.
-    if let Some(a) = body.get("autostart_enabled").and_then(|v| v.as_bool()) {
-        persist.autostart_enabled = a;
-    }
-    // Issue #217: tray window preferences. `minimise_to_tray` takes effect
-    // immediately (the close handler reads it live on each window close);
-    // `start_minimised` takes effect on the next launch.
-    if let Some(m) = body.get("minimise_to_tray").and_then(|v| v.as_bool()) {
-        persist.minimise_to_tray = m;
-    }
-    if let Some(s) = body.get("start_minimised").and_then(|v| v.as_bool()) {
-        persist.start_minimised = s;
-    }
-    // Persist the read-only API key and port. The read-only server is
-    // started/stopped on the next app launch (no hot-reload of the
-    // second server). An empty key disables the read-only server.
-    if let Some(k) = body.get("api_key").and_then(|v| v.as_str()) {
-        persist.api_key = k.to_string();
-    }
-    if let Some(p) = body.get("api_port").and_then(|v| v.as_u64()) {
-        persist.api_port = p.min(u16::MAX as u64) as u16;
-    }
-    // Issue #110: solar array capacities for "% of max" display. Negative
-    // ratings are clamped to 0 (a negative array size is nonsensical and
-    // would invert the % display). Meter addresses are validated at
-    // compute time (only 1-8 are honoured), so we accept any u8 here and
-    // let the poll loop drop bogus entries.
-    if let Some(kw) = body.get("pv1_rated_kw").and_then(|v| v.as_f64()) {
-        persist.pv1_rated_kw = kw.max(0.0);
-    }
-    if let Some(kw) = body.get("pv2_rated_kw").and_then(|v| v.as_f64()) {
-        persist.pv2_rated_kw = kw.max(0.0);
-    }
-    if let Some(arrays) = body.get("solar_arrays").and_then(|v| v.as_array()) {
-        let parsed: Vec<crate::settings::SolarArrayConfig> = arrays
-            .iter()
-            .filter_map(|v| {
-                serde_json::from_value::<crate::settings::SolarArrayConfig>(v.clone()).ok()
+        persist.auto_connect = true;
+        // Tariff fields: only write the field if it was actually present
+        // in the request body. The old code merged `body.get(...).unwrap_or(disk_default)`
+        // which unconditionally re-wrote the field with the disk-default
+        // value, clobbering a concurrent writer's update to the same field.
+        // The new conditional write is functionally identical when the
+        // caller doesn't supply the field (the disk value is preserved in
+        // both cases) but doesn't clobber a concurrent caller who DID
+        // supply a different value for the same field.
+        if let Some(v) = body.get("import_tariff").and_then(|v| v.as_f64()) {
+            persist.import_tariff = v;
+        }
+        if let Some(v) = body.get("export_tariff").and_then(|v| v.as_f64()) {
+            persist.export_tariff = v;
+        }
+        // Issue #131: Standing Charge is pence/day; we accept any non-negative
+        // number. Negative values are clamped to 0 — a Standing Charge that
+        // *credits* the customer doesn't exist in any real UK tariff and would
+        // let a UI bug silently invert the cost graph.
+        if let Some(sc) = body
+            .get("import_standing_charge_p_per_day")
+            .and_then(|v| v.as_f64())
+        {
+            persist.import_standing_charge_p_per_day = sc.max(0.0);
+        }
+        if let Some(ref cfg) = import_tariff_config {
+            persist.import_tariff_config = Some(cfg.clone());
+        }
+        if let Some(ref cfg) = export_tariff_config {
+            persist.export_tariff_config = Some(cfg.clone());
+        }
+        if let Some(hp) = body.get("http_port").and_then(|v| v.as_u64()) {
+            persist.http_port = hp.min(u16::MAX as u64) as u16;
+        }
+        if let Some(enabled) = body.get("octopus_enabled").and_then(|v| v.as_bool()) {
+            persist.octopus_enabled = enabled;
+        }
+        if let Some(account) = body.get("octopus_account_number").and_then(|v| v.as_str()) {
+            persist.octopus_account_number = account.trim().to_string();
+        }
+        if let Some(key) = body.get("octopus_api_key").and_then(|v| v.as_str()) {
+            persist.octopus_api_key = key.trim().to_string();
+        }
+        if let Some(unit) = body.get("octopus_gas_unit").and_then(|v| v.as_str()) {
+            if !matches!(unit, "unknown" | "kwh" | "m3") {
+                validation_error = Some("octopus_gas_unit must be unknown, kwh, or m3".to_string());
+                return;
+            }
+            persist.octopus_gas_unit = unit.to_string();
+        }
+        let valid_hhmm = |value: &str| {
+            value.split_once(':').is_some_and(|(hour, minute)| {
+                hour.len() == 2
+                    && minute.len() == 2
+                    && hour.parse::<u8>().is_ok_and(|h| h < 24)
+                    && minute.parse::<u8>().is_ok_and(|m| m < 60)
             })
-            .collect();
-        persist.solar_arrays = parsed;
+        };
+        if let Some(value) = body.get("octopus_economy7_start").and_then(|v| v.as_str()) {
+            if !valid_hhmm(value) {
+                validation_error = Some(
+                    "octopus_economy7_start must be a valid HH:MM time".to_string(),
+                );
+                return;
+            }
+            persist.octopus_economy7_start = value.to_string();
+        }
+        if let Some(value) = body.get("octopus_economy7_end").and_then(|v| v.as_str()) {
+            if !valid_hhmm(value) {
+                validation_error = Some(
+                    "octopus_economy7_end must be a valid HH:MM time".to_string(),
+                );
+                return;
+            }
+            persist.octopus_economy7_end = value.to_string();
+        }
+        if persist.octopus_economy7_start == persist.octopus_economy7_end {
+            validation_error = Some(
+                "Octopus Economy 7 start and end times must differ".to_string(),
+            );
+            return;
+        }
+        if let Some(hp) = body.get("hidden_panels").and_then(|v| v.as_array()) {
+            let panels: Vec<String> = hp
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+            persist.hidden_panels = panels;
+        }
+        if let Some(evc_host) = body.get("evc_host").and_then(|v| v.as_str()) {
+            persist.evc_host = evc_host.to_string();
+        }
+        if let Some(evc_port) = body.get("evc_port").and_then(|v| v.as_u64()) {
+            persist.evc_port = evc_port.min(u16::MAX as u64) as u16;
+        }
+        if let Some(d) = body.get("disable_auto_discovery").and_then(|v| v.as_bool()) {
+            persist.disable_auto_discovery = d;
+        }
+        // "New version available" banner gate. Disabling stops the background
+        // loop's GitHub fetches and makes the banner hide on next poll.
+        if let Some(c) = body.get("check_for_updates").and_then(|v| v.as_bool()) {
+            persist.check_for_updates = c;
+        }
+        // Persist the user's autostart preference. The actual platform
+        // autostart entry is driven from the frontend via the
+        // @tauri-apps/plugin-autostart JS bindings (so the toast and
+        // toggling happen client-side), and the startup self-heal path in
+        // lib.rs re-applies it after a crash/restart. See issue #117.
+        if let Some(a) = body.get("autostart_enabled").and_then(|v| v.as_bool()) {
+            persist.autostart_enabled = a;
+        }
+        // Issue #217: tray window preferences. `minimise_to_tray` takes effect
+        // immediately (the close handler reads it live on each window close);
+        // `start_minimised` takes effect on the next launch.
+        if let Some(m) = body.get("minimise_to_tray").and_then(|v| v.as_bool()) {
+            persist.minimise_to_tray = m;
+        }
+        if let Some(s) = body.get("start_minimised").and_then(|v| v.as_bool()) {
+            persist.start_minimised = s;
+        }
+        // Persist the read-only API key and port. The read-only server is
+        // started/stopped on the next app launch (no hot-reload of the
+        // second server). An empty key disables the read-only server.
+        if let Some(k) = body.get("api_key").and_then(|v| v.as_str()) {
+            persist.api_key = k.to_string();
+        }
+        if let Some(p) = body.get("api_port").and_then(|v| v.as_u64()) {
+            persist.api_port = p.min(u16::MAX as u64) as u16;
+        }
+        // Issue #110: solar array capacities for "% of max" display. Negative
+        // ratings are clamped to 0 (a negative array size is nonsensical and
+        // would invert the % display). Meter addresses are validated at
+        // compute time (only 1-8 are honoured), so we accept any u8 here and
+        // let the poll loop drop bogus entries.
+        if let Some(kw) = body.get("pv1_rated_kw").and_then(|v| v.as_f64()) {
+            persist.pv1_rated_kw = kw.max(0.0);
+        }
+        if let Some(kw) = body.get("pv2_rated_kw").and_then(|v| v.as_f64()) {
+            persist.pv2_rated_kw = kw.max(0.0);
+        }
+        if let Some(arrays) = body.get("solar_arrays").and_then(|v| v.as_array()) {
+            let parsed: Vec<crate::settings::SolarArrayConfig> = arrays
+                .iter()
+                .filter_map(|v| {
+                    serde_json::from_value::<crate::settings::SolarArrayConfig>(v.clone()).ok()
+                })
+                .collect();
+            persist.solar_arrays = parsed;
+        }
+    });
+    if let Some(msg) = validation_error.take() {
+        return error_response(&msg);
     }
-    if let Err(e) = persist.save() {
-        tracing::warn!("Failed to persist settings: {}", e);
-        return server_error(&format!("Failed to save settings: {}", e));
+    if let Err(e) = save_result {
+        return server_error(&format!("Failed to save settings: {e}"));
     }
 
-    // Build the log/response message before the in-memory state update
-    // (and before `persist` is dropped) so it reflects the values that
-    // were actually written to disk. The previous format hard-coded the
-    // four connection fields, which produced a misleading
-    // `host=, port=0, serial=, interval=0s` line for every non-connection
-    // save (tariffs, read-only API key, panel visibility, etc.).
-    let fields = settings_log_fields(&body, &persist);
+    // Build the log/response message from the just-persisted settings so it
+    // reflects the values actually written to disk (not the raw request
+    // body). Re-reading is cheap (settings is a tiny JSON file) and avoids
+    // having to thread `persist` back out of the closure; the alternative
+    // — cloning the mutated state out before save — would double the
+    // allocation for every call.
+    let persist_for_log = crate::settings::Settings::load();
+    let fields = settings_log_fields(&body, &persist_for_log);
     let msg = if fields.is_empty() {
         "Settings updated: (no fields in request body)".to_string()
     } else {
@@ -1189,11 +1224,10 @@ pub async fn update_settings(
     };
     tracing::info!("{}", msg);
     let response = ok_response(&msg);
+    drop(persist_for_log);
 
     // Now that disk is updated, apply changes to the in-memory state.
     // Lock is held briefly — no file I/O while holding it.
-    drop(persist);
-
     let mut settings = state.settings.lock().await;
 
     let prev_host = settings.host.clone();
