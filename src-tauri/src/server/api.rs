@@ -347,9 +347,12 @@ async fn capture_discharge_schedule_backup(
         .map(crate::settings::DischargeSlotBackup::from)
         .collect();
 
-    let mut settings = crate::settings::Settings::load();
-    settings.discharge_slots_backup = Some(backup.clone());
-    if let Err(e) = settings.save() {
+    // Transactional save (review #1 follow-up): holds the settings lock
+    // across the read-modify-write so a concurrent writer can't clobber
+    // this update.
+    if let Err(e) = crate::settings::Settings::update(|s| {
+        s.discharge_slots_backup = Some(backup.clone());
+    }) {
         tracing::warn!(
             "Failed to persist discharge-slot backup, schedule may not round-trip on next Timed toggle: {e}"
         );
@@ -1037,6 +1040,11 @@ pub async fn update_settings(
     // succeeds, so a saved-with-validation-error state is recoverable by
     // sending a corrected request.
     let mut validation_error: Option<String> = None;
+    // Captured inside the closure under the settings lock, then used by
+    // the log/response block below. Re-reading disk after Settings::update
+    // would race with a concurrent writer between the save and the log
+    // (review #1 follow-up).
+    let mut persist_for_log: Option<crate::settings::Settings> = None;
     let save_result = crate::settings::Settings::update(|persist| {
         if !incoming.host.is_empty() {
             persist.host = incoming.host.clone();
@@ -1201,6 +1209,10 @@ pub async fn update_settings(
                 .collect();
             persist.solar_arrays = parsed;
         }
+        // Capture the post-mutation settings for the log message below.
+        // We must clone here because the closure's `persist` is dropped
+        // when the lock is released at the end of Settings::update.
+        persist_for_log = Some(persist.clone());
     });
     if let Some(msg) = validation_error.take() {
         return error_response(&msg);
@@ -1209,13 +1221,13 @@ pub async fn update_settings(
         return server_error(&format!("Failed to save settings: {e}"));
     }
 
-    // Build the log/response message from the just-persisted settings so it
-    // reflects the values actually written to disk (not the raw request
-    // body). Re-reading is cheap (settings is a tiny JSON file) and avoids
-    // having to thread `persist` back out of the closure; the alternative
-    // — cloning the mutated state out before save — would double the
-    // allocation for every call.
-    let persist_for_log = crate::settings::Settings::load();
+    // Build the log/response message from the just-persisted settings so
+    // it reflects the values actually written to disk (not the raw
+    // request body). The snapshot was captured inside the closure above
+    // — no post-save Settings::load() that could race with a concurrent
+    // writer (review #1 follow-up).
+    let persist_for_log = persist_for_log
+        .expect("closure always sets persist_for_log before returning");
     let fields = settings_log_fields(&body, &persist_for_log);
     let msg = if fields.is_empty() {
         "Settings updated: (no fields in request body)".to_string()
@@ -1880,9 +1892,13 @@ pub async fn set_timed_export(
         let rx = queue_writes_with_completion(&state, writes).await;
         match await_write_outcome(rx).await {
             Ok(()) => {
-                let mut settings = crate::settings::Settings::load();
-                settings.discharge_slots_backup = None;
-                if let Err(e) = settings.save() {
+                // Transactional save (review #1 follow-up): the backup
+                // clear happens under the settings lock so a concurrent
+                // writer can't sneak a backup-reseed in between our read
+                // and our save (matching the pattern used by other handlers).
+                if let Err(e) = crate::settings::Settings::update(|s| {
+                    s.discharge_slots_backup = None;
+                }) {
                     tracing::warn!(
                         "Failed to clear discharge-slot backup after Timed Export restore: {e}"
                     );
@@ -2560,9 +2576,10 @@ pub async fn pause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, J
         let mut saved = state.load_limiter_saved.lock().await;
         *saved = Some(crate::inverter::poll::LoadLimiterSaved { reserve });
 
-        let mut settings = crate::settings::Settings::load();
-        settings.load_limiter_saved_reserve = Some(reserve);
-        if let Err(e) = settings.save() {
+        // Transactional save (review #1 follow-up): single-field update.
+        if let Err(e) = crate::settings::Settings::update(|s| {
+            s.load_limiter_saved_reserve = Some(reserve);
+        }) {
             tracing::warn!("Failed to persist pause reserve for manual unpause: {e}");
         }
     }
@@ -2644,17 +2661,20 @@ pub async fn unpause_battery(State(state): State<Arc<AppState>>) -> (StatusCode,
         )
     };
 
-    let mut settings = crate::settings::Settings::load();
-    if disabled_load_limiter {
-        settings.load_limiter_enabled = false;
-    }
-    if disabled_temperature_limiter {
-        settings.temperature_limiter_enabled = false;
-    }
-    settings.load_limiter_active_persisted = false;
-    settings.temperature_limiter_active_persisted = false;
-    settings.load_limiter_saved_reserve = None;
-    if let Err(e) = settings.save() {
+    // Transactional save (review #1 follow-up): the five-field reset
+    // happens under the settings lock so a concurrent writer can't
+    // resurrect any of the flags between our read and our save.
+    if let Err(e) = crate::settings::Settings::update(|settings| {
+        if disabled_load_limiter {
+            settings.load_limiter_enabled = false;
+        }
+        if disabled_temperature_limiter {
+            settings.temperature_limiter_enabled = false;
+        }
+        settings.load_limiter_active_persisted = false;
+        settings.temperature_limiter_active_persisted = false;
+        settings.load_limiter_saved_reserve = None;
+    }) {
         tracing::warn!("Failed to persist load limiter reset during manual unpause: {e}");
     }
 
@@ -4077,11 +4097,11 @@ pub async fn set_charging_mode(
             return error_response(&format!("Invalid Adaptive Charge config: {e}"));
         }
         drop(pre_settings);
-        let snapshot = state.latest_snapshot.lock().await.clone();
-        let Some(snapshot) = snapshot else {
+        let snapshot_for_preflight = state.latest_snapshot.lock().await.clone();
+        let Some(snapshot_for_preflight) = snapshot_for_preflight else {
             return error_response("Connect to the inverter before enabling Adaptive Charge");
         };
-        if crate::inverter::state_machines::adaptive_charge_register(snapshot.device_type).is_none()
+        if crate::inverter::state_machines::adaptive_charge_register(snapshot_for_preflight.device_type).is_none()
         {
             return error_response("Adaptive Charge is not supported by this inverter");
         }
@@ -4089,12 +4109,22 @@ pub async fn set_charging_mode(
 
     let cosy_slots = parse_cosy_slots(body.get("cosy_slots"));
     let mut previous_scope = crate::settings::AgileScope::Off;
+    // Snapshot the fields `queue_cached_agile_action_for_settings` reads
+    // so we can feed it the just-written state without re-reading disk
+    // (review #1 follow-up: a post-save Settings::load() would race with
+    // a concurrent writer, defeating the point of Settings::update).
+    let mut post_snapshot = crate::settings::Settings::default();
     let save_result = crate::settings::Settings::update(|settings| {
         previous_scope = crate::settings::agile_scope_for_settings(settings);
         apply_charging_mode(settings, mode);
         if let Some(slots) = cosy_slots.clone() {
             settings.cosy_slots = slots;
         }
+        post_snapshot.cosy_enabled = settings.cosy_enabled;
+        post_snapshot.agile_scope = settings.agile_scope;
+        post_snapshot.agile_enabled = settings.agile_enabled;
+        post_snapshot.agile_charge_threshold = settings.agile_charge_threshold;
+        post_snapshot.agile_discharge_threshold = settings.agile_discharge_threshold;
     });
     if let Err(e) = save_result {
         return server_error(&format!("Failed to save charging mode: {e}"));
@@ -4125,11 +4155,7 @@ pub async fn set_charging_mode(
             | crate::settings::ChargingMode::AgileCharge
             | crate::settings::ChargingMode::AgileDischarge
     ) {
-        // Re-read the just-written settings to feed the queue helper with
-        // the up-to-date scope/thresholds (the closure mutated the snapshot
-        // we have no direct access to once it returned).
-        let settings = crate::settings::Settings::load();
-        queue_cached_agile_action_for_settings(&state, &settings).await;
+        queue_cached_agile_action_for_settings(&state, &post_snapshot).await;
     }
     state.write_notify.notify_one();
     ok_response("Charging mode updated")
@@ -4165,9 +4191,10 @@ pub async fn set_adaptive_charge(
         return error_response(&e);
     }
 
-    let mut settings = crate::settings::Settings::load();
-    settings.adaptive_charge_config = config;
-    if let Err(e) = settings.save() {
+    // Transactional save (review #1 follow-up): single-field update.
+    if let Err(e) = crate::settings::Settings::update(|s| {
+        s.adaptive_charge_config = config;
+    }) {
         return server_error(&format!("Failed to save Adaptive Charge config: {e}"));
     }
     state.write_notify.notify_one();
@@ -4428,11 +4455,13 @@ pub async fn set_agile(
     let discharge_threshold = body["discharge_threshold"].as_f64();
     let api_base_url = body["api_base_url"].as_str().map(|s| s.to_string());
 
-    // Capture the post-mutation scope + region/base_url flags inside the
-    // closure so we can use them after the save without re-reading disk.
-    // Reading them inside the lock guarantees the snapshot reflects exactly
-    // what the closure wrote.
-    let mut applied_scope = AgileScope::Off;
+    // Capture the post-mutation scope, thresholds, and cosy flag inside
+    // the closure so the helper below can read them without re-reading
+    // disk. Re-reading disk after Settings::update would race with any
+    // concurrent writer that mutated the same fields between our save
+    // and our re-read, defeating the whole point of the transactional
+    // helper. The closure is the only safe place to snapshot these.
+    let mut snapshot = crate::settings::Settings::default();
     let mut price_source_changed_in_closure = false;
     let save_result = crate::settings::Settings::update(|app_settings| {
         let current_scope = match explicit_scope {
@@ -4442,7 +4471,6 @@ pub async fn set_agile(
                 None => crate::settings::agile_scope_for_settings(app_settings),
             },
         };
-        applied_scope = current_scope;
         app_settings.agile_scope = current_scope;
         app_settings.agile_enabled = current_scope != AgileScope::Off;
         if scope_update_requested && current_scope != AgileScope::Off {
@@ -4465,6 +4493,14 @@ pub async fn set_agile(
             app_settings.agile_api_base_url = u;
             price_source_changed_in_closure = true;
         }
+        // Snapshot the fields the queue helper actually reads, scoped to
+        // just the post-mutation state — no full clone of the Settings
+        // struct, no race window for a concurrent writer.
+        snapshot.cosy_enabled = app_settings.cosy_enabled;
+        snapshot.agile_scope = app_settings.agile_scope;
+        snapshot.agile_enabled = app_settings.agile_enabled;
+        snapshot.agile_charge_threshold = app_settings.agile_charge_threshold;
+        snapshot.agile_discharge_threshold = app_settings.agile_discharge_threshold;
     });
     if let Err(e) = save_result {
         tracing::warn!("Failed to persist agile config: {e}");
@@ -4476,29 +4512,14 @@ pub async fn set_agile(
         || price_source_changed_in_closure;
     if price_source_changed {
         state.cached_agile_prices.lock().await.clear();
-        tracing::info!("Agile price cache cleared after region/API-base change");
+        tracing::info!("Agile price cleared after region/API-base change");
     } else {
         // Threshold-only changes can change the live 30-minute decision using
         // the currently cached price. Queue that action immediately so the
         // inverter starts/stops now, not at app restart or the next normal poll.
-        // Re-read the settings to pass the *just-written* state to the
-        // helper; the closure's mutations are otherwise captured by-value
-        // and we'd be passing a stale snapshot otherwise.
-        let app_settings = crate::settings::Settings::load();
-        queue_cached_agile_action_for_settings(&state, &app_settings).await;
-    }
-    if price_source_changed {
-        state.cached_agile_prices.lock().await.clear();
-        tracing::info!("Agile price cache cleared after region/API-base change");
-    } else {
-        // Threshold-only changes can change the live 30-minute decision using
-        // the currently cached price. Queue that action immediately so the
-        // inverter starts/stops now, not at app restart or the next normal poll.
-        // Re-read the settings to pass the *just-written* state to the
-        // helper; the closure's mutations are otherwise captured by-value
-        // and we'd be passing a stale snapshot otherwise.
-        let app_settings = crate::settings::Settings::load();
-        queue_cached_agile_action_for_settings(&state, &app_settings).await;
+        // `snapshot` was captured inside the Settings::update closure above
+        // — no disk re-read, no concurrent-writer race.
+        queue_cached_agile_action_for_settings(&state, &snapshot).await;
     }
 
     // Wake the poll loop after any Agile settings save. The poll loop already
@@ -4520,7 +4541,7 @@ pub async fn set_agile(
     // "is anything armed?" check risks skipping the clear right after an
     // arm — leaving the sim/inverter with enable_charge stuck on. The 8
     // writes are idempotent zeros and drain once.
-    if scope_update_requested && applied_scope == AgileScope::Off {
+    if scope_update_requested && snapshot.agile_scope == AgileScope::Off {
         let device_type = latest_device_type(&state).await;
         let cmd = if device_type.uses_three_phase_schedule_slots() {
             ControlCommand::ThreePhaseAgileClearActiveSlot
@@ -7125,6 +7146,100 @@ mod tests {
                     .expect("export_paused must write HR110")
                     .value,
                 4
+            );
+        })
+        .await;
+    }
+
+    /// Regression test for `set_mode` consuming the #137 discharge-slot
+    /// backup BEFORE confirming the inverter accepted the slot-restore
+    /// writes. Same bug class as 2877466 fixed for `set_timed_export`,
+    /// which the author missed in the original sweep. Currently RED on
+    /// master: `set_mode` calls `queue_writes` (no completion channel)
+    /// AND `settings.save()` to clear the backup before any write
+    /// confirmation could possibly arrive, so a rejected register write
+    /// silently destroys the user's schedule.
+    ///
+    /// After the fix (queue_writes_with_completion + await_write_outcome),
+    /// the backup survives a rejected write and the handler returns a
+    /// 502 with the user's schedule intact for retry.
+    #[tokio::test]
+    async fn set_mode_timed_restore_keeps_backup_on_rejected_write() {
+        use crate::settings::{DischargeSlotBackup, Settings};
+        with_isolated_config_dir_async(|| async {
+            // Seed a non-empty backup that the inverter would restore on
+            // a Timed-mode entry without body slots.
+            let mut settings = Settings::load();
+            settings.discharge_slots_backup = Some(vec![DischargeSlotBackup {
+                enabled: true,
+                start_hour: 16,
+                start_minute: 0,
+                end_hour: 19,
+                end_minute: 30,
+                target_soc: 50,
+            }]);
+            settings.save().unwrap();
+
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let body = serde_json::json!({
+                "mode": "timed_demand",
+                "soc_reserve": 12,
+                // NOTE: no `discharge_slots` field — forces the backup-restore path.
+            });
+
+            // Drive the handler in a separate task so we can simulate the
+            // poll loop rejecting the slot-restore write.
+            let handle = tokio::spawn(set_mode(State(state.clone()), Json(body)));
+            // Try to drive the completion channel for the slot-restore
+            // write batch. With the current bug, set_mode uses
+            // `queue_writes` (no completion channel), so the handler
+            // completes immediately and we exit the loop. The backup is
+            // then gone from disk (RED).
+            let mut drained = false;
+            for _ in 0..100 {
+                if handle.is_finished() {
+                    break;
+                }
+                let mut pw = state.pending_writes.lock().await;
+                if let Some(batch) = pw.first_mut() {
+                    if let Some(tx) = batch.completion.take() {
+                        let _ = tx.send(WriteOutcome::Failed {
+                            address: 0,
+                            value: 0,
+                            error: "simulated reject".to_string(),
+                        });
+                        drained = true;
+                        break;
+                    }
+                }
+                drop(pw);
+                tokio::task::yield_now().await;
+            }
+            let (status, _) = handle.await.unwrap();
+
+            // RED on master: backup was cleared by settings.save() inside
+            // set_mode BEFORE the write was confirmed. GREEN after fix:
+            // backup survives because Settings::update only runs on Ok(()).
+            assert!(
+                Settings::load()
+                    .discharge_slots_backup
+                    .as_ref()
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false),
+                "discharge_slots_backup must survive a rejected slot-restore write so the user can retry"
+            );
+            // RED on master: handler returned 200 because it never
+            // awaited confirmation. GREEN after fix: returns 502.
+            assert_eq!(
+                status,
+                StatusCode::BAD_GATEWAY,
+                "handler must surface rejected slot-restore as 502 (BAD_GATEWAY), not 200"
+            );
+            // Sanity: we successfully drove the completion channel
+            // (test would be meaningless if it didn't engage the new code).
+            assert!(
+                drained,
+                "test couldn't drive the completion channel — set_mode may not use queue_writes_with_completion yet"
             );
         })
         .await;
