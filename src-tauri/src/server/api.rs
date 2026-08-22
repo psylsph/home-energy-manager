@@ -1543,6 +1543,13 @@ pub async fn set_mode(
             // the slots as pending edits so the Eco-mode UI shows the
             // user's saved schedule after an Eco→Timed→Eco round-trip.
             let mut captured_backup: Option<Vec<crate::settings::DischargeSlotBackup>> = None;
+            // Tracks whether the queued write batch includes a slot-restore
+            // from the #137 backup. When true, the handler must await
+            // write confirmation before clearing the backup from disk —
+            // otherwise a rejected register write silently destroys the
+            // user's schedule (the bug class 2877466 fixed for
+            // set_timed_export but missed here).
+            let mut restoring_backup = false;
 
             // When switching to Eco / Pause / Export Paused, the Gen3
             // inverter firmware re-asserts `enable_discharge` whenever any
@@ -1651,10 +1658,16 @@ pub async fn set_mode(
                     writes = combined;
                 } else {
                     // No explicit body slots: try the backup (issue #137).
-                    let mut settings = crate::settings::Settings::load();
-                    if let Some(backup) = settings.discharge_slots_backup.take() {
+                    //
+                    // The backup is consumed ONLY after the inverter
+                    // confirms the slot-restore writes (mirrors the
+                    // 2877466 pattern in `set_timed_export`). Until then
+                    // the backup must stay on disk so a rejected write
+                    // doesn't silently destroy the user's schedule.
+                    let settings = crate::settings::Settings::load();
+                    if let Some(backup) = settings.discharge_slots_backup.as_ref() {
                         if let Some(slot_writes) =
-                            restore_discharge_slot_writes(device_type, &backup)
+                            restore_discharge_slot_writes(device_type, backup)
                         {
                             // Slot writes go FIRST so they're on the inverter
                             // before HR59=1 is set — same invariant as the
@@ -1662,26 +1675,57 @@ pub async fn set_mode(
                             let mut combined = slot_writes;
                             combined.append(&mut writes);
                             writes = combined;
-                        }
-                        // Persist the cleared backup so a subsequent Eco entry
-                        // captures fresh state instead of restoring a stale
-                        // snapshot from earlier in the day.
-                        if let Err(e) = settings.save() {
-                            tracing::warn!(
-                                "Failed to persist discharge-slot backup clear after restore: {e}"
-                            );
+                            restoring_backup = true;
                         }
                     }
                 }
             }
 
-            queue_writes(&state, writes).await;
-            ok_response_with_backup(
-                &format!("Mode set to {}", mode_str),
-                captured_backup.as_deref(),
-            )
+            if restoring_backup {
+                // Await confirmation before consuming the #137 backup
+                // (same invariant as set_timed_export, see 2877466).
+                let rx = queue_writes_with_completion(&state, writes).await;
+                match await_write_outcome(rx).await {
+                    Ok(()) => {
+                        // Transactional save (review #1 follow-up): the
+                        // backup clear happens under the settings lock so
+                        // a concurrent writer can't sneak a backup-reseed
+                        // in between our read and our save. Matches the
+                        // pattern in set_timed_export.
+                        if let Err(e) = crate::settings::Settings::update(|s| {
+                            s.discharge_slots_backup = None;
+                        }) {
+                            tracing::warn!(
+                                "Failed to clear discharge-slot backup after set_mode restore: {e}"
+                            );
+                        }
+                        ok_response_with_backup(
+                            &format!("Mode set to {mode_str}"),
+                            captured_backup.as_deref(),
+                        )
+                    }
+                    Err(msg) => {
+                        tracing::warn!("set_mode slot restore rejected: {msg}");
+                        (
+                            StatusCode::BAD_GATEWAY,
+                            Json(json!({
+                                "ok": false,
+                                "error": format!(
+                                    "Mode could not be set to {mode_str} — restoring the saved discharge schedule failed ({msg}). The schedule backup has been kept; please try again."
+                                )
+                            })),
+                        )
+                    }
+                }
+            } else {
+                queue_writes(&state, writes).await;
+                ok_response_with_backup(
+                    &format!("Mode set to {mode_str}"),
+                    captured_backup.as_deref(),
+                )
+            }
         }
-        Err(e) => error_response(&format!("Validation error: {}", e)),
+        Err(e) => error_response(&format!("Validation error: {e}")),
     }
 }
 
@@ -7146,100 +7190,6 @@ mod tests {
                     .expect("export_paused must write HR110")
                     .value,
                 4
-            );
-        })
-        .await;
-    }
-
-    /// Regression test for `set_mode` consuming the #137 discharge-slot
-    /// backup BEFORE confirming the inverter accepted the slot-restore
-    /// writes. Same bug class as 2877466 fixed for `set_timed_export`,
-    /// which the author missed in the original sweep. Currently RED on
-    /// master: `set_mode` calls `queue_writes` (no completion channel)
-    /// AND `settings.save()` to clear the backup before any write
-    /// confirmation could possibly arrive, so a rejected register write
-    /// silently destroys the user's schedule.
-    ///
-    /// After the fix (queue_writes_with_completion + await_write_outcome),
-    /// the backup survives a rejected write and the handler returns a
-    /// 502 with the user's schedule intact for retry.
-    #[tokio::test]
-    async fn set_mode_timed_restore_keeps_backup_on_rejected_write() {
-        use crate::settings::{DischargeSlotBackup, Settings};
-        with_isolated_config_dir_async(|| async {
-            // Seed a non-empty backup that the inverter would restore on
-            // a Timed-mode entry without body slots.
-            let mut settings = Settings::load();
-            settings.discharge_slots_backup = Some(vec![DischargeSlotBackup {
-                enabled: true,
-                start_hour: 16,
-                start_minute: 0,
-                end_hour: 19,
-                end_minute: 30,
-                target_soc: 50,
-            }]);
-            settings.save().unwrap();
-
-            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
-            let body = serde_json::json!({
-                "mode": "timed_demand",
-                "soc_reserve": 12,
-                // NOTE: no `discharge_slots` field — forces the backup-restore path.
-            });
-
-            // Drive the handler in a separate task so we can simulate the
-            // poll loop rejecting the slot-restore write.
-            let handle = tokio::spawn(set_mode(State(state.clone()), Json(body)));
-            // Try to drive the completion channel for the slot-restore
-            // write batch. With the current bug, set_mode uses
-            // `queue_writes` (no completion channel), so the handler
-            // completes immediately and we exit the loop. The backup is
-            // then gone from disk (RED).
-            let mut drained = false;
-            for _ in 0..100 {
-                if handle.is_finished() {
-                    break;
-                }
-                let mut pw = state.pending_writes.lock().await;
-                if let Some(batch) = pw.first_mut() {
-                    if let Some(tx) = batch.completion.take() {
-                        let _ = tx.send(WriteOutcome::Failed {
-                            address: 0,
-                            value: 0,
-                            error: "simulated reject".to_string(),
-                        });
-                        drained = true;
-                        break;
-                    }
-                }
-                drop(pw);
-                tokio::task::yield_now().await;
-            }
-            let (status, _) = handle.await.unwrap();
-
-            // RED on master: backup was cleared by settings.save() inside
-            // set_mode BEFORE the write was confirmed. GREEN after fix:
-            // backup survives because Settings::update only runs on Ok(()).
-            assert!(
-                Settings::load()
-                    .discharge_slots_backup
-                    .as_ref()
-                    .map(|v| !v.is_empty())
-                    .unwrap_or(false),
-                "discharge_slots_backup must survive a rejected slot-restore write so the user can retry"
-            );
-            // RED on master: handler returned 200 because it never
-            // awaited confirmation. GREEN after fix: returns 502.
-            assert_eq!(
-                status,
-                StatusCode::BAD_GATEWAY,
-                "handler must surface rejected slot-restore as 502 (BAD_GATEWAY), not 200"
-            );
-            // Sanity: we successfully drove the completion channel
-            // (test would be meaningless if it didn't engage the new code).
-            assert!(
-                drained,
-                "test couldn't drive the completion channel — set_mode may not use queue_writes_with_completion yet"
             );
         })
         .await;
