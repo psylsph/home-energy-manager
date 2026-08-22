@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **All settings-mutating API handlers now persist atomically.** Every handler that previously did `Settings::load()` → mutate one or two fields → `Settings::save()` raced any concurrent writer: two requests touching disjoint fields each saved the full struct from their own stale baseline, so the second save silently reverted the first's change. All handlers now use the transactional `Settings::update` (or `try_update` for validation-heavy paths), which holds the settings lock across the whole read-modify-write. Concurrent-race regressions pin the property for `set_alerts` × `set_auto_winter`, `set_load_limiter` × `set_temperature_limiter`, and `update_settings` × `update_settings`.
+
+- **A rejected `POST /api/settings` no longer persists part of the request.** Validation previously ran inside the save closure, which cannot abort the save — a request with a valid `host` plus an invalid `octopus_gas_unit` returned 400 but had already written the host change to disk. `Settings::try_update` now discards the partially-mutated settings on a validation error, so a rejected request is all-or-nothing: 400 and disk untouched.
+
+- **`set_mode` no longer consumes the discharge-schedule backup before the inverter confirms the restore.** Same bug class as the earlier `set_timed_export` fix, missed in the identical Timed-restore path: the #137 backup was cleared from disk before the slot-restore writes were confirmed, so a rejected register write silently destroyed the user's saved schedule with no retry possible. The backup now survives a rejected write and the handler returns a 502 telling the user to retry.
+
+### Internal
+
+- `Settings::update` returns the closure's payload (the post-mutation snapshot), so handlers capture post-save state for logging/follow-up actions under the lock instead of re-loading from disk and racing a concurrent writer. New `Settings::try_update` variant aborts the save when the closure returns `Err`. The `set_agile`/`set_charging_mode`/`update_settings` post-save follow-ups (cached-agile-action queueing, EVC field sync, log message) all use closure-captured snapshots.
+
 ## [0.74.13] - 2026-08-22
 
 ### Fixed
