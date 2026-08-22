@@ -582,8 +582,8 @@ fn build_force_charge_stop_writes(
 ) -> Vec<RegisterWrite> {
     use crate::modbus::registers::{
         HR_3PH_AC_CHARGE_ENABLE, HR_3PH_FORCE_CHARGE_ENABLE, HR_BATTERY_POWER_MODE,
-        HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE,
-        HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
+        HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC,
+        HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
     };
     let mut writes = Vec::new();
 
@@ -1986,7 +1986,35 @@ pub async fn set_charge_slot(
     let start_minute = body["start_minute"].as_u64().unwrap_or(0) as u8;
     let end_hour = body["end_hour"].as_u64().unwrap_or(0) as u8;
     let end_minute = body["end_minute"].as_u64().unwrap_or(0) as u8;
-    let target_soc = body["target_soc"].as_u64().unwrap_or(100) as u8;
+    // Target SOC semantics: an explicit value always wins. When omitted, do
+    // NOT silently default to 100 ("no limit") — that disarms any armed
+    // charge target via the `target_soc >= 100` branch below (HR 20 cleared,
+    // HR 116 inert), so an automated re-post without `target_soc` would turn
+    // an armed 99% target into "charge to full". Instead preserve the
+    // currently armed target from the latest snapshot. Only 5-99 is
+    // unambiguous: the decoder clamps HR 116 to [4,100] with 4 meaning
+    // "unset/minimum" (raw 0 → 4), and a decoded 100 already means no-limit,
+    // which is the old default anyway.
+    let target_soc = match body["target_soc"].as_u64() {
+        Some(explicit) => explicit.clamp(4, 100) as u8,
+        None => {
+            let armed = state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_ref()
+                .map(|s| s.target_soc)
+                .filter(|t| (5..=99).contains(t))
+                .unwrap_or(100);
+            if armed != 100 {
+                tracing::info!(
+                    armed,
+                    "Charge slot POST omitted target_soc - preserving armed target"
+                );
+            }
+            armed
+        }
+    };
 
     if start_hour > 23 || end_hour > 23 {
         return error_response("Hour must be 0-23");
@@ -6020,8 +6048,7 @@ mod tests {
     async fn charge_slot_omitted_target_soc_preserves_armed_target() {
         with_isolated_config_dir_async(|| async {
             use crate::modbus::registers::{
-                HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE,
-                HR_ENABLE_CHARGE_TARGET,
+                HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE_TARGET,
             };
             // Seed a connected AC-coupled inverter with HR 116 armed at 99%.
             let state = Arc::new(AppState::new());
