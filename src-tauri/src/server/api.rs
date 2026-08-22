@@ -10394,6 +10394,98 @@ mod tests {
         .await;
     }
 
+    /// Regression test for review #1 (third cycle): `update_settings`
+    /// (POST /api/settings) is the big multi-field handler — it reads the
+    /// current settings to apply per-field defaults, then writes the
+    /// complete settings struct. Two concurrent calls each updating a
+    /// disjoint field must both survive on disk.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_update_settings_calls_preserve_disjoint_field_updates() {
+        use std::sync::Arc as StdArc;
+        with_isolated_config_dir_async(|| async {
+            // Seed baseline settings with non-default sentinels on the
+            // fields we expect to be updated + a few untouched sentinels.
+            let mut baseline = crate::settings::Settings::load();
+            baseline.host = "0.0.0.0".to_string();
+            baseline.port = 8899;
+            baseline.import_tariff = 0.25;
+            baseline.export_tariff = 0.15;
+            baseline.poll_interval = 15;
+            baseline.http_port = 7337;
+            baseline.save().unwrap();
+
+            let state = Arc::new(AppState::new());
+            // Mirror the baseline into the in-memory PollSettings so the
+            // handler's defaults read matches the seeded disk state.
+            {
+                let mut s = state.settings.lock().await;
+                s.host = baseline.host.clone();
+                s.port = baseline.port;
+                s.interval_secs = baseline.poll_interval;
+            }
+
+            let barrier = StdArc::new(std::sync::Barrier::new(3));
+
+            // Caller A: change host only. Without transactional save, the
+            // caller-B save would overwrite the host change (because A
+            // saves the full Settings struct including whatever default
+            // import_tariff it loaded from disk before B's update landed).
+            let state_a = state.clone();
+            let barrier_a = barrier.clone();
+            let h_a = tokio::spawn(async move {
+                barrier_a.wait();
+                update_settings(
+                    State(state_a.clone()),
+                    Json(serde_json::json!({
+                        "host": "192.168.1.10",
+                        // serial must be present (or explicit empty) so
+                        // the handler doesn't reuse the baseline serial.
+                        "serial": "TEST-A",
+                    })),
+                )
+                .await
+            });
+
+            // Caller B: change import_tariff only.
+            let state_b = state.clone();
+            let barrier_b = barrier.clone();
+            let h_b = tokio::spawn(async move {
+                barrier_b.wait();
+                update_settings(
+                    State(state_b.clone()),
+                    Json(serde_json::json!({
+                        "import_tariff": 0.42,
+                    })),
+                )
+                .await
+            });
+
+            barrier.wait();
+            let (status_a, _) = h_a.await.unwrap();
+            let (status_b, _) = h_b.await.unwrap();
+            assert_eq!(status_a, StatusCode::OK);
+            assert_eq!(status_b, StatusCode::OK);
+
+            let saved = crate::settings::Settings::load();
+            // Both updates must survive. A lost-update bug shows up as one
+            // field holding the baseline (host=0.0.0.0 or import_tariff=0.25).
+            assert_eq!(
+                saved.host, "192.168.1.10",
+                "host must reflect caller-A's update"
+            );
+            assert!(
+                (saved.import_tariff - 0.42).abs() < 0.0001,
+                "import_tariff must reflect caller-B's update"
+            );
+            // Untouched fields must remain at baseline.
+            assert_eq!(saved.port, 8899);
+            assert!((saved.export_tariff - 0.15).abs() < 0.0001);
+            assert_eq!(saved.poll_interval, 15);
+            assert_eq!(saved.http_port, 7337);
+        })
+        .await;
+    }
+
     /// `test_alerts` must short-circuit with a 400 BEFORE any HTTP call when
     /// no channel (Telegram, ntfy, or Pushover) is configured. This is the
     /// network-free path of the gate, so it's safe to assert without mocking.
