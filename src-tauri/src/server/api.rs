@@ -4033,12 +4033,16 @@ pub async fn set_charging_mode(
         return error_response("Unknown charging mode");
     };
 
-    let mut settings = crate::settings::Settings::load();
-    let previous_scope = crate::settings::agile_scope_for_settings(&settings);
+    // Preflight: validate the existing adaptive config + check the live
+    // snapshot for the Adaptive register. The validation/snapshot read
+    // happens outside the settings lock; the actual mutation happens
+    // inside the closure under the lock (review #1 follow-up).
     if mode == crate::settings::ChargingMode::Adaptive {
-        if let Err(e) = settings.adaptive_charge_config.validate() {
+        let pre_settings = crate::settings::Settings::load();
+        if let Err(e) = pre_settings.adaptive_charge_config.validate() {
             return error_response(&format!("Invalid Adaptive Charge config: {e}"));
         }
+        drop(pre_settings);
         let snapshot = state.latest_snapshot.lock().await.clone();
         let Some(snapshot) = snapshot else {
             return error_response("Connect to the inverter before enabling Adaptive Charge");
@@ -4049,11 +4053,16 @@ pub async fn set_charging_mode(
         }
     }
 
-    apply_charging_mode(&mut settings, mode);
-    if let Some(slots) = parse_cosy_slots(body.get("cosy_slots")) {
-        settings.cosy_slots = slots;
-    }
-    if let Err(e) = settings.save() {
+    let cosy_slots = parse_cosy_slots(body.get("cosy_slots"));
+    let mut previous_scope = crate::settings::AgileScope::Off;
+    let save_result = crate::settings::Settings::update(|settings| {
+        previous_scope = crate::settings::agile_scope_for_settings(settings);
+        apply_charging_mode(settings, mode);
+        if let Some(slots) = cosy_slots.clone() {
+            settings.cosy_slots = slots;
+        }
+    });
+    if let Err(e) = save_result {
         return server_error(&format!("Failed to save charging mode: {e}"));
     }
 
@@ -4082,6 +4091,10 @@ pub async fn set_charging_mode(
             | crate::settings::ChargingMode::AgileCharge
             | crate::settings::ChargingMode::AgileDischarge
     ) {
+        // Re-read the just-written settings to feed the queue helper with
+        // the up-to-date scope/thresholds (the closure mutated the snapshot
+        // we have no direct access to once it returned).
+        let settings = crate::settings::Settings::load();
         queue_cached_agile_action_for_settings(&state, &settings).await;
     }
     state.write_notify.notify_one();
@@ -4152,22 +4165,30 @@ pub async fn set_cosy(
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
     let enabled = body["enabled"].as_bool().unwrap_or(false);
-    let mut app_settings = crate::settings::Settings::load();
-    let previous_agile_scope = crate::settings::agile_scope_for_settings(&app_settings);
-    app_settings.cosy_enabled = enabled;
-    if enabled {
-        app_settings.adaptive_charge_enabled = false;
-        app_settings.agile_scope = crate::settings::AgileScope::Off;
-        app_settings.agile_enabled = false;
-    }
+    let slots = parse_cosy_slots(body.get("slots"));
 
-    if let Some(slots) = parse_cosy_slots(body.get("slots")) {
-        // `parse_cosy_slots` clamps before narrowing to u8, keeping eventual
-        // register writes inside the inverter-safe ranges.
-        app_settings.cosy_slots = slots;
-    }
-
-    if let Err(e) = app_settings.save() {
+    // Transactional save (review #1 follow-up): capture the pre-change
+    // agile scope inside the closure so a concurrent writer can't sneak a
+    // scope change in between our read and our save (the previous
+    // load-then-save pattern could see a stale scope and then clobber a
+    // concurrent writer's update). Slots parsing happens outside the
+    // closure so we only re-run the (cheap) JSON validation, not the
+    // load-and-save I/O.
+    let mut previous_agile_scope = None;
+    let save_result = crate::settings::Settings::update(|app_settings| {
+        previous_agile_scope = Some(crate::settings::agile_scope_for_settings(app_settings));
+        app_settings.cosy_enabled = enabled;
+        if enabled {
+            app_settings.adaptive_charge_enabled = false;
+            app_settings.agile_scope = crate::settings::AgileScope::Off;
+            app_settings.agile_enabled = false;
+        }
+        if let Some(slots) = slots.clone() {
+            app_settings.cosy_slots = slots;
+        }
+    });
+    let previous_agile_scope = previous_agile_scope.expect("closure always runs");
+    if let Err(e) = save_result {
         tracing::warn!("Failed to persist cosy config: {e}");
         return server_error(&format!("Failed to save: {e}"));
     }
@@ -4341,23 +4362,13 @@ pub async fn set_agile(
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
     use crate::settings::AgileScope;
-    let mut app_settings = crate::settings::Settings::load();
 
-    // New explicit `scope` field wins over legacy `enabled` when both are
-    // provided. This keeps the wire API additive — old frontends sending
-    // only `enabled` keep working, new frontends can use `scope`.
-    //
-    // Partial-update semantics: scope only changes when the caller explicitly
-    // asks for it. The old behaviour derived scope from the legacy `enabled`
-    // flag even when the caller was sending a body that didn't include
-    // `enabled` at all — which meant a threshold-only POST (no `scope`, no
-    // `enabled`) silently flipped scope to Off, wiping the user's mode. Now:
-    //   - `scope` present  → use it (explicit intent).
-    //   - `scope` absent, `enabled` present, no other Agile fields
-    //                        → legacy `{ enabled }` toggle (back-compat).
-    //   - `scope` absent, thresholds/region/api_base_url present (with or
-    //     without `enabled`) → partial update, leave scope unchanged.
-    //   - empty body       → leave scope unchanged (defensive; was Off).
+    // Compute scope-update semantics up front so the closure can apply them
+    // transactionally (review #1 follow-up). The closure runs once under the
+    // settings lock; it captures the pre-change scope inside the lock so a
+    // concurrent writer can't sneak a scope change in between our read and
+    // our save (the previous load-then-save pattern saw a stale scope and
+    // could then clobber a concurrent writer's update).
     let explicit_scope = body
         .get("scope")
         .and_then(|v| v.as_str())
@@ -4369,70 +4380,66 @@ pub async fn set_agile(
     let legacy_scope_toggle =
         explicit_scope.is_none() && body.get("enabled").is_some() && !has_agile_partial_fields;
     let scope_update_requested = explicit_scope.is_some() || legacy_scope_toggle;
-    let new_scope = match explicit_scope {
-        Some(scope) => scope,
-        None => {
-            if legacy_scope_toggle {
-                // Legacy `{ enabled }` toggle — back-compat for frontends
-                // that haven't been updated to send `scope` explicitly.
-                if body["enabled"].as_bool().unwrap_or(false) {
-                    AgileScope::Full
-                } else {
-                    AgileScope::Off
-                }
+    let legacy_enabled = body["enabled"].as_bool();
+    let new_scope_from_legacy_toggle = legacy_scope_toggle
+        .then(|| {
+            if legacy_enabled.unwrap_or(false) {
+                AgileScope::Full
             } else {
-                // Partial update (or empty body) — leave the current scope
-                // alone so updating thresholds can't accidentally toggle
-                // the mode off.
-                crate::settings::agile_scope_for_settings(&app_settings)
+                AgileScope::Off
             }
+        });
+    let region = body["region"].as_str().map(|s| s.to_string());
+    let charge_threshold = body["charge_threshold"].as_f64();
+    let discharge_threshold = body["discharge_threshold"].as_f64();
+    let api_base_url = body["api_base_url"].as_str().map(|s| s.to_string());
+
+    // Capture the post-mutation scope + region/base_url flags inside the
+    // closure so we can use them after the save without re-reading disk.
+    // Reading them inside the lock guarantees the snapshot reflects exactly
+    // what the closure wrote.
+    let mut applied_scope = AgileScope::Off;
+    let mut price_source_changed_in_closure = false;
+    let save_result = crate::settings::Settings::update(|app_settings| {
+        let current_scope = match explicit_scope {
+            Some(scope) => scope,
+            None => match new_scope_from_legacy_toggle {
+                Some(scope) => scope,
+                None => crate::settings::agile_scope_for_settings(app_settings),
+            },
+        };
+        applied_scope = current_scope;
+        app_settings.agile_scope = current_scope;
+        app_settings.agile_enabled = current_scope != AgileScope::Off;
+        if scope_update_requested && current_scope != AgileScope::Off {
+            app_settings.cosy_enabled = false;
+            app_settings.cosy_active_persisted = false;
+            app_settings.adaptive_charge_enabled = false;
         }
-    };
 
-    // Keep the legacy `agile_enabled` boolean in sync with the new scope
-    // so older settings files (and any future code that reads the bool
-    // directly) see the same intent. The migration helper in
-    // `settings::agile_scope_for_settings` will still prefer the explicit
-    // scope when both fields disagree.
-    app_settings.agile_scope = new_scope;
-    app_settings.agile_enabled = new_scope != AgileScope::Off;
-    if scope_update_requested && new_scope != AgileScope::Off {
-        app_settings.cosy_enabled = false;
-        app_settings.cosy_active_persisted = false;
-        app_settings.adaptive_charge_enabled = false;
-    }
-
-    if let Some(r) = body["region"].as_str() {
-        app_settings.agile_region = r.to_string();
-    }
-    // Only update thresholds when the field is actually present in the body.
-    // Previously these were `body["..."].as_f64().unwrap_or(<default>)`, which
-    // silently reset a saved threshold to the default whenever the caller
-    // POSTed an Agile update without including the field (e.g. the mode
-    // "Apply" button on the Control page, which only sends `scope`). That
-    // meant hitting Apply on Standard silently wiped the user's discharge
-    // threshold back to 30p — and worse, made it look like the setting had
-    // been "reset" when in fact the front-end had just been sending
-    // incomplete bodies. With partial-update semantics, every Agile field is
-    // independent: callers send only what they want to change.
-    if let Some(v) = body["charge_threshold"].as_f64() {
-        app_settings.agile_charge_threshold = v;
-    }
-    if let Some(v) = body["discharge_threshold"].as_f64() {
-        app_settings.agile_discharge_threshold = v;
-    }
-    // Optional Octopus base URL override — used by tests to point at a
-    // local mock server, and by self-hosters to point at a mirror.
-    if let Some(u) = body["api_base_url"].as_str() {
-        app_settings.agile_api_base_url = u.to_string();
-    }
-
-    if let Err(e) = app_settings.save() {
+        if let Some(r) = region.clone() {
+            app_settings.agile_region = r;
+            price_source_changed_in_closure = true;
+        }
+        if let Some(v) = charge_threshold {
+            app_settings.agile_charge_threshold = v;
+        }
+        if let Some(v) = discharge_threshold {
+            app_settings.agile_discharge_threshold = v;
+        }
+        if let Some(u) = api_base_url.clone() {
+            app_settings.agile_api_base_url = u;
+            price_source_changed_in_closure = true;
+        }
+    });
+    if let Err(e) = save_result {
         tracing::warn!("Failed to persist agile config: {e}");
         return server_error(&format!("Failed to save: {e}"));
     }
 
-    let price_source_changed = body.get("region").is_some() || body.get("api_base_url").is_some();
+    let price_source_changed = body.get("region").is_some()
+        || body.get("api_base_url").is_some()
+        || price_source_changed_in_closure;
     if price_source_changed {
         state.cached_agile_prices.lock().await.clear();
         tracing::info!("Agile price cache cleared after region/API-base change");
@@ -4440,6 +4447,23 @@ pub async fn set_agile(
         // Threshold-only changes can change the live 30-minute decision using
         // the currently cached price. Queue that action immediately so the
         // inverter starts/stops now, not at app restart or the next normal poll.
+        // Re-read the settings to pass the *just-written* state to the
+        // helper; the closure's mutations are otherwise captured by-value
+        // and we'd be passing a stale snapshot otherwise.
+        let app_settings = crate::settings::Settings::load();
+        queue_cached_agile_action_for_settings(&state, &app_settings).await;
+    }
+    if price_source_changed {
+        state.cached_agile_prices.lock().await.clear();
+        tracing::info!("Agile price cache cleared after region/API-base change");
+    } else {
+        // Threshold-only changes can change the live 30-minute decision using
+        // the currently cached price. Queue that action immediately so the
+        // inverter starts/stops now, not at app restart or the next normal poll.
+        // Re-read the settings to pass the *just-written* state to the
+        // helper; the closure's mutations are otherwise captured by-value
+        // and we'd be passing a stale snapshot otherwise.
+        let app_settings = crate::settings::Settings::load();
         queue_cached_agile_action_for_settings(&state, &app_settings).await;
     }
 
@@ -4462,7 +4486,7 @@ pub async fn set_agile(
     // "is anything armed?" check risks skipping the clear right after an
     // arm — leaving the sim/inverter with enable_charge stuck on. The 8
     // writes are idempotent zeros and drain once.
-    if scope_update_requested && new_scope == AgileScope::Off {
+    if scope_update_requested && applied_scope == AgileScope::Off {
         let device_type = latest_device_type(&state).await;
         let cmd = if device_type.uses_three_phase_schedule_slots() {
             ControlCommand::ThreePhaseAgileClearActiveSlot
@@ -4615,17 +4639,24 @@ pub async fn set_discharge_floor(
 
     tracing::info!("Discharge floor guard config updated: {:?}", candidate);
 
-    // Persist first — on failure the live config must stay untouched so it
-    // can't diverge from the saved settings.
-    let mut app_settings = crate::settings::Settings::load();
-    app_settings.discharge_floor_enabled = candidate.enabled;
-    app_settings.discharge_floor_soc = candidate.floor_soc;
-    if let Err(e) = app_settings.save() {
+    // Transactional save (review #1 follow-up): the beb781b "save before
+    // swapping live state" ordering is preserved — Settings::update gives
+    // the same atomicity guarantee against concurrent writers as it does
+    // for the poll-path writers in 78ba6fd, and the live config swap
+    // stays after the persist so a failed save leaves live state
+    // untouched (the existing
+    // `discharge_floor_config_not_mutated_when_save_fails` test pins
+    // this property).
+    let snapshot = candidate;
+    if let Err(e) = crate::settings::Settings::update(|app_settings| {
+        app_settings.discharge_floor_enabled = snapshot.enabled;
+        app_settings.discharge_floor_soc = snapshot.floor_soc;
+    }) {
         tracing::warn!("Failed to persist discharge floor config: {e}");
         return server_error(&format!("Failed to save: {e}"));
     }
 
-    *state.discharge_floor_config.lock().await = candidate;
+    *state.discharge_floor_config.lock().await = snapshot;
     ok_response("Discharge floor guard config updated")
 }
 
@@ -4853,9 +4884,12 @@ pub async fn set_weather(
     drop(ws);
 
     // Persist to settings.json so the config survives a restart.
-    let mut app_settings = crate::settings::Settings::load();
-    app_settings.weather_config = config_clone;
-    if let Err(e) = app_settings.save() {
+    // Transactional save (review #1 follow-up): the whole
+    // read-modify-write happens under the settings lock.
+    let snapshot = config_clone;
+    if let Err(e) = crate::settings::Settings::update(|app_settings| {
+        app_settings.weather_config = snapshot.clone();
+    }) {
         tracing::warn!("Failed to persist weather config: {e}");
         return server_error(&format!("Failed to save: {e}"));
     }
