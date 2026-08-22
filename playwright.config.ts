@@ -17,6 +17,7 @@ export default defineConfig({
     '**/pv2-after-sunset.spec.ts',
     '**/timed-export-slot-guard.spec.ts',
     '**/websocket-stale-timeout.spec.ts',
+    '**/charge-slot-target-soc.spec.ts',
   ],
   fullyParallel: false,
   workers: 1,
