@@ -4039,6 +4039,66 @@ mod tests {
         );
     }
 
+    #[test]
+    fn three_phase_discharge_slot1_floor_is_placeholder_after_redecode() {
+        // Documentation pin (discharge-slot fallback cleanup, 2026-08-22):
+        // decode_holding_1080_1124 re-decodes discharge slots 1-2 wholesale
+        // via decode_timeslot (HR 1118-1121) AFTER every other block,
+        // resetting their floors to the 4% placeholder. Unlike charge slots
+        // (saved/restored at ~1353-1360), discharge slots have no restore —
+        // so on three-phase models the reserve fallback from
+        // decode_holding_60_119 is invisible for slots 1-2: they always end
+        // at 4 unless HR 272/275 carry a real per-slot floor that arrives in
+        // an even later block (none does in the current dispatch order).
+        // Pre-existing behaviour, deliberately documented not fixed.
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x4001; // Three Phase
+
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[110 - 60] = 20; // HR(110): single-phase reserve register
+
+        let mut three_phase = vec![0u16; 45]; // HR 1080-1124
+        three_phase[1109 - 1080] = 20; // HR(1109): three-phase reserve (authoritative)
+        three_phase[1118 - 1080] = 1600; // discharge slot 1 start 16:00
+        three_phase[1119 - 1080] = 1900; // discharge slot 1 end 19:00
+
+        let extended = vec![0u16; 60]; // HR 240-299: no per-slot floors
+
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+            make_block(RegisterType::Holding, 240, 60, "holding_240_299", extended),
+            make_block(
+                RegisterType::Holding,
+                1080,
+                45,
+                "holding_1080_1124",
+                three_phase,
+            ),
+        ];
+
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.device_type, DeviceType::ThreePhase);
+        assert_eq!(snap.battery_reserve, 20);
+        assert!(
+            snap.discharge_slots[0].enabled,
+            "non-zero HR 1118/1119 times mean slot 1 is enabled"
+        );
+        assert_eq!(
+            snap.discharge_slots[0].target_soc, 4,
+            "three-phase discharge slot 1-2 floors are wholesale re-decoded from \
+             HR 1118-1121 after the reserve fallback; the placeholder 4 wins — \
+             pre-existing quirk, documented not fixed"
+        );
+    }
+
     /// Regression: the AIO/single-phase behaviour must NOT change. HR 242
     /// = 0 must NOT clobber the global HR 116 value when slot 1 is
     /// enabled, and HR 242 > 0 must still override the global when set
