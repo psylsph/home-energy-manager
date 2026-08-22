@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.74.10] - 2026-08-22
+
+### Fixed
+
+- **Charge slot POSTs omitting `target_soc` no longer disarm an armed charge target.** The endpoint defaulted an omitted `target_soc` to 100 ("no limit"), which cleared the charge-target enable flag and left the armed target SOC (HR 116) inert — the inverter then charged to full inside the slot window. Any client re-posting the slot without an explicit target (the field report caught an automated re-post after a poll blip) now preserves the snapshot's currently armed target when it is unambiguously 5-99%. Explicit values always win; an explicit 100 keeps GivTCP-compatible "no limit" semantics; omitting with nothing armed keeps the old default.
+
+### Internal
+
+- GUI Playwright regression tests for the charge-slot target SOC: arming 99 via the slider then re-posting the slot without `target_soc` preserves HR 116=99; explicit 100 never writes HR 116; omitted with nothing armed keeps the no-limit default.
+
 ## [0.74.9] - 2026-08-21
 
 ### Fixed
