@@ -96,6 +96,31 @@ async function waitForWrite(
   return drainWrites();
 }
 
+/** Wait until /api/snapshot's payload satisfies `predicate`.
+ *
+ * The mock applies writes to its register store immediately, but the
+ * backend's snapshot only reflects them on the next poll cycle — asserting
+ * straight after a write races the poll loop. Poll the snapshot endpoint
+ * until the decoded field settles. */
+async function waitForSnapshotValue(
+  baseUrl: string,
+  predicate: (data: Record<string, unknown>) => boolean,
+  timeoutMs = 20_000,
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const resp = await fetch(`${baseUrl}/api/snapshot`);
+      const body = await resp.json();
+      if (predicate(body?.data ?? {})) return;
+    } catch {
+      // backend not ready yet — retry
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error(`waitForSnapshotValue: condition not met within ${timeoutMs}ms`);
+}
+
 /** Clear any in-flight writes from previous tests.
  *
  * Repeatedly drains writes and waits until no new writes appear for
@@ -387,7 +412,7 @@ test.describe('API Control Endpoints', () => {
     const resp = await fetch(`${baseUrl}/api/control/mode`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: 'eco' }),
+      body: JSON.stringify({ mode: 'eco', soc_reserve: 4 }),
     });
     expect((await resp.json()).ok).toBe(true);
 
@@ -400,6 +425,55 @@ test.describe('API Control Endpoints', () => {
     expect(findWrite(writes, 57)!.value).toBe(0);   // discharge slot 1 end
   });
 
+  test('POST /api/control/mode omitting soc_reserve preserves configured reserve', async ({
+    baseUrl,
+    drainModbusWrites,
+    peekModbusWrites,
+  }) => {
+    await clearWrites(drainModbusWrites);
+
+    // Arm a real (non-default) reserve first, so the snapshot carries 30%.
+    const setResp = await fetch(`${baseUrl}/api/control/reserve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ soc: 30 }),
+    });
+    expect((await setResp.json()).ok).toBe(true);
+    // Drain the reserve write itself; the mock applies the write to its
+    // register store, but the backend's snapshot only picks it up on the next
+    // poll — wait for /api/snapshot to reflect 30% before continuing.
+    await waitForWrite(peekModbusWrites, drainModbusWrites, 110, 30, 15_000);
+    await clearWrites(drainModbusWrites);
+    await waitForSnapshotValue(baseUrl, (s) => s.battery_reserve === 30, 20_000);
+
+    // Now POST a mode WITHOUT soc_reserve — the automated round-trip shape.
+    const resp = await fetch(`${baseUrl}/api/control/mode`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'eco' }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+
+    const writes = await waitForWrite(peekModbusWrites, drainModbusWrites, 110, 30, 15_000);
+    expect(findWrite(writes, 27)!.value).toBe(1);  // self-consumption
+    expect(findWrite(writes, 59)!.value).toBe(0);  // disable discharge
+    // HR 110 must echo the configured 30, not the old 4% omit-default.
+    expect(findWrite(writes, 110)!.value).toBe(30);  // SOC reserve preserved
+
+    // Restore the harness default so later tests see HR 110 = 4.
+    const restore = await fetch(`${baseUrl}/api/control/reserve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ soc: 4 }),
+    });
+    expect((await restore.json()).ok).toBe(true);
+    await waitForWrite(peekModbusWrites, drainModbusWrites, 110, 4, 15_000);
+    // Wait for the snapshot to settle back to 4% too — the following tests
+    // pin HR 110 = 4 on an omitted `soc_reserve`, which now preserves the
+    // snapshot value instead of defaulting.
+    await waitForSnapshotValue(baseUrl, (s) => s.battery_reserve === 4, 20_000);
+  });
+
   test('POST /api/control/mode timed_demand sends correct writes', async ({
     baseUrl,
     drainModbusWrites,
@@ -410,7 +484,7 @@ test.describe('API Control Endpoints', () => {
     const resp = await fetch(`${baseUrl}/api/control/mode`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: 'timed_demand' }),
+      body: JSON.stringify({ mode: 'timed_demand', soc_reserve: 4 }),
     });
     expect((await resp.json()).ok).toBe(true);
 
@@ -434,7 +508,7 @@ test.describe('API Control Endpoints', () => {
     const resp = await fetch(`${baseUrl}/api/control/mode`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: 'timed_export' }),
+      body: JSON.stringify({ mode: 'timed_export', soc_reserve: 4 }),
     });
     expect((await resp.json()).ok).toBe(true);
 
@@ -878,7 +952,7 @@ test.describe('API Mode Transitions', () => {
     let resp = await fetch(`${baseUrl}/api/control/mode`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: 'eco' }),
+      body: JSON.stringify({ mode: 'eco', soc_reserve: 4 }),
     });
     expect((await resp.json()).ok).toBe(true);
     await waitForWrites(peekModbusWrites, drainModbusWrites, 4, 20_000);
@@ -888,7 +962,7 @@ test.describe('API Mode Transitions', () => {
     resp = await fetch(`${baseUrl}/api/control/mode`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: 'timed_demand' }),
+      body: JSON.stringify({ mode: 'timed_demand', soc_reserve: 4 }),
     });
     expect((await resp.json()).ok).toBe(true);
 
@@ -934,7 +1008,7 @@ test.describe('API Mode Transitions', () => {
     let resp = await fetch(`${baseUrl}/api/control/mode`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: 'eco' }),
+      body: JSON.stringify({ mode: 'eco', soc_reserve: 4 }),
     });
     expect((await resp.json()).ok).toBe(true);
     await waitForWrites(peekModbusWrites, drainModbusWrites, 4, 20_000);
@@ -943,7 +1017,7 @@ test.describe('API Mode Transitions', () => {
     resp = await fetch(`${baseUrl}/api/control/mode`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: 'timed_export' }),
+      body: JSON.stringify({ mode: 'timed_export', soc_reserve: 4 }),
     });
     expect((await resp.json()).ok).toBe(true);
 
@@ -982,7 +1056,7 @@ test.describe('API Mode Transitions', () => {
     let resp = await fetch(`${baseUrl}/api/control/mode`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: 'timed_demand' }),
+      body: JSON.stringify({ mode: 'timed_demand', soc_reserve: 4 }),
     });
     expect((await resp.json()).ok).toBe(true);
     await waitForWrites(peekModbusWrites, drainModbusWrites, 3, 15_000);
@@ -991,7 +1065,7 @@ test.describe('API Mode Transitions', () => {
     resp = await fetch(`${baseUrl}/api/control/mode`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: 'eco' }),
+      body: JSON.stringify({ mode: 'eco', soc_reserve: 4 }),
     });
     expect((await resp.json()).ok).toBe(true);
 

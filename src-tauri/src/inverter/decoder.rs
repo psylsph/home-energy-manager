@@ -3321,8 +3321,6 @@ mod tests {
         // "99%" right after the user asked for 100, and re-saving the slot
         // would resurrect the stale 99 as an explicit target. When the flag
         // is off there is no limit: the effective target is 100.
-        let mut holding_data = vec![0u16; 60];
-        holding_data[0] = 0x3001; // AC Coupled
 
         let mut holding_60_data = vec![0u16; 60];
         holding_60_data[94 - 60] = 2330; // HR(94): slot 1 start 23:30
@@ -3361,8 +3359,6 @@ mod tests {
     fn ac_charge_target_flag_on_reports_hr116_value() {
         // Counterpart: flag armed (HR 20 = 1) and HR 116 = 99 — the snapshot
         // must keep reporting the real armed target, 99.
-        let mut holding_data = vec![0u16; 60];
-        holding_data[0] = 0x3001; // AC Coupled
 
         let mut holding_60_data = vec![0u16; 60];
         holding_60_data[94 - 60] = 2330; // HR(94): slot 1 start 23:30

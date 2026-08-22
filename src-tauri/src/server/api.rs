@@ -1459,7 +1459,22 @@ pub async fn set_mode(
         Some(m) => m,
         None => return error_response("Missing 'mode' field"),
     };
-    let soc_reserve = body["soc_reserve"].as_u64().unwrap_or(4) as u16;
+    // An omitted `soc_reserve` must preserve the snapshot's configured
+    // reserve rather than silently resetting it to the 4% default — the same
+    // omit-default clobber class as the 0.74.10 charge-slot `target_soc` fix.
+    // An explicit value always wins.
+    let soc_reserve = match body["soc_reserve"].as_u64() {
+        Some(v) => v as u16,
+        None => state
+            .latest_snapshot
+            .lock()
+            .await
+            .as_ref()
+            .map(|s| s.battery_reserve as u16)
+            // Default only when nothing is connected/configured yet.
+            .filter(|r| *r >= 4)
+            .unwrap_or(4),
+    };
 
     let is_timed = mode_str == "timed_demand" || mode_str == "timed_export";
 
