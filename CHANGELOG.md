@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.74.11] - 2026-08-22
+
+### Fixed
+
+- **Charge target now reports the effective value, not a stale register.** On flag-gated models (AC-coupled, Gen1/Gen2) the decoder published raw HR 116 into `target_soc` even when the charge-target enable flag (HR 20) was off — so sending 100 ("no limit", which clears the flag) left the GUI showing the old 99 and re-saving the slot echoed that stale 99 back as an explicit target, re-arming it. The decoder now reports the effective 100 when the flag is off; HR 116 is only surfaced when it is actually armed. Extended-slot models (AIO, Gen3+) are unchanged.
+
 ## [0.74.10] - 2026-08-22
 
 ### Fixed
