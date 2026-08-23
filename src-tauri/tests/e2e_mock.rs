@@ -653,3 +653,132 @@ async fn unknown_api_path_returns_404() {
     assert_eq!(body["ok"], Value::Bool(false));
     assert_eq!(body["error"], "Not found");
 }
+
+// ====================================================================
+// POST /api/settings — immediate re-stamp of kWp-derived snapshot fields
+// ====================================================================
+
+/// Issue #282 follow-up / local-E2E "solar arrays never appear": the poll
+/// loop stamps `solar_arrays` / `pv1_pct` / `pv2_pct` from settings on every
+/// cycle, but a control-page write storm can monopolise the loop for minutes
+/// (each queued register write costs a 1.5 s inter-write gap), so a
+/// `pv1_rated_kw` save made right after mode changes was invisible in the
+/// snapshot long past any UI patience. Saving settings must re-stamp those
+/// fields on the CURRENT snapshot immediately — no poll cycle required.
+#[tokio::test]
+async fn settings_save_restamps_solar_array_fields_without_poll_cycle() {
+    use givenergy_local::inverter::model::{BatteryMode, BatteryState, InverterSnapshot};
+
+    let _config = IsolatedConfig::enter();
+    let state = Arc::new(AppState::new());
+    *state.latest_snapshot.lock().await = Some(InverterSnapshot {
+        timestamp: 1_700_000_000,
+        solar_power: 3_321,
+        pv1_power: 3_321,
+        pv2_power: 0,
+        battery_power: 0,
+        grid_power: -2_700,
+        home_power: 600,
+        soc: 64,
+        battery_state: BatteryState::Idle,
+        battery_mode: BatteryMode::Eco,
+        grid_loss: false,
+        inverter_trip: false,
+        battery_over_temp: false,
+        device_type_display: String::from("Gen3 Hybrid"),
+        ..Default::default()
+    });
+    let router = create_router(state);
+
+    // Before: no rated kWp configured → no pv percentages, no array summary.
+    let (status, body) = get_json(&router, "/api/snapshot").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["data"]["pv1_pct"].is_null());
+    assert_eq!(body["data"]["solar_arrays"].as_array().map(Vec::len), Some(0));
+
+    // Save the rated kWp like the Solar page settings UI does.
+    let (status, body) = post_json(
+        &router,
+        "/api/settings",
+        &json!({ "pv1_rated_kw": 5.0, "pv2_rated_kw": 3.0 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "settings save failed: {body}");
+    assert_eq!(body["ok"], Value::Bool(true));
+
+    // The SAME snapshot must now expose the stamped fields — without any
+    // poll cycle having run (no inverter is connected in this harness).
+    let (status, body) = get_json(&router, "/api/snapshot").await;
+    assert_eq!(status, StatusCode::OK);
+    let pv1_pct = body["data"]["pv1_pct"].as_f64().expect("pv1_pct stamped");
+    assert!(
+        (pv1_pct - 66.42).abs() < 0.01,
+        "pv1_pct = {pv1_pct}, want ~66.42 (3321 W / 5000 W)"
+    );
+    let arrays = body["data"]["solar_arrays"].as_array().expect("arrays");
+    assert_eq!(arrays.len(), 2, "PV1 + PV2 entries: {arrays:?}");
+    assert_eq!(arrays[0]["rated_kw"], serde_json::json!(5.0));
+    assert_eq!(arrays[1]["rated_kw"], serde_json::json!(3.0));
+}
+
+/// Clearing the rated kWp must equally take effect immediately — the Solar
+/// page hides the Solar Arrays card when no array is configured, so a stale
+/// non-empty `solar_arrays` would keep the card on screen for minutes.
+#[tokio::test]
+async fn settings_save_clearing_kwp_restamps_snapshot_immediately() {
+    use givenergy_local::inverter::model::{BatteryMode, BatteryState, InverterSnapshot};
+
+    let _config = IsolatedConfig::enter();
+    let state = Arc::new(AppState::new());
+    // Configure the rated kWp first (persisted on disk), then seed the
+    // snapshot as the poll loop would have stamped it.
+    {
+        let router = create_router(state.clone());
+        let (status, body) = post_json(
+            &router,
+            "/api/settings",
+            &json!({ "pv1_rated_kw": 5.0, "pv2_rated_kw": 3.0 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "settings save failed: {body}");
+    }
+    *state.latest_snapshot.lock().await = Some(InverterSnapshot {
+        timestamp: 1_700_000_000,
+        solar_power: 3_321,
+        pv1_power: 3_321,
+        pv2_power: 0,
+        soc: 64,
+        battery_state: BatteryState::Idle,
+        battery_mode: BatteryMode::Eco,
+        pv1_pct: Some(66.42),
+        pv2_pct: Some(0.0),
+        ..Default::default()
+    });
+    let router = create_router(state);
+
+    let (status, body) = post_json(
+        &router,
+        "/api/settings",
+        &json!({ "pv1_rated_kw": 0.0, "pv2_rated_kw": 0.0 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "settings save failed: {body}");
+
+    let (status, body) = get_json(&router, "/api/snapshot").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["data"]["pv1_pct"].is_null(),
+        "pv1_pct must clear immediately: {}",
+        body["data"]["pv1_pct"]
+    );
+    assert!(
+        body["data"]["pv2_pct"].is_null(),
+        "pv2_pct must clear immediately: {}",
+        body["data"]["pv2_pct"]
+    );
+    assert_eq!(
+        body["data"]["solar_arrays"].as_array().map(Vec::len),
+        Some(0),
+        "solar_arrays must clear immediately"
+    );
+}
