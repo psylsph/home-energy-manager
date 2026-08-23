@@ -895,14 +895,36 @@ async fn drain_write_batches_with_gap(
 /// publish point so the publish step's contract with concurrent settings
 /// saves (see `update_settings`) is unit-testable without a live poll loop
 /// or Modbus server.
+///
+/// ## Settings-save reconciliation
+///
+/// A poll cycle loads settings once (right after the register read) and may
+/// spend seconds-to-minutes afterward draining queued register writes and
+/// running its state machines before it reaches this point. The snapshot
+/// arrives stamped with the kWp-derived solar fields from *those* settings,
+/// so a settings save landing mid-cycle is clobbered by publish: the
+/// stored/broadcast snapshot regresses the new config (Solar page's Solar
+/// Arrays card / PV % revert until the next cycle publishes — minutes away
+/// while the loop drains queued control writes). Re-stamping here from the
+/// freshest on-disk settings closes that window. `Settings::load()` is
+/// infallible (defaults on any read/parse error), so this can only clear
+/// stamps in the exact scenarios the mid-cycle stamp already did. A save
+/// racing this very store (post-load, pre-store — sub-millisecond) is
+/// covered by `update_settings` restamping on save, and self-heals on the
+/// next publish in the worst case.
 pub(crate) async fn publish_snapshot(state: &Arc<AppState>, snapshot: InverterSnapshot) {
+    let mut snapshot = snapshot;
+    stamp_solar_array_fields(&mut snapshot, &crate::settings::Settings::load());
+
     {
         let mut latest = state.latest_snapshot.lock().await;
         *latest = Some(snapshot.clone());
     }
 
     // Broadcast to WebSocket subscribers.
-    let _ = state.tx.send(PollMessage::Snapshot(Box::new(snapshot.clone())));
+    let _ = state
+        .tx
+        .send(PollMessage::Snapshot(Box::new(snapshot.clone())));
 
     // Persist to history database. Clone the Arc and
     // drop the lock so synchronous SQLite I/O doesn't
@@ -919,6 +941,7 @@ pub(crate) async fn publish_snapshot(state: &Arc<AppState>, snapshot: InverterSn
         }
     }
 }
+
 
 /// Runs the polling loop indefinitely (spawn as a Tokio task).
 ///
