@@ -988,33 +988,25 @@ pub async fn update_settings(
         Err(e) => return error_response(&e),
     };
 
-    // Read tariff config defaults from disk BEFORE acquiring the
-    // settings::update lock, so the synchronous file I/O doesn't block the
-    // Tokio worker thread while the poll loop contends for the same lock.
-    // The per-tariff scalar defaults (import_tariff, export_tariff) are
-    // read inside the closure now — see the comment on the closure below
-    // for why unconditional re-write there would clobber a concurrent
-    // writer's update.
-    let disk_settings = crate::settings::Settings::load();
-    let import_tariff_config_default = disk_settings.import_tariff_config.clone();
-    let export_tariff_config_default = disk_settings.export_tariff_config.clone();
-    drop(disk_settings);
-
-    // Tariff defaults are now read inside the closure (see below), so the
-    // pre-closure default-read local can go away. The closure captures
-    // the disk-defaulted value via Settings::update's own load.
+    // Validate the tariff config fields if present. We do NOT fall back to a
+    // pre-lock disk default here: the closure only writes a config when the
+    // body actually supplied it, and Settings::update loads the freshest
+    // disk state under the lock, so omitting the field preserves whatever is
+    // on disk. Falling back to a pre-lock read and writing it back
+    // unconditionally would revert a concurrent writer's update to the same
+    // field (the clobber class fixed for the scalar import/export tariff).
+    // (The old pre-lock default read was only to keep file I/O off the Tokio
+    // worker; that concern is moot now the closure owns the disk read.)
     let import_tariff_config =
         match parse_and_validate_tariff(body.get("import_tariff_config"), "import_tariff_config") {
             Ok(v) => v,
             Err(e) => return error_response(&e),
         };
-    let import_tariff_config = import_tariff_config.or(import_tariff_config_default);
     let export_tariff_config =
         match parse_and_validate_tariff(body.get("export_tariff_config"), "export_tariff_config") {
             Ok(v) => v,
             Err(e) => return error_response(&e),
         };
-    let export_tariff_config = export_tariff_config.or(export_tariff_config_default);
 
     // Transactional save (review #1 third cycle): wrap the entire
     // field-build + save in Settings::update so the read-modify-write
@@ -10677,6 +10669,108 @@ mod tests {
             assert!((saved.export_tariff - 0.15).abs() < 0.0001);
             assert_eq!(saved.poll_interval, 15);
             assert_eq!(saved.http_port, 7337);
+        })
+        .await;
+    }
+
+    /// Regression test for the review finding: `update_settings` captures the
+    /// on-disk `import_tariff_config` / `export_tariff_config` default BEFORE
+    /// acquiring the settings lock (to keep file I/O off the Tokio worker),
+    /// then the closure writes it back UNCONDITIONALLY when the body omits
+    /// the field. A concurrent `update_settings` that supplies a NEW tariff
+    /// config in that window is reverted to the stale pre-lock default — the
+    /// same clobber class the sweep fixed for the scalar `import_tariff` /
+    /// `export_tariff` fields (which were made conditional). Host-only
+    /// (no tariff field) races config-write and must NOT revert it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 32)]
+    async fn concurrent_update_settings_cannot_revert_stale_tariff_config() {
+        use std::sync::Arc as StdArc;
+        with_isolated_config_dir_async(|| async {
+            // Seed a pre-existing tariff config so the host-only writers'
+            // pre-lock default read sees it (Some) and thus, under the buggy
+            // code, unconditionally re-writes it (reverting any concurrent
+            // config update).
+            let mut baseline = crate::settings::Settings::load();
+            baseline.import_tariff_config = Some(crate::settings::TariffConfig {
+                slots: vec![
+                    crate::settings::TariffSlot {
+                        start: "00:00".to_string(),
+                        end: "23:59".to_string(),
+                        rate: 0.10,
+                    },
+                ],
+            });
+            baseline.save().unwrap();
+
+            let state = Arc::new(AppState::new());
+
+            // Many host-only writers (no tariff field) racing a single config
+            // writer. With the buggy code each host-only writer collapses
+            // `import_tariff_config` to its pre-lock default and writes it
+            // back unconditionally, so if any of them runs its save AFTER the
+            // config writer commits, the config is reverted. The many writers
+            // widen the window so the interleaving is hit reliably.
+            const N_HOST_WRITERS: usize = 16;
+            let barrier = StdArc::new(std::sync::Barrier::new(N_HOST_WRITERS + 1));
+
+            let mut host_handles = Vec::new();
+            for i in 0..N_HOST_WRITERS {
+                let state_i = state.clone();
+                let barrier_i = barrier.clone();
+                host_handles.push(tokio::spawn(async move {
+                    barrier_i.wait();
+                    update_settings(
+                        State(state_i.clone()),
+                        Json(serde_json::json!({
+                            "host": format!("192.168.1.{i}"),
+                            "serial": format!("TEST-{i}"),
+                        })),
+                    )
+                    .await
+                }));
+            }
+
+            // The single config writer. Its new value must survive all the
+            // concurrent host-only saves.
+            let state_c = state.clone();
+            let barrier_c = barrier.clone();
+            let h_c = tokio::spawn(async move {
+                barrier_c.wait();
+                update_settings(
+                    State(state_c.clone()),
+                    Json(serde_json::json!({
+                        "import_tariff_config": {
+                            "slots": [
+                                { "start": "00:00", "end": "23:59", "rate": 0.55 },
+                            ],
+                        },
+                    })),
+                )
+                .await
+            });
+
+            // main does NOT wait on the barrier (it awaits the handles below);
+            // the barrier releases all spawned writers together.
+            let mut statuses_ok = true;
+            for h in host_handles {
+                let (status, _) = h.await.unwrap();
+                statuses_ok &= status == StatusCode::OK;
+            }
+            let (status_c, _) = h_c.await.unwrap();
+            assert!(statuses_ok, "all host-only writers must succeed");
+            assert_eq!(status_c, StatusCode::OK);
+
+            let saved = crate::settings::Settings::load();
+            let saved_rate = saved
+                .import_tariff_config
+                .as_ref()
+                .and_then(|c| c.slots.first())
+                .map(|s| s.rate)
+                .unwrap_or(f64::NAN);
+            assert!(
+                (saved_rate - 0.55).abs() < 0.0001,
+                "import_tariff_config must survive concurrent host-only saves (got rate {saved_rate}) — a host-only writer's stale pre-lock default reverted the config writer's update"
+            );
         })
         .await;
     }

@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Saving other settings no longer reverts a tariff you just saved.** A request that didn't touch the tariff (for example just reconnecting to the inverter) could silently overwrite a fresh import or export tariff with an older copy read at the start of the request, if the two happened to land close together. Tariff changes are now only ever written when that request actually included them, so a concurrent tariff save can't be undone.
+
 ## [0.74.14] - 2026-08-23
 
 ### Fixed
