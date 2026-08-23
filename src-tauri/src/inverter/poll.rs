@@ -5937,4 +5937,90 @@ mod tests {
         })
         .await;
     }
+
+    // ------------------------------------------------------------------
+    // publish_snapshot must reconcile with concurrent settings saves.
+    //
+    // Poll-cycle sequence: drain queued writes (up to minutes) → read
+    // registers → load settings → decode/stamp → publish. A
+    // `POST /api/settings` save landing between the cycle's settings load
+    // and its publish is currently CLOBBERED: publish stores the snapshot
+    // stamped from the older settings, hiding the new solar-array config
+    // (e.g. rated kWp → Solar page "% of max") until the next cycle —
+    // which a write storm can push minutes out. The publish step must
+    // re-stamp the kWp-derived fields from the freshest on-disk settings
+    // so the stored/broadcast snapshot can never regress them.
+    // ------------------------------------------------------------------
+
+    fn pv_snapshot() -> InverterSnapshot {
+        InverterSnapshot {
+            timestamp: 1_700_000_000,
+            solar_power: 3_321,
+            pv1_power: 3_321,
+            soc: 64,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_restamps_solar_fields_when_settings_saved_mid_cycle() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            // Cycle stamped the snapshot from settings where pv1_rated_kw=5
+            // (simulating the cycle's stale in-memory settings read).
+            let mut snap = pv_snapshot();
+            snap.pv1_pct = Some(66.42); // 3321 W / 5000 W
+
+            // The "concurrent" save while the cycle was still in flight —
+            // written to disk (as update_settings persists it) before the
+            // cycle reaches its publish point. Sequential reproduction of
+            // exactly the racy interleaving, not a flaky threaded race.
+            Settings::update(|s| {
+                s.pv1_rated_kw = 3.0;
+            })
+            .expect("seed settings");
+
+            let state = Arc::new(AppState::new());
+            let mut rx = state.tx.subscribe();
+            publish_snapshot(&state, snap).await;
+
+            let latest = state.latest_snapshot.lock().await.clone().expect("published");
+            let (tx_pct, rx_pct): (f64, f64) = match rx.try_recv().expect("broadcast frame") {
+                PollMessage::Snapshot(b) => (b.pv1_pct.expect("tx pv_pct"), latest.pv1_pct.unwrap_or(f64::NAN)),
+                _ => panic!("expected snapshot frame"),
+            };
+            let want = 3321.0 / 3000.0 * 100.0; // 110.7%
+            for (label, got) in [("broadcast", tx_pct), ("latest_snapshot", rx_pct)] {
+                assert!(
+                    (got - want).abs() < 0.01,
+                    "{label} pv1_pct = {got}, want {want} — publish must re-stamp                      from on-disk settings so a mid-cycle save is not clobbered"
+                );
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn publish_without_settings_save_keeps_cycle_stamps() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            Settings::update(|s| {
+                s.pv1_rated_kw = 5.0;
+            })
+            .expect("seed settings");
+
+            let mut snap = pv_snapshot();
+            snap.pv1_pct = Some(66.42); // stamped from the same settings
+
+            let state = Arc::new(AppState::new());
+            publish_snapshot(&state, snap).await;
+
+            let latest = state.latest_snapshot.lock().await.clone().expect("published");
+            assert_eq!(
+                latest.pv1_pct,
+                Some(66.42),
+                "no settings save mid-cycle → publish must not disturb the cycle's stamps"
+            );
+        })
+        .await;
+    }
 }
+
