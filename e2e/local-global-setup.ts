@@ -12,6 +12,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { fileURLToPath } from 'url';
 import { writeTestSettings, type TestSettingsFixture } from './test-settings.js';
+import { simulatorBinaryPath } from './binary-path.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,15 +28,11 @@ const BACKEND_PATH = path.resolve(
   'release',
   'givenergy-local',
 );
-const SIMULATOR_PATH = path.resolve(
-  __dirname,
-  '..',
-  '..',
-  'givenergy-simulator',
-  'target',
-  'release',
-  'sim-api',
-);
+// The simulator checkout has lived in two locations: a sibling of this
+// repo (~/givenergy-simulator) and, currently, ~/repos/givenergy-simulator
+// (which is where the build instructions point). The shared resolver in
+// binary-path.ts accepts either, plus a GIVENERGY_SIMULATOR_BIN override.
+const SIMULATOR_PATH = simulatorBinaryPath();
 
 let simulatorProcess: ChildProcess | null = null;
 let backendProcess: ChildProcess | null = null;
@@ -73,10 +70,11 @@ export default async function globalSetup(_config: FullConfig) {
   killLeftoverProcesses();
   await new Promise((r) => setTimeout(r, 500));
 
-  // Verify build artifacts
-  if (!fs.existsSync(SIMULATOR_PATH)) {
+  // Verify build artifacts. simulatorBinaryPath() returns undefined when no
+  // candidate exists, so the guard is on the value, not existence.
+  if (!SIMULATOR_PATH || !fs.existsSync(SIMULATOR_PATH)) {
     throw new Error(
-      `Simulator not found at ${SIMULATOR_PATH}. Build it first:\n` +
+      `Simulator not found (looked in ~/repos/givenergy-simulator and ~/givenergy-simulator). Build it first:\n` +
       `  cd ~/repos/givenergy-simulator && cargo build --release`,
     );
   }

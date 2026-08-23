@@ -11,13 +11,12 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { fileURLToPath } from 'url';
 import { writeTestSettings, type TestSettingsFixture } from './test-settings.js';
+import { simulatorBinaryPath } from './binary-path.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const SIMULATOR_PATH = path.resolve(
-  __dirname, '..', '..', 'givenergy-simulator', 'target', 'release', 'sim-api',
-);
+const SIMULATOR_PATH = simulatorBinaryPath();
 const BACKEND_PATH = path.resolve(
   __dirname, '..', 'src-tauri', 'target', 'release', 'givenergy-local',
 );
@@ -30,7 +29,7 @@ async function startHighTemperatureInfrastructure(): Promise<{ baseUrl: string; 
   let simulator: ChildProcess | null = null;
   let backend: ChildProcess | null = null;
 
-  if (!fs.existsSync(SIMULATOR_PATH)) throw new Error(`Simulator not found at ${SIMULATOR_PATH}`);
+  if (!SIMULATOR_PATH || !fs.existsSync(SIMULATOR_PATH)) throw new Error(`Simulator not found: ${SIMULATOR_PATH}`);
   if (!fs.existsSync(BACKEND_PATH)) throw new Error(`Backend not found at ${BACKEND_PATH}`);
   if (!fs.existsSync(path.join(DIST_DIR, 'index.html'))) throw new Error(`Frontend dist not found at ${DIST_DIR}`);
 

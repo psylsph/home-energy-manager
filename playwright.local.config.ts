@@ -1,4 +1,5 @@
 import { defineConfig } from '@playwright/test';
+import { existsSync } from 'fs';
 
 /**
  * Local-only Playwright config for tests that require the real GivEnergy simulator.
@@ -30,7 +31,10 @@ export default defineConfig({
   use: {
     headless: true,
     browserName: 'chromium',
-    channel: 'chrome',
+    // Prefer system Chrome (matches the developer setups this suite was
+    // written on); fall back to Playwright's bundled Chromium when Chrome
+    // isn't installed. Overridable: GIVENERGY_E2E_CHANNEL=chrome|chromium.
+    channel: process.env.GIVENERGY_E2E_CHANNEL ?? (existsSync('/opt/google/chrome/chrome') ? 'chrome' : undefined),
     viewport: { width: 1280, height: 900 },
     actionTimeout: 10_000,
     navigationTimeout: 10_000,

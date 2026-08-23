@@ -29,13 +29,12 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { fileURLToPath } from 'url';
 import { writeTestSettings, type TestSettingsFixture } from './test-settings.js';
+import { simulatorBinaryPath } from './binary-path.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const SIMULATOR_PATH = path.resolve(
-  __dirname, '..', '..', 'givenergy-simulator', 'target', 'release', 'sim-api',
-);
+const SIMULATOR_PATH = simulatorBinaryPath();
 const BACKEND_PATH = path.resolve(
   __dirname, '..', 'src-tauri', 'target', 'release', 'givenergy-local',
 );
@@ -53,9 +52,9 @@ const INVERTER_ARGS = [
 ];
 
 function verifyArtifacts() {
-  if (!fs.existsSync(SIMULATOR_PATH)) {
+  if (!SIMULATOR_PATH || !fs.existsSync(SIMULATOR_PATH)) {
     throw new Error(
-      `Simulator not found at ${SIMULATOR_PATH}. Build it first:\n` +
+      `Simulator not found (looked in ~/repos/givenergy-simulator and ~/givenergy-simulator). Build it first:\n` +
       `  cd ~/repos/givenergy-simulator && cargo build --release`,
     );
   }

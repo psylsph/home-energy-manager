@@ -14,6 +14,7 @@ import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { writeTestSettings } from './test-settings.js';
 import type { TestSettingsFixture } from './test-settings.js';
+import { simulatorBinaryPath } from './binary-path.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -29,15 +30,7 @@ const BACKEND_PATH = path.resolve(
   'release',
   process.platform === 'win32' ? 'givenergy-local.exe' : 'givenergy-local',
 );
-const SIMULATOR_PATH = path.resolve(
-  __dirname,
-  '..',
-  '..',
-  'givenergy-simulator',
-  'target',
-  'release',
-  process.platform === 'win32' ? 'sim-api.exe' : 'sim-api',
-);
+const SIMULATOR_PATH = simulatorBinaryPath();
 
 let simulator: ChildProcess | null = null;
 let backend: ChildProcess | null = null;
@@ -101,7 +94,7 @@ test.describe.serial('Adaptive Charge with real simulator', () => {
     test.setTimeout(60_000);
 
     for (const binary of [SIMULATOR_PATH, BACKEND_PATH]) {
-      if (!fs.existsSync(binary)) {
+      if (!binary || !fs.existsSync(binary)) {
         throw new Error(`Required release binary not found: ${binary}`);
       }
     }
