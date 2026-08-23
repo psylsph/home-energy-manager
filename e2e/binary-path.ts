@@ -8,23 +8,37 @@ export function backendExecutableName(platform: NodeJS.Platform = process.platfo
 }
 
 /**
- * Resolve the givenergy-simulator release binary.
+ * Build the ordered candidate list for the givenergy-simulator release
+ * binary, rooted at the e2e/ directory containing this helper. Split out
+ * from simulatorBinaryPath() so the path arithmetic is unit-testable
+ * without touching the real filesystem.
  *
  * The simulator checkout has lived in two locations: a sibling of this
- * repo (~/givenergy-simulator) and, currently, ~/repos/givenergy-simulator
- * (which is where the build instructions point). Accept either, plus a
- * GIVENERGY_SIMULATOR_BIN override, so the local E2E suite works from all
- * of them. First existing candidate wins; returns undefined when the
- * simulator isn't built yet.
+ * repo under the same parent (~/repos/givenergy-simulator — where the
+ * build instructions point) and, formerly, a sibling of the repos
+ * directory (~/givenergy-simulator). Accept both, plus a
+ * GIVENERGY_SIMULATOR_BIN override, so the local E2E suite works from
+ * all of them. First existing candidate wins.
+ */
+export function simulatorBinaryCandidates(
+  e2eDir: string,
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  const executable = platform === 'win32' ? 'sim-api.exe' : 'sim-api';
+  const repoRoot = path.resolve(e2eDir, '..');
+  return [
+    env.GIVENERGY_SIMULATOR_BIN,
+    path.resolve(repoRoot, '..', 'givenergy-simulator', 'target', 'release', executable),
+    path.resolve(repoRoot, '..', '..', 'givenergy-simulator', 'target', 'release', executable),
+  ].filter((p): p is string => typeof p === 'string' && p.length > 0);
+}
+
+/**
+ * Resolve the givenergy-simulator release binary. Returns undefined when
+ * no candidate exists — callers guard on the value, not existence.
  */
 export function simulatorBinaryPath(): string | undefined {
   const e2eDir = path.dirname(fileURLToPath(import.meta.url));
-  const executable = process.platform === 'win32' ? 'sim-api.exe' : 'sim-api';
-  const repoRoot = path.resolve(e2eDir, '..', '..');
-  const candidates = [
-    process.env.GIVENERGY_SIMULATOR_BIN,
-    path.resolve(repoRoot, 'repos', 'givenergy-simulator', 'target', 'release', executable),
-    path.resolve(repoRoot, '..', 'givenergy-simulator', 'target', 'release', executable),
-  ].filter((p): p is string => typeof p === 'string' && p.length > 0);
-  return candidates.find((p) => fs.existsSync(p));
+  return simulatorBinaryCandidates(e2eDir).find((p) => fs.existsSync(p));
 }
