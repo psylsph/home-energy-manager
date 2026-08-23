@@ -14,8 +14,8 @@ use serde_json::{json, Value};
 use crate::inverter::encoder::{ControlCommand, RegisterWrite, WriteOutcome};
 use crate::inverter::model::{DeviceType, InverterSnapshot};
 use crate::inverter::poll::{
-    AppState, ConnectionState, ForceChargeRevert, ForceDischargeRevert, PendingWriteBatch,
-    PollSettings,
+    stamp_solar_array_fields, AppState, ConnectionState, ForceChargeRevert, ForceDischargeRevert,
+    PendingWriteBatch, PollMessage, PollSettings,
 };
 use crate::modbus::registers::encode_hhmm;
 use crate::settings::TariffConfig;
@@ -1218,6 +1218,26 @@ pub async fn update_settings(
         format!("Settings updated: {}", fields.join(", "))
     };
     tracing::info!("{}", msg);
+
+    // Issue #110 / local-E2E "solar arrays never appear": when the save
+    // touched any of the solar-array settings, re-stamp the kWp-derived
+    // fields (`solar_arrays`, `pv1_pct`, `pv2_pct`) on the CURRENT
+    // snapshot right away. The poll loop normally does this every cycle,
+    // but after a control-page change it can spend minutes draining queued
+    // register writes (1.5 s per write) before its next read — without
+    // this re-stamp (plus broadcast), the Solar page's Solar Arrays card
+    // lags the save by that whole drain window.
+    if body.get("pv1_rated_kw").is_some()
+        || body.get("pv2_rated_kw").is_some()
+        || body.get("solar_arrays").is_some()
+    {
+        let mut snapshot = state.latest_snapshot.lock().await;
+        if let Some(snap) = snapshot.as_mut() {
+            stamp_solar_array_fields(snap, &persist_for_log);
+            let _ = state.tx.send(PollMessage::Snapshot(Box::new(snap.clone())));
+        }
+    }
+
     let response = ok_response(&msg);
 
     // Now that disk is updated, apply changes to the in-memory state.

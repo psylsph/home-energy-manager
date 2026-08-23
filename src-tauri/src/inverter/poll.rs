@@ -2346,20 +2346,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 // snapshot (Solar / Power / Summary) can show
                                 // output as a percentage of rated kWp without
                                 // each component re-fetching settings.
-                                snapshot.solar_arrays =
-                                    compute_solar_arrays(&snapshot, &poll_settings);
-                                snapshot.pv1_pct = if poll_settings.pv1_rated_kw > 0.0 {
-                                    Some((snapshot.pv1_power.max(0) as f64 * 100.0)
-                                        / (poll_settings.pv1_rated_kw * 1000.0))
-                                } else {
-                                    None
-                                };
-                                snapshot.pv2_pct = if poll_settings.pv2_rated_kw > 0.0 {
-                                    Some((snapshot.pv2_power.max(0) as f64 * 100.0)
-                                        / (poll_settings.pv2_rated_kw * 1000.0))
-                                } else {
-                                    None
-                                };
+                                stamp_solar_array_fields(&mut snapshot, &poll_settings);
 
                                 // ---- CT-meter solar authority (issue #277) ----
                                 // When any external CT meter is labelled as a
@@ -3945,6 +3932,31 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 /// output picks up a few watts of the inverter's own standby draw, and
 /// that must not surface as overnight "generation" (issue #273).
 pub(crate) const SOLAR_METER_NOISE_THRESHOLD_W: u32 = 20;
+
+/// Stamp the settings-derived solar-array fields (`solar_arrays`,
+/// `pv1_pct`, `pv2_pct`) onto a snapshot. Extracted from the poll loop so
+/// `POST /api/settings` can apply the same stamping to the *current*
+/// snapshot immediately after a save: the poll loop can be busy draining
+/// queued register writes for minutes after a control-page change (each
+/// write costs a 1.5 s inter-write gap), and without this re-stamp the
+/// Solar page's Solar Arrays card would lag a settings save by that entire
+/// drain window.
+pub(crate) fn stamp_solar_array_fields(
+    snapshot: &mut InverterSnapshot,
+    settings: &crate::settings::Settings,
+) {
+    snapshot.solar_arrays = compute_solar_arrays(snapshot, settings);
+    snapshot.pv1_pct = if settings.pv1_rated_kw > 0.0 {
+        Some((snapshot.pv1_power.max(0) as f64 * 100.0) / (settings.pv1_rated_kw * 1000.0))
+    } else {
+        None
+    };
+    snapshot.pv2_pct = if settings.pv2_rated_kw > 0.0 {
+        Some((snapshot.pv2_power.max(0) as f64 * 100.0) / (settings.pv2_rated_kw * 1000.0))
+    } else {
+        None
+    };
+}
 
 pub(crate) fn compute_solar_arrays(
     snapshot: &InverterSnapshot,
