@@ -142,8 +142,8 @@ test.describe('History Page - API', () => {
     await page.locator('button:has-text("Solar")').first().click();
     await page.waitForTimeout(1500);
 
-    // The PV Energy Today chart should be present (or empty state).
-    const hasChart = await page.locator('text=/PV Energy Today/').count();
+    // The PV Energy chart should be present (or empty state).
+    const hasChart = await page.locator('text=/PV Energy/').count();
     const hasEmpty = await page.locator('text=/No data available/').count();
     expect(hasChart > 0 || hasEmpty > 0).toBe(true);
   });

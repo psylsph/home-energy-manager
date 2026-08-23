@@ -142,7 +142,7 @@ function getCharts(tab: MetricTab, hasStandingCharge: boolean): ChartDef[] {
         },
         {
           key: 'pv-energy',
-          title: 'PV Energy Today (kWh)',
+          title: 'PV Energy (kWh)',
           unit: 'kWh',
           fields: [
             { field: 'today_pv1_kwh', color: '#F59E0B', label: 'PV1' },
@@ -179,7 +179,7 @@ function getCharts(tab: MetricTab, hasStandingCharge: boolean): ChartDef[] {
         },
         {
           key: 'grid-energy',
-          title: 'Grid Energy Today (kWh)',
+          title: 'Grid Energy (kWh)',
           unit: 'kWh',
           // Use the inverter's own daily counters rather than integrating the
           // averaged power columns. Daily counters track the same registers as
@@ -209,7 +209,7 @@ function getCharts(tab: MetricTab, hasStandingCharge: boolean): ChartDef[] {
         },
         {
           key: 'home-energy',
-          title: 'Load Energy Today (kWh)',
+          title: 'Load Energy (kWh)',
           unit: 'kWh',
           fields: [{ field: 'home_energy_today_kwh', color: '#14B8A6' }],
         },
