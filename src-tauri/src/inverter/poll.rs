@@ -890,6 +890,29 @@ async fn drain_write_batches_with_gap(
     }
 }
 
+/// Persist the pre-winter register values (or clear them when winter mode
+/// deactivates) based on the state machine's `saved` output. Extracted for
+/// unit-testability of its concurrency contract.
+fn persist_auto_winter_saved(
+    poll_settings: &crate::settings::Settings,
+    saved: &Option<AutoWinterSaved>,
+) {
+    let mut app_settings = poll_settings.clone();
+    let changed = app_settings.auto_winter_saved_enable_target
+        != saved.as_ref().map(|s| s.enable_charge_target)
+        || app_settings.auto_winter_saved_target_soc
+            != saved.as_ref().map(|s| s.target_soc as u16);
+    if changed {
+        app_settings.auto_winter_saved_enable_target =
+            saved.as_ref().map(|s| s.enable_charge_target);
+        app_settings.auto_winter_saved_target_soc =
+            saved.as_ref().map(|s| s.target_soc as u16);
+        if let Err(e) = app_settings.save() {
+            tracing::warn!("Failed to persist auto winter saved values: {e}");
+        }
+    }
+}
+
 /// Store the decoded snapshot as the latest, broadcast it to WebSocket
 /// subscribers, and append it to history. Extracted from `run_poll_loop`'s
 /// publish point so the publish step's contract with concurrent settings
@@ -2294,20 +2317,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     drop(aw_state);
                                     drop(saved);
 
-                                    let mut app_settings = poll_settings.clone();
-                                    let changed = app_settings.auto_winter_saved_enable_target
-                                        != persist_saved.as_ref().map(|s| s.enable_charge_target)
-                                        || app_settings.auto_winter_saved_target_soc
-                                        != persist_saved.as_ref().map(|s| s.target_soc as u16);
-                                    if changed {
-                                        app_settings.auto_winter_saved_enable_target =
-                                            persist_saved.as_ref().map(|s| s.enable_charge_target);
-                                        app_settings.auto_winter_saved_target_soc =
-                                            persist_saved.as_ref().map(|s| s.target_soc as u16);
-                                        if let Err(e) = app_settings.save() {
-                                            tracing::warn!("Failed to persist auto winter saved values: {e}");
-                                        }
-                                    }
+                                    persist_auto_winter_saved(&poll_settings, &persist_saved);
 
                                     if let Some(writes) = writes {
                                         for w in &writes {
@@ -6045,5 +6055,49 @@ mod tests {
         })
         .await;
     }
-}
 
+    // ------------------------------------------------------------------
+    // persist_auto_winter_saved must not clobber concurrent settings saves.
+    // The poll loop passes its cycle-start settings clone; saving that whole
+    // struct back after a disjoint field (e.g. pv1_rated_kw) changed on disk
+    // mid-cycle is a lost update (same class as review finding #5, fixed for
+    // Adaptive Charge by switching to a narrow Settings::update).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn persist_auto_winter_does_not_clobber_disjoint_settings_save() {
+        crate::test_util::with_isolated_config_dir(|| {
+            // Cycle-start snapshot of settings (rated kWp still unset).
+            let stale = Settings::load();
+
+            // The concurrent save lands while the cycle is in flight —
+            // sequential reproduction of exactly the racy interleaving, not
+            // a flaky threaded race: load old → other writer saves → winter
+            // persist saves from the old snapshot.
+            Settings::update(|s| {
+                s.pv1_rated_kw = 5.0;
+            })
+            .expect("concurrent save");
+
+            persist_auto_winter_saved(
+                &stale,
+                &Some(AutoWinterSaved {
+                    enable_charge_target: true,
+                    target_soc: 80,
+                }),
+            );
+
+            let after = Settings::load();
+            assert_eq!(
+                after.pv1_rated_kw, 5.0,
+                "auto-winter persist clobbered the concurrent settings save"
+            );
+            assert_eq!(
+                after.auto_winter_saved_enable_target,
+                Some(true),
+                "winter pre-values must still be persisted"
+            );
+            assert_eq!(after.auto_winter_saved_target_soc, Some(80));
+        });
+    }
+}
