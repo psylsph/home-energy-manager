@@ -893,23 +893,24 @@ async fn drain_write_batches_with_gap(
 /// Persist the pre-winter register values (or clear them when winter mode
 /// deactivates) based on the state machine's `saved` output. Extracted for
 /// unit-testability of its concurrency contract.
-fn persist_auto_winter_saved(
-    poll_settings: &crate::settings::Settings,
-    saved: &Option<AutoWinterSaved>,
-) {
-    let mut app_settings = poll_settings.clone();
-    let changed = app_settings.auto_winter_saved_enable_target
-        != saved.as_ref().map(|s| s.enable_charge_target)
-        || app_settings.auto_winter_saved_target_soc
-            != saved.as_ref().map(|s| s.target_soc as u16);
-    if changed {
-        app_settings.auto_winter_saved_enable_target =
-            saved.as_ref().map(|s| s.enable_charge_target);
-        app_settings.auto_winter_saved_target_soc =
-            saved.as_ref().map(|s| s.target_soc as u16);
-        if let Err(e) = app_settings.save() {
-            tracing::warn!("Failed to persist auto winter saved values: {e}");
+///
+/// The transactional `Settings::update` mutates the freshly-loaded settings
+/// under the settings lock, so a concurrent save of a disjoint field (e.g.
+/// rated kWp from the settings UI) can never be reverted by persist the way
+/// a save of the cycle's `poll_settings` clone did (lost update).
+fn persist_auto_winter_saved(saved: &Option<AutoWinterSaved>) {
+    let result = crate::settings::Settings::update(|disk| {
+        let new_enable = saved.as_ref().map(|s| s.enable_charge_target);
+        let new_soc = saved.as_ref().map(|s| s.target_soc as u16);
+        if disk.auto_winter_saved_enable_target != new_enable
+            || disk.auto_winter_saved_target_soc != new_soc
+        {
+            disk.auto_winter_saved_enable_target = new_enable;
+            disk.auto_winter_saved_target_soc = new_soc;
         }
+    });
+    if let Err(e) = result {
+        tracing::warn!("Failed to persist auto winter saved values: {e}");
     }
 }
 
@@ -2317,7 +2318,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     drop(aw_state);
                                     drop(saved);
 
-                                    persist_auto_winter_saved(&poll_settings, &persist_saved);
+                                    persist_auto_winter_saved(&persist_saved);
 
                                     if let Some(writes) = writes {
                                         for w in &writes {
@@ -6067,8 +6068,10 @@ mod tests {
     #[test]
     fn persist_auto_winter_does_not_clobber_disjoint_settings_save() {
         crate::test_util::with_isolated_config_dir(|| {
-            // Cycle-start snapshot of settings (rated kWp still unset).
-            let stale = Settings::load();
+            // The cycle's pre-save settings snapshot — kept named to make
+            // the interleaving explicit even though the fixed persist path
+            // no longer consults it.
+            let _stale = Settings::load();
 
             // The concurrent save lands while the cycle is in flight —
             // sequential reproduction of exactly the racy interleaving, not
@@ -6079,9 +6082,7 @@ mod tests {
             })
             .expect("concurrent save");
 
-            persist_auto_winter_saved(
-                &stale,
-                &Some(AutoWinterSaved {
+            persist_auto_winter_saved(&Some(AutoWinterSaved {
                     enable_charge_target: true,
                     target_soc: 80,
                 }),
