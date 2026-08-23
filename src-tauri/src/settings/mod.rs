@@ -1725,8 +1725,19 @@ impl Settings {
             .map_err(|e| format!("Lock error: {e}"))?;
 
         let mut settings = Self::load();
+        // Snapshot before mutation so a no-op closure doesn't touch the
+        // file (mtime churn, backup churn, extra fsync). This covers the
+        // `persist_auto_winter_saved` steady-state poll where winter mode
+        // isn't transitioning but `update()` is still called — the file
+        // must stay untouched unless the two winter fields actually change.
+        let before = serde_json::to_string(&settings)
+            .map_err(|e| format!("Failed to serialize settings: {e}"))?;
         let payload = f(&mut settings);
-        settings.save_unlocked()?;
+        let after = serde_json::to_string(&settings)
+            .map_err(|e| format!("Failed to serialize settings: {e}"))?;
+        if before != after {
+            settings.save_unlocked()?;
+        }
         Ok(payload)
     }
 

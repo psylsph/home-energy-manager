@@ -899,9 +899,17 @@ async fn drain_write_batches_with_gap(
 /// rated kWp from the settings UI) can never be reverted by persist the way
 /// a save of the cycle's `poll_settings` clone did (lost update).
 fn persist_auto_winter_saved(saved: &Option<AutoWinterSaved>) {
+    let new_enable = saved.as_ref().map(|s| s.enable_charge_target);
+    let new_soc = saved.as_ref().map(|s| s.target_soc as u16);
+    // Fast-path: avoid taking the settings lock + touching the file when
+    // winter mode isn't transitioning (steady-state call every poll).
+    let current = crate::settings::Settings::load();
+    if current.auto_winter_saved_enable_target == new_enable
+        && current.auto_winter_saved_target_soc == new_soc
+    {
+        return;
+    }
     let result = crate::settings::Settings::update(|disk| {
-        let new_enable = saved.as_ref().map(|s| s.enable_charge_target);
-        let new_soc = saved.as_ref().map(|s| s.target_soc as u16);
         if disk.auto_winter_saved_enable_target != new_enable
             || disk.auto_winter_saved_target_soc != new_soc
         {
@@ -945,20 +953,28 @@ pub(crate) async fn publish_snapshot(state: &Arc<AppState>, snapshot: InverterSn
         *latest = Some(snapshot.clone());
     }
 
-    // Broadcast to WebSocket subscribers.
+    // Clone for history before moving `snapshot` into the broadcast.
+    // This avoids a third clone — `latest` + `history` are the only
+    // clones, the broadcast reuses the original allocation.
+    let history_snapshot = if snapshot.soc > 0 {
+        Some(snapshot.clone())
+    } else {
+        None
+    };
+
+    // Broadcast to WebSocket subscribers (move, no clone).
     let _ = state
         .tx
-        .send(PollMessage::Snapshot(Box::new(snapshot.clone())));
+        .send(PollMessage::Snapshot(Box::new(snapshot)));
 
     // Persist to history database. Clone the Arc and
     // drop the lock so synchronous SQLite I/O doesn't
     // block the Tokio worker (same pattern as get_history).
-    if snapshot.soc > 0 {
+    if let Some(snap) = history_snapshot {
         let db_guard = state.history.lock().await;
         let db = db_guard.clone();
         drop(db_guard);
         if let Some(db) = db {
-            let snap = snapshot.clone();
             tokio::task::spawn_blocking(move || {
                 db.insert_reading(&snap);
             });
@@ -3608,7 +3624,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // "Timed Charge — active" from enable_charge + slot
                                 // window + battery_state.
 
-                                publish_snapshot(&state, snapshot.clone()).await;
+                                publish_snapshot(&state, snapshot).await;
 
                                 (true, sanitized || block_suspicious, false)
                             }
