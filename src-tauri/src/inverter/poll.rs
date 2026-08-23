@@ -890,6 +890,36 @@ async fn drain_write_batches_with_gap(
     }
 }
 
+/// Store the decoded snapshot as the latest, broadcast it to WebSocket
+/// subscribers, and append it to history. Extracted from `run_poll_loop`'s
+/// publish point so the publish step's contract with concurrent settings
+/// saves (see `update_settings`) is unit-testable without a live poll loop
+/// or Modbus server.
+pub(crate) async fn publish_snapshot(state: &Arc<AppState>, snapshot: InverterSnapshot) {
+    {
+        let mut latest = state.latest_snapshot.lock().await;
+        *latest = Some(snapshot.clone());
+    }
+
+    // Broadcast to WebSocket subscribers.
+    let _ = state.tx.send(PollMessage::Snapshot(Box::new(snapshot.clone())));
+
+    // Persist to history database. Clone the Arc and
+    // drop the lock so synchronous SQLite I/O doesn't
+    // block the Tokio worker (same pattern as get_history).
+    if snapshot.soc > 0 {
+        let db_guard = state.history.lock().await;
+        let db = db_guard.clone();
+        drop(db_guard);
+        if let Some(db) = db {
+            let snap = snapshot.clone();
+            tokio::task::spawn_blocking(move || {
+                db.insert_reading(&snap);
+            });
+        }
+    }
+}
+
 /// Runs the polling loop indefinitely (spawn as a Tokio task).
 ///
 /// ## Behaviour
@@ -902,7 +932,7 @@ async fn drain_write_batches_with_gap(
 /// 4. If a poll or I/O error occurs, break out of the inner loop,
 ///    disconnect, broadcast `Reconnecting`, and attempt reconnection
 ///    with exponential back-off (5 s → 60 s cap).
-pub async fn run_poll_loop(state: Arc<AppState>) {
+pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
     // Start the Telegram /status command poller
     crate::alerts::spawn_telegram_poller(state.clone());
 
@@ -3544,28 +3574,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 // "Timed Charge — active" from enable_charge + slot
                                 // window + battery_state.
 
-                                {
-                                    let mut latest = state.latest_snapshot.lock().await;
-                                    *latest = Some(snapshot.clone());
-                                }
-
-                                // Broadcast to WebSocket subscribers.
-                                let _ = state.tx.send(PollMessage::Snapshot(Box::new(snapshot.clone())));
-
-                                // Persist to history database. Clone the Arc and
-                                // drop the lock so synchronous SQLite I/O doesn't
-                                // block the Tokio worker (same pattern as get_history).
-                                if snapshot.soc > 0 {
-                                    let db_guard = state.history.lock().await;
-                                    let db = db_guard.clone();
-                                    drop(db_guard);
-                                    if let Some(db) = db {
-                                        let snap = snapshot.clone();
-                                        tokio::task::spawn_blocking(move || {
-                                            db.insert_reading(&snap);
-                                        });
-                                    }
-                                }
+                                publish_snapshot(&state, snapshot.clone()).await;
 
                                 (true, sanitized || block_suspicious, false)
                             }
