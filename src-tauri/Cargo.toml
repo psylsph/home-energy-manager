@@ -79,7 +79,7 @@ tokio-modbus = "0.17.0"
 proptest = "1"
 # Real-socket WebSocket integration tests for the keepalive probe (issue
 # #274) — axum's oneshot router tests can't perform the HTTP upgrade.
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 
 [build-dependencies]
 tauri-build = { version = "2.6.2", features = [] }
