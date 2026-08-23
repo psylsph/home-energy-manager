@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.74.14] - 2026-08-23
+
 ### Fixed
 
 - **All settings-mutating API handlers now persist atomically.** Every handler that previously did `Settings::load()` → mutate one or two fields → `Settings::save()` raced any concurrent writer: two requests touching disjoint fields each saved the full struct from their own stale baseline, so the second save silently reverted the first's change. All handlers now use the transactional `Settings::update` (or `try_update` for validation-heavy paths), which holds the settings lock across the whole read-modify-write. Concurrent-race regressions pin the property for `set_alerts` × `set_auto_winter`, `set_load_limiter` × `set_temperature_limiter`, and `update_settings` × `update_settings`.
@@ -12,9 +14,15 @@ All notable changes to this project will be documented in this file.
 
 - **`set_mode` no longer consumes the discharge-schedule backup before the inverter confirms the restore.** Same bug class as the earlier `set_timed_export` fix, missed in the identical Timed-restore path: the #137 backup was cleared from disk before the slot-restore writes were confirmed, so a rejected register write silently destroyed the user's saved schedule with no retry possible. The backup now survives a rejected write and the handler returns a 502 telling the user to retry.
 
+- **Saving solar array sizes no longer flickers the live percentage for minutes.** Changing the rated kWp while a poll cycle was still draining control writes was clobbered by the snapshot publish that followed, reverting the Solar page's "% of max" until the next cycle finished minutes later. The publish step now re-stamps solar fields from the latest saved settings so the new capacity takes effect immediately.
+
+- **Winter-mode background saves no longer revert your solar array sizes.** The winter-mode persist path wrote back the poll loop's stale settings snapshot, silently undoing a concurrent save that touched a different field like rated kWp. It now updates only the two winter fields under the settings lock so other fields are preserved.
+
 ### Internal
 
 - `Settings::update` returns the closure's payload (the post-mutation snapshot), so handlers capture post-save state for logging/follow-up actions under the lock instead of re-loading from disk and racing a concurrent writer. New `Settings::try_update` variant aborts the save when the closure returns `Err`. The `set_agile`/`set_charging_mode`/`update_settings` post-save follow-ups (cached-agile-action queueing, EVC field sync, log message) all use closure-captured snapshots.
+- `Settings::update` no longer touches the file when the closure made no changes, avoiding mtime and backup churn on steady-state winter-mode polls. The winter persist also fast-paths the common no-change case without taking the lock.
+- `publish_snapshot` was extracted from the poll loop and now moves the snapshot into the WebSocket broadcast instead of cloning it, saving an allocation every 5 s poll.
 
 ## [0.74.13] - 2026-08-22
 
