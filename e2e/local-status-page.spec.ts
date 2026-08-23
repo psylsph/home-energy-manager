@@ -172,8 +172,10 @@ test.describe('Status Page - Polling State', () => {
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
     // The snapshot is loaded, so the status page should show energy data.
-    // The SummaryTiles "Solar Today" tile is the most reliable indicator.
-    await expect(page.getByText('Solar Today', { exact: true })).toBeVisible({ timeout: 5_000 });
+    // The SummaryTiles grid's "Solar" tile is the most reliable indicator
+    // (scoped to the grid so the nav link of the same name doesn't match).
+    const tiles = page.getByTestId('summary-tiles-grid');
+    await expect(tiles.getByText('Solar', { exact: true })).toBeVisible({ timeout: 5_000 });
   });
 });
 

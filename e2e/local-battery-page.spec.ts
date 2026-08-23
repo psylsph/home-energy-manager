@@ -117,9 +117,13 @@ test.describe('Battery Page - Stored Energy', () => {
     // glyph. Its accessible name is "Battery N% charged" (aria-label),
     // which avoids the visibility quirks of SVG <text> and the ambiguity
     // of per-module SOC labels that share the same "75%" text.
+    // The simulator seeds SOC 75, but its physics immediately charges the
+    // battery from solar surplus (~+0.5%/35s on a 19 kWh pack), so the
+    // value drifts past 75 while the suite runs. Assert the label's shape
+    // rather than an exact percentage.
     const visibleGauge = page.locator('svg[data-orientation="vertical"]');
     await expect(visibleGauge).toBeVisible({ timeout: 5_000 });
-    await expect(visibleGauge).toHaveAttribute('aria-label', 'Battery 75% charged');
+    await expect(visibleGauge).toHaveAttribute('aria-label', /^Battery \d+% charged$/);
   });
 });
 

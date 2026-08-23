@@ -14,9 +14,10 @@ test.describe('Power Page - Loading', () => {
 });
 
 test.describe('Power Page - Stat Tiles', () => {
-  test('should show Generation tile', async ({ page }) => {
+  test('should show solar generation tile', async ({ page }) => {
     await page.goto('/#/power');
-    await expect(page.locator('text=Generation')).toBeVisible({ timeout: 15_000 });
+    // The PV tile is labelled "Combined PV" (PV1+PV2 aggregate).
+    await expect(page.getByText('Combined PV').first()).toBeVisible({ timeout: 15_000 });
   });
 
   test('should show battery state tile', async ({ page }) => {
