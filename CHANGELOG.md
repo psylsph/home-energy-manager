@@ -2,16 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.74.16] - 2026-08-25
 
 ### Fixed
 
-- **History Import Cost box now matches the chart.** The Period Totals box and the Power-page Consumption Report used to fall back to a trapezoid integration of `grid_power` whenever the daily `today_import_kwh` counter was empty, on the assumption that an empty counter always meant a broken-counter firmware. On a working inverter that lets CT-clamp noise (and any brief sub-counter-resolution import) inflate the box by an arbitrary amount while the chart, which never applied the fallback, stayed at the standing-charge-only figure (issue #269, Pete's £3.86 noise case in the screenshot showing £0.5735 on the chart). Both the box and the report now trust the counter alone, so they always equal the chart on every range.
+- **History Import Cost box now matches the chart.** The Period Totals box and the Consumption Report used to fall back to a trapezoid integration of `grid_power` whenever the daily import counter was empty. On a working inverter that lets CT-clamp noise inflate the box by an arbitrary amount while the chart stays at the standing-charge-only figure, which is what issue #269 was reporting (Pete's £3.86 box against a £0.5735 chart). Both sides now trust the counter alone and always agree on every range.
 
 ### Internal
 
 - Poll-loop settings reads (the publish-time solar re-stamp and the winter-mode persist) now run on the blocking thread pool like the cycle's own settings load, so a slow or networked settings file can't stall a poll tick.
-- The poll-path persists for CT-solar meter baselines (issue #277) and the discharge-floor guard's saved reserve now go through `Settings::update` rather than `load + save`, so a concurrent settings save landing mid-poll can no longer be reverted by the poll's full-struct write (the same lost-update class the Aug-21 sweep eliminated elsewhere; the two poll-loop sites were missed at the time).
+- The poll-path persists for CT-solar meter baselines and the discharge-floor guard's saved reserve now go through `Settings::update` rather than `load + save`, so a concurrent settings save landing mid-poll can no longer be reverted by the poll's full-struct write (the same lost-update class the Aug-21 sweep eliminated elsewhere; the two poll-loop sites were missed at the time).
 
 ## [0.74.15] - 2026-08-23
 
