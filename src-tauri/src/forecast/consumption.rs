@@ -210,6 +210,55 @@ mod tests {
     }
 
     #[test]
+    fn sub_hourly_samples_sum_within_each_hour() {
+        // Real deployments poll every ~20 s, so an hour carries many tiny
+        // deltas. The profile must report the hour's TOTAL energy (sum of
+        // deltas), not the median single-interval delta — otherwise a
+        // 20 s cadence collapses each hour to ~0.01 kWh (found while
+        // seeding demo data against the simulator).
+        let mut rows = Vec::new();
+        // Three days, hour 12, four 15-minute intervals of 0.25 kWh each
+        // → the hour consumed 1.0 kWh on every day.
+        for i in 0..3u32 {
+            let d = 10 + i;
+            let mut counter = 0.0;
+            for q in 0..4u32 {
+                let ts = local_ts(2025, 6, d, 12, q * 15);
+                rows.push(row(ts, counter));
+                counter += 0.25;
+            }
+            // Anchor the last sample's hour attribution cleanly.
+            rows.push(row(local_ts(2025, 6, d, 13, 0), counter));
+        }
+        let profile = build_consumption_profile(&rows);
+        let band = profile.hours[12].expect("hour 12 band");
+        assert!((band.median - 1.0).abs() < 1e-9, "median = {}", band.median);
+        assert!((band.p25 - 1.0).abs() < 1e-9);
+        assert!((band.p75 - 1.0).abs() < 1e-9);
+        assert_eq!(profile.days_observed, 3);
+    }
+
+    #[test]
+    fn mixed_cadences_do_not_distort_the_profile() {
+        // Day A polls hourly (one 0.5 delta in hour 10), day B every 20 s
+        // (90 deltas of ~0.0056 summing to 0.5). Both days consumed the
+        // same energy; the fitted median must be 0.5, not ~0.006.
+        let mut rows = Vec::new();
+        // Day A: hourly.
+        rows.push(row(local_ts(2025, 6, 10, 10, 0), 1.0));
+        rows.push(row(local_ts(2025, 6, 10, 11, 0), 1.5));
+        // Day B: 20-second cadence over the same hour.
+        let mut counter = 2.0;
+        for s in (0..=3600u32).step_by(20) {
+            rows.push(row(local_ts(2025, 6, 11, 10, 0) + s as i64, counter));
+            counter += 0.5 / 180.0;
+        }
+        let profile = build_consumption_profile(&rows);
+        let band = profile.hours[10].expect("hour 10 band");
+        assert!((band.median - 0.5).abs() < 0.02, "median = {}", band.median);
+    }
+
+    #[test]
     fn median_per_hour_across_days() {
         // Three days, each with a 12:00→13:00 interval (attributed to
         // clock hour 12) consuming 1.0, 2.0 and 4.0 kWh → median 2.0,
