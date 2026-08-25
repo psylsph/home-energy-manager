@@ -12,6 +12,7 @@
 
 pub mod calibration;
 pub mod consumption;
+pub mod planner;
 pub mod simulate;
 pub mod solar;
 
