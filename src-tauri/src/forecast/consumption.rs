@@ -11,6 +11,8 @@
 //! valid when the two counter samples are ≤ 2 h apart, share the same
 //! local day (no midnight-reset artefacts), and are non-decreasing.
 
+use chrono::Timelike;
+
 /// Minimum distinct days of consumption history before the profile is
 /// reported as sufficient. A week captures at least one of every weekday.
 pub const MIN_CONSUMPTION_DAYS: u32 = 7;
@@ -95,11 +97,73 @@ fn percentile_sorted(sorted: &[f64], pct: f64) -> f64 {
 /// Build the hour-of-day profile from counter samples (any ordering; the
 /// samples are sorted by timestamp internally).
 pub fn build_consumption_profile(rows: &[ConsumptionCounterRow]) -> ConsumptionProfile {
-    // RED stub — Phase 1 implementation lands in the following commit.
-    let _ = rows;
+    let mut sorted: Vec<&ConsumptionCounterRow> =
+        rows.iter().filter(|r| r.kwh.is_some()).collect();
+    sorted.sort_by_key(|r| r.timestamp);
+
+    // Buckets of valid hourly deltas keyed by local hour-of-day, plus the
+    // set of distinct local days that contributed.
+    let mut buckets: Vec<Vec<f64>> = vec![Vec::new(); 24];
+    let mut days: std::collections::BTreeSet<chrono::NaiveDate> = Default::default();
+
+    for pair in sorted.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let gap = b.timestamp - a.timestamp;
+        if gap <= 0 || gap > MAX_DELTA_GAP_SECS {
+            continue;
+        }
+        let (Some(a_dt), Some(b_dt)) = (
+            chrono::DateTime::from_timestamp(a.timestamp, 0),
+            chrono::DateTime::from_timestamp(b.timestamp, 0),
+        ) else {
+            continue;
+        };
+        let a_local = a_dt.with_timezone(&chrono::Local);
+        let b_local = b_dt.with_timezone(&chrono::Local);
+        // A midnight counter reset shows up as a day change; a mid-day
+        // reset as a negative delta. Neither is real consumption.
+        if a_local.date_naive() != b_local.date_naive() {
+            continue;
+        }
+        let (Some(a_kwh), Some(b_kwh)) = (a.kwh, b.kwh) else {
+            continue;
+        };
+        let delta = b_kwh - a_kwh;
+        if delta < 0.0 {
+            continue;
+        }
+        // Attribute to the hour containing the interval midpoint — with
+        // hourly polls that's the hour both samples live in.
+        let mid_ts = a.timestamp + gap / 2;
+        let hour = chrono::DateTime::from_timestamp(mid_ts, 0)
+            .map(|dt| dt.with_timezone(&chrono::Local))
+            .map(|dt| dt.hour() as usize)
+            .unwrap_or(0);
+        buckets[hour].push(delta);
+        days.insert(a_local.date_naive());
+    }
+
+    let hours = buckets
+        .into_iter()
+        .enumerate()
+        .map(|(hour, mut deltas)| {
+            if deltas.is_empty() {
+                return None;
+            }
+            deltas.sort_by(|a, b| a.partial_cmp(b).expect("deltas are finite"));
+            let band = ConsumptionHourBand {
+                hour: hour as u8,
+                p25: percentile_sorted(&deltas, 25.0),
+                median: percentile_sorted(&deltas, 50.0),
+                p75: percentile_sorted(&deltas, 75.0),
+            };
+            Some(band)
+        })
+        .collect();
+
     ConsumptionProfile {
-        hours: vec![None; 24],
-        days_observed: 0,
+        hours,
+        days_observed: days.len() as u32,
     }
 }
 
@@ -147,16 +211,14 @@ mod tests {
 
     #[test]
     fn median_per_hour_across_days() {
-        // Three days, hour 12 deltas of 1.0, 2.0, 4.0 → median 2.0,
+        // Three days, each with a 12:00→13:00 interval (attributed to
+        // clock hour 12) consuming 1.0, 2.0 and 4.0 kWh → median 2.0,
         // p25 1.5, p75 3.0.
         let mut rows = Vec::new();
-        for (i, base) in [0.0, 10.0, 20.0].iter().enumerate() {
+        for (i, kwh) in [1.0, 2.0, 4.0].iter().enumerate() {
             let d = 10 + i as u32;
-            for h in 11..14u32 {
-                let ts = local_ts(2025, 6, d, h, 0);
-                let kwh = base + 1.0 * (h - 11) as f64;
-                rows.push(row(ts, kwh));
-            }
+            rows.push(row(local_ts(2025, 6, d, 12, 0), 0.0));
+            rows.push(row(local_ts(2025, 6, d, 13, 0), *kwh));
         }
         let profile = build_consumption_profile(&rows);
         let band = profile.hours[12].expect("hour 12 has three deltas");

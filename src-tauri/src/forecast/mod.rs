@@ -15,12 +15,10 @@ pub mod consumption;
 pub mod simulate;
 pub mod solar;
 
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, Timelike};
 
-use crate::forecast::calibration::calibrate_performance_ratio;
-use crate::forecast::consumption::{
-    build_consumption_profile, ConsumptionCounterRow, MIN_CONSUMPTION_DAYS,
-};
+use crate::forecast::calibration::calibrate_performance_ratio_detailed;
+use crate::forecast::consumption::build_consumption_profile;
 use crate::forecast::simulate::{simulate_battery, SimHourInput, SimulationParams};
 use crate::forecast::solar::{OpenMeteoSolarProvider, SolarForecast, SolarForecastProvider};
 use crate::history::{ForecastValueRow, HistoryDb};
@@ -125,23 +123,182 @@ pub struct ForecastInputs<'a> {
 /// radiation, calibrated PR, fitted consumption profile, current snapshot
 /// and settings. Every degradation path yields partial data plus a
 /// status code — never zeros pretending to be a prediction.
-pub fn build_forecast_payload(_inputs: &ForecastInputs) -> ForecastPayload {
-    // RED stub — Phase 1 implementation lands in the following commit.
+pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
+    let now = inputs.now;
+    let now_ts = now.timestamp();
+    let today = now.date_naive();
+    let tomorrow = today
+        .checked_add_signed(chrono::Duration::days(1))
+        .unwrap_or(today);
+    let mut status: Vec<String> = Vec::new();
+
+    // --- gating ----------------------------------------------------------
+    if !inputs.weather_enabled {
+        status.push("weather_disabled".to_string());
+    } else if inputs.weather_coords.is_none() {
+        status.push("no_coordinates".to_string());
+    }
+
+    // --- performance ratio ----------------------------------------------
+    let pr_stored = inputs
+        .db
+        .and_then(|db| db.get_meta_value(META_FORECAST_PR))
+        .and_then(|v| v.parse::<f64>().ok());
+    let pr_days = inputs
+        .db
+        .and_then(|db| db.get_meta_value(META_FORECAST_PR_DAYS))
+        .and_then(|v| v.parse::<u32>().ok());
+    if pr_stored.is_none() {
+        status.push("calibrating".to_string());
+    }
+    let pr = pr_stored.unwrap_or(FALLBACK_PERFORMANCE_RATIO);
+
+    // --- forward solar ---------------------------------------------------
+    let kwp = effective_solar_kwp(inputs.settings);
+    let mut solar: Vec<ForecastSolarHour> = Vec::new();
+    let mut solar_today_remaining_kwh = 0.0;
+    let mut solar_tomorrow_kwh = 0.0;
+    if let Some(db) = inputs.db {
+        let series = db
+            .query_forecast_series(
+                "shortwave_radiation",
+                crate::forecast::solar::OpenMeteoSolarProvider::SOURCE,
+                now_ts,
+                now_ts + 72 * 3600,
+            )
+            .unwrap_or_default();
+        for p in series {
+            let Some(utc) = chrono::DateTime::from_timestamp(p.timestamp, 0) else {
+                continue;
+            };
+            let local = utc.with_timezone(&chrono::Local);
+            let kwh = p.value / 1000.0 * kwp * pr;
+            match local.date_naive() {
+                d if d == today => solar_today_remaining_kwh += kwh,
+                d if d == tomorrow => solar_tomorrow_kwh += kwh,
+                _ => {}
+            }
+            solar.push(ForecastSolarHour {
+                timestamp: p.timestamp,
+                kwh,
+                band_low: kwh * (1.0 - SOLAR_BAND_FACTOR),
+                band_high: kwh * (1.0 + SOLAR_BAND_FACTOR),
+            });
+        }
+    }
+    if solar.is_empty() {
+        status.push("no_forecast_data".to_string());
+    }
+
+    // --- consumption profile ----------------------------------------------
+    let rows = inputs
+        .db
+        .map(|db| {
+            db.consumption_counter_rows_since(now_ts - CONSUMPTION_WINDOW_DAYS * 86_400)
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    let profile = build_consumption_profile(&rows);
+    if !profile.sufficient() {
+        status.push("insufficient_consumption_history".to_string());
+    }
+    let consumption: Vec<ForecastConsumptionHour> = (0..24u8)
+        .map(|hour| match &profile.hours[hour as usize] {
+            Some(band) => ForecastConsumptionHour {
+                hour,
+                kwh: band.median,
+                p25: band.p25,
+                p75: band.p75,
+            },
+            None => {
+                // Unobserved hour: the nearest-neighbour fallback value,
+                // with a degenerate band (we have no statistics for it).
+                let kwh = profile.median_kwh_for_hour(hour);
+                ForecastConsumptionHour {
+                    hour,
+                    kwh,
+                    p25: kwh,
+                    p75: kwh,
+                }
+            }
+        })
+        .collect();
+    let consumption_tomorrow_kwh: f64 = consumption.iter().map(|c| c.kwh).sum();
+
+    // --- battery projection -----------------------------------------------
+    let mut battery = None;
+    let mut import_tomorrow_kwh = 0.0;
+    let mut export_tomorrow_kwh = 0.0;
+    match inputs.snapshot {
+        None => status.push("no_snapshot".to_string()),
+        Some(snap) => {
+            let (charge_kw, discharge_kw) = battery_rate_limits_kw(snap);
+            if snap.battery_capacity_kwh <= 0.0 || charge_kw <= 0.0 || discharge_kw <= 0.0 {
+                status.push("no_battery_capacity".to_string());
+            } else {
+                let sim_hours: Vec<SimHourInput> = solar
+                    .iter()
+                    .map(|s| {
+                        let hour = chrono::DateTime::from_timestamp(s.timestamp, 0)
+                            .map(|dt| dt.with_timezone(&chrono::Local).hour() as u8)
+                            .unwrap_or(0);
+                        SimHourInput {
+                            timestamp: s.timestamp,
+                            solar_kwh: s.kwh,
+                            consumption_kwh: profile.median_kwh_for_hour(hour),
+                        }
+                    })
+                    .collect();
+                let params = SimulationParams {
+                    capacity_kwh: snap.battery_capacity_kwh as f64,
+                    start_soc_pct: snap.soc as f64,
+                    reserve_soc_pct: snap.battery_reserve as f64,
+                    max_charge_kw: charge_kw,
+                    max_discharge_kw: discharge_kw,
+                    charge_efficiency: inputs.settings.forecast_charge_efficiency,
+                    discharge_efficiency: inputs.settings.forecast_discharge_efficiency,
+                };
+                let sim = simulate_battery(&sim_hours, &params);
+                for h in &sim.hours {
+                    let is_tomorrow = chrono::DateTime::from_timestamp(h.timestamp, 0)
+                        .map(|dt| dt.with_timezone(&chrono::Local).date_naive() == tomorrow)
+                        .unwrap_or(false);
+                    if is_tomorrow {
+                        import_tomorrow_kwh += h.import_kwh;
+                        export_tomorrow_kwh += h.export_kwh;
+                    }
+                }
+                let end_soc_pct = sim
+                    .hours
+                    .last()
+                    .map(|h| h.soc_pct)
+                    .unwrap_or(snap.soc as f64);
+                battery = Some(ForecastBattery {
+                    capacity_kwh: params.capacity_kwh,
+                    start_soc_pct: params.start_soc_pct,
+                    reserve_soc_pct: params.reserve_soc_pct,
+                    hours: sim.hours.iter().map(|h| (h.timestamp, h.soc_pct)).collect(),
+                    end_soc_pct,
+                });
+            }
+        }
+    }
+
     ForecastPayload {
-        generated_at: 0,
-        status: vec!["no_forecast_data".to_string()],
-        performance_ratio: None,
-        performance_ratio_days: None,
-        solar: Vec::new(),
-        solar_today_remaining_kwh: 0.0,
-        solar_tomorrow_kwh: 0.0,
-        consumption: Vec::new(),
-        consumption_days_observed: 0,
-        consumption_sufficient: false,
-        consumption_tomorrow_kwh: 0.0,
-        battery: None,
-        import_tomorrow_kwh: 0.0,
-        export_tomorrow_kwh: 0.0,
+        generated_at: now_ts,
+        status,
+        performance_ratio: pr_stored,
+        performance_ratio_days: pr_days,
+        solar,
+        solar_today_remaining_kwh,
+        solar_tomorrow_kwh,
+        consumption,
+        consumption_days_observed: profile.days_observed,
+        consumption_sufficient: profile.sufficient(),
+        consumption_tomorrow_kwh,
+        battery,
+        import_tomorrow_kwh,
+        export_tomorrow_kwh,
     }
 }
 
@@ -149,9 +306,24 @@ pub fn build_forecast_payload(_inputs: &ForecastInputs) -> ForecastPayload {
 /// the same model classification the Control page applies: direct-limit
 /// families store 1–100%, DC hybrids store 0–50 which the UI doubles.
 /// Returns (0, 0) when the max battery power is unknown.
-pub(crate) fn battery_rate_limits_kw(_snapshot: &InverterSnapshot) -> (f64, f64) {
-    // RED stub — Phase 1 implementation lands in the following commit.
-    (0.0, 0.0)
+pub(crate) fn battery_rate_limits_kw(snapshot: &InverterSnapshot) -> (f64, f64) {
+    if snapshot.max_battery_power_w == 0 {
+        return (0.0, 0.0);
+    }
+    let max_kw = snapshot.max_battery_power_w as f64 / 1000.0;
+    // DC hybrids store 0–50 which the UI doubles for display; direct-limit
+    // families store 1–100 natively.
+    let scale = if snapshot.device_type.uses_direct_charge_limit() {
+        1.0
+    } else {
+        2.0
+    };
+    let charge_pct = (snapshot.charge_rate as f64 * scale).clamp(0.0, 100.0);
+    let discharge_pct = (snapshot.discharge_rate as f64 * scale).clamp(0.0, 100.0);
+    (
+        charge_pct / 100.0 * max_kw,
+        discharge_pct / 100.0 * max_kw,
+    )
 }
 
 /// How far back the calibration reads actual generation for. One day
@@ -219,7 +391,19 @@ pub fn store_and_calibrate(
 
     let since = now_ts - CALIBRATION_LOOKBACK_DAYS * 86_400;
     let totals = db.daily_solar_totals_since(since).unwrap_or_default();
-    calibrate_performance_ratio(&past, &totals, rated_kw, now.date_naive())
+    let fit = calibrate_performance_ratio_detailed(&past, &totals, rated_kw, now.date_naive());
+    // Persist the calibration so `GET /api/forecast` can serve the PR
+    // without recalibrating. Written only on success — a failed attempt
+    // keeps the previous fit (and its day count / timestamp) until the
+    // next successful one supersedes it.
+    if let Some(pr) = fit.pr {
+        if let Err(e) = db.set_meta_value(META_FORECAST_PR, &format!("{pr:.4}")) {
+            tracing::warn!("Failed to persist forecast PR: {e}");
+        }
+        let _ = db.set_meta_value(META_FORECAST_PR_DAYS, &fit.usable_days.to_string());
+        let _ = db.set_meta_value(META_FORECAST_CALIBRATED_AT, &now_ts.to_string());
+    }
+    fit.pr
 }
 
 /// Total rated kWp used by the radiation→power model. Mirrors the
@@ -501,7 +685,7 @@ mod tests {
     fn store_and_calibrate_persists_pr_to_meta() {
         let db = test_db();
         let now = local_dt(2025, 6, 15, 12, 0);
-        let now_ts = now.timestamp();
+        let _now_ts = now.timestamp();
         let rated = 5.0_f64;
         let kwhs = [24.5_f32, 28.0, 31.5, 35.0, 21.0];
         for (i, &kwh) in kwhs.iter().enumerate() {
@@ -541,10 +725,15 @@ mod tests {
         assert!(pr.is_some(), "five complete days should calibrate");
         // The PR and usable-day count survive to meta so GET /api/forecast
         // can serve them without recalibrating from scratch.
-        assert_eq!(db.get_meta_value(META_FORECAST_PR), Some("0.8".to_string()));
         assert_eq!(
-            db.get_meta_value(META_FORECAST_PR_DAYS),
-            Some("5".to_string())
+            db.get_meta_value(META_FORECAST_PR)
+                .and_then(|v| v.parse::<f64>().ok()),
+            Some(0.8)
+        );
+        assert_eq!(
+            db.get_meta_value(META_FORECAST_PR_DAYS)
+                .and_then(|v| v.parse::<u32>().ok()),
+            Some(5)
         );
         assert!(db.get_meta_value(META_FORECAST_CALIBRATED_AT).is_some());
     }

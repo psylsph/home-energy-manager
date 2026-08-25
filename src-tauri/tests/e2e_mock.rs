@@ -866,6 +866,14 @@ async fn forecast_endpoint_serves_seeded_forecast() {
     }
     *state.history.lock().await = Some(Arc::new(db));
 
+    // Weather enabled with coordinates so the forecast isn't gated off.
+    {
+        let mut ws = state.weather.lock().await;
+        ws.config.enabled = true;
+        ws.config.latitude = Some(51.5);
+        ws.config.longitude = Some(-0.13);
+    }
+
     *state.latest_snapshot.lock().await = Some(InverterSnapshot {
         soc: 50,
         battery_capacity_kwh: 10.0,

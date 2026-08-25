@@ -521,8 +521,17 @@ impl DeviceType {
     /// page's rate maths. Gateway (0x70xx) is included per the frontend
     /// classification; the AIO kW variants (0x80xx) are not.
     pub fn uses_direct_charge_limit(&self) -> bool {
-        // RED stub — Phase 1 implementation lands in the following commit.
-        false
+        matches!(
+            self,
+            Self::ACCoupled
+                | Self::ACCoupledMk2
+                | Self::ThreePhase
+                | Self::AioCommercial
+                | Self::ACThreePhase
+                | Self::Gateway
+                | Self::HybridHvGen3
+                | Self::AllInOneHybrid
+        )
     }
 
     pub fn supports_eps(&self) -> bool {

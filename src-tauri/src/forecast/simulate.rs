@@ -66,13 +66,68 @@ pub struct SimulationOutput {
 /// out-of-range start SOC yields no simulation (empty output), matching
 /// the API's "no battery" degradation path.
 pub fn simulate_battery(hours: &[SimHourInput], params: &SimulationParams) -> SimulationOutput {
-    // RED stub — Phase 1 implementation lands in the following commit.
-    let _ = (hours, params);
-    SimulationOutput {
-        hours: Vec::new(),
+    // Guards: no capacity / unknown max rates / out-of-range start SOC
+    // mean we cannot project — the API reports `no_battery_capacity` /
+    // empty output instead of guessing.
+    if params.capacity_kwh <= 0.0
+        || params.max_charge_kw <= 0.0
+        || params.max_discharge_kw <= 0.0
+        || !(0.0..=100.0).contains(&params.start_soc_pct)
+    {
+        return SimulationOutput {
+            hours: Vec::new(),
+            total_import_kwh: 0.0,
+            total_export_kwh: 0.0,
+        };
+    }
+
+    let eta_c = params.charge_efficiency.clamp(0.01, 1.0);
+    let eta_d = params.discharge_efficiency.clamp(0.01, 1.0);
+    let capacity = params.capacity_kwh;
+    let mut stored = params.start_soc_pct / 100.0 * capacity;
+    let reserve_stored = params.reserve_soc_pct.clamp(0.0, 100.0) / 100.0 * capacity;
+
+    let mut out = SimulationOutput {
+        hours: Vec::with_capacity(hours.len()),
         total_import_kwh: 0.0,
         total_export_kwh: 0.0,
+    };
+
+    for h in hours {
+        let net = h.solar_kwh - h.consumption_kwh;
+        let (charge, discharge, import, export) = if net >= 0.0 {
+            let surplus = net;
+            let room = capacity - stored;
+            let charge_ac = surplus
+                .min(params.max_charge_kw)
+                .min(if eta_c > 0.0 { room / eta_c } else { surplus });
+            stored += charge_ac * eta_c;
+            (charge_ac, 0.0, 0.0, surplus - charge_ac)
+        } else {
+            let need = -net;
+            let available_dc = (stored - reserve_stored).max(0.0);
+            let discharge_ac = need
+                .min(params.max_discharge_kw)
+                .min(if eta_d > 0.0 { available_dc * eta_d } else { need });
+            stored -= discharge_ac / eta_d;
+            (0.0, discharge_ac, need - discharge_ac, 0.0)
+        };
+
+        // Numerical safety: never report SOC outside [0, 100].
+        stored = stored.clamp(0.0, capacity);
+        out.hours.push(SimHourResult {
+            timestamp: h.timestamp,
+            soc_pct: stored / capacity * 100.0,
+            import_kwh: import.max(0.0),
+            export_kwh: export.max(0.0),
+            charge_kwh: charge.max(0.0),
+            discharge_kwh: discharge.max(0.0),
+        });
+        out.total_import_kwh += import.max(0.0);
+        out.total_export_kwh += export.max(0.0);
     }
+
+    out
 }
 
 #[cfg(test)]
@@ -211,7 +266,8 @@ mod tests {
     #[test]
     fn invalid_capacity_or_soc_yields_empty_output() {
         let p = params(10.0, 50.0, 10.0);
-        assert!(simulate_battery(&[hour(0, 1.0, 1.0)], &p).hours.is_empty());
+        // Valid params simulate normally.
+        assert_eq!(simulate_battery(&[hour(0, 1.0, 1.0)], &p).hours.len(), 1);
 
         let mut zero_cap = p;
         zero_cap.capacity_kwh = 0.0;

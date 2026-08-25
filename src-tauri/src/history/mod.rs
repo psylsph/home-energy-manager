@@ -2165,14 +2165,27 @@ impl HistoryDb {
     /// forecast subsystem persists its calibrated performance ratio here).
     /// The `meta` table previously had no generic accessors; migrations
     /// used inline SQL.
-    pub fn get_meta_value(&self, _key: &str) -> Option<String> {
-        // RED stub — Phase 1 implementation lands in the following commit.
-        None
+    pub fn get_meta_value(&self, key: &str) -> Option<String> {
+        let conn = self.conn.lock().ok()?;
+        conn.query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
     }
 
     /// Upsert a `meta` table value by key.
-    pub fn set_meta_value(&self, _key: &str, _value: &str) -> Result<(), String> {
-        // RED stub — Phase 1 implementation lands in the following commit.
+    pub fn set_meta_value(&self, key: &str, value: &str) -> Result<(), String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            params![key, value],
+        )
+        .map_err(|e| format!("Failed to write meta {key}: {e}"))?;
         Ok(())
     }
 
@@ -2251,10 +2264,49 @@ impl HistoryDb {
     /// when present, else `today_consumption_kwh`.
     pub fn consumption_counter_rows_since(
         &self,
-        _since_ts: i64,
+        since_ts: i64,
     ) -> Result<Vec<crate::forecast::consumption::ConsumptionCounterRow>, String> {
-        // RED stub — Phase 1 implementation lands in the following commit.
-        Ok(Vec::new())
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp, home_energy_today_kwh, today_consumption_kwh \
+                 FROM readings WHERE timestamp >= ?1 \
+                 AND (home_energy_today_kwh > 0 OR today_consumption_kwh > 0) \
+                 ORDER BY timestamp ASC",
+            )
+            .map_err(|e| format!("Failed to prepare consumption rows query: {e}"))?;
+        let rows = stmt
+            .query_map(params![since_ts], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<f64>>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                ))
+            })
+            .map_err(|e| format!("Consumption rows query failed: {e}"))?
+            .collect::<SqlResult<Vec<_>>>()
+            .map_err(|e| format!("Failed to read consumption rows row: {e}"))?;
+
+        // Precedence mirrors query_energy_summary: home_energy_today_kwh
+        // wins when it carries a value. The snapshot counters are plain
+        // f32 (never NULL in the DB), so "carries a value" is `> 0` — a
+        // dongle that hasn't reported the counter writes 0. The cost is
+        // that a genuinely-zero midnight-reset reading is dropped; the
+        // first positive sample of the day still anchors the profile.
+        Ok(rows
+            .into_iter()
+            .map(|(timestamp, home, fallback)| {
+                let kwh = match (home, fallback) {
+                    (Some(h), _) if h > 0.0 => Some(h),
+                    (_, Some(f)) if f > 0.0 => Some(f),
+                    _ => None,
+                };
+                crate::forecast::consumption::ConsumptionCounterRow { timestamp, kwh }
+            })
+            .collect())
     }
 
     /// Actual solar generation grouped by local day for the
@@ -6299,12 +6351,14 @@ mod tests {
             ..Default::default()
         });
 
-        let rows = db.consumption_counter_rows_since(base).unwrap();
+        // Window starting after the first row excludes it but keeps the
+        // later two.
+        let rows = db.consumption_counter_rows_since(base + 1).unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].timestamp, base);
-        assert_eq!(rows[0].kwh, Some(5.0));
-        assert_eq!(rows[1].timestamp, base + 60);
-        assert_eq!(rows[1].kwh, Some(4.5));
+        assert_eq!(rows[0].timestamp, base + 60);
+        assert_eq!(rows[0].kwh, Some(4.5));
+        assert_eq!(rows[1].timestamp, base + 600);
+        assert_eq!(rows[1].kwh, Some(9.0));
     }
 
     #[test]

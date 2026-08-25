@@ -56,14 +56,27 @@ const PR_CLAMP_MAX: f64 = 1.5;
 /// Returns `None` when fewer than [`MIN_CALIBRATION_DAYS`] usable days
 /// remain after the rejection filters (dark / partial / dead / no-data /
 /// current day).
-pub fn calibrate_performance_ratio(
+/// Result of a calibration attempt: the fitted PR (when enough usable
+/// days existed) plus how many days actually contributed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CalibrationFit {
+    pub pr: Option<f64>,
+    pub usable_days: usize,
+}
+
+/// Fit the performance ratio, exposing the usable-day count so callers
+/// can persist calibration metadata.
+pub fn calibrate_performance_ratio_detailed(
     samples: &[SolarForecastSample],
     totals: &[DailySolarTotal],
     rated_kw: f64,
     today: chrono::NaiveDate,
-) -> Option<f64> {
+) -> CalibrationFit {
     if rated_kw <= 0.0 {
-        return None;
+        return CalibrationFit {
+            pr: None,
+            usable_days: 0,
+        };
     }
 
     // Integrate hourly radiation per local day. Samples are hourly on
@@ -96,7 +109,10 @@ pub fn calibrate_performance_ratio(
         .collect();
 
     if ratios.len() < MIN_CALIBRATION_DAYS {
-        return None;
+        return CalibrationFit {
+            pr: None,
+            usable_days: ratios.len(),
+        };
     }
 
     // Median (not mean): a single bad dongle day or a stale counter must
@@ -108,7 +124,20 @@ pub fn calibrate_performance_ratio(
     } else {
         (ratios[n / 2 - 1] + ratios[n / 2]) / 2.0
     };
-    Some(median.clamp(PR_CLAMP_MIN, PR_CLAMP_MAX))
+    CalibrationFit {
+        pr: Some(median.clamp(PR_CLAMP_MIN, PR_CLAMP_MAX)),
+        usable_days: n,
+    }
+}
+
+/// Convenience wrapper returning just the fitted PR.
+pub fn calibrate_performance_ratio(
+    samples: &[SolarForecastSample],
+    totals: &[DailySolarTotal],
+    rated_kw: f64,
+    today: chrono::NaiveDate,
+) -> Option<f64> {
+    calibrate_performance_ratio_detailed(samples, totals, rated_kw, today).pr
 }
 
 #[cfg(test)]
