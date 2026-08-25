@@ -1,5 +1,6 @@
 pub mod alerts;
 pub mod evc;
+pub mod forecast;
 pub mod history;
 pub mod inverter;
 pub mod modbus;

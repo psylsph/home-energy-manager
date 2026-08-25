@@ -845,6 +845,43 @@ CREATE TABLE IF NOT EXISTS octopus_tariff_prices (
 );
 ";
 
+/// One local day's actual solar generation total (issue #283, Phase 0):
+/// the max `today_solar_kwh` observed that day (the inverter counter is
+/// monotonic within a day and resets at local midnight) plus how many
+/// distinct local hours had readings — the completeness signal the
+/// forecast performance-ratio calibration uses to reject partial poll
+/// days.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DailySolarTotal {
+    /// Local calendar day the total belongs to.
+    pub date: chrono::NaiveDate,
+    /// Best (max) `today_solar_kwh` seen on that day, kWh.
+    pub kwh: f64,
+    /// Count of distinct local hours with at least one reading.
+    pub hours_covered: u32,
+}
+
+/// One stored forecast variable sample (issue #283, Phase 0) — a single
+/// hourly value of a named variable (`shortwave_radiation`,
+/// `direct_radiation`, `cloud_cover`) from a named source, as fetched at
+/// `fetched_at`. Re-fetching the same hour upserts, so the newest
+/// forecast for any (timestamp, variable, source) wins.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForecastValueRow {
+    pub timestamp: i64,
+    pub variable: String,
+    pub value: f64,
+    pub source: String,
+    pub fetched_at: i64,
+}
+
+/// A point in a stored forecast series.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ForecastPoint {
+    pub timestamp: i64,
+    pub value: f64,
+}
+
 // ---------------------------------------------------------------------------
 // HistoryDb wrapper
 // ---------------------------------------------------------------------------
@@ -2108,6 +2145,37 @@ impl HistoryDb {
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
         )
         .ok()
+    }
+
+    /// Batch-upsert forecast variable samples into `forecast_values`.
+    /// Returns the number of rows written. All-or-nothing via a
+    /// transaction so a partial fetch never leaves a half-updated
+    /// forecast window.
+    pub fn insert_forecast_values(&self, _rows: &[ForecastValueRow]) -> Result<usize, String> {
+        // RED stub — Phase 0 implementation lands in the following commit.
+        Ok(0)
+    }
+
+    /// Read one stored forecast series — samples for `variable` from
+    /// `source` with `since_ts <= timestamp < until_ts`, ascending.
+    pub fn query_forecast_series(
+        &self,
+        _variable: &str,
+        _source: &str,
+        _since_ts: i64,
+        _until_ts: i64,
+    ) -> Result<Vec<ForecastPoint>, String> {
+        // RED stub — Phase 0 implementation lands in the following commit.
+        Ok(Vec::new())
+    }
+
+    /// Actual solar generation grouped by local day for the
+    /// performance-ratio calibration (issue #283, Phase 0). See
+    /// [`DailySolarTotal`] for the grouping rules; only days with at
+    /// least one reading carrying `today_solar_kwh > 0` are returned.
+    pub fn daily_solar_totals_since(&self, _since_ts: i64) -> Result<Vec<DailySolarTotal>, String> {
+        // RED stub — Phase 0 implementation lands in the following commit.
+        Ok(Vec::new())
     }
 
     /// Upsert an Octopus response page atomically. Re-fetching a recent
@@ -5877,7 +5945,6 @@ mod tests {
         let ts = 1700000000i64;
         db.insert_weather(ts, 12.0, "backfill", None, None, ts);
         db.insert_weather(ts, 14.5, "current", Some(51.5), Some(-0.13), ts);
-
         let count: i64 = db
             .conn
             .lock()
@@ -5912,6 +5979,155 @@ mod tests {
             )
             .unwrap();
         assert_eq!(source, "current");
+    }
+
+    // --- forecast_values (issue #283, Phase 0) ----------------------------
+
+    fn make_solar_kwh_snapshot(ts: i64, kwh: f32) -> InverterSnapshot {
+        InverterSnapshot {
+            timestamp: ts,
+            today_solar_kwh: kwh,
+            ..Default::default()
+        }
+    }
+
+    fn forecast_row(ts: i64, variable: &str, value: f64, source: &str) -> ForecastValueRow {
+        ForecastValueRow {
+            timestamp: ts,
+            variable: variable.to_string(),
+            value,
+            source: source.to_string(),
+            fetched_at: 1000,
+        }
+    }
+
+    #[test]
+    fn forecast_values_roundtrip_and_query_filters() {
+        let db = test_db();
+        let written = db
+            .insert_forecast_values(&[
+                forecast_row(100, "shortwave_radiation", 300.0, "open-meteo"),
+                forecast_row(200, "shortwave_radiation", 350.0, "open-meteo"),
+                forecast_row(200, "cloud_cover", 90.0, "open-meteo"),
+                forecast_row(150, "shortwave_radiation", 310.0, "open-meteo"),
+                // Same (ts, variable) from a different source coexists.
+                forecast_row(100, "shortwave_radiation", 280.0, "solcast"),
+            ])
+            .unwrap();
+        assert_eq!(written, 5);
+
+        // Variable + source filter, ascending order.
+        let sw = db
+            .query_forecast_series("shortwave_radiation", "open-meteo", 0, i64::MAX)
+            .unwrap();
+        assert_eq!(
+            sw,
+            vec![
+                ForecastPoint { timestamp: 100, value: 300.0 },
+                ForecastPoint { timestamp: 150, value: 310.0 },
+                ForecastPoint { timestamp: 200, value: 350.0 },
+            ]
+        );
+
+        // Half-open [since, until) window like every other history query.
+        let windowed = db
+            .query_forecast_series("shortwave_radiation", "open-meteo", 150, 200)
+            .unwrap();
+        assert_eq!(
+            windowed,
+            vec![ForecastPoint { timestamp: 150, value: 310.0 }]
+        );
+
+        // Source isolation: the solcast row must not leak into the
+        // open-meteo series (checked above by value) nor vice versa.
+        let sc = db
+            .query_forecast_series("shortwave_radiation", "solcast", 0, i64::MAX)
+            .unwrap();
+        assert_eq!(sc, vec![ForecastPoint { timestamp: 100, value: 280.0 }]);
+
+        // Unknown variable → empty, not an error.
+        assert!(db
+            .query_forecast_series("nope", "open-meteo", 0, i64::MAX)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn forecast_values_upsert_on_refetch() {
+        // Re-fetching an overlapping forecast window must replace the
+        // older hour's value rather than duplicate it.
+        let db = test_db();
+        db.insert_forecast_values(&[forecast_row(100, "shortwave_radiation", 300.0, "open-meteo")])
+            .unwrap();
+        let mut refresh = forecast_row(100, "shortwave_radiation", 320.0, "open-meteo");
+        refresh.fetched_at = 2000;
+        db.insert_forecast_values(&[refresh]).unwrap();
+
+        let sw = db
+            .query_forecast_series("shortwave_radiation", "open-meteo", 0, i64::MAX)
+            .unwrap();
+        assert_eq!(sw.len(), 1);
+        assert!((sw[0].value - 320.0).abs() < 1e-9, "newest forecast must win");
+    }
+
+    #[test]
+    fn daily_solar_totals_group_by_local_day_and_take_max() {
+        let db = test_db();
+        let day1 = Local::now().date_naive() - chrono::Duration::days(10);
+        let day2 = day1 + chrono::Duration::days(1);
+        let ts = |date: chrono::NaiveDate, h: u32, m: u32| {
+            Local
+                .from_local_datetime(&date.and_hms_opt(h, m, 0).unwrap())
+                .earliest()
+                .unwrap()
+                .timestamp()
+        };
+        // Day 1: counter rises 5 → 20 → 21 across three distinct hours.
+        db.insert_reading(&make_solar_kwh_snapshot(ts(day1, 6, 0), 5.0));
+        db.insert_reading(&make_solar_kwh_snapshot(ts(day1, 12, 30), 20.0));
+        db.insert_reading(&make_solar_kwh_snapshot(ts(day1, 18, 0), 21.0));
+        // Day 2: two distinct hours.
+        db.insert_reading(&make_solar_kwh_snapshot(ts(day2, 7, 0), 10.0));
+        db.insert_reading(&make_solar_kwh_snapshot(ts(day2, 19, 0), 12.0));
+
+        let totals = db.daily_solar_totals_since(0).unwrap();
+        assert_eq!(totals.len(), 2);
+        assert_eq!(
+            totals[0],
+            DailySolarTotal { date: day1, kwh: 21.0, hours_covered: 3 }
+        );
+        assert_eq!(
+            totals[1],
+            DailySolarTotal { date: day2, kwh: 12.0, hours_covered: 2 }
+        );
+    }
+
+    #[test]
+    fn daily_solar_totals_skip_zero_days_and_respect_window() {
+        let db = test_db();
+        let zero_day = Local::now().date_naive() - chrono::Duration::days(10);
+        let real_day = zero_day + chrono::Duration::days(1);
+        let ts = |date: chrono::NaiveDate, h: u32| {
+            Local
+                .from_local_datetime(&date.and_hms_opt(h, 0, 0).unwrap())
+                .earliest()
+                .unwrap()
+                .timestamp()
+        };
+        // A no-solar day writes 0 kWh counters — must not appear at all.
+        db.insert_reading(&make_solar_kwh_snapshot(ts(zero_day, 8), 0.0));
+        db.insert_reading(&make_solar_kwh_snapshot(ts(zero_day, 9), 0.0));
+        db.insert_reading(&make_solar_kwh_snapshot(ts(real_day, 8), 15.0));
+
+        // Window starting after the zero day still finds the real day.
+        let since = ts(zero_day, 23) + 1;
+        let totals = db.daily_solar_totals_since(since).unwrap();
+        assert_eq!(totals.len(), 1);
+        assert_eq!(totals[0].date, real_day);
+        assert!((totals[0].kwh - 15.0).abs() < 1e-9);
+
+        // Window after everything → empty.
+        assert!(db.daily_solar_totals_since(ts(real_day, 23) + 1).unwrap().is_empty());
     }
 
     #[test]
