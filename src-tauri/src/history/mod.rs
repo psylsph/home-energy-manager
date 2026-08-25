@@ -843,6 +843,20 @@ CREATE TABLE IF NOT EXISTS octopus_tariff_prices (
     rate_type     TEXT NOT NULL,
     PRIMARY KEY (meter_kind, meter_point, tariff_code, valid_from, rate_type)
 );
+-- Forecast variable samples (issue #283, Phase 0). One row per
+-- (timestamp, variable, source): hourly Open-Meteo radiation / cloud
+-- values for the forward forecast window. Re-fetches upsert (newest
+-- forecast wins per hour+variable+source) so predicted-vs-actual
+-- tracking can later compare any stored forecast hour against the
+-- reading that materialised.
+CREATE TABLE IF NOT EXISTS forecast_values (
+    timestamp  INTEGER NOT NULL,
+    variable   TEXT NOT NULL,
+    value      REAL NOT NULL,
+    source     TEXT NOT NULL,
+    fetched_at INTEGER NOT NULL,
+    PRIMARY KEY (timestamp, variable, source)
+);
 ";
 
 /// One local day's actual solar generation total (issue #283, Phase 0):
@@ -2151,31 +2165,114 @@ impl HistoryDb {
     /// Returns the number of rows written. All-or-nothing via a
     /// transaction so a partial fetch never leaves a half-updated
     /// forecast window.
-    pub fn insert_forecast_values(&self, _rows: &[ForecastValueRow]) -> Result<usize, String> {
-        // RED stub — Phase 0 implementation lands in the following commit.
-        Ok(0)
+    pub fn insert_forecast_values(&self, rows: &[ForecastValueRow]) -> Result<usize, String> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut written = 0usize;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT OR REPLACE INTO forecast_values \
+                     (timestamp, variable, value, source, fetched_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                )
+                .map_err(|e| format!("Failed to prepare forecast insert: {e}"))?;
+            for row in rows {
+                written += stmt
+                    .execute(params![
+                        row.timestamp,
+                        row.variable,
+                        row.value,
+                        row.source,
+                        row.fetched_at
+                    ])
+                    .map_err(|e| format!("Failed to insert forecast value: {e}"))?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(written)
     }
 
     /// Read one stored forecast series — samples for `variable` from
     /// `source` with `since_ts <= timestamp < until_ts`, ascending.
     pub fn query_forecast_series(
         &self,
-        _variable: &str,
-        _source: &str,
-        _since_ts: i64,
-        _until_ts: i64,
+        variable: &str,
+        source: &str,
+        since_ts: i64,
+        until_ts: i64,
     ) -> Result<Vec<ForecastPoint>, String> {
-        // RED stub — Phase 0 implementation lands in the following commit.
-        Ok(Vec::new())
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp, value FROM forecast_values \
+                 WHERE variable = ?1 AND source = ?2 AND timestamp >= ?3 AND timestamp < ?4 \
+                 ORDER BY timestamp ASC",
+            )
+            .map_err(|e| format!("Failed to prepare forecast series query: {e}"))?;
+        let points = stmt
+            .query_map(params![variable, source, since_ts, until_ts], |row| {
+                Ok(ForecastPoint {
+                    timestamp: row.get(0)?,
+                    value: row.get(1)?,
+                })
+            })
+            .map_err(|e| format!("Forecast series query failed: {e}"))?
+            .collect::<SqlResult<Vec<_>>>()
+            .map_err(|e| format!("Failed to read forecast series row: {e}"))?;
+        Ok(points)
     }
 
     /// Actual solar generation grouped by local day for the
     /// performance-ratio calibration (issue #283, Phase 0). See
     /// [`DailySolarTotal`] for the grouping rules; only days with at
     /// least one reading carrying `today_solar_kwh > 0` are returned.
-    pub fn daily_solar_totals_since(&self, _since_ts: i64) -> Result<Vec<DailySolarTotal>, String> {
-        // RED stub — Phase 0 implementation lands in the following commit.
-        Ok(Vec::new())
+    pub fn daily_solar_totals_since(&self, since_ts: i64) -> Result<Vec<DailySolarTotal>, String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT strftime('%Y-%m-%d', timestamp, 'unixepoch', 'localtime') AS day, \
+                        MAX(today_solar_kwh) AS kwh, \
+                        COUNT(DISTINCT strftime('%H', timestamp, 'unixepoch', 'localtime')) AS hours \
+                 FROM readings WHERE timestamp >= ?1 AND today_solar_kwh > 0 \
+                 GROUP BY day ORDER BY day ASC",
+            )
+            .map_err(|e| format!("Failed to prepare daily solar totals query: {e}"))?;
+        let rows = stmt
+            .query_map(params![since_ts], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(|e| format!("Daily solar totals query failed: {e}"))?
+            .collect::<SqlResult<Vec<_>>>()
+            .map_err(|e| format!("Failed to read daily solar totals row: {e}"))?;
+
+        let mut totals = Vec::with_capacity(rows.len());
+        for (day, kwh, hours) in rows {
+            let Ok(date) = chrono::NaiveDate::parse_from_str(&day, "%Y-%m-%d") else {
+                // A day key we can't parse shouldn't exist; skip rather
+                // than fail the whole calibration input.
+                continue;
+            };
+            totals.push(DailySolarTotal {
+                date,
+                kwh,
+                hours_covered: u32::try_from(hours).unwrap_or(0),
+            });
+        }
+        Ok(totals)
     }
 
     /// Upsert an Octopus response page atomically. Re-fetching a recent

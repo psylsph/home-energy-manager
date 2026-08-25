@@ -23,22 +23,92 @@
 //! current (incomplete) day. Fewer than 5 usable days yields `None` — the
 //! caller must show "not enough history yet" rather than a guess.
 
+use std::collections::BTreeMap;
+
 use crate::forecast::solar::SolarForecastSample;
 use crate::history::DailySolarTotal;
+
+/// Minimum number of usable days before a PR is reported. Below this the
+/// caller must show "not enough history yet" — a guess would look like
+/// a prediction.
+pub const MIN_CALIBRATION_DAYS: usize = 5;
+/// Days delivering less insolation than this (kWh/m²) are rejected: the
+/// actual/radiation ratio is dominated by noise in near-dark conditions.
+const MIN_DAILY_INSOLATION_KWH_M2: f64 = 0.5;
+/// Days with less actual generation than this (kWh) are rejected — dead
+/// or zero-export days say nothing about conversion efficiency.
+const MIN_DAILY_ACTUAL_KWH: f64 = 0.5;
+/// A day must have readings in at least this many distinct local hours
+/// to count as fully polled; partial days understate the counter.
+const MIN_DAY_COVERAGE_HOURS: u32 = 12;
+/// Physical clamp for the fitted ratio. A median above ~1.5 means the
+/// configured kWp is badly understated (or readings are wrong); below
+/// ~0.05 the array would be effectively dead.
+const PR_CLAMP_MIN: f64 = 0.05;
+const PR_CLAMP_MAX: f64 = 1.5;
 
 /// Fit the performance ratio from the trailing history. `samples` are the
 /// past portion of the latest radiation fetch (any forward samples are
 /// simply not matched by a past-day total, so mixing them in is harmless).
 /// `today` is passed in rather than read from the clock so the whole
 /// function is deterministic under test.
+///
+/// Returns `None` when fewer than [`MIN_CALIBRATION_DAYS`] usable days
+/// remain after the rejection filters (dark / partial / dead / no-data /
+/// current day).
 pub fn calibrate_performance_ratio(
-    _samples: &[SolarForecastSample],
-    _totals: &[DailySolarTotal],
-    _rated_kw: f64,
-    _today: chrono::NaiveDate,
+    samples: &[SolarForecastSample],
+    totals: &[DailySolarTotal],
+    rated_kw: f64,
+    today: chrono::NaiveDate,
 ) -> Option<f64> {
-    // RED stub — Phase 0 implementation lands in the following commit.
-    None
+    if rated_kw <= 0.0 {
+        return None;
+    }
+
+    // Integrate hourly radiation per local day. Samples are hourly on
+    // UTC boundaries but generation days run local-midnight to
+    // local-midnight (the inverter counter resets on local midnight), so
+    // group by the sample's local date. Σ(W/m² × 1 h) / 1000 = kWh/m².
+    let mut insolation: BTreeMap<chrono::NaiveDate, f64> = BTreeMap::new();
+    for s in samples {
+        let Some(utc) = chrono::DateTime::from_timestamp(s.timestamp, 0) else {
+            continue;
+        };
+        let local_date = utc.with_timezone(&chrono::Local).date_naive();
+        *insolation.entry(local_date).or_insert(0.0) += s.shortwave_radiation as f64 / 1000.0;
+    }
+
+    let mut ratios: Vec<f64> = totals
+        .iter()
+        .filter(|t| {
+            t.date < today
+                && t.hours_covered >= MIN_DAY_COVERAGE_HOURS
+                && t.kwh >= MIN_DAILY_ACTUAL_KWH
+        })
+        .filter_map(|t| {
+            let day_insolation = insolation.get(&t.date).copied()?;
+            if day_insolation < MIN_DAILY_INSOLATION_KWH_M2 {
+                return None;
+            }
+            Some(t.kwh / (day_insolation * rated_kw))
+        })
+        .collect();
+
+    if ratios.len() < MIN_CALIBRATION_DAYS {
+        return None;
+    }
+
+    // Median (not mean): a single bad dongle day or a stale counter must
+    // not drag the fitted ratio around.
+    ratios.sort_by(|a, b| a.partial_cmp(b).expect("ratios are finite"));
+    let n = ratios.len();
+    let median = if n % 2 == 1 {
+        ratios[n / 2]
+    } else {
+        (ratios[n / 2 - 1] + ratios[n / 2]) / 2.0
+    };
+    Some(median.clamp(PR_CLAMP_MIN, PR_CLAMP_MAX))
 }
 
 #[cfg(test)]

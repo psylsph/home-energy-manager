@@ -1,6 +1,6 @@
 # Design: Forecast & Planning (issue #283)
 
-Status: **planned — not yet implemented**
+Status: **Phase 0 implemented; Phases 1–4 planned**
 Issue: <https://github.com/psylsph/home-energy-manager/issues/283>
 
 ## Summary
@@ -99,16 +99,24 @@ read undersized. Phase 4 may self-calibrate efficiencies from
 
 ## Phases
 
-### Phase 0 — forecast data foundation (backend, no UI)
+### Phase 0 — forecast data foundation (backend, no UI) — **shipped**
 
-- Extend the weather fetch to include hourly radiation + cloud cover for +48 h.
-- Introduce a `SolarForecastProvider` trait with a single Open-Meteo impl.
-- New `forecast_values` table in `history.db`
-  (`timestamp, variable, value, source, fetched_at`) — the basis for
-  predicted-vs-actual accuracy tracking and honest confidence bands.
-- PR self-calibration maths from `readings` history.
-- Tests: JSON parser tables (mirror the `parse_archive_response` tests),
-  calibration maths, fetch cadence.
+- `src-tauri/src/forecast/` — `solar.rs` (Open-Meteo provider behind
+  `SolarForecastProvider`, URL builder + pure response parser),
+  `calibration.rs` (PR fit), `mod.rs` (`store_and_calibrate` seam,
+  `effective_solar_kwp`, `run_solar_forecast_fetch` tick entry point).
+- The fetch rides the weather loop on a 3 h tick (`past_days=14`
+  modelled radiation for calibration, `forecast_days=3` forward).
+- `forecast_values` table in `history.db`
+  (`timestamp, variable, value, source, fetched_at`, upsert per
+  (timestamp, variable, source)) — the basis for predicted-vs-actual
+  accuracy tracking and honest confidence bands.
+- `daily_solar_totals_since` query + PR self-calibration: median daily
+  ratio of actual `today_solar_kwh` vs delivered insolation × rated
+  kWp, rejecting dark / partial-coverage / dead days; needs ≥ 5 usable
+  days before reporting a value.
+- Tests: JSON parser tables (mirroring `parse_archive_response`),
+  calibration maths, upsert/query round-trip, kWp selection rules.
 
 ### Phase 1 — forecast module, API and page
 

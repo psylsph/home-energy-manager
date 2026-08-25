@@ -15,7 +15,8 @@ pub mod solar;
 
 use chrono::{DateTime, Local};
 
-use crate::forecast::solar::SolarForecast;
+use crate::forecast::calibration::calibrate_performance_ratio;
+use crate::forecast::solar::{OpenMeteoSolarProvider, SolarForecast, SolarForecastProvider};
 use crate::history::{ForecastValueRow, HistoryDb};
 
 /// How often the radiation forecast is refreshed. Open-Meteo's European
@@ -23,6 +24,11 @@ use crate::history::{ForecastValueRow, HistoryDb};
 /// horizon while staying far inside the free tier's fair-use envelope.
 pub const SOLAR_FORECAST_FETCH_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(3 * 60 * 60);
+
+/// How far back the calibration reads actual generation for. One day
+/// beyond the 14 modelled past days so a fetch early in the local day
+/// still sees a full trailing window.
+const CALIBRATION_LOOKBACK_DAYS: i64 = 15;
 
 /// Split a fetched forecast at `now`: persist the forward window to
 /// `forecast_values` (one row per variable per hour — optional fields are
@@ -34,14 +40,57 @@ pub const SOLAR_FORECAST_FETCH_INTERVAL: std::time::Duration =
 /// future/past split, variable persistence, calibration hand-off — is
 /// testable without network access.
 pub fn store_and_calibrate(
-    _db: &HistoryDb,
-    _rated_kw: f64,
-    _source: &str,
-    _now: DateTime<Local>,
-    _forecast: &SolarForecast,
+    db: &HistoryDb,
+    rated_kw: f64,
+    source: &str,
+    now: DateTime<Local>,
+    forecast: &SolarForecast,
 ) -> Option<f64> {
-    // RED stub — Phase 0 implementation lands in the following commit.
-    None
+    let now_ts = now.timestamp();
+    let mut rows: Vec<ForecastValueRow> = Vec::new();
+    let mut past: Vec<crate::forecast::solar::SolarForecastSample> = Vec::new();
+
+    for s in &forecast.samples {
+        if s.timestamp >= now_ts {
+            rows.push(ForecastValueRow {
+                timestamp: s.timestamp,
+                variable: "shortwave_radiation".to_string(),
+                value: s.shortwave_radiation as f64,
+                source: source.to_string(),
+                fetched_at: now_ts,
+            });
+            if let Some(v) = s.direct_radiation {
+                rows.push(ForecastValueRow {
+                    timestamp: s.timestamp,
+                    variable: "direct_radiation".to_string(),
+                    value: v as f64,
+                    source: source.to_string(),
+                    fetched_at: now_ts,
+                });
+            }
+            if let Some(v) = s.cloud_cover {
+                rows.push(ForecastValueRow {
+                    timestamp: s.timestamp,
+                    variable: "cloud_cover".to_string(),
+                    value: v as f64,
+                    source: source.to_string(),
+                    fetched_at: now_ts,
+                });
+            }
+        } else {
+            past.push(s.clone());
+        }
+    }
+
+    if !rows.is_empty() {
+        if let Err(e) = db.insert_forecast_values(&rows) {
+            tracing::warn!("Failed to store solar forecast: {e}");
+        }
+    }
+
+    let since = now_ts - CALIBRATION_LOOKBACK_DAYS * 86_400;
+    let totals = db.daily_solar_totals_since(since).unwrap_or_default();
+    calibrate_performance_ratio(&past, &totals, rated_kw, now.date_naive())
 }
 
 /// Total rated kWp used by the radiation→power model. Mirrors the
@@ -50,9 +99,63 @@ pub fn store_and_calibrate(
 /// what `today_solar_kwh` reports, so their capacity is the denominator;
 /// otherwise the hybrid's DC strings (pv1 + pv2) are. Arrays with zero
 /// rated capacity are ignored — they carry no measurement.
-pub(crate) fn effective_solar_kwp(_settings: &crate::settings::Settings) -> f64 {
-    // RED stub — Phase 0 implementation lands in the following commit.
-    0.0
+pub(crate) fn effective_solar_kwp(settings: &crate::settings::Settings) -> f64 {
+    let meter_total: f64 = settings
+        .solar_arrays
+        .iter()
+        .map(|a| a.rated_kw)
+        .filter(|kw| *kw > 0.0)
+        .sum();
+    if meter_total > 0.0 {
+        meter_total
+    } else {
+        settings.pv1_rated_kw + settings.pv2_rated_kw
+    }
+}
+
+/// One solar forecast fetch-and-store cycle, invoked by the weather loop
+/// every [`SOLAR_FORECAST_FETCH_INTERVAL`]. Gated on the same weather
+/// enable flag and coordinates; failures log a warning and retry on the
+/// next tick.
+pub async fn run_solar_forecast_fetch(state: std::sync::Arc<crate::inverter::poll::AppState>) {
+    let (config, history_db) = {
+        let ws = state.weather.lock().await;
+        let history_db = state.history.lock().await.clone();
+        (ws.config.clone(), history_db)
+    };
+    if !config.enabled {
+        return;
+    }
+    let (Some(lat), Some(lon)) = (config.latitude, config.longitude) else {
+        return;
+    };
+    let Some(db) = history_db else {
+        return;
+    };
+
+    let rated_kw = effective_solar_kwp(&crate::settings::Settings::load());
+    let provider = OpenMeteoSolarProvider::new(&config.open_meteo_base_url);
+    match provider.fetch(lat, lon).await {
+        Ok(forecast) => {
+            let now = Local::now();
+            let sample_count = forecast.samples.len();
+            match store_and_calibrate(&db, rated_kw, OpenMeteoSolarProvider::SOURCE, now, &forecast)
+            {
+                Some(pr) => tracing::info!(
+                    pr,
+                    samples = sample_count,
+                    "solar forecast stored and performance ratio calibrated"
+                ),
+                None => tracing::info!(
+                    samples = sample_count,
+                    "solar forecast stored; not enough history to calibrate performance ratio yet"
+                ),
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Solar forecast fetch failed: {e}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -195,28 +298,32 @@ mod tests {
 
     #[test]
     fn kwp_prefers_meter_arrays_when_configured() {
-        let mut settings = Settings::default();
-        settings.pv1_rated_kw = 3.0;
-        settings.solar_arrays = vec![
-            SolarArrayConfig {
-                meter_address: 1,
-                name: "East roof".into(),
-                rated_kw: 6.0,
-            },
-            SolarArrayConfig {
-                meter_address: 2,
-                name: String::new(),
-                rated_kw: 4.2,
-            },
-        ];
+        let settings = Settings {
+            pv1_rated_kw: 3.0,
+            solar_arrays: vec![
+                SolarArrayConfig {
+                    meter_address: 1,
+                    name: "East roof".into(),
+                    rated_kw: 6.0,
+                },
+                SolarArrayConfig {
+                    meter_address: 2,
+                    name: String::new(),
+                    rated_kw: 4.2,
+                },
+            ],
+            ..Settings::default()
+        };
         assert!((effective_solar_kwp(&settings) - 10.2).abs() < 1e-9);
     }
 
     #[test]
     fn kwp_falls_back_to_dc_strings() {
-        let mut settings = Settings::default();
-        settings.pv1_rated_kw = 6.0;
-        settings.pv2_rated_kw = 4.2;
+        let settings = Settings {
+            pv1_rated_kw: 6.0,
+            pv2_rated_kw: 4.2,
+            ..Settings::default()
+        };
         assert!((effective_solar_kwp(&settings) - 10.2).abs() < 1e-9);
     }
 
@@ -224,13 +331,15 @@ mod tests {
     fn kwp_ignores_zero_rated_meter_arrays() {
         // A meter array without a rating carries no measurement — the DC
         // string ratings remain the denominator.
-        let mut settings = Settings::default();
-        settings.pv1_rated_kw = 5.0;
-        settings.solar_arrays = vec![SolarArrayConfig {
-            meter_address: 1,
-            name: String::new(),
-            rated_kw: 0.0,
-        }];
+        let settings = Settings {
+            pv1_rated_kw: 5.0,
+            solar_arrays: vec![SolarArrayConfig {
+                meter_address: 1,
+                name: String::new(),
+                rated_kw: 0.0,
+            }],
+            ..Settings::default()
+        };
         assert!((effective_solar_kwp(&settings) - 5.0).abs() < 1e-9);
     }
 }

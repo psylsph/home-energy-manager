@@ -42,13 +42,26 @@ pub struct SolarForecast {
     pub grid_lon: Option<f32>,
 }
 
+/// How many complete past days of modelled radiation to request so the
+/// performance-ratio calibration has history to learn from.
+pub const PAST_DAYS: u32 = 14;
+/// How many forward days to request — covers the 48 h planning horizon
+/// with a day of slack at hourly resolution.
+pub const FORECAST_DAYS: u32 = 3;
+
 /// Builds the Open-Meteo URL for the hourly solar forecast request.
 ///
 /// Pure so the parameter table (variables, past/forward day counts,
 /// UTC times) is unit-testable without network access.
-pub fn solar_forecast_url(_base_url: &str, _latitude: f64, _longitude: f64) -> String {
-    // RED stub — Phase 0 implementation lands in the following commit.
-    String::new()
+pub fn solar_forecast_url(base_url: &str, latitude: f64, longitude: f64) -> String {
+    format!(
+        "{base}/v1/forecast?latitude={lat}&longitude={lon}\
+         &hourly=shortwave_radiation,direct_radiation,cloud_cover\
+         &past_days={PAST_DAYS}&forecast_days={FORECAST_DAYS}&timezone=UTC",
+        base = base_url.trim_end_matches('/'),
+        lat = latitude,
+        lon = longitude,
+    )
 }
 
 /// Parse Open-Meteo's hourly forecast response into a [`SolarForecast`].
@@ -57,9 +70,134 @@ pub fn solar_forecast_url(_base_url: &str, _latitude: f64, _longitude: f64) -> S
 /// error bodies, missing fields, length mismatches, null rows — is
 /// unit-tested without any network, mirroring the weather module's
 /// `parse_archive_response` tests.
-pub fn parse_solar_forecast_response(_json: &serde_json::Value) -> Result<SolarForecast, String> {
-    // RED stub — Phase 0 implementation lands in the following commit.
-    Err("not implemented".to_string())
+pub fn parse_solar_forecast_response(json: &serde_json::Value) -> Result<SolarForecast, String> {
+    // Guard against Open-Meteo's own error responses (HTTP 200 with an
+    // `error: true` body, e.g. for malformed parameters) — same shape
+    // the weather module handles.
+    if json.get("error").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let reason = json
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        return Err(format!("Open-Meteo error: {reason}"));
+    }
+
+    let hourly = json
+        .get("hourly")
+        .ok_or_else(|| "missing 'hourly'".to_string())?;
+    let times = hourly
+        .get("time")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "missing 'hourly.time'".to_string())?;
+    let shortwave = hourly
+        .get("shortwave_radiation")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "missing 'hourly.shortwave_radiation'".to_string())?;
+    if times.len() != shortwave.len() {
+        return Err(format!(
+            "hourly.time ({} entries) and hourly.shortwave_radiation ({} entries) lengths differ",
+            times.len(),
+            shortwave.len()
+        ));
+    }
+
+    // Optional variables may be absent entirely; when present their
+    // length must match the time axis.
+    let optional_series = |name: &str| -> Result<Option<&Vec<serde_json::Value>>, String> {
+        match hourly.get(name).and_then(|v| v.as_array()) {
+            None => Ok(None),
+            Some(values) if values.len() == times.len() => Ok(Some(values)),
+            Some(values) => Err(format!(
+                "hourly.time ({} entries) and hourly.{name} ({} entries) lengths differ",
+                times.len(),
+                values.len()
+            )),
+        }
+    };
+    let direct = optional_series("direct_radiation")?;
+    let cloud = optional_series("cloud_cover")?;
+
+    let grid_lat = json
+        .get("latitude")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
+    let grid_lon = json
+        .get("longitude")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
+
+    let mut samples = Vec::with_capacity(times.len());
+    for (i, t) in times.iter().enumerate() {
+        let Some(time_str) = t.as_str() else { continue };
+        let Ok(parsed) = chrono::NaiveDateTime::parse_from_str(time_str, "%Y-%m-%dT%H:%M") else {
+            continue;
+        };
+        let Some(g) = shortwave[i].as_f64() else { continue };
+        samples.push(SolarForecastSample {
+            timestamp: parsed.and_utc().timestamp(),
+            shortwave_radiation: g as f32,
+            direct_radiation: direct.and_then(|v| v[i].as_f64()).map(|v| v as f32),
+            cloud_cover: cloud.and_then(|v| v[i].as_f64()).map(|v| v as f32),
+        });
+    }
+    Ok(SolarForecast {
+        samples,
+        grid_lat,
+        grid_lon,
+    })
+}
+
+/// A source of hourly solar radiation forecasts. Phase 0 ships a single
+/// Open-Meteo implementation; the trait exists so an alternative (e.g. a
+/// Solcast hobbyist account) can slot in without touching callers.
+///
+/// `async fn` in the trait is deliberate: providers are used by static
+/// dispatch inside the already-`Send` weather-loop task, so the missing
+/// auto-trait bounds the lint warns about don't apply here.
+#[allow(async_fn_in_trait)] // rustc lint, not clippy
+pub trait SolarForecastProvider {
+    /// Fetch hourly samples covering the provider's configured past and
+    /// forward windows, ordered by timestamp ascending.
+    async fn fetch(&self, latitude: f64, longitude: f64) -> Result<SolarForecast, String>;
+}
+
+/// The free Open-Meteo forecast endpoint — keyless, CC-BY 4.0, sharing
+/// the weather module's HTTP agent (same 10 s timeout / no-pooling
+/// policy, same base-URL override for self-hosted instances).
+pub struct OpenMeteoSolarProvider {
+    base_url: String,
+}
+
+impl OpenMeteoSolarProvider {
+    /// Source name persisted into `forecast_values.source`.
+    pub const SOURCE: &str = "open-meteo";
+
+    pub fn new(base_url: &str) -> Self {
+        Self {
+            base_url: base_url.to_string(),
+        }
+    }
+}
+
+impl SolarForecastProvider for OpenMeteoSolarProvider {
+    async fn fetch(&self, latitude: f64, longitude: f64) -> Result<SolarForecast, String> {
+        let url = solar_forecast_url(&self.base_url, latitude, longitude);
+        let result: Result<serde_json::Value, String> = tokio::task::spawn_blocking(move || {
+            let mut resp = weather_agent()
+                .get(&url)
+                .call()
+                .map_err(|e| format!("HTTP error: {e}"))?;
+            let body = resp
+                .body_mut()
+                .read_to_string()
+                .map_err(|e| format!("read error: {e}"))?;
+            serde_json::from_str(&body).map_err(|e| format!("JSON error: {e}"))
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking failed: {e}"))?;
+
+        parse_solar_forecast_response(&result?)
+    }
 }
 
 #[cfg(test)]
