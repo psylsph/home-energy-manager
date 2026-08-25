@@ -41,6 +41,8 @@ globalThis.ResizeObserver = class {
 import ForecastPage from '../../src/pages/ForecastPage';
 import { apiGet } from '../../src/lib/api';
 
+const apiGetMock = vi.mocked(apiGet);
+
 function fullPayload() {
   return {
     generated_at: 1_700_000_000,
@@ -99,8 +101,7 @@ describe('ForecastPage', () => {
   });
 
   it('renders degradation explanations instead of hiding the page', async () => {
-    const mock = apiGet as unknown as { mock: { implementation: (fn: () => unknown) => void } };
-    mock.mock.implementation(async () => ({
+    apiGetMock.mockImplementation(async () => ({
       ok: true,
       data: {
         ...fullPayload(),
@@ -120,8 +121,7 @@ describe('ForecastPage', () => {
   });
 
   it('surfaces a fetch failure as an error card, not a crash', async () => {
-    const mock = apiGet as unknown as { mock: { implementation: (fn: () => unknown) => void } };
-    mock.mock.implementation(async () => {
+    apiGetMock.mockImplementation(async () => {
       throw new Error('backend down');
     });
 

@@ -17,6 +17,7 @@ import BatteryPage from './pages/BatteryPage';
 import ControlPage from './pages/ControlPage';
 import SettingsPage from './pages/SettingsPage';
 import HistoryPage from './pages/HistoryPage';
+import ForecastPage from './pages/ForecastPage';
 import OctopusPage from './pages/OctopusPage';
 import LogsPage from './pages/LogsPage';
 import SolarPage from './pages/SolarPage';
@@ -178,6 +179,7 @@ const NAV_ITEMS = [
   { to: '/inverter', label: 'Inverter', icon: InverterIcon, accent: FLOW_COLORS.inverter },
   { to: '/meters', label: 'Meters', icon: MeterIcon, accent: FLOW_COLORS.grid },
   { to: '/history', label: 'History', icon: HistoryIcon, accent: undefined },
+  { to: '/forecast', label: 'Forecast', icon: ForecastIcon, accent: FLOW_COLORS.solar },
   { to: '/octopus', label: 'Octopus', icon: OctopusIcon, accent: '#ec4899' },
   { to: '/control', label: 'Control', icon: ControlIcon, accent: undefined },
   { to: '/settings', label: 'Settings', icon: SettingsIcon, accent: undefined },
@@ -191,6 +193,14 @@ function StatusIcon() {
   return (
     <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0a1 1 0 01-1-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 01-1 1" />
+    </svg>
+  );
+}
+
+function ForecastIcon() {
+  return (
+    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 00-9.6 1.4A4 4 0 003 15z" />
     </svg>
   );
 }
@@ -463,6 +473,7 @@ function Layout() {
           {page('/power', <PowerPage />, true)}
           {page('/battery', <BatteryPage />, true)}
           {page('/history', <HistoryPage />, true)}
+          {page('/forecast', <ForecastPage />, true)}
           {octopusConfigured
             ? page('/octopus', <OctopusPage />)
             : <Route path="/octopus" element={<Navigate to="/" replace />} />}
