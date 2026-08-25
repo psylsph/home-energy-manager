@@ -1,6 +1,6 @@
 # Design: Forecast & Planning (issue #283)
 
-Status: **Phase 0 implemented; Phases 1–4 planned**
+Status: **Phases 0–1 implemented; Phases 2–4 planned**
 Issue: <https://github.com/psylsph/home-energy-manager/issues/283>
 
 ## Summary
@@ -118,17 +118,33 @@ read undersized. Phase 4 may self-calibrate efficiencies from
 - Tests: JSON parser tables (mirroring `parse_archive_response`),
   calibration maths, upsert/query round-trip, kWp selection rules.
 
-### Phase 1 — forecast module, API and page
+### Phase 1 — forecast module, API and page — **shipped**
 
-- `src-tauri/src/forecast/`: `mod.rs` (loop + `ForecastState` on
-  `AppState`), `solar.rs`, `consumption.rs` (hour-of-day median profile over
-  trailing 28–90 days, p25/p75 band), `simulate.rs`.
-- `GET /api/forecast` → summary numbers, hourly series, bands, and a
-  data-sufficiency status ("needs N more days of history").
-- `ForecastPage.tsx` (route `/forecast`) + pure helpers in
-  `src/lib/forecast/`.
-- Graceful degradation throughout: weather disabled / no coordinates /
-  insufficient history each render a clear explanation, never zeros.
+- `forecast/consumption.rs` — hour-of-day profile (median + p25/p75)
+  fitted from `home_energy_today_kwh` counters (`today_consumption_kwh`
+  fallback, same precedence as `query_energy_summary`); deltas guarded
+  against >2 h gaps, midnight resets and negative glitches; 7-day
+  sufficiency gate; nearest-neighbour fallback for unobserved hours.
+- `forecast/simulate.rs` — hourly SOC projection: efficiency-scaled
+  charge/discharge, rate caps (model-aware kW from
+  `DeviceType::uses_direct_charge_limit` + `max_battery_power_w`),
+  reserve floor, room clamp.
+- Settings: `forecast_charge_efficiency` (0.9) and
+  `forecast_discharge_efficiency` (0.95), range-validated both sides,
+  editable on the Settings page's Solar section.
+- Calibrated PR persisted to `history.meta` (`forecast_pr`,
+  `forecast_pr_days`, `forecast_calibrated_at`) at fetch time; payload
+  falls back to a 0.75 PR flagged `calibrating`.
+- `GET /api/forecast` — assembled on request from local state only
+  (no network on the request path); degradation codes
+  (`weather_disabled`, `no_coordinates`, `no_forecast_data`,
+  `calibrating`, `insufficient_consumption_history`, `no_snapshot`,
+  `no_battery_capacity`) with partial data always served.
+- `ForecastPage.tsx` at `/forecast` (nav after History): Tomorrow
+  summary card, 48 h solar chart (±20 % model band until Phase 4
+  replaces it with measured error quantiles), consumption profile
+  chart with band, battery projection with reserve line, status banner,
+  Open-Meteo attribution.
 
 Page layout, top to bottom:
 
