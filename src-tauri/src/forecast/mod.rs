@@ -668,6 +668,41 @@ mod tests {
     }
 
     #[test]
+    fn rate_limits_fall_back_to_hardware_max_when_unset() {
+        // A 0 rate register means "unset/unknown", not "disabled": the AC
+        // config block is optional and often reads zero (right after
+        // connect, or on simulators). Found via the real simulator —
+        // the projection must still run, capped at the hardware max.
+        use crate::inverter::model::DeviceType;
+        let mut snap = rate_snapshot();
+        snap.charge_rate = 0;
+        snap.discharge_rate = 0;
+        snap.device_type = DeviceType::ACCoupled;
+        assert_eq!(battery_rate_limits_kw(&snap), (5.0, 5.0));
+        snap.device_type = DeviceType::Gen3Hybrid;
+        assert_eq!(battery_rate_limits_kw(&snap), (5.0, 5.0));
+    }
+
+    #[test]
+    fn payload_projects_battery_despite_zero_rate_registers() {
+        // The exact simulator scenario: AC-coupled snapshot with capacity
+        // and max power known but rate registers reading zero. The payload
+        // must include the battery projection (not no_battery_capacity).
+        let db = test_db();
+        let now = local_dt(2025, 6, 15, 12, 0);
+        seed_full_forecast_state(&db, now);
+        let mut snap = battery_snapshot();
+        snap.charge_rate = 0;
+        snap.discharge_rate = 0;
+        let settings = five_kwp_settings();
+        let payload =
+            build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
+        assert!(!payload.status.contains(&"no_battery_capacity".to_string()));
+        let battery = payload.battery.expect("projection must run");
+        assert!((battery.end_soc_pct - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn rate_limits_double_dc_hybrid_and_use_direct_for_ac() {
         use crate::inverter::model::DeviceType;
         let mut snap = rate_snapshot();
