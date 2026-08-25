@@ -10,11 +10,12 @@ import { render, screen, cleanup, waitFor } from '@testing-library/react';
 
 vi.mock('../../src/lib/api', () => ({
   apiGet: vi.fn(async (path: string) => {
-    if (path === '/api/forecast') {
-      return { ok: true, data: fullPayload() };
-    }
+    if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+    if (path === '/api/forecast/plan') return planPayload('charge');
     return { ok: true, data: {} };
   }),
+  apiPost: vi.fn(async (_path: string, _body: unknown) => ({ ok: true })),
+  getApiBase: () => 'http://127.0.0.1:7337',
 }));
 
 vi.mock('recharts', () => ({
@@ -131,3 +132,62 @@ describe('ForecastPage', () => {
     });
   });
 });
+
+import { apiPost } from '../../src/lib/api';
+const apiPostMocked = vi.mocked(apiPost);
+
+describe('ForecastPage plan card', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('renders a Charge recommendation with an Apply button', async () => {
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect(screen.getByTestId('forecast-plan').textContent).toMatch(/3\.2/);
+    });
+    expect(screen.getByTestId('forecast-plan').textContent).toMatch(/02:00/);
+    expect(screen.getByTestId('forecast-plan').textContent).toMatch(/05:00/);
+    const apply = screen.getByTestId('forecast-plan-apply');
+    await waitFor(() => {
+      fireEvent.click(apply);
+    });
+    // apply-charge-slot: the slot is dispatched first.
+    const slotCall = apiPostMocked.mock.calls.find((c) => c[0] === '/api/control/charge-slot');
+    expect(slotCall).toBeTruthy();
+    const timedCall = apiPostMocked.mock.calls.find((c) => c[0] === '/api/control/timed-charge');
+    expect(timedCall).toBeTruthy();
+  });
+
+  it('hides Apply when no charge is needed', async () => {
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('no_charge_needed');
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect(screen.getByTestId('forecast-plan').textContent).toMatch(/No overnight charge/i);
+    });
+    expect(screen.queryByTestId('forecast-plan-apply')).toBeNull();
+  });
+
+  it('renders the reason when no plan is available', async () => {
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('no_plan');
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect(screen.getByTestId('forecast-plan').textContent).toMatch(/plan (unavailable|not ready)/i);
+    });
+    expect(screen.queryByTestId('forecast-plan-apply')).toBeNull();
+  });
+});
+

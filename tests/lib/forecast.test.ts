@@ -1,11 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import {
   forecastStatusMessages,
+  forecastPlanTitle,
   toSolarChartData,
   toBatteryChartData,
   tomorrowSummary,
 } from '../../src/lib/forecast';
-import type { ForecastData, ForecastBattery } from '../../src/lib/forecast';
+import type { ForecastData, ForecastBattery, PlanRecommendation } from '../../src/lib/forecast';
 
 describe('forecastStatusMessages', () => {
   it('maps every documented degradation code to a human explanation', () => {
@@ -121,5 +122,37 @@ describe('tomorrowSummary', () => {
     expect(tomorrowSummary(data).startSocPct).toBeNull();
     // Other numbers still derived.
     expect(tomorrowSummary(data).solarKwh).toBe(18.4);
+  });
+});
+
+describe('forecastPlanTitle', () => {
+  const charge: Extract<PlanRecommendation, { kind: 'charge' }> = {
+    kind: 'charge',
+    window: { start: '02:00', end: '05:00', rate: 0.09, tomorrow: true },
+    kwh: 3.2,
+    target_soc_pct: 80,
+    projected_end_soc_pct: 80,
+    rationale: 'Charge the battery in the cheap window.',
+  };
+  const noCharge: Extract<PlanRecommendation, { kind: 'no_charge_needed' }> = {
+    kind: 'no_charge_needed',
+    projected_end_soc_pct: 100,
+    rationale: 'Sunny day — the battery fills from solar.',
+  };
+  const noPlan: Extract<PlanRecommendation, { kind: 'no_plan' }> = {
+    kind: 'no_plan',
+    reason: 'no battery projection',
+  };
+
+  it('renders a clear headline for each kind', () => {
+    expect(forecastPlanTitle(charge)).toMatch(/overnight charge/i);
+    expect(forecastPlanTitle(charge)).toMatch(/3\.2/);
+    expect(forecastPlanTitle(noCharge)).toMatch(/No overnight charge/);
+    expect(forecastPlanTitle(noPlan)).toMatch(/plan (unavailable|not ready)/i);
+  });
+
+  it('mentions the window hours', () => {
+    expect(forecastPlanTitle(charge)).toMatch(/02:00/);
+    expect(forecastPlanTitle(charge)).toMatch(/05:00/);
   });
 });
