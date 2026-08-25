@@ -326,6 +326,10 @@ export default function SettingsPage() {
   // array's kWp. Empty CT-array list = no AC-coupled labelling configured.
   const [pv1RatedKw, setPv1RatedKw] = useState<string>('');
   const [pv2RatedKw, setPv2RatedKw] = useState<string>('');
+  // Issue #283: forecast battery efficiencies, edited as whole percents
+  // (90 / 95) and converted to 0–1 ratios on save.
+  const [forecastChargeEffPct, setForecastChargeEffPct] = useState<string>('90');
+  const [forecastDischargeEffPct, setForecastDischargeEffPct] = useState<string>('95');
   const [solarCtArrays, setSolarCtArrays] = useState<
     { meter_address: number; name: string; rated_kw: string }[]
   >([]);
@@ -431,6 +435,19 @@ export default function SettingsPage() {
         // Issue #110: hydrate the solar-array inputs.
         setPv1RatedKw(
           s.pv1_rated_kw != null && s.pv1_rated_kw > 0 ? String(s.pv1_rated_kw) : '',
+        );
+        // Issue #283: hydrate forecast efficiencies as whole percents.
+        // Missing fields (pre-#283 settings) fall back to the defaults the
+        // backend will report once saved.
+        setForecastChargeEffPct(
+          s.forecast_charge_efficiency != null
+            ? String(Math.round(s.forecast_charge_efficiency * 100))
+            : '90',
+        );
+        setForecastDischargeEffPct(
+          s.forecast_discharge_efficiency != null
+            ? String(Math.round(s.forecast_discharge_efficiency * 100))
+            : '95',
         );
         setPv2RatedKw(
           s.pv2_rated_kw != null && s.pv2_rated_kw > 0 ? String(s.pv2_rated_kw) : '',
@@ -718,10 +735,27 @@ export default function SettingsPage() {
       );
     setSolarSaving(true);
     try {
+      // Issue #283: forecast efficiencies save with the solar section.
+      // Parsed as percents → 0–1 ratios; anything outside 50–100 is
+      // rejected client-side (mirrors the backend's 0.5–1.0 validation)
+      // so the save never round-trips a nonsense ratio.
+      const chargePctNum = Number(forecastChargeEffPct);
+      const dischargePctNum = Number(forecastDischargeEffPct);
+      const pctOrInvalid = (n: number): number | null =>
+        Number.isFinite(n) && n >= 50 && n <= 100 ? n : null;
+      const chargePct = pctOrInvalid(chargePctNum);
+      const dischargePct = pctOrInvalid(dischargePctNum);
+      if (chargePct === null || dischargePct === null) {
+        flash('Battery efficiencies must be between 50 and 100 percent', false);
+        setSolarSaving(false);
+        return;
+      }
       await apiPost('/api/settings', {
         pv1_rated_kw: numOrZero(pv1RatedKw),
         pv2_rated_kw: numOrZero(pv2RatedKw),
         solar_arrays: cleanedArrays,
+        forecast_charge_efficiency: chargePct / 100,
+        forecast_discharge_efficiency: dischargePct / 100,
       });
       // Keep local CT-array state in sync with what was persisted (the
       // server may have normalised a row's address / dropped invalid
@@ -1074,6 +1108,7 @@ export default function SettingsPage() {
       {/* Toast */}
       {message && (
         <div
+          data-testid="settings-flash"
           className={`fixed top-4 right-4 z-50 px-4 py-2 rounded-lg text-sm font-sans shadow-lg ${
             message.ok ? 'bg-green-800/80 text-green-200' : 'bg-red-800/80 text-red-200'
           }`}
@@ -1580,6 +1615,50 @@ export default function SettingsPage() {
             </div>
             <span className="text-text-secondary text-xs font-sans">
               Leave blank to hide PV2 from the % display.
+            </span>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="forecast-charge-eff" className="text-text-primary text-sm font-sans font-medium">
+              Battery charge efficiency
+            </label>
+            <div className="flex items-center gap-2">
+              <input
+                id="forecast-charge-eff"
+                type="number"
+                min={50}
+                max={100}
+                step={1}
+                value={forecastChargeEffPct}
+                onChange={(e) => setForecastChargeEffPct(e.target.value)}
+                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-transparent focus:outline-none focus:border-accent"
+                data-testid="forecast-charge-eff-input"
+              />
+              <span className="text-text-secondary text-xs font-sans">%</span>
+            </div>
+            <span className="text-text-secondary text-xs font-sans">
+              Used by the Forecast page’s battery projection. Default 90.
+            </span>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="forecast-discharge-eff" className="text-text-primary text-sm font-sans font-medium">
+              Battery discharge efficiency
+            </label>
+            <div className="flex items-center gap-2">
+              <input
+                id="forecast-discharge-eff"
+                type="number"
+                min={50}
+                max={100}
+                step={1}
+                value={forecastDischargeEffPct}
+                onChange={(e) => setForecastDischargeEffPct(e.target.value)}
+                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-transparent focus:outline-none focus:border-accent"
+                data-testid="forecast-discharge-eff-input"
+              />
+              <span className="text-text-secondary text-xs font-sans">%</span>
+            </div>
+            <span className="text-text-secondary text-xs font-sans">
+              Default 95. Round-trip with charge efficiency ≈ 85.5%.
             </span>
           </div>
         </div>

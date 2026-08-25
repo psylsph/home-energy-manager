@@ -301,6 +301,10 @@ export interface PollSettings {
   // -- Solar array capacities (issue #110) --
   /** Rated peak capacity (kWp) of the PV1 DC string (hybrid). 0 = unset. */
   pv1_rated_kw?: number;
+  /** Issue #283: battery efficiencies for the Forecast SOC projection,
+   * 0–1 (backend validates 0.5–1.0). */
+  forecast_charge_efficiency?: number;
+  forecast_discharge_efficiency?: number;
   /** Rated peak capacity (kWp) of the PV2 DC string. 0 = unset. */
   pv2_rated_kw?: number;
   /** External solar arrays measured by CT clamps (AC-coupled). */
