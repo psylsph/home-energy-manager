@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Internal
 
 - Poll-loop settings reads (the publish-time solar re-stamp and the winter-mode persist) now run on the blocking thread pool like the cycle's own settings load, so a slow or networked settings file can't stall a poll tick.
+- The poll-path persists for CT-solar meter baselines (issue #277) and the discharge-floor guard's saved reserve now go through `Settings::update` rather than `load + save`, so a concurrent settings save landing mid-poll can no longer be reverted by the poll's full-struct write (the same lost-update class the Aug-21 sweep eliminated elsewhere; the two poll-loop sites were missed at the time).
 
 ## [0.74.15] - 2026-08-23
 

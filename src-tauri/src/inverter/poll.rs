@@ -926,39 +926,32 @@ fn persist_auto_winter_saved(saved: &Option<AutoWinterSaved>) {
 /// authority (issue #277). The poll loop owns this field — the only
 /// other place that mutates `solar_meter_baselines` is this same
 /// fn — so a concurrent `POST /api/settings` racing a poll-cycle
-/// persist can still be reverted by a full-struct write-back if the
-/// site is not transactional. Extracted for unit-testability of the
-/// concurrent contract.
-///
-/// RED (master, the buggy body): does the plain load + set + save
-/// pattern that can lose a concurrent disjoint save (review MAJOR1
-/// in the 3-week sweep). GREEN (fixed): `Settings::update` so the
-/// persist is serialised with every other settings writer under the
-/// settings mutex.
+/// persist would be reverted by a full-struct write-back. The
+/// transactional `Settings::update` reads fresh state under the
+/// settings mutex, mutates only this field, and persists — a
+/// concurrent disjoint save (tariff, kWp, etc.) serialises on the
+/// same mutex and both writes survive (review MAJOR1 in the
+/// 3-week sweep; same fix the Aug-21 sweep applied to auto-winter
+/// c5fd0ed and the Adaptive Charge baseline at line ~2409).
 pub(crate) fn persist_solar_meter_baselines(
     baselines: std::collections::BTreeMap<String, crate::settings::SolarMeterBaseline>,
 ) -> Result<(), String> {
-    let mut app_settings = crate::settings::Settings::load();
-    app_settings.solar_meter_baselines = baselines;
-    app_settings.save()
+    crate::settings::Settings::update(|s| {
+        s.solar_meter_baselines = baselines;
+    })
 }
 
 /// Persist the discharge-floor guard's saved-reserve value (issue
-/// #243 follow-up). Same concurrency contract as
-/// `persist_solar_meter_baselines`: extracted so the concurrent
-/// test pins the property. RED (master): plain load + set + save.
-/// GREEN: `Settings::update`. Skips the file touch when the on-disk
-/// value already matches (steady state).
+/// #243 follow-up). Same transactional contract as
+/// `persist_solar_meter_baselines` — the inner closure's no-op
+/// skip avoids touching the file on steady-state polls where the
+/// reserve hasn't changed.
 pub(crate) fn persist_discharge_floor_saved_reserve(
     persisted: Option<u16>,
 ) -> Result<(), String> {
-    let mut app_settings = crate::settings::Settings::load();
-    if app_settings.discharge_floor_saved_reserve != persisted {
-        app_settings.discharge_floor_saved_reserve = persisted;
-        app_settings.save()
-    } else {
-        Ok(())
-    }
+    crate::settings::Settings::update(|s| {
+        s.discharge_floor_saved_reserve = persisted;
+    })
 }
 
 /// Store the decoded snapshot as the latest, broadcast it to WebSocket
@@ -4143,23 +4136,33 @@ pub(crate) const SOLAR_METER_BASELINE_RESEED_DELTA_KWH: f64 = 1.0;
 /// history, alerts) reads the same CT-derived figures by construction.
 ///
 /// This mutates `snapshot`:
-/// - `solar_power` becomes Σ meter arrays' `power_w` + Σ DC strings'
-///   power, **replacing** the inverter's own PV-register sum (on a pure
-///   AC-coupled box the registers mirror the same solar the CT measures,
-///   so keeping them would double-count).
-/// - `today_solar_kwh` becomes Σ per-meter counter deltas since the
-///   persisted midnight baseline + Σ DC strings' today counters. The
-///   baseline map (in `baselines`) is reseeded at local midnight and on
-///   counter resets; reseeded entries are returned so the caller can
-///   persist them.
+/// - `solar_power` becomes the Σ of the meter-backed solar arrays'
+///   `power_w` ONLY — DC-string cards surfaced by `compute_solar_arrays`
+///   stay visible individually but do NOT add into the aggregate. On an
+///   AC-coupled box the inverter's own PV registers already mirror the
+///   same solar the CT measures (different refresh cadence) so keeping
+///   them would double-count. On a hybrid that genuinely has both DC
+///   strings and a configured solar CT this means the aggregate uses the
+///   CT only; per-string cards still show per-array power.
+/// - `today_solar_kwh` becomes the Σ of per-meter counter deltas since
+///   the persisted midnight baseline ONLY, for the same reason (the
+///   inverter's register-based today counters mirror CT-measured
+///   generation on an AC-coupled box). The baseline map (in
+///   `baselines`) is reseeded at local midnight and on counter resets;
+///   reseeded entries drive the `bool` return so the caller can persist
+///   them.
 /// - Per-array `today_kwh` is stamped onto the meter entries in
 ///   `snapshot.solar_arrays` (they ship `None` today, issue #110).
 ///
 /// No-op when no meter-backed solar arrays are configured — hybrid /
 /// DC-coupled installs keep the inverter-register path untouched.
+/// Also no-op when any configured solar CT is absent from this cycle's
+/// reads (the `all_configured_read` guard, review finding #2): a
+/// transient meter outage must not zero the solar aggregate, the
+/// inverter-register reading is the safer fallback.
 ///
-/// Returns `(updated_baselines, today_kwh_by_meter)` so the poll loop can
-/// persist baselines and tests can assert without touching disk.
+/// Returns `true` when at least one baseline entry was reseeded (caller
+/// persists via `persist_solar_meter_baselines`), `false` otherwise.
 pub(crate) fn apply_ct_solar_authority(
     snapshot: &mut InverterSnapshot,
     settings: &crate::settings::Settings,
