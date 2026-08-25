@@ -940,13 +940,24 @@ fn persist_auto_winter_saved(saved: &Option<AutoWinterSaved>) {
 /// while the loop drains queued control writes). Re-stamping here from the
 /// freshest on-disk settings closes that window. `Settings::load()` is
 /// infallible (defaults on any read/parse error), so this can only clear
-/// stamps in the exact scenarios the mid-cycle stamp already did. A save
-/// racing this very store (post-load, pre-store — sub-millisecond) is
-/// covered by `update_settings` restamping on save, and self-heals on the
-/// next publish in the worst case.
-pub(crate) async fn publish_snapshot(state: &Arc<AppState>, snapshot: InverterSnapshot) {
+/// stamps in the exact scenarios the mid-cycle stamp already did.
+///
+/// A save racing this very store (post-load, pre-store — a sub-millisecond
+/// window each cycle) is NOT fully covered by `update_settings`' on-save
+/// restamp: that restamp lands in `latest_snapshot` before this store and
+/// is overwritten by it. The residual race is accepted — the save's restamp
+/// broadcast already delivered the new values once, and the next publish
+/// re-stamps from current settings, so the regression is bounded by one
+/// publish.
+async fn publish_snapshot(state: &Arc<AppState>, snapshot: InverterSnapshot) {
     let mut snapshot = snapshot;
-    stamp_solar_array_fields(&mut snapshot, &crate::settings::Settings::load());
+    // Load on the blocking pool so a slow/networked settings file can't
+    // stall the poll task (same pattern as the cycle's own settings load
+    // in `run_poll_loop`).
+    let fresh_settings = tokio::task::spawn_blocking(crate::settings::Settings::load)
+        .await
+        .unwrap_or_default();
+    stamp_solar_array_fields(&mut snapshot, &fresh_settings);
 
     {
         let mut latest = state.latest_snapshot.lock().await;
@@ -963,9 +974,7 @@ pub(crate) async fn publish_snapshot(state: &Arc<AppState>, snapshot: InverterSn
     };
 
     // Broadcast to WebSocket subscribers (move, no clone).
-    let _ = state
-        .tx
-        .send(PollMessage::Snapshot(Box::new(snapshot)));
+    let _ = state.tx.send(PollMessage::Snapshot(Box::new(snapshot)));
 
     // Persist to history database. Clone the Arc and
     // drop the lock so synchronous SQLite I/O doesn't
@@ -981,7 +990,6 @@ pub(crate) async fn publish_snapshot(state: &Arc<AppState>, snapshot: InverterSn
         }
     }
 }
-
 
 /// Runs the polling loop indefinitely (spawn as a Tokio task).
 ///
@@ -2334,7 +2342,15 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     drop(aw_state);
                                     drop(saved);
 
-                                    persist_auto_winter_saved(&persist_saved);
+                                    // File I/O (the fast-path load and, on a
+                                    // winter transition, `Settings::update`)
+                                    // runs on the blocking pool so it can't
+                                    // stall the poll task — same pattern as
+                                    // the cycle's own settings load above.
+                                    let _ = tokio::task::spawn_blocking(move || {
+                                        persist_auto_winter_saved(&persist_saved);
+                                    })
+                                    .await;
 
                                     if let Some(writes) = writes {
                                         for w in &writes {
@@ -6063,7 +6079,12 @@ mod tests {
             let state = Arc::new(AppState::new());
             publish_snapshot(&state, snap).await;
 
-            let latest = state.latest_snapshot.lock().await.clone().expect("published");
+            let latest = state
+                .latest_snapshot
+                .lock()
+                .await
+                .clone()
+                .expect("published");
             assert_eq!(
                 latest.pv1_pct,
                 Some(66.42),
@@ -6099,10 +6120,9 @@ mod tests {
             .expect("concurrent save");
 
             persist_auto_winter_saved(&Some(AutoWinterSaved {
-                    enable_charge_target: true,
-                    target_soc: 80,
-                }),
-            );
+                enable_charge_target: true,
+                target_soc: 80,
+            }));
 
             let after = Settings::load();
             assert_eq!(

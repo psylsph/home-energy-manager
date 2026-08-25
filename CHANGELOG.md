@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Internal
+
+- Poll-loop settings reads (the publish-time solar re-stamp and the winter-mode persist) now run on the blocking thread pool like the cycle's own settings load, so a slow or networked settings file can't stall a poll tick.
+
 ## [0.74.15] - 2026-08-23
 
 ### Fixed

@@ -694,7 +694,10 @@ async fn settings_save_restamps_solar_array_fields_without_poll_cycle() {
     let (status, body) = get_json(&router, "/api/snapshot").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body["data"]["pv1_pct"].is_null());
-    assert_eq!(body["data"]["solar_arrays"].as_array().map(Vec::len), Some(0));
+    assert_eq!(
+        body["data"]["solar_arrays"].as_array().map(Vec::len),
+        Some(0)
+    );
 
     // Save the rated kWp like the Solar page settings UI does.
     let (status, body) = post_json(

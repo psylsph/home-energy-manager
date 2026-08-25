@@ -1219,6 +1219,13 @@ pub async fn update_settings(
     // register writes (1.5 s per write) before its next read — without
     // this re-stamp (plus broadcast), the Solar page's Solar Arrays card
     // lags the save by that whole drain window.
+    //
+    // NOTE: this key set must cover every settings field that
+    // `stamp_solar_array_fields` / `compute_solar_arrays` reads — today
+    // `pv1_rated_kw`, `pv2_rated_kw`, and the `solar_arrays` CT-meter list.
+    // Adding a new solar-derived setting means extending BOTH this
+    // condition and the poll loop's stamping, or saves of the new field
+    // won't restamp the current snapshot.
     if body.get("pv1_rated_kw").is_some()
         || body.get("pv2_rated_kw").is_some()
         || body.get("solar_arrays").is_some()
@@ -1455,10 +1462,15 @@ fn parse_settings(body: &serde_json::Value) -> Result<PollSettings, String> {
 
 /// Parse and validate an optional tariff config from a request body field.
 ///
-/// Returns `Ok(None)` when the field is missing or `null` (the caller should
-/// fall back to the existing on-disk value). Returns `Err(msg)` when the
-/// field is present but malformed or fails validation — the message is
-/// surfaced to the user as a 400 response.
+/// Returns `Ok(None)` both when the key is absent and when it is
+/// explicitly `null` — the caller (`update_settings`' closure) treats both
+/// as "preserve whatever is on disk" and only writes `Some(cfg)`. Note
+/// this means there is currently no way to CLEAR a tariff config via the
+/// API; the settings UI always sends a full config, so a clear path has
+/// never been needed. Distinguish `null` from absent here (and write
+/// `None` in the closure) if a clear path is ever added. Returns `Err(msg)`
+/// when the field is present but malformed or fails validation — the
+/// message is surfaced to the user as a 400 response.
 ///
 /// Validation enforces (see [`TariffConfig::validate`]):
 /// - non-empty slot list
