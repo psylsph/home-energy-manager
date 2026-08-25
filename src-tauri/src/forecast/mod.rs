@@ -318,8 +318,20 @@ pub(crate) fn battery_rate_limits_kw(snapshot: &InverterSnapshot) -> (f64, f64) 
     } else {
         2.0
     };
-    let charge_pct = (snapshot.charge_rate as f64 * scale).clamp(0.0, 100.0);
-    let discharge_pct = (snapshot.discharge_rate as f64 * scale).clamp(0.0, 100.0);
+    // A 0 rate register means "unset/unknown", not "disabled" — the AC
+    // config / limit blocks are optional and read zero right after connect
+    // (and on simulators). Fall back to the hardware maximum so the
+    // projection still runs; a genuine user-configured 0 is rare and the
+    // forecast is an estimate capped at the physical limit either way.
+    let pct_or_max = |raw: u8| {
+        if raw == 0 {
+            100.0
+        } else {
+            (raw as f64 * scale).clamp(0.0, 100.0)
+        }
+    };
+    let charge_pct = pct_or_max(snapshot.charge_rate);
+    let discharge_pct = pct_or_max(snapshot.discharge_rate);
     (
         charge_pct / 100.0 * max_kw,
         discharge_pct / 100.0 * max_kw,
