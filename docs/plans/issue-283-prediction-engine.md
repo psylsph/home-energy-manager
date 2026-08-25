@@ -1,6 +1,6 @@
 # Design: Forecast & Planning (issue #283)
 
-Status: **Phases 0–1 implemented; Phases 2–4 planned**
+Status: **Phases 0–2 implemented; Phases 3–4 planned**
 Issue: <https://github.com/psylsph/home-energy-manager/issues/283>
 
 ## Summary
@@ -157,7 +157,30 @@ Page layout, top to bottom:
    reserve/target SOC reference lines.
 5. *(Phase 2)* **Plan card** — recommendation with rationale and Apply.
 
-### Phase 2 — planner (suggest; human applies)
+### Phase 2 — planner (issue #283) — **shipped**
+
+- `forecast/planner.rs` — consumes the Phase 1 SOC trajectory plus the
+  user's import-tariff config and returns a `PlanRecommendation`:
+  - `NoChargeNeeded { projected_end_soc_pct }` when the projection
+    already ends above the target;
+  - `Charge { window, kwh, target_soc_pct, projected_end_soc_pct,
+    rationale }` when the cheapest forward import window can close the
+    gap, AC kWh asked for clamped by capacity / rate / window time;
+  - `NoPlan { reason }` for missing-tariff / insufficient-history /
+    no-projection.
+- `cheapest_import_window(tariff, now_min, min_duration_min)` rotates
+  slot starts into the forward 24 h so a 02:00–05:00 off-peak is
+  always reachable; cheaper-first with past-skipped and duration-floor
+  filtering.
+- `GET /api/forecast/plan` assembles the recommendation from the Phase
+  1 payload plus settings and snapshot, and serialises an `apply`
+  block that mirrors the Control page's POST bodies
+  (`/api/control/charge-slot`, `/api/control/timed-charge`).
+- `ForecastPage.tsx` Plan card: `forecastPlanTitle` headline per kind,
+  Apply button wired to those two endpoints, no button on
+  no-charge / no-plan states. No autonomy — the user always clicks.
+
+### Phase 2 — originally proposed (now superseded above)
 
 - `forecast/planner.rs`: tariff-aware planner. For Flux-style tariffs the
   output collapses to "charge X kWh in the cheapest fixed window to hit
