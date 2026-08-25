@@ -66,7 +66,8 @@ const { fullPayload, planPayload } = vi.hoisted(() => {
             kwh: 3.2,
             target_soc_pct: 80,
             projected_end_soc_pct: 80,
-            rationale: 'Cheap overnight charge covers the deficit.',
+            current_soc_pct: 25,
+            rationale: 'Battery is at 25% now and solar leaves it at 30%. Charging 3.2 kWh in the 9.0p window lifts it to 80%.',
           },
           apply: {
             charge_slot: {
@@ -90,6 +91,7 @@ const { fullPayload, planPayload } = vi.hoisted(() => {
           recommendation: {
             kind: 'no_charge_needed',
             projected_end_soc_pct: 100,
+            current_soc_pct: 80,
             rationale: 'Sunny day — the battery fills from solar.',
           },
           apply: null,
@@ -317,3 +319,28 @@ describe('ForecastPage refresh triggers', () => {
     expect(calls.length).toBe(0);
   });
 });
+
+  it('shows the live current SOC on the plan card so reactivity is visible', async () => {
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') {
+        const liveSoc = (useInverterStore.getState().snapshot as { soc?: number } | null)?.soc ?? 0;
+        const out = planPayload('charge') as { data: { recommendation: { current_soc_pct: number; rationale: string } } };
+        out.data.recommendation.current_soc_pct = liveSoc;
+        out.data.recommendation.rationale = `Battery is at ${liveSoc}% now...`;
+        return out;
+      }
+      return { ok: true, data: {} };
+    });
+    useInverterStore.setState({ snapshot: { soc: 25, max_battery_power_w: 3000 } as never });
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect(screen.getByTestId('forecast-plan-current-soc').textContent).toMatch(/25%/);
+    });
+    await act(async () => {
+      useInverterStore.setState({ snapshot: { soc: 32, max_battery_power_w: 3000 } as never });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('forecast-plan-current-soc').textContent).toMatch(/32%/);
+    });
+  });

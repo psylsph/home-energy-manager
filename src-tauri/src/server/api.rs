@@ -5062,6 +5062,7 @@ fn build_plan_payload(
         consumption_tomorrow_kwh: forecast.consumption_tomorrow_kwh,
         consumption_sufficient: forecast.consumption_sufficient,
         now_min,
+        current_soc_pct: snapshot.map(|s| s.soc as f64).unwrap_or(0.0),
     };
     let rec = crate::forecast::planner::plan_overnight_charge(&inputs);
     plan_to_json_value(&rec)
@@ -5072,12 +5073,14 @@ fn build_plan_payload(
 fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> serde_json::Value {
     use crate::forecast::planner::PlanRecommendation;
     match rec {
-        PlanRecommendation::NoChargeNeeded { projected_end_soc_pct } => serde_json::json!({
+        PlanRecommendation::NoChargeNeeded { projected_end_soc_pct, current_soc_pct } => serde_json::json!({
             "kind": "no_charge_needed",
             "projected_end_soc_pct": projected_end_soc_pct,
+            "current_soc_pct": current_soc_pct,
             "rationale": format!(
-                "Your battery reaches {:.0}% tomorrow on its own — nothing to schedule.",
-                projected_end_soc_pct
+                "Your battery reaches {:.0}% tomorrow on its own (currently {:.0}%) — nothing to schedule.",
+                projected_end_soc_pct,
+                current_soc_pct
             ),
             "apply": null,
         }),
@@ -5086,6 +5089,7 @@ fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> ser
             kwh,
             target_soc_pct,
             projected_end_soc_pct,
+            current_soc_pct,
             rationale,
         } => {
             let (start_h, start_m) = hhmm_split(window.start_min);
@@ -5108,6 +5112,7 @@ fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> ser
                 "kwh": kwh,
                 "target_soc_pct": target_soc_pct,
                 "projected_end_soc_pct": projected_end_soc_pct,
+                "current_soc_pct": current_soc_pct,
                 "rationale": rationale,
                 "apply": {
                     "charge_slot": {

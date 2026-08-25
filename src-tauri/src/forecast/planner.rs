@@ -35,6 +35,8 @@ pub enum PlanRecommendation {
     NoChargeNeeded {
         /// Projected end-of-window SOC, %.
         projected_end_soc_pct: f64,
+        /// Current SOC at the moment of the plan request, %.
+        current_soc_pct: f64,
     },
     /// Charge `kwh` AC in the window; the battery should then reach
     /// `projected_end_soc_pct` by the window's end.
@@ -46,6 +48,8 @@ pub enum PlanRecommendation {
         /// Target SOC the charge aims for, %.
         target_soc_pct: f64,
         projected_end_soc_pct: f64,
+        /// Current SOC at the moment of the plan request, %.
+        current_soc_pct: f64,
         /// Human-readable rationale shown under the recommendation.
         rationale: String,
     },
@@ -72,6 +76,10 @@ pub struct PlanInputs<'a> {
     pub consumption_tomorrow_kwh: f64,
     /// Whether the consumption history was sufficient (Phase 1 gate).
     pub consumption_sufficient: bool,
+    /// Current SOC at the moment of the request, % (sourced from the
+    /// live snapshot so the user can see the planner is reading fresh
+    /// data — a stuck value here would mean the page isn't refetching).
+    pub current_soc_pct: f64,
     /// `now` minute-of-day, for picking windows that haven't passed.
     pub now_min: u16,
 }
@@ -162,6 +170,7 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
         .unwrap_or(0.0);
     if projected_end >= inputs.target_soc_pct {
         return PlanRecommendation::NoChargeNeeded {
+            current_soc_pct: inputs.current_soc_pct,
             projected_end_soc_pct: projected_end,
         };
     }
@@ -194,15 +203,16 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
         (projected_end + kwh * eta / capacity * 100.0).min(100.0);
 
     let rationale = format!(
-        "Tomorrow's solar won't lift the battery to {:.0}% — the projection \
-         ends at {:.0}%. Charging {:.1} kWh in the {:.1}p window ({}–{}) \
-         covers the gap for about £{:.2}.",
-        inputs.target_soc_pct,
+        "Battery is at {:.0}% now and tomorrow's solar is only expected to \
+         leave it at {:.0}% by the end of the day. Charging {:.1} kWh in the \
+         {:.1}p window ({}–{}) lifts it to {:.0}% (about £{:.2} of grid import).",
+        inputs.current_soc_pct,
         projected_end,
         kwh,
         window.rate * 100.0,
         hhmm(window.start_min),
         hhmm(window.end_min),
+        inputs.target_soc_pct,
         kwh * window.rate,
     );
 
@@ -210,6 +220,7 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
         window,
         kwh,
         target_soc_pct: inputs.target_soc_pct,
+        current_soc_pct: inputs.current_soc_pct,
         projected_end_soc_pct: projected_after,
         rationale,
     }
@@ -295,6 +306,7 @@ mod tests {
             // 22:00 — well past solar, close enough to Flux's 02:00 that
             // the planner's "ready for tomorrow" branch is exercised.
             now_min: 22 * 60,
+            current_soc_pct: 30.0,
         }
     }
 
@@ -373,7 +385,7 @@ mod tests {
         let sim = simulate_tomorrow(1.5, 0.3, &p);
         let flux = flux_tariff();
         match plan_overnight_charge(&plan_inputs(&sim, &p, Some(&flux))) {
-            PlanRecommendation::NoChargeNeeded { projected_end_soc_pct } => {
+            PlanRecommendation::NoChargeNeeded { projected_end_soc_pct, .. } => {
                 assert!(
                     projected_end_soc_pct > 60.0,
                     "sunny projection must exceed target: {projected_end_soc_pct}"
@@ -397,6 +409,7 @@ mod tests {
                 kwh,
                 target_soc_pct,
                 projected_end_soc_pct,
+                current_soc_pct,
                 ..
             } => {
                 assert!(window.tomorrow);
@@ -406,6 +419,9 @@ mod tests {
                 assert!(kwh > 0.0 && kwh <= 10.0 / 0.9);
                 assert!((target_soc_pct - 60.0).abs() < 1e-9);
                 assert!(projected_end_soc_pct >= 59.0);
+                // The planner round-trips the live current SOC so the UI
+                // can show the user which number drove the kWh ask.
+                assert!((current_soc_pct - 30.0).abs() < 1e-9);
             }
             other => panic!("expected Charge, got {other:?}"),
         }
@@ -506,13 +522,17 @@ mod tests {
         let p = params();
         let sim = simulate_tomorrow(0.2, 0.5, &p);
         let flux = flux_tariff();
-        if let PlanRecommendation::Charge { rationale, .. } =
+        if let PlanRecommendation::Charge { rationale, current_soc_pct, .. } =
             plan_overnight_charge(&plan_inputs(&sim, &p, Some(&flux)))
         {
             // The rate should always appear in the rationale regardless
             // of which window was picked.
             assert!(rationale.contains("9.0p") || rationale.contains("26.0p"));
             assert!(rationale.contains("02:00") || rationale.contains("05:00"));
+            // The live current SOC drives the rationale and the kWh ask,
+            // so it must be present in the user-visible text.
+            assert!(rationale.contains("30%"), "rationale: {rationale}");
+            assert!((current_soc_pct - 30.0).abs() < 1e-9);
         } else {
             panic!("expected Charge");
         }

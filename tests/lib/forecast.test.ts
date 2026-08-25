@@ -186,3 +186,26 @@ describe('shouldRefetchForecast', () => {
     expect(shouldRefetchForecast(null, 50, 0, 1000, 3000, 3000)).toBe(true);
   });
 });
+
+describe('forecastPlanChargeRationale', () => {
+  it('mentions the live current SOC so the user can see what drove the kWh ask', () => {
+    const charge: Extract<PlanRecommendation, { kind: 'charge' }> = {
+      kind: 'charge',
+      window: { start: '00:30', end: '05:30', rate: 0.07, tomorrow: true },
+      kwh: 5.7,
+      target_soc_pct: 100,
+      projected_end_soc_pct: 100,
+      current_soc_pct: 4,
+      rationale:
+        'Battery is at 4% now and tomorrow\'s solar is only expected to leave it at 46% by the end of the day. Charging 5.7 kWh in the 7.0p window (00:30–05:30) lifts it to 100% (about £0.40 of grid import).',
+    };
+    expect(charge.current_soc_pct).toBe(4);
+    // The current SOC must appear so the user can confirm reactivity.
+    expect(charge.rationale).toMatch(/4%/);
+    // The window/£ numbers must too.
+    expect(charge.rationale).toMatch(/5\.7 kWh/);
+    expect(charge.rationale).toMatch(/7\.0p/);
+    expect(charge.rationale).toMatch(/00:30/);
+    expect(charge.rationale).toMatch(/05:30/);
+  });
+});

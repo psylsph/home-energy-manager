@@ -249,6 +249,15 @@ export default function ForecastPage() {
             <h2 className="text-sm font-semibold text-text-primary">
               {forecastPlanTitle(plan.recommendation)}
             </h2>
+            {plan.recommendation.kind !== 'no_plan' && (
+              <span
+                data-testid="forecast-plan-current-soc"
+                className="text-[11px] text-text-secondary"
+                title="Live snapshot SOC at the time the plan was computed"
+              >
+                Current SOC {Math.round(plan.recommendation.current_soc_pct)}%
+              </span>
+            )}
           </div>
           {plan.recommendation.kind === 'charge' && (
             <p className="text-xs text-text-secondary">

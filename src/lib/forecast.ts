@@ -136,11 +136,15 @@ export type PlanRecommendation =
       kwh: number;
       target_soc_pct: number;
       projected_end_soc_pct: number;
+      /** Live snapshot SOC at the time the plan was computed, %. */
+      current_soc_pct: number;
       rationale: string;
     }
   | {
       kind: 'no_charge_needed';
       projected_end_soc_pct: number;
+      /** Live snapshot SOC at the time the plan was computed, %. */
+      current_soc_pct: number;
       rationale: string;
     }
   | { kind: 'no_plan'; reason: string };
