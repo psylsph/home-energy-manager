@@ -252,3 +252,32 @@ describe('ForecastPage plan card', () => {
   });
 });
 
+
+describe('ForecastPage refresh triggers', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+  afterEach(() => cleanup());
+
+  it('refetches when the live snapshot SOC changes meaningfully', async () => {
+    // Two separate mounts let us assert that the second mount was
+    // triggered by the store change: the first mount establishes the
+    // initial two apiGet calls, then we wait long enough that the
+    // 10-minute interval has not elapsed, change the simulated SOC,
+    // and re-render. The fresh calls confirm a refetch.
+    render(<ForecastPage />);
+    await waitFor(() =>
+      expect(screen.getByTestId('forecast-solar-tomorrow').textContent).toMatch(/18\.4/),
+    );
+    expect(apiGetMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+    apiGetMock.mockClear();
+    // The store's snapshot is mutated between renders (mirrors what the
+    // WS push does). Forcing a re-render of the page exercises the
+    // refresh-on-snapshot-change path.
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect(apiGetMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+});

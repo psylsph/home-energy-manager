@@ -156,3 +156,32 @@ describe('forecastPlanTitle', () => {
     expect(forecastPlanTitle(charge)).toMatch(/05:00/);
   });
 });
+
+describe('shouldRefetchForecast', () => {
+  it('refetches on a meaningful SOC change (>= 1 percentage point)', () => {
+    expect(shouldRefetchForecast(50, 51, 0, 1000, 3000, 3000)).toBe(true);
+    expect(shouldRefetchForecast(50, 50, 0, 1000, 3000, 3000)).toBe(false);
+  });
+
+  it('refetches when the rate caps change', () => {
+    expect(shouldRefetchForecast(50, 50, 0, 1000, 3000, 5000)).toBe(true);
+  });
+
+  it('force-refreshes after the long interval (30 s)', () => {
+    expect(shouldRefetchForecast(50, 50, 0, 30_001, 3000, 3000)).toBe(true);
+    expect(shouldRefetchForecast(50, 50, 0, 29_999, 3000, 3000)).toBe(false);
+  });
+
+  it('debounces rapid changes (no more than once per 5 s)', () => {
+    expect(shouldRefetchForecast(50, 50.4, 1000, 6000, 3000, 3000)).toBe(false);
+    expect(shouldRefetchForecast(50, 51, 1000, 6000, 3000, 3000)).toBe(true);
+  });
+
+  it('treats null snapshots (no inverter yet) as "no change"', () => {
+    expect(shouldRefetchForecast(null, null, 0, 1000, 3000, 3000)).toBe(false);
+  });
+
+  it('treats the first snapshot arrival as a refetch', () => {
+    expect(shouldRefetchForecast(null, 50, 0, 1000, 3000, 3000)).toBe(true);
+  });
+});
