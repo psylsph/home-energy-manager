@@ -913,3 +913,151 @@ async fn forecast_endpoint_serves_seeded_forecast() {
     let end_soc = battery["end_soc_pct"].as_f64().unwrap();
     assert!((end_soc - 100.0).abs() < 1e-6, "end_soc = {end_soc}");
 }
+
+// ====================================================================
+// GET /api/forecast/plan — issue #283 Phase 2
+// ====================================================================
+
+/// Empty state: no tariff, no snapshot → NoPlan with a reason, 200 OK.
+#[tokio::test]
+async fn forecast_plan_endpoint_degrades_to_no_plan() {
+    let _config = IsolatedConfig::enter();
+    let state = Arc::new(AppState::new());
+    let router = create_router(state);
+
+    let (status, body) = get_json(&router, "/api/forecast/plan").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], Value::Bool(true));
+    let rec = body["data"]["recommendation"].as_object().expect("rec");
+    assert_eq!(rec["kind"], Value::String("no_plan".to_string()));
+    // Either gate is fine for an empty state — the test's contract is
+    // "no_plan with a human-readable reason", not a specific message.
+    let reason = rec["reason"].as_str().unwrap().to_lowercase();
+    assert!(
+        reason.contains("tariff")
+            || reason.contains("projection")
+            || reason.contains("history"),
+        "reason: {}",
+        rec["reason"]
+    );
+}
+
+/// Fully seeded: cloudy forecast + Flux tariff + drained battery → a
+/// Charge recommendation with the off-peak window and kWh, plus the
+/// exact Apply payload the UI posts to the existing control endpoints.
+#[tokio::test]
+async fn forecast_plan_endpoint_recommends_overnight_charge() {
+    use chrono::TimeZone;
+    use givenergy_local::history::{ForecastValueRow, HistoryDb};
+    use givenergy_local::inverter::model::InverterSnapshot;
+
+    let config = IsolatedConfig::enter();
+    let state = Arc::new(AppState::new());
+
+    // Cloudy forward forecast: 100 W/m² for tomorrow's daylight.
+    let db = HistoryDb::open(&config.dir.join("history.db")).unwrap();
+    let now = chrono::Local::now();
+    let now_ts = now.timestamp();
+    let hour_start = now_ts - now_ts.rem_euclid(3600);
+    for h in 0..48i64 {
+        let ts = hour_start + h * 3600;
+        db.insert_forecast_values(&[ForecastValueRow {
+            timestamp: ts,
+            variable: "shortwave_radiation".to_string(),
+            value: if h % 24 >= 6 && h % 24 <= 19 { 100.0 } else { 0.0 },
+            source: "open-meteo".to_string(),
+            fetched_at: now_ts,
+        }])
+        .unwrap();
+    }
+    db.set_meta_value("forecast_pr", "0.8").unwrap();
+    db.set_meta_value("forecast_pr_days", "12").unwrap();
+
+    // A week of consumption history (+0.5/h).
+    let mut date = now.date_naive() - chrono::Duration::days(7);
+    while date < now.date_naive() {
+        let mut counter = 0.0_f64;
+        for hour in 0..24u32 {
+            let ts = chrono::Local
+                .from_local_datetime(&date.and_hms_opt(hour, 0, 0).unwrap())
+                .earliest()
+                .unwrap()
+                .timestamp();
+            db.insert_reading(&InverterSnapshot {
+                timestamp: ts,
+                home_energy_today_kwh: counter as f32,
+                ..Default::default()
+            });
+            counter += 0.5;
+        }
+        date = date.succ_opt().unwrap();
+    }
+    *state.history.lock().await = Some(Arc::new(db));
+
+    // Drained battery + rate limits on the snapshot.
+    *state.latest_snapshot.lock().await = Some(InverterSnapshot {
+        soc: 20,
+        battery_capacity_kwh: 9.5,
+        max_battery_power_w: 3000,
+        charge_rate: 50,
+        discharge_rate: 50,
+        battery_reserve: 10,
+        ..Default::default()
+    });
+    {
+        let mut ws = state.weather.lock().await;
+        ws.config.enabled = true;
+        ws.config.latitude = Some(51.5);
+        ws.config.longitude = Some(-0.13);
+    }
+
+    let router = create_router(state.clone());
+
+    // Flux-like tariff via the existing settings endpoint.
+    let (status, body) = post_json(
+        &router,
+        "/api/settings",
+        &json!({
+            "pv1_rated_kw": 5.0,
+            "import_tariff_config": {
+                "slots": [
+                    { "start": "00:00", "end": "02:00", "rate": 0.26 },
+                    { "start": "02:00", "end": "05:00", "rate": 0.09 },
+                    { "start": "05:00", "end": "16:00", "rate": 0.26 },
+                    { "start": "16:00", "end": "21:00", "rate": 0.35 },
+                    { "start": "21:00", "end": "23:59", "rate": 0.26 }
+                ]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "settings save failed: {body}");
+
+    let (status, body) = get_json(&router, "/api/forecast/plan").await;
+    assert_eq!(status, StatusCode::OK);
+    let rec = body["data"]["recommendation"].as_object().expect("rec");
+    assert_eq!(rec["kind"], Value::String("charge".to_string()));
+    let window = rec["window"].as_object().expect("window");
+    assert_eq!(window["start"], serde_json::json!("02:00"));
+    assert_eq!(window["end"], serde_json::json!("05:00"));
+    let kwh = rec["kwh"].as_f64().expect("kwh");
+    assert!(kwh > 0.0 && kwh < 9.5, "kwh = {kwh}");
+    assert!(
+        rec["rationale"].as_str().unwrap().contains("9.0p"),
+        "rationale: {}",
+        rec["rationale"]
+    );
+    // The Apply payload mirrors what the Control page posts.
+    let apply = body["data"]["apply"].as_object().expect("apply");
+    // The API returns target_soc as an integer; rec["target_soc_pct"]
+    // holds the float from the recommendation.
+    let target_soc_int = rec["target_soc_pct"].as_f64().unwrap() as u64;
+    assert_eq!(apply["charge_slot"], serde_json::json!({
+        "slot": 1,
+        "enabled": true,
+        "start_hour": 2, "start_minute": 0,
+        "end_hour": 5, "end_minute": 0,
+        "target_soc": target_soc_int,
+    }));
+    assert_eq!(apply["timed_charge"], serde_json::json!({ "enabled": true }));
+}

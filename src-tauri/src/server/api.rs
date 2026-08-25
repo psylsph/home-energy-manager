@@ -4931,6 +4931,218 @@ pub async fn get_forecast(State(state): State<Arc<AppState>>) -> (StatusCode, Js
     (StatusCode::OK, Json(json!({ "ok": true, "data": payload })))
 }
 
+/// GET /api/forecast/plan — tariff-aware overnight charge recommendation
+/// (issue #283, Phase 2). Same inputs as `/api/forecast` plus the user's
+/// import-tariff config; never writes any register — Apply happens only
+/// from the UI through the existing control endpoints.
+pub async fn get_forecast_plan(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    use chrono::Local;
+    use chrono::Timelike;
+
+    let snapshot = state.latest_snapshot.lock().await.clone();
+    let history = state.history.lock().await.clone();
+    let (weather_enabled, coords) = {
+        let ws = state.weather.lock().await;
+        (ws.config.enabled, ws.config.latitude.zip(ws.config.longitude))
+    };
+    let settings = crate::settings::Settings::load();
+    let forecast = crate::forecast::build_forecast_payload(&crate::forecast::ForecastInputs {
+        db: history.as_deref(),
+        settings: &settings,
+        snapshot: snapshot.as_ref(),
+        weather_enabled,
+        weather_coords: coords,
+        now: Local::now(),
+    });
+
+    let now = Local::now();
+    let now_min: u16 = now.hour() as u16 * 60 + now.minute() as u16;
+
+    let rec = build_plan_payload(&forecast, &settings, snapshot.as_ref(), now_min);
+    let apply = rec
+        .get("apply")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let recommendation = {
+        let mut r = rec.as_object().cloned().unwrap_or_default();
+        r.remove("apply");
+        serde_json::Value::Object(r)
+    };
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "data": {
+                "recommendation": recommendation,
+                "apply": apply,
+            }
+        })),
+    )
+}
+
+/// Build the serialisable plan response (recommendation + Apply payload).
+///
+/// The forecast already produced the SOC trajectory; the planner only
+/// needs the projected end SOC plus the simulated hour series (for the
+/// `NoChargeNeeded` branch). Everything else comes from the snapshot
+/// and settings.
+fn build_plan_payload(
+    forecast: &crate::forecast::ForecastPayload,
+    settings: &crate::settings::Settings,
+    snapshot: Option<&crate::inverter::model::InverterSnapshot>,
+    now_min: u16,
+) -> serde_json::Value {
+    use crate::forecast::simulate::{SimHourResult, SimulationParams, SimulationOutput};
+    let import_tariff = settings.import_tariff_config.as_ref();
+
+    // No battery projection -> straight NoPlan.
+    let battery = match &forecast.battery {
+        Some(b) => b,
+        None => {
+            let _ = import_tariff;
+            return plan_only_payload_str("no battery projection available — connect to the inverter and wait for forecast data");
+        }
+    };
+
+    // Reserve floor + capacity from the snapshot/battery block; rate caps
+    // and efficiencies from settings. We use the snapshot for live
+    // capacity when present, otherwise the battery block's capacity_kwh.
+    let (capacity_kwh, start_soc, reserve_soc) = match snapshot {
+        Some(s) if s.battery_capacity_kwh > 0.0 => (
+            s.battery_capacity_kwh as f64,
+            s.soc as f64,
+            s.battery_reserve as f64,
+        ),
+        _ => (battery.capacity_kwh, battery.start_soc_pct, battery.reserve_soc_pct),
+    };
+
+    // Target SOC: the snapshot's configured target, else 80%.
+    let target_soc_pct = snapshot
+        .map(|s| s.target_soc as f64)
+        .filter(|p| *p >= 4.0 && *p <= 100.0)
+        .unwrap_or(80.0);
+
+    let max_charge_kw = battery.capacity_kwh; // 1C as a safe upper bound
+    let max_discharge_kw = battery.capacity_kwh;
+    let eta_c = settings.forecast_charge_efficiency;
+    let eta_d = settings.forecast_discharge_efficiency;
+
+    let hours: Vec<SimHourResult> = battery
+        .hours
+        .iter()
+        .map(|(ts, soc)| SimHourResult {
+            timestamp: *ts,
+            soc_pct: *soc,
+            import_kwh: 0.0,
+            export_kwh: 0.0,
+            charge_kwh: 0.0,
+            discharge_kwh: 0.0,
+        })
+        .collect();
+
+    let params = SimulationParams {
+        capacity_kwh,
+        start_soc_pct: start_soc,
+        reserve_soc_pct: reserve_soc,
+        max_charge_kw,
+        max_discharge_kw,
+        charge_efficiency: eta_c,
+        discharge_efficiency: eta_d,
+    };
+    let sim = SimulationOutput {
+        hours,
+        total_import_kwh: forecast.import_tomorrow_kwh,
+        total_export_kwh: forecast.export_tomorrow_kwh,
+    };
+    let inputs = crate::forecast::planner::PlanInputs {
+        simulation: &sim,
+        params: &params,
+        import_tariff,
+        target_soc_pct,
+        consumption_tomorrow_kwh: forecast.consumption_tomorrow_kwh,
+        consumption_sufficient: forecast.consumption_sufficient,
+        now_min,
+    };
+    let rec = crate::forecast::planner::plan_overnight_charge(&inputs);
+    plan_to_json_value(&rec)
+}
+
+/// Serialise a `PlanRecommendation` into the JSON shape the UI/Apply
+/// path expects.
+fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> serde_json::Value {
+    use crate::forecast::planner::PlanRecommendation;
+    match rec {
+        PlanRecommendation::NoChargeNeeded { projected_end_soc_pct } => serde_json::json!({
+            "kind": "no_charge_needed",
+            "projected_end_soc_pct": projected_end_soc_pct,
+            "rationale": format!(
+                "Your battery reaches {:.0}% tomorrow on its own — nothing to schedule.",
+                projected_end_soc_pct
+            ),
+            "apply": null,
+        }),
+        PlanRecommendation::Charge {
+            window,
+            kwh,
+            target_soc_pct,
+            projected_end_soc_pct,
+            rationale,
+        } => {
+            let (start_h, start_m) = hhmm_split(window.start_min);
+            // ChargeSlot2 ends at 23:59 inclusively; if the window reaches
+            // the day's end, keep it at 23:59 so the inverter's slot
+            // remains enabled.
+            let (end_h, end_m) = if window.end_min >= 23 * 60 + 59 {
+                (23u16, 59u16)
+            } else {
+                hhmm_split(window.end_min)
+            };
+            serde_json::json!({
+                "kind": "charge",
+                "window": {
+                    "start": format!("{:02}:{:02}", start_h, start_m),
+                    "end": format!("{:02}:{:02}", end_h, end_m),
+                    "rate": window.rate,
+                    "tomorrow": window.tomorrow,
+                },
+                "kwh": kwh,
+                "target_soc_pct": target_soc_pct,
+                "projected_end_soc_pct": projected_end_soc_pct,
+                "rationale": rationale,
+                "apply": {
+                    "charge_slot": {
+                        "slot": 1,
+                        "enabled": true,
+                        "start_hour": start_h,
+                        "start_minute": start_m,
+                        "end_hour": end_h,
+                        "end_minute": end_m,
+                        "target_soc": *target_soc_pct as u64,
+                    },
+                    "timed_charge": { "enabled": true },
+                },
+            })
+        }
+        PlanRecommendation::NoPlan { reason } => serde_json::json!({
+            "kind": "no_plan",
+            "reason": reason,
+            "apply": null,
+        }),
+    }
+}
+
+fn plan_only_payload_str(reason: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "no_plan",
+        "reason": reason,
+        "apply": null,
+    })
+}
+
+fn hhmm_split(minutes: u16) -> (u16, u16) {
+    (minutes / 60, minutes % 60)
+}
+
 /// POST /api/weather — update the weather config.
 ///
 /// Accepts a partial update: any of `enabled`, `postcode`, `latitude`,
