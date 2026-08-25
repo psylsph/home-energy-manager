@@ -969,6 +969,10 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "pv1_rated_kw": settings.pv1_rated_kw,
             "pv2_rated_kw": settings.pv2_rated_kw,
             "solar_arrays": settings.solar_arrays,
+            // Issue #283: forecast efficiencies consumed by the SOC
+            // projection on the Forecast page.
+            "forecast_charge_efficiency": settings.forecast_charge_efficiency,
+            "forecast_discharge_efficiency": settings.forecast_discharge_efficiency,
         }
         })),
     )
@@ -1175,6 +1179,21 @@ pub async fn update_settings(
         }
         if let Some(kw) = body.get("pv2_rated_kw").and_then(|v| v.as_f64()) {
             persist.pv2_rated_kw = kw.max(0.0);
+        }
+        // Issue #283: forecast battery efficiencies for the SOC projection.
+        // Range-validated so a typo can't silently zero the projection's
+        // energy accounting.
+        if let Some(v) = body.get("forecast_charge_efficiency").and_then(|v| v.as_f64()) {
+            if !(0.5..=1.0).contains(&v) {
+                return Err("Charge efficiency must be between 0.5 and 1.0".to_string());
+            }
+            persist.forecast_charge_efficiency = v;
+        }
+        if let Some(v) = body.get("forecast_discharge_efficiency").and_then(|v| v.as_f64()) {
+            if !(0.5..=1.0).contains(&v) {
+                return Err("Discharge efficiency must be between 0.5 and 1.0".to_string());
+            }
+            persist.forecast_discharge_efficiency = v;
         }
         if let Some(arrays) = body.get("solar_arrays").and_then(|v| v.as_array()) {
             let parsed: Vec<crate::settings::SolarArrayConfig> = arrays
@@ -4885,6 +4904,31 @@ pub async fn get_weather(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
             "data": ws,
         })),
     )
+}
+
+/// GET /api/forecast — the assembled prediction payload (issue #283).
+///
+/// Computes from entirely local state (stored forecast values, meta PR,
+/// history counters, current snapshot, settings) — no network access on
+/// the request path, so the endpoint is cheap to poll and hermetic under
+/// test. Degradations are reported as status codes in the payload.
+pub async fn get_forecast(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let snapshot = state.latest_snapshot.lock().await.clone();
+    let history = state.history.lock().await.clone();
+    let (weather_enabled, coords) = {
+        let ws = state.weather.lock().await;
+        (ws.config.enabled, ws.config.latitude.zip(ws.config.longitude))
+    };
+    let settings = crate::settings::Settings::load();
+    let payload = crate::forecast::build_forecast_payload(&crate::forecast::ForecastInputs {
+        db: history.as_deref(),
+        settings: &settings,
+        snapshot: snapshot.as_ref(),
+        weather_enabled,
+        weather_coords: coords,
+        now: chrono::Local::now(),
+    });
+    (StatusCode::OK, Json(json!({ "ok": true, "data": payload })))
 }
 
 /// POST /api/weather — update the weather config.
@@ -10749,6 +10793,47 @@ mod tests {
     /// so a request with a valid `host` plus an invalid `octopus_gas_unit`
     /// returns 400 but has ALREADY written the host change to disk.
     /// A rejected request must be all-or-nothing: 400 and no mutation.
+    /// Issue #283: forecast efficiencies are range-validated on save —
+    /// an out-of-range value must 400 and leave disk untouched, an
+    /// in-range value round-trips.
+    #[tokio::test]
+    async fn update_settings_validates_forecast_efficiencies() {
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+
+            let (status, body) = update_settings(
+                State(state.clone()),
+                Json(json!({ "forecast_charge_efficiency": 1.5 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(body["error"].as_str().unwrap().contains("Charge efficiency"));
+            // Disk untouched — still the default.
+            assert!((crate::settings::Settings::load().forecast_charge_efficiency - 0.9).abs() < 1e-9);
+
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "forecast_discharge_efficiency": 0.4 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({
+                    "forecast_charge_efficiency": 0.85,
+                    "forecast_discharge_efficiency": 0.92
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let s = crate::settings::Settings::load();
+            assert!((s.forecast_charge_efficiency - 0.85).abs() < 1e-9);
+            assert!((s.forecast_discharge_efficiency - 0.92).abs() < 1e-9);
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn update_settings_rejected_request_leaves_disk_untouched() {
         with_isolated_config_dir_async(|| async {

@@ -785,3 +785,123 @@ async fn settings_save_clearing_kwp_restamps_snapshot_immediately() {
         "solar_arrays must clear immediately"
     );
 }
+
+// ====================================================================
+// GET /api/forecast — issue #283 Phase 1
+// ====================================================================
+
+/// A fresh install (no weather, no history, no snapshot) must return a
+/// well-formed payload with degradation codes — never zeros pretending
+/// to be a prediction, and never a 500.
+#[tokio::test]
+async fn forecast_endpoint_degrades_cleanly_with_empty_state() {
+    let _config = IsolatedConfig::enter();
+    let state = Arc::new(AppState::new());
+    let router = create_router(state);
+
+    let (status, body) = get_json(&router, "/api/forecast").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], Value::Bool(true));
+    let codes = body["data"]["status"].as_array().expect("status array");
+    for code in ["weather_disabled", "no_forecast_data", "no_snapshot"] {
+        assert!(
+            codes.iter().any(|c| c == code),
+            "expected status code {code} in {codes:?}"
+        );
+    }
+    assert!(body["data"]["battery"].is_null());
+    assert_eq!(body["data"]["solar"].as_array().map(Vec::len), Some(0));
+}
+
+/// Fully seeded state returns numbers: forward radiation, calibrated PR,
+/// consumption profile and a battery projection wired through settings.
+#[tokio::test]
+async fn forecast_endpoint_serves_seeded_forecast() {
+    use chrono::TimeZone;
+    use givenergy_local::forecast::ForecastSolarHour;
+    use givenergy_local::history::{ForecastValueRow, HistoryDb};
+    use givenergy_local::inverter::model::InverterSnapshot;
+
+    let _ = std::mem::size_of::<ForecastSolarHour>(); // shape compiles
+    let config = IsolatedConfig::enter();
+    let state = Arc::new(AppState::new());
+
+    let db = HistoryDb::open(&config.dir.join("history.db")).unwrap();
+    let now = chrono::Local::now();
+    let now_ts = now.timestamp();
+    let hour_start = now_ts - now_ts.rem_euclid(3600);
+    for h in 0..72i64 {
+        db.insert_forecast_values(&[ForecastValueRow {
+            timestamp: hour_start + h * 3600,
+            variable: "shortwave_radiation".to_string(),
+            value: 500.0,
+            source: "open-meteo".to_string(),
+            fetched_at: now_ts,
+        }])
+        .unwrap();
+    }
+    db.set_meta_value("forecast_pr", "0.8").unwrap();
+    db.set_meta_value("forecast_pr_days", "12").unwrap();
+    db.set_meta_value("forecast_calibrated_at", &now_ts.to_string())
+        .unwrap();
+
+    // Seven days of hourly consumption counters (+0.5 kWh/h).
+    let mut date = now.date_naive() - chrono::Duration::days(7);
+    while date < now.date_naive() {
+        let mut counter = 0.0_f64;
+        for hour in 0..24u32 {
+            let ts = chrono::Local
+                .from_local_datetime(&date.and_hms_opt(hour, 0, 0).unwrap())
+                .earliest()
+                .unwrap()
+                .timestamp();
+            db.insert_reading(&InverterSnapshot {
+                timestamp: ts,
+                home_energy_today_kwh: counter as f32,
+                ..Default::default()
+            });
+            counter += 0.5;
+        }
+        date = date.succ_opt().unwrap();
+    }
+    *state.history.lock().await = Some(Arc::new(db));
+
+    *state.latest_snapshot.lock().await = Some(InverterSnapshot {
+        soc: 50,
+        battery_capacity_kwh: 10.0,
+        max_battery_power_w: 5000,
+        charge_rate: 50,
+        discharge_rate: 50,
+        battery_reserve: 10,
+        ..Default::default()
+    });
+
+    let router = create_router(state.clone());
+    let (status, body) = post_json(
+        &router,
+        "/api/settings",
+        &json!({ "pv1_rated_kw": 5.0 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "settings save failed: {body}");
+
+    let (status, body) = get_json(&router, "/api/forecast").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], Value::Bool(true));
+    let status_codes = body["data"]["status"].as_array().expect("status");
+    assert!(
+        status_codes.is_empty(),
+        "expected no degradation codes: {status_codes:?}"
+    );
+    let tomorrow = body["data"]["solar_tomorrow_kwh"].as_f64().unwrap();
+    assert!(
+        (tomorrow - 48.0).abs() < 0.5,
+        "solar_tomorrow_kwh = {tomorrow}, want ~48"
+    );
+    assert_eq!(body["data"]["performance_ratio"], serde_json::json!(0.8));
+    assert_eq!(body["data"]["consumption_sufficient"], Value::Bool(true));
+    let battery = body["data"]["battery"].as_object().expect("battery");
+    assert_eq!(battery["start_soc_pct"], serde_json::json!(50.0));
+    let end_soc = battery["end_soc_pct"].as_f64().unwrap();
+    assert!((end_soc - 100.0).abs() < 1e-6, "end_soc = {end_soc}");
+}

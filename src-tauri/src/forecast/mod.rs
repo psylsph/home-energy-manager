@@ -11,19 +11,148 @@
 //! Open-Meteo endpoint, agent, config and enable gate.
 
 pub mod calibration;
+pub mod consumption;
+pub mod simulate;
 pub mod solar;
 
 use chrono::{DateTime, Local};
 
 use crate::forecast::calibration::calibrate_performance_ratio;
+use crate::forecast::consumption::{
+    build_consumption_profile, ConsumptionCounterRow, MIN_CONSUMPTION_DAYS,
+};
+use crate::forecast::simulate::{simulate_battery, SimHourInput, SimulationParams};
 use crate::forecast::solar::{OpenMeteoSolarProvider, SolarForecast, SolarForecastProvider};
 use crate::history::{ForecastValueRow, HistoryDb};
+use crate::inverter::model::InverterSnapshot;
+use crate::settings::Settings;
 
 /// How often the radiation forecast is refreshed. Open-Meteo's European
 /// models update hourly, so three hours is plenty for a 48 h planning
 /// horizon while staying far inside the free tier's fair-use envelope.
 pub const SOLAR_FORECAST_FETCH_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(3 * 60 * 60);
+
+/// How far back the consumption profile fit reads counter samples for.
+const CONSUMPTION_WINDOW_DAYS: i64 = 28;
+
+/// Model-uncertainty band around the solar prediction while measured
+/// forecast-error quantiles don't exist yet (Phase 4 replaces this with
+/// real error statistics from `forecast_values`).
+const SOLAR_BAND_FACTOR: f64 = 0.2;
+
+/// Performance ratio used while calibration hasn't accumulated enough
+/// days — the payload reports the `calibrating` status alongside so the
+/// UI can label these numbers preliminary.
+const FALLBACK_PERFORMANCE_RATIO: f64 = 0.75;
+
+/// `meta` keys persisted by [`store_and_calibrate`].
+pub const META_FORECAST_PR: &str = "forecast_pr";
+pub const META_FORECAST_PR_DAYS: &str = "forecast_pr_days";
+pub const META_FORECAST_CALIBRATED_AT: &str = "forecast_calibrated_at";
+
+// ---------------------------------------------------------------------------
+// GET /api/forecast payload
+// ---------------------------------------------------------------------------
+
+/// One forward solar-prediction hour (kWh plus the model band).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ForecastSolarHour {
+    pub timestamp: i64,
+    pub kwh: f64,
+    pub band_low: f64,
+    pub band_high: f64,
+}
+
+/// One hour-of-day consumption statistic.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ForecastConsumptionHour {
+    pub hour: u8,
+    pub kwh: f64,
+    pub p25: f64,
+    pub p75: f64,
+}
+
+/// Battery projection over the forward window.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ForecastBattery {
+    pub capacity_kwh: f64,
+    pub start_soc_pct: f64,
+    pub reserve_soc_pct: f64,
+    /// SOC at the end of each forward hour.
+    pub hours: Vec<(i64, f64)>,
+    pub end_soc_pct: f64,
+}
+
+/// The complete `GET /api/forecast` data block. `status` carries
+/// human-resolvable degradation codes (empty = fully calibrated):
+/// `weather_disabled`, `no_coordinates`, `no_forecast_data`,
+/// `calibrating`, `insufficient_consumption_history`, `no_snapshot`,
+/// `no_battery_capacity`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ForecastPayload {
+    pub generated_at: i64,
+    pub status: Vec<String>,
+    pub performance_ratio: Option<f64>,
+    pub performance_ratio_days: Option<u32>,
+    /// Forward solar hours from now, ascending.
+    pub solar: Vec<ForecastSolarHour>,
+    pub solar_today_remaining_kwh: f64,
+    pub solar_tomorrow_kwh: f64,
+    /// The 24 hour-of-day statistics (median + p25/p75), using the
+    /// nearest-neighbour fallback for unobserved hours.
+    pub consumption: Vec<ForecastConsumptionHour>,
+    pub consumption_days_observed: u32,
+    pub consumption_sufficient: bool,
+    pub consumption_tomorrow_kwh: f64,
+    pub battery: Option<ForecastBattery>,
+    pub import_tomorrow_kwh: f64,
+    pub export_tomorrow_kwh: f64,
+}
+
+/// Everything [`build_forecast_payload`] needs, so the assembly is a pure
+/// function of local state (testable without network or live poll loop).
+pub struct ForecastInputs<'a> {
+    pub db: Option<&'a HistoryDb>,
+    pub settings: &'a Settings,
+    pub snapshot: Option<&'a InverterSnapshot>,
+    pub weather_enabled: bool,
+    pub weather_coords: Option<(f64, f64)>,
+    pub now: DateTime<Local>,
+}
+
+/// Assemble the forecast payload from local state: stored forward
+/// radiation, calibrated PR, fitted consumption profile, current snapshot
+/// and settings. Every degradation path yields partial data plus a
+/// status code — never zeros pretending to be a prediction.
+pub fn build_forecast_payload(_inputs: &ForecastInputs) -> ForecastPayload {
+    // RED stub — Phase 1 implementation lands in the following commit.
+    ForecastPayload {
+        generated_at: 0,
+        status: vec!["no_forecast_data".to_string()],
+        performance_ratio: None,
+        performance_ratio_days: None,
+        solar: Vec::new(),
+        solar_today_remaining_kwh: 0.0,
+        solar_tomorrow_kwh: 0.0,
+        consumption: Vec::new(),
+        consumption_days_observed: 0,
+        consumption_sufficient: false,
+        consumption_tomorrow_kwh: 0.0,
+        battery: None,
+        import_tomorrow_kwh: 0.0,
+        export_tomorrow_kwh: 0.0,
+    }
+}
+
+/// Battery AC rate limits in kW derived from snapshot registers, using
+/// the same model classification the Control page applies: direct-limit
+/// families store 1–100%, DC hybrids store 0–50 which the UI doubles.
+/// Returns (0, 0) when the max battery power is unknown.
+pub(crate) fn battery_rate_limits_kw(_snapshot: &InverterSnapshot) -> (f64, f64) {
+    // RED stub — Phase 1 implementation lands in the following commit.
+    (0.0, 0.0)
+}
 
 /// How far back the calibration reads actual generation for. One day
 /// beyond the 14 modelled past days so a fetch early in the local day
@@ -341,5 +470,264 @@ mod tests {
             ..Settings::default()
         };
         assert!((effective_solar_kwp(&settings) - 5.0).abs() < 1e-9);
+    }
+
+    // --- Phase 1: rate limits, meta persistence, payload assembly ------
+
+    fn rate_snapshot() -> InverterSnapshot {
+        InverterSnapshot {
+            max_battery_power_w: 5000,
+            charge_rate: 50,
+            discharge_rate: 50,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rate_limits_double_dc_hybrid_and_use_direct_for_ac() {
+        use crate::inverter::model::DeviceType;
+        let mut snap = rate_snapshot();
+        // DC hybrid raw register 0-50 → display 100% → full 5 kW.
+        assert_eq!(battery_rate_limits_kw(&snap), (5.0, 5.0));
+        // Direct-limit family: raw 50 is already a percentage → 2.5 kW.
+        snap.device_type = DeviceType::ACCoupled;
+        assert_eq!(battery_rate_limits_kw(&snap), (2.5, 2.5));
+        // Unknown max power → no simulation basis.
+        snap.max_battery_power_w = 0;
+        assert_eq!(battery_rate_limits_kw(&snap), (0.0, 0.0));
+    }
+
+    #[test]
+    fn store_and_calibrate_persists_pr_to_meta() {
+        let db = test_db();
+        let now = local_dt(2025, 6, 15, 12, 0);
+        let now_ts = now.timestamp();
+        let rated = 5.0_f64;
+        let kwhs = [24.5_f32, 28.0, 31.5, 35.0, 21.0];
+        for (i, &kwh) in kwhs.iter().enumerate() {
+            let date = chrono::NaiveDate::from_ymd_opt(2025, 6, 10 + i as u32).unwrap();
+            for hour in 7..19u32 {
+                let ts = Local
+                    .from_local_datetime(&date.and_hms_opt(hour, 0, 0).unwrap())
+                    .earliest()
+                    .unwrap()
+                    .timestamp();
+                let fraction = (hour - 6) as f32 / 12.0;
+                db.insert_reading(&InverterSnapshot {
+                    timestamp: ts,
+                    today_solar_kwh: kwh * fraction,
+                    ..Default::default()
+                });
+            }
+        }
+        let mut samples: Vec<SolarForecastSample> = Vec::new();
+        for i in 0..5u32 {
+            let date = chrono::NaiveDate::from_ymd_opt(2025, 6, 10 + i).unwrap();
+            for hour in 7..17u32 {
+                let ts = Local
+                    .from_local_datetime(&date.and_hms_opt(hour, 0, 0).unwrap())
+                    .earliest()
+                    .unwrap()
+                    .timestamp();
+                samples.push(sample(ts, 700.0, None, None));
+            }
+        }
+        let forecast = SolarForecast {
+            samples,
+            grid_lat: None,
+            grid_lon: None,
+        };
+        let pr = store_and_calibrate(&db, rated, "open-meteo", now, &forecast);
+        assert!(pr.is_some(), "five complete days should calibrate");
+        // The PR and usable-day count survive to meta so GET /api/forecast
+        // can serve them without recalibrating from scratch.
+        assert_eq!(db.get_meta_value(META_FORECAST_PR), Some("0.8".to_string()));
+        assert_eq!(
+            db.get_meta_value(META_FORECAST_PR_DAYS),
+            Some("5".to_string())
+        );
+        assert!(db.get_meta_value(META_FORECAST_CALIBRATED_AT).is_some());
+    }
+
+    /// Seed the full data set a healthy deployment accumulates: 72 h of
+    /// forward radiation (constant 500 W/m²), a calibrated PR of 0.8 in
+    /// meta, seven days of hourly home-consumption counters, and a
+    /// connected snapshot with battery detail.
+    fn seed_full_forecast_state(db: &HistoryDb, now: DateTime<Local>) {
+        let now_ts = now.timestamp();
+        // Align the forward window to the local hour so "today remaining"
+        // counting is exact under test.
+        let hour_start = now_ts - (now_ts.rem_euclid(3600));
+        for h in 0..72i64 {
+            let ts = hour_start + h * 3600;
+            db.insert_forecast_values(&[ForecastValueRow {
+                timestamp: ts,
+                variable: "shortwave_radiation".to_string(),
+                value: 500.0,
+                source: "open-meteo".to_string(),
+                fetched_at: now_ts,
+            }])
+            .unwrap();
+        }
+        db.set_meta_value(META_FORECAST_PR, "0.8").unwrap();
+        db.set_meta_value(META_FORECAST_PR_DAYS, "12").unwrap();
+        db.set_meta_value(META_FORECAST_CALIBRATED_AT, &now_ts.to_string()).unwrap();
+
+        // Seven days of hourly home-energy counters, +0.5 kWh every hour,
+        // all 24 hours covered: today-7 through yesterday inclusive.
+        let mut date = now.date_naive() - chrono::Duration::days(7);
+        while date < now.date_naive() {
+            let mut counter = 0.0_f64;
+            for hour in 0..24u32 {
+                let ts = Local
+                    .from_local_datetime(&date.and_hms_opt(hour, 0, 0).unwrap())
+                    .earliest()
+                    .unwrap()
+                    .timestamp();
+                db.insert_reading(&InverterSnapshot {
+                    timestamp: ts,
+                    home_energy_today_kwh: counter as f32,
+                    ..Default::default()
+                });
+                counter += 0.5;
+            }
+            date = date.succ_opt().unwrap();
+        }
+    }
+
+    fn full_forecast_inputs<'a>(
+        db: &'a HistoryDb,
+        snapshot: Option<&'a InverterSnapshot>,
+        now: DateTime<Local>,
+        settings: &'a Settings,
+    ) -> ForecastInputs<'a> {
+        ForecastInputs {
+            db: Some(db),
+            settings,
+            snapshot,
+            weather_enabled: true,
+            weather_coords: Some((51.5, -0.13)),
+            now,
+        }
+    }
+
+    fn five_kwp_settings() -> Settings {
+        Settings {
+            pv1_rated_kw: 5.0,
+            ..Settings::default()
+        }
+    }
+
+    fn battery_snapshot() -> InverterSnapshot {
+        InverterSnapshot {
+            soc: 50,
+            battery_capacity_kwh: 10.0,
+            max_battery_power_w: 5000,
+            charge_rate: 50,
+            discharge_rate: 50,
+            battery_reserve: 10,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn payload_builds_full_forecast() {
+        let db = test_db();
+        let now = local_dt(2025, 6, 15, 12, 0);
+        seed_full_forecast_state(&db, now);
+        let snap = battery_snapshot();
+        let settings = five_kwp_settings();
+        let payload =
+            build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
+
+        assert!(payload.status.is_empty(), "status = {:?}", payload.status);
+        assert_eq!(payload.performance_ratio, Some(0.8));
+        assert_eq!(payload.performance_ratio_days, Some(12));
+        // 500 W/m² × 5 kWp × 0.8 = 2 kWh/h → tomorrow = 24 × 2 = 48.
+        assert!(
+            (payload.solar_tomorrow_kwh - 48.0).abs() < 0.01,
+            "tomorrow = {}",
+            payload.solar_tomorrow_kwh
+        );
+        assert!(payload.solar_today_remaining_kwh > 0.0);
+        assert_eq!(payload.consumption.len(), 24);
+        assert!(payload.consumption_sufficient);
+        assert_eq!(payload.consumption_days_observed, 7);
+        assert!((payload.consumption_tomorrow_kwh - 12.0).abs() < 0.01);
+
+        // Battery: surplus 1.5 kWh/h charges the 10 kWh pack from 50% to
+        // full within the first hours; every later hour exports 1.5.
+        let battery = payload.battery.as_ref().expect("battery projection");
+        assert!((battery.start_soc_pct - 50.0).abs() < 1e-9);
+        assert!((battery.reserve_soc_pct - 10.0).abs() < 1e-9);
+        assert!((battery.end_soc_pct - 100.0).abs() < 1e-9);
+        assert!(payload.import_tomorrow_kwh.abs() < 1e-9);
+        assert!((payload.export_tomorrow_kwh - 36.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn payload_reports_every_degradation_when_empty() {
+        let db = test_db();
+        let now = local_dt(2025, 6, 15, 12, 0);
+        let settings = Settings::default();
+        let inputs = ForecastInputs {
+            db: Some(&db),
+            settings: &settings,
+            snapshot: None,
+            weather_enabled: false,
+            weather_coords: None,
+            now,
+        };
+        let payload = build_forecast_payload(&inputs);
+        for code in [
+            "weather_disabled",
+            "no_forecast_data",
+            "calibrating",
+            "insufficient_consumption_history",
+            "no_snapshot",
+        ] {
+            assert!(payload.status.contains(&code.to_string()), "{code} missing");
+        }
+        assert!(payload.battery.is_none());
+        assert!(payload.solar.is_empty());
+    }
+
+    #[test]
+    fn payload_flags_calibrating_and_uses_fallback_pr() {
+        let db = test_db();
+        let now = local_dt(2025, 6, 15, 12, 0);
+        // Radiation stored but no PR in meta (fresh install).
+        let now_ts = now.timestamp();
+        for h in 0..72i64 {
+            db.insert_forecast_values(&[ForecastValueRow {
+                timestamp: now_ts + h * 3600,
+                variable: "shortwave_radiation".to_string(),
+                value: 500.0,
+                source: "open-meteo".to_string(),
+                fetched_at: now_ts,
+            }])
+            .unwrap();
+        }
+        let snap = battery_snapshot();
+        let settings = five_kwp_settings();
+        let payload = build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
+        assert!(payload.status.contains(&"calibrating".to_string()));
+        // Preliminary numbers still served, using the fallback PR.
+        assert!((payload.solar_tomorrow_kwh - 45.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn payload_without_battery_capacity_omits_projection() {
+        let db = test_db();
+        let now = local_dt(2025, 6, 15, 12, 0);
+        seed_full_forecast_state(&db, now);
+        let mut snap = battery_snapshot();
+        snap.battery_capacity_kwh = 0.0;
+        let settings = five_kwp_settings();
+        let payload = build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
+        assert!(payload.status.contains(&"no_battery_capacity".to_string()));
+        assert!(payload.battery.is_none());
+        // Solar and consumption still served.
+        assert!((payload.solar_tomorrow_kwh - 48.0).abs() < 0.01);
     }
 }

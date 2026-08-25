@@ -512,6 +512,19 @@ impl DeviceType {
     /// Hybrid HV Gen3 exposes the read-back `backup_enable` field at HR 1105,
     /// but neither reference implementation includes HR 1105 in its safe-write
     /// set, so it remains excluded from user control until writing is confirmed.
+    /// Whether the charge/discharge power-limit registers are a direct
+    /// 1–100% percentage (AC-coupled and the three-phase-limit banks)
+    /// rather than the 0–50 DC-hybrid half scale the UI doubles.
+    ///
+    /// Mirrors `deviceCapabilities.ts::usesDirectChargeLimit` so backend
+    /// kW derivations (forecast SOC projection) agree with the Control
+    /// page's rate maths. Gateway (0x70xx) is included per the frontend
+    /// classification; the AIO kW variants (0x80xx) are not.
+    pub fn uses_direct_charge_limit(&self) -> bool {
+        // RED stub — Phase 1 implementation lands in the following commit.
+        false
+    }
+
     pub fn supports_eps(&self) -> bool {
         matches!(
             self,
@@ -1505,6 +1518,44 @@ mod tests {
         assert_eq!(DeviceType::AllInOne3_6kW.max_battery_power_w(), 3600);
         assert_eq!(DeviceType::AllInOne5kW.max_battery_power_w(), 5000);
         assert_eq!(DeviceType::AllInOneHybrid.max_battery_power_w(), 6000);
+    }
+
+    #[test]
+    fn uses_direct_charge_limit_mirrors_frontend_classification() {
+        // Mirrors deviceCapabilities.ts `usesDirectChargeLimit`: AC-coupled
+        // (0x30xx) and the three-phase-limit banks (0x40/41/60/70/81/82)
+        // store charge/discharge limits as a direct 1–100% percentage.
+        for dt in [
+            DeviceType::ACCoupled,
+            DeviceType::ACCoupledMk2,
+            DeviceType::ThreePhase,
+            DeviceType::AioCommercial,
+            DeviceType::ACThreePhase,
+            DeviceType::Gateway,
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOneHybrid,
+        ] {
+            assert!(dt.uses_direct_charge_limit(), "{dt:?} should be direct");
+        }
+        // DC hybrids (0-50 half-scale registers), PV inverters, EMS and the
+        // AIO kW variants are not.
+        for dt in [
+            DeviceType::Gen1Hybrid,
+            DeviceType::Gen2Hybrid,
+            DeviceType::Gen3Hybrid,
+            DeviceType::PolarHybrid,
+            DeviceType::Gen3PlusHybrid,
+            DeviceType::Gen4Hybrid,
+            DeviceType::PvInverter,
+            DeviceType::Ems,
+            DeviceType::EmsCommercial,
+            DeviceType::AllInOne6kW,
+            DeviceType::AllInOne3_6kW,
+            DeviceType::AllInOne5kW,
+            DeviceType::Unknown(0x9999),
+        ] {
+            assert!(!dt.uses_direct_charge_limit(), "{dt:?} should not be direct");
+        }
     }
 
     #[test]

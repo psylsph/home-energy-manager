@@ -595,6 +595,14 @@ pub(crate) fn default_open_meteo_base_url() -> String {
     "https://api.open-meteo.com".to_string()
 }
 
+pub(crate) fn default_forecast_charge_efficiency() -> f64 {
+    0.9
+}
+
+pub(crate) fn default_forecast_discharge_efficiency() -> f64 {
+    0.95
+}
+
 /// A snapshot of a single discharge schedule slot, persisted to settings
 /// so the user's pre-Eco schedule can be restored when they switch back
 /// to Timed mode.
@@ -1152,6 +1160,17 @@ pub struct Settings {
     #[serde(default)]
     pub weather_config: WeatherConfig,
 
+    // -- Forecast & planning (issue #283) --
+    /// AC→battery charge efficiency used by the SOC projection, 0–1.
+    /// Default 0.9 (cell + inverter AC→DC conversion losses); round-trip
+    /// with the discharge default ≈ 85.5%.
+    #[serde(default = "default_forecast_charge_efficiency")]
+    pub forecast_charge_efficiency: f64,
+    /// Battery→AC discharge efficiency used by the SOC projection, 0–1.
+    /// Default 0.95.
+    #[serde(default = "default_forecast_discharge_efficiency")]
+    pub forecast_discharge_efficiency: f64,
+
     // -- Update checking ("new version available" banner) --
     /// When true, the backend periodically asks GitHub for the latest
     /// release tag and the frontend shows a dismissible banner when a newer
@@ -1571,6 +1590,8 @@ impl Default for Settings {
             hidden_panels: Vec::new(),
             alerts_config: AlertsConfig::default(),
             weather_config: WeatherConfig::default(),
+            forecast_charge_efficiency: default_forecast_charge_efficiency(),
+            forecast_discharge_efficiency: default_forecast_discharge_efficiency(),
             check_for_updates: default_check_for_updates(),
             octopus_enabled: false,
             octopus_api_key: String::new(),
@@ -1782,6 +1803,10 @@ mod tests {
     #[test]
     fn default_settings() {
         let s = Settings::default();
+        // Forecast efficiencies (issue #283): 90% charge / 95% discharge
+        // — round-trip ≈ 85.5%, in line with GivEnergy LV assumptions.
+        assert!((s.forecast_charge_efficiency - 0.9).abs() < 1e-9);
+        assert!((s.forecast_discharge_efficiency - 0.95).abs() < 1e-9);
         assert!(s.host.is_empty());
         assert_eq!(s.port, 8899);
         assert!(s.serial.is_empty());
@@ -1899,6 +1924,8 @@ mod tests {
                 ),
                 open_meteo_base_url: "https://api.open-meteo.com".to_string(),
             },
+            forecast_charge_efficiency: 0.88,
+            forecast_discharge_efficiency: 0.93,
             octopus_enabled: true,
             octopus_api_key: "sk_test".to_string(),
             octopus_account_number: "A-1234ABCD".to_string(),
@@ -1988,6 +2015,9 @@ mod tests {
         assert!(decoded.weather_config.enabled);
         assert_eq!(decoded.weather_config.postcode, "SW1A 1AA");
         assert_eq!(decoded.weather_config.latitude, Some(51.501009));
+        // Issue #283: forecast efficiencies round-trip through save/load.
+        assert!((decoded.forecast_charge_efficiency - 0.88).abs() < 1e-9);
+        assert!((decoded.forecast_discharge_efficiency - 0.93).abs() < 1e-9);
         assert_eq!(decoded.weather_config.longitude, Some(-0.141588));
         assert_eq!(
             decoded.weather_config.last_backfill_completed,
@@ -2124,6 +2154,23 @@ mod tests {
         // upgrade path is silent — see the dedicated
         // `legacy_settings_without_discharge_slots_backup_loads` test.
         assert_eq!(decoded.discharge_slots_backup, None);
+    }
+
+    /// `settings.json` written before issue #283 has no forecast
+    /// efficiency keys — both must load with their defaults so the SOC
+    /// projection works immediately after upgrade.
+    #[test]
+    fn legacy_settings_without_forecast_efficiencies_loads() {
+        let legacy = r#"{
+            "host": "192.168.1.50",
+            "port": 8899,
+            "serial": "",
+            "poll_interval": 60,
+            "auto_connect": true
+        }"#;
+        let decoded: Settings = serde_json::from_str(legacy).unwrap();
+        assert!((decoded.forecast_charge_efficiency - 0.9).abs() < 1e-9);
+        assert!((decoded.forecast_discharge_efficiency - 0.95).abs() < 1e-9);
     }
 
     /// `settings.json` written before auto-discovery became opt-in must
@@ -2348,6 +2395,8 @@ mod tests {
             hidden_panels: Vec::new(),
             alerts_config: AlertsConfig::default(),
             weather_config: WeatherConfig::default(),
+            forecast_charge_efficiency: default_forecast_charge_efficiency(),
+            forecast_discharge_efficiency: default_forecast_discharge_efficiency(),
             check_for_updates: default_check_for_updates(),
             octopus_enabled: false,
             octopus_api_key: String::new(),

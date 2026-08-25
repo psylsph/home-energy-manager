@@ -2161,6 +2161,21 @@ impl HistoryDb {
         .ok()
     }
 
+    /// Read a `meta` table value by key (issue #283, Phase 1 — the
+    /// forecast subsystem persists its calibrated performance ratio here).
+    /// The `meta` table previously had no generic accessors; migrations
+    /// used inline SQL.
+    pub fn get_meta_value(&self, _key: &str) -> Option<String> {
+        // RED stub — Phase 1 implementation lands in the following commit.
+        None
+    }
+
+    /// Upsert a `meta` table value by key.
+    pub fn set_meta_value(&self, _key: &str, _value: &str) -> Result<(), String> {
+        // RED stub — Phase 1 implementation lands in the following commit.
+        Ok(())
+    }
+
     /// Batch-upsert forecast variable samples into `forecast_values`.
     /// Returns the number of rows written. All-or-nothing via a
     /// transaction so a partial fetch never leaves a half-updated
@@ -2227,6 +2242,19 @@ impl HistoryDb {
             .collect::<SqlResult<Vec<_>>>()
             .map_err(|e| format!("Failed to read forecast series row: {e}"))?;
         Ok(points)
+    }
+
+    /// Raw cumulative home-consumption counter samples since `since_ts`
+    /// (issue #283, Phase 1) — input to the consumption profile fit.
+    /// Each row carries the effective counter value with the same
+    /// precedence `query_energy_summary` uses: `home_energy_today_kwh`
+    /// when present, else `today_consumption_kwh`.
+    pub fn consumption_counter_rows_since(
+        &self,
+        _since_ts: i64,
+    ) -> Result<Vec<crate::forecast::consumption::ConsumptionCounterRow>, String> {
+        // RED stub — Phase 1 implementation lands in the following commit.
+        Ok(Vec::new())
     }
 
     /// Actual solar generation grouped by local day for the
@@ -6225,6 +6253,58 @@ mod tests {
 
         // Window after everything → empty.
         assert!(db.daily_solar_totals_since(ts(real_day, 23) + 1).unwrap().is_empty());
+    }
+
+    // --- meta + consumption rows (issue #283, Phase 1) --------------------
+
+    #[test]
+    fn meta_value_roundtrip_and_isolation() {
+        let db = test_db();
+        assert_eq!(db.get_meta_value("forecast_pr"), None);
+        db.set_meta_value("forecast_pr", "0.82").unwrap();
+        assert_eq!(db.get_meta_value("forecast_pr"), Some("0.82".to_string()));
+        // Upsert replaces.
+        db.set_meta_value("forecast_pr", "0.9").unwrap();
+        assert_eq!(db.get_meta_value("forecast_pr"), Some("0.9".to_string()));
+        // Other keys untouched.
+        assert_eq!(db.get_meta_value("other"), None);
+    }
+
+    #[test]
+    fn consumption_rows_prefer_home_energy_and_respect_window() {
+        let db = test_db();
+        let base = 1_700_000_000i64;
+        // Both counters present → home_energy_today_kwh wins.
+        db.insert_reading(&InverterSnapshot {
+            timestamp: base,
+            home_energy_today_kwh: 5.0,
+            today_consumption_kwh: 4.0,
+            ..Default::default()
+        });
+        // Only the fallback counter present.
+        db.insert_reading(&InverterSnapshot {
+            timestamp: base + 60,
+            today_consumption_kwh: 4.5,
+            ..Default::default()
+        });
+        // Neither → row dropped entirely.
+        db.insert_reading(&InverterSnapshot {
+            timestamp: base + 120,
+            ..Default::default()
+        });
+        // Outside the window.
+        db.insert_reading(&InverterSnapshot {
+            timestamp: base + 600,
+            home_energy_today_kwh: 9.0,
+            ..Default::default()
+        });
+
+        let rows = db.consumption_counter_rows_since(base).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].timestamp, base);
+        assert_eq!(rows[0].kwh, Some(5.0));
+        assert_eq!(rows[1].timestamp, base + 60);
+        assert_eq!(rows[1].kwh, Some(4.5));
     }
 
     #[test]

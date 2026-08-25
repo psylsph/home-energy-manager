@@ -150,6 +150,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Weather (Open-Meteo integration)
         .route("/api/weather", get(api::get_weather).post(api::set_weather))
         .route("/api/weather/backfill", post(api::backfill_weather))
+        .route("/api/forecast", get(api::get_forecast))
         // Reconnect control
         .route("/api/reconnect", post(api::post_reconnect))
         // Discovery
