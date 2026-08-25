@@ -101,9 +101,15 @@ pub fn build_consumption_profile(rows: &[ConsumptionCounterRow]) -> ConsumptionP
         rows.iter().filter(|r| r.kwh.is_some()).collect();
     sorted.sort_by_key(|r| r.timestamp);
 
-    // Buckets of valid hourly deltas keyed by local hour-of-day, plus the
-    // set of distinct local days that contributed.
-    let mut buckets: Vec<Vec<f64>> = vec![Vec::new(); 24];
+    // Energy per (local day, local hour): the SUM of valid deltas inside
+    // that hour. Summing (not mediating) per-interval deltas makes the fit
+    // cadence-agnostic — a 20 s poll writes ~180 tiny deltas that add up
+    // to the same hourly kWh as one hourly delta. Guardrails apply per
+    // interval: gaps > 2 h are skipped entirely (the missing energy must
+    // not be smeared into one bucket), midnight resets and negative
+    // glitches contribute nothing.
+    let mut hour_sums:
+        std::collections::BTreeMap<(chrono::NaiveDate, u8), f64> = Default::default();
     let mut days: std::collections::BTreeSet<chrono::NaiveDate> = Default::default();
 
     for pair in sorted.windows(2) {
@@ -132,30 +138,40 @@ pub fn build_consumption_profile(rows: &[ConsumptionCounterRow]) -> ConsumptionP
         if delta < 0.0 {
             continue;
         }
-        // Attribute to the hour containing the interval midpoint — with
-        // hourly polls that's the hour both samples live in.
+        // Attribute to the hour containing the interval midpoint — an
+        // interval never spans midnight (same-day check above), so this
+        // keeps every delta inside its own hour or an adjacent one.
         let mid_ts = a.timestamp + gap / 2;
-        let hour = chrono::DateTime::from_timestamp(mid_ts, 0)
-            .map(|dt| dt.with_timezone(&chrono::Local))
-            .map(|dt| dt.hour() as usize)
-            .unwrap_or(0);
-        buckets[hour].push(delta);
-        days.insert(a_local.date_naive());
+        let (day, hour) = match chrono::DateTime::from_timestamp(mid_ts, 0) {
+            Some(dt) => {
+                let local = dt.with_timezone(&chrono::Local);
+                (local.date_naive(), local.hour() as u8)
+            }
+            None => continue,
+        };
+        *hour_sums.entry((day, hour)).or_insert(0.0) += delta;
+        days.insert(day);
+    }
+
+    // Per-hour-of-day statistics ACROSS days.
+    let mut buckets: Vec<Vec<f64>> = vec![Vec::new(); 24];
+    for ((_, hour), sum) in hour_sums {
+        buckets[hour as usize].push(sum);
     }
 
     let hours = buckets
         .into_iter()
         .enumerate()
-        .map(|(hour, mut deltas)| {
-            if deltas.is_empty() {
+        .map(|(hour, mut sums)| {
+            if sums.is_empty() {
                 return None;
             }
-            deltas.sort_by(|a, b| a.partial_cmp(b).expect("deltas are finite"));
+            sums.sort_by(|a, b| a.partial_cmp(b).expect("sums are finite"));
             let band = ConsumptionHourBand {
                 hour: hour as u8,
-                p25: percentile_sorted(&deltas, 25.0),
-                median: percentile_sorted(&deltas, 50.0),
-                p75: percentile_sorted(&deltas, 75.0),
+                p25: percentile_sorted(&sums, 25.0),
+                median: percentile_sorted(&sums, 50.0),
+                p75: percentile_sorted(&sums, 75.0),
             };
             Some(band)
         })
