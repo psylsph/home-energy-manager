@@ -11981,9 +11981,11 @@ mod tests {
     // Issue #269 exhaustive: period-totals box vs chart series equivalence
     // through the real endpoints, for every scenario combination. The box
     // comes from get_history_summary; the chart's final value comes from
-    // get_history's `_import_cost` series. They must agree in every case
-    // where the import counter is populated — the box may only exceed the
-    // chart through the grid-power fallback when the counter is empty.
+    // get_history's `_import_cost` series. Both trust the daily counter
+    // alone and must agree exactly. The earlier grid-power trapezoid
+    // fallback fired when the counter was empty and inflated the box
+    // above the chart by trapezoid-noise amounts (Pete's £3.86 box vs
+    // £0.5735 chart, issue #269 comment 5407621722); it is removed.
     // -----------------------------------------------------------------------
 
     /// Local-midnight unix seconds (local time) for a day offset.
@@ -12181,10 +12183,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api269_empty_counter_uses_grid_fallback() {
-        // The legit fallback case: counters never populated (firmware
-        // leaves them 0), real grid power. Box should exceed the standing
-        // charge via the trapezoid; chart stays at standing-only.
+    async fn api269_empty_counter_trusts_counter_no_fallback() {
+        // Empty daily counter + sustained grid_power used to trigger the
+        // trapezoid fallback and inflate the box above the chart by
+        // whatever the trapezoid integrated. The fix trusts the counter;
+        // the chart already did. They must match exactly on a quiet day.
         with_isolated_config_dir_async(|| async {
             let state = build_report_test_state(0.30, 0.15, 57.35);
             api_seed_day(&state, 0, 0.0, 0.0, 2000).await;
@@ -12195,14 +12198,110 @@ mod tests {
                 (chart - 0.5735).abs() < 0.02,
                 "chart {chart} != standing-only £0.5735"
             );
-            // Box: fallback fires, trapezoid integrates ~2.4 kWh average ×
-            // 12 h effective ≈ over £0.60. Must clearly exceed the chart.
+            // Box: counter path — must match chart exactly. (Old code
+            // added the trapezoid's import_kwh here, taking box above
+            // chart by £7+ on this scenario.)
             assert!(
-                box_vals.0 > chart + 0.30,
-                "box {box_vals:?} should exceed chart {chart} via fallback"
+                (box_vals.0 - chart).abs() < 0.02,
+                "box {box_vals:?} != chart {chart}: empty-counter trapezoid fallback must not fire"
             );
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn api269_pete_noise_no_fallback_on_empty_counter() {
+        // Pete's exact scenario (issue #269 comment 5407621722, screenshot
+        // 24 Aug): the inverter genuinely imported nothing today (counter
+        // stays 0) while exporting solar (counter ramps) — grid_power
+        // shows the export AND small positive CT-clamp noise throughout
+        // the day. The trapezoid would integrate the noise into a
+        // non-trivial "import" cost, the box would show that spurious
+        // £3-odd figure, and the chart would still show standing-only.
+        // Trusting the counter makes box == chart.
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.30, 0.15, 57.35);
+            let guard = state.history.lock().await;
+            let db = guard.as_ref().unwrap();
+            let midnight = api_test_midnight(0);
+            for step in 0..48i64 {
+                let ts = midnight + step * 1800;
+                let min_of_day = step * 30;
+                let export_frac = if min_of_day < 15 * 60 {
+                    0.0
+                } else if min_of_day >= 18 * 60 {
+                    1.0
+                } else {
+                    (min_of_day - 15 * 60) as f64 / (18 * 60 - 15 * 60) as f64
+                };
+                // Export counter ramps 15:00→18:00 to 14.8 kWh
+                // (£2.22 at £0.15/kWh — matches the screenshot's export
+                // income box). Import counter stays at 0 throughout.
+                // grid_power is +5 W sensor noise all day, dropping to
+                // −1500 W during the export window.
+                let export_kwh = 14.8 * export_frac;
+                let grid_power_w: i32 = if export_frac > 0.0 {
+                    -1500 + 5
+                } else {
+                    5
+                };
+                db.insert_reading(&crate::inverter::model::InverterSnapshot {
+                    timestamp: ts,
+                    today_import_kwh: 0.0,
+                    today_export_kwh: export_kwh as f32,
+                    grid_power: grid_power_w,
+                    ..Default::default()
+                });
+            }
+            drop(guard);
+
+            let (box_vals, chart) =
+                box_and_chart_totals(&state, api_test_midnight(0), api_test_midnight(1)).await;
+            // Chart: no import counter deltas → standing only.
+            assert!(
+                (chart - 0.5735).abs() < 0.02,
+                "chart {chart} != standing-only £0.5735"
+            );
+            // Box must equal chart exactly — trapezoid noise must not
+            // inflate the import cost.
+            assert!(
+                (box_vals.0 - chart).abs() < 0.02,
+                "box import {box_vals:?} != chart {chart}: empty-counter trapezoid fallback must not fire on noise"
+            );
+            // The export side should also match the chart's £2.22 export
+            // income (sanity check that the box-vs-chart contract holds
+            // for the populated direction too).
+            let chart_export = chart_export_total(&state, api_test_midnight(0), api_test_midnight(1)).await;
+            assert!(
+                (box_vals.1 - chart_export).abs() < 0.02,
+                "box export {box_vals:?} != chart {chart_export}: populated-counter direction must agree"
+            );
+        })
+        .await;
+    }
+
+    /// Last `_export_income` point in the today window — used by the
+    /// Pete-noise test to assert the populated direction agrees too.
+    async fn chart_export_total(
+        state: &std::sync::Arc<AppState>,
+        start: i64,
+        end: i64,
+    ) -> f64 {
+        let (status, Json(chart)) = get_history(
+            State(state.clone()),
+            Query(HistoryQuery {
+                range: Some("today".to_string()),
+                fields: Some("_export_income".to_string()),
+                offset: Some(0),
+                rolling: Some(false),
+                start_ms: Some(start * 1000),
+                end_ms: Some(end * 1000),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "history endpoint failed");
+        let points = chart["data"]["_export_income"].as_array().unwrap();
+        points.last().and_then(|p| p["v"].as_f64()).unwrap_or(0.0)
     }
 
     #[tokio::test]
