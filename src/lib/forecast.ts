@@ -174,3 +174,47 @@ export function forecastPlanTitle(rec: PlanRecommendation): string {
   }
   return `Plan not ready yet — ${rec.reason}`;
 }
+
+/**
+ * Decide whether the Forecast page should refetch `/api/forecast` and
+ * `/api/forecast/plan` given a snapshot change.
+ *
+ * Triggers (any of):
+ * - SOC changed by ≥ 1 percentage point (battery projection moves meaningfully),
+ * - The charge / max-battery-power register changed (rate cap shifted),
+ * - ≥ `FORECAST_REFRESH_INTERVAL_MS` have elapsed since the last refresh
+ *   (safety net for slow-moving data sources like the consumption profile).
+ *
+ * Debounced by `MIN_REFRESH_INTERVAL_MS` so a flurry of WS snapshot
+ * pushes doesn't refetch more than once every few seconds.
+ *
+ * `null` snapshots (inverter not connected yet) count as "no change".
+ *
+ * Issue #283.
+ */
+export const FORECAST_REFRESH_INTERVAL_MS = 30_000;
+export const FORECAST_MIN_REFRESH_INTERVAL_MS = 5_000;
+export const FORECAST_SOC_DELTA_PCT = 1;
+
+export function shouldRefetchForecast(
+  prevSocPct: number | null,
+  newSocPct: number | null,
+  lastRefetchMs: number,
+  nowMs: number,
+  prevMaxBatteryPowerW: number,
+  newMaxBatteryPowerW: number,
+): boolean {
+  // First snapshot arrival or capability change is always a refetch.
+  if (prevSocPct === null && newSocPct !== null) return true;
+  if (prevMaxBatteryPowerW !== newMaxBatteryPowerW) return true;
+  if (prevSocPct === null || newSocPct === null) return false;
+
+  const socDelta = Math.abs(prevSocPct - newSocPct);
+  if (socDelta >= FORECAST_SOC_DELTA_PCT) return true;
+
+  // Safety-net periodic refresh AND the debounce floor.
+  if (nowMs - lastRefetchMs < FORECAST_MIN_REFRESH_INTERVAL_MS) return false;
+  if (nowMs - lastRefetchMs >= FORECAST_REFRESH_INTERVAL_MS) return true;
+
+  return false;
+}

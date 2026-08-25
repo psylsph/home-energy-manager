@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, act } from '@testing-library/react';
+import { useInverterStore } from '../../src/store/useInverterStore';
 
 // ---------------------------------------------------------------------------
 // ForecastPage (issue #283 Phase 1): the summary card renders the payload's
@@ -256,28 +257,63 @@ describe('ForecastPage plan card', () => {
 describe('ForecastPage refresh triggers', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useInverterStore.setState({ snapshot: null } as never);
   });
-  afterEach(() => cleanup());
+  afterEach(() => {
+    cleanup();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
 
-  it('refetches when the live snapshot SOC changes meaningfully', async () => {
-    // Two separate mounts let us assert that the second mount was
-    // triggered by the store change: the first mount establishes the
-    // initial two apiGet calls, then we wait long enough that the
-    // 10-minute interval has not elapsed, change the simulated SOC,
-    // and re-render. The fresh calls confirm a refetch.
+  it('refetches when the live snapshot SOC changes by >= 1 pp', async () => {
+    useInverterStore.setState({ snapshot: { soc: 50, max_battery_power_w: 3000 } as never });
     render(<ForecastPage />);
     await waitFor(() =>
       expect(screen.getByTestId('forecast-solar-tomorrow').textContent).toMatch(/18\.4/),
     );
-    expect(apiGetMock.mock.calls.length).toBeGreaterThanOrEqual(2);
-
     apiGetMock.mockClear();
-    // The store's snapshot is mutated between renders (mirrors what the
-    // WS push does). Forcing a re-render of the page exercises the
-    // refresh-on-snapshot-change path.
-    render(<ForecastPage />);
-    await waitFor(() => {
-      expect(apiGetMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+    await act(async () => {
+      useInverterStore.setState({ snapshot: { soc: 51, max_battery_power_w: 3000 } as never });
     });
+    await waitFor(() => {
+      const calls = apiGetMock.mock.calls.filter(
+        (c) => c[0] === '/api/forecast' || c[0] === '/api/forecast/plan',
+      );
+      expect(calls.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it('refetches when the rate cap changes, same SOC', async () => {
+    useInverterStore.setState({ snapshot: { soc: 50, max_battery_power_w: 3000 } as never });
+    render(<ForecastPage />);
+    await waitFor(() =>
+      expect(screen.getByTestId('forecast-solar-tomorrow').textContent).toMatch(/18\.4/),
+    );
+    apiGetMock.mockClear();
+    await act(async () => {
+      useInverterStore.setState({ snapshot: { soc: 50, max_battery_power_w: 5000 } as never });
+    });
+    await waitFor(() => {
+      const calls = apiGetMock.mock.calls.filter(
+        (c) => c[0] === '/api/forecast' || c[0] === '/api/forecast/plan',
+      );
+      expect(calls.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it('debounces no-op changes within 5 s', async () => {
+    useInverterStore.setState({ snapshot: { soc: 50, max_battery_power_w: 3000 } as never });
+    render(<ForecastPage />);
+    await waitFor(() =>
+      expect(screen.getByTestId('forecast-solar-tomorrow').textContent).toMatch(/18\.4/),
+    );
+    apiGetMock.mockClear();
+    await act(async () => {
+      useInverterStore.setState({ snapshot: { soc: 50, max_battery_power_w: 3000 } as never });
+    });
+    await new Promise((r) => setTimeout(r, 80));
+    const calls = apiGetMock.mock.calls.filter(
+      (c) => c[0] === '/api/forecast' || c[0] === '/api/forecast/plan',
+    );
+    expect(calls.length).toBe(0);
   });
 });

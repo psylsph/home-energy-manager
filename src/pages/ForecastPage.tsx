@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Area,
   AreaChart,
@@ -16,11 +16,13 @@ import { formatEnergy } from '../lib/format';
 import {
   forecastPlanTitle,
   forecastStatusMessages,
+  shouldRefetchForecast,
   toBatteryChartData,
   toSolarChartData,
   tomorrowSummary,
 } from '../lib/forecast';
 import type { ForecastData, PlanResponse } from '../lib/forecast';
+import { useInverterStore } from '../store/useInverterStore';
 
 /**
  * Forecast & planning page (issue #283).
@@ -33,7 +35,6 @@ import type { ForecastData, PlanResponse } from '../lib/forecast';
  * a prediction.
  */
 
-const REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 
 function hourLabel(tsSeconds: number): string {
   const d = new Date(tsSeconds * 1000);
@@ -78,6 +79,12 @@ export default function ForecastPage() {
   const [applyError, setApplyError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const snapshot = useInverterStore((s) => s.snapshot);
+  const lastRefetchRef = useRef<number>(0);
+  const lastTriggerRef = useRef<{
+    soc: number | null;
+    maxPowerW: number;
+  }>({ soc: null, maxPowerW: 0 });
 
   const load = async () => {
     try {
@@ -101,12 +108,37 @@ export default function ForecastPage() {
       if (!cancelled) setLoaded(true);
     };
     void wrap();
-    const timer = setInterval(() => void load(), REFRESH_INTERVAL_MS);
     return () => {
       cancelled = true;
-      clearInterval(timer);
     };
   }, []);
+
+  // Refetch when the live snapshot changes meaningfully: SOC ± 1 pp,
+  // the rate-cap changed, or the safety-net interval (30 s) has elapsed.
+  useEffect(() => {
+    const newSoc = snapshot?.soc ?? null;
+    const newMaxPower = snapshot?.max_battery_power_w ?? 0;
+    const last = lastTriggerRef.current;
+    const now = Date.now();
+    if (
+      shouldRefetchForecast(
+        last.soc,
+        newSoc,
+        lastRefetchRef.current,
+        now,
+        last.maxPowerW,
+        newMaxPower,
+      )
+    ) {
+      lastRefetchRef.current = now;
+      lastTriggerRef.current = { soc: newSoc, maxPowerW: newMaxPower };
+      void load();
+    } else {
+      // Track the latest snapshot state either way so the next call has
+      // a current SOC for delta comparison.
+      lastTriggerRef.current = { soc: newSoc, maxPowerW: newMaxPower };
+    }
+  }, [snapshot]);
 
   const handleApply = async () => {
     if (!plan || !plan.apply) return;
