@@ -11,15 +11,16 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { apiGet } from '../lib/api';
+import { apiGet, apiPost } from '../lib/api';
 import { formatEnergy } from '../lib/format';
 import {
+  forecastPlanTitle,
   forecastStatusMessages,
   toBatteryChartData,
   toSolarChartData,
   tomorrowSummary,
 } from '../lib/forecast';
-import type { ForecastData } from '../lib/forecast';
+import type { ForecastData, PlanResponse } from '../lib/forecast';
 
 /**
  * Forecast & planning page (issue #283).
@@ -72,31 +73,54 @@ function SummaryTile({
 
 export default function ForecastPage() {
   const [data, setData] = useState<ForecastData | null>(null);
+  const [plan, setPlan] = useState<PlanResponse | null>(null);
+  const [applyState, setApplyState] = useState<'idle' | 'sending' | 'done' | 'error'>('idle');
+  const [applyError, setApplyError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
 
+  const load = async () => {
+    try {
+      const [forecastRes, planRes] = await Promise.all([
+        apiGet<{ ok: boolean; data: ForecastData }>('/api/forecast'),
+        apiGet<{ ok: boolean; data: PlanResponse }>('/api/forecast/plan'),
+      ]);
+      setData(forecastRes.data);
+      setPlan(planRes.data);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load forecast');
+    }
+  };
+
   useEffect(() => {
     let cancelled = false;
-    const load = async () => {
-      try {
-        const res = await apiGet<{ ok: boolean; data: ForecastData }>('/api/forecast');
-        if (cancelled) return;
-        setData(res.data);
-        setError(null);
-      } catch (e) {
-        if (cancelled) return;
-        setError(e instanceof Error ? e.message : 'Failed to load forecast');
-      } finally {
-        if (!cancelled) setLoaded(true);
-      }
+    const wrap = async () => {
+      if (cancelled) return;
+      await load();
+      if (!cancelled) setLoaded(true);
     };
-    void load();
+    void wrap();
     const timer = setInterval(() => void load(), REFRESH_INTERVAL_MS);
     return () => {
       cancelled = true;
       clearInterval(timer);
     };
   }, []);
+
+  const handleApply = async () => {
+    if (!plan || !plan.apply) return;
+    setApplyState('sending');
+    setApplyError(null);
+    try {
+      await apiPost('/api/control/charge-slot', plan.apply.charge_slot);
+      await apiPost('/api/control/timed-charge', plan.apply.timed_charge);
+      setApplyState('done');
+    } catch (e) {
+      setApplyState('error');
+      setApplyError(e instanceof Error ? e.message : 'Apply failed');
+    }
+  };
 
   if (error) {
     return (
@@ -182,6 +206,63 @@ export default function ForecastPage() {
           />
         )}
       </div>
+
+      {plan && plan.recommendation && (
+        <section
+          data-testid="forecast-plan"
+          className="bg-bg-surface rounded-lg p-3 sm:p-4 flex flex-col gap-2"
+          aria-live="polite"
+        >
+          <div className="flex items-baseline justify-between gap-2">
+            <h2 className="text-sm font-semibold text-text-primary">
+              {forecastPlanTitle(plan.recommendation)}
+            </h2>
+          </div>
+          {plan.recommendation.kind === 'charge' && (
+            <p className="text-xs text-text-secondary">
+              <span data-testid="forecast-plan-kwh">
+                Charge {plan.recommendation.kwh.toFixed(1)} kWh in the off-peak
+                window ({plan.recommendation.window.start}–
+                {plan.recommendation.window.end},{' '}
+                {(plan.recommendation.window.rate * 100).toFixed(1)}p)
+              </span>{' '}
+              to reach {Math.round(plan.recommendation.target_soc_pct)}% — about £
+              {(plan.recommendation.kwh * plan.recommendation.window.rate).toFixed(2)} of
+              grid import.
+            </p>
+          )}
+          {plan.recommendation.kind === 'no_charge_needed' && (
+            <p className="text-xs text-text-secondary">
+              Projected end-of-day SOC {Math.round(plan.recommendation.projected_end_soc_pct)}%
+              — your solar forecast already covers the day's needs.
+            </p>
+          )}
+          {plan.recommendation.kind === 'no_plan' && (
+            <p className="text-xs text-text-secondary">{plan.recommendation.reason}</p>
+          )}
+          {plan.apply && plan.recommendation.kind === 'charge' && (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                data-testid="forecast-plan-apply"
+                disabled={applyState === 'sending' || applyState === 'done'}
+                onClick={() => void handleApply()}
+                className="px-3 py-1.5 rounded-md bg-accent text-accent-on text-sm font-medium hover:opacity-90 disabled:opacity-50"
+              >
+                {applyState === 'idle' && 'Apply — schedule charge slot'}
+                {applyState === 'sending' && 'Applying…'}
+                {applyState === 'done' && 'Applied ✓'}
+                {applyState === 'error' && 'Retry Apply'}
+              </button>
+              {applyError && (
+                <span data-testid="forecast-plan-error" className="text-xs text-red-400">
+                  {applyError}
+                </span>
+              )}
+            </div>
+          )}
+        </section>
+      )}
 
       <ChartCard title="Solar forecast (next 48 h)">
         {solarChart.length === 0 ? (

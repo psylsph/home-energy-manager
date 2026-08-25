@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 
 // ---------------------------------------------------------------------------
 // ForecastPage (issue #283 Phase 1): the summary card renders the payload's
@@ -11,12 +11,103 @@ import { render, screen, cleanup, waitFor } from '@testing-library/react';
 vi.mock('../../src/lib/api', () => ({
   apiGet: vi.fn(async (path: string) => {
     if (path === '/api/forecast') return { ok: true, data: fullPayload() };
-    if (path === '/api/forecast/plan') return planPayload('charge');
+    if (path === '/api/forecast/plan') return planPayload('no_plan');
     return { ok: true, data: {} };
   }),
-  apiPost: vi.fn(async (_path: string, _body: unknown) => ({ ok: true })),
+  apiPost: vi.fn(async () => ({ ok: true })),
   getApiBase: () => 'http://127.0.0.1:7337',
 }));
+
+// vi.hoisted values are computed BEFORE vi.mock factories run (factories
+// capture refs to these via the closure). Defining fullPayload /
+// planPayload at module scope would be a ReferenceError when the mock
+// factory's arrow body is executed at hoist time.
+const { fullPayload, planPayload } = vi.hoisted(() => {
+  const fullPayload = () => ({
+    generated_at: 1_700_000_000,
+    status: [],
+    performance_ratio: 0.8,
+    performance_ratio_days: 12,
+    solar: [
+      { timestamp: 1_700_003_600, kwh: 2.0, band_low: 1.6, band_high: 2.4 },
+    ],
+    solar_today_remaining_kwh: 10,
+    solar_tomorrow_kwh: 18.4,
+    consumption: Array.from({ length: 24 }, (_: number, hour: number) => ({
+      hour,
+      kwh: 0.5,
+      p25: 0.4,
+      p75: 0.6,
+    })),
+    consumption_days_observed: 14,
+    consumption_sufficient: true,
+    consumption_tomorrow_kwh: 11.2,
+    battery: {
+      capacity_kwh: 9.5,
+      start_soc_pct: 62,
+      reserve_soc_pct: 15,
+      hours: [[1_700_003_600, 70]],
+      end_soc_pct: 70,
+    },
+    import_tomorrow_kwh: 1.1,
+    export_tomorrow_kwh: 7.2,
+  });
+  const planPayload = (
+    kind: 'charge' | 'no_charge_needed' | 'no_plan',
+  ): { ok: true; data: unknown } => {
+    if (kind === 'charge') {
+      return {
+        ok: true,
+        data: {
+          recommendation: {
+            kind: 'charge',
+            window: { start: '02:00', end: '05:00', rate: 0.09, tomorrow: true },
+            kwh: 3.2,
+            target_soc_pct: 80,
+            projected_end_soc_pct: 80,
+            rationale: 'Cheap overnight charge covers the deficit.',
+          },
+          apply: {
+            charge_slot: {
+              slot: 1,
+              enabled: true,
+              start_hour: 2,
+              start_minute: 0,
+              end_hour: 5,
+              end_minute: 0,
+              target_soc: 80,
+            },
+            timed_charge: { enabled: true },
+          },
+        },
+      };
+    }
+    if (kind === 'no_charge_needed') {
+      return {
+        ok: true,
+        data: {
+          recommendation: {
+            kind: 'no_charge_needed',
+            projected_end_soc_pct: 100,
+            rationale: 'Sunny day — the battery fills from solar.',
+          },
+          apply: null,
+        },
+      };
+    }
+    return {
+      ok: true,
+      data: {
+        recommendation: {
+          kind: 'no_plan',
+          reason: 'no battery projection available — connect to the inverter',
+        },
+        apply: null,
+      },
+    };
+  };
+  return { fullPayload, planPayload };
+});
 
 vi.mock('recharts', () => ({
   ResponsiveContainer: ({ children }: { children: React.ReactNode }) => (
@@ -40,41 +131,10 @@ globalThis.ResizeObserver = class {
 };
 
 import ForecastPage from '../../src/pages/ForecastPage';
-import { apiGet } from '../../src/lib/api';
+import { apiGet, apiPost } from '../../src/lib/api';
 
 const apiGetMock = vi.mocked(apiGet);
-
-function fullPayload() {
-  return {
-    generated_at: 1_700_000_000,
-    status: [],
-    performance_ratio: 0.8,
-    performance_ratio_days: 12,
-    solar: [
-      { timestamp: 1_700_003_600, kwh: 2.0, band_low: 1.6, band_high: 2.4 },
-    ],
-    solar_today_remaining_kwh: 10,
-    solar_tomorrow_kwh: 18.4,
-    consumption: Array.from({ length: 24 }, (_, hour) => ({
-      hour,
-      kwh: 0.5,
-      p25: 0.4,
-      p75: 0.6,
-    })),
-    consumption_days_observed: 14,
-    consumption_sufficient: true,
-    consumption_tomorrow_kwh: 11.2,
-    battery: {
-      capacity_kwh: 9.5,
-      start_soc_pct: 62,
-      reserve_soc_pct: 15,
-      hours: [[1_700_003_600, 70]],
-      end_soc_pct: 70,
-    },
-    import_tomorrow_kwh: 1.1,
-    export_tomorrow_kwh: 7.2,
-  };
-}
+const apiPostMocked = vi.mocked(apiPost);
 
 describe('ForecastPage', () => {
   beforeEach(() => {
@@ -133,12 +193,13 @@ describe('ForecastPage', () => {
   });
 });
 
-import { apiPost } from '../../src/lib/api';
-const apiPostMocked = vi.mocked(apiPost);
-
 describe('ForecastPage plan card', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    cleanup();
   });
 
   it('renders a Charge recommendation with an Apply button', async () => {

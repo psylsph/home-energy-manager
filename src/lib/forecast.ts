@@ -113,3 +113,64 @@ export function tomorrowSummary(data: ForecastData): TomorrowSummary {
     startSocPct: data.battery ? data.battery.start_soc_pct : null,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Planner (Phase 2)
+// ---------------------------------------------------------------------------
+
+export type PlannerChargeWindow = {
+  /** "HH:MM" wall-clock start — 02:00 even on tomorrow's calendar day. */
+  start: string;
+  /** "HH:MM" wall-clock end. */
+  end: string;
+  /** £/kWh inside the window. */
+  rate: number;
+  /** True when the start occurs on the day after the planner's `now`. */
+  tomorrow: boolean;
+};
+
+export type PlanRecommendation =
+  | {
+      kind: 'charge';
+      window: PlannerChargeWindow;
+      kwh: number;
+      target_soc_pct: number;
+      projected_end_soc_pct: number;
+      rationale: string;
+    }
+  | {
+      kind: 'no_charge_needed';
+      projected_end_soc_pct: number;
+      rationale: string;
+    }
+  | { kind: 'no_plan'; reason: string };
+
+export type PlanApply = {
+  charge_slot: {
+    slot: 1;
+    enabled: true;
+    start_hour: number;
+    start_minute: number;
+    end_hour: number;
+    end_minute: number;
+    target_soc: number;
+  };
+  timed_charge: { enabled: true };
+} | null;
+
+export type PlanResponse = {
+  recommendation: PlanRecommendation;
+  apply: PlanApply;
+};
+
+/** Short headline for the Plan card. Degrades gracefully per kind. */
+export function forecastPlanTitle(rec: PlanRecommendation): string {
+  if (rec.kind === 'charge') {
+    const when = rec.window.tomorrow ? 'Tomorrow' : 'Tonight';
+    return `Overnight charge — ${when} ${rec.window.start}\u2013${rec.window.end}, ${rec.kwh.toFixed(1)} kWh`;
+  }
+  if (rec.kind === 'no_charge_needed') {
+    return `No overnight charge needed — solar covers the day`;
+  }
+  return `Plan not ready yet — ${rec.reason}`;
+}
