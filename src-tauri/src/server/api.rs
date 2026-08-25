@@ -3430,35 +3430,17 @@ pub async fn get_history_summary(
         )?;
         let days_in_range = crate::history::days_in_local_window(start_ts, end_ts);
         let standing_charge_gbp = days_in_range as f64 * standing_charge_p_per_day / 100.0;
-        let counter_import_cost_gbp = import_series
+        // Both the box and the chart's _import_cost / _export_income
+        // series trust the daily counter alone. The chart never applied a
+        // grid-power trapezoid fallback, and neither does the box — when
+        // the counter is empty the box shows the standing-charge-only
+        // figure (issue #269 comment 5407621722). See api269_empty_counter_trusts_counter_no_fallback.
+        let import_cost_gbp = import_series
             .last()
             .map(|point| point.v)
             .unwrap_or(standing_charge_gbp);
-        let counter_export_income_gbp = export_series.last().map(|point| point.v).unwrap_or(0.0);
-
-        // Keep period-summary money aligned with `/api/report`, including its
-        // fallback for inverters whose daily grid counters remain at zero.
-        let grid_fallback = db.query_grid_power_cost_totals(
-            &window,
-            &import_tariff,
-            &export_tariff,
-            flat_import,
-            flat_export,
-        )?;
-        let counter_import_energy_gbp = (counter_import_cost_gbp - standing_charge_gbp).max(0.0);
-        let import_energy_gbp =
-            if counter_import_energy_gbp <= 0.000_001 && grid_fallback.import_kwh > 0.001 {
-                grid_fallback.import_cost_gbp
-            } else {
-                counter_import_energy_gbp
-            };
-        let export_income_gbp =
-            if counter_export_income_gbp <= 0.000_001 && grid_fallback.export_kwh > 0.001 {
-                grid_fallback.export_income_gbp
-            } else {
-                counter_export_income_gbp
-            };
-        let import_cost_gbp = import_energy_gbp + standing_charge_gbp;
+        let export_income_gbp = export_series.last().map(|point| point.v).unwrap_or(0.0);
+        let net_cost_gbp = import_cost_gbp - export_income_gbp;
 
         Ok::<_, String>(json!({
             "ok": true,
@@ -3471,7 +3453,7 @@ pub async fn get_history_summary(
                 "home_consumed_kwh": energy.home_consumed_kwh,
                 "import_cost_gbp": import_cost_gbp,
                 "export_income_gbp": export_income_gbp,
-                "net_cost_gbp": import_cost_gbp - export_income_gbp
+                "net_cost_gbp": net_cost_gbp
             }
         }))
     })
@@ -3563,44 +3545,18 @@ pub async fn get_report(
         )?;
         let days_in_range = crate::history::days_in_local_window(start_ts, end_ts);
         let standing_charge_gbp = days_in_range as f64 * standing_charge_p_per_day / 100.0;
-        let counter_import_cost_gbp = import_series
+        // Both the report and the History chart's _import_cost / _export_income
+        // series trust the daily counter alone — no grid-power trapezoid
+        // fallback. When the counter is empty the report shows the
+        // standing-charge-only figure, matching the chart (issue #269
+        // comment 5407621722). The report still surfaces the standing-
+        // charge component separately so the frontend can footnote the
+        // "kWh + standing charge = total" breakdown.
+        let import_cost_gbp = import_series
             .last()
             .map(|p| p.v)
             .unwrap_or(standing_charge_p_per_day / 100.0);
-        let counter_export_income_gbp = export_series.last().map(|p| p.v).unwrap_or(0.0);
-
-        // Some inverter/firmware combinations leave the daily import/export
-        // counters at zero even though `grid_power` is present. The Power page
-        // report's kWh totals are integrated from signed power samples, so a
-        // counter-only cost query would show £0.00 beside non-zero import/export
-        // energy. Fall back per direction to the same grid-power integration
-        // when the counter-derived per-kWh component is effectively empty.
-        let grid_fallback = db.query_grid_power_cost_totals(
-            &window,
-            &import_tariff,
-            &export_tariff,
-            flat_import,
-            flat_export,
-        )?;
-        let counter_import_energy_gbp = (counter_import_cost_gbp - standing_charge_gbp).max(0.0);
-        let import_energy_gbp =
-            if counter_import_energy_gbp <= 0.000_001 && grid_fallback.import_kwh > 0.001 {
-                grid_fallback.import_cost_gbp
-            } else {
-                counter_import_energy_gbp
-            };
-        let export_income_gbp =
-            if counter_export_income_gbp <= 0.000_001 && grid_fallback.export_kwh > 0.001 {
-                grid_fallback.export_income_gbp
-            } else {
-                counter_export_income_gbp
-            };
-        // The standing-charge component of the import total is the
-        // number of distinct local days the window covers × per-day
-        // amount. The per-kWh component is the rest. We surface both
-        // separately so the frontend can show a clear "kWh + standing
-        // charge = total" breakdown in the report footnote.
-        let import_cost_gbp = import_energy_gbp + standing_charge_gbp;
+        let export_income_gbp = export_series.last().map(|p| p.v).unwrap_or(0.0);
         let net_cost_gbp = import_cost_gbp - export_income_gbp;
         Ok::<_, String>(serde_json::json!({
             "ok": true,
@@ -11734,10 +11690,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_report_falls_back_to_grid_power_when_import_counter_is_zero() {
-        // Some devices expose live grid power but never populate the daily
-        // import counter. The Consumption Report should still price the same
-        // import energy it shows in the kWh tiles instead of reporting £0.00.
+    async fn get_report_no_fallback_trusts_counter_when_import_counter_is_zero() {
+        // Issue #269 (Pete's £3.86 noise case, comment 5407621722):
+        // the report used to fall back to a grid-power trapezoid when
+        // the daily counter was empty, but on a working inverter that
+        // means CT-clamp noise gets priced as import. The fix trusts
+        // the counter — an empty counter produces £0.00 import cost in
+        // the report, matching the chart. This loses the (rare)
+        // "broken counter firmware" safety net; users with that
+        // firmware would now see a £0.00 report while their kWh tiles
+        // show real energy, and the chart stays at standing-only.
         with_isolated_config_dir_async(|| async {
             let state = build_report_test_state(0.25, 0.15, 0.0);
             let start = chrono::Local
@@ -11771,17 +11733,18 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
             let import_cost = json["import_cost_gbp"].as_f64().unwrap();
             assert!(
-                (import_cost - 0.50).abs() < 0.001,
-                "2h at 1kW and £0.25/kWh should cost £0.50; got {import_cost} ({json:?})"
+                import_cost.abs() < 1e-9,
+                "empty import counter must produce £0.00 cost (no trapezoid fallback); got {import_cost} ({json:?})"
             );
         })
         .await;
     }
 
     #[tokio::test]
-    async fn get_report_falls_back_to_grid_power_when_export_counter_is_zero() {
-        // Same fallback for export income: negative grid power should be
-        // priced even when today_export_kwh remains stuck at zero.
+    async fn get_report_no_fallback_trusts_counter_when_export_counter_is_zero() {
+        // Symmetric to the import side: an empty export counter
+        // produces £0.00 export income, even though grid_power shows
+        // real export. Matches the chart's contract.
         with_isolated_config_dir_async(|| async {
             let state = build_report_test_state(0.25, 0.15, 0.0);
             let start = chrono::Local
@@ -11815,8 +11778,8 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
             let export_income = json["export_income_gbp"].as_f64().unwrap();
             assert!(
-                (export_income - 0.30).abs() < 0.001,
-                "2h at 1kW export and £0.15/kWh should earn £0.30; got {export_income} ({json:?})"
+                export_income.abs() < 1e-9,
+                "empty export counter must produce £0.00 income (no trapezoid fallback); got {export_income} ({json:?})"
             );
         })
         .await;

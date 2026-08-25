@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **History Import Cost box now matches the chart.** The Period Totals box and the Power-page Consumption Report used to fall back to a trapezoid integration of `grid_power` whenever the daily `today_import_kwh` counter was empty, on the assumption that an empty counter always meant a broken-counter firmware. On a working inverter that lets CT-clamp noise (and any brief sub-counter-resolution import) inflate the box by an arbitrary amount while the chart, which never applied the fallback, stayed at the standing-charge-only figure (issue #269, Pete's £3.86 noise case in the screenshot showing £0.5735 on the chart). Both the box and the report now trust the counter alone, so they always equal the chart on every range.
+
 ### Internal
 
 - Poll-loop settings reads (the publish-time solar re-stamp and the winter-mode persist) now run on the blocking thread pool like the cycle's own settings load, so a slow or networked settings file can't stall a poll tick.
