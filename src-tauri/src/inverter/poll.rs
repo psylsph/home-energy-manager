@@ -922,6 +922,45 @@ fn persist_auto_winter_saved(saved: &Option<AutoWinterSaved>) {
     }
 }
 
+/// Persist the per-meter midnight baselines that drive CT-solar
+/// authority (issue #277). The poll loop owns this field — the only
+/// other place that mutates `solar_meter_baselines` is this same
+/// fn — so a concurrent `POST /api/settings` racing a poll-cycle
+/// persist can still be reverted by a full-struct write-back if the
+/// site is not transactional. Extracted for unit-testability of the
+/// concurrent contract.
+///
+/// RED (master, the buggy body): does the plain load + set + save
+/// pattern that can lose a concurrent disjoint save (review MAJOR1
+/// in the 3-week sweep). GREEN (fixed): `Settings::update` so the
+/// persist is serialised with every other settings writer under the
+/// settings mutex.
+pub(crate) fn persist_solar_meter_baselines(
+    baselines: std::collections::BTreeMap<String, crate::settings::SolarMeterBaseline>,
+) -> Result<(), String> {
+    let mut app_settings = crate::settings::Settings::load();
+    app_settings.solar_meter_baselines = baselines;
+    app_settings.save()
+}
+
+/// Persist the discharge-floor guard's saved-reserve value (issue
+/// #243 follow-up). Same concurrency contract as
+/// `persist_solar_meter_baselines`: extracted so the concurrent
+/// test pins the property. RED (master): plain load + set + save.
+/// GREEN: `Settings::update`. Skips the file touch when the on-disk
+/// value already matches (steady state).
+pub(crate) fn persist_discharge_floor_saved_reserve(
+    persisted: Option<u16>,
+) -> Result<(), String> {
+    let mut app_settings = crate::settings::Settings::load();
+    if app_settings.discharge_floor_saved_reserve != persisted {
+        app_settings.discharge_floor_saved_reserve = persisted;
+        app_settings.save()
+    } else {
+        Ok(())
+    }
+}
+
 /// Store the decoded snapshot as the latest, broadcast it to WebSocket
 /// subscribers, and append it to history. Extracted from `run_poll_loop`'s
 /// publish point so the publish step's contract with concurrent settings
@@ -2466,16 +2505,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     if reseeded || solar_baselines
                                         != poll_settings.solar_meter_baselines
                                     {
-                                        // Reload before the narrow persistence
-                                        // update so a concurrent settings save
-                                        // cannot be overwritten by this poll's
-                                        // older snapshot (same pattern as the
-                                        // Adaptive Charge baseline above).
-                                        let mut app_settings =
-                                            crate::settings::Settings::load();
-                                        app_settings.solar_meter_baselines =
-                                            solar_baselines;
-                                        if let Err(e) = app_settings.save() {
+                                        if let Err(e) = persist_solar_meter_baselines(solar_baselines) {
                                             tracing::warn!(
                                                 "Failed to persist solar meter baselines: {e}"
                                             );
@@ -3187,19 +3217,10 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         drop(df_config);
                                         drop(df_state);
 
-                                        let mut app_settings =
-                                            crate::settings::Settings::load();
-                                        let changed = app_settings
-                                            .discharge_floor_saved_reserve
-                                            != persisted;
-                                        if changed {
-                                            app_settings.discharge_floor_saved_reserve =
-                                                persisted;
-                                            if let Err(e) = app_settings.save() {
-                                                tracing::warn!(
-                                                    "Failed to persist discharge floor state: {e}"
-                                                );
-                                            }
+                                        if let Err(e) = persist_discharge_floor_saved_reserve(persisted) {
+                                            tracing::warn!(
+                                                "Failed to persist discharge floor state: {e}"
+                                            );
                                         }
 
                                         for write in &writes {
@@ -4303,7 +4324,7 @@ pub(crate) fn apply_ct_solar_authority(
 mod tests {
     use super::*;
     use crate::inverter::model::{DeviceType, MeterData};
-    use crate::settings::{Settings, SolarArrayConfig};
+    use crate::settings::{Settings, SolarArrayConfig, SolarMeterBaseline, TariffConfig, TariffSlot};
 
     /// Build a `MeterData` with only the fields `compute_solar_arrays`
     /// inspects set; the rest are zeroed. `MeterData` doesn't derive
@@ -6136,5 +6157,150 @@ mod tests {
             );
             assert_eq!(after.auto_winter_saved_target_soc, Some(80));
         });
+    }
+
+    // ------------------------------------------------------------------
+    // persist_solar_meter_baselines / persist_discharge_floor_saved_reserve
+    // must not clobber concurrent settings saves. These two poll-loop
+    // sites still do plain load + set + save on master; the GREEN fix
+    // converts both to `Settings::update`, mirroring the Aug-21 sweep
+    // (auto-winter c5fd0ed, Adaptive Charge baseline at line ~2409). The
+    // concurrent tests here pin the contract by racing each helper
+    // against a `Settings::update` that touches a disjoint field
+    // (tariff config). With the RED pattern the helper's full-struct
+    // save reverts the tariff; with the GREEN pattern both writes
+    // serialise under the settings mutex and both survive.
+    // ------------------------------------------------------------------
+
+    fn baseline_for_test(
+        day: &str,
+        e_import_kwh: f64,
+        e_export_kwh: f64,
+    ) -> SolarMeterBaseline {
+        SolarMeterBaseline {
+            day: day.to_string(),
+            e_import_kwh,
+            e_export_kwh,
+        }
+    }
+
+    fn tariff_for_test(rate: f64) -> TariffConfig {
+        TariffConfig {
+            slots: vec![TariffSlot {
+                start: "00:00".to_string(),
+                end: "23:59".to_string(),
+                rate,
+            }],
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn persist_solar_meter_baselines_survives_concurrent_disjoint_save() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            // Seed an unrelated baseline so the persist path has something
+            // to overwrite and the on-disk struct is non-trivial at lock
+            // acquire time.
+            Settings::update(|s| {
+                s.solar_meter_baselines.insert(
+                    "address-1".to_string(),
+                    baseline_for_test("2026-08-22", 5.5, 0.0),
+                );
+            })
+            .unwrap();
+
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+            let h_baseline = {
+                let barrier = barrier.clone();
+                tokio::spawn(async move {
+                    barrier.wait();
+                    let mut new_baselines = std::collections::BTreeMap::new();
+                    new_baselines.insert(
+                        "address-2".to_string(),
+                        baseline_for_test("2026-08-23", 100.0, 0.0),
+                    );
+                    persist_solar_meter_baselines(new_baselines).unwrap();
+                })
+            };
+            let h_tariff = {
+                let barrier = barrier.clone();
+                tokio::spawn(async move {
+                    barrier.wait();
+                    Settings::update(|s| {
+                        s.import_tariff_config = Some(tariff_for_test(0.55));
+                    })
+                    .unwrap();
+                })
+            };
+            let _ = tokio::join!(h_baseline, h_tariff);
+
+            let after = Settings::load();
+            let baseline = after
+                .solar_meter_baselines
+                .get("address-2")
+                .expect("solar baseline persist must survive concurrent disjoint save");
+            assert!(
+                (baseline.e_import_kwh - 100.0).abs() < 0.0001,
+                "baseline must keep poll writer's value, got {}",
+                baseline.e_import_kwh
+            );
+            let saved_rate = after
+                .import_tariff_config
+                .as_ref()
+                .and_then(|c| c.slots.first())
+                .map(|s| s.rate)
+                .unwrap_or(f64::NAN);
+            assert!(
+                (saved_rate - 0.55).abs() < 0.0001,
+                "tariff must survive concurrent baseline persist, got {}",
+                saved_rate
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn persist_discharge_floor_saved_reserve_survives_concurrent_disjoint_save() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+            let h_floor = {
+                let barrier = barrier.clone();
+                tokio::spawn(async move {
+                    barrier.wait();
+                    persist_discharge_floor_saved_reserve(Some(42)).unwrap();
+                })
+            };
+            let h_tariff = {
+                let barrier = barrier.clone();
+                tokio::spawn(async move {
+                    barrier.wait();
+                    Settings::update(|s| {
+                        s.import_tariff_config = Some(tariff_for_test(0.33));
+                    })
+                    .unwrap();
+                })
+            };
+            let _ = tokio::join!(h_floor, h_tariff);
+
+            let after = Settings::load();
+            assert_eq!(
+                after.discharge_floor_saved_reserve,
+                Some(42),
+                "discharge floor persist must survive concurrent tariff save"
+            );
+            let saved_rate = after
+                .import_tariff_config
+                .as_ref()
+                .and_then(|c| c.slots.first())
+                .map(|s| s.rate)
+                .unwrap_or(f64::NAN);
+            assert!(
+                (saved_rate - 0.33).abs() < 0.0001,
+                "tariff must survive concurrent floor persist, got {}",
+                saved_rate
+            );
+        })
+        .await;
     }
 }
