@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.75.1] - 2026-08-26
+
+### Fixed
+
+- **The Tomorrow tiles now agree with the charge plan.** "Expected import" and "Expected export" were computed from the solar-only simulation, so with a 6.2 kWh overnight charge recommended the import tile still read 0.3 kWh (the uncharged day's residual) — making the plan look like it cost almost nothing, or the tiles look wrong against the plan's £ figure. When a charge is recommended the tiles now show tomorrow's numbers under the plan: the import tile includes the off-peak window's grid draw (with an "incl. X kWh charge" hint) plus the day's residual, and both tiles are labelled "with charge plan". No plan (or no charge needed) leaves them exactly as they were.
+
+- **The overnight-charge planner no longer buys more grid import than your minimum SOC needs.** The sizing loop only ever grew the ask, and its top-up steps overshot whenever the trough responds faster than linear to the nightly charge — which it does across a multi-night horizon, where each night's charge lifts the next day's starting point (in practice a 2.7 kWh ask landing the trough at 31% against a 20% floor, ~1 kWh of needless import every night). Once the loop holds the floor, the planner now bisects back down to the smallest per-night kWh that still holds it, so the dashed with-charge line hugs your minimum instead of floating well above it.
+
 ## [0.75.0] - 2026-08-26
 
 ### Fixed

@@ -77,6 +77,17 @@ pub enum PlanRecommendation {
         /// enacting the recommendation actually does. Empty when the
         /// planner couldn't size an injection (no window run).
         with_charge_series: Vec<(i64, f64)>,
+        /// Tomorrow's grid import under the recommended plan, kWh — the
+        /// window's grid draw (once per occurrence starting tomorrow;
+        /// the what-if sim models the charge as free surplus so its own
+        /// import for window hours is zero and the draw must be added
+        /// back) plus the residual import of tomorrow's what-if hours.
+        /// Lets the Tomorrow tiles agree with the plan instead of the
+        /// uncharged simulation.
+        import_tomorrow_with_charge_kwh: f64,
+        /// Tomorrow's grid export under the recommended plan, kWh
+        /// (tomorrow's what-if hours, summed).
+        export_tomorrow_with_charge_kwh: f64,
     },
     /// Inputs insufficient for a plan (no tariff config, no
     /// consumption history, etc.) — the UI shows a reason, not zeros.
@@ -379,7 +390,7 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
     // grows the ask until the simulated trajectory actually holds.
     // Callers without the per-hour series (tests / degraded inputs)
     // keep the analytic estimate.
-    let (after_min_soc_pct, charge_target_soc_pct, with_charge_series) = if !runs.is_empty() {
+    let (after_min_soc_pct, charge_target_soc_pct, with_charge_series, import_tomorrow_with_charge_kwh, export_tomorrow_with_charge_kwh) = if !runs.is_empty() {
         let mut outcome = simulate_with_charge(sim_hours, inputs.params, &runs, kwh);
         for _ in 0..10 {
             if outcome.trough_pct >= inputs.target_soc_pct
@@ -397,6 +408,82 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
             kwh = next_kwh;
             outcome = simulate_with_charge(sim_hours, inputs.params, &runs, kwh);
         }
+        // Minimise: the grow loop above only ever ADDS to the ask, and
+        // its fixed-point steps overshoot when the trough responds
+        // super-linearly to the per-night kWh (which it does whenever
+        // the window repeats across several nights — each night's
+        // charge lifts the next day's starting point, and near the
+        // reserve floor the response is a cliff). The whole point of
+        // the plan is to buy as little grid import as the floor needs,
+        // so once the loop holds the floor, bisect back down to the
+        // smallest ask that still holds it. Skipped when the ask hit
+        // the deliverable cap without holding the floor (nothing to
+        // shrink — the capped caveat below reports that honestly).
+        if outcome.trough_pct >= inputs.target_soc_pct && kwh > 0.0 && kwh < deliverable_ac {
+            let mut lo = 0.0_f64; // known-failing
+            let mut hi = kwh; // known-good
+            for _ in 0..24 {
+                if hi - lo <= 0.01 {
+                    break;
+                }
+                let mid = (lo + hi) / 2.0;
+                let probe = simulate_with_charge(sim_hours, inputs.params, &runs, mid);
+                if probe.trough_pct >= inputs.target_soc_pct {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            kwh = hi;
+            outcome = simulate_with_charge(sim_hours, inputs.params, &runs, kwh);
+        }
+        // Tomorrow's import/export under the plan, for the Tomorrow
+        // tiles. "Tomorrow" = the first local date change in the
+        // forward series (the series starts at the current hour, so
+        // its first date is today). The what-if sim models the charge
+        // as free surplus — window hours report import 0 — so the
+        // window's grid draw is added back explicitly, once per
+        // occurrence that STARTS tomorrow (the horizon spans several
+        // nights; the tile is a one-day summary, so later occurrences
+        // belong to their own day's numbers).
+        let local_date = |ts: i64| {
+            chrono::DateTime::from_timestamp(ts, 0)
+                .unwrap()
+                .with_timezone(&chrono::Local)
+                .date_naive()
+        };
+        let tomorrow_date = outcome
+            .series
+            .first()
+            .map(|h| local_date(h.timestamp) + chrono::Duration::days(1));
+        let (import_tw, export_tw) = match tomorrow_date {
+            Some(td) => {
+                let is_t = |ts: i64| local_date(ts) == td;
+                let residual: f64 = outcome
+                    .series
+                    .iter()
+                    .filter(|h| is_t(h.timestamp))
+                    .map(|h| h.import_kwh)
+                    .sum();
+                let export: f64 = outcome
+                    .series
+                    .iter()
+                    .filter(|h| is_t(h.timestamp))
+                    .map(|h| h.export_kwh)
+                    .sum();
+                let nights_tomorrow = runs
+                    .iter()
+                    .filter(|r| {
+                        r.first()
+                            .and_then(|&i| sim_hours.get(i))
+                            .map(|h| is_t(h.timestamp))
+                            .unwrap_or(false)
+                    })
+                    .count() as f64;
+                (kwh * nights_tomorrow + residual, export)
+            }
+            None => (0.0, 0.0),
+        };
         (
             outcome.trough_pct,
             outcome.charge_level_pct.max(inputs.target_soc_pct),
@@ -405,6 +492,8 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
                 .iter()
                 .map(|h| (h.timestamp, h.soc_pct))
                 .collect(),
+            import_tw,
+            export_tw,
         )
     } else {
         let lift = kwh * eta / capacity * 100.0;
@@ -414,6 +503,8 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
             // No window to inject into, so no with-charge projection to
             // overlay. The Battery tab falls back to solar-only.
             Vec::new(),
+            0.0,
+            0.0,
         )
     };
 
@@ -465,6 +556,8 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
         charge_target_soc_pct,
         rationale,
         with_charge_series,
+        import_tomorrow_with_charge_kwh,
+        export_tomorrow_with_charge_kwh,
     }
 }
 
@@ -738,6 +831,92 @@ mod tests {
     /// recorded SOC history. The uncharged trough is lower than the
     /// with-charge trough, the series spans the full forecast horizon,
     /// and its timestamps align with the uncharged simulation.
+    /// The Tomorrow tiles must reflect the plan, not the uncharged
+    /// simulation: when a charge is recommended, tomorrow's expected
+    /// import includes the window's grid draw (the what-if sim models
+    /// the charge as free surplus, so its own `import_kwh` for window
+    /// hours is zero — the recommendation must add the per-night kWh
+    /// back for every window occurrence that starts tomorrow, and only
+    /// tomorrow: the horizon spans several nights but the tile is a
+    /// one-day summary). Export comes from the same what-if hours, no
+    /// adjustment. The live report that surfaced this was an Expected
+    /// Import tile reading 0.3 kWh against a 6.2 kWh charge plan.
+    #[test]
+    fn charge_recommendation_carries_tomorrow_import_with_charge() {
+        let p = params();
+        let solar = {
+            let mut s = [0.0; 24];
+            for slot in s.iter_mut().take(17).skip(9) {
+                *slot = 1.4;
+            }
+            s
+        };
+        let cons: [f64; 24] = std::array::from_fn(|h| {
+            if (17..=21).contains(&h) { 1.0 } else { 0.45 }
+        });
+        let (sim, sim_hours) = fixed_72h(46.0, solar, cons, &p);
+        let flux = flux_tariff();
+        let rec = plan_overnight_charge(&plan_inputs_with_min(
+            &sim, &sim_hours, &p, Some(&flux), 20.0,
+        ));
+        let PlanRecommendation::Charge {
+            kwh,
+            window,
+            import_tomorrow_with_charge_kwh,
+            export_tomorrow_with_charge_kwh,
+            ..
+        } = rec
+        else {
+            panic!("expected Charge, got {rec:?}")
+        };
+        assert!(kwh > 0.0);
+        let runs = window_runs(&sim_hours, &window);
+        assert!(!runs.is_empty());
+        let tomorrow_date = chrono::DateTime::from_timestamp(sim_hours[0].timestamp, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .date_naive()
+            + chrono::Duration::days(1);
+        let is_tomorrow = |ts: i64| {
+            chrono::DateTime::from_timestamp(ts, 0)
+                .unwrap()
+                .with_timezone(&chrono::Local)
+                .date_naive()
+                == tomorrow_date
+        };
+        let what_if = simulate_with_charge(&sim_hours, &p, &runs, kwh);
+        let residual: f64 = what_if
+            .series
+            .iter()
+            .filter(|h| is_tomorrow(h.timestamp))
+            .map(|h| h.import_kwh)
+            .sum();
+        let export: f64 = what_if
+            .series
+            .iter()
+            .filter(|h| is_tomorrow(h.timestamp))
+            .map(|h| h.export_kwh)
+            .sum();
+        // Exactly one window occurrence starts tomorrow (the 72h series
+        // holds two nights; only the first counts toward the tile).
+        let runs_tomorrow = runs
+            .iter()
+            .filter(|r| is_tomorrow(sim_hours[r[0]].timestamp))
+            .count();
+        assert_eq!(runs_tomorrow, 1, "72h fixture: one window starts tomorrow");
+        assert_eq!(runs.len(), 3, "...and the horizon holds three nights total");
+        assert!(
+            (import_tomorrow_with_charge_kwh - (kwh + residual)).abs() < 1e-6,
+            "import tile = window draw + residual: {} vs {}",
+            import_tomorrow_with_charge_kwh,
+            kwh + residual
+        );
+        assert!((export_tomorrow_with_charge_kwh - export).abs() < 1e-6);
+        // The window draw is included exactly once — not once per night.
+        assert!(import_tomorrow_with_charge_kwh >= kwh - 1e-9);
+        assert!(import_tomorrow_with_charge_kwh < 2.0 * kwh);
+    }
+
     #[test]
     fn charge_recommendation_exposes_with_charge_series() {
         let p = params();
@@ -784,6 +963,153 @@ mod tests {
             observed_min_soc_pct < with_charge_min,
             "planning must show real lift: observed {observed_min_soc_pct} < with-charge {with_charge_min}"
         );
+    }
+
+    /// While the recommended charge is running, the battery's SOC can
+    /// only rise or hold — a timed AC charge covers the window hours'
+    /// load and adds charge on top, so the eco simulation never draws
+    /// the battery down inside the window. Pins the property behind the
+    /// user-reported "SOC decreasing during the charging period": that
+    /// reading came from comparing against the misaligned midnight-
+    /// anchored consumption chart, not from the with-charge line itself.
+    /// The planner's objective is MINIMAL import: charge just enough
+    /// that the re-simulated trough holds the user's floor — never more.
+    /// The original grow-only sizing loop overshot badly on multi-night
+    /// horizons (each top-up step adds the shortfall measured at the
+    /// trough, but because the window repeats every night the trough
+    /// responds super-linearly, so the last step jumped well past the
+    /// floor and the ask was left oversized — the live-data report was
+    /// a 2.7 kWh ask landing the trough at 31% against a 20% floor).
+    /// This test scans for the true minimal ask and requires the
+    /// recommendation to be within 0.05 kWh of it.
+    #[test]
+    fn charge_ask_is_minimal_not_oversized() {
+        // Deterministic 72-hour fixture (fixed date, all hours present)
+        // shaped like the live report: start SOC 46%, flat overnight
+        // drain with an evening peak, daytime solar that recovers most
+        // but not all of the day's use. The uncharged post-window trough
+        // dips well below the 20% floor, so a charge is required.
+        let p = params();
+        let solar = {
+            let mut s = [0.0; 24];
+            for slot in s.iter_mut().take(17).skip(9) {
+                *slot = 1.4;
+            }
+            s
+        };
+        let cons: [f64; 24] = std::array::from_fn(|h| {
+            if (17..=21).contains(&h) { 1.0 } else { 0.45 }
+        });
+        let (sim, sim_hours) = fixed_72h(46.0, solar, cons, &p);
+        let flux = flux_tariff();
+        let rec = plan_overnight_charge(&plan_inputs_with_min(
+            &sim, &sim_hours, &p, Some(&flux), 20.0,
+        ));
+        let PlanRecommendation::Charge {
+            kwh,
+            window,
+            after_min_soc_pct,
+            ..
+        } = rec
+        else {
+            panic!("expected Charge, got {rec:?}")
+        };
+        assert!(
+            after_min_soc_pct >= 20.0,
+            "the recommendation must hold the floor (got {after_min_soc_pct})"
+        );
+        // Ground truth: scan for the minimal per-night kWh whose
+        // re-simulated post-window trough still clears 20%.
+        let runs = window_runs(&sim_hours, &window);
+        assert!(!runs.is_empty());
+        let holds = |ask: f64| {
+            simulate_with_charge(&sim_hours, &p, &runs, ask).trough_pct >= 20.0
+        };
+        assert!(
+            holds(kwh),
+            "recommended {kwh} kWh must itself hold the floor"
+        );
+        // Tightness: shaving a further 0.1 kWh off the recommended ask
+        // must break the floor. If a smaller ask still holds, the
+        // planner is buying more grid import than the floor needs (the
+        // grow-only sizing loop's failure mode — a coarse scan can't
+        // measure this when the ask is already near-minimal, but the
+        // boundary probe can).
+        let slack = kwh - 0.1;
+        if slack > 0.0 {
+            assert!(
+                !holds(slack),
+                "ask {kwh:.3} kWh is not minimal — {slack:.3} kWh still holds the floor, so the planner is buying more import than the floor needs"
+            );
+        }
+    }
+
+    /// Deterministic 72-hour series on a FIXED local date (no
+    /// wall-clock dependence): every hour present, so the window
+    /// occurrences land at stable indices regardless of when the test
+    /// runs. `build_48h_sim`/`build_48h_series` anchor on `now` and
+    /// make trough shapes vary by run time — unusable for a test that
+    /// pins exact sizing behaviour.
+    fn fixed_72h(
+        start_soc: f64,
+        solar_kwh_per_hour: [f64; 24],
+        cons_kwh_per_hour: [f64; 24],
+        p: &SimulationParams,
+    ) -> (SimulationOutput, Vec<SimHourInput>) {
+        use chrono::TimeZone;
+        let base = chrono::NaiveDate::from_ymd_opt(2024, 6, 15).unwrap();
+        let mut hours: Vec<SimHourInput> = Vec::new();
+        for d in 0..3i64 {
+            for h in 0..24u32 {
+                let day = base + chrono::Duration::days(d);
+                let ts = chrono::Local
+                    .from_local_datetime(&day.and_hms_opt(h, 0, 0).unwrap())
+                    .earliest()
+                    .unwrap()
+                    .timestamp();
+                hours.push(SimHourInput {
+                    timestamp: ts,
+                    solar_kwh: solar_kwh_per_hour[h as usize],
+                    consumption_kwh: cons_kwh_per_hour[h as usize],
+                });
+            }
+        }
+        let mut p2 = *p;
+        p2.start_soc_pct = start_soc;
+        let sim = simulate_battery(&hours, &p2);
+        (sim, hours)
+    }
+
+    #[test]
+    fn with_charge_soc_never_decreases_inside_the_window() {
+        let p = params();
+        let (sim, sim_hours) = simulate_tomorrow(0.2, 0.5, &p);
+        let flux = flux_tariff();
+        let rec = plan_overnight_charge(&plan_inputs(&sim, &sim_hours, &p, Some(&flux)));
+        let PlanRecommendation::Charge {
+            window,
+            with_charge_series,
+            kwh,
+            ..
+        } = rec
+        else {
+            panic!("expected Charge, got {rec:?}")
+        };
+        assert!(kwh > 0.0);
+        // Re-find the window hours in the series and check monotone
+        // non-decreasing SOC across each run's hours.
+        let runs = window_runs(&sim_hours, &window);
+        assert!(!runs.is_empty(), "recommendation implies at least one window run");
+        for run in &runs {
+            for w in run.windows(2) {
+                let (_, soc_a) = with_charge_series[w[0]];
+                let (_, soc_b) = with_charge_series[w[1]];
+                assert!(
+                    soc_b >= soc_a - 1e-9,
+                    "SOC fell inside the charge window: {soc_a}% -> {soc_b}% at series index {w:?}"
+                );
+            }
+        }
     }
 
     #[test]

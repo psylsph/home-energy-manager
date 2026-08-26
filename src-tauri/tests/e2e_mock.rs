@@ -1052,6 +1052,25 @@ async fn forecast_plan_endpoint_recommends_overnight_charge() {
     // uncharged one (planner v2 objective).
     assert!(rec["observed_min_soc_pct"].as_f64().unwrap() < 20.0);
     assert!(rec["after_min_soc_pct"].as_f64().unwrap() >= rec["observed_min_soc_pct"].as_f64().unwrap());
+    // Tomorrow's import/export under the plan drive the Tomorrow tiles.
+    // The import includes the window's grid draw exactly once (the
+    // what-if sim hides it as free surplus) plus the residual of
+    // tomorrow's what-if hours — so it must be at least the nightly
+    // kWh, and less than two nights' worth.
+    let import_tw = rec["import_tomorrow_with_charge_kwh"]
+        .as_f64()
+        .expect("import_tomorrow_with_charge_kwh");
+    let kwh_val = rec["kwh"].as_f64().unwrap();
+    assert!(
+        import_tw >= kwh_val - 1e-6,
+        "tomorrow import ({import_tw}) must include the window draw ({kwh_val})"
+    );
+    assert!(import_tw < 2.0 * kwh_val, "window draw counted once, not per night");
+    assert!(
+        rec["export_tomorrow_with_charge_kwh"]
+            .as_f64()
+            .is_some_and(|v| v >= 0.0)
+    );
     // The Apply payload mirrors what the Control page posts. The slot's
     // charge target is the SOC the re-simulated plan says the battery
     // must REACH in the window (`charge_target_soc_pct`, clamped to the

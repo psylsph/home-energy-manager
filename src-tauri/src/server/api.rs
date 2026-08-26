@@ -5143,6 +5143,8 @@ fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> ser
             current_soc_pct,
             rationale,
             with_charge_series,
+            import_tomorrow_with_charge_kwh,
+            export_tomorrow_with_charge_kwh,
         } => {
             let (start_h, start_m) = hhmm_split(window.start_min);
             // ChargeSlot2 ends at 23:59 inclusively; if the window reaches
@@ -5183,6 +5185,14 @@ fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> ser
                 "current_soc_pct": current_soc_pct,
                 "rationale": rationale,
                 "with_charge_series": with_charge_series,
+                // Tomorrow's import/export under the plan — the same
+                // numbers the Tomorrow tiles show, so the tiles and the
+                // plan card can never disagree (the live report was an
+                // Expected Import tile at 0.3 kWh against a 6.2 kWh
+                // charge plan because the tile read the uncharged
+                // simulation).
+                "import_tomorrow_with_charge_kwh": import_tomorrow_with_charge_kwh,
+                "export_tomorrow_with_charge_kwh": export_tomorrow_with_charge_kwh,
                 "apply": {
                     "charge_slot": {
                         "slot": 1,

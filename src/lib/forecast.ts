@@ -95,6 +95,47 @@ export function toBatteryChartData(battery: ForecastBattery): BatteryChartPoint[
   return battery.hours.map(([timestamp, soc]) => ({ timestamp, soc }));
 }
 
+export type ConsumptionChartPoint = {
+  timestamp: number;
+  kwh: number;
+  p25: number;
+  p75: number;
+};
+
+/** Tile the typical-day consumption profile onto the forward timestamps
+ *  so the Consumption chart shares the same x-axis, start time (now),
+ *  and horizon as the Solar forecast and Battery projection charts —
+ *  instead of a midnight-anchored 24 h "typical day" view that can't be
+ *  compared hour-for-hour against the projections. Each forward
+ *  timestamp is stamped with its local hour-of-day's median + p25/p75
+ *  band, repeating across days. */
+export function toConsumptionChartData(
+  consumption: ForecastConsumptionHour[],
+  timestamps: number[],
+): ConsumptionChartPoint[] {
+  const byHour = new Map<number, ForecastConsumptionHour>();
+  for (const c of consumption) byHour.set(c.hour, c);
+  return timestamps.map((ts) => {
+    const c = byHour.get(new Date(ts * 1000).getHours());
+    return {
+      timestamp: ts,
+      kwh: c?.kwh ?? 0,
+      p25: c?.p25 ?? 0,
+      p75: c?.p75 ?? 0,
+    };
+  });
+}
+
+/** Hourly timestamps starting at the current hour boundary, spanning
+ *  `count` hours forward. Used when neither the solar series nor the
+ *  battery projection provides timestamps (degraded, weather-off
+ *  state) so the consumption chart still renders on a now-anchored
+ *  axis instead of reverting to a midnight-anchored typical day. */
+export function forwardHourTimestamps(count: number): number[] {
+  const start = Math.floor(Date.now() / 1000 / 3600) * 3600;
+  return Array.from({ length: count }, (_, i) => start + i * 3600);
+}
+
 export type TomorrowSummary = {
   solarKwh: number;
   consumptionKwh: number;
@@ -156,6 +197,14 @@ export type PlanRecommendation =
        *  recommendation actually does. Empty when the planner has
        *  nothing to offer (no_plan / no_charge_needed). */
       with_charge_series: [number, number][];
+      /** Tomorrow's grid import under the recommended plan, kWh — the
+       *  window's grid draw plus the residual import of tomorrow's
+       *  what-if hours. Drives the Tomorrow "Expected import" tile so
+       *  the tile agrees with the plan instead of the uncharged
+       *  simulation. */
+      import_tomorrow_with_charge_kwh: number;
+      /** Tomorrow's grid export under the recommended plan, kWh. */
+      export_tomorrow_with_charge_kwh: number;
     }
   | {
       kind: 'no_charge_needed';

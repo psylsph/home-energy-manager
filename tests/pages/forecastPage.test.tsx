@@ -79,6 +79,10 @@ const { fullPayload, planPayload } = vi.hoisted(() => {
               [1_700_007_200, 35],
               [1_700_010_800, 40],
             ],
+            // Tomorrow's totals under the plan — drive the Tomorrow
+            // tiles so they agree with the recommendation.
+            import_tomorrow_with_charge_kwh: 3.5,
+            export_tomorrow_with_charge_kwh: 0.2,
           },
           apply: {
             charge_slot: {
@@ -176,6 +180,81 @@ describe('ForecastPage', () => {
     expect(screen.queryByTestId('forecast-status-banner')).toBeNull();
   });
 
+  it('renders the consumption profile on the same forward axis as the solar and battery charts', async () => {
+    // The consumption chart is tiled onto the forward timestamps (the
+    // solar series' axis) instead of a midnight-anchored 24 h "typical
+    // day" — the title drops the "typical day" wording and the three
+    // charts start at the same "now".
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect(screen.getByText('Consumption profile (next 48 h)')).toBeTruthy();
+    });
+    expect(screen.queryByText('Consumption profile (typical day)')).toBeNull();
+  });
+
+  it('keeps the consumption chart on a now-anchored axis even with no solar or battery series', async () => {
+    // Degraded state: weather off (no solar) and no battery projection.
+    // The consumption chart must not fall back to a midnight-anchored
+    // day — it generates its own now-anchored forward axis — and must
+    // not show the "Not enough history" placeholder while a profile
+    // exists.
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') {
+        return {
+          ok: true,
+          data: { ...fullPayload(), solar: [], battery: null },
+        };
+      }
+      if (path === '/api/forecast/plan') return planPayload('no_plan');
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect(screen.getByText('Consumption profile (next 48 h)')).toBeTruthy();
+    });
+    expect(screen.queryByText('Not enough history yet.')).toBeNull();
+  });
+
+  it('shows the not-enough-history placeholder when no consumption profile exists', async () => {
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') {
+        return {
+          ok: true,
+          data: { ...fullPayload(), consumption: [] },
+        };
+      }
+      if (path === '/api/forecast/plan') return planPayload('no_plan');
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect(screen.getByText('Not enough history yet.')).toBeTruthy();
+    });
+  });
+
+  it('shows the Tomorrow import/export tiles under the charge plan, not the uncharged simulation', async () => {
+    // The tiles must agree with the plan being recommended: with a
+    // Charge plan the Expected import tile includes the window's grid
+    // draw (with a hint saying so) instead of the uncharged-sim
+    // residual (0.3 kWh against a 6.2 kWh plan was the live report).
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect(screen.getByTestId('forecast-plan').textContent).toMatch(/3\.2/);
+    });
+    // Uncharged tiles would read 1.1 import / 7.2 export; the plan
+    // scenario numbers (3.5 / 0.2) must win.
+    expect(screen.getByTestId('forecast-import-tomorrow').textContent).toMatch(/3\.5/);
+    expect(screen.getByTestId('forecast-import-tomorrow').textContent).not.toMatch(/1\.1/);
+    expect(screen.getByText(/incl\. 3\.2 kWh charge/)).toBeTruthy();
+    expect(screen.getByTestId('forecast-surplus-tomorrow').textContent).toMatch(/0\.2/);
+    expect(screen.getByText(/with charge plan/)).toBeTruthy();
+  });
+
   it('renders degradation explanations instead of hiding the page', async () => {
     apiGetMock.mockImplementation(async () => ({
       ok: true,
@@ -256,6 +335,23 @@ describe('ForecastPage plan card', () => {
     expect(container.textContent).toMatch(/02:00/);
     expect(container.textContent).toMatch(/05:00/);
     expect(container.textContent).toMatch(/3\.2 kWh/);
+    // The caption is a footer INSIDE the card's <section> (the card's
+    // rounded background), after the fixed-height chart area — not a
+    // child of the h-56 chart div where it would overflow the card and
+    // render outside the background.
+    const card = screen
+      .getByText('Battery projection')
+      .closest('section');
+    expect(card).not.toBeNull();
+    const caption = container.textContent?.match(/SOC if overnight charge enacted/);
+    expect(caption).toBeTruthy();
+    const chartDiv = screen.getByText('Battery projection').parentElement
+      ?.querySelector('div.h-56');
+    expect(chartDiv).not.toBeNull();
+    // Caption paragraph lives after the chart div, still inside section.
+    const footer = card?.querySelector('div.mt-2 > p');
+    expect(footer?.textContent).toMatch(/SOC if overnight charge enacted/);
+    expect(footer?.textContent).toMatch(/3\.2 kWh/);
   });
 
   it('hides Apply when no charge is needed', async () => {

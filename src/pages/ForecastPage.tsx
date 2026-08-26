@@ -16,8 +16,10 @@ import { formatEnergy } from '../lib/format';
 import {
   forecastPlanTitle,
   forecastStatusMessages,
+  forwardHourTimestamps,
   shouldRefetchForecast,
   toBatteryChartData,
+  toConsumptionChartData,
   toSolarChartData,
   tomorrowSummary,
 } from '../lib/forecast';
@@ -41,11 +43,24 @@ function hourLabel(tsSeconds: number): string {
   return `${String(d.getHours()).padStart(2, '0')}:00`;
 }
 
-function ChartCard({ title, children }: { title: string; children: React.ReactNode }) {
+function ChartCard({
+  title,
+  footer,
+  children,
+}: {
+  title: string;
+  /** Optional caption rendered INSIDE the card background, below the
+   *  fixed-height chart area. Anything placed among `children` would
+   *  land inside the `h-56` div alongside the 100%-height chart and
+   *  overflow the card's rounded background. */
+  footer?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
     <section className="bg-bg-surface rounded-lg p-3 sm:p-4">
       <h2 className="text-sm font-semibold text-text-primary mb-3">{title}</h2>
       <div className="h-56 sm:h-64">{children}</div>
+      {footer ? <div className="mt-2">{footer}</div> : null}
     </section>
   );
 }
@@ -222,12 +237,23 @@ export default function ForecastPage() {
     return match ? { ...p, withCharge: match[1] } : { ...p, withCharge: undefined };
   });
   const hasWithCharge = withChargeSeries.length > 0;
-  const consumptionChart = data.consumption.map((c) => ({
-    hour: `${String(c.hour).padStart(2, '0')}:00`,
-    kwh: c.kwh,
-    p25: c.p25,
-    p75: c.p75,
-  }));
+  // The consumption profile is a typical-day hour-of-day series; tile it
+  // onto the forward timestamps so all three charts share one x-axis —
+  // same start (now), same horizon — instead of a midnight-anchored 24 h
+  // view that can't be compared hour-for-hour against the projections.
+  // Prefer the solar series' timestamps (the payload's forward axis),
+  // fall back to the battery projection's, and generate a now-anchored
+  // 48 h axis only when both are empty (weather-off degraded state).
+  const forwardTimestamps = solarChart.length > 0
+    ? solarChart.map((p) => p.timestamp)
+    : batteryChart.map((p) => p.timestamp);
+  const consumptionEmpty = data.consumption.length === 0;
+  const consumptionChart = consumptionEmpty
+    ? []
+    : toConsumptionChartData(
+        data.consumption,
+        forwardTimestamps.length > 0 ? forwardTimestamps : forwardHourTimestamps(48),
+      );
 
   return (
     <div className="flex flex-col gap-3 sm:gap-4 max-w-5xl">
@@ -314,13 +340,27 @@ export default function ForecastPage() {
         />
         <SummaryTile
           label="Expected export"
-          value={formatEnergy(summary.surplusKwh)}
+          value={formatEnergy(
+            plan?.recommendation?.kind === 'charge'
+              ? plan.recommendation.export_tomorrow_with_charge_kwh
+              : summary.surplusKwh,
+          )}
           testId="forecast-surplus-tomorrow"
+          hint={plan?.recommendation?.kind === 'charge' ? 'with charge plan' : undefined}
         />
         <SummaryTile
           label="Expected import"
-          value={formatEnergy(summary.importKwh)}
+          value={formatEnergy(
+            plan?.recommendation?.kind === 'charge'
+              ? plan.recommendation.import_tomorrow_with_charge_kwh
+              : summary.importKwh,
+          )}
           testId="forecast-import-tomorrow"
+          hint={
+            plan?.recommendation?.kind === 'charge'
+              ? `incl. ${plan.recommendation.kwh.toFixed(1)} kWh charge`
+              : undefined
+          }
         />
         {summary.startSocPct != null && (
           <SummaryTile
@@ -463,8 +503,8 @@ export default function ForecastPage() {
         )}
       </ChartCard>
 
-      <ChartCard title="Consumption profile (typical day)">
-        {consumptionChart.length === 0 ? (
+      <ChartCard title="Consumption profile (next 48 h)">
+        {consumptionEmpty || consumptionChart.length === 0 ? (
           <div className="h-full flex items-center justify-center text-xs text-text-secondary">
             Not enough history yet.
           </div>
@@ -472,9 +512,17 @@ export default function ForecastPage() {
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={consumptionChart}>
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
-              <XAxis dataKey="hour" stroke="#94a3b8" fontSize={10} interval={3} />
+              <XAxis
+                dataKey="timestamp"
+                tickFormatter={hourLabel}
+                stroke="#94a3b8"
+                fontSize={10}
+              />
               <YAxis stroke="#94a3b8" fontSize={10} unit="kWh" width={48} />
-              <Tooltip formatter={(value: number | string) => `${Number(value).toFixed(2)} kWh`} />
+              <Tooltip
+                labelFormatter={(ts) => hourLabel(Number(ts))}
+                formatter={(value: number | string) => `${Number(value).toFixed(2)} kWh`}
+              />
               <Area
                 type="monotone"
                 dataKey="p25"
@@ -505,7 +553,23 @@ export default function ForecastPage() {
         )}
       </ChartCard>
 
-      <ChartCard title="Battery projection">
+      <ChartCard
+        title="Battery projection"
+        footer={
+          hasWithCharge && plan?.recommendation?.kind === 'charge' ? (
+            <p className="text-[10px] text-text-secondary/70 font-sans leading-snug">
+              <span
+                aria-hidden
+                className="inline-block w-3 h-px align-middle mr-1"
+                style={{ borderTop: '2px dashed #60a5fa' }}
+              />
+              SOC if overnight charge enacted —
+              Tomorrow {plan.recommendation.window.start}–{plan.recommendation.window.end},
+              {' '}{plan.recommendation.kwh.toFixed(1)} kWh.
+            </p>
+          ) : undefined
+        }
+      >
         {batteryChart.length === 0 ? (
           <div className="h-full flex items-center justify-center text-xs text-text-secondary">
             No battery projection — connect to the inverter.
@@ -565,18 +629,6 @@ export default function ForecastPage() {
               )}
             </LineChart>
           </ResponsiveContainer>
-        )}
-        {hasWithCharge && plan?.recommendation?.kind === 'charge' && (
-          <p className="text-[10px] text-text-secondary/70 font-sans mt-2 leading-snug">
-            <span
-              aria-hidden
-              className="inline-block w-3 h-px align-middle mr-1"
-              style={{ borderTop: '2px dashed #60a5fa' }}
-            />
-            SOC if overnight charge enacted —
-            Tomorrow {plan.recommendation.window.start}–{plan.recommendation.window.end},
-            {' '}{plan.recommendation.kwh.toFixed(1)} kWh.
-          </p>
         )}
       </ChartCard>
 

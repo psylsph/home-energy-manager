@@ -2,7 +2,9 @@ import { describe, it, expect } from 'vitest';
 import {
   forecastPlanTitle,
   forecastStatusMessages,
+  forwardHourTimestamps,
   shouldRefetchForecast,
+  toConsumptionChartData,
   toSolarChartData,
   toBatteryChartData,
   tomorrowSummary,
@@ -38,6 +40,66 @@ describe('forecastStatusMessages', () => {
 
   it('returns empty for a healthy payload', () => {
     expect(forecastStatusMessages([])).toEqual([]);
+  });
+});
+
+describe('toConsumptionChartData', () => {
+  // Timestamps built from a local Date so the test is timezone-independent.
+  const ts = (y: number, m: number, d: number, h: number) =>
+    new Date(y, m, d, h, 0, 0).getTime() / 1000;
+
+  it('tiles the typical-day profile onto the forward timestamps by local hour-of-day', () => {
+    const consumption = [
+      { hour: 6, kwh: 0.4, p25: 0.3, p75: 0.5 },
+      { hour: 18, kwh: 1.2, p25: 1.0, p75: 1.4 },
+    ];
+    const points = toConsumptionChartData(consumption, [
+      ts(2024, 5, 15, 6),
+      ts(2024, 5, 15, 18),
+    ]);
+    expect(points).toEqual([
+      { timestamp: ts(2024, 5, 15, 6), kwh: 0.4, p25: 0.3, p75: 0.5 },
+      { timestamp: ts(2024, 5, 15, 18), kwh: 1.2, p25: 1.0, p75: 1.4 },
+    ]);
+  });
+
+  it('repeats the same hour-of-day band on subsequent days (the profile is a typical day, the window spans several)', () => {
+    const consumption = [{ hour: 2, kwh: 0.25, p25: 0.2, p75: 0.3 }];
+    const day1 = ts(2024, 5, 15, 2);
+    const day2 = ts(2024, 5, 16, 2);
+    const points = toConsumptionChartData(consumption, [day1, day2]);
+    expect(points[0].kwh).toBe(0.25);
+    expect(points[1].kwh).toBe(0.25);
+    expect(points[1].timestamp).toBe(day2);
+  });
+
+  it('yields zeros for hours with no observed data', () => {
+    const points = toConsumptionChartData(
+      [{ hour: 6, kwh: 0.4, p25: 0.3, p75: 0.5 }],
+      [ts(2024, 5, 15, 9)],
+    );
+    expect(points).toEqual([
+      { timestamp: ts(2024, 5, 15, 9), kwh: 0, p25: 0, p75: 0 },
+    ]);
+  });
+
+  it('returns an empty series when there are no forward timestamps', () => {
+    expect(toConsumptionChartData([{ hour: 6, kwh: 1, p25: 1, p75: 1 }], [])).toEqual([]);
+  });
+});
+
+describe('forwardHourTimestamps', () => {
+  it('generates hourly ascending timestamps starting at the current hour boundary', () => {
+    const stamps = forwardHourTimestamps(48);
+    expect(stamps).toHaveLength(48);
+    expect(stamps[0] % 3600).toBe(0);
+    for (let i = 1; i < stamps.length; i += 1) {
+      expect(stamps[i] - stamps[i - 1]).toBe(3600);
+    }
+    // The first stamp is the current hour — never more than an hour ago.
+    const nowSec = Date.now() / 1000;
+    expect(nowSec - stamps[0]).toBeGreaterThanOrEqual(0);
+    expect(nowSec - stamps[0]).toBeLessThan(3600);
   });
 });
 
