@@ -79,6 +79,10 @@ export default function ForecastPage() {
   const [applyError, setApplyError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [minSocPctInput, setMinSocPctInput] = useState<string>('20');
+  const [minSocSaving, setMinSocSaving] = useState(false);
+  const [minSocError, setMinSocError] = useState<string | null>(null);
+  const [minSocPct, setMinSocPct] = useState<number>(20);
   const snapshot = useInverterStore((s) => s.snapshot);
   const lastRefetchRef = useRef<number>(0);
   const lastTriggerRef = useRef<{
@@ -88,12 +92,21 @@ export default function ForecastPage() {
 
   const load = async () => {
     try {
-      const [forecastRes, planRes] = await Promise.all([
+      const [forecastRes, planRes, settingsRes] = await Promise.all([
         apiGet<{ ok: boolean; data: ForecastData }>('/api/forecast'),
         apiGet<{ ok: boolean; data: PlanResponse }>('/api/forecast/plan'),
+        apiGet<{
+          ok: boolean;
+          data: { forecast_min_soc_pct?: number } & Record<string, unknown>;
+        }>('/api/settings'),
       ]);
       setData(forecastRes.data);
       setPlan(planRes.data);
+      if (settingsRes.data.forecast_min_soc_pct != null) {
+        const v = Math.round(settingsRes.data.forecast_min_soc_pct);
+        setMinSocPctInput(String(v));
+        setMinSocPct(v);
+      }
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load forecast');
@@ -140,6 +153,30 @@ export default function ForecastPage() {
     }
   }, [snapshot]);
 
+  const saveMinSoc = async () => {
+    const next = Number(minSocPctInput);
+    if (!Number.isFinite(next)) {
+      setMinSocError('Min SOC must be a number');
+      return;
+    }
+    if (!(0 <= next && next <= 100)) {
+      setMinSocError('Min SOC must be between 0 and 100');
+      return;
+    }
+    setMinSocError(null);
+    setMinSocSaving(true);
+    try {
+      await apiPost('/api/settings', { forecast_min_soc_pct: next });
+      setMinSocPct(next);
+      // Refetch — the planner sees the new floor on the next call.
+      await load();
+    } catch (e) {
+      setMinSocError(e instanceof Error ? e.message : 'Save failed');
+    } finally {
+      setMinSocSaving(false);
+    }
+  };
+
   const handleApply = async () => {
     if (!plan || !plan.apply) return;
     setApplyState('sending');
@@ -170,6 +207,21 @@ export default function ForecastPage() {
   const summary = tomorrowSummary(data);
   const solarChart = toSolarChartData(data.solar);
   const batteryChart = data.battery ? toBatteryChartData(data.battery) : [];
+  // Merge the planner's "if we follow the recommendation" trajectory onto
+  // the battery projection so the Forecast tab's Battery projection chart
+  // can draw it as a second line — same x-axis (unix seconds), same
+  // horizon, one entry per forecast hour. `with_charge_series` is only
+  // present on a `charge` recommendation; anything else leaves the
+  // chart showing just the solar-only projection.
+  const withChargeSeries =
+    plan?.recommendation?.kind === 'charge'
+      ? plan.recommendation.with_charge_series
+      : [];
+  const batteryChartWithPlan = batteryChart.map((p) => {
+    const match = withChargeSeries.find(([ts]) => ts === p.timestamp);
+    return match ? { ...p, withCharge: match[1] } : { ...p, withCharge: undefined };
+  });
+  const hasWithCharge = withChargeSeries.length > 0;
   const consumptionChart = data.consumption.map((c) => ({
     hour: `${String(c.hour).padStart(2, '0')}:00`,
     kwh: c.kwh,
@@ -204,6 +256,46 @@ export default function ForecastPage() {
         <div className="col-span-2 md:col-span-5 text-xs font-semibold uppercase tracking-wide text-text-secondary">
           Tomorrow
         </div>
+
+        {/* Min-SOC floor for the planner: ensures the battery never dips
+            below this percentage over the forward forecast window, not
+            just at the end. Editing it saves immediately and triggers a
+            plan refetch. */}
+        <div className="col-span-2 md:col-span-5 flex items-center gap-3">
+          <label
+            htmlFor="forecast-min-soc-input"
+            className="text-text-primary text-sm font-sans font-medium"
+          >
+            Min SOC
+          </label>
+          <input
+            id="forecast-min-soc-input"
+            type="number"
+            min={0}
+            max={100}
+            step={1}
+            value={minSocPctInput}
+            onChange={(e) => setMinSocPctInput(e.target.value)}
+            onBlur={() => void saveMinSoc()}
+            disabled={!data || minSocSaving}
+            className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-24 border border-transparent focus:outline-none focus:border-accent disabled:opacity-50"
+            data-testid="forecast-min-soc-input"
+          />
+          <span className="text-text-secondary text-xs font-sans">%</span>
+          <span className="text-text-secondary text-xs font-sans">
+            — planner keeps the battery at or above this percentage across
+            the next 48h.
+          </span>
+          {minSocError && (
+            <span
+              data-testid="forecast-min-soc-error"
+              className="text-xs text-red-400"
+            >
+              {minSocError}
+            </span>
+          )}
+        </div>
+
         <SummaryTile
           label="Solar prediction"
           value={formatEnergy(summary.solarKwh)}
@@ -267,15 +359,31 @@ export default function ForecastPage() {
                 {plan.recommendation.window.end},{' '}
                 {(plan.recommendation.window.rate * 100).toFixed(1)}p)
               </span>{' '}
-              to reach {Math.round(plan.recommendation.target_soc_pct)}% — about £
+              to clear{' '}
+              <span data-testid="forecast-plan-trough">
+                {Math.round(plan.recommendation.observed_min_soc_pct)}%
+              </span>{' '}
+              trough →{' '}
+              <span data-testid="forecast-plan-after-min">
+                {plan.recommendation.after_min_soc_pct.toFixed(0)}%
+              </span>{' '}
+              (slot target{' '}
+              <span data-testid="forecast-plan-charge-target">
+                {Math.round(plan.recommendation.charge_target_soc_pct)}%
+              </span>
+              ) — about £
               {(plan.recommendation.kwh * plan.recommendation.window.rate).toFixed(2)} of
               grid import.
             </p>
           )}
           {plan.recommendation.kind === 'no_charge_needed' && (
             <p className="text-xs text-text-secondary">
-              Projected end-of-day SOC {Math.round(plan.recommendation.projected_end_soc_pct)}%
-              — your solar forecast already covers the day's needs.
+              Projected low{' '}
+              <span data-testid="forecast-plan-observed-min">
+                {Math.round(plan.recommendation.observed_min_soc_pct)}%
+              </span>{' '}
+              — your {Math.round(plan.recommendation.min_soc_pct)}% floor is held
+              on solar alone.
             </p>
           )}
           {plan.recommendation.kind === 'no_plan' && (
@@ -404,7 +512,7 @@ export default function ForecastPage() {
           </div>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={batteryChart}>
+            <LineChart data={batteryChartWithPlan}>
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
               <XAxis
                 dataKey="timestamp"
@@ -415,15 +523,25 @@ export default function ForecastPage() {
               <YAxis stroke="#94a3b8" fontSize={10} domain={[0, 100]} unit="%" width={44} />
               <Tooltip
                 labelFormatter={(ts) => hourLabel(Number(ts))}
-                formatter={(value: number | string) => `${Number(value).toFixed(0)}%`}
+                formatter={(value: number | string, name: string) =>
+                  Number.isFinite(Number(value)) ? [`${Number(value).toFixed(0)}%`, name] : ['—', name]
+                }
               />
               {data.battery && (
-                <ReferenceLine
-                  y={data.battery.reserve_soc_pct}
-                  stroke="#f87171"
-                  strokeDasharray="4 4"
-                  label={{ value: 'reserve', fill: '#f87171', fontSize: 10 }}
-                />
+                <>
+                  <ReferenceLine
+                    y={data.battery.reserve_soc_pct}
+                    stroke="#f87171"
+                    strokeDasharray="4 4"
+                    label={{ value: 'reserve', fill: '#f87171', fontSize: 10 }}
+                  />
+                  <ReferenceLine
+                    y={minSocPct}
+                    stroke="#fbbf24"
+                    strokeDasharray="6 3"
+                    label={{ value: `min ${minSocPct}%`, fill: '#fbbf24', fontSize: 10 }}
+                  />
+                </>
               )}
               <Line
                 type="monotone"
@@ -433,8 +551,32 @@ export default function ForecastPage() {
                 dot={false}
                 name="SOC"
               />
+              {hasWithCharge && (
+                <Line
+                  type="monotone"
+                  dataKey="withCharge"
+                  stroke="#60a5fa"
+                  strokeWidth={2}
+                  strokeDasharray="6 4"
+                  dot={false}
+                  name="If charge enacted"
+                  connectNulls
+                />
+              )}
             </LineChart>
           </ResponsiveContainer>
+        )}
+        {hasWithCharge && plan?.recommendation?.kind === 'charge' && (
+          <p className="text-[10px] text-text-secondary/70 font-sans mt-2 leading-snug">
+            <span
+              aria-hidden
+              className="inline-block w-3 h-px align-middle mr-1"
+              style={{ borderTop: '2px dashed #60a5fa' }}
+            />
+            SOC if overnight charge enacted —
+            Tomorrow {plan.recommendation.window.start}–{plan.recommendation.window.end},
+            {' '}{plan.recommendation.kwh.toFixed(1)} kWh.
+          </p>
         )}
       </ChartCard>
 

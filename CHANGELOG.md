@@ -4,14 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.74.16] - 2026-08-26
+
 ### Fixed
 
 - **History Import Cost box now matches the chart.** The Period Totals box and the Power-page Consumption Report used to fall back to a trapezoid integration of `grid_power` whenever the daily `today_import_kwh` counter was empty, on the assumption that an empty counter always meant a broken-counter firmware. On a working inverter that lets CT-clamp noise (and any brief sub-counter-resolution import) inflate the box by an arbitrary amount while the chart, which never applied the fallback, stayed at the standing-charge-only figure (issue #269, Pete's £3.86 noise case in the screenshot showing £0.5735 on the chart). Both the box and the report now trust the counter alone, so they always equal the chart on every range.
+
+- **The overnight-charge planner no longer pretends a cheap-window charge will hit the minimum SOC.** When the forecast's lowest SOC fell AFTER the off-peak window (evening drain at 17:00–22:00 after a 02:00–05:00 charge, the most common shape), the old analytic "uniform lift" model reported the battery would reach the floor at the time the window ends, even though the intermediate discharge consumed that charge before the trough arrived in the evening. The planner now re-runs the simulation with the proposed kWh injected into every window occurrence, sizes the charge iteratively against the re-simulated post-window trough (capped at what the window and rate limit can physically deliver), and reports the truthful result — including a "still below minimum" caveat when the window physically can't hold the floor. The Apply button now writes the slot target to the level the re-simulation says the battery needs to REACH in the window (clamped to the register's 4–100 % range), so the charge actually runs long enough to survive the day rather than switching off the moment the floor is touched.
+
+- **The Forecast tab's Battery projection chart now shows what the recommended charge actually does.** The existing SOC projection line (solar-only) gains a dashed companion that plots the battery's SOC if the planner's overnight charge is enacted — same horizon, same x-axis, one line per scenario. A caption under the chart names the window and kWh the dashed line represents. The dashed line only appears when the planner returns a `Charge` recommendation; `NoChargeNeeded` and `NoPlan` leave the chart unchanged.
 
 ### Internal
 
 - Poll-loop settings reads (the publish-time solar re-stamp and the winter-mode persist) now run on the blocking thread pool like the cycle's own settings load, so a slow or networked settings file can't stall a poll tick.
 - The poll-path persists for CT-solar meter baselines (issue #277) and the discharge-floor guard's saved reserve now go through `Settings::update` rather than `load + save`, so a concurrent settings save landing mid-poll can no longer be reverted by the poll's full-struct write (the same lost-update class the Aug-21 sweep eliminated elsewhere; the two poll-loop sites were missed at the time).
+- The forecast plan endpoint reconstructs the original hourly inputs (solar per timestamp, consumption per hour-of-day) and re-runs the simulator; matches what the projection already used.
+- The planner uses the live snapshot's charge and discharge rate limits as the what-if cap, so its deliverable estimate matches the inverter's actual capability.
+- `POST /api/forecast/plan`'s charge recommendation now also carries `observed_min_soc_pct`, `after_min_soc_pct`, and `charge_target_soc_pct`; the old `target_soc_pct` / `projected_end_soc_pct` fields are gone (trough and target were conflated).
+- `POST /api/forecast/plan`'s charge recommendation also returns `with_charge_series` (the per-hour SOC when the proposed kWh are injected into every window occurrence), used by the Forecast tab's Battery projection chart.
+- The `_48h` test fixture builder became a 3-day forward series to match the production forecast window.
 
 ## [0.74.15] - 2026-08-23
 

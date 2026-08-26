@@ -1041,23 +1041,65 @@ async fn forecast_plan_endpoint_recommends_overnight_charge() {
     assert_eq!(window["start"], serde_json::json!("02:00"));
     assert_eq!(window["end"], serde_json::json!("05:00"));
     let kwh = rec["kwh"].as_f64().expect("kwh");
-    assert!(kwh > 0.0 && kwh < 9.5, "kwh = {kwh}");
+    // The window's deliverable ceiling is 3 kW × 3 h.
+    assert!(kwh > 0.0 && kwh <= 9.0 + 1e-6, "kwh = {kwh}");
     assert!(
         rec["rationale"].as_str().unwrap().contains("9.0p"),
         "rationale: {}",
         rec["rationale"]
     );
-    // The Apply payload mirrors what the Control page posts.
+    // The re-simulated post-charge trough is reported alongside the
+    // uncharged one (planner v2 objective).
+    assert!(rec["observed_min_soc_pct"].as_f64().unwrap() < 20.0);
+    assert!(rec["after_min_soc_pct"].as_f64().unwrap() >= rec["observed_min_soc_pct"].as_f64().unwrap());
+    // The Apply payload mirrors what the Control page posts. The slot's
+    // charge target is the SOC the re-simulated plan says the battery
+    // must REACH in the window (`charge_target_soc_pct`, clamped to the
+    // 4–100 register range and rounded up) — NOT the min-soc floor. A
+    // slot targeted at the floor stops charging as soon as it's
+    // touched and the battery crashes back below the floor later in
+    // the day, which is the exact failure the planner exists to fix.
     let apply = body["data"]["apply"].as_object().expect("apply");
-    // The API returns target_soc as an integer; rec["target_soc_pct"]
-    // holds the float from the recommendation.
-    let target_soc_int = rec["target_soc_pct"].as_f64().unwrap() as u64;
+    let charge_target = rec["charge_target_soc_pct"].as_f64().expect("charge_target_soc_pct");
+    let min_soc = rec["min_soc_pct"].as_f64().expect("min_soc_pct");
+    assert!(charge_target >= min_soc, "charge target {charge_target} must be at least the {min_soc} floor");
+    let expected_target = charge_target.clamp(4.0, 100.0).ceil() as u64;
+    // The planner's re-simulated trajectory ("SOC if the recommended
+    // charge is enacted") is what the Battery tab chart plots as a
+    // dashed overlay on top of the recorded SOC history. It must
+    // cover the same horizon as the uncharged projection and never
+    // drop below it for the same timestamp.
+    let with_charge_series = rec["with_charge_series"]
+        .as_array()
+        .expect("with_charge_series");
+    let forecast = get_json(&router, "/api/forecast").await;
+    assert_eq!(forecast.0, StatusCode::OK);
+    let uncharged_series = forecast.1["data"]["battery"]["hours"]
+        .as_array()
+        .expect("battery.hours");
+    assert_eq!(
+        with_charge_series.len(),
+        uncharged_series.len(),
+        "with_charge_series should cover the same horizon as the uncharged battery projection"
+    );
+    for (i, (charged, uncharged)) in with_charge_series
+        .iter()
+        .zip(uncharged_series.iter())
+        .enumerate()
+    {
+        let ts = charged[0].as_i64().expect("timestamp");
+        let soc = charged[1].as_f64().expect("soc");
+        let u_ts = uncharged[0].as_i64().expect("timestamp");
+        let u_soc = uncharged[1].as_f64().expect("soc");
+        assert_eq!(ts, u_ts, "timestamps must align (hour {i})");
+        assert!(soc >= u_soc - 1e-6, "with-charge must not dip below uncharged at hour {i}");
+    }
     assert_eq!(apply["charge_slot"], serde_json::json!({
         "slot": 1,
         "enabled": true,
         "start_hour": 2, "start_minute": 0,
         "end_hour": 5, "end_minute": 0,
-        "target_soc": target_soc_int,
+        "target_soc": expected_target,
     }));
     assert_eq!(apply["timed_charge"], serde_json::json!({ "enabled": true }));
 }

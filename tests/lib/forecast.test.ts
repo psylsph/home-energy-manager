@@ -131,13 +131,18 @@ describe('forecastPlanTitle', () => {
     kind: 'charge',
     window: { start: '02:00', end: '05:00', rate: 0.09, tomorrow: true },
     kwh: 3.2,
-    target_soc_pct: 80,
-    projected_end_soc_pct: 80,
+    min_soc_pct: 20,
+    observed_min_soc_pct: 4,
+    after_min_soc_pct: 80,
+    charge_target_soc_pct: 90,
+    current_soc_pct: 50,
     rationale: 'Charge the battery in the cheap window.',
   };
   const noCharge: Extract<PlanRecommendation, { kind: 'no_charge_needed' }> = {
     kind: 'no_charge_needed',
-    projected_end_soc_pct: 100,
+    min_soc_pct: 20,
+    observed_min_soc_pct: 80,
+    current_soc_pct: 50,
     rationale: 'Sunny day — the battery fills from solar.',
   };
   const noPlan: Extract<PlanRecommendation, { kind: 'no_plan' }> = {
@@ -193,8 +198,10 @@ describe('forecastPlanChargeRationale', () => {
       kind: 'charge',
       window: { start: '00:30', end: '05:30', rate: 0.07, tomorrow: true },
       kwh: 5.7,
-      target_soc_pct: 100,
-      projected_end_soc_pct: 100,
+      min_soc_pct: 20,
+      observed_min_soc_pct: 4,
+      after_min_soc_pct: 46,
+      charge_target_soc_pct: 100,
       current_soc_pct: 4,
       rationale:
         'Battery is at 4% now and tomorrow\'s solar is only expected to leave it at 46% by the end of the day. Charging 5.7 kWh in the 7.0p window (00:30–05:30) lifts it to 100% (about £0.40 of grid import).',

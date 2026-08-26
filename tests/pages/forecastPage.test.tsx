@@ -64,10 +64,21 @@ const { fullPayload, planPayload } = vi.hoisted(() => {
             kind: 'charge',
             window: { start: '02:00', end: '05:00', rate: 0.09, tomorrow: true },
             kwh: 3.2,
-            target_soc_pct: 80,
-            projected_end_soc_pct: 80,
+            min_soc_pct: 20,
+            observed_min_soc_pct: 4,
+            after_min_soc_pct: 80,
+            charge_target_soc_pct: 80,
             current_soc_pct: 25,
             rationale: 'Battery is at 25% now and solar leaves it at 30%. Charging 3.2 kWh in the 9.0p window lifts it to 80%.',
+            // Real planner payload (planner v2): the trajectory when the
+            // recommended charge is applied to every window occurrence —
+            // the Battery tab chart renders this as a dashed overlay on
+            // top of the recorded SOC history.
+            with_charge_series: [
+              [1_700_003_600, 30],
+              [1_700_007_200, 35],
+              [1_700_010_800, 40],
+            ],
           },
           apply: {
             charge_slot: {
@@ -90,7 +101,8 @@ const { fullPayload, planPayload } = vi.hoisted(() => {
         data: {
           recommendation: {
             kind: 'no_charge_needed',
-            projected_end_soc_pct: 100,
+            min_soc_pct: 20,
+            observed_min_soc_pct: 80,
             current_soc_pct: 80,
             rationale: 'Sunny day — the battery fills from solar.',
           },
@@ -228,6 +240,24 @@ describe('ForecastPage plan card', () => {
     expect(timedCall).toBeTruthy();
   });
 
+  it('draws a dashed with-charge line on the Battery projection chart when the plan recommends a charge', async () => {
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      return { ok: true, data: {} };
+    });
+    const { container } = render(<ForecastPage />);
+    // The Battery projection chart gains a caption naming the window
+    // and kWh the dashed line represents — so the user can tell what
+    // the second line means without reading the plan card.
+    await waitFor(() => {
+      expect(container.textContent).toMatch(/SOC if overnight charge enacted/);
+    });
+    expect(container.textContent).toMatch(/02:00/);
+    expect(container.textContent).toMatch(/05:00/);
+    expect(container.textContent).toMatch(/3\.2 kWh/);
+  });
+
   it('hides Apply when no charge is needed', async () => {
     apiGetMock.mockImplementation(async (path: string) => {
       if (path === '/api/forecast') return { ok: true, data: fullPayload() };
@@ -344,3 +374,51 @@ describe('ForecastPage refresh triggers', () => {
       expect(screen.getByTestId('forecast-plan-current-soc').textContent).toMatch(/32%/);
     });
   });
+
+describe('ForecastPage min SOC input', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
+  afterEach(() => {
+    cleanup();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
+
+  it('lets the user change the minimum SOC and refetches the plan', async () => {
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan')
+        return planPayload('no_charge_needed');
+      if (path === '/api/settings') {
+        return {
+          ok: true,
+          data: {
+            forecast_min_soc_pct: 20,
+            forecast_charge_efficiency: 0.9,
+            forecast_discharge_efficiency: 0.95,
+          },
+        };
+      }
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    const input = await waitFor(() =>
+      screen.getByTestId('forecast-min-soc-input') as HTMLInputElement,
+    );
+    // Plan = no charge by default, but the input must still render the
+    // current saved min SOC so the user can tune it.
+    expect(input.value).toBe('20');
+
+    apiPostMocked.mockClear();
+    fireEvent.change(input, { target: { value: '40' } });
+    fireEvent.blur(input);
+    // Should POST the new min SOC and refetch /api/forecast/plan.
+    await waitFor(() => {
+      const post = apiPostMocked.mock.calls.find(
+        (c) => c[0] === '/api/settings',
+      );
+      expect(post?.[1]).toEqual({ forecast_min_soc_pct: 40 });
+    });
+  });
+});

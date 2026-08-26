@@ -973,6 +973,9 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             // projection on the Forecast page.
             "forecast_charge_efficiency": settings.forecast_charge_efficiency,
             "forecast_discharge_efficiency": settings.forecast_discharge_efficiency,
+            // Min SOC the planner keeps the battery above across the
+            // forward forecast window (issue #283, planner v2).
+            "forecast_min_soc_pct": settings.forecast_min_soc_pct,
         }
         })),
     )
@@ -1194,6 +1197,12 @@ pub async fn update_settings(
                 return Err("Discharge efficiency must be between 0.5 and 1.0".to_string());
             }
             persist.forecast_discharge_efficiency = v;
+        }
+        if let Some(v) = body.get("forecast_min_soc_pct").and_then(|v| v.as_f64()) {
+            if !(0.0..=100.0).contains(&v) {
+                return Err("Min SOC must be between 0 and 100 percent".to_string());
+            }
+            persist.forecast_min_soc_pct = v;
         }
         if let Some(arrays) = body.get("solar_arrays").and_then(|v| v.as_array()) {
             let parsed: Vec<crate::settings::SolarArrayConfig> = arrays
@@ -4992,7 +5001,7 @@ fn build_plan_payload(
     snapshot: Option<&crate::inverter::model::InverterSnapshot>,
     now_min: u16,
 ) -> serde_json::Value {
-    use crate::forecast::simulate::{SimHourResult, SimulationParams, SimulationOutput};
+    use crate::forecast::simulate::{SimHourInput, SimHourResult, SimulationParams, SimulationOutput};
     let import_tariff = settings.import_tariff_config.as_ref();
 
     // No battery projection -> straight NoPlan.
@@ -5016,14 +5025,20 @@ fn build_plan_payload(
         _ => (battery.capacity_kwh, battery.start_soc_pct, battery.reserve_soc_pct),
     };
 
-    // Target SOC: the snapshot's configured target, else 80%.
-    let target_soc_pct = snapshot
-        .map(|s| s.target_soc as f64)
-        .filter(|p| *p >= 4.0 && *p <= 100.0)
-        .unwrap_or(80.0);
+    // Minimum SOC across the forward window (planner v2 objective).
+    let min_soc_pct = settings
+        .forecast_min_soc_pct
+        .clamp(0.0, 100.0);
 
-    let max_charge_kw = battery.capacity_kwh; // 1C as a safe upper bound
-    let max_discharge_kw = battery.capacity_kwh;
+    // Rate caps: the same model-aware limits the forecast projection
+    // used, so the planner's what-if re-simulation and its
+    // "deliverable in the window" clamp match the physics of the
+    // original projection. Falls back to a 1C upper bound when the
+    // live registers are unavailable.
+    let (max_charge_kw, max_discharge_kw) = snapshot
+        .map(crate::forecast::battery_rate_limits_kw)
+        .filter(|(c, d)| *c > 0.0 && *d > 0.0)
+        .unwrap_or((battery.capacity_kwh, battery.capacity_kwh));
     let eta_c = settings.forecast_charge_efficiency;
     let eta_d = settings.forecast_discharge_efficiency;
 
@@ -5037,6 +5052,34 @@ fn build_plan_payload(
             export_kwh: 0.0,
             charge_kwh: 0.0,
             discharge_kwh: 0.0,
+        })
+        .collect();
+
+    // Reconstruct the original hourly inputs so the planner can re-run
+    // the simulation with the proposed charge applied. Without this the
+    // planner over-estimates `after_min_soc_pct` whenever the forecast
+    // trough falls AFTER the charge window — intermediate discharge
+    // consumes the kWh before the trough is reached, leaving SOC
+    // untouched. The forecast payload exposes `solar` (per-timestamp)
+    // and `consumption` (per-hour-of-day); pair them back up so the
+    // re-simulation sees the same hourly inputs the original did.
+    let sim_hours: Vec<SimHourInput> = forecast
+        .solar
+        .iter()
+        .map(|s| {
+            let local_hour = chrono::DateTime::from_timestamp(s.timestamp, 0)
+                .map(|dt| dt.with_timezone(&chrono::Local).hour() as usize)
+                .unwrap_or(0);
+            let cons = forecast
+                .consumption
+                .get(local_hour)
+                .map(|c| c.kwh)
+                .unwrap_or(0.0);
+            SimHourInput {
+                timestamp: s.timestamp,
+                solar_kwh: s.kwh,
+                consumption_kwh: cons,
+            }
         })
         .collect();
 
@@ -5056,9 +5099,10 @@ fn build_plan_payload(
     };
     let inputs = crate::forecast::planner::PlanInputs {
         simulation: &sim,
+        sim_hours: Some(&sim_hours),
         params: &params,
         import_tariff,
-        target_soc_pct,
+        target_soc_pct: min_soc_pct,
         consumption_tomorrow_kwh: forecast.consumption_tomorrow_kwh,
         consumption_sufficient: forecast.consumption_sufficient,
         now_min,
@@ -5073,24 +5117,32 @@ fn build_plan_payload(
 fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> serde_json::Value {
     use crate::forecast::planner::PlanRecommendation;
     match rec {
-        PlanRecommendation::NoChargeNeeded { projected_end_soc_pct, current_soc_pct } => serde_json::json!({
+        PlanRecommendation::NoChargeNeeded {
+            current_soc_pct,
+            min_soc_pct,
+            observed_min_soc_pct,
+        } => serde_json::json!({
             "kind": "no_charge_needed",
-            "projected_end_soc_pct": projected_end_soc_pct,
+            "min_soc_pct": min_soc_pct,
+            "observed_min_soc_pct": observed_min_soc_pct,
             "current_soc_pct": current_soc_pct,
             "rationale": format!(
-                "Your battery reaches {:.0}% tomorrow on its own (currently {:.0}%) — nothing to schedule.",
-                projected_end_soc_pct,
-                current_soc_pct
+                "Battery is at {:.0}% now and the forecast trough stays above your {:.0}% minimum — nothing to schedule.",
+                current_soc_pct,
+                min_soc_pct
             ),
             "apply": null,
         }),
         PlanRecommendation::Charge {
             window,
             kwh,
-            target_soc_pct,
-            projected_end_soc_pct,
+            min_soc_pct,
+            observed_min_soc_pct,
+            after_min_soc_pct,
+            charge_target_soc_pct,
             current_soc_pct,
             rationale,
+            with_charge_series,
         } => {
             let (start_h, start_m) = hhmm_split(window.start_min);
             // ChargeSlot2 ends at 23:59 inclusively; if the window reaches
@@ -5101,6 +5153,20 @@ fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> ser
             } else {
                 hhmm_split(window.end_min)
             };
+            // The slot's charge target is the SOC the re-simulated plan
+            // says the battery must REACH during the window — NOT the
+            // min-soc floor. A slot targeted at the floor stops charging
+            // as soon as it's touched, and the rest of the day's drain
+            // pulls the battery right back below the floor (the exact
+            // "still drops to 4%" failure the planner exists to prevent).
+            // Clamped to the inverter's 4–100% register range and rounded
+            // up so the applied slot never under-shoots the model.
+            let slot_target_soc = charge_target_soc_pct.clamp(4.0, 100.0).ceil() as u64;
+            // The "if we follow the plan" trajectory, in the same
+            // `[timestamp_unix, soc_pct]` shape as the forecast's
+            // `battery.hours` so the Forecast tab's Battery projection
+            // chart can draw it as a dashed overlay line without
+            // coordinate work.
             serde_json::json!({
                 "kind": "charge",
                 "window": {
@@ -5110,10 +5176,13 @@ fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> ser
                     "tomorrow": window.tomorrow,
                 },
                 "kwh": kwh,
-                "target_soc_pct": target_soc_pct,
-                "projected_end_soc_pct": projected_end_soc_pct,
+                "min_soc_pct": min_soc_pct,
+                "observed_min_soc_pct": observed_min_soc_pct,
+                "after_min_soc_pct": after_min_soc_pct,
+                "charge_target_soc_pct": charge_target_soc_pct,
                 "current_soc_pct": current_soc_pct,
                 "rationale": rationale,
+                "with_charge_series": with_charge_series,
                 "apply": {
                     "charge_slot": {
                         "slot": 1,
@@ -5122,7 +5191,7 @@ fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> ser
                         "start_minute": start_m,
                         "end_hour": end_h,
                         "end_minute": end_m,
-                        "target_soc": *target_soc_pct as u64,
+                        "target_soc": slot_target_soc,
                     },
                     "timed_charge": { "enabled": true },
                 },
@@ -11047,6 +11116,46 @@ mod tests {
             let s = crate::settings::Settings::load();
             assert!((s.forecast_charge_efficiency - 0.85).abs() < 1e-9);
             assert!((s.forecast_discharge_efficiency - 0.92).abs() < 1e-9);
+        })
+        .await;
+    }
+
+    /// Issue #283 planner v2: the settings endpoint accepts and validates
+    /// `forecast_min_soc_pct` (0..=100, the SOC floor for the forecast
+    /// window). Out-of-range values are rejected and leave disk untouched.
+    #[tokio::test]
+    async fn update_settings_validates_forecast_min_soc_pct() {
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+
+            let (status, body) = update_settings(
+                State(state.clone()),
+                Json(json!({ "forecast_min_soc_pct": 101.0 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(body["error"].as_str().unwrap().contains("Min SOC"));
+            // Disk untouched — still the default (20).
+            assert!(
+                (crate::settings::Settings::load().forecast_min_soc_pct - 20.0).abs() < 1e-9
+            );
+
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "forecast_min_soc_pct": -1.0 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "forecast_min_soc_pct": 30.0 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(
+                (crate::settings::Settings::load().forecast_min_soc_pct - 30.0).abs() < 1e-9
+            );
         })
         .await;
     }

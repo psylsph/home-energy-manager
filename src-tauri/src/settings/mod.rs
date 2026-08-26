@@ -603,6 +603,10 @@ pub(crate) fn default_forecast_discharge_efficiency() -> f64 {
     0.95
 }
 
+pub(crate) fn default_forecast_min_soc_pct() -> f64 {
+    20.0
+}
+
 /// A snapshot of a single discharge schedule slot, persisted to settings
 /// so the user's pre-Eco schedule can be restored when they switch back
 /// to Timed mode.
@@ -1170,6 +1174,10 @@ pub struct Settings {
     /// Default 0.95.
     #[serde(default = "default_forecast_discharge_efficiency")]
     pub forecast_discharge_efficiency: f64,
+    /// Minimum SOC the planner should never let the battery dip below
+    /// across the forward forecast window, 0–100. Default 20.
+    #[serde(default = "default_forecast_min_soc_pct")]
+    pub forecast_min_soc_pct: f64,
 
     // -- Update checking ("new version available" banner) --
     /// When true, the backend periodically asks GitHub for the latest
@@ -1592,6 +1600,7 @@ impl Default for Settings {
             weather_config: WeatherConfig::default(),
             forecast_charge_efficiency: default_forecast_charge_efficiency(),
             forecast_discharge_efficiency: default_forecast_discharge_efficiency(),
+            forecast_min_soc_pct: default_forecast_min_soc_pct(),
             check_for_updates: default_check_for_updates(),
             octopus_enabled: false,
             octopus_api_key: String::new(),
@@ -1914,6 +1923,7 @@ mod tests {
             hidden_panels: Vec::new(),
             alerts_config: AlertsConfig::default(),
             check_for_updates: default_check_for_updates(),
+            forecast_min_soc_pct: default_forecast_min_soc_pct(),
             weather_config: WeatherConfig {
                 enabled: true,
                 postcode: "SW1A 1AA".to_string(),
@@ -2171,6 +2181,9 @@ mod tests {
         let decoded: Settings = serde_json::from_str(legacy).unwrap();
         assert!((decoded.forecast_charge_efficiency - 0.9).abs() < 1e-9);
         assert!((decoded.forecast_discharge_efficiency - 0.95).abs() < 1e-9);
+        // Issue #283 planner v2: legacy files without the new key get the
+        // default; the user can tune it on the Forecast page.
+        assert!((decoded.forecast_min_soc_pct - 20.0).abs() < 1e-9);
     }
 
     /// `settings.json` written before auto-discovery became opt-in must
@@ -2398,6 +2411,7 @@ mod tests {
             forecast_charge_efficiency: default_forecast_charge_efficiency(),
             forecast_discharge_efficiency: default_forecast_discharge_efficiency(),
             check_for_updates: default_check_for_updates(),
+            forecast_min_soc_pct: default_forecast_min_soc_pct(),
             octopus_enabled: false,
             octopus_api_key: String::new(),
             octopus_account_number: String::new(),

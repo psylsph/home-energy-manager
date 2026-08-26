@@ -133,16 +133,36 @@ export type PlanRecommendation =
   | {
       kind: 'charge';
       window: PlannerChargeWindow;
+      /** AC kWh to draw from the grid, per night. */
       kwh: number;
-      target_soc_pct: number;
-      projected_end_soc_pct: number;
+      /** The user's configured minimum-allowable SOC, %. */
+      min_soc_pct: number;
+      /** Lowest SOC in the uncharged projection, %. */
+      observed_min_soc_pct: number;
+      /** Lowest SOC across the hours the charge can influence, %. */
+      after_min_soc_pct: number;
+      /** SOC the battery reaches by the end of the charge window, % —
+       *  the level the applied charge-slot target is set to. */
+      charge_target_soc_pct: number;
       /** Live snapshot SOC at the time the plan was computed, %. */
       current_soc_pct: number;
       rationale: string;
+      /** Per-hour SOC trajectory when the recommended charge is applied
+       *  to every window occurrence in the forward horizon, in the
+       *  `[timestamp_unix, soc_pct]` shape used by the forecast
+       *  payload's `battery.hours`. The Forecast tab's Battery
+       *  projection chart draws it as a dashed line next to the
+       *  solar-only projection so the user can see what enacting the
+       *  recommendation actually does. Empty when the planner has
+       *  nothing to offer (no_plan / no_charge_needed). */
+      with_charge_series: [number, number][];
     }
   | {
       kind: 'no_charge_needed';
-      projected_end_soc_pct: number;
+      /** The user's configured minimum-allowable SOC, %. */
+      min_soc_pct: number;
+      /** Lowest SOC in the projection — stays above the minimum. */
+      observed_min_soc_pct: number;
       /** Live snapshot SOC at the time the plan was computed, %. */
       current_soc_pct: number;
       rationale: string;
