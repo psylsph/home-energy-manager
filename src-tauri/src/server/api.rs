@@ -9158,6 +9158,55 @@ mod tests {
         .await;
     }
 
+    /// Issue #289: Gen3-family firmware re-asserts `enable_discharge`
+    /// whenever ANY discharge slot register is non-zero (the #248 quirk),
+    /// and Gen3 supports ten discharge slots — slots 3–10 live in the
+    /// extended HR 276–298 bank. Clearing only the classic 1–2 pair leaves
+    /// those extended slots armed, so the firmware keeps bouncing the
+    /// inverter out of Eco. The clear must cover every slot the model
+    /// supports (classic 1–2 registers + the extended 3–10 bank).
+    #[test]
+    fn clear_discharge_slots_covers_extended_slots_on_gen3() {
+        use crate::modbus::registers::{
+            HR_DISCHARGE_SLOT_10_END, HR_DISCHARGE_SLOT_10_START, HR_DISCHARGE_SLOT_3_END,
+            HR_DISCHARGE_SLOT_3_START, SAFE_WRITE_REGS,
+        };
+
+        let writes = clear_discharge_slot_writes(DeviceType::Gen3Hybrid);
+        assert_eq!(writes.len(), 20, "Gen3 clears 10 slots x start/end");
+        for w in &writes {
+            assert_eq!(w.value, 0);
+            assert!(
+                SAFE_WRITE_REGS.contains(&w.address),
+                "address {} must be whitelisted",
+                w.address
+            );
+        }
+        // Extended slots 3–10 (HR 276–298) must be zeroed, not just the
+        // classic 1–2 pair.
+        for reg in [
+            HR_DISCHARGE_SLOT_3_START,
+            HR_DISCHARGE_SLOT_3_END,
+            HR_DISCHARGE_SLOT_10_START,
+            HR_DISCHARGE_SLOT_10_END,
+        ] {
+            assert!(
+                writes.iter().any(|w| w.address == reg && w.value == 0),
+                "Gen3 clear must zero extended slot register {reg}"
+            );
+        }
+
+        // Three-phase models route slots 1–2 through HR 1118-1121 and
+        // 3–10 through the same extended bank — they must clear all ten
+        // as well.
+        let writes = clear_discharge_slot_writes(DeviceType::ThreePhase);
+        assert_eq!(writes.len(), 20, "three-phase clears 10 slots x start/end");
+        assert!(
+            writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_10_END && w.value == 0),
+            "three-phase clear must zero extended slot registers"
+        );
+    }
+
     #[tokio::test]
     async fn set_charge_slot_2_non_gen3_uses_classic_hr31_32() {
         with_isolated_config_dir_async(|| async {
