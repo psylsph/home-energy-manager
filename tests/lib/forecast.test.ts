@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  anchorSeriesAtNow,
   forecastPlanTitle,
   forecastStatusMessages,
   forwardHourTimestamps,
@@ -113,6 +114,42 @@ describe('toSolarChartData', () => {
       { timestamp: 100, kwh: 2.0, low: 1.6, high: 2.4 },
       { timestamp: 200, kwh: 0.1, low: 0, high: 0.25 },
     ]);
+  });
+});
+
+describe('anchorSeriesAtNow', () => {
+  it('prepends the live SOC at the forecast generation time so the chart starts at "now"', () => {
+    // The stored forward hours are full future hours stamped at their
+    // start; without an anchor the chart's left edge is the END of the
+    // first hour — a full hour's drain below the live SOC (the user
+    // report: graph starts at 48% while the battery is at 59%).
+    const generatedAt = new Date(2024, 5, 15, 22, 45).getTime() / 1000;
+    const firstHour = new Date(2024, 5, 15, 23, 0).getTime() / 1000;
+    const anchored = anchorSeriesAtNow([[firstHour, 48.4]], generatedAt, 59);
+    expect(anchored).toEqual([
+      [generatedAt, 59],
+      [firstHour, 48.4],
+    ]);
+  });
+
+  it('keeps the series sorted when the anchor precedes everything', () => {
+    const generatedAt = new Date(2024, 5, 15, 6, 0).getTime() / 1000;
+    const h1 = new Date(2024, 5, 15, 7, 0).getTime() / 1000;
+    const h2 = new Date(2024, 5, 15, 8, 0).getTime() / 1000;
+    expect(anchorSeriesAtNow([[h1, 40], [h2, 35]], generatedAt, 62)).toEqual([
+      [generatedAt, 62],
+      [h1, 40],
+      [h2, 35],
+    ]);
+  });
+
+  it('does not prepend when the anchor would land after the first point (already anchored)', () => {
+    const ts = new Date(2024, 5, 15, 9, 0).getTime() / 1000;
+    expect(anchorSeriesAtNow([[ts, 50]], ts + 60, 50)).toEqual([[ts, 50]]);
+  });
+
+  it('returns an empty series unchanged', () => {
+    expect(anchorSeriesAtNow([], 100, 50)).toEqual([]);
   });
 });
 

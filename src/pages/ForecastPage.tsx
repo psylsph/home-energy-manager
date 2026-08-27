@@ -14,6 +14,7 @@ import {
 import { apiGet, apiPost } from '../lib/api';
 import { formatEnergy } from '../lib/format';
 import {
+  anchorSeriesAtNow,
   forecastPlanTitle,
   forecastStatusMessages,
   forwardHourTimestamps,
@@ -221,7 +222,23 @@ export default function ForecastPage() {
   const statusMessages = forecastStatusMessages(data.status);
   const summary = tomorrowSummary(data);
   const solarChart = toSolarChartData(data.solar);
-  const batteryChart = data.battery ? toBatteryChartData(data.battery) : [];
+  const batteryChart = data.battery
+    ? toBatteryChartData({
+        ...data.battery,
+        // Anchor the projection at "now": the stored forward hours are
+        // full future hours, so without the anchor the chart's left
+        // edge is the END of the first hour — a full hour's drain below
+        // the live SOC (graph starting at 48% while the battery sat at
+        // 59%). The anchor uses the payload's generation time and the
+        // SOC the simulation actually started from, so it always lines
+        // up with the series regardless of fetch latency.
+        hours: anchorSeriesAtNow(
+          data.battery.hours,
+          data.generated_at,
+          data.battery.start_soc_pct,
+        ),
+      })
+    : [];
   // Merge the planner's "if we follow the recommendation" trajectory onto
   // the battery projection so the Forecast tab's Battery projection chart
   // can draw it as a second line — same x-axis (unix seconds), same
@@ -230,7 +247,14 @@ export default function ForecastPage() {
   // chart showing just the solar-only projection.
   const withChargeSeries =
     plan?.recommendation?.kind === 'charge'
-      ? plan.recommendation.with_charge_series
+      ? // The what-if trajectory starts from the same live SOC at the
+        // same generation time — anchor it too so both lines meet at
+        // "now" and the divergence reads as the charge's effect.
+        anchorSeriesAtNow(
+          plan.recommendation.with_charge_series,
+          data.generated_at,
+          data.battery?.start_soc_pct ?? plan.recommendation.current_soc_pct,
+        )
       : [];
   const batteryChartWithPlan = batteryChart.map((p) => {
     const match = withChargeSeries.find(([ts]) => ts === p.timestamp);

@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.75.2] - 2026-08-26
+
+### Fixed
+
+- **The Battery projection chart now starts at the battery's live SOC.** The forward series only contains full future hours, so the chart's left edge was the END of the first hour — a full hour's drain below the current charge (a graph opening at 48% while the battery sat at 59%). Both lines (solar-only and with-charge) are anchored at the forecast's generation time and the SOC the simulation actually started from, so they meet at "now" and read as diverging from the live value rather than from somewhere below it.
+
+### Internal
+
+- Changelog backfill: the v0.70.2 release shipped the first-party Proxmox VE LXC installer (`scripts/proxmox/create-lxc.sh`, one-command container provisioning with a digest-pinned installer) but the launch entry was never written. Only its follow-ups (the `update` command rename, CI digest check) appear in later release notes.
+
 ## [0.75.1] - 2026-08-26
 
 ### Fixed
@@ -301,6 +311,10 @@ All notable changes to this project will be documented in this file.
 - **The app now lets you know when a new release is available.** A small dismissible banner appears under the header (and a version line in Settings) when a newer build is published on GitHub, with a link straight to the release page. It only checks periodically and only contacts GitHub with your IP address — no usage data is sent — and you can turn the check off entirely in Settings if you'd rather it never reach out.
 
 ## [0.70.2] - 2026-08-02
+
+### Added
+
+- **Proxmox VE users get a one-command LXC installer.** Run the helper script on your Proxmox host and it creates a dedicated, unprivileged container with sensible defaults (1 core, 1 GB RAM, 4 GB disk — all overridable), installs Home Energy Manager, and starts it on port 7337. The installer it downloads is digest-pinned, so the script fails rather than installing anything that doesn't match. *(Entry backfilled 2026-08-26 — the feature shipped here but was never recorded; only its follow-ups were.)*
 
 ### Changed
 

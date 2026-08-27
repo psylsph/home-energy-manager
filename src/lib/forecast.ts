@@ -90,6 +90,25 @@ export function toSolarChartData(points: ForecastSolarHour[]): SolarChartPoint[]
 
 export type BatteryChartPoint = { timestamp: number; soc: number };
 
+/** Prepend the live SOC at the forecast's generation time so a chart
+ *  built from `[timestamp, soc][]` pairs starts at "now". The stored
+ *  forward hours are full FUTURE hours (elapsed ones are dropped by
+ *  the query), so the first series point is the end of the first hour
+ *  — a full hour's drain below the live SOC, which reads wrong next
+ *  to the "Battery now" tile (user report: graph starting at 48% while
+ *  the battery sat at 59%). Skipped when the anchor would not precede
+ *  the first point (already anchored) or the series is empty. */
+export function anchorSeriesAtNow(
+  series: [number, number][],
+  generatedAt: number,
+  startValue: number,
+): [number, number][] {
+  if (series.length === 0 || generatedAt >= series[0][0]) {
+    return series;
+  }
+  return [[generatedAt, startValue], ...series];
+}
+
 /** Chart-ready SOC projection points. */
 export function toBatteryChartData(battery: ForecastBattery): BatteryChartPoint[] {
   return battery.hours.map(([timestamp, soc]) => ({ timestamp, soc }));
