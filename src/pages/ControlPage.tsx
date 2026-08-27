@@ -54,6 +54,19 @@ const BATTERY_MODE_LABELS: Record<BatteryModeKind, string> = {
   timed_discharge: 'Timed Discharge',
 };
 
+/**
+ * How long a battery-mode toggle may stay in the "Applying…" state before
+ * the UI reports that the inverter never confirmed the change (issue #289).
+ *
+ * Mode writes are drained by the poll loop with ~1.5s between every register
+ * write, and an Eco enable on a 10-slot model is 3 mode writes + 20 slot
+ * clears — ~35s of writes before the confirming snapshot even broadcasts.
+ * Dongle exception-67 retries can add up to ~13s per affected register on
+ * top. A 30s window reported a spurious failure on every such toggle, so
+ * the window must comfortably outlast the write pacing.
+ */
+const MODE_CONFIRMATION_TIMEOUT_MS = 90_000;
+
 function hasConfiguredDischargeSlot(slots: ReadonlyArray<ScheduleSlot> | undefined): boolean {
   return (slots ?? []).some((slot) => slot.enabled && (
     slot.start_hour !== 0
@@ -2368,7 +2381,7 @@ export default function ControlPage() {
       setBatteryModeError(
         `${BATTERY_MODE_LABELS[action.kind]} did not confirm the change. Please try again.`,
       );
-    }, 30_000);
+    }, MODE_CONFIRMATION_TIMEOUT_MS);
     return () => window.clearTimeout(timeout);
   }, [batteryModeConfirmed, batteryModePending]);
   const hasLiveControlSnapshot = snapshot != null && connectionState === 'connected';
