@@ -338,9 +338,14 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
     expect(within(section).queryByText('Applying…')).toBeNull();
   });
 
-  it('shows a timeout error when a mode change is not confirmed within 30 seconds', async () => {
+  it('keeps Applying until 90s — slow write batches must not time out spuriously', async () => {
     // shouldAdvanceTime lets findBy* polling work while still allowing
-    // advanceTimersByTime to fast-forward the 30s confirmation timeout.
+    // advanceTimersByTime to fast-forward the confirmation timeout.
+    // Issue #289: enabling Eco on a 10-slot model queues 3 mode writes +
+    // 20 slot clears, each spaced 1.5s apart (plus exception-67 retries) —
+    // ~35s of writes before the confirming snapshot even broadcasts. A
+    // 30s window reported a spurious failure on every such toggle, so the
+    // confirmation window has to outlast the write pacing.
     vi.useFakeTimers({ shouldAdvanceTime: true });
     useInverterStore.setState({ snapshot: makeSnapshot({ enable_discharge: false }), developerMode: false, connectionState: 'connected' });
     render(<ControlPage />);
@@ -349,8 +354,15 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
     fireEvent.click(within(section).getByText('Timed Export').closest('button')!);
     expect(await within(section).findByText('Applying…')).toBeDefined();
 
-    // Fast-forward past the 30-second confirmation timeout.
+    // At 30s the batch may legitimately still be draining — no error yet.
     act(() => { vi.advanceTimersByTime(30_001); });
+    expect(within(section).queryByText(
+      'Timed Export did not confirm the change. Please try again.',
+    )).toBeNull();
+    expect(within(section).queryByText('Applying…')).not.toBeNull();
+
+    // Fast-forward past the 90-second confirmation timeout.
+    act(() => { vi.advanceTimersByTime(60_000); });
 
     expect(
       await within(section).findByText('Timed Export did not confirm the change. Please try again.'),
