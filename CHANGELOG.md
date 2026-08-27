@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.75.4] - 2026-08-27
+
+### Fixed
+
+- **Eco mode now stays on when your schedule uses the later slots.** On Gen3 inverters the app has to clear the discharge schedule when you switch to Eco — the inverter firmware otherwise re-arms timed discharge all by itself the moment any slot is set — but that clear only covered the first two slots, so a schedule using slots 3–10 kept dragging the inverter straight back out of Eco and it looked like Eco simply wouldn't stay on. Switching to Eco now clears every slot your inverter supports, and your schedule is still backed up and restored automatically the next time you switch back to Timed (issue #289).
+
+- **Switching battery modes no longer reports a failure while the change is still being applied.** An Eco switch on a ten-slot model sends a long sequence of writes to the inverter, which can take half a minute or more at the pace the dongle needs — the app used to give up waiting after 30 seconds and tell you the change "did not confirm" even though it went through moments later. It now waits long enough for the writes to actually land (issue #289).
+
 ## [0.75.3] - 2026-08-27
 
 ### Fixed
