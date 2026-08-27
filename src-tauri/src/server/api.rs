@@ -183,16 +183,25 @@ fn discharge_slot_command_for_device(
 
 /// Produce whitelist-validated register writes that clear both standard
 /// discharge slots (1 and 2) by setting them to 00:00–00:00 (disabled).
+/// Produce whitelist-validated register writes that clear **every**
+/// discharge slot the device supports by setting them to 00:00–00:00
+/// (disabled) — classic slots 1–2 (HR 44-45/56-57, or HR 1118-1121 on
+/// three-phase) plus the extended slots 3–10 bank (HR 276-298) on
+/// Gen3/AIO/HV/three-phase families.
+///
+/// Clearing all of them matters: Gen3-family firmware re-asserts
+/// `enable_discharge` whenever ANY discharge slot register is non-zero
+/// (issue #248), so leaving extended slots armed keeps bouncing the
+/// inverter back out of Eco (issue #289).
 ///
 /// Routes through the encoder's `SetDischargeSlot*` commands so every target
-/// address is checked against `SAFE_WRITE_REGS`. Three-phase models write
-/// HR 1118-1121; all others write the classic HR 44-45/56-57 pair. Use this
+/// address is checked against `SAFE_WRITE_REGS`. Use this
 /// instead of constructing raw `RegisterWrite` structs, which would bypass
 /// the encoder's whitelist validation (the security invariant that *all*
 /// register writes must be validated by the encoder).
 fn clear_discharge_slot_writes(device_type: DeviceType) -> Vec<RegisterWrite> {
     let mut out = Vec::new();
-    for slot in [1u8, 2u8] {
+    for slot in 1..=device_type.max_discharge_slots() {
         match discharge_slot_command_for_device(device_type, slot, false, 0, 0) {
             Ok(cmd) => match cmd.encode() {
                 Ok(mut w) => out.append(&mut w),
@@ -323,9 +332,9 @@ async fn capture_discharge_schedule_backup(
     state: &AppState,
 ) -> Option<Vec<crate::settings::DischargeSlotBackup>> {
     // Snapshot read: take the entire `discharge_slots` array so the backup
-    // covers all 10 slots (Gen3 extended), not just the 1–2 that the
-    // clear-path zeroes. Slots 3–10 survive on the inverter today, but a
-    // restore from a partial backup would silently drop them.
+    // covers all 10 slots (Gen3 extended). The clear path zeroes every
+    // slot the model supports (issue #289), so a restore from a partial
+    // backup would silently drop slots 3–10.
     let slots = {
         let snap = state.latest_snapshot.lock().await;
         let snap = snap.as_ref()?;
@@ -5550,9 +5559,9 @@ mod tests {
     fn clear_discharge_slots_only_emits_whitelisted_addresses() {
         use crate::modbus::registers::{
             HR_3PH_DISCHARGE_SLOT_1_END, HR_3PH_DISCHARGE_SLOT_1_START,
-            HR_3PH_DISCHARGE_SLOT_2_END, HR_3PH_DISCHARGE_SLOT_2_START, HR_DISCHARGE_SLOT_1_END,
-            HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END, HR_DISCHARGE_SLOT_2_START,
-            SAFE_WRITE_REGS,
+            HR_3PH_DISCHARGE_SLOT_2_END, HR_3PH_DISCHARGE_SLOT_2_START, HR_DISCHARGE_SLOT_10_END,
+            HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END,
+            HR_DISCHARGE_SLOT_2_START, HR_DISCHARGE_SLOT_3_START, SAFE_WRITE_REGS,
         };
 
         // Single-phase: classic HR 44-45 (slot 2) + HR 56-57 (slot 1).
@@ -5574,9 +5583,10 @@ mod tests {
         assert!(addrs.contains(&HR_DISCHARGE_SLOT_2_START));
         assert!(addrs.contains(&HR_DISCHARGE_SLOT_2_END));
 
-        // Three-phase: HR 1118-1121.
+        // Three-phase: slots 1–2 via HR 1118-1121 plus the extended
+        // slots 3–10 bank (HR 276-298) — 10 slots x start/end.
         let writes = clear_discharge_slot_writes(DeviceType::ThreePhase);
-        assert_eq!(writes.len(), 4, "three-phase clears 2 slots x start/end");
+        assert_eq!(writes.len(), 20, "three-phase clears 10 slots x start/end");
         for w in &writes {
             assert_eq!(w.value, 0);
             assert!(SAFE_WRITE_REGS.contains(&w.address));
@@ -5586,6 +5596,8 @@ mod tests {
         assert!(addrs.contains(&HR_3PH_DISCHARGE_SLOT_1_END));
         assert!(addrs.contains(&HR_3PH_DISCHARGE_SLOT_2_START));
         assert!(addrs.contains(&HR_3PH_DISCHARGE_SLOT_2_END));
+        assert!(addrs.contains(&HR_DISCHARGE_SLOT_3_START));
+        assert!(addrs.contains(&HR_DISCHARGE_SLOT_10_END));
     }
 
     /// Changing only the refresh rate must NOT bump the settings version —
@@ -8226,11 +8238,10 @@ mod tests {
     }
 
     /// Gen3 inverters support 10 discharge slots (HR 56–57, 44–45, and
-    /// HR 276–298 for slots 3–10). `clear_discharge_slot_writes` only
-    /// iterates slots 1–2 today — slots 3–10 already survive an Eco
-    /// toggle on the inverter. The backup MUST mirror that: it must
-    /// cover all 10 slots, not just the two the clear path writes to,
-    /// otherwise the restore round-trip silently drops slots 3–10.
+    /// HR 276–298 for slots 3–10). `clear_discharge_slot_writes` zeroes
+    /// every slot the model supports, so the backup MUST cover all 10
+    /// slots — a partial backup would make the restore round-trip
+    /// silently drop slots 3–10 (issue #289).
     #[tokio::test]
     async fn backup_covers_extended_slots_on_gen3() {
         with_isolated_config_dir_async(|| async {
@@ -9140,11 +9151,12 @@ mod tests {
         with_isolated_config_dir_async(|| async {
             use crate::modbus::registers::{
                 HR_3PH_DISCHARGE_SLOT_1_END, HR_3PH_DISCHARGE_SLOT_1_START,
-                HR_3PH_DISCHARGE_SLOT_2_END, HR_3PH_DISCHARGE_SLOT_2_START, SAFE_WRITE_REGS,
+                HR_3PH_DISCHARGE_SLOT_2_END, HR_3PH_DISCHARGE_SLOT_2_START,
+                HR_DISCHARGE_SLOT_10_END, HR_DISCHARGE_SLOT_3_START, SAFE_WRITE_REGS,
             };
 
             let writes = clear_discharge_slot_writes(DeviceType::ThreePhase);
-            assert_eq!(writes.len(), 4, "three-phase clears 2 slots x start/end");
+            assert_eq!(writes.len(), 20, "three-phase clears 10 slots x start/end");
             for w in &writes {
                 assert_eq!(w.value, 0);
                 assert!(SAFE_WRITE_REGS.contains(&w.address));
@@ -9154,6 +9166,9 @@ mod tests {
             assert!(addrs.contains(&HR_3PH_DISCHARGE_SLOT_1_END));
             assert!(addrs.contains(&HR_3PH_DISCHARGE_SLOT_2_START));
             assert!(addrs.contains(&HR_3PH_DISCHARGE_SLOT_2_END));
+            // Extended slots 3–10 must be cleared too (issue #289).
+            assert!(addrs.contains(&HR_DISCHARGE_SLOT_3_START));
+            assert!(addrs.contains(&HR_DISCHARGE_SLOT_10_END));
         })
         .await;
     }
