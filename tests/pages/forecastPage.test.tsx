@@ -518,3 +518,40 @@ describe('ForecastPage min SOC input', () => {
     });
   });
 });
+
+describe('ForecastPage issue #283 feedback fixes', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
+  afterEach(() => {
+    cleanup();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
+
+  it('explains what the minimum battery level means', async () => {
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('no_charge_needed');
+      if (path === '/api/settings') {
+        return { ok: true, data: { forecast_min_soc_pct: 20 } };
+      }
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect(
+        screen.getByText(/planner sizes the overnight charge so the battery never drops/i),
+      ).toBeTruthy();
+    });
+  });
+
+  it('shows the calibration window on the solar prediction tile', async () => {
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect(
+        screen.getByText(/calibrated against 12 days of your history \(last 2 weeks\)/i),
+      ).toBeTruthy();
+    });
+  });
+});

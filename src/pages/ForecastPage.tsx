@@ -12,6 +12,7 @@ import {
   YAxis,
 } from 'recharts';
 import { apiGet, apiPost } from '../lib/api';
+import { tooltipStyleProps } from '../lib/chartTooltip';
 import { formatEnergy } from '../lib/format';
 import {
   anchorSeriesAtNow,
@@ -37,7 +38,6 @@ import { useInverterStore } from '../store/useInverterStore';
  * degradation state renders an explanation — never zeros pretending to be
  * a prediction.
  */
-
 
 function hourLabel(tsSeconds: number): string {
   const d = new Date(tsSeconds * 1000);
@@ -302,21 +302,19 @@ export default function ForecastPage() {
         </div>
       )}
 
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-2 sm:gap-3">
-        <div className="col-span-2 md:col-span-5 text-xs font-semibold uppercase tracking-wide text-text-secondary">
-          Tomorrow
-        </div>
-
-        {/* Min-SOC floor for the planner: ensures the battery never dips
-            below this percentage over the forward forecast window, not
-            just at the end. Editing it saves immediately and triggers a
-            plan refetch. */}
-        <div className="col-span-2 md:col-span-5 flex items-center gap-3">
+      {/* Planner floor — a setting, not a statistic, so it lives outside
+          the "Tomorrow" tiles. The planner sizes the overnight charge so
+          the battery never dips below this percentage across the forward
+          window, not just at the end. Editing saves immediately and
+          triggers a plan refetch. */}
+      <section className="bg-bg-surface rounded-lg p-3 sm:p-4 flex flex-col gap-1">
+        <div className="flex items-center gap-3">
           <label
             htmlFor="forecast-min-soc-input"
+            title="The planner never lets the battery drop below this percentage over the next 48 h"
             className="text-text-primary text-sm font-sans font-medium"
           >
-            Min SOC
+            Minimum battery level
           </label>
           <input
             id="forecast-min-soc-input"
@@ -332,10 +330,6 @@ export default function ForecastPage() {
             data-testid="forecast-min-soc-input"
           />
           <span className="text-text-secondary text-xs font-sans">%</span>
-          <span className="text-text-secondary text-xs font-sans">
-            — planner keeps the battery at or above this percentage across
-            the next 48h.
-          </span>
           {minSocError && (
             <span
               data-testid="forecast-min-soc-error"
@@ -345,6 +339,17 @@ export default function ForecastPage() {
             </span>
           )}
         </div>
+        <p className="text-xs text-text-secondary font-sans">
+          The planner sizes the overnight charge so the battery never drops
+          below this percentage across the next 48 h. Lower means less grid
+          import; higher keeps more backup in reserve.
+        </p>
+      </section>
+
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-2 sm:gap-3">
+        <div className="col-span-2 md:col-span-5 text-xs font-semibold uppercase tracking-wide text-text-secondary">
+          Tomorrow
+        </div>
 
         <SummaryTile
           label="Solar prediction"
@@ -352,8 +357,8 @@ export default function ForecastPage() {
           testId="forecast-solar-tomorrow"
           hint={
             data.performance_ratio != null
-              ? `calibrated, ${data.performance_ratio_days ?? '?'} days`
-              : 'preliminary'
+              ? `calibrated against ${data.performance_ratio_days ?? '?'} days of your history (last 2 weeks)`
+              : 'preliminary — still calibrating'
           }
         />
         <SummaryTile
@@ -494,6 +499,7 @@ export default function ForecastPage() {
               />
               <YAxis stroke="#94a3b8" fontSize={10} unit="kWh" width={48} />
               <Tooltip
+                {...tooltipStyleProps}
                 labelFormatter={(ts) => hourLabel(Number(ts))}
                 formatter={(value: number | string) => `${Number(value).toFixed(2)} kWh`}
               />
@@ -544,6 +550,7 @@ export default function ForecastPage() {
               />
               <YAxis stroke="#94a3b8" fontSize={10} unit="kWh" width={48} />
               <Tooltip
+                {...tooltipStyleProps}
                 labelFormatter={(ts) => hourLabel(Number(ts))}
                 formatter={(value: number | string) => `${Number(value).toFixed(2)} kWh`}
               />
@@ -610,6 +617,7 @@ export default function ForecastPage() {
               />
               <YAxis stroke="#94a3b8" fontSize={10} domain={[0, 100]} unit="%" width={44} />
               <Tooltip
+                {...tooltipStyleProps}
                 labelFormatter={(ts) => hourLabel(Number(ts))}
                 formatter={(value: number | string, name: string) =>
                   Number.isFinite(Number(value)) ? [`${Number(value).toFixed(0)}%`, name] : ['—', name]
@@ -657,7 +665,9 @@ export default function ForecastPage() {
       </ChartCard>
 
       <p className="text-[11px] text-text-secondary">
-        Forecast data by Open-Meteo.com (CC-BY 4.0). Solar band is a ±20%
+        Forecast data by Open-Meteo.com (CC-BY 4.0). Solar predictions are
+        Open-Meteo radiation scaled by a performance ratio fitted from your
+        own generation history (the last 2 weeks). Solar band is a ±20%
         model estimate until measured accuracy statistics accumulate.
       </p>
     </div>

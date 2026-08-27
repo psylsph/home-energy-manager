@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.75.3] - 2026-08-27
+
+### Fixed
+
+- **Forecast chart tooltips are readable in dark mode again.** The solar, consumption and battery charts were still using the default white tooltip box, so the time label (light text in dark mode) vanished against it. They now use the same theme-aware surface as the other charts, so the tooltip follows light and dark mode.
+
+- **The planner's minimum battery level is now explained.** The setting moved out of the Tomorrow tiles into its own panel with a plain-language description of what it does — the overnight charge is sized so the battery never drops below this percentage across the next 48 hours — and the solar prediction tile now says how many days of your history the calibration used (the last two weeks).
+
 ## [0.75.2] - 2026-08-26
 
 ### Fixed
