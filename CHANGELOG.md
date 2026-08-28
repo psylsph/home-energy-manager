@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.75.5] - 2026-08-27
+
+### Fixed
+
++- **The overnight-charge planner no longer over-buys when its first estimate maxes out what the window can deliver.** On a narrow cheap window with a deep forecast deficit, the planner's opening estimate could already exceed what the window can physically charge — and when that maximum turned out to be more than the battery actually needed, the planner kept recommending the full amount instead of trimming it back. The recommendation is now always trimmed to the smallest nightly charge that still keeps the battery above your minimum, so the dashed with-charge line hugs your minimum instead of floating above it.
++
++- **Forecast charts now space their points by real time.** The solar, consumption and battery charts previously laid points out evenly like beads on a string, so the "now" marker sat a whole slot wider than its true position and any missing forecast hour squeezed the following points together. Every point now sits at its actual time, which keeps the three charts aligned hour-for-hour.
+
 ## [0.75.4] - 2026-08-27
 
 ### Fixed
