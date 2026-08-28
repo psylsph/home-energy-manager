@@ -4708,6 +4708,114 @@ mod tests {
     }
 
     #[test]
+    fn single_phase_phantom_watts_riding_phantom_current_zeroed_on_dark_string() {
+        // Issue #261 (2026-08-28 follow-up): under EV-charger electrical noise
+        // the dongle reports a small phantom power *together with* a small
+        // phantom current on a dark string, so the current == 0 guard never
+        // fires. A dark string only holds residual open-circuit voltage (tens
+        // of V), far below a loaded string's operating point, so watts at or
+        // below the noise floor on a dark string are noise, not generation.
+        let mut snap = InverterSnapshot::default();
+        let mut data = vec![0u16; 60];
+        data[1] = 340; // IR(1): pv1_voltage = 34.0 V (residual dark)
+        data[8] = 1; // IR(8): pv1_current = 0.1 A phantom
+        data[18] = 25; // IR(18): pv1_power = 25 W phantom
+        data[2] = 380; // IR(2): pv2_voltage = 38.0 V (residual dark)
+        data[9] = 2; // IR(9): pv2_current = 0.2 A phantom
+        data[20] = 30; // IR(20): pv2_power = 30 W phantom (reporter's ~30 W)
+        decode_input_0_59(&data, &mut snap);
+        assert_eq!(
+            snap.pv1_power, 0,
+            "phantom watts + phantom current on dark PV1 must be zeroed"
+        );
+        assert_eq!(
+            snap.pv2_power, 0,
+            "phantom watts + phantom current on dark PV2 must be zeroed"
+        );
+        assert_eq!(snap.solar_power, 0);
+        // Voltage/current readings themselves are untouched — only power is judged.
+        assert!((snap.pv2_voltage - 38.0).abs() < 0.01);
+        assert!((snap.pv2_current - 0.2).abs() < 0.01);
+    }
+
+    #[test]
+    fn single_phase_genuine_low_watts_survive_at_operating_voltage() {
+        // Dawn/dusk: 30 W of genuine generation. The loaded string sits at its
+        // operating voltage (hundreds of V), far above dark residual, so the
+        // dark-string noise floor must not suppress it — even though the
+        // wattage is identical to the phantom case above.
+        let mut snap = InverterSnapshot::default();
+        let mut data = vec![0u16; 60];
+        data[2] = 3000; // IR(2): pv2_voltage = 300 V operating
+        data[9] = 1; // IR(9): pv2_current = 0.1 A
+        data[20] = 30; // IR(20): pv2_power = 30 W genuine
+        decode_input_0_59(&data, &mut snap);
+        assert_eq!(snap.pv2_power, 30, "genuine low-light watts must survive");
+        assert_eq!(snap.solar_power, 30);
+    }
+
+    #[test]
+    fn single_phase_dark_string_noise_floor_boundary() {
+        // The floor is inclusive: 50 W on a dark string reads as noise; 51 W
+        // reads through (larger anomalies belong to the sanitizer's absolute
+        // range / rate checks, not the decoder).
+        let mut snap = InverterSnapshot::default();
+        let mut data = vec![0u16; 60];
+        data[2] = 380; // pv2_voltage = 38.0 V residual dark
+        data[9] = 3; // pv2_current = 0.3 A phantom
+        data[20] = 50; // pv2_power = 50 W — at the floor
+        decode_input_0_59(&data, &mut snap);
+        assert_eq!(snap.pv2_power, 0, "watts at the floor on a dark string are noise");
+
+        let mut snap = InverterSnapshot::default();
+        let mut data = vec![0u16; 60];
+        data[2] = 380;
+        data[9] = 3;
+        data[20] = 51; // pv2_power = 51 W — one above the floor
+        decode_input_0_59(&data, &mut snap);
+        assert_eq!(snap.pv2_power, 51, "watts above the floor read through");
+    }
+
+    #[test]
+    fn three_phase_phantom_watts_riding_phantom_current_zeroed_on_dark_string() {
+        // Issue #261 follow-up on the three-phase / HV decode path: the same
+        // phantom power + phantom current pairing, only caught by the
+        // dark-string noise floor.
+        let mut snap = InverterSnapshot::default();
+        let mut data = vec![0u16; 60];
+        data[1] = 3500; // IR(1001): pv1_voltage = 350 V (PV1 live)
+        data[9] = 50; // IR(1009): pv1_current = 5.0 A
+        data[17] = 0; // p_pv1 high
+        data[18] = 17_000; // p_pv1 low → 1700 W
+        data[2] = 450; // IR(1002): pv2_voltage = 45.0 V residual dark
+        data[10] = 2; // IR(1010): pv2_current = 0.2 A phantom
+        data[19] = 0; // p_pv2 high
+        data[20] = 300; // p_pv2 low → 30 W phantom
+        decode_input_1000_1059(&data, &mut snap);
+        assert_eq!(snap.pv1_power, 1700, "live PV1 survives (3ph)");
+        assert_eq!(
+            snap.pv2_power, 0,
+            "dark PV2 phantom riding a phantom current must be zeroed (3ph)"
+        );
+        assert_eq!(snap.solar_power, 1700);
+    }
+
+    #[test]
+    fn three_phase_genuine_low_watts_survive_at_operating_voltage() {
+        // 30 W of genuine generation at a loaded operating voltage survives the
+        // dark-string noise floor on the three-phase path too.
+        let mut snap = InverterSnapshot::default();
+        let mut data = vec![0u16; 60];
+        data[2] = 3000; // IR(1002): pv2_voltage = 300 V operating
+        data[10] = 1; // IR(1010): pv2_current = 0.1 A
+        data[19] = 0; // p_pv2 high
+        data[20] = 300; // p_pv2 low → 30 W genuine
+        decode_input_1000_1059(&data, &mut snap);
+        assert_eq!(snap.pv2_power, 30, "genuine low-light watts must survive (3ph)");
+        assert_eq!(snap.solar_power, 30);
+    }
+
+    #[test]
     fn three_phase_per_string_pv1_pv2_populated_from_ir1366_ir1370() {
         // uint32(high, low) — IR(1366)=high, IR(1367)=low.
         // PV1: high=0, low=1500 → 150.0 kWh.
