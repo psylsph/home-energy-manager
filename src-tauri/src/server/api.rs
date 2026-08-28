@@ -163,13 +163,10 @@ fn discharge_slot_command_for_device(
     start: u16,
     end: u16,
 ) -> Result<ControlCommand, String> {
-    // When disabled, clear the slot times (write 0/0). We deliberately do NOT
-    // touch the master enable_discharge flag here — that is controlled by the
-    // battery mode (Timed Demand/Export). Keeping slot configuration
-    // independent of mode selection matches the givenergy-modbus reference,
-    // where set_discharge_slot() writes only the slot registers. Coupling the
-    // two forced an immediate Eco→TimedDemand mode switch whenever a discharge
-    // slot was saved.
+    // When disabled, clear the slot times (write 0/0). The master
+    // enable_discharge flag is managed by the caller: an enabled save arms
+    // Timed Export right after the slot writes, and disabling the last armed
+    // slot returns the inverter to Eco (both in `set_discharge_slot`).
     let (start, end) = if enabled { (start, end) } else { (0, 0) };
     match (device_type.uses_three_phase_schedule_slots(), slot) {
         (true, 1) => Ok(ControlCommand::SetThreePhaseDischargeSlot1 { start, end }),
@@ -594,8 +591,8 @@ fn build_force_charge_stop_writes(
 ) -> Vec<RegisterWrite> {
     use crate::modbus::registers::{
         HR_3PH_AC_CHARGE_ENABLE, HR_3PH_FORCE_CHARGE_ENABLE, HR_BATTERY_POWER_MODE,
-        HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC,
-        HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
+        HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE,
+        HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
     };
     let mut writes = Vec::new();
 
@@ -1115,24 +1112,18 @@ pub async fn update_settings(
         };
         if let Some(value) = body.get("octopus_economy7_start").and_then(|v| v.as_str()) {
             if !valid_hhmm(value) {
-                return Err(
-                    "octopus_economy7_start must be a valid HH:MM time".to_string(),
-                );
+                return Err("octopus_economy7_start must be a valid HH:MM time".to_string());
             }
             persist.octopus_economy7_start = value.to_string();
         }
         if let Some(value) = body.get("octopus_economy7_end").and_then(|v| v.as_str()) {
             if !valid_hhmm(value) {
-                return Err(
-                    "octopus_economy7_end must be a valid HH:MM time".to_string(),
-                );
+                return Err("octopus_economy7_end must be a valid HH:MM time".to_string());
             }
             persist.octopus_economy7_end = value.to_string();
         }
         if persist.octopus_economy7_start == persist.octopus_economy7_end {
-            return Err(
-                "Octopus Economy 7 start and end times must differ".to_string(),
-            );
+            return Err("Octopus Economy 7 start and end times must differ".to_string());
         }
         if let Some(hp) = body.get("hidden_panels").and_then(|v| v.as_array()) {
             let panels: Vec<String> = hp
@@ -1195,13 +1186,19 @@ pub async fn update_settings(
         // Issue #283: forecast battery efficiencies for the SOC projection.
         // Range-validated so a typo can't silently zero the projection's
         // energy accounting.
-        if let Some(v) = body.get("forecast_charge_efficiency").and_then(|v| v.as_f64()) {
+        if let Some(v) = body
+            .get("forecast_charge_efficiency")
+            .and_then(|v| v.as_f64())
+        {
             if !(0.5..=1.0).contains(&v) {
                 return Err("Charge efficiency must be between 0.5 and 1.0".to_string());
             }
             persist.forecast_charge_efficiency = v;
         }
-        if let Some(v) = body.get("forecast_discharge_efficiency").and_then(|v| v.as_f64()) {
+        if let Some(v) = body
+            .get("forecast_discharge_efficiency")
+            .and_then(|v| v.as_f64())
+        {
             if !(0.5..=1.0).contains(&v) {
                 return Err("Discharge efficiency must be between 0.5 and 1.0".to_string());
             }
@@ -4159,7 +4156,10 @@ pub async fn set_charging_mode(
         let Some(snapshot_for_preflight) = snapshot_for_preflight else {
             return error_response("Connect to the inverter before enabling Adaptive Charge");
         };
-        if crate::inverter::state_machines::adaptive_charge_register(snapshot_for_preflight.device_type).is_none()
+        if crate::inverter::state_machines::adaptive_charge_register(
+            snapshot_for_preflight.device_type,
+        )
+        .is_none()
         {
             return error_response("Adaptive Charge is not supported by this inverter");
         }
@@ -4500,14 +4500,13 @@ pub async fn set_agile(
         explicit_scope.is_none() && body.get("enabled").is_some() && !has_agile_partial_fields;
     let scope_update_requested = explicit_scope.is_some() || legacy_scope_toggle;
     let legacy_enabled = body["enabled"].as_bool();
-    let new_scope_from_legacy_toggle = legacy_scope_toggle
-        .then(|| {
-            if legacy_enabled.unwrap_or(false) {
-                AgileScope::Full
-            } else {
-                AgileScope::Off
-            }
-        });
+    let new_scope_from_legacy_toggle = legacy_scope_toggle.then(|| {
+        if legacy_enabled.unwrap_or(false) {
+            AgileScope::Full
+        } else {
+            AgileScope::Off
+        }
+    });
     let region = body["region"].as_str().map(|s| s.to_string());
     let charge_threshold = body["charge_threshold"].as_f64();
     let discharge_threshold = body["discharge_threshold"].as_f64();
@@ -4950,7 +4949,10 @@ pub async fn get_forecast(State(state): State<Arc<AppState>>) -> (StatusCode, Js
     let history = state.history.lock().await.clone();
     let (weather_enabled, coords) = {
         let ws = state.weather.lock().await;
-        (ws.config.enabled, ws.config.latitude.zip(ws.config.longitude))
+        (
+            ws.config.enabled,
+            ws.config.latitude.zip(ws.config.longitude),
+        )
     };
     let settings = crate::settings::Settings::load();
     let payload = crate::forecast::build_forecast_payload(&crate::forecast::ForecastInputs {
@@ -4976,7 +4978,10 @@ pub async fn get_forecast_plan(State(state): State<Arc<AppState>>) -> (StatusCod
     let history = state.history.lock().await.clone();
     let (weather_enabled, coords) = {
         let ws = state.weather.lock().await;
-        (ws.config.enabled, ws.config.latitude.zip(ws.config.longitude))
+        (
+            ws.config.enabled,
+            ws.config.latitude.zip(ws.config.longitude),
+        )
     };
     let settings = crate::settings::Settings::load();
     let forecast = crate::forecast::build_forecast_payload(&crate::forecast::ForecastInputs {
@@ -4992,10 +4997,7 @@ pub async fn get_forecast_plan(State(state): State<Arc<AppState>>) -> (StatusCod
     let now_min: u16 = now.hour() as u16 * 60 + now.minute() as u16;
 
     let rec = build_plan_payload(&forecast, &settings, snapshot.as_ref(), now_min);
-    let apply = rec
-        .get("apply")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
+    let apply = rec.get("apply").cloned().unwrap_or(serde_json::Value::Null);
     let recommendation = {
         let mut r = rec.as_object().cloned().unwrap_or_default();
         r.remove("apply");
@@ -5025,7 +5027,9 @@ fn build_plan_payload(
     snapshot: Option<&crate::inverter::model::InverterSnapshot>,
     now_min: u16,
 ) -> serde_json::Value {
-    use crate::forecast::simulate::{SimHourInput, SimHourResult, SimulationParams, SimulationOutput};
+    use crate::forecast::simulate::{
+        SimHourInput, SimHourResult, SimulationOutput, SimulationParams,
+    };
     let import_tariff = settings.import_tariff_config.as_ref();
 
     // No battery projection -> straight NoPlan.
@@ -5046,13 +5050,15 @@ fn build_plan_payload(
             s.soc as f64,
             s.battery_reserve as f64,
         ),
-        _ => (battery.capacity_kwh, battery.start_soc_pct, battery.reserve_soc_pct),
+        _ => (
+            battery.capacity_kwh,
+            battery.start_soc_pct,
+            battery.reserve_soc_pct,
+        ),
     };
 
     // Minimum SOC across the forward window (planner v2 objective).
-    let min_soc_pct = settings
-        .forecast_min_soc_pct
-        .clamp(0.0, 100.0);
+    let min_soc_pct = settings.forecast_min_soc_pct.clamp(0.0, 100.0);
 
     // Rate caps: the same model-aware limits the forecast projection
     // used, so the planner's what-if re-simulation and its
@@ -7179,6 +7185,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn saving_extended_discharge_slot_3_arms_timed_export() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_BATTERY_POWER_MODE, HR_DISCHARGE_SLOT_3_END, HR_DISCHARGE_SLOT_3_START,
+                HR_DISCHARGE_TARGET_SOC_3, HR_ENABLE_DISCHARGE,
+            };
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+
+            let (status, _) = set_discharge_slot(
+                State(state.clone()),
+                Json(serde_json::json!({
+                    "slot": 3,
+                    "enabled": true,
+                    "start_hour": 20,
+                    "end_hour": 22,
+                    "target_soc": 10
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            // The extended slot + per-slot floor must land before the arming
+            // pair — the same ordering guarantee the slot-1 test pins.
+            assert_eq!(
+                writes
+                    .iter()
+                    .map(|write| (write.address, write.value))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (HR_DISCHARGE_SLOT_3_START, 2000),
+                    (HR_DISCHARGE_SLOT_3_END, 2200),
+                    (HR_DISCHARGE_TARGET_SOC_3, 10),
+                    (HR_BATTERY_POWER_MODE, 0),
+                    (HR_ENABLE_DISCHARGE, 1),
+                ]
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn saving_three_phase_discharge_slot_arms_timed_export() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_3PH_DISCHARGE_SLOT_1_END, HR_3PH_DISCHARGE_SLOT_1_START, HR_BATTERY_POWER_MODE,
+                HR_DISCHARGE_TARGET_SOC_1, HR_ENABLE_DISCHARGE,
+            };
+            let state = make_state_with_device(DeviceType::ThreePhase).await;
+
+            let (status, _) = set_discharge_slot(
+                State(state.clone()),
+                Json(serde_json::json!({
+                    "slot": 1,
+                    "enabled": true,
+                    "start_hour": 16,
+                    "end_hour": 19,
+                    "target_soc": 40
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            // Three-phase slot writes land in the HR 1080-1124 bank; the
+            // arming pair stays on the reference-library registers HR27/59
+            // (givenergy-modbus has no three-phase enable setter).
+            assert_eq!(
+                writes
+                    .iter()
+                    .map(|write| (write.address, write.value))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (HR_3PH_DISCHARGE_SLOT_1_START, 1600),
+                    (HR_3PH_DISCHARGE_SLOT_1_END, 1900),
+                    (HR_DISCHARGE_TARGET_SOC_1, 40),
+                    (HR_BATTERY_POWER_MODE, 0),
+                    (HR_ENABLE_DISCHARGE, 1),
+                ]
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn disabling_a_slot_while_timed_export_is_disarmed_writes_no_mode_registers() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_BATTERY_POWER_MODE, HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START,
+                HR_ENABLE_DISCHARGE,
+            };
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            {
+                let mut snapshot = state.latest_snapshot.lock().await;
+                let snapshot = snapshot.as_mut().unwrap();
+                snapshot.enable_discharge = false;
+                snapshot.discharge_slots[0] = crate::inverter::model::ScheduleSlot {
+                    enabled: true,
+                    start_hour: 16,
+                    start_minute: 0,
+                    end_hour: 19,
+                    end_minute: 0,
+                    target_soc: 4,
+                };
+            }
+
+            let (status, _) = set_discharge_slot(
+                State(state.clone()),
+                Json(serde_json::json!({
+                    "slot": 1,
+                    "enabled": false,
+                    "start_hour": 16,
+                    "end_hour": 19
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            // Disarming is not this path's job: only the slot clears go out,
+            // so a disabled save can never flip the inverter's mode by itself.
+            assert_eq!(
+                writes
+                    .iter()
+                    .map(|write| (write.address, write.value))
+                    .collect::<Vec<_>>(),
+                vec![(HR_DISCHARGE_SLOT_1_START, 0), (HR_DISCHARGE_SLOT_1_END, 0)]
+            );
+            assert!(!writes.iter().any(|w| w.address == HR_BATTERY_POWER_MODE));
+            assert!(!writes.iter().any(|w| w.address == HR_ENABLE_DISCHARGE));
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn disabling_last_discharge_slot_returns_timed_export_to_eco() {
         with_isolated_config_dir_async(|| async {
             use crate::modbus::registers::{HR_BATTERY_POWER_MODE, HR_ENABLE_DISCHARGE};
@@ -9297,7 +9438,9 @@ mod tests {
         let writes = clear_discharge_slot_writes(DeviceType::ThreePhase);
         assert_eq!(writes.len(), 20, "three-phase clears 10 slots x start/end");
         assert!(
-            writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_10_END && w.value == 0),
+            writes
+                .iter()
+                .any(|w| w.address == HR_DISCHARGE_SLOT_10_END && w.value == 0),
             "three-phase clear must zero extended slot registers"
         );
     }
@@ -9318,7 +9461,11 @@ mod tests {
             SAFE_WRITE_REGS,
         };
 
-        for dt in [DeviceType::ACCoupled, DeviceType::ACCoupledMk2, DeviceType::Gen1Hybrid] {
+        for dt in [
+            DeviceType::ACCoupled,
+            DeviceType::ACCoupledMk2,
+            DeviceType::Gen1Hybrid,
+        ] {
             let writes = clear_discharge_slot_writes(dt);
             assert_eq!(
                 writes.len(),
@@ -9326,7 +9473,10 @@ mod tests {
                 "{dt:?} has one discharge slot: clear is 1 slot x start/end"
             );
             let addrs: Vec<u16> = writes.iter().map(|w| w.address).collect();
-            assert_eq!(addrs, vec![HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_1_END]);
+            assert_eq!(
+                addrs,
+                vec![HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_1_END]
+            );
             for w in &writes {
                 assert_eq!(w.value, 0);
                 assert!(
@@ -9337,7 +9487,9 @@ mod tests {
             }
             // Slot 2 must NOT be touched on single-slot devices.
             assert!(
-                !writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_2_START),
+                !writes
+                    .iter()
+                    .any(|w| w.address == HR_DISCHARGE_SLOT_2_START),
                 "{dt:?} clear must not write slot 2 registers"
             );
         }
@@ -11288,9 +11440,14 @@ mod tests {
             )
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
-            assert!(body["error"].as_str().unwrap().contains("Charge efficiency"));
+            assert!(body["error"]
+                .as_str()
+                .unwrap()
+                .contains("Charge efficiency"));
             // Disk untouched — still the default.
-            assert!((crate::settings::Settings::load().forecast_charge_efficiency - 0.9).abs() < 1e-9);
+            assert!(
+                (crate::settings::Settings::load().forecast_charge_efficiency - 0.9).abs() < 1e-9
+            );
 
             let (status, _) = update_settings(
                 State(state.clone()),
@@ -11331,9 +11488,7 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST);
             assert!(body["error"].as_str().unwrap().contains("Min SOC"));
             // Disk untouched — still the default (20).
-            assert!(
-                (crate::settings::Settings::load().forecast_min_soc_pct - 20.0).abs() < 1e-9
-            );
+            assert!((crate::settings::Settings::load().forecast_min_soc_pct - 20.0).abs() < 1e-9);
 
             let (status, _) = update_settings(
                 State(state.clone()),
@@ -11348,9 +11503,7 @@ mod tests {
             )
             .await;
             assert_eq!(status, StatusCode::OK);
-            assert!(
-                (crate::settings::Settings::load().forecast_min_soc_pct - 30.0).abs() < 1e-9
-            );
+            assert!((crate::settings::Settings::load().forecast_min_soc_pct - 30.0).abs() < 1e-9);
         })
         .await;
     }
@@ -12507,7 +12660,9 @@ mod tests {
         // same invalid input with the same behaviour. If any endpoint
         // drifts (as the report copy already had, with a different
         // inverted-window error message), this fails.
-        for range in ["1h", "6h", "12h", "24h", "today", "7d", "30d", "6m", "1y", "month"] {
+        for range in [
+            "1h", "6h", "12h", "24h", "today", "7d", "30d", "6m", "1y", "month",
+        ] {
             let _ = range; // keep range bound for clarity of the table below
             let params = HistoryQuery {
                 range: Some(range.to_string()),
@@ -12851,11 +13006,7 @@ mod tests {
 
     /// Last `_export_income` point in the today window — used by the
     /// Pete-noise test to assert the populated direction agrees too.
-    async fn chart_export_total(
-        state: &std::sync::Arc<AppState>,
-        start: i64,
-        end: i64,
-    ) -> f64 {
+    async fn chart_export_total(state: &std::sync::Arc<AppState>, start: i64, end: i64) -> f64 {
         let (status, Json(chart)) = get_history(
             State(state.clone()),
             Query(HistoryQuery {
