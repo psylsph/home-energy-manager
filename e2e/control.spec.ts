@@ -430,6 +430,12 @@ test.describe('API Control Endpoints', () => {
     drainModbusWrites,
     peekModbusWrites,
   }) => {
+    // Since issue #289 (v0.75.4), entering Eco on an extended-slot model
+    // clears every slot register the inverter supports: 3 mode writes + 20
+    // slot clears at the dongle's 1.5s pacing ≈ 35s per Eco batch. Every
+    // wait below must cover a full batch plus whatever is left queued from
+    // the previous step.
+    test.setTimeout(180_000);
     await clearWrites(drainModbusWrites);
 
     // Arm a real (non-default) reserve first, so the snapshot carries 30%.
@@ -442,7 +448,7 @@ test.describe('API Control Endpoints', () => {
     // Drain the reserve write itself; the mock applies the write to its
     // register store, but the backend's snapshot only picks it up on the next
     // poll — wait for /api/snapshot to reflect 30% before continuing.
-    await waitForWrite(peekModbusWrites, drainModbusWrites, 110, 30, 15_000);
+    await waitForWrite(peekModbusWrites, drainModbusWrites, 110, 30, 30_000);
     await clearWrites(drainModbusWrites);
     await waitForSnapshotValue(baseUrl, (s) => s.battery_reserve === 30, 20_000);
 
@@ -454,7 +460,7 @@ test.describe('API Control Endpoints', () => {
     });
     expect((await resp.json()).ok).toBe(true);
 
-    const writes = await waitForWrite(peekModbusWrites, drainModbusWrites, 110, 30, 15_000);
+    const writes = await waitForWrite(peekModbusWrites, drainModbusWrites, 110, 30, 45_000);
     expect(findWrite(writes, 27)!.value).toBe(1);  // self-consumption
     expect(findWrite(writes, 59)!.value).toBe(0);  // disable discharge
     // HR 110 must echo the configured 30, not the old 4% omit-default.
@@ -467,7 +473,9 @@ test.describe('API Control Endpoints', () => {
       body: JSON.stringify({ soc: 4 }),
     });
     expect((await restore.json()).ok).toBe(true);
-    await waitForWrite(peekModbusWrites, drainModbusWrites, 110, 4, 15_000);
+    // The restore batch queues BEHIND the eco slot-clear batch (~20
+    // registers at 1.5s pacing), so this wait is the long pole of the test.
+    await waitForWrite(peekModbusWrites, drainModbusWrites, 110, 4, 60_000);
     // Wait for the snapshot to settle back to 4% too — the following tests
     // pin HR 110 = 4 on an omitted `soc_reserve`, which now preserves the
     // snapshot value instead of defaulting.
@@ -949,7 +957,7 @@ test.describe('Quick Actions - extended', () => {
     drainModbusWrites,
     peekModbusWrites,
   }) => {
-    test.setTimeout(60_000);
+    test.setTimeout(120_000);
 
     // Aggressive drain of any pending writes from previous tests
     const deadline = Date.now() + 45_000;
@@ -967,8 +975,9 @@ test.describe('Quick Actions - extended', () => {
     });
     expect((await modeResp.json()).ok).toBe(true);
 
-    // Wait for ALL eco mode writes to complete (7 writes ~10s)
-    await waitForWrites(peekModbusWrites, drainModbusWrites, 7, 25_000);
+    // Wait for the eco mode's leading writes (HR 27/59/110 arrive first,
+    // then up to 20 slot-clears at 1.5s each on a ten-slot model).
+    await waitForWrites(peekModbusWrites, drainModbusWrites, 7, 45_000);
     // Drain any remaining
     while (true) {
       const remaining = await drainModbusWrites();
@@ -986,15 +995,34 @@ test.describe('Quick Actions - extended', () => {
     });
     expect((await fcResp.json()).ok).toBe(true);
 
-    // API sends minutes=30 → 7 writes (2 slot + 5 flags)
-    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 7, 20_000);
-    expect(writes.length).toBeGreaterThanOrEqual(7);
+    // The FC batch queues behind the eco slot-clear leftovers, so a plain
+    // `waitForWrites(7)` can be satisfied by HR 276/277/… clears before any
+    // force-charge register shows up. Collect writes until the four
+    // FC-specific registers are all captured instead.
+    let allWrites: RegisterWrite[] = [];
+    const fcDeadline = Date.now() + 60_000;
+    while (Date.now() < fcDeadline) {
+      const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 1, 5_000);
+      allWrites = [...allWrites, ...writes];
+      if (
+        findWrite(allWrites, 96) &&
+        findWrite(allWrites, 20) &&
+        findWrite(allWrites, 116) &&
+        findWrite(allWrites, 94)
+      ) {
+        break;
+      }
+    }
 
-    expect(findWrite(writes, 27)!.value).toBe(1);    // eco mode
-    expect(findWrite(writes, 59)!.value).toBe(0);    // clear stale discharge
-    expect(findWrite(writes, 96)!.value).toBe(1);    // enable_charge
-    expect(findWrite(writes, 20)!.value).toBe(1);    // enable_charge_target
-    expect(findWrite(writes, 116)!.value).toBe(100); // target SOC
+    // Slot registers present (30-minute window) + force-charge flags.
+    expect(findWrite(allWrites, 94)!.value).not.toBe(
+      findWrite(allWrites, 95)!.value,
+    );
+    expect(findWrite(allWrites, 27)!.value).toBe(1);    // eco mode
+    expect(findWrite(allWrites, 59)!.value).toBe(0);    // clear stale discharge
+    expect(findWrite(allWrites, 96)!.value).toBe(1);    // enable_charge
+    expect(findWrite(allWrites, 20)!.value).toBe(1);    // enable_charge_target
+    expect(findWrite(allWrites, 116)!.value).toBe(100); // target SOC
 
     const stop = await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' });
     expect((await stop.json()).ok).toBe(true);
@@ -1034,6 +1062,10 @@ test.describe('API Mode Transitions', () => {
     drainModbusWrites,
     peekModbusWrites,
   }) => {
+    // The first Eco POST queues ~23 writes (~35s at dongle pacing since
+    // the v0.75.4 ten-slot Eco clear, issue #289); the transition's
+    // write batch queues behind whatever is left of it.
+    test.setTimeout(180_000);
     // Set eco mode first
     await clearWrites(drainModbusWrites);
     let resp = await fetch(`${baseUrl}/api/control/mode`, {
@@ -1042,7 +1074,7 @@ test.describe('API Mode Transitions', () => {
       body: JSON.stringify({ mode: 'eco', soc_reserve: 4 }),
     });
     expect((await resp.json()).ok).toBe(true);
-    await waitForWrites(peekModbusWrites, drainModbusWrites, 4, 20_000);
+    await waitForWrites(peekModbusWrites, drainModbusWrites, 4, 45_000);
 
     // Now transition to timed_demand
     await clearWrites(drainModbusWrites);
@@ -1053,18 +1085,10 @@ test.describe('API Mode Transitions', () => {
     });
     expect((await resp.json()).ok).toBe(true);
 
-    // Wait for AT LEAST 3 writes — the mode-flag writes (HR 27/59/110).
-    // Issue #137 may add up to 4 slot restore writes when a backup
-    // exists from a prior test; wait for the whole batch.
-    //
-    // Slot restore writes (HR 56/57/44/45, if any) are queued FIRST in
-    // the writes batch, so the very first `waitForWrites(3)` typically
-    // drains the slot writes and the test moves on without seeing the
-    // mode-flag writes. We loop until all three mode-flag writes
-    // (HR 27/59/110) are present in the drained set, with a hard cap
-    // so a stuck queue can't hang the test forever.
     let allWrites: RegisterWrite[] = [];
-    const deadline = Date.now() + 30_000;
+    // The eco batch queued by the FIRST mode POST can still be draining
+    // (~20 slot-clears at 1.5s) when the transition POST lands behind it.
+    const deadline = Date.now() + 90_000;
     while (Date.now() < deadline) {
       const writes = await waitForWrites(
         peekModbusWrites,
@@ -1091,6 +1115,7 @@ test.describe('API Mode Transitions', () => {
     drainModbusWrites,
     peekModbusWrites,
   }) => {
+    test.setTimeout(180_000);
     await clearWrites(drainModbusWrites);
     let resp = await fetch(`${baseUrl}/api/control/mode`, {
       method: 'POST',
@@ -1112,7 +1137,7 @@ test.describe('API Mode Transitions', () => {
     // on the previous test for why a single `waitForWrites(3)` is not
     // sufficient under issue #137's slot-restore path.
     let allWrites: RegisterWrite[] = [];
-    const deadline = Date.now() + 30_000;
+    const deadline = Date.now() + 90_000;
     while (Date.now() < deadline) {
       const writes = await waitForWrites(
         peekModbusWrites,
@@ -1139,7 +1164,10 @@ test.describe('API Mode Transitions', () => {
     drainModbusWrites,
     peekModbusWrites,
   }) => {
-    await clearWrites(drainModbusWrites);
+    // The eco half of this transition queues ~20 slot clears behind the
+    // mode writes (issue #289 / v0.75.4 ten-slot clear) — ~35s at dongle
+    // pacing.
+    test.setTimeout(150_000);
     let resp = await fetch(`${baseUrl}/api/control/mode`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1167,11 +1195,13 @@ test.describe('API Mode Transitions', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Edge Cases', () => {
-  test('Force charge with minutes=0 clamps to 1', async ({
+    test('Force charge with minutes=0 clamps to 1', async ({
     baseUrl,
     drainModbusWrites,
     peekModbusWrites,
   }) => {
+    // May queue behind a prior test's eco slot-clear batch.
+    test.setTimeout(120_000);
     await clearWrites(drainModbusWrites);
 
     const resp = await fetch(`${baseUrl}/api/control/force-charge`, {
