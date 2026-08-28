@@ -452,17 +452,16 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
         // belong to their own day's numbers).
         let local_date = |ts: i64| {
             chrono::DateTime::from_timestamp(ts, 0)
-                .unwrap()
-                .with_timezone(&chrono::Local)
-                .date_naive()
+                .map(|dt| dt.with_timezone(&chrono::Local).date_naive())
         };
         let tomorrow_date = outcome
             .series
             .first()
-            .map(|h| local_date(h.timestamp) + chrono::Duration::days(1));
+            .and_then(|h| local_date(h.timestamp))
+            .map(|d| d + chrono::Duration::days(1));
         let (import_tw, export_tw) = match tomorrow_date {
             Some(td) => {
-                let is_t = |ts: i64| local_date(ts) == td;
+                let is_t = |ts: i64| local_date(ts).is_some_and(|d| d == td);
                 let residual: f64 = outcome
                     .series
                     .iter()
