@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.75.6] - 2026-08-28
+
+### Fixed
+
+- **Overnight "sunshine" on a quiet PV string during EV charging now reads as zero.** The inverter can report a trickle of phantom generation on a dark string under electrical noise — typically while an EV charger is running nearby — and because the reading also carried a small phantom current, the earlier overnight-suppression fix let it straight through to the charts, night after night in the reporter's capture. A string that is genuinely producing always sits at its full working voltage, so a handful of watts on a near-dark string is now treated as noise whatever the current reading claims (issue #261).
+
 ## [0.75.5] - 2026-08-27
 
 ### Fixed
