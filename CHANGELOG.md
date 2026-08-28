@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Updating on Linux/Proxmox no longer fails with a 404 when a release has just gone out.** The in-container updater now retries the package download a few times instead of giving up on the first failure, which covers the brief window where GitHub already lists a new version but its download link isn't serving yet (issue #291).
+
+### Changed
+
+- **Releases no longer go public until every platform's installer has been uploaded.** Previously whichever platform finished building first made the release visible on GitHub, so for a few minutes the latest version could be missing some downloads; releases are now published in one step once all installers are present (issue #291).
+
 ## [0.75.6] - 2026-08-28
 
 ### Fixed

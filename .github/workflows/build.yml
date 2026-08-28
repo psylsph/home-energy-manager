@@ -416,7 +416,7 @@ jobs:
             echo "Verified macOS DMG contains app/frontend version $expected_version"
           fi
 
-      - name: Upload release assets
+      - name: Upload release assets (draft)
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
@@ -443,7 +443,7 @@ jobs:
             ---
 
             See [CHANGELOG.md](https://github.com/psylsph/home-energy-manager/blob/master/CHANGELOG.md) for details.
-          draft: false
+          draft: true
           prerelease: false
           files: release-assets/*
 
@@ -570,8 +570,87 @@ jobs:
             exit 1
           fi
 
-      - name: Upload release assets
+      - name: Upload release assets (draft)
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
+          draft: true
           files: release-assets/*
+
+  # The platform jobs above upload their installers to a draft release
+  # because GitHub marks a release as "latest" the moment it stops being a
+  # draft — with per-job publishing, whichever platform finished first
+  # made releases/latest flip to the new tag while the other installers
+  # were still uploading (issue #291: updaters read "latest" in that
+  # window and got 404s on the missing .deb). This job runs only after
+  # every build has uploaded, verifies every user-facing installer is on
+  # the draft, and only then makes the release public.
+  publish-release:
+    name: Publish release once every asset is uploaded
+    needs: [build, build-android]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Verify every platform installer is on the release
+        run: |
+          set -euo pipefail
+
+          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+            --jq '.[] | select(.tag_name == env.TAG) | "\(.id) \(.draft)"' | head -n 1)"
+          if [ -z "$release_id" ]; then
+            echo "::error::No release found for ${TAG}; nothing to publish."
+            exit 1
+          fi
+
+          read -r id is_draft <<<"$release_id"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${id}" --jq '.assets[].name' > assets.txt
+          echo "Release assets:"
+          cat assets.txt
+
+          missing=""
+          # The unsigned Windows Store MSIX is best-effort (continue-on-error
+          # upstream), so it is deliberately not required here.
+          for pattern in \
+            'Android-Chromebook-*.apk' \
+            'Linux-Debian-ARM64-*.deb' \
+            'Linux-Debian-x86_64-*.deb' \
+            'Linux-RPM-ARM64-*.rpm' \
+            'Linux-RPM-x86_64-*.rpm' \
+            'macOS-Apple-Silicon-*.dmg' \
+            'macOS-Intel-*.dmg' \
+            'Windows-MSI-*.msi'; do
+            matched=no
+            while IFS= read -r asset; do
+              case "$asset" in
+                $pattern) matched=yes; break ;;
+              esac
+            done < assets.txt
+            if [ "$matched" = no ]; then
+              missing="${missing} ${pattern}"
+            fi
+          done
+
+          if [ -n "$missing" ]; then
+            echo "::error::Release ${TAG} is missing assets:${missing}"
+            echo "The release stays a draft; nothing partial goes public."
+            exit 1
+          fi
+
+          if [ "$is_draft" = "false" ]; then
+            echo "Release ${TAG} is already public; nothing to do."
+            exit 0
+          fi
+          echo "RELEASE_ID=${id}" >> "$GITHUB_ENV"
+
+      - name: Publish the release
+        run: |
+          set -euo pipefail
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -f draft=false \
+            -f make_latest=true \
+            --jq '.html_url'

@@ -438,7 +438,9 @@ Updates stop the service, save a pre-update copy of the persistent data under
 `/var/backups/home-energy-manager/`, retain the three newest backups, verify the
 new package digest, install it, restart the service, and check `/api/status`.
 Before changing anything, the updater also downloads and verifies the currently
-installed package. If package installation or the post-update health check
+installed package. Both downloads are retried a few times so a download that
+fails while GitHub is still publishing the release (a transient 404) doesn't
+abort the update. If package installation or the post-update health check
 fails, it reinstalls that package and restores the pre-update data automatically.
 Settings, logs, and history live under `/var/lib/givenergy-local` and are not
 owned by the application package.

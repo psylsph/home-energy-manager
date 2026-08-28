@@ -17,6 +17,16 @@ fail() {
   exit 1
 }
 
+# A release can be listed as latest a moment before its asset URLs come
+# alive on GitHub's CDN, so a fresh download can 404 transiently
+# (issue #291). curl only retries what it considers transient errors and
+# a 404 is not one of them, so opt into retrying every error class when
+# the local curl supports the flag (>= 7.71).
+CURL_RETRY=(--retry 5 --retry-delay 5)
+if curl --retry-all-errors --version >/dev/null 2>&1; then
+  CURL_RETRY+=(--retry-all-errors)
+fi
+
 root_path() {
   printf '%s%s' "$DESTDIR" "$1"
 }
@@ -81,6 +91,7 @@ ASSET_DIGEST="$(jq -er --arg name "$ASSET_NAME" '.assets[] | select(.name == $na
 DEB_PATH="$TMPDIR/$ASSET_NAME"
 printf 'Downloading %s...\n' "$ASSET_NAME"
 curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  "${CURL_RETRY[@]}" \
   -o "$DEB_PATH" "$ASSET_URL"
 EXPECTED_SHA256="${ASSET_DIGEST#sha256:}"
 ACTUAL_SHA256="$(sha256sum "$DEB_PATH" | awk '{ print $1 }')"
@@ -105,6 +116,7 @@ if [ -n "$INSTALLED_VERSION" ]; then
   [[ "$OLD_ASSET_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || fail "previous package digest is not SHA-256"
   OLD_DEB_PATH="$TMPDIR/$OLD_ASSET_NAME"
   curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+    "${CURL_RETRY[@]}" \
     -o "$OLD_DEB_PATH" "$OLD_ASSET_URL"
   OLD_ACTUAL_SHA256="$(sha256sum "$OLD_DEB_PATH" | awk '{ print $1 }')"
   [ "${OLD_ACTUAL_SHA256,,}" = "${OLD_ASSET_DIGEST#sha256:}" ] \

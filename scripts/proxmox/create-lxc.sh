@@ -5,7 +5,7 @@ set -Eeuo pipefail
 
 REPO="psylsph/home-energy-manager"
 SCRIPT_REF="${HEM_SCRIPT_REF:-master}"
-INSTALLER_SHA256="341c49be7daa6a80ab38d4ccefd372fb41a4fd53d040d136cd6a0262ed2b16d6"
+INSTALLER_SHA256="342bfc94cddbcf6fd2304db13322378af60aeedd848229f6df1986ea87b98631"
 CTID="${HEM_CTID:-}"
 HOSTNAME="${HEM_HOSTNAME:-home-energy-manager}"
 CORES="${HEM_CORES:-1}"

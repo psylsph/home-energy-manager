@@ -331,7 +331,7 @@ macOS 26.5 blocks ad-hoc signed binaries inside `/Applications`. Three issues: (
 1. Bump version in `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`. `npm run check:versions` (also a step in CI and the first check in `npm test`) fails if the three drift — this is the guard against the "bumped two, forgot one" mistake that shipped v0.33.2 with `tauri.conf.json` still reading `0.33.1`.
 2. Update `CHANGELOG.md` with a new heading
 3. Commit, then **immediately tag** (`vX.Y.Z`) — match the changelog heading exactly. Every version heading must have a corresponding git tag. Push both. The release build (`.github/workflows/build.yml`, triggered by `v*` tags) runs `check-versions` as a gating job before any platform build starts, so an out-of-sync tag fails fast instead of producing installers whose bundled version disagrees with the release name.
-4. GitHub Actions builds for macOS (ARM + x64), Linux, Windows and creates a GitHub Release
+4. GitHub Actions builds for macOS (ARM + x64), Linux, Windows and creates a GitHub Release. Platform jobs upload to a **draft**; a final `publish-release` job verifies every installer is present and only then publishes it, so `releases/latest` never points at a release with missing downloads (issue #291). If that job fails, the release stays a draft — fix the build and re-run rather than publishing by hand.
 
 ### Changelog style
 

@@ -57,7 +57,7 @@ assert_eq() {
 WORKFLOW_YAML="$(cat "$WORKFLOW")"
 # grep -c exits 1 on zero matches; keep set -e from aborting the test.
 count_matches() {
-  grep -c "$1" "$WORKFLOW" || true
+  grep -c -- "$1" "$WORKFLOW" || true
 }
 
 echo "tests/scripts/release-workflow.test.sh"
@@ -89,7 +89,7 @@ done
 
 echo
 echo "3. publishing flips the draft once, and marks it latest"
-PUBLISH_COUNT="$(count_matches -- '-f draft=false')"
+PUBLISH_COUNT="$(count_matches '-f draft=false')"
 assert_eq "exactly one publish edit flips the draft" "1" "$PUBLISH_COUNT"
 assert_contains "published release is marked latest" "make_latest=true" "$WORKFLOW_YAML"
 
