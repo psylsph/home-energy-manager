@@ -1171,13 +1171,16 @@ mod tests {
         }
     }
 
-    /// Deterministic 72-hour series on a FIXED local date (no
-    /// wall-clock dependence): every hour present, so the window
-    /// occurrences land at stable indices regardless of when the test
-    /// runs. `build_48h_sim`/`build_48h_series` anchor on `now` and
-    /// make trough shapes vary by run time — unusable for a test that
-    /// pins exact sizing behaviour.
-    fn fixed_72h(
+    /// Deterministic series on a FIXED local date (no wall-clock
+    /// dependence): every hour present, so the window occurrences land
+    /// at stable indices regardless of when the test runs.
+    /// `build_48h_series` anchors on `now` and makes trough shapes vary
+    /// by run time — unusable for a test that pins sizing behaviour
+    /// (the `sunny_48h` test shipped that way and only passed when run
+    /// early enough in the day for its same-day solar to top the battery
+    /// up; evening/CI runs dipped below the floor and failed).
+    fn fixed_series(
+        days: i64,
         start_soc: f64,
         solar_kwh_per_hour: [f64; 24],
         cons_kwh_per_hour: [f64; 24],
@@ -1186,7 +1189,7 @@ mod tests {
         use chrono::TimeZone;
         let base = chrono::NaiveDate::from_ymd_opt(2024, 6, 15).unwrap();
         let mut hours: Vec<SimHourInput> = Vec::new();
-        for d in 0..3i64 {
+        for d in 0..days {
             for h in 0..24u32 {
                 let day = base + chrono::Duration::days(d);
                 let ts = chrono::Local
@@ -1205,6 +1208,28 @@ mod tests {
         p2.start_soc_pct = start_soc;
         let sim = simulate_battery(&hours, &p2);
         (sim, hours)
+    }
+
+    /// 48-hour fixed-date variant — the horizon the min-soc sizing tests
+    /// were written against. See [`fixed_series`] for why the date is
+    /// pinned instead of anchored on the wall clock.
+    fn fixed_48h(
+        start_soc: f64,
+        solar_kwh_per_hour: [f64; 24],
+        cons_kwh_per_hour: [f64; 24],
+        p: &SimulationParams,
+    ) -> (SimulationOutput, Vec<SimHourInput>) {
+        fixed_series(2, start_soc, solar_kwh_per_hour, cons_kwh_per_hour, p)
+    }
+
+    /// 72-hour fixed-date variant. See [`fixed_series`].
+    fn fixed_72h(
+        start_soc: f64,
+        solar_kwh_per_hour: [f64; 24],
+        cons_kwh_per_hour: [f64; 24],
+        p: &SimulationParams,
+    ) -> (SimulationOutput, Vec<SimHourInput>) {
+        fixed_series(3, start_soc, solar_kwh_per_hour, cons_kwh_per_hour, p)
     }
 
     #[test]
@@ -1362,50 +1387,15 @@ mod tests {
         }
     }
     // --- Phase 2 v2: "minimum SOC across the window" objective ---------------
-
-    /// Build a 48-hour series with explicit hourly solar/cons arrays. Returns
-    /// the simulation's output — the planner will then derive the trough and
-    /// decide whether to charge enough to lift it above `min_soc_pct`.
-    ///
-    /// Day 0 starts at the *current* hour (mirroring the forecast payload's
-    /// contract: forward hours only, at or after `now`) — the planner's
-    /// window matching relies on the first occurrence of a tariff slot in
-    /// the series being the reachable one, so pre-now hours must not
-    /// appear.
-    fn build_48h_sim(
-        start_soc: f64,
-        solar_kwh_per_hour: [f64; 24],
-        cons_kwh_per_hour: [f64; 24],
-        day1_offset: i64,
-        p: &SimulationParams,
-    ) -> (SimulationOutput, Vec<SimHourInput>) {
-        let now = chrono::Local::now();
-        let now_hour = now.hour();
-        let mut hours: Vec<SimHourInput> = Vec::new();
-        for d in 0..2 {
-            for h in 0..24u32 {
-                // Day 0 skips the already-elapsed hours of today.
-                if d == 0 && h < now_hour {
-                    continue;
-                }
-                let date = now.date_naive() + chrono::Duration::days(day1_offset + d);
-                let ts = chrono::Local
-                    .from_local_datetime(&date.and_hms_opt(h, 0, 0).unwrap())
-                    .earliest()
-                    .unwrap()
-                    .timestamp();
-                hours.push(SimHourInput {
-                    timestamp: ts,
-                    solar_kwh: solar_kwh_per_hour[h as usize],
-                    consumption_kwh: cons_kwh_per_hour[h as usize],
-                });
-            }
-        }
-        let mut p = *p;
-        p.start_soc_pct = start_soc;
-        let sim = simulate_battery(&hours, &p);
-        (sim, hours)
-    }
+    //
+    // The v2 sizing tests below all use fixed_48h (fixed date, every hour
+    // present). There is deliberately NO wall-clock-anchored builder here:
+    // the old build_48h_sim anchored its series on Local::now(), so the
+    // same test dipped below the min-soc floor or not depending on the
+    // hour it ran at — green in daytime CI runs, red in the evening
+    // (v0.75.8's release run caught it). Tests that genuinely exercise
+    // the forward-only payload contract use build_48h_series and derive
+    // their expectations from the same series they feed the planner.
 
     fn plan_inputs_with_min<'a>(
         sim: &'a SimulationOutput,
@@ -1442,7 +1432,7 @@ mod tests {
             s
         };
         let cons = [0.3; 24];
-        let (sim, sim_hours) = build_48h_sim(50.0, solar, cons, 0, &p);
+        let (sim, sim_hours) = fixed_48h(50.0, solar, cons, &p);
         let flux = flux_tariff();
         match plan_overnight_charge(&plan_inputs_with_min(
             &sim,
@@ -1485,7 +1475,7 @@ mod tests {
         };
         let cons: [f64; 24] =
             std::array::from_fn(|h| if (3..=5).contains(&h) { 1.0 } else { 0.25 });
-        let (sim, sim_hours) = build_48h_sim(30.0, solar, cons, 0, &p);
+        let (sim, sim_hours) = fixed_48h(30.0, solar, cons, &p);
         let flux = flux_tariff();
         match plan_overnight_charge(&plan_inputs_with_min(
             &sim,
@@ -1528,7 +1518,7 @@ mod tests {
         let cons: [f64; 24] = std::array::from_fn(|h| if (3..=5).contains(&h) { 3.0 } else { 0.6 });
         let flux = flux_tariff();
         let kwh_for = |m: f64| -> f64 {
-            let (sim, sim_hours) = build_48h_sim(30.0, solar, cons, 0, &p);
+            let (sim, sim_hours) = fixed_48h(30.0, solar, cons, &p);
             match plan_overnight_charge(&plan_inputs_with_min(&sim, &sim_hours, &p, Some(&flux), m))
             {
                 PlanRecommendation::Charge { kwh, .. } => kwh,
@@ -1558,7 +1548,7 @@ mod tests {
         };
         let cons: [f64; 24] = std::array::from_fn(|h| if (3..=5).contains(&h) { 3.0 } else { 0.4 });
         let flux = flux_tariff();
-        let (sim, sim_hours) = build_48h_sim(80.0, solar, cons, 0, &p);
+        let (sim, sim_hours) = fixed_48h(80.0, solar, cons, &p);
         match plan_overnight_charge(&plan_inputs_with_min(
             &sim,
             &sim_hours,
