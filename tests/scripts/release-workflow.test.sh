@@ -91,7 +91,8 @@ echo
 echo "3. publishing flips the draft once, and marks it latest"
 PUBLISH_COUNT="$(count_matches '-f draft=false')"
 assert_eq "exactly one publish edit flips the draft" "1" "$PUBLISH_COUNT"
-assert_contains "published release is marked latest" "make_latest=true" "$WORKFLOW_YAML"
+assert_contains "published release is marked latest with a typed form field" "-F make_latest=true" "$WORKFLOW_YAML"
+assert_contains "publish is verified against releases/latest" "releases/latest" "$WORKFLOW_YAML"
 assert_contains 're-run against an already-public release exits cleanly' '${RELEASE_ID:-}' "$WORKFLOW_YAML"
 
 

@@ -657,5 +657,22 @@ jobs:
           [ -n "${RELEASE_ID:-}" ] || { echo "Nothing to publish."; exit 0; }
           gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
             -f draft=false \
-            -f make_latest=true \
+            -F make_latest=true \
             --jq '.html_url'
+
+      - name: Verify releases/latest points at this tag
+        run: |
+          set -euo pipefail
+          # The release API is served with a short cache; allow up to a
+          # minute for make_latest to land before failing the run.
+          for attempt in 1 2 3 4 5 6; do
+            latest="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
+            if [ "$latest" = "$TAG" ]; then
+              echo "releases/latest is ${latest}."
+              exit 0
+            fi
+            echo "releases/latest is ${latest}, expected ${TAG} (attempt ${attempt}); retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::releases/latest never pointed at ${TAG} after publishing."
+          exit 1
