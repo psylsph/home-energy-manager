@@ -9222,6 +9222,47 @@ mod tests {
         );
     }
 
+    /// The clear loop's slot range comes from
+    /// `DeviceType::max_discharge_slots()`, which returns 1 for
+    /// AC-coupled and Gen1 (matching the givenergy-modbus reference —
+    /// those devices expose a single discharge slot). The clear must
+    /// therefore write ONLY slot 1's pair (HR 56-57) — exactly two
+    /// writes, with slot 2's registers (HR 44-45) absent. Pinning this
+    /// matters in both directions: a future change to the model's slot
+    /// count must not silently grow or shrink the clear set for
+    /// single-slot devices.
+    #[test]
+    fn clear_discharge_slots_on_single_slot_devices_writes_only_slot_1() {
+        use crate::modbus::registers::{
+            HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_START,
+            SAFE_WRITE_REGS,
+        };
+
+        for dt in [DeviceType::ACCoupled, DeviceType::ACCoupledMk2, DeviceType::Gen1Hybrid] {
+            let writes = clear_discharge_slot_writes(dt);
+            assert_eq!(
+                writes.len(),
+                2,
+                "{dt:?} has one discharge slot: clear is 1 slot x start/end"
+            );
+            let addrs: Vec<u16> = writes.iter().map(|w| w.address).collect();
+            assert_eq!(addrs, vec![HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_1_END]);
+            for w in &writes {
+                assert_eq!(w.value, 0);
+                assert!(
+                    SAFE_WRITE_REGS.contains(&w.address),
+                    "address {} must be whitelisted",
+                    w.address
+                );
+            }
+            // Slot 2 must NOT be touched on single-slot devices.
+            assert!(
+                !writes.iter().any(|w| w.address == HR_DISCHARGE_SLOT_2_START),
+                "{dt:?} clear must not write slot 2 registers"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn set_charge_slot_2_non_gen3_uses_classic_hr31_32() {
         with_isolated_config_dir_async(|| async {
