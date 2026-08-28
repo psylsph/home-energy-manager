@@ -545,6 +545,40 @@ fn grid_online_from_ac(voltage: f32, frequency: f32) -> bool {
     voltage > 50.0 && frequency > 1.0
 }
 
+/// Noise floor for a PV string's own power register, in watts (issue #261).
+///
+/// Deliberately higher than the 20 W meter floor (`SOLAR_METER_NOISE_THRESHOLD_W`,
+/// issue #273): the reporter's EV-charger-induced phantom plateaus at ~25–30 W,
+/// and the dark-string voltage gate below is what makes the wider bound safe.
+const PV_STRING_NOISE_THRESHOLD_W: i32 = 50;
+
+/// A string carrying real generation sits at its loaded operating voltage
+/// (hundreds of volts for a domestic series string). A dark string only holds
+/// residual open-circuit voltage — tens of volts (issue #261 fixtures: 34–45 V).
+/// Below this a string is dark, whatever its current register claims.
+const PV_DARK_STRING_VOLTAGE_V: f32 = 100.0;
+
+/// Zero phantom watts on a dark string (issue #261).
+///
+/// Under electrical noise (e.g. EV charging) the dongle can report a small
+/// phantom power *together with* a small phantom current, so the current == 0
+/// guard never fires. A dark string only holds residual open-circuit voltage,
+/// so watts at or below the noise floor on a sub-operating-voltage string are
+/// noise, not generation: P = V×I caps real output at a few tens of watts even
+/// at implausibly high current, and no loaded domestic string operates below
+/// [`PV_DARK_STRING_VOLTAGE_V`]. Genuine low-light generation survives because
+/// a loaded string reports its operating voltage.
+fn suppress_dark_string_noise(power: i32, voltage: f32) -> i32 {
+    if power > 0
+        && power <= PV_STRING_NOISE_THRESHOLD_W
+        && voltage < PV_DARK_STRING_VOLTAGE_V
+    {
+        0
+    } else {
+        power
+    }
+}
+
 fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     // -- PV --
     snap.pv1_power = get_reg(data, 18) as i32; // IR(18): p_pv1 (W)
@@ -565,6 +599,11 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     if snap.pv2_current == 0.0 {
         snap.pv2_power = 0;
     }
+    // Phantom watts can also ride a small phantom *current* under electrical
+    // noise (EV charging, issue #261 follow-up), which the guards above don't
+    // see. A dark string only holds residual voltage, so floor its watts.
+    snap.pv1_power = suppress_dark_string_noise(snap.pv1_power, snap.pv1_voltage);
+    snap.pv2_power = suppress_dark_string_noise(snap.pv2_power, snap.pv2_voltage);
     // Compute the aggregate only after dormant-string cleanup so a stale power
     // register cannot survive in the total while its own current (and therefore
     // its own power field) is 0.
@@ -1409,6 +1448,11 @@ fn decode_input_1000_1059(data: &[u16], snap: &mut InverterSnapshot) {
     if snap.pv2_current == 0.0 {
         snap.pv2_power = 0;
     }
+    // Phantom watts can also ride a small phantom *current* under electrical
+    // noise (EV charging, issue #261 follow-up), which the guards above don't
+    // see. A dark string only holds residual voltage, so floor its watts.
+    snap.pv1_power = suppress_dark_string_noise(snap.pv1_power, snap.pv1_voltage);
+    snap.pv2_power = suppress_dark_string_noise(snap.pv2_power, snap.pv2_voltage);
     // Compute the aggregate only after dormant-string cleanup so a stale power
     // register cannot survive in the total while its own current (and therefore
     // its own power field) is 0.
