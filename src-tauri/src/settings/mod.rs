@@ -3521,7 +3521,11 @@ mod tests {
                     Settings::update(|s| {
                         s.solar_meter_baselines.insert(
                             "address-1".to_string(),
-                            SolarMeterBaseline { day: "2026-08-21".to_string(), e_import_kwh: 5.5, e_export_kwh: 0.0 },
+                            SolarMeterBaseline {
+                                day: "2026-08-21".to_string(),
+                                e_import_kwh: 5.5,
+                                e_export_kwh: 0.0,
+                            },
                         );
                     })
                     .unwrap();
@@ -3531,7 +3535,10 @@ mod tests {
 
             let s = Settings::load();
             assert_eq!(
-                s.adaptive_charge_saved_limit.as_ref().map(|l| l.raw_value).unwrap_or(0),
+                s.adaptive_charge_saved_limit
+                    .as_ref()
+                    .map(|l| l.raw_value)
+                    .unwrap_or(0),
                 2000,
                 "adaptive baseline must survive the concurrent save"
             );
@@ -3581,9 +3588,16 @@ mod tests {
             let _ = tokio::join!(h_poll, h_api);
 
             let s = Settings::load();
-            assert_eq!(s.load_limiter_saved_reserve, Some(42), "API save must survive");
             assert_eq!(
-                s.adaptive_charge_saved_limit.as_ref().map(|l| l.raw_value).unwrap_or(0),
+                s.load_limiter_saved_reserve,
+                Some(42),
+                "API save must survive"
+            );
+            assert_eq!(
+                s.adaptive_charge_saved_limit
+                    .as_ref()
+                    .map(|l| l.raw_value)
+                    .unwrap_or(0),
                 1234,
                 "poll writer's field must survive"
             );

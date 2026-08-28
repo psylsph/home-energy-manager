@@ -98,17 +98,21 @@ pub fn simulate_battery(hours: &[SimHourInput], params: &SimulationParams) -> Si
         let (charge, discharge, import, export) = if net >= 0.0 {
             let surplus = net;
             let room = capacity - stored;
-            let charge_ac = surplus
-                .min(params.max_charge_kw)
-                .min(if eta_c > 0.0 { room / eta_c } else { surplus });
+            let charge_ac = surplus.min(params.max_charge_kw).min(if eta_c > 0.0 {
+                room / eta_c
+            } else {
+                surplus
+            });
             stored += charge_ac * eta_c;
             (charge_ac, 0.0, 0.0, surplus - charge_ac)
         } else {
             let need = -net;
             let available_dc = (stored - reserve_stored).max(0.0);
-            let discharge_ac = need
-                .min(params.max_discharge_kw)
-                .min(if eta_d > 0.0 { available_dc * eta_d } else { need });
+            let discharge_ac = need.min(params.max_discharge_kw).min(if eta_d > 0.0 {
+                available_dc * eta_d
+            } else {
+                need
+            });
             stored -= discharge_ac / eta_d;
             (0.0, discharge_ac, need - discharge_ac, 0.0)
         };
@@ -158,10 +162,7 @@ mod tests {
     fn surplus_charges_with_efficiency_and_caps_at_full() {
         // 10 kWh battery at 50%: 5 kWh room, surplus 3 kWh → all 3 kWh AC
         // drawn, 2.7 kWh stored → SOC 77%.
-        let out = simulate_battery(
-            &[hour(0, 3.0, 0.0)],
-            &params(10.0, 50.0, 10.0),
-        );
+        let out = simulate_battery(&[hour(0, 3.0, 0.0)], &params(10.0, 50.0, 10.0));
         assert_eq!(out.hours.len(), 1);
         assert!((out.hours[0].charge_kwh - 3.0).abs() < 1e-9);
         assert!((out.hours[0].soc_pct - 77.0).abs() < 1e-9);
@@ -173,10 +174,7 @@ mod tests {
     fn surplus_beyond_room_and_rate_exports_the_rest() {
         // 10 kWh at 95%: room 0.5 kWh → AC charge 0.5/0.9 ≈ 0.5556; solar
         // surplus 4 kWh → export ≈ 3.444, SOC pinned at 100.
-        let out = simulate_battery(
-            &[hour(0, 4.0, 0.0)],
-            &params(10.0, 95.0, 10.0),
-        );
+        let out = simulate_battery(&[hour(0, 4.0, 0.0)], &params(10.0, 95.0, 10.0));
         let h = &out.hours[0];
         assert!((h.soc_pct - 100.0).abs() < 1e-9);
         assert!((h.charge_kwh - 0.5 / 0.9).abs() < 1e-9);
@@ -199,10 +197,7 @@ mod tests {
         // 10 kWh at 50%, reserve 10% → 4 kWh usable stored → 3.8 kWh AC
         // deliverable. Need 2 kWh → fully covered, SOC 50 - 2/0.95/10*100
         // = 28.947%.
-        let out = simulate_battery(
-            &[hour(0, 0.0, 2.0)],
-            &params(10.0, 50.0, 10.0),
-        );
+        let out = simulate_battery(&[hour(0, 0.0, 2.0)], &params(10.0, 50.0, 10.0));
         let h = &out.hours[0];
         assert!((h.discharge_kwh - 2.0).abs() < 1e-9);
         assert!((h.soc_pct - (50.0 - 2.0 / 0.95 / 10.0 * 100.0)).abs() < 1e-9);
@@ -212,10 +207,7 @@ mod tests {
     #[test]
     fn deficit_beyond_reserve_imports_the_rest() {
         // At reserve: no discharge allowed, all need imports.
-        let out = simulate_battery(
-            &[hour(0, 0.0, 3.0)],
-            &params(10.0, 10.0, 10.0),
-        );
+        let out = simulate_battery(&[hour(0, 0.0, 3.0)], &params(10.0, 10.0, 10.0));
         let h = &out.hours[0];
         assert!((h.discharge_kwh - 0.0).abs() < 1e-9);
         assert!((h.import_kwh - 3.0).abs() < 1e-9);
@@ -226,10 +218,7 @@ mod tests {
     fn partially_dischargeable_deficit_splits_discharge_and_import() {
         // 10 kWh at 50%, reserve 10%: 4 kWh stored → 3.8 kWh AC. Need
         // 5 kWh, discharge rate 5 kW → discharge 3.8, import 1.2.
-        let out = simulate_battery(
-            &[hour(0, 0.0, 5.0)],
-            &params(10.0, 50.0, 10.0),
-        );
+        let out = simulate_battery(&[hour(0, 0.0, 5.0)], &params(10.0, 50.0, 10.0));
         let h = &out.hours[0];
         assert!((h.discharge_kwh - 3.8).abs() < 1e-9);
         assert!((h.import_kwh - 1.2).abs() < 1e-9);
@@ -251,7 +240,11 @@ mod tests {
     fn soc_carries_across_hours_and_totals_sum() {
         // Two surplus hours then one deficit hour across a 10 kWh pack.
         let out = simulate_battery(
-            &[hour(0, 2.0, 0.0), hour(3600, 2.0, 0.0), hour(7200, 0.0, 1.0)],
+            &[
+                hour(0, 2.0, 0.0),
+                hour(3600, 2.0, 0.0),
+                hour(7200, 0.0, 1.0),
+            ],
             &params(10.0, 20.0, 10.0),
         );
         assert_eq!(out.hours.len(), 3);
@@ -271,10 +264,14 @@ mod tests {
 
         let mut zero_cap = p;
         zero_cap.capacity_kwh = 0.0;
-        assert!(simulate_battery(&[hour(0, 1.0, 1.0)], &zero_cap).hours.is_empty());
+        assert!(simulate_battery(&[hour(0, 1.0, 1.0)], &zero_cap)
+            .hours
+            .is_empty());
 
         let mut over = p;
         over.start_soc_pct = 101.0;
-        assert!(simulate_battery(&[hour(0, 1.0, 1.0)], &over).hours.is_empty());
+        assert!(simulate_battery(&[hour(0, 1.0, 1.0)], &over)
+            .hours
+            .is_empty());
     }
 }

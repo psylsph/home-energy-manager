@@ -569,10 +569,7 @@ const PV_DARK_STRING_VOLTAGE_V: f32 = 100.0;
 /// [`PV_DARK_STRING_VOLTAGE_V`]. Genuine low-light generation survives because
 /// a loaded string reports its operating voltage.
 fn suppress_dark_string_noise(power: i32, voltage: f32) -> i32 {
-    if power > 0
-        && power <= PV_STRING_NOISE_THRESHOLD_W
-        && voltage < PV_DARK_STRING_VOLTAGE_V
-    {
+    if power > 0 && power <= PV_STRING_NOISE_THRESHOLD_W && voltage < PV_DARK_STRING_VOLTAGE_V {
         0
     } else {
         power
@@ -4809,7 +4806,10 @@ mod tests {
         data[9] = 3; // pv2_current = 0.3 A phantom
         data[20] = 50; // pv2_power = 50 W — at the floor
         decode_input_0_59(&data, &mut snap);
-        assert_eq!(snap.pv2_power, 0, "watts at the floor on a dark string are noise");
+        assert_eq!(
+            snap.pv2_power, 0,
+            "watts at the floor on a dark string are noise"
+        );
 
         let mut snap = InverterSnapshot::default();
         let mut data = vec![0u16; 60];
@@ -4855,7 +4855,10 @@ mod tests {
         data[19] = 0; // p_pv2 high
         data[20] = 300; // p_pv2 low → 30 W genuine
         decode_input_1000_1059(&data, &mut snap);
-        assert_eq!(snap.pv2_power, 30, "genuine low-light watts must survive (3ph)");
+        assert_eq!(
+            snap.pv2_power, 30,
+            "genuine low-light watts must survive (3ph)"
+        );
         assert_eq!(snap.solar_power, 30);
     }
 

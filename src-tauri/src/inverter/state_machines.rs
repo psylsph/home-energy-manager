@@ -337,10 +337,7 @@ pub(crate) fn check_discharge_floor(
                 "Discharge floor guard: disabled while holding floor, restoring reserve"
             );
             *state = DischargeFloorState::Idle;
-            return Some(vec![soc_reserve_write(
-                snap.device_type,
-                saved_reserve,
-            )]);
+            return Some(vec![soc_reserve_write(snap.device_type, saved_reserve)]);
         }
         *state = DischargeFloorState::Idle;
         return None;
@@ -387,10 +384,7 @@ pub(crate) fn check_discharge_floor(
                     "Discharge floor guard: window ended, restoring Minimum SOC"
                 );
                 *state = DischargeFloorState::Idle;
-                Some(vec![soc_reserve_write(
-                    snap.device_type,
-                    saved_reserve,
-                )])
+                Some(vec![soc_reserve_write(snap.device_type, saved_reserve)])
             }
         }
         DischargeFloorState::HeldFromRestart { saved_reserve } => {
@@ -417,10 +411,7 @@ pub(crate) fn check_discharge_floor(
                     "Discharge floor guard: restart outside window, restoring saved reserve"
                 );
                 *state = DischargeFloorState::Idle;
-                Some(vec![soc_reserve_write(
-                    snap.device_type,
-                    saved_reserve,
-                )])
+                Some(vec![soc_reserve_write(snap.device_type, saved_reserve)])
             }
         }
     }

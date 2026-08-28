@@ -1563,7 +1563,10 @@ mod tests {
             DeviceType::AllInOne5kW,
             DeviceType::Unknown(0x9999),
         ] {
-            assert!(!dt.uses_direct_charge_limit(), "{dt:?} should not be direct");
+            assert!(
+                !dt.uses_direct_charge_limit(),
+                "{dt:?} should not be direct"
+            );
         }
     }
 

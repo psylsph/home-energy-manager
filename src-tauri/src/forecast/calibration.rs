@@ -186,7 +186,11 @@ mod tests {
     const RATED: f64 = 5.0;
     const G: f32 = 700.0;
 
-    fn five_valid_days() -> (Vec<SolarForecastSample>, Vec<DailySolarTotal>, chrono::NaiveDate) {
+    fn five_valid_days() -> (
+        Vec<SolarForecastSample>,
+        Vec<DailySolarTotal>,
+        chrono::NaiveDate,
+    ) {
         let days = [
             d(2025, 6, 5),
             d(2025, 6, 6),
@@ -196,7 +200,10 @@ mod tests {
         ];
         // Ratios 0.7, 0.8, 0.9, 1.0, 0.6 → median 0.8.
         let kwhs = [24.5, 28.0, 31.5, 35.0, 21.0];
-        let samples: Vec<_> = days.iter().flat_map(|&day| day_of_radiation(day, G)).collect();
+        let samples: Vec<_> = days
+            .iter()
+            .flat_map(|&day| day_of_radiation(day, G))
+            .collect();
         let totals: Vec<_> = days
             .iter()
             .zip(kwhs)
@@ -320,7 +327,10 @@ mod tests {
             d(2025, 6, 8),
             d(2025, 6, 9),
         ];
-        let samples: Vec<_> = days.iter().flat_map(|&day| day_of_radiation(day, G)).collect();
+        let samples: Vec<_> = days
+            .iter()
+            .flat_map(|&day| day_of_radiation(day, G))
+            .collect();
         let today = d(2025, 6, 15);
 
         let high: Vec<_> = days.iter().map(|&day| total(day, 105.0, 14)).collect();
@@ -346,7 +356,10 @@ mod tests {
         ];
         // Ratios 0.6, 0.7, 0.8, 0.9, 1.0, 1.1 → median (0.8 + 0.9) / 2.
         let kwhs = [21.0, 24.5, 28.0, 31.5, 35.0, 38.5];
-        let samples: Vec<_> = days.iter().flat_map(|&day| day_of_radiation(day, G)).collect();
+        let samples: Vec<_> = days
+            .iter()
+            .flat_map(|&day| day_of_radiation(day, G))
+            .collect();
         let totals: Vec<_> = days
             .iter()
             .zip(kwhs)

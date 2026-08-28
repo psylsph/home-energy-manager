@@ -6200,9 +6200,18 @@ mod tests {
         assert_eq!(
             sw,
             vec![
-                ForecastPoint { timestamp: 100, value: 300.0 },
-                ForecastPoint { timestamp: 150, value: 310.0 },
-                ForecastPoint { timestamp: 200, value: 350.0 },
+                ForecastPoint {
+                    timestamp: 100,
+                    value: 300.0
+                },
+                ForecastPoint {
+                    timestamp: 150,
+                    value: 310.0
+                },
+                ForecastPoint {
+                    timestamp: 200,
+                    value: 350.0
+                },
             ]
         );
 
@@ -6212,7 +6221,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             windowed,
-            vec![ForecastPoint { timestamp: 150, value: 310.0 }]
+            vec![ForecastPoint {
+                timestamp: 150,
+                value: 310.0
+            }]
         );
 
         // Source isolation: the solcast row must not leak into the
@@ -6220,7 +6232,13 @@ mod tests {
         let sc = db
             .query_forecast_series("shortwave_radiation", "solcast", 0, i64::MAX)
             .unwrap();
-        assert_eq!(sc, vec![ForecastPoint { timestamp: 100, value: 280.0 }]);
+        assert_eq!(
+            sc,
+            vec![ForecastPoint {
+                timestamp: 100,
+                value: 280.0
+            }]
+        );
 
         // Unknown variable → empty, not an error.
         assert!(db
@@ -6234,8 +6252,13 @@ mod tests {
         // Re-fetching an overlapping forecast window must replace the
         // older hour's value rather than duplicate it.
         let db = test_db();
-        db.insert_forecast_values(&[forecast_row(100, "shortwave_radiation", 300.0, "open-meteo")])
-            .unwrap();
+        db.insert_forecast_values(&[forecast_row(
+            100,
+            "shortwave_radiation",
+            300.0,
+            "open-meteo",
+        )])
+        .unwrap();
         let mut refresh = forecast_row(100, "shortwave_radiation", 320.0, "open-meteo");
         refresh.fetched_at = 2000;
         db.insert_forecast_values(&[refresh]).unwrap();
@@ -6244,7 +6267,10 @@ mod tests {
             .query_forecast_series("shortwave_radiation", "open-meteo", 0, i64::MAX)
             .unwrap();
         assert_eq!(sw.len(), 1);
-        assert!((sw[0].value - 320.0).abs() < 1e-9, "newest forecast must win");
+        assert!(
+            (sw[0].value - 320.0).abs() < 1e-9,
+            "newest forecast must win"
+        );
     }
 
     #[test]
@@ -6271,11 +6297,19 @@ mod tests {
         assert_eq!(totals.len(), 2);
         assert_eq!(
             totals[0],
-            DailySolarTotal { date: day1, kwh: 21.0, hours_covered: 3 }
+            DailySolarTotal {
+                date: day1,
+                kwh: 21.0,
+                hours_covered: 3
+            }
         );
         assert_eq!(
             totals[1],
-            DailySolarTotal { date: day2, kwh: 12.0, hours_covered: 2 }
+            DailySolarTotal {
+                date: day2,
+                kwh: 12.0,
+                hours_covered: 2
+            }
         );
     }
 
@@ -6304,7 +6338,10 @@ mod tests {
         assert!((totals[0].kwh - 15.0).abs() < 1e-9);
 
         // Window after everything → empty.
-        assert!(db.daily_solar_totals_since(ts(real_day, 23) + 1).unwrap().is_empty());
+        assert!(db
+            .daily_solar_totals_since(ts(real_day, 23) + 1)
+            .unwrap()
+            .is_empty());
     }
 
     // --- meta + consumption rows (issue #283, Phase 1) --------------------

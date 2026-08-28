@@ -319,7 +319,9 @@ impl AlertDebounce {
     /// Whether the battery at `slave_addr` is currently confirmed as
     /// disconnected (sustained read failures past the threshold).
     pub fn battery_connection_lost_confirmed(&self, slave_addr: u8) -> bool {
-        self.battery_conn.get(&slave_addr).is_some_and(|s| s.confirmed)
+        self.battery_conn
+            .get(&slave_addr)
+            .is_some_and(|s| s.confirmed)
     }
 
     /// Whether ANY battery is currently confirmed lost via the per-battery
@@ -2319,7 +2321,10 @@ mod tests {
     #[test]
     fn test_healthiest_module_voltage_filters_garbage() {
         // NaN and 0.0 readings are discarded; the max valid wins.
-        assert_eq!(healthiest_module_voltage(&[f32::NAN, 0.0, 53.2, 52.9]), Some(53.2));
+        assert_eq!(
+            healthiest_module_voltage(&[f32::NAN, 0.0, 53.2, 52.9]),
+            Some(53.2)
+        );
         assert_eq!(healthiest_module_voltage(&[]), None);
         assert_eq!(healthiest_module_voltage(&[0.0, f32::NAN]), None);
     }

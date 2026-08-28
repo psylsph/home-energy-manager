@@ -97,8 +97,7 @@ fn percentile_sorted(sorted: &[f64], pct: f64) -> f64 {
 /// Build the hour-of-day profile from counter samples (any ordering; the
 /// samples are sorted by timestamp internally).
 pub fn build_consumption_profile(rows: &[ConsumptionCounterRow]) -> ConsumptionProfile {
-    let mut sorted: Vec<&ConsumptionCounterRow> =
-        rows.iter().filter(|r| r.kwh.is_some()).collect();
+    let mut sorted: Vec<&ConsumptionCounterRow> = rows.iter().filter(|r| r.kwh.is_some()).collect();
     sorted.sort_by_key(|r| r.timestamp);
 
     // Energy per (local day, local hour): the SUM of valid deltas inside
@@ -108,8 +107,8 @@ pub fn build_consumption_profile(rows: &[ConsumptionCounterRow]) -> ConsumptionP
     // interval: gaps > 2 h are skipped entirely (the missing energy must
     // not be smeared into one bucket), midnight resets and negative
     // glitches contribute nothing.
-    let mut hour_sums:
-        std::collections::BTreeMap<(chrono::NaiveDate, u8), f64> = Default::default();
+    let mut hour_sums: std::collections::BTreeMap<(chrono::NaiveDate, u8), f64> =
+        Default::default();
     let mut days: std::collections::BTreeSet<chrono::NaiveDate> = Default::default();
 
     for pair in sorted.windows(2) {

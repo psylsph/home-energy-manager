@@ -580,10 +580,8 @@ async fn track_battery_conn(
              {} consecutive cycles — connection lost",
             crate::alerts::BATTERY_CONNECTION_LOST_CONFIRM_CYCLES,
         );
-        crate::alerts::send_battery_connection_lost_notification(
-            state, battery_number, slave_addr,
-        )
-        .await;
+        crate::alerts::send_battery_connection_lost_notification(state, battery_number, slave_addr)
+            .await;
     }
     if restored {
         tracing::info!(
@@ -591,7 +589,9 @@ async fn track_battery_conn(
              connection restored",
         );
         crate::alerts::send_battery_connection_restored_notification(
-            state, battery_number, slave_addr,
+            state,
+            battery_number,
+            slave_addr,
         )
         .await;
     }
@@ -819,10 +819,7 @@ pub const MAX_WRITE_BATCHES_PER_CYCLE: usize = 8;
 /// the poll loop so the per-cycle cap is unit-testable without a full poll
 /// loop (the completion channels of untaken batches are simply left queued —
 /// their `await_write_outcome` callers keep waiting, which is correct).
-fn take_pending_writes(
-    queue: &mut Vec<PendingWriteBatch>,
-    cap: usize,
-) -> Vec<PendingWriteBatch> {
+fn take_pending_writes(queue: &mut Vec<PendingWriteBatch>, cap: usize) -> Vec<PendingWriteBatch> {
     if queue.len() <= cap {
         return std::mem::take(queue);
     }
@@ -946,9 +943,7 @@ pub(crate) fn persist_solar_meter_baselines(
 /// `persist_solar_meter_baselines` — the inner closure's no-op
 /// skip avoids touching the file on steady-state polls where the
 /// reserve hasn't changed.
-pub(crate) fn persist_discharge_floor_saved_reserve(
-    persisted: Option<u16>,
-) -> Result<(), String> {
+pub(crate) fn persist_discharge_floor_saved_reserve(persisted: Option<u16>) -> Result<(), String> {
     crate::settings::Settings::update(|s| {
         s.discharge_floor_saved_reserve = persisted;
     })
@@ -4327,7 +4322,9 @@ pub(crate) fn apply_ct_solar_authority(
 mod tests {
     use super::*;
     use crate::inverter::model::{DeviceType, MeterData};
-    use crate::settings::{Settings, SolarArrayConfig, SolarMeterBaseline, TariffConfig, TariffSlot};
+    use crate::settings::{
+        Settings, SolarArrayConfig, SolarMeterBaseline, TariffConfig, TariffSlot,
+    };
 
     /// Build a `MeterData` with only the fields `compute_solar_arrays`
     /// inspects set; the rest are zeroed. `MeterData` doesn't derive
@@ -4359,7 +4356,12 @@ mod tests {
 
     /// Variant of [`meter`] with cumulative energy counters set, for the
     /// CT-solar "today" baseline tests (issue #277).
-    fn meter_with_energy(address: u8, p_active_total: i32, e_import: f32, e_export: f32) -> MeterData {
+    fn meter_with_energy(
+        address: u8,
+        p_active_total: i32,
+        e_import: f32,
+        e_export: f32,
+    ) -> MeterData {
         MeterData {
             e_import_active_kwh: e_import,
             e_export_active_kwh: e_export,
@@ -4474,9 +4476,21 @@ mod tests {
         };
         let settings = Settings {
             solar_arrays: vec![
-                SolarArrayConfig { meter_address: 1, name: String::new(), rated_kw: 6.0 },
-                SolarArrayConfig { meter_address: 2, name: String::new(), rated_kw: 6.0 },
-                SolarArrayConfig { meter_address: 3, name: String::new(), rated_kw: 6.0 },
+                SolarArrayConfig {
+                    meter_address: 1,
+                    name: String::new(),
+                    rated_kw: 6.0,
+                },
+                SolarArrayConfig {
+                    meter_address: 2,
+                    name: String::new(),
+                    rated_kw: 6.0,
+                },
+                SolarArrayConfig {
+                    meter_address: 3,
+                    name: String::new(),
+                    rated_kw: 6.0,
+                },
             ],
             ..Default::default()
         };
@@ -4484,7 +4498,10 @@ mod tests {
         assert_eq!(arrays.len(), 3);
         assert_eq!(arrays[0].power_w, 0, "+16 W standby draw → 0 W");
         assert_eq!(arrays[1].power_w, 0, "-18 W reversed-clamp noise → 0 W");
-        assert_eq!(arrays[2].power_w, 21, "above the 20 W floor still reads through");
+        assert_eq!(
+            arrays[2].power_w, 21,
+            "above the 20 W floor still reads through"
+        );
     }
 
     #[test]
@@ -4566,7 +4583,11 @@ mod tests {
     /// loop does, so `apply_ct_solar_authority` tests exercise the real
     /// input shape. Returns the settings used, so tests can mutate the
     /// configured meter set before calling `apply_ct_solar_authority`.
-    fn ct_snapshot(meters: Vec<MeterData>, pv1_w: i32, today_pv1: f32) -> (InverterSnapshot, Settings) {
+    fn ct_snapshot(
+        meters: Vec<MeterData>,
+        pv1_w: i32,
+        today_pv1: f32,
+    ) -> (InverterSnapshot, Settings) {
         let settings = Settings {
             pv1_rated_kw: 5.0,
             solar_arrays: vec![SolarArrayConfig {
@@ -4597,7 +4618,8 @@ mod tests {
         // The reporter's scenario (issue #277): inverter PV registers say
         // 1.8 kW while the CT clamp on the solar inverter output says
         // 3.8 kW. With a meter-backed array configured, the CT wins.
-        let (mut snap, settings) = ct_snapshot(vec![meter_with_energy(1, 3800, 100.0, 500.0)], 1800, 28.1);
+        let (mut snap, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3800, 100.0, 500.0)], 1800, 28.1);
         let mut baselines = std::collections::BTreeMap::new();
         apply_ct_solar_authority(&mut snap, &settings, &mut baselines, day(0));
         assert_eq!(snap.solar_power, 3800, "CT replaces inverter PV registers");
@@ -4611,22 +4633,32 @@ mod tests {
     fn ct_authority_accumulates_today_energy_since_midnight() {
         // First poll of the day: baseline seeded, today = 0.
         let mut baselines = std::collections::BTreeMap::new();
-        let (mut snap, settings) = ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 500.0)], 0, 0.0);
+        let (mut snap, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 500.0)], 0, 0.0);
         apply_ct_solar_authority(&mut snap, &settings, &mut baselines, day(0));
         assert_eq!(snap.today_solar_kwh, 0.0);
         // First read of the day: today starts at 0 (baseline seeded at the
         // current counters), and the meter card shows 0 rather than hiding
         // the row.
-        let meter_arr = snap.solar_arrays.iter().find(|a| a.source == SolarArraySource::Meter).unwrap();
+        let meter_arr = snap
+            .solar_arrays
+            .iter()
+            .find(|a| a.source == SolarArraySource::Meter)
+            .unwrap();
         assert_eq!(meter_arr.today_kwh, Some(0.0));
 
         // Later same day: export counter advanced 12.4 kWh → today = 12.4.
-        let (mut snap2, settings) = ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 512.4)], 0, 0.0);
+        let (mut snap2, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 512.4)], 0, 0.0);
         let reseeded = apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, day(0));
         assert!(!reseeded, "same-day accumulation must not reseed");
         assert!((snap2.today_solar_kwh - 12.4).abs() < 0.01);
         // Per-array card gets its own today figure.
-        let meter_arr = snap2.solar_arrays.iter().find(|a| a.source == SolarArraySource::Meter).unwrap();
+        let meter_arr = snap2
+            .solar_arrays
+            .iter()
+            .find(|a| a.source == SolarArraySource::Meter)
+            .unwrap();
         assert!((meter_arr.today_kwh.unwrap() - 12.4).abs() < 0.01);
         // Baseline untouched mid-day.
         assert_eq!(baselines["1"].e_export_kwh, 500.0);
@@ -4637,12 +4669,15 @@ mod tests {
         // Day 0 accumulates 12.4 kWh; first poll of day 1 reseeds and
         // today restarts at 0.
         let mut baselines = std::collections::BTreeMap::new();
-        let (mut snap, settings) = ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 500.0)], 0, 0.0);
+        let (mut snap, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 500.0)], 0, 0.0);
         apply_ct_solar_authority(&mut snap, &settings, &mut baselines, day(0));
-        let (mut snap2, settings) = ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 512.4)], 0, 0.0);
+        let (mut snap2, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 512.4)], 0, 0.0);
         apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, day(0));
 
-        let (mut snap3, settings) = ct_snapshot(vec![meter_with_energy(1, 1000, 100.0, 513.0)], 0, 0.0);
+        let (mut snap3, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 1000, 100.0, 513.0)], 0, 0.0);
         let reseeded = apply_ct_solar_authority(&mut snap3, &settings, &mut baselines, day(1));
         assert!(reseeded, "new day must reseed the baseline");
         assert_eq!(snap3.today_solar_kwh, 0.0, "today restarts at midnight");
@@ -4655,9 +4690,11 @@ mod tests {
         // factory reset): reseed instead of freezing today at the stale
         // value.
         let mut baselines = std::collections::BTreeMap::new();
-        let (mut snap, settings) = ct_snapshot(vec![meter_with_energy(1, 3000, 1000.0, 500.0)], 0, 0.0);
+        let (mut snap, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 1000.0, 500.0)], 0, 0.0);
         apply_ct_solar_authority(&mut snap, &settings, &mut baselines, day(0));
-        let (mut snap2, settings) = ct_snapshot(vec![meter_with_energy(1, 3000, 1005.0, 512.4)], 0, 0.0);
+        let (mut snap2, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 1005.0, 512.4)], 0, 0.0);
         apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, day(0));
         assert!((snap2.today_solar_kwh - 12.4).abs() < 0.01);
 
@@ -4673,7 +4710,8 @@ mod tests {
     fn ct_authority_noop_without_meter_arrays() {
         // Pure hybrid (Stuart's own install): no CT arrays configured →
         // the inverter-register path must be untouched.
-        let (mut snap, _settings) = ct_snapshot(vec![meter_with_energy(1, 3800, 100.0, 500.0)], 1800, 28.1);
+        let (mut snap, _settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3800, 100.0, 500.0)], 1800, 28.1);
         // Re-stamp arrays WITHOUT the meter entry.
         let settings = Settings {
             pv1_rated_kw: 5.0,
@@ -4724,7 +4762,11 @@ mod tests {
         // not added in.
         assert!((snap.today_solar_kwh - 0.0).abs() < 0.01);
         // DC string's per-array today is preserved for its card.
-        let pv1_arr = snap.solar_arrays.iter().find(|a| a.source == SolarArraySource::Pv1).unwrap();
+        let pv1_arr = snap
+            .solar_arrays
+            .iter()
+            .find(|a| a.source == SolarArraySource::Pv1)
+            .unwrap();
         assert_eq!(pv1_arr.today_kwh, Some(10.0));
     }
 
@@ -4739,8 +4781,16 @@ mod tests {
         // solar_power / today_solar_kwh stay authoritative.
         let settings = Settings {
             solar_arrays: vec![
-                SolarArrayConfig { meter_address: 1, name: "Roof".into(), rated_kw: 9.48 },
-                SolarArrayConfig { meter_address: 2, name: "Garage".into(), rated_kw: 4.0 },
+                SolarArrayConfig {
+                    meter_address: 1,
+                    name: "Roof".into(),
+                    rated_kw: 9.48,
+                },
+                SolarArrayConfig {
+                    meter_address: 2,
+                    name: "Garage".into(),
+                    rated_kw: 4.0,
+                },
             ],
             ..Default::default()
         };
@@ -4790,7 +4840,8 @@ mod tests {
         // Edge case: meter present and genuinely reading 0 W (night).
         // CT authority still applies — solar shows 0, the inverter's
         // stale register figure is discarded as usual.
-        let (mut snap, settings) = ct_snapshot(vec![meter_with_energy(1, 5, 100.0, 500.0)], 1800, 28.1);
+        let (mut snap, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 5, 100.0, 500.0)], 1800, 28.1);
         // 5 W is below the noise threshold → power_w clamps to 0.
         let mut baselines = std::collections::BTreeMap::new();
         apply_ct_solar_authority(&mut snap, &settings, &mut baselines, day(0));
@@ -5588,8 +5639,8 @@ mod tests {
 
     #[test]
     fn take_pending_writes_caps_drain_at_max_batches_per_cycle() {
-        use crate::inverter::encoder::RegisterWrite;
         use super::{take_pending_writes, MAX_WRITE_BATCHES_PER_CYCLE};
+        use crate::inverter::encoder::RegisterWrite;
 
         // Queue MORE batches than the cap, tagged by address so we can check
         // which ones were taken. Completion channels stay intact for the
@@ -5601,8 +5652,9 @@ mod tests {
             }],
             completion: None,
         };
-        let mut queue: Vec<PendingWriteBatch> =
-            (0..MAX_WRITE_BATCHES_PER_CYCLE + 5).map(|i| make(i as u16)).collect();
+        let mut queue: Vec<PendingWriteBatch> = (0..MAX_WRITE_BATCHES_PER_CYCLE + 5)
+            .map(|i| make(i as u16))
+            .collect();
 
         let taken = take_pending_writes(&mut queue, MAX_WRITE_BATCHES_PER_CYCLE);
 
@@ -5611,14 +5663,26 @@ mod tests {
             MAX_WRITE_BATCHES_PER_CYCLE,
             "one poll-cycle drain must take only the capped number of batches"
         );
-        assert_eq!(queue.len(), 5, "remainder must stay queued for later cycles");
+        assert_eq!(
+            queue.len(),
+            5,
+            "remainder must stay queued for later cycles"
+        );
         // Oldest-first: the taken batches must be the first N queued.
         assert_eq!(taken[0].writes[0].address, 0);
-        assert_eq!(taken[MAX_WRITE_BATCHES_PER_CYCLE - 1].writes[0].address,
-            (MAX_WRITE_BATCHES_PER_CYCLE - 1) as u16);
+        assert_eq!(
+            taken[MAX_WRITE_BATCHES_PER_CYCLE - 1].writes[0].address,
+            (MAX_WRITE_BATCHES_PER_CYCLE - 1) as u16
+        );
         // And the queue now holds the newest batches in order.
-        assert_eq!(queue[0].writes[0].address, MAX_WRITE_BATCHES_PER_CYCLE as u16);
-        assert_eq!(queue[4].writes[0].address, (MAX_WRITE_BATCHES_PER_CYCLE + 4) as u16);
+        assert_eq!(
+            queue[0].writes[0].address,
+            MAX_WRITE_BATCHES_PER_CYCLE as u16
+        );
+        assert_eq!(
+            queue[4].writes[0].address,
+            (MAX_WRITE_BATCHES_PER_CYCLE + 4) as u16
+        );
 
         // Draining repeatedly empties the queue without losing batches.
         let mut total = taken.len();
@@ -5630,8 +5694,8 @@ mod tests {
 
     #[test]
     fn take_pending_writes_returns_all_when_at_or_below_cap() {
-        use crate::inverter::encoder::RegisterWrite;
         use super::{take_pending_writes, MAX_WRITE_BATCHES_PER_CYCLE};
+        use crate::inverter::encoder::RegisterWrite;
 
         let make = |addr| PendingWriteBatch {
             writes: vec![RegisterWrite {
@@ -5643,8 +5707,7 @@ mod tests {
         // Exactly at the cap (boundary) and below it: everything is taken,
         // matching the old drain-everything behaviour for small queues.
         for n in [0, 1, MAX_WRITE_BATCHES_PER_CYCLE] {
-            let mut queue: Vec<PendingWriteBatch> =
-                (0..n).map(|i| make(i as u16)).collect();
+            let mut queue: Vec<PendingWriteBatch> = (0..n).map(|i| make(i as u16)).collect();
             let taken = take_pending_writes(&mut queue, MAX_WRITE_BATCHES_PER_CYCLE);
             assert_eq!(taken.len(), n, "queue of {n} batches should drain fully");
             assert!(queue.is_empty());
@@ -6175,11 +6238,7 @@ mod tests {
     // serialise under the settings mutex and both survive.
     // ------------------------------------------------------------------
 
-    fn baseline_for_test(
-        day: &str,
-        e_import_kwh: f64,
-        e_export_kwh: f64,
-    ) -> SolarMeterBaseline {
+    fn baseline_for_test(day: &str, e_import_kwh: f64, e_export_kwh: f64) -> SolarMeterBaseline {
         SolarMeterBaseline {
             day: day.to_string(),
             e_import_kwh,

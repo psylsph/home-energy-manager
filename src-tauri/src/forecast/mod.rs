@@ -333,10 +333,7 @@ pub(crate) fn battery_rate_limits_kw(snapshot: &InverterSnapshot) -> (f64, f64) 
     };
     let charge_pct = pct_or_max(snapshot.charge_rate);
     let discharge_pct = pct_or_max(snapshot.discharge_rate);
-    (
-        charge_pct / 100.0 * max_kw,
-        discharge_pct / 100.0 * max_kw,
-    )
+    (charge_pct / 100.0 * max_kw, discharge_pct / 100.0 * max_kw)
 }
 
 /// How far back the calibration reads actual generation for. One day
@@ -465,8 +462,13 @@ pub async fn run_solar_forecast_fetch(state: std::sync::Arc<crate::inverter::pol
         Ok(forecast) => {
             let now = Local::now();
             let sample_count = forecast.samples.len();
-            match store_and_calibrate(&db, rated_kw, OpenMeteoSolarProvider::SOURCE, now, &forecast)
-            {
+            match store_and_calibrate(
+                &db,
+                rated_kw,
+                OpenMeteoSolarProvider::SOURCE,
+                now,
+                &forecast,
+            ) {
                 Some(pr) => tracing::info!(
                     pr,
                     samples = sample_count,
@@ -808,7 +810,8 @@ mod tests {
         }
         db.set_meta_value(META_FORECAST_PR, "0.8").unwrap();
         db.set_meta_value(META_FORECAST_PR_DAYS, "12").unwrap();
-        db.set_meta_value(META_FORECAST_CALIBRATED_AT, &now_ts.to_string()).unwrap();
+        db.set_meta_value(META_FORECAST_CALIBRATED_AT, &now_ts.to_string())
+            .unwrap();
 
         // Seven days of hourly home-energy counters, +0.5 kWh every hour,
         // all 24 hours covered: today-7 through yesterday inclusive.
@@ -947,7 +950,8 @@ mod tests {
         }
         let snap = battery_snapshot();
         let settings = five_kwp_settings();
-        let payload = build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
+        let payload =
+            build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
         assert!(payload.status.contains(&"calibrating".to_string()));
         // Preliminary numbers still served, using the fallback PR.
         assert!((payload.solar_tomorrow_kwh - 45.0).abs() < 0.01);
@@ -961,7 +965,8 @@ mod tests {
         let mut snap = battery_snapshot();
         snap.battery_capacity_kwh = 0.0;
         let settings = five_kwp_settings();
-        let payload = build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
+        let payload =
+            build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
         assert!(payload.status.contains(&"no_battery_capacity".to_string()));
         assert!(payload.battery.is_none());
         // Solar and consumption still served.

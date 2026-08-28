@@ -132,7 +132,9 @@ pub fn parse_solar_forecast_response(json: &serde_json::Value) -> Result<SolarFo
         let Ok(parsed) = chrono::NaiveDateTime::parse_from_str(time_str, "%Y-%m-%dT%H:%M") else {
             continue;
         };
-        let Some(g) = shortwave[i].as_f64() else { continue };
+        let Some(g) = shortwave[i].as_f64() else {
+            continue;
+        };
         samples.push(SolarForecastSample {
             timestamp: parsed.and_utc().timestamp(),
             shortwave_radiation: g as f32,
@@ -207,7 +209,10 @@ mod tests {
     #[test]
     fn url_contains_solar_params() {
         let url = solar_forecast_url("https://api.open-meteo.com", 51.5, -0.13);
-        assert!(url.starts_with("https://api.open-meteo.com/v1/forecast?"), "{url}");
+        assert!(
+            url.starts_with("https://api.open-meteo.com/v1/forecast?"),
+            "{url}"
+        );
         assert!(url.contains("latitude=51.5"), "{url}");
         assert!(url.contains("longitude=-0.13"), "{url}");
         assert!(

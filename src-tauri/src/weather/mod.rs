@@ -478,8 +478,7 @@ pub async fn run_weather_loop(state: Arc<AppState>) {
     // loop because it shares the Open-Meteo endpoint, agent, config and
     // enable gate. First tick fires immediately so a pre-configured
     // setup starts accumulating forecast history on startup.
-    let mut solar_tick =
-        tokio::time::interval(crate::forecast::SOLAR_FORECAST_FETCH_INTERVAL);
+    let mut solar_tick = tokio::time::interval(crate::forecast::SOLAR_FORECAST_FETCH_INTERVAL);
     solar_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {

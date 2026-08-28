@@ -885,12 +885,7 @@ async fn forecast_endpoint_serves_seeded_forecast() {
     });
 
     let router = create_router(state.clone());
-    let (status, body) = post_json(
-        &router,
-        "/api/settings",
-        &json!({ "pv1_rated_kw": 5.0 }),
-    )
-    .await;
+    let (status, body) = post_json(&router, "/api/settings", &json!({ "pv1_rated_kw": 5.0 })).await;
     assert_eq!(status, StatusCode::OK, "settings save failed: {body}");
 
     let (status, body) = get_json(&router, "/api/forecast").await;
@@ -934,9 +929,7 @@ async fn forecast_plan_endpoint_degrades_to_no_plan() {
     // "no_plan with a human-readable reason", not a specific message.
     let reason = rec["reason"].as_str().unwrap().to_lowercase();
     assert!(
-        reason.contains("tariff")
-            || reason.contains("projection")
-            || reason.contains("history"),
+        reason.contains("tariff") || reason.contains("projection") || reason.contains("history"),
         "reason: {}",
         rec["reason"]
     );
@@ -964,7 +957,11 @@ async fn forecast_plan_endpoint_recommends_overnight_charge() {
         db.insert_forecast_values(&[ForecastValueRow {
             timestamp: ts,
             variable: "shortwave_radiation".to_string(),
-            value: if h % 24 >= 6 && h % 24 <= 19 { 100.0 } else { 0.0 },
+            value: if h % 24 >= 6 && h % 24 <= 19 {
+                100.0
+            } else {
+                0.0
+            },
             source: "open-meteo".to_string(),
             fetched_at: now_ts,
         }])
@@ -1051,7 +1048,9 @@ async fn forecast_plan_endpoint_recommends_overnight_charge() {
     // The re-simulated post-charge trough is reported alongside the
     // uncharged one (planner v2 objective).
     assert!(rec["observed_min_soc_pct"].as_f64().unwrap() < 20.0);
-    assert!(rec["after_min_soc_pct"].as_f64().unwrap() >= rec["observed_min_soc_pct"].as_f64().unwrap());
+    assert!(
+        rec["after_min_soc_pct"].as_f64().unwrap() >= rec["observed_min_soc_pct"].as_f64().unwrap()
+    );
     // Tomorrow's import/export under the plan drive the Tomorrow tiles.
     // The import includes the window's grid draw exactly once (the
     // what-if sim hides it as free surplus) plus the residual of
@@ -1065,12 +1064,13 @@ async fn forecast_plan_endpoint_recommends_overnight_charge() {
         import_tw >= kwh_val - 1e-6,
         "tomorrow import ({import_tw}) must include the window draw ({kwh_val})"
     );
-    assert!(import_tw < 2.0 * kwh_val, "window draw counted once, not per night");
     assert!(
-        rec["export_tomorrow_with_charge_kwh"]
-            .as_f64()
-            .is_some_and(|v| v >= 0.0)
+        import_tw < 2.0 * kwh_val,
+        "window draw counted once, not per night"
     );
+    assert!(rec["export_tomorrow_with_charge_kwh"]
+        .as_f64()
+        .is_some_and(|v| v >= 0.0));
     // The Apply payload mirrors what the Control page posts. The slot's
     // charge target is the SOC the re-simulated plan says the battery
     // must REACH in the window (`charge_target_soc_pct`, clamped to the
@@ -1079,9 +1079,14 @@ async fn forecast_plan_endpoint_recommends_overnight_charge() {
     // touched and the battery crashes back below the floor later in
     // the day, which is the exact failure the planner exists to fix.
     let apply = body["data"]["apply"].as_object().expect("apply");
-    let charge_target = rec["charge_target_soc_pct"].as_f64().expect("charge_target_soc_pct");
+    let charge_target = rec["charge_target_soc_pct"]
+        .as_f64()
+        .expect("charge_target_soc_pct");
     let min_soc = rec["min_soc_pct"].as_f64().expect("min_soc_pct");
-    assert!(charge_target >= min_soc, "charge target {charge_target} must be at least the {min_soc} floor");
+    assert!(
+        charge_target >= min_soc,
+        "charge target {charge_target} must be at least the {min_soc} floor"
+    );
     let expected_target = charge_target.clamp(4.0, 100.0).ceil() as u64;
     // The planner's re-simulated trajectory ("SOC if the recommended
     // charge is enacted") is what the Battery tab chart plots as a
@@ -1111,14 +1116,23 @@ async fn forecast_plan_endpoint_recommends_overnight_charge() {
         let u_ts = uncharged[0].as_i64().expect("timestamp");
         let u_soc = uncharged[1].as_f64().expect("soc");
         assert_eq!(ts, u_ts, "timestamps must align (hour {i})");
-        assert!(soc >= u_soc - 1e-6, "with-charge must not dip below uncharged at hour {i}");
+        assert!(
+            soc >= u_soc - 1e-6,
+            "with-charge must not dip below uncharged at hour {i}"
+        );
     }
-    assert_eq!(apply["charge_slot"], serde_json::json!({
-        "slot": 1,
-        "enabled": true,
-        "start_hour": 2, "start_minute": 0,
-        "end_hour": 5, "end_minute": 0,
-        "target_soc": expected_target,
-    }));
-    assert_eq!(apply["timed_charge"], serde_json::json!({ "enabled": true }));
+    assert_eq!(
+        apply["charge_slot"],
+        serde_json::json!({
+            "slot": 1,
+            "enabled": true,
+            "start_hour": 2, "start_minute": 0,
+            "end_hour": 5, "end_minute": 0,
+            "target_soc": expected_target,
+        })
+    );
+    assert_eq!(
+        apply["timed_charge"],
+        serde_json::json!({ "enabled": true })
+    );
 }

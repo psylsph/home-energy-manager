@@ -69,7 +69,9 @@ async fn quiet_client_survives_keepalive_probe_and_still_receives_broadcasts() {
         // surface the first broadcast snapshot after the quiet window.
         let mut saw_first_after_quiet;
         loop {
-            let Some(Ok(msg)) = stream.next().await else { return false };
+            let Some(Ok(msg)) = stream.next().await else {
+                return false;
+            };
             match msg {
                 Message::Ping(payload) => {
                     let _ = sink.send(Message::Pong(payload)).await;
@@ -103,7 +105,10 @@ async fn quiet_client_survives_keepalive_probe_and_still_receives_broadcasts() {
         .await
         .expect("timeout waiting for broadcast after quiet window")
         .expect("driver task panicked");
-    assert!(received, "client should still receive broadcasts after idle period");
+    assert!(
+        received,
+        "client should still receive broadcasts after idle period"
+    );
 
     drop(config_guard);
 }
