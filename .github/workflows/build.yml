@@ -417,6 +417,7 @@ jobs:
           fi
 
       - name: Upload release assets (draft)
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
@@ -571,6 +572,7 @@ jobs:
           fi
 
       - name: Upload release assets (draft)
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
@@ -650,6 +652,9 @@ jobs:
       - name: Publish the release
         run: |
           set -euo pipefail
+          # The verify step exits early without setting RELEASE_ID when the
+          # release is already public (workflow re-run after a success).
+          [ -n "${RELEASE_ID:-}" ] || { echo "Nothing to publish."; exit 0; }
           gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
             -f draft=false \
             -f make_latest=true \
