@@ -718,6 +718,34 @@ mod tests {
         assert!(!w.tomorrow);
     }
 
+    /// A tariff slot that wraps midnight ("22:00"–"02:00") is never a
+    /// candidate charge window: `cheapest_import_window` skips any slot
+    /// whose end is at or before its start, and `TariffConfig::validate`
+    /// rejects such slots outright. This is what keeps every
+    /// charge-window occurrence inside a single calendar day —
+    /// `window_runs` matches minute-of-day within `[start, end)`, so a
+    /// non-wrapping window's runs can never straddle midnight, which in
+    /// turn makes the Tomorrow tiles' "count the window draw once per
+    /// occurrence that starts tomorrow" attribution exact rather than
+    /// an approximation. If the wrap-skip here is ever relaxed, the
+    /// tile attribution and `window_runs` both need re-examining first.
+    #[test]
+    fn wrapping_tariff_slot_is_never_selected() {
+        let wrap = tariff(&[
+            ("02:00", "22:00", 0.30),
+            ("22:00", "02:00", 0.05), // wraps midnight — must be skipped
+        ]);
+        // Even though the wrapping slot is the cheapest, it must never
+        // win: the valid day slot is selected instead.
+        let w = cheapest_import_window(&wrap, 12 * 60, 30).unwrap();
+        assert_eq!(w.start_min, 2 * 60);
+        assert_eq!(w.end_min, 22 * 60);
+        // And with ONLY the wrapping slot present there is no window
+        // at all.
+        let only_wrap = tariff(&[("22:00", "02:00", 0.05)]);
+        assert!(cheapest_import_window(&only_wrap, 12 * 60, 30).is_none());
+    }
+
     #[test]
     fn sunny_day_needs_no_charge() {
         // Steady solar + light load keeps SOC above 60% across all
