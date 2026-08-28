@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.75.8] - 2026-08-28
+
+### Fixed
+
+- **Saving a Timed Export window now switches Timed Export on — the same as saving a Timed Discharge window always has.** The two editors used to behave differently: a saved Timed Discharge window took effect immediately, but a saved export window only stored the times and left you to press the Timed Export button yourself, so a window set in advance quietly never fired. Saving an enabled slot of either type now activates its mode, and the old "Discharge Schedule" section is renamed Timed Export so it matches the button it drives (issue #289).
+
 ## [0.75.7] - 2026-08-28
 
 ### Fixed
