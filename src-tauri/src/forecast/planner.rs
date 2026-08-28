@@ -1044,6 +1044,83 @@ mod tests {
         }
     }
 
+    /// The minimisation bisection must run whenever the capped ask
+    /// HOLDS the floor — including when the ask sits at exactly the
+    /// window's deliverable cap. Deep-deficit / narrow-window shapes
+    /// hit this: the analytic shortfall exceeds what the window can
+    /// deliver, so `kwh` is clamped to `deliverable_ac` from the very
+    /// first sizing step, and the multi-night carry-over (each night's
+    /// capped charge lifts the next day's starting point) makes that
+    /// capped charge hold the floor with room to spare. The grow loop
+    /// breaks immediately on `trough >= target`, and the old
+    /// `kwh < deliverable_ac` guard then skipped the bisection —
+    /// leaving the ask pinned at the cap even though a smaller
+    /// per-night charge holds the floor, i.e. the planner buying more
+    /// off-peak import than the minimum needs (the same failure mode
+    /// `charge_ask_is_minimal_not_oversized` pins for the uncapped
+    /// case, surviving at the cap boundary).
+    #[test]
+    fn charge_ask_is_minimal_even_when_capped() {
+        // One-hour cheapest window: deliverable cap = 2.5 kW x 1 h.
+        let narrow = tariff(&[
+            ("00:00", "01:00", 0.05),
+            ("01:00", "23:59", 0.30),
+        ]);
+        let p = params();
+        // Start at 30%, flat 0.025 kWh/h drain, no solar: the 72 h
+        // uncharged trough lands near 11% against a 45% floor, so the
+        // analytic ask (~3.8 kWh) overshoots the 2.5 kWh cap — but
+        // three nights of capped charge compound to hold the floor
+        // from day 0's end (46.4%) onward, while the true minimal
+        // per-night ask is ~2.34 kWh.
+        let cons = [0.025; 24];
+        let (sim, sim_hours) = fixed_72h(30.0, [0.0; 24], cons, &p);
+        let rec = plan_overnight_charge(&plan_inputs_with_min(
+            &sim, &sim_hours, &p, Some(&narrow), 45.0,
+        ));
+        let PlanRecommendation::Charge {
+            kwh,
+            window,
+            after_min_soc_pct,
+            ..
+        } = rec
+        else {
+            panic!("expected Charge, got {rec:?}")
+        };
+        // Sanity: the fixture really is the capped-and-holding shape.
+        // If the floor did NOT hold at the cap, the recommendation
+        // would be the honest capped caveat instead — retune the
+        // fixture before trusting a failure here.
+        assert!(
+            after_min_soc_pct >= 45.0,
+            "capped ask must hold the floor (got {after_min_soc_pct})"
+        );
+        let runs = window_runs(&sim_hours, &window);
+        assert!(!runs.is_empty());
+        let holds = |ask: f64| {
+            simulate_with_charge(&sim_hours, &p, &runs, ask).trough_pct >= 45.0
+        };
+        assert!(holds(kwh), "recommended {kwh} kWh must itself hold the floor");
+        // The ask must not sit pinned at the window's deliverable cap
+        // (2.5 kWh here) when a smaller ask still holds the floor.
+        let cap = p.max_charge_kw * (window.end_min - window.start_min) as f64 / 60.0;
+        assert!(
+            kwh < cap - 1e-6,
+            "ask {kwh:.3} kWh is pinned at the deliverable cap {cap:.3} — \
+             the bisection must shrink it to the minimal holding ask"
+        );
+        // Tightness: shaving a further 0.1 kWh off the recommended ask
+        // must break the floor (same boundary probe as the uncapped
+        // test).
+        let slack = kwh - 0.1;
+        if slack > 0.0 {
+            assert!(
+                !holds(slack),
+                "ask {kwh:.3} kWh is not minimal — {slack:.3} kWh still holds the floor, so the planner is buying more import than the floor needs"
+            );
+        }
+    }
+
     /// Deterministic 72-hour series on a FIXED local date (no
     /// wall-clock dependence): every hour present, so the window
     /// occurrences land at stable indices regardless of when the test
