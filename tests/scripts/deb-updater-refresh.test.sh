@@ -145,6 +145,47 @@ sh "$STAGE/postinst" abort-upgrade >/dev/null 2>&1
 cmp -s "$STAGE/usr/local/bin/update" <(printf '#/old content with marker\nREPO="psylsph/home-energy-manager"\n')
 assert_eq "abort-upgrade leaves the updater alone" "0" "$?"
 
+echo
+echo "8. a binary file at the updater path is never touched"
+# A binary that happens to embed the marker string must not be matched by
+# the marker grep — grep treats binary files as matches by default, so the
+# postinst has to opt out with -I.
+printf 'REPO="psylsph/home-energy-manager"\x00\x80\x81\xffgarbage' >"$STAGE/usr/local/bin/update"
+sh "$STAGE/postinst" configure 0.75.7 >/dev/null 2>&1
+RC=0
+cmp -s "$STAGE/usr/local/bin/update" <(printf 'REPO="psylsph/home-energy-manager"\x00\x80\x81\xffgarbage') || RC=$?
+assert_eq "binary file at the updater path left untouched" "0" "$RC"
+
+echo
+echo "9. a failed or interrupted refresh leaves no temp file behind"
+BROKEN="$STAGE/share/givenergy-local/unreadable-install.sh"
+cp "$INSTALLER" "$BROKEN"
+chmod 000 "$BROKEN"
+sed "s|/usr/local/bin|$STAGE/usr/local/bin|g; s|/usr/local/sbin|$STAGE/usr/local/sbin|g; s|$PACKAGED_PATH|$BROKEN|g" \
+  "$REPO_ROOT/src-tauri/$POSTINST" >"$STAGE/postinst-broken"
+printf '#!/bin/sh\nREPO="psylsph/home-energy-manager"\n# stale copy\n' >"$STAGE/usr/local/bin/update"
+# A half-written temp file from a refresh that was killed mid-copy.
+printf 'partial garbage from an interrupted cp' >"$STAGE/usr/local/bin/update.tmp"
+sh "$STAGE/postinst-broken" configure 0.75.7 >/dev/null 2>&1
+RC=0
+cmp -s "$STAGE/usr/local/bin/update" <(printf '#!/bin/sh\nREPO="psylsph/home-energy-manager"\n# stale copy\n') || RC=$?
+assert_eq "updater untouched when the packaged copy is unreadable" "0" "$RC"
+assert_eq "leftover temp file cleaned up" "no" "$([ -e "$STAGE/usr/local/bin/update.tmp" ] && echo yes || echo no)"
+
+echo
+echo "10. a running updater keeps reading its old copy across a refresh"
+printf '#!/bin/sh\nREPO="psylsph/home-energy-manager"\nOLD RUNNING COPY\n' >"$STAGE/usr/local/bin/update"
+exec 3<"$STAGE/usr/local/bin/update"
+sh "$STAGE/postinst" configure 0.75.7 >/dev/null 2>&1
+READ_BACK="$(cat <&3)"
+exec 3<&-
+RC=0
+cmp -s <(printf '%s\n' "$READ_BACK") <(printf '#!/bin/sh\nREPO="psylsph/home-energy-manager"\nOLD RUNNING COPY\n') || RC=$?
+assert_eq "an already-open reader still sees the old inode" "0" "$RC"
+RC=0
+cmp -s "$STAGE/usr/local/bin/update" "$INSTALLER" || RC=$?
+assert_eq "file on disk is the refreshed copy" "0" "$RC"
+
 rm -rf "$STAGE"
 
 echo
