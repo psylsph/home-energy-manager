@@ -61,7 +61,6 @@ PY
 }
 
 POSTINST="$(conf_value bundle.linux.deb.postInstallScript)"
-POSTINST_BODY=""
 if [ -n "$POSTINST" ] && [ "$POSTINST" != "null" ]; then
   POSTINST_CONTENT="$(cat "$REPO_ROOT/src-tauri/$POSTINST")"
 fi
