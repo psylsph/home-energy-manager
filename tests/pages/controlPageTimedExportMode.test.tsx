@@ -223,6 +223,19 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
     expect(within(section).getByText('Timed Discharge')).toBeDefined();
   });
 
+  it('labels the export slot section Timed Export to match the battery-mode control', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot(),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    expect(await screen.findByRole('heading', { name: 'Timed Export', exact: true })).toBeDefined();
+    expect(screen.queryByRole('heading', { name: 'Discharge Schedule', exact: true })).toBeNull();
+    expect(screen.getByText(/Saving an enabled slot also enables Timed Export/)).toBeDefined();
+  });
+
   it('locks Timed Export and explains the required discharge slot when none is configured', async () => {
     useInverterStore.setState({
       snapshot: makeSnapshot({

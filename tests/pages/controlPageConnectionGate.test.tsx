@@ -264,7 +264,7 @@ describe('<ControlPage/> — connection-state gate', () => {
     expect(screen.queryByRole('heading', { name: 'Quick Actions', exact: true })).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Battery Mode', exact: true })).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Charge Schedule', exact: true })).toBeNull();
-    expect(screen.queryByRole('heading', { name: 'Discharge Schedule', exact: true })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Timed Export', exact: true })).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Battery and Power Controls', exact: true })).toBeNull();
 
     // The Retry button is there so the user can poke the backend instead

@@ -1,12 +1,12 @@
 /**
- * Tests for Cosy mode visibility of the Timed Discharge and Discharge
- * Schedule (Timed Export slot) sections on ControlPage.
+ * Tests for Cosy mode visibility of the Timed Discharge and Timed Export
+ * schedule sections on ControlPage.
  *
  * Background: Cosy mode was reworked from a "replace the battery mode"
  * preset to an independent force-charge mechanism that owns only the
  * `enable_charge` side of the inverter. The pause-discharge window
- * (Timed Discharge) and the export schedule (Discharge Schedule, the
- * schedule that drives Timed Export mode via `enable_discharge`) are
+ * (Timed Discharge) and the Timed Export schedule (driven via
+ * `enable_discharge`) are
  * independent mechanisms — they don't conflict with Cosy, so the user
  * can layer them (e.g. "Cosy force-charges 02:00–05:00, and Timed
  * Discharge blocks discharge outside 16:00–19:00").
@@ -114,7 +114,7 @@ function emptySlot(overrides: Partial<ScheduleSlot> = {}): ScheduleSlot {
  * Build a complete InverterSnapshot for a Gen3 Hybrid (device type code
  * '2001'). The two discharge-schedule sections under test don't depend on
  * any register state — they just render the slot list from
- * `discharge_slots` (Discharge Schedule) or `battery_pause_slot`
+ * `discharge_slots` (Timed Export) or `battery_pause_slot`
  * (Timed Discharge) — so we only need realistic defaults.
  */
 function makeSnapshot(overrides: Partial<InverterSnapshot> = {}): InverterSnapshot {
@@ -194,7 +194,7 @@ function makeSnapshot(overrides: Partial<InverterSnapshot> = {}): InverterSnapsh
     device_type_display: 'All-in-One 6kW',
     // All-in-One (8001) supports Timed Discharge (pause registers
     // HR318-320 are writable on the 8xxx family), so BOTH the Timed
-    // Discharge section and the Discharge Schedule (HR 56-57) render —
+    // Discharge section and the Timed Export schedule (HR 56-57) render —
     // this file verifies Cosy mode shows / hides them together. AC-coupled
     // (3001) was the original fixture, but those inverters reject
     // HR319/320 slot writes (Modbus exception 1), so Timed Discharge is
@@ -249,17 +249,17 @@ describe('<ControlPage/> — Cosy mode discharge schedule visibility', () => {
     return section;
   }
 
-  async function dischargeScheduleSection() {
+  async function timedExportSection() {
     const heading = await screen.findByRole('heading', {
-      name: 'Discharge Schedule',
+      name: 'Timed Export',
       exact: true,
     });
     const section = heading.closest('section');
-    if (!section) throw new Error('Discharge Schedule heading has no <section> ancestor');
+    if (!section) throw new Error('Timed Export heading has no <section> ancestor');
     return section;
   }
 
-  it('renders Timed Discharge + Discharge Schedule in Cosy mode', async () => {
+  it('renders Timed Discharge + Timed Export in Cosy mode', async () => {
     // The snapshot's cosy_enabled flag drives the initial mode; the
     // CosyChargingSection useEffect then re-asserts the mode from
     // /api/cosy on mount and flips the dropdown if they disagree.
@@ -297,15 +297,15 @@ describe('<ControlPage/> — Cosy mode discharge schedule visibility', () => {
     expect((select as HTMLSelectElement).value).toBe('cosy');
 
     // Both sections must be present. The Timed Discharge heading is
-    // unique to that section; the Discharge Schedule heading is the
-    // section that hosts the Timed Export slot editors. Assert on the
+    // unique to that section; the Timed Export heading identifies the
+    // section that hosts its slot editors. Assert on the
     // headings rather than the slot labels so we don't collide with the
     // "Slot 1" / "Slot 2" mentions in the slot-ordering warning callout.
     await timedDischargeSection();
-    await dischargeScheduleSection();
+    await timedExportSection();
   });
 
-  it('still renders Timed Discharge + Discharge Schedule in Standard mode (regression guard)', async () => {
+  it('still renders Timed Discharge + Timed Export in Standard mode (regression guard)', async () => {
     // Pre-Cosy behaviour already exposed both — this test pins that
     // contract so a future change can't quietly drop Standard mode.
     useInverterStore.setState({
@@ -319,10 +319,10 @@ describe('<ControlPage/> — Cosy mode discharge schedule visibility', () => {
     expect((select as HTMLSelectElement).value).toBe('standard');
 
     await timedDischargeSection();
-    await dischargeScheduleSection();
+    await timedExportSection();
   });
 
-  it('still hides Timed Discharge + Discharge Schedule in Agile mode (regression guard)', async () => {
+  it('still hides Timed Discharge + Timed Export in Agile mode (regression guard)', async () => {
     // Agile drives both charge and discharge from live prices, so manual
     // schedule editors must stay hidden. This guards against an
     // over-eager refactor that drops the agile exclusion at the same
@@ -347,6 +347,6 @@ describe('<ControlPage/> — Cosy mode discharge schedule visibility', () => {
     expect(select.value).toBe('agile');
 
     expect(screen.queryByRole('heading', { name: 'Timed Discharge', exact: true })).toBeNull();
-    expect(screen.queryByRole('heading', { name: 'Discharge Schedule', exact: true })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Timed Export', exact: true })).toBeNull();
   });
 });

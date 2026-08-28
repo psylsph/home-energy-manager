@@ -890,7 +890,7 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
               : mode === 'agile'
                 ? 'Agile mode automatically charges and discharges based on live Octopus prices. The app must stay running for price checks and switching to work — if you close it, the inverter stays in whatever mode it was last set to.'
                 : mode === 'agile_charge'
-                  ? 'Agile — Charge only drives the cheap-side charge slot from prices, while your Discharge Schedule and Timed Discharge keep full control of the discharge side. The app must stay running for price checks to keep the charge slot current.'
+                  ? 'Agile — Charge only drives the cheap-side charge slot from prices, while your Timed Export and Timed Discharge schedules keep full control of the discharge side. The app must stay running for price checks to keep the charge slot current.'
                   : 'Agile — Discharge only drives the expensive-side discharge slot from prices, while your Charge Schedule keeps full control of the charge side. The app must stay running for price checks to keep the discharge slot current.'
             }
           </p>
@@ -3192,7 +3192,9 @@ export default function ControlPage() {
       {!agileOwnsDischarge && !schedulesUnsupported && supportsTimedDischarge && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold text-lg">Timed Discharge</h2>
-          <p className="text-text-secondary/60 text-xs">Please Allow upto 10 Seconds for Changes to Save</p>
+          <p className="text-text-secondary/60 text-xs">
+            Saving an enabled slot also enables Timed Discharge. Please allow up to 10 seconds for changes to save.
+          </p>
           <ScheduleSlotEditor
             key={`timed-discharge-${timedDischargeSlot.enabled}-${timedDischargeSlot.start_hour}:${timedDischargeSlot.start_minute}-${timedDischargeSlot.end_hour}:${timedDischargeSlot.end_minute}`}
             slotIndex={0}
@@ -3216,8 +3218,10 @@ export default function ControlPage() {
           doesn't touch the discharge side. */}
       {!agileOwnsDischarge && !schedulesUnsupported && (
         <section className="space-y-3">
-          <h2 className="text-text-primary font-semibold text-lg">Discharge Schedule</h2>
-          <p className="text-text-secondary/60 text-xs">Please Allow upto 10 Seconds for Changes to Save</p>
+          <h2 className="text-text-primary font-semibold text-lg">Timed Export</h2>
+          <p className="text-text-secondary/60 text-xs">
+            Saving an enabled slot also enables Timed Export. Please allow up to 10 seconds for changes to save.
+          </p>
           <div className="space-y-3">
             {dischargeSlots.map((slot, i) => (
               <>

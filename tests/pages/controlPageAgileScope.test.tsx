@@ -734,7 +734,7 @@ describe('<ControlPage/> — Agile scope UI', () => {
   // ---------------------------------------------------------------
 
   it('shows the "Controlled by manual timer" label on discharge slots in Agile Charge Only mode', async () => {
-    // Charge Only mode owns charging; the user's Discharge Schedule
+    // Charge Only mode owns charging; the user's Timed Export schedule
     // coexists and should render with the explanatory label.
     useInverterStore.setState({
       snapshot: makeSnapshot({
@@ -750,7 +750,7 @@ describe('<ControlPage/> — Agile scope UI', () => {
     const { default: ControlPage } = await import('../../src/pages/ControlPage');
     render(<ControlPage />);
 
-    await screen.findByRole('heading', { name: 'Discharge Schedule', exact: true });
+    await screen.findByRole('heading', { name: 'Timed Export', exact: true });
     // The label should appear on each visible discharge slot.
     expect(screen.getAllByText(/Controlled by manual timer/).length).toBeGreaterThan(0);
   });
@@ -768,7 +768,7 @@ describe('<ControlPage/> — Agile scope UI', () => {
     const { default: ControlPage } = await import('../../src/pages/ControlPage');
     render(<ControlPage />);
 
-    await screen.findByRole('heading', { name: 'Discharge Schedule', exact: true });
+    await screen.findByRole('heading', { name: 'Timed Export', exact: true });
     expect(screen.queryByText(/Controlled by manual timer/)).toBeNull();
   });
 
@@ -780,11 +780,11 @@ describe('<ControlPage/> — Agile scope UI', () => {
     render(<ControlPage />);
 
     // Wait for the page to settle.
-    await screen.findByRole('heading', { name: 'Discharge Schedule', exact: true });
+    await screen.findByRole('heading', { name: 'Timed Export', exact: true });
     expect(screen.queryByRole('heading', { name: 'Charge Schedule', exact: true })).toBeNull();
   });
 
-  it('hides Discharge Schedule section in Agile Discharge Only mode', async () => {
+  it('hides Timed Export section in Agile Discharge Only mode', async () => {
     useInverterStore.setState({
       snapshot: makeSnapshot({ agile_scope: 'discharge_only', agile_enabled: true }),
     });
@@ -792,7 +792,7 @@ describe('<ControlPage/> — Agile scope UI', () => {
     render(<ControlPage />);
 
     await screen.findByRole('heading', { name: 'Charge Schedule', exact: true });
-    expect(screen.queryByRole('heading', { name: 'Discharge Schedule', exact: true })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Timed Export', exact: true })).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Timed Discharge', exact: true })).toBeNull();
   });
 
@@ -807,7 +807,7 @@ describe('<ControlPage/> — Agile scope UI', () => {
 
     await waitFor(() => {
       expect(screen.queryByRole('heading', { name: 'Charge Schedule', exact: true })).toBeNull();
-      expect(screen.queryByRole('heading', { name: 'Discharge Schedule', exact: true })).toBeNull();
+      expect(screen.queryByRole('heading', { name: 'Timed Export', exact: true })).toBeNull();
       expect(screen.queryByRole('heading', { name: 'Timed Discharge', exact: true })).toBeNull();
     });
   });
