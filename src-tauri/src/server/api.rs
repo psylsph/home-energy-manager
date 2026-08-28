@@ -2296,10 +2296,10 @@ pub async fn set_charge_slot(
 ///         "enabled": true}`
 ///
 /// If `enabled` is false, the slot times are set to 0 (per givenergy-modbus reference).
-/// Slot configuration normally remains independent of the master
-/// `enable_discharge` flag. However, disabling the last configured slot while
-/// Timed Export is armed also returns the inverter to Eco, so HR59/HR27 cannot
-/// be left in the invalid no-window state.
+/// Saving an enabled slot also arms Timed Export after the slot and target-SOC
+/// writes, matching the Timed Discharge editor's save-and-enable behaviour.
+/// Disabling the last configured slot while Timed Export is armed returns the
+/// inverter to Eco, so HR59/HR27 cannot be left in the invalid no-window state.
 pub async fn set_discharge_slot(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -2362,6 +2362,9 @@ pub async fn set_discharge_slot(
         encode_hhmm(start_hour, start_minute),
         encode_hhmm(end_hour, end_minute),
     );
+    if enabled && start == end {
+        return error_response("Start and end times must differ for an enabled Timed Export slot");
+    }
 
     let should_return_to_eco = if enabled {
         false
@@ -2389,24 +2392,36 @@ pub async fn set_discharge_slot(
 
     match cmd.encode() {
         Ok(mut writes) => {
-            // Slot configuration normally remains independent of HR59. If
-            // this is the last configured slot while Timed Export is armed,
-            // append the same HR59=0 + HR27=1 transition as the Timed Export
-            // Stop button, leaving the inverter in a consistent Eco state.
             // Write per-slot discharge target SOC (extended registers HR 272+)
             // when the inverter supports the HR240-299 schedule/target block.
-            if enabled && target_soc > 0 && device_type.uses_extended_schedule_slots() {
-                if let Ok(target_writes) = (ControlCommand::SetDischargeTargetSocSlot {
-                    slot,
-                    soc: target_soc as u16,
-                })
-                .encode()
-                {
-                    writes.extend(target_writes);
+            // Then arm Timed Export, keeping the slot/target writes ahead of
+            // HR27/HR59 so the inverter never sees an enabled schedule without
+            // a valid gating window.
+            if enabled {
+                if target_soc > 0 && device_type.uses_extended_schedule_slots() {
+                    if let Ok(target_writes) = (ControlCommand::SetDischargeTargetSocSlot {
+                        slot,
+                        soc: target_soc as u16,
+                    })
+                    .encode()
+                    {
+                        writes.extend(target_writes);
+                    }
                 }
-            }
 
-            if should_return_to_eco {
+                for command in [
+                    ControlCommand::SetBatteryPowerMode { mode: 0 },
+                    ControlCommand::SetEnableDischarge { enabled: true },
+                ] {
+                    match command.encode() {
+                        Ok(mut mode_writes) => writes.append(&mut mode_writes),
+                        Err(e) => return error_response(&format!("Validation error: {e}")),
+                    }
+                }
+            } else if should_return_to_eco {
+                // This was the last configured slot while Timed Export was
+                // armed. Append the same HR59=0 + HR27=1 transition as the
+                // Timed Export Stop button, leaving a consistent Eco state.
                 writes.extend(crate::inverter::state_machines::build_timed_export_disable_writes());
             }
 
@@ -7094,6 +7109,71 @@ mod tests {
             assert!(drain_pending_writes(&state).await.is_empty());
             // The backup must not be consumed by the refused operation.
             assert!(Settings::load().discharge_slots_backup.is_some());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn saving_enabled_discharge_slot_arms_timed_export_after_slot_writes() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_BATTERY_POWER_MODE, HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START,
+                HR_DISCHARGE_TARGET_SOC_1, HR_ENABLE_DISCHARGE,
+            };
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+
+            let (status, _) = set_discharge_slot(
+                State(state.clone()),
+                Json(serde_json::json!({
+                    "slot": 1,
+                    "enabled": true,
+                    "start_hour": 16,
+                    "end_hour": 19,
+                    "target_soc": 40
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert_eq!(
+                writes
+                    .iter()
+                    .map(|write| (write.address, write.value))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (HR_DISCHARGE_SLOT_1_START, 1600),
+                    (HR_DISCHARGE_SLOT_1_END, 1900),
+                    (HR_DISCHARGE_TARGET_SOC_1, 40),
+                    (HR_BATTERY_POWER_MODE, 0),
+                    (HR_ENABLE_DISCHARGE, 1),
+                ]
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn saving_enabled_zero_duration_discharge_slot_does_not_arm_timed_export() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+
+            let (status, response) = set_discharge_slot(
+                State(state.clone()),
+                Json(serde_json::json!({
+                    "slot": 1,
+                    "enabled": true,
+                    "start_hour": 16,
+                    "end_hour": 16,
+                    "target_soc": 40
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(response.0["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("differ")));
+            assert!(drain_pending_writes(&state).await.is_empty());
         })
         .await;
     }
