@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.75.7] - 2026-08-28
 
 ### Fixed
 
@@ -10,7 +10,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
-- **The Proxmox update command now refreshes itself when the app package is updated.** The in-container `update` command used to stay frozen at whatever installer version created the container, so updater improvements never reached existing setups; every package update now carries a fresh copy and installs it automatically, with the retry-on-404 hardening from #291 included.
+- **The Proxmox update command now refreshes itself when the app package is updated.** The in-container `update` command used to stay frozen at whatever installer version created the container, so updater improvements never reached existing setups; every package update now carries a fresh copy and installs it automatically, with the retry hardening above included.
 
 - **Releases no longer go public until every platform's installer has been uploaded.** Previously whichever platform finished building first made the release visible on GitHub, so for a few minutes the latest version could be missing some downloads; releases are now published in one step once all installers are present (issue #291).
 
