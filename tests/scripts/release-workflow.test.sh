@@ -92,6 +92,13 @@ echo "3. publishing flips the draft once, and marks it latest"
 PUBLISH_COUNT="$(count_matches '-f draft=false')"
 assert_eq "exactly one publish edit flips the draft" "1" "$PUBLISH_COUNT"
 assert_contains "published release is marked latest" "make_latest=true" "$WORKFLOW_YAML"
+assert_contains 're-run against an already-public release exits cleanly' '${RELEASE_ID:-}' "$WORKFLOW_YAML"
+
+
+echo
+echo "4. asset uploads only run for version tags"
+TAG_GUARD_COUNT="$(count_matches "startsWith(github.ref, 'refs/tags/v')")"
+assert_eq "tag guard on both upload steps, docker and publish jobs" "4" "$TAG_GUARD_COUNT"
 
 echo
 echo "---------------------------------------"
