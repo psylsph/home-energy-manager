@@ -12,6 +12,7 @@ import {
   YAxis,
 } from 'recharts';
 import { apiGet, apiPost } from '../lib/api';
+import { timeAxisProps } from '../lib/chartAxis';
 import { tooltipStyleProps } from '../lib/chartTooltip';
 import { formatEnergy } from '../lib/format';
 import {
@@ -496,6 +497,7 @@ export default function ForecastPage() {
                 tickFormatter={hourLabel}
                 stroke="#94a3b8"
                 fontSize={10}
+                {...timeAxisProps}
               />
               <YAxis stroke="#94a3b8" fontSize={10} unit="kWh" width={48} />
               <Tooltip
@@ -547,6 +549,7 @@ export default function ForecastPage() {
                 tickFormatter={hourLabel}
                 stroke="#94a3b8"
                 fontSize={10}
+                {...timeAxisProps}
               />
               <YAxis stroke="#94a3b8" fontSize={10} unit="kWh" width={48} />
               <Tooltip
@@ -614,6 +617,7 @@ export default function ForecastPage() {
                 tickFormatter={hourLabel}
                 stroke="#94a3b8"
                 fontSize={10}
+                {...timeAxisProps}
               />
               <YAxis stroke="#94a3b8" fontSize={10} domain={[0, 100]} unit="%" width={44} />
               <Tooltip
