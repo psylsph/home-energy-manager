@@ -445,6 +445,29 @@ FRESH_FAILURE_COMMANDS="$(cat "$STAGE/commands.log")"
 assert_eq "failed first install reports non-zero" "1" "$FRESH_FAILURE_RC"
 assert_contains "disables failed service" "systemctl disable --now home-energy-manager.service" "$FRESH_FAILURE_COMMANDS"
 assert_contains "removes failed package" "apt remove -y home-energy-manager" "$FRESH_FAILURE_COMMANDS"
+
+echo
+echo "9. package downloads retry transient GitHub 404s"
+# A release can be listed as latest a moment before its asset URLs come
+# alive on GitHub's CDN (issue #291). Both package downloads (the new
+# release and the retained previous one) must retry instead of failing
+# on the first 404.
+: >"$STAGE/commands.log"
+set +e
+PATH="$STAGE/bin:/usr/bin:/bin" \
+  HEM_TEST_LOG="$STAGE/commands.log" \
+  HEM_TEST_DEB="$STAGE/deb-fixture" \
+  HEM_TEST_DIGEST="$DIGEST" \
+  HEM_TEST_INSTALLED_VERSION="1.2.2" \
+  HEM_ROOT="$STAGE/retry-root" \
+  bash "$REPO_ROOT/scripts/proxmox/install.sh" >"$STAGE/retry-output.log" 2>&1
+RETRY_RC=$?
+set -e
+DOWNLOAD_LINES="$(grep -c 'example.invalid/hem' "$STAGE/commands.log" || true)"
+RETRIED_LINES="$(grep 'example.invalid/hem' "$STAGE/commands.log" | grep -c -- '--retry 5 --retry-delay 5 --retry-all-errors' || true)"
+assert_eq "retrying installer exits successfully" "0" "$RETRY_RC"
+assert_eq "downloads both the new and retained package" "2" "$DOWNLOAD_LINES"
+assert_eq "every package download carries retry flags" "$DOWNLOAD_LINES" "$RETRIED_LINES"
 rm -rf "$STAGE"
 
 echo
