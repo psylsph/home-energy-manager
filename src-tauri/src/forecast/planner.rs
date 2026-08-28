@@ -416,10 +416,14 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
         // reserve floor the response is a cliff). The whole point of
         // the plan is to buy as little grid import as the floor needs,
         // so once the loop holds the floor, bisect back down to the
-        // smallest ask that still holds it. Skipped when the ask hit
-        // the deliverable cap without holding the floor (nothing to
-        // shrink — the capped caveat below reports that honestly).
-        if outcome.trough_pct >= inputs.target_soc_pct && kwh > 0.0 && kwh < deliverable_ac {
+        // smallest ask that still holds it. This includes the case
+        // where the ask was clamped AT the deliverable cap and the
+        // capped ask holds the floor (deep deficit + narrow window):
+        // every bisection probe stays <= the cap, so shrinking is
+        // safe. Only a capped ask that still FAILS the floor has
+        // nothing to shrink — the capped caveat below reports that
+        // honestly.
+        if outcome.trough_pct >= inputs.target_soc_pct && kwh > 0.0 {
             let mut lo = 0.0_f64; // known-failing
             let mut hi = kwh; // known-good
             for _ in 0..24 {
