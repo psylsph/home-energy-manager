@@ -177,12 +177,12 @@ function makeSnapshot(overrides: Partial<InverterSnapshot> = {}): InverterSnapsh
     max_charge_slots: 2,
     max_discharge_slots: 2,
     charge_slots: [emptySlot(), emptySlot()],
-    // A disabled-but-populated window (the shape the decoder reports for
-    // a previously configured slot) so the editor defaults to 16:00-19:00
-    // with a 4% floor — the values the save-parity assertions pin.
+    // Disabled-but-populated windows (the shape the decoder reports for
+    // previously configured slots) so the editors default to concrete
+    // values — the ones the save-parity assertions pin.
     discharge_slots: [
       emptySlot({ start_hour: 16, end_hour: 19, target_soc: 4 }),
-      emptySlot(),
+      emptySlot({ start_hour: 20, end_hour: 22, target_soc: 10 }),
     ],
     meters: [],
     inverter_serial: 'BAT000131',
@@ -308,6 +308,79 @@ describe('<ControlPage/> — Timed Export / Timed Discharge save parity', () => 
       '/api/control/timed-discharge',
       expect.objectContaining({ enabled: false }),
     );
+  });
+
+  it('saving slot 2 of the Timed Export schedule POSTs slot: 2 with its own window', async () => {
+    render(<ControlPage />);
+
+    const section = await sectionByHeading('Timed Export');
+    // Slot 2's editor is the second Save button in the section.
+    fireEvent.click(within(section).getByLabelText('Slot 2 disabled'));
+    fireEvent.click(within(section).getAllByRole('button', { name: 'Save' })[1]);
+
+    expect(vi.mocked(apiPost)).toHaveBeenCalledWith('/api/control/discharge-slot', {
+      slot: 2,
+      enabled: true,
+      start_hour: 20,
+      start_minute: 0,
+      end_hour: 22,
+      end_minute: 0,
+      target_soc: 10,
+    });
+  });
+
+  it('a saved Timed Discharge window lights the Battery Mode indicator immediately and stays lit once the snapshot confirms', async () => {
+    render(<ControlPage />);
+
+    const section = await sectionByHeading('Timed Discharge');
+    await enableAndSave(section, 'Slot 1');
+
+    const modeButton = screen.getByRole('button', { name: /Timed Discharge/ });
+    // The save applies an optimistic 10s override, so the indicator responds
+    // to the save itself — no dead time waiting for the poll round-trip.
+    expect(modeButton.getAttribute('aria-pressed')).toBe('true');
+
+    // Once the poll loop confirms HR318=2, the snapshot keeps it lit even
+    // after the optimistic override expires.
+    act(() => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({
+          battery_pause_mode: 2,
+          battery_pause_slot: emptySlot({
+            enabled: true,
+            start_hour: 4,
+            start_minute: 0,
+            end_hour: 3,
+            end_minute: 0,
+          }),
+        }),
+      });
+    });
+
+    expect(modeButton.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('surfaces a backend rejection when the window has no duration', async () => {
+    vi.mocked(apiPost).mockRejectedValueOnce(
+      new Error('Start and end times must differ for an enabled Timed Export slot'),
+    );
+    render(<ControlPage />);
+
+    const section = await sectionByHeading('Timed Export');
+    // Enable slot 1, then collapse the end time onto the start time.
+    fireEvent.click(within(section).getByLabelText('Slot 1 disabled'));
+    const selects = within(section).getAllByRole('combobox');
+    // Slot 1's editor renders Start (hour, minute) then End (hour, minute).
+    fireEvent.change(selects[2], { target: { value: '16' } });
+    fireEvent.click(within(section).getAllByRole('button', { name: 'Save' })[0]);
+
+    // The editor sent exactly what the user picked — the backend is the one
+    // that rejects a zero-duration window.
+    expect(vi.mocked(apiPost)).toHaveBeenCalledWith(
+      '/api/control/discharge-slot',
+      expect.objectContaining({ slot: 1, enabled: true, end_hour: 16 }),
+    );
+    expect(await within(section).findByText('✗ Error')).toBeDefined();
   });
 
   it('both sections carry matching save-and-enable wording', async () => {
