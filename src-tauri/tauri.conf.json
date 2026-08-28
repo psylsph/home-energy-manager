@@ -68,8 +68,10 @@
         "replaces": [
           "giv-energy-local"
         ],
+        "postInstallScript": "deb/postinst.sh",
         "files": {
-          "/usr/share/givenergy-local/dist": "../dist"
+          "/usr/share/givenergy-local/dist": "../dist",
+          "/usr/share/givenergy-local/proxmox-install.sh": "../scripts/proxmox/install.sh"
         }
       },
       "rpm": {

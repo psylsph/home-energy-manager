@@ -56,11 +56,11 @@ for part in pointer.split('.'):
     value = value.get(part) if isinstance(value, dict) else None
     if value is None:
         break
-print(json.dumps(value) if value is not None else '')
+print(value if isinstance(value, str) else json.dumps(value) if value is not None else '')
 PY
 }
 
-POSTINST="$(conf_value bundle.deb.postInstScript)"
+POSTINST="$(conf_value bundle.linux.deb.postInstallScript)"
 POSTINST_BODY=""
 if [ -n "$POSTINST" ] && [ "$POSTINST" != "null" ]; then
   POSTINST_CONTENT="$(cat "$REPO_ROOT/src-tauri/$POSTINST")"
@@ -72,15 +72,15 @@ echo
 echo "1. the deb ships the LXC installer and a postinst refresh script"
 DEB_FILES_JSON="$(python3 -c "
 import json
-print(json.dumps(json.load(open('$CONF')).get('bundle', {}).get('deb', {}).get('files', {})))
+print(json.dumps(json.load(open('$CONF')).get('bundle', {}).get('linux', {}).get('deb', {}).get('files', {})))
 ")"
 DEB_CONFIG_JSON="$(python3 -c "
 import json
-print(json.dumps(json.load(open('$CONF')).get('bundle', {}).get('deb', {})))
+print(json.dumps(json.load(open('$CONF')).get('bundle', {}).get('linux', {}).get('deb', {})))
 ")"
 assert_contains "deb ships install.sh at the packaged path" "$PACKAGED_PATH" "$DEB_FILES_JSON"
 assert_contains "packaged copy comes from the live installer" "../scripts/proxmox/install.sh" "$DEB_FILES_JSON"
-assert_contains "postinst script is configured" "postInstScript" "$DEB_CONFIG_JSON"
+assert_contains "postinst script is configured" "postInstallScript" "$DEB_CONFIG_JSON"
 
 if [ -z "${POSTINST_CONTENT:-}" ]; then
   echo "  FAIL  postinst content readable"
