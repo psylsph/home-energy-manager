@@ -31,6 +31,7 @@ settings.json
 *.sln
 *.sw?
 docs/*.md
+.opencode
 
 # OS files
 Thumbs.db
