@@ -655,23 +655,35 @@ jobs:
           # The verify step exits early without setting RELEASE_ID when the
           # release is already public (workflow re-run after a success).
           [ -n "${RELEASE_ID:-}" ] || { echo "Nothing to publish."; exit 0; }
+          # Flip the draft first, then mark latest in a separate PATCH.
+          # GitHub silently drops make_latest when it rides along in the
+          # same request that flips draft=false (v0.75.7 and v0.75.8 both
+          # published unmarked that way, typed field or not); the marker
+          # only lands on a standalone PATCH against the public release.
           gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
             -f draft=false \
-            -F make_latest=true \
             --jq '.html_url'
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -F make_latest=true > /dev/null
 
       - name: Verify releases/latest points at this tag
         run: |
           set -euo pipefail
-          # The release API is served with a short cache; allow up to a
-          # minute for make_latest to land before failing the run.
+          # Same re-run guard as the publish step: an already-public
+          # release has nothing to re-verify.
+          [ -n "${RELEASE_ID:-}" ] || { echo "Nothing to verify."; exit 0; }
+          # The release API is served with a short cache and GitHub can
+          # drop make_latest outright, so re-assert the marker on every
+          # retry rather than only re-reading.
           for attempt in 1 2 3 4 5 6; do
             latest="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
             if [ "$latest" = "$TAG" ]; then
               echo "releases/latest is ${latest}."
               exit 0
             fi
-            echo "releases/latest is ${latest}, expected ${TAG} (attempt ${attempt}); retrying in 10s..."
+            echo "releases/latest is ${latest}, expected ${TAG} (attempt ${attempt}); re-asserting make_latest and retrying in 10s..."
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+              -F make_latest=true > /dev/null
             sleep 10
           done
           echo "::error::releases/latest never pointed at ${TAG} after publishing."

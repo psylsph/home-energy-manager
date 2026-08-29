@@ -8,6 +8,11 @@
 # workflow must now upload everything to a draft release and only flip
 # it public from a final job that first verifies every installer is
 # present.
+#
+# v0.75.7/v0.75.8 follow-up: GitHub silently drops make_latest when it
+# rides along in the PATCH that flips draft=false, so the publish step
+# must flip the draft and mark latest in separate PATCHes, and the
+# verify loop must re-assert make_latest rather than only re-reading.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -88,12 +93,41 @@ for pattern in \
 done
 
 echo
-echo "3. publishing flips the draft once, and marks it latest"
+# Extract one named step's run block so assertions can be scoped to the
+# step that must contain (or avoid) a string, not just the whole file.
+step_block() {
+  awk -v step="$1" '
+    index($0, "- name: " step) { inblock = 1; next }
+    inblock && /^      - name: / { exit }
+    inblock { print }
+  ' "$WORKFLOW"
+}
+
+# Join backslash-continued lines so a multi-line gh api call is checked
+# as one unit.
+joined_commands() {
+  awk '{
+    if (sub(/\\$/, "")) buf = buf $0
+    else { print buf $0; buf = "" }
+  } END { if (buf != "") print buf }'
+}
+
+echo "3. publishing flips the draft once, marks latest separately, and self-heals"
+PUBLISH_BLOCK="$(step_block 'Publish the release')"
+VERIFY_BLOCK="$(step_block 'Verify releases/latest points at this tag')"
+PUBLISH_CMDS="$(printf '%s\n' "$PUBLISH_BLOCK" | joined_commands)"
+
 PUBLISH_COUNT="$(count_matches '-f draft=false')"
 assert_eq "exactly one publish edit flips the draft" "1" "$PUBLISH_COUNT"
-assert_contains "published release is marked latest with a typed form field" "-F make_latest=true" "$WORKFLOW_YAML"
-assert_contains "publish is verified against releases/latest" "releases/latest" "$WORKFLOW_YAML"
-assert_contains 're-run against an already-public release exits cleanly' '${RELEASE_ID:-}' "$WORKFLOW_YAML"
+FLIP_CMD="$(printf '%s\n' "$PUBLISH_CMDS" | grep -- '-f draft=false')"
+assert_contains "publish step flips the draft" "-f draft=false" "$FLIP_CMD"
+assert_not_contains "draft flip PATCH carries no make_latest (GitHub drops it there)" "make_latest" "$FLIP_CMD"
+LATEST_PATCH_COUNT="$(printf '%s\n' "$PUBLISH_CMDS" | grep -c -- 'make_latest=true' || true)"
+assert_eq "a separate PATCH marks the release latest" "1" "$LATEST_PATCH_COUNT"
+assert_contains "publish is verified against releases/latest" "releases/latest" "$VERIFY_BLOCK"
+assert_contains "verify loop re-asserts make_latest instead of only re-reading" "-F make_latest=true" "$VERIFY_BLOCK"
+assert_contains 're-run against an already-public release exits cleanly' '${RELEASE_ID:-}' "$PUBLISH_BLOCK"
+assert_contains 'verify step guards re-runs too' '${RELEASE_ID:-}' "$VERIFY_BLOCK"
 
 
 echo
