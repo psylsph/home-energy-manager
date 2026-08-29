@@ -134,6 +134,12 @@ Home Energy Manager connects directly to your inverter over your home network. I
 - **PDF consumption reports** — generate formatted reports with charts and summary tables for solar, home, grid, and battery energy, including cost breakdowns. Open **Consumption Report** from the Power page, then choose **Print / save as PDF**. The History page exports CSV only.
 - **Consumption Reports** — summary statistics for any time range including total energy, peak power, solar coverage percentage, and grid dependency, with time-bucketed breakdowns exportable as CSV
 
+### Forecasting & Planning
+
+- **Solar forecast** — a 48-hour generation forecast built from live weather data (Open-Meteo — free, no account or API key needed) and automatically calibrated against your own generation history, so it learns your panels' real-world performance over the first couple of weeks
+- **Consumption profile** — your household's typical hourly electricity usage, learned from your own history and shown with typical low/high ranges
+- **Battery projection & overnight charge plan** — see where your battery charge is heading hour by hour, and get a recommended overnight grid charge when it would otherwise dip below your minimum level. The plan is sized to the smallest charge that holds your floor and placed in your cheapest import tariff window; one click applies it to the inverter
+
 ### Control
 
 - **Charge & discharge schedules** — set time slots for when your battery charges from the grid or discharges to power your home (up to **10 slots** on supported models)
@@ -149,7 +155,8 @@ Home Energy Manager connects directly to your inverter over your home network. I
 - **Octopus Cosy** (beta) — enter your three Cosy cheap-rate windows and the app automatically charges your battery during each one, switching back to Eco mode in between. Survives an app restart mid-slot.
 - **Octopus Agile** (beta) — enter your postcode and price thresholds. The app charges when Agile prices are low, discharges when they're high, and stays in Eco the rest of the time. Includes a live 24-hour price forecast grid with daily savings estimates.
 - **Auto Winter Mode** — protects your battery from cold by automatically charging it from the grid when the temperature drops. You set the temperature threshold and target charge level. Works the same way as GivEnergy Cloud's winter mode, but runs entirely on your own machine.
-- **Alert notifications (Telegram & ntfy)** — set thresholds for battery temperature, inverter temperature, SOC, solar clipping, grid offline, and battery over-temp. Get an alert message when something's wrong — and another when it's back to normal. Send `/status` in your Telegram chat for a live system snapshot. Choose between a Telegram bot, ntfy push notifications, or both.
+- **Alert notifications (Telegram, ntfy & Pushover)** — set thresholds for battery temperature, inverter temperature, SOC, solar clipping, grid offline, and battery over-temp. Get an alert message when something's wrong — and another when it's back to normal. Send `/status`, `/today`, or `/report` in your Telegram chat for a live system snapshot, today's cost summary, or yesterday's full consumption report. Choose between a Telegram bot, ntfy or Pushover push notifications, or any combination.
+- **Octopus smart-meter dashboard** — add your Octopus account number and API key to see supplier-recorded electricity import, export, and gas usage alongside your inverter data, including billing costs, monthly and yearly summaries, and a comparison against the app's own readings. Export as CSV or PDF. The Octopus tab stays hidden until configured.
 
 ### Compatibility
 

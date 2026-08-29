@@ -205,6 +205,16 @@ instructions on all three channels.
 
 ---
 
+### How does the Forecast tab work?
+
+The Forecast tab predicts the next 48 hours from live weather data (Open-Meteo — free, no account or API key needed) combined with your own history:
+
+- **Solar** is calibrated against your actual generation over the last two weeks, so the prediction learns how your panels really perform. Until roughly five usable days of history exist, the prediction is marked *preliminary*.
+- **Consumption** is learned from your household's typical hourly usage.
+- **Battery projection** simulates your charge level hour by hour. When it would dip below your **Minimum battery level**, the planner recommends an overnight grid charge — sized to the smallest charge that holds that floor and placed in your cheapest import tariff window. Press **Apply** to write the charge slot to the inverter.
+
+For charge recommendations to appear, make sure your import tariff windows are configured under **Settings → Energy Tariffs**.
+
 ### Something else?
 
 Open an issue on [GitHub](https://github.com/psylsph/home-energy-manager/issues) and we'll help you out.

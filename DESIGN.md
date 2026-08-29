@@ -47,10 +47,12 @@ Technical reference for GivEnergy Local. For a user-oriented overview, see [READ
 | `src/lib/types.ts` | `InverterSnapshot` interface (mirrors Rust struct) |
 | `src/lib/format.ts` | Power (W), voltage (V), current (A), temp (°C), percent formatters |
 | `src/hooks/useWebSocket.ts` | Connects to `/ws`, auto-reconnects, fetches initial REST snapshot |
-| `src/components/EnergyFlowDiagram.tsx` | Radial SVG with animated power flow lines |
+| `src/components/EnergyOrbitDiagram.tsx` | Radial SVG with animated power flow lines (renamed from `EnergyFlowDiagram`) |
 | `src/components/BatteryPanel.tsx` | Per-battery-module cell voltage/temperature table |
+| `src/pages/ForecastPage.tsx` | 48 h solar / consumption / battery-projection charts + overnight charge plan (issue #283) |
+| `src/pages/OctopusPage.tsx` | Octopus smart-meter dashboard — supplier import/export/gas, billing, CSV/PDF export (issue #212) |
 | `src/pages/ControlPage.tsx` | Schedule slots, mode selector, SOC/limit sliders |
-| `src/pages/SettingsPage.tsx` | Connection config, discovery, about section |
+| `src/pages/SettingsPage.tsx` | Connection config, discovery, tariffs, alerts, about section |
 
 ### State management
 
@@ -59,8 +61,17 @@ Zustand store (`useInverterStore`):
 ```typescript
 {
   snapshot: InverterSnapshot | null,
-  connectionState: 'connected' | 'disconnected',
+  connectionState: ConnectionState,
   connectedHost: string | null,
+  developerMode: boolean,        // persisted to localStorage
+  themeMode: ThemeMode,
+  readOnly: boolean,
+  hiddenPanels: string[],
+  chartRange: HistoryRange,
+  gridLineWeight: GridLineWeight,
+  // EV Charger state (evcHost, evcPower, evcCharging, evcConnected,
+  // evcEverConnected latch, session energy …) — the latch distinguishes
+  // "charger was here, now offline" from "never reached" (issue #138)
 }
 ```
 
@@ -78,24 +89,37 @@ App version is injected at build time via `vite.config.ts` → `__APP_VERSION__`
 
 ```
 src-tauri/src/
-├── lib.rs              Tauri setup, spawns server + poll task
+├── lib.rs              Tauri setup + headless CLI, spawns server + poll task
 ├── main.rs             Tauri builder entry point
+├── update.rs           "New version available" GitHub Releases polling
+├── octopus.rs          Octopus Energy account integration (issue #212)
+├── windows_autostart.rs Windows registry autostart helper
+├── test_util.rs        Shared test fixtures
 ├── inverter/
 │   ├── mod.rs          Re-exports
-│   ├── model.rs        InverterSnapshot, ScheduleSlot, BatteryMode, BatteryState
+│   ├── model.rs        InverterSnapshot, ScheduleSlot, BatteryMode, DeviceType
 │   ├── decoder.rs      Register → snapshot decoder, timeslot logic, enable flag gating
 │   ├── encoder.rs      ControlCommand → RegisterWrite encoder, whitelist validation
 │   ├── poll.rs         Poll loop: write queue → register reads → snapshot broadcast
+│   ├── sanitizer.rs    Register-corruption defense (range/delta/median checks)
+│   ├── state_machines.rs  Connect/reconnect + battery-protocol + Cosy/Agile automations
+│   ├── reconnect.rs    Reconnect backoff
 │   └── discovery.rs    Network scan, subnet inference, serial auto-detect
 ├── modbus/
 │   ├── mod.rs          Re-exports
 │   ├── client.rs       ModbusClient: connect, read, write (FC6), stale frame drain
 │   ├── framer.rs       GivEnergy frame encode/decode (proprietary MBAP variant)
 │   └── registers.rs    Register addresses, poll blocks, safe-write list, HHMM codec
+├── history/            SQLite history + forecast persistence (~/.givenergy-local/history.db)
+├── forecast/           Solar forecast, consumption profile, SOC simulation, planner (#283)
+├── weather/            Open-Meteo ambient-temperature fetch + backfill
+├── alerts/             Threshold alerts, Telegram/ntfy/Pushover delivery, daily report
+├── evc/                EV charger (OCPP/Modbus) client + poll loop
 ├── server/
 │   ├── mod.rs          Axum router, server startup (graceful error handling)
-│   ├── api.rs          REST endpoints (/api/control/*, /api/snapshot, /api/settings)
-│   └── ws.rs           WebSocket handler, PollMessage broadcast
+│   ├── api.rs          REST endpoints (/api/control/*, /api/snapshot, /api/settings …)
+│   ├── ws.rs           WebSocket handler, PollMessage broadcast
+│   └── logs.rs         LogRing + GET /api/logs
 └── settings/
     └── mod.rs          JSON file persistence (~/.givenergy-local/settings.json)
 ```
@@ -349,17 +373,25 @@ Leave `serial` empty for auto-discovery from the dongle's first response frame.
 | Method | Endpoint | Description |
 |---|---|---|
 | GET | `/api/snapshot` | Latest inverter snapshot (JSON) |
-| GET/POST | `/api/settings` | Read/update connection settings. Returns `import_tariff_config`/`export_tariff_config` with `{peak_rate, off_peak_rate, off_peak_start, off_peak_end}` |
-| GET | `/api/history` | Aggregated time-series data (`?range=,fields=,offset=`) |
-| GET | `/api/logs` | Developer log buffer (2000 most recent log lines) |
-| POST | `/api/control/mode` | Set battery mode (`{mode: "eco\|timed_demand\|timed_export\|pause"}`) |
-| POST | `/api/control/charge-slot` | Configure charge slot (`{slot, enabled, start_hour, start_minute, end_hour, end_minute, target_soc}`) |
-| POST | `/api/control/discharge-slot` | Configure discharge slot (same shape, no target_soc) |
-| POST | `/api/control/reserve` | Set SOC reserve (`{soc: 4}`) |
-| POST | `/api/control/charge-rate` | Set charge power limit (`{limit: 50}`) |
-| POST | `/api/control/discharge-rate` | Set discharge power limit (`{limit: 50}`) |
-| POST | `/api/control/pause` | Pause battery (sets SOC reserve to 100) |
-| GET | `/api/discover` | Scan network for inverters |
+| GET | `/api/status` | Connection state + poll health |
+| GET/POST | `/api/settings` | Read/update settings (connection, tariffs, alerts, weather, automation …) |
+| GET | `/api/history`, `/api/history/summary` | Aggregated time-series (`?range=,fields=,offset=`) + period summary |
+| GET | `/api/report` | Power-page consumption report data |
+| POST | `/api/control/mode`, `/eco`, `/timed-charge`, `/timed-export` | Battery mode selection |
+| POST | `/api/control/charge-slot`, `/discharge-slot` | Configure schedule slots (incl. `target_soc`) |
+| POST | `/api/control/reserve`, `/charge-rate`, `/discharge-rate`, `/export-limit`, `/eps` | Limits and SOC reserve |
+| POST | `/api/control/pause`, `/unpause`, `/force-charge`, `/force-discharge` | Manual overrides |
+| POST | `/api/control/calibration`, `/reboot`, `/sync-clock` | Maintenance actions |
+| GET/POST | `/api/auto-winter`, `/charging-mode`, `/adaptive-charge`, `/load-limiter`, `/temperature-limiter`, `/discharge-floor` | Automation configuration |
+| GET/POST | `/api/cosy`, `/api/agile` | Octopus Cosy / Agile tariff automation |
+| GET/POST | `/api/octopus/*` | Octopus account data (status, sync, history, summary, comparison) |
+| GET | `/api/forecast`, `/api/forecast/plan` | 48 h forecast + overnight charge recommendation (#283) |
+| GET/POST | `/api/weather`, `/api/weather/backfill` | Local weather config + history backfill |
+| GET/POST | `/api/alerts`, `/api/alerts/test` | Alert thresholds + test delivery |
+| GET | `/api/discover`, `/api/evc/discover` | Network scans (inverter, EV charger) |
+| GET | `/api/evc/status` | EV charger reachability + cached snapshot |
+| GET | `/api/logs`, `/api/log-level`, `/api/latest-version` | Dev console logs, log level, update check |
+| POST | `/api/reconnect` | Force a reconnect |
 | WS | `/ws` | Real-time snapshot + connection state stream |
 
 ## Docker Deployment
