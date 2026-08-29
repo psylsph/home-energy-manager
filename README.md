@@ -34,6 +34,7 @@ Home Energy Manager connects directly to your inverter over your home network an
   </tr>
   <tr>
     <td align="center"><b>History — Home</b><br><img src=".github/screenshots/history-home.png" width="400"></td>
+    <td align="center"><b>Forecast</b><br><img src=".github/screenshots/forecast.png" width="290"></td>
 </tr>
 
   <tr>

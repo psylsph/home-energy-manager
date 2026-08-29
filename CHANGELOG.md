@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.75.9] - 2026-08-29
+
+### Fixed
+
+- **The Forecast tab is now on the website — with a screenshot.** The feature shipped in v0.75.0 without a launch entry: the release notes jumped straight to its follow-up fixes, and neither the website's feature grid nor the README mentioned it. The site gains a "Forecast & Charge Planning" card with the new forecast screenshot in the gallery, the README gains a Forecasting & Planning section, and the FAQ explains the calibration period and why charge recommendations need import tariff windows configured.
+
+- **The website's feature list now covers everything that ships.** The Octopus smart-meter dashboard (supplier import, export and gas usage with billing costs and CSV/PDF export) had no card — only the Cosy and Agile automations did — and the compatibility list was missing the Gateway. Both are listed now, and the README's alert section finally names Pushover alongside Telegram and ntfy.
+
+### Internal
+
+- Changelog backfill: the Forecast tab — a 48-hour solar forecast calibrated against your own generation history, a learned household consumption profile, an hour-by-hour battery projection, and an overnight charge plan you can apply with one tap — shipped as the headline feature of v0.75.0, but the launch entry was never written. Only its follow-up fixes appear in the later release notes; this entry stands in for it.
+- Release publishing now marks the release latest in a standalone PATCH and re-asserts it on retry. GitHub silently drops `make_latest` when it rides along in the same PATCH that flips `draft=false` (v0.75.7 and v0.75.8 both published unmarked that way), so the marker only lands on a separate request against the already-public release.
+- DESIGN.md caught up with the current architecture (module tree including the sanitizer, state machines, forecast, alerts, EVC, Octopus, history and weather modules; the post-rename `EnergyOrbitDiagram`; the full API endpoint table; the store's current shape). AGENTS.md pins Vite 8 (it claimed 9), lists `OctopusPage` and `octopus.rs`, and includes Pushover in the alert delivery paths.
+
 ## [0.75.8] - 2026-08-28
 
 ### Fixed
