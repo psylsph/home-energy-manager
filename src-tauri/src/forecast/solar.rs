@@ -209,28 +209,27 @@ mod tests {
     #[test]
     fn url_contains_solar_params() {
         let url = solar_forecast_url("https://api.open-meteo.com", 51.5, -0.13);
-        assert!(
-            url.starts_with("https://api.open-meteo.com/v1/forecast?"),
-            "{url}"
-        );
-        assert!(url.contains("latitude=51.5"), "{url}");
-        assert!(url.contains("longitude=-0.13"), "{url}");
-        assert!(
-            url.contains("hourly=shortwave_radiation,direct_radiation,cloud_cover"),
-            "{url}"
-        );
+        // No `{url}` assert messages here: CodeQL's cleartext-logging
+        // query treats URL query params named latitude/longitude as
+        // sensitive and assert panics as log sinks, so interpolating the
+        // URL re-opens the alert. The assert conditions are
+        // self-describing.
+        assert!(url.starts_with("https://api.open-meteo.com/v1/forecast?"));
+        assert!(url.contains("latitude=51.5"));
+        assert!(url.contains("longitude=-0.13"));
+        assert!(url.contains("hourly=shortwave_radiation,direct_radiation,cloud_cover"));
         // 14 modelled past days feed the performance-ratio calibration;
         // 3 forward days cover the 48 h planning horizon with slack.
-        assert!(url.contains("past_days=14"), "{url}");
-        assert!(url.contains("forecast_days=3"), "{url}");
+        assert!(url.contains("past_days=14"));
+        assert!(url.contains("forecast_days=3"));
         // UTC keeps the timestamp parse tz-free like the weather module.
-        assert!(url.contains("timezone=UTC"), "{url}");
+        assert!(url.contains("timezone=UTC"));
     }
 
     #[test]
     fn url_trims_trailing_slash_from_base() {
         let url = solar_forecast_url("https://api.open-meteo.com/", 1.0, 2.0);
-        assert!(!url.contains("//v1"), "{url}");
+        assert!(!url.contains("//v1"));
     }
 
     fn json_with(hourly: serde_json::Value) -> serde_json::Value {
