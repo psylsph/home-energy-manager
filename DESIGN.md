@@ -309,6 +309,225 @@ match (eco, enable_discharge, reserve == 100) {
 }
 ```
 
+### Proposed Eco and timed-export design
+
+This section records the intended resolution of issue #289. It is a design,
+not a description of the current implementation.
+
+#### Register semantics
+
+The discharge controls are related but not interchangeable:
+
+| Mechanism | Registers | Meaning |
+|---|---|---|
+| Eco / match demand | HR27 = 1 | Battery discharge follows home demand; it does not deliberately export surplus |
+| Maximum-power discharge | HR27 = 0 | Battery runs at its configured discharge rate; output beyond home demand is exported |
+| DC discharge schedule | HR59 + HR44/45, HR56/57 and extended slots | Arms the inverter's discharge windows |
+| Timed Discharge / pause discharge | HR318 = 2, HR319/320 | Prevents discharge during the pause window |
+
+The established local-Modbus interpretation is:
+
+```text
+HR27=1, HR59=0  Eco
+HR27=1, HR59=1  Timed Demand
+HR27=0, HR59=1  Timed Export
+HR27=0, HR59=0  Export Paused
+```
+
+GivTCP deliberately uses this conservative model. Its Timed Demand command
+writes HR27=1 and HR59=1; Timed Export and Force Export always write HR27=0
+and HR59=1. GivTCP does not query the cloud capability flag and has no
+model/firmware table for it.
+
+Household demand does not define whether Eco is enabled. During maximum-power
+export the house consumes the power it needs from the local AC bus and only
+surplus reaches the grid. For example, 3.6 kW battery output with 1 kW home
+load produces approximately 2.6 kW export. HR27 controls the battery's
+_discharge target_, not whether the home is supplied first.
+
+#### `full-power-discharge-in-eco-mode`
+
+GivEnergy exposes `full-power-discharge-in-eco-mode` as cloud metadata rather
+than a readable local Modbus register:
+
+- When present, a scheduled DC discharge runs at full power during its slot
+  even while HR27 remains 1. The firmware temporarily overrides Eco for the
+  slot and Eco can remain the configured baseline outside it.
+- When absent, HR27=1 limits scheduled discharge to matching demand. A
+  controller must write HR27=0 to guarantee full-power export.
+- When unknown, HEM must not infer support solely from inverter family or
+  firmware until a verified capability table exists. Automatic probing is
+  unsafe and unreliable because the result depends on SOC, load, export
+  limits, generation and the current schedule.
+
+A known-capable inverter may use the native combination HR27=1, HR59=1 with
+its slots permanently armed. All other devices need explicit boundary
+management if the user wants normal Eco between export windows.
+
+#### App-managed Timed Export
+
+For absent or unknown capability, HEM should treat Timed Export as a temporary
+override of an Eco baseline rather than leaving maximum-power mode selected
+all day. The desired slots are persisted in HEM and, where firmware permits,
+remain programmed on the inverter continuously.
+
+Outside an export window:
+
+```text
+HR59 = 0  disarm scheduled discharge
+HR27 = 1  select Eco / match demand
+```
+
+At window entry:
+
+```text
+HR27 = 0  select maximum-power discharge
+HR59 = 1  arm the already-programmed export slot
+```
+
+At window exit:
+
+```text
+HR59 = 0  stop scheduled discharge first
+HR27 = 1  restore Eco
+```
+
+The slot remains an inverter-side safety boundary. If HEM stops during an
+export, the inverter slot still ends the discharge. HR27 may remain 0 and hold
+the battery afterward, so startup and reconnect handling must detect that an
+export window is no longer active and repair HR59=0 followed by HR27=1.
+Missing the entry transition means full-power export does not start, so the UI
+must state that this mode requires HEM to remain running.
+
+Multiple and overnight slots are evaluated using inverter-local time. Entry
+and exit transitions must be idempotent, survive reconnects, and avoid
+re-queueing the same writes every poll.
+
+#### Firmware that re-arms HR59
+
+Some Gen3 firmware reasserts HR59 when any discharge slot remains non-zero.
+The preferred permanent-slot approach must therefore be confirmed from
+readback:
+
+1. At window exit, write HR59=0 and HR27=1.
+2. Observe subsequent polls for an unsolicited HR59 return to 1.
+3. If HR59 remains 0, keep the slots on the inverter permanently.
+4. If HR59 reasserts, do not fight it with continuous writes. Persist the
+   desired schedule in HEM, clear the physical slots outside export windows,
+   and restore them immediately before HR27=0/HR59=1 at entry.
+
+On the fallback path the inverter slots are cleared only because that firmware
+makes true Eco impossible while they remain populated. The persisted HEM
+schedule is still the user-visible source of truth. A backed-up or app-managed
+slot must remain visible as **Configured** in the Control page even when the
+live inverter slot is temporarily zero; it must not become an empty editor or
+disable the Timed Export control.
+
+#### Interaction with HR318 Timed Discharge
+
+HR318 is an independent pause gate and is not part of the HR27/HR59 export
+transition:
+
+```text
+HR318=0  pause disabled
+HR318=1  pause charging
+HR318=2  pause discharging
+HR318=3  pause charging and discharging
+```
+
+HEM presents HR318=2 as Timed Discharge. For a visible demand window of
+03:00-04:00, HR319/320 contains the inverse pause window 04:00-03:00. HR318
+does not initiate discharge; it only permits discharge inside the visible
+window and blocks it outside.
+
+Ordinary scheduled Timed Export must respect HR318:
+
+| Export window | HR318 is currently blocking discharge | Effective behaviour |
+|---|---|---|
+| Outside | No | Eco |
+| Outside | Yes | Eco configured, battery discharge paused |
+| Inside | No | HR27=0 and HR59=1; maximum-power export |
+| Inside | Yes | Export remains scheduled but is blocked by Pause Discharge |
+
+Scheduled export must not silently clear HR318. If an export slot overlaps an
+active pause interval, the UI should report **Blocked by Pause Discharge**.
+If it overlaps the allowed Timed Discharge window, export may run normally.
+
+A manual Force Discharge is deliberately different. It is an explicit
+override and may temporarily disable battery pause, but it must capture
+HR318, HR319 and HR320 first and restore all three when the force action ends.
+Thermal and hardware safety protection always has higher priority than manual
+or scheduled discharge.
+
+The intended priority is:
+
+1. Hardware and thermal safety
+2. Explicit Pause Discharge / HR318
+3. Manual Force Charge or Force Discharge (with captured pause-state restore)
+4. Scheduled Timed Export
+5. Timed Charge
+6. Eco baseline
+
+#### Battery-mode presentation
+
+The Control page must not present Eco, Timed Charge, Timed Discharge and Timed
+Export as four equivalent binary modes. Eco is a baseline; the others are
+armed schedules or temporary overrides. A single cyan highlight currently
+conflates **configured**, **armed** and **active now**.
+
+The UI should separate:
+
+- **Baseline**: normally `Eco`.
+- **Current behaviour**: Eco, charging, demand discharge, export, paused or a
+  safety override.
+- **Schedules**: Off, Configured, Armed, Active now, Blocked or Error.
+
+Eco has three presentation states:
+
+| State | Presentation |
+|---|---|
+| Eco controls discharge now | **Eco — Active** |
+| Eco is the configured baseline but Timed Export, Force Discharge or pause currently owns behaviour | **Eco — Temporarily overridden** |
+| Eco was explicitly disabled and will not be restored | **Eco — Off** |
+
+During an active Timed Export window, Eco should therefore not appear simply
+active or permanently off. Show:
+
+```text
+Baseline: Eco — temporarily overridden
+Current behaviour: Timed Export — exporting now
+Home load is supplied first; surplus power is exported.
+Eco resumes at 19:00.
+```
+
+This remains the correct presentation on a flag-capable inverter even if the
+raw HR27 value stays 1: the firmware's scheduled full-power behaviour, not Eco
+match-demand, currently controls battery output. Raw HR27/HR59 values belong
+in developer diagnostics, not in the user-facing meaning of the indicator.
+
+Timed Charge and Timed Export indicators must distinguish a future armed slot
+from current activity. Timed Export is **Active now** only when the current
+time is in an enabled export slot, the export transition is confirmed, HR318
+is not blocking it, and telemetry is consistent with discharge/export. HR59
+alone is not proof of Timed Export because HR27=1/HR59=1 is Timed Demand on
+ordinary firmware.
+
+#### Required verification
+
+Implementation must add deterministic tests for:
+
+- Normal, overnight and adjacent export-slot entry/exit transitions.
+- Write ordering: HR27 then HR59 at entry; HR59 then HR27 at exit.
+- Restart and reconnect inside and outside an export window.
+- Permanent-slot operation when HR59 remains off outside a window.
+- Detection and fallback when firmware reasserts HR59.
+- Persistence and display of configured slots while physical slots are clear.
+- HR318 blocking, non-overlapping and allowed-window overlap cases.
+- Force Discharge capture/disable/restore of HR318-320.
+- Eco **Active**, **Temporarily overridden** and **Off** presentation.
+- Timed Export **Configured**, **Active now** and **Blocked** presentation.
+- Fixed clocks for every time-window test.
+
 ## Testing
 
 101 Rust unit tests across all modules. No frontend tests.
