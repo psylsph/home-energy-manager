@@ -6535,6 +6535,100 @@ mod tests {
     }
 
     #[test]
+    fn timed_export_failed_stop_disarm_stays_repairable_while_disabled() {
+        // CODE_REVIEW.md finding 2: a Stop whose disarm writes failed
+        // persists schedule_enabled=false and arms the machine into
+        // Exiting. The physical slots are still populated (non-re-arm
+        // firmware keeps them), but they are residue of HEM's own
+        // incomplete stop — the reconciler must keep re-issuing the exit
+        // writes instead of mistaking them for an external owner.
+        let mut config = te_config_enabled();
+        config.schedule_enabled = false; // stop persisted; disarm failed
+        let mut state = TimedExportState::Exiting {
+            polls_waiting: 0,
+            retries: 0,
+        };
+        let mut snap = export_armed_snapshot();
+        snap.discharge_slots[0] = configured_slot();
+
+        let decision = check_timed_export_with_defaults(
+            &snap,
+            &config,
+            &mut state,
+            10 * 60,
+            DeviceType::Gen3Hybrid,
+        );
+        assert!(
+            matches!(
+                decision.new_state,
+                TimedExportState::Exiting { .. }
+            ),
+            "a failed stop must keep its exit pending, not fold to Off"
+        );
+        assert!(
+            !decision.writes.is_empty(),
+            "a failed stop's disarm must stay eligible for repair while the schedule is disabled"
+        );
+        assert!(decision.is_exit_transition);
+    }
+
+    #[test]
+    fn timed_export_failed_stop_exit_completes_to_off_once_eco_confirmed() {
+        // Once the retried disarm lands, the disabled-schedule Exiting state
+        // settles into Off — even with a residue physical slot still
+        // configured on the inverter.
+        let mut config = te_config_enabled();
+        config.schedule_enabled = false;
+        let mut state = TimedExportState::Exiting {
+            polls_waiting: 0,
+            retries: 0,
+        };
+        let mut snap = eco_snapshot();
+        snap.discharge_slots[0] = configured_slot();
+
+        let decision = check_timed_export_with_defaults(
+            &snap,
+            &config,
+            &mut state,
+            10 * 60,
+            DeviceType::Gen3Hybrid,
+        );
+        assert!(matches!(decision.new_state, TimedExportState::Off));
+        assert!(decision.writes.is_empty());
+    }
+
+    #[test]
+    fn timed_export_failed_stop_exit_retry_is_bounded() {
+        // The failed-stop repair is bounded by the shared Exiting retry
+        // budget: persistent write failures surface Error rather than
+        // retrying forever.
+        let mut config = te_config_enabled();
+        config.schedule_enabled = false;
+        let mut state = TimedExportState::Exiting {
+            polls_waiting: 0,
+            retries: 0,
+        };
+        let mut snap = export_armed_snapshot();
+        snap.discharge_slots[0] = configured_slot();
+
+        for _ in 0..(TIMED_EXPORT_MAX_WRITE_RETRIES + 1) {
+            let _ = check_timed_export(
+                &snap,
+                &config,
+                &mut state,
+                10 * 60,
+                DeviceType::Gen3Hybrid,
+                TimedExportWriteOutcome::Failed,
+                false,
+            );
+        }
+        assert!(
+            matches!(state, TimedExportState::Error { .. }),
+            "persistent exit-write failures must surface Error, got {state:?}"
+        );
+    }
+
+    #[test]
     fn timed_export_repairs_partial_export_mode_when_schedule_is_disabled() {
         // A failed/partial transition can leave HR27 in export mode while
         // the model-specific discharge-enable register is already clear.

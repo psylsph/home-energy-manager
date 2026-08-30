@@ -8077,6 +8077,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn timed_export_stop_disarm_failure_leaves_retryable_exit_state() {
+        // CODE_REVIEW.md finding 2: a stop whose disarm batch fails must
+        // not strand the export-armed registers behind a quiet machine. The
+        // handler already persisted schedule_enabled=false and set Off;
+        // when the awaited disarm fails it must arm the reconciler into
+        // Exiting so the poll loop keeps repairing (distinguished from an
+        // externally-owned schedule, which lands Off and stays quiet).
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            // Physically exporting (HR27=0/HR59=1) with a populated physical
+            // slot — the residue shape the reconciler must keep repairing.
+            {
+                let mut snap = state.latest_snapshot.lock().await;
+                if let Some(s) = snap.as_mut() {
+                    s.battery_power_mode = 0;
+                    s.enable_discharge = true;
+                    s.discharge_slots[0] = crate::inverter::model::ScheduleSlot {
+                        enabled: true,
+                        start_hour: 16,
+                        start_minute: 0,
+                        end_hour: 19,
+                        end_minute: 0,
+                        target_soc: 4,
+                    };
+                }
+            }
+            let (status, _) = drive_set_timed_export_completion_with(
+                &state,
+                serde_json::json!({ "enabled": false }),
+                WriteOutcome::Failed {
+                    address: 59,
+                    value: 0,
+                    error: "dongle busy".to_string(),
+                },
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY);
+            assert!(
+                !crate::settings::Settings::load().timed_export_schedule_enabled,
+                "the stop still persists the disabled schedule for retry"
+            );
+            assert!(
+                matches!(
+                    *state.timed_export_state.lock().await,
+                    crate::inverter::state_machines::TimedExportState::Exiting { .. }
+                ),
+                "a failed disarm must leave the machine in Exiting so the poll loop repairs it"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn timed_export_disable_with_rearm_fallback_clears_slots_before_disarm() {
         // Issue #289: once the firmware is classified as HR59 re-arming,
         // Stop must clear the physical slot registers BEFORE the HR59=0
