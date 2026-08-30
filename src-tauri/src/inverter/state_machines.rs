@@ -1814,28 +1814,6 @@ fn is_in_export_window(slots: &[ScheduleSlot], minute_of_day: u16) -> bool {
     })
 }
 
-/// Find the next slot transition time after the given minute.
-/// Returns the minute-of-day when the next slot starts or ends.
-#[allow(dead_code)]
-fn next_transition_after(slots: &[ScheduleSlot], current_minute: u16) -> Option<u16> {
-    let mut transitions: Vec<u16> = Vec::new();
-    for slot in slots.iter().filter(|s| s.enabled) {
-        let start = u16::from(slot.start_hour) * 60 + u16::from(slot.start_minute);
-        let end = u16::from(slot.end_hour) * 60 + u16::from(slot.end_minute);
-        if start != end {
-            transitions.push(start);
-            transitions.push(end);
-        }
-    }
-    // Find the next transition after current_minute
-    transitions
-        .iter()
-        .filter(|&&t| t > current_minute)
-        .min()
-        .or_else(|| transitions.iter().min())
-        .copied()
-}
-
 /// Whether HR318 is actively blocking battery discharge at the given minute.
 ///
 /// HR318=2 (pause discharging) or 3 (pause charge + discharge) arms a
@@ -1951,10 +1929,15 @@ pub fn check_timed_export(
         // Agile/Cosy and manual Timed Discharge use the same physical
         // HR27/enable-discharge shape as Timed Export. When the managed
         // schedule is off, a populated physical slot is evidence that
-        // another controller owns those registers; do not clobber it with
-        // an Eco repair. A genuinely stale raw export state has no slot and
-        // still follows the repair path below.
-        if !config.schedule_enabled && !has_enabled_slots && physical_slot_configured {
+        // another controller owns those registers — including Agile
+        // arming export after a Stop that retained the desired slots
+        // (code-review blocking finding: the repair used to fire for that
+        // shape and oscillate export↔Eco with Agile every other poll).
+        // Do not clobber it with an Eco repair; HEM's own post-Stop state
+        // is already disarmed by the awaited transactional stop path. A
+        // genuinely stale raw export state has no slot and still follows
+        // the repair path below.
+        if !config.schedule_enabled && physical_slot_configured {
             *state = TimedExportState::Off;
             return quiet(state);
         }
@@ -6517,6 +6500,38 @@ mod tests {
             decision.writes.is_empty(),
             "disabled Timed Export must not clear another controller's slot"
         );
+    }
+
+    #[test]
+    fn timed_export_stays_quiet_when_agile_arms_after_stop_with_retained_slots() {
+        // The blocking oscillation from code review: Stop retains the
+        // desired slots in config and (outside the re-arm fallback) leaves
+        // the physical slot registers populated. Agile Full then arms
+        // HR27=0/HR59=1 plus its own slot 1, so the readback is
+        // export-armed with a populated physical slot. The Off repair
+        // must not fire: HEM would disarm this poll, Agile would re-arm
+        // the next, and the inverter would flap export↔Eco forever. A
+        // populated physical slot while the schedule is disabled means
+        // another controller owns the registers.
+        let mut config = te_config_enabled();
+        config.schedule_enabled = false; // stopped, desired slots retained
+        let mut state = TimedExportState::Off;
+        let mut snap = export_armed_snapshot(); // Agile armed export
+        snap.discharge_slots[0] = configured_slot(); // Agile's slot 1
+
+        let decision = check_timed_export_with_defaults(
+            &snap,
+            &config,
+            &mut state,
+            10 * 60,
+            DeviceType::Gen3Hybrid,
+        );
+        assert!(matches!(decision.new_state, TimedExportState::Off));
+        assert!(
+            decision.writes.is_empty(),
+            "disabled Timed Export must not fight another controller's armed export"
+        );
+        assert!(!decision.is_exit_transition);
     }
 
     #[test]

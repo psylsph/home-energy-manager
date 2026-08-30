@@ -739,8 +739,7 @@ impl ScheduleSlot {
     /// 16:00–16:00) is not configured — same parity as the window math and
     /// the TS `isSlotConfigured` helper (CODE_REVIEW.md finding 5).
     pub fn is_configured(&self) -> bool {
-        self.enabled
-            && (self.start_hour != self.end_hour || self.start_minute != self.end_minute)
+        self.enabled && (self.start_hour != self.end_hour || self.start_minute != self.end_minute)
     }
 }
 

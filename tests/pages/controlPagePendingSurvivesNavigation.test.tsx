@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { act, fireEvent, render, screen, cleanup } from '@testing-library/react';
+import { act, fireEvent, render, screen, cleanup, within, waitFor } from '@testing-library/react';
 import ControlPage from '../../src/pages/ControlPage';
 import { useInverterStore } from '../../src/store/useInverterStore';
 import { apiGet, apiPost } from '../../src/lib/api';
@@ -206,5 +206,46 @@ describe('ControlPage battery-mode banners survive tab navigation', () => {
         const exportButton = screen.getByRole('button', { name: /Timed Export/ }) as HTMLButtonElement;
         expect(exportButton.dataset.variant).toBe('error');
         void apiGet;
+    });
+
+    it('clears the Timed Export error after the next accepted slot save', async () => {
+        // Live-session report: a stop attempt deferred behind an HR318
+        // pause surfaced "could not be stopped yet". The user then
+        // re-saved the export slot (accepted) — the stale error banner and
+        // the error variant must clear, because the user has just acted
+        // on the error.
+        vi.mocked(apiPost)
+            .mockRejectedValueOnce(
+                new Error(
+                    'Timed Export could not be stopped yet (the required inverter write did not complete within 15 seconds). The schedule is disabled — retry the stop to also disarm the inverter.',
+                ),
+            )
+            .mockResolvedValue({ ok: true, data: {} });
+
+        useInverterStore.setState({
+            snapshot: makeSnapshot({
+                discharge_slots: [{ ...emptySlot(), enabled: true, start_hour: 16, end_hour: 19 }],
+            }),
+            connectionState: 'connected',
+        });
+        render(<ControlPage />);
+        await screen.findByRole('heading', { name: 'Battery Mode', exact: true });
+
+        // The failed toggle leaves the error banner…
+        fireEvent.click(screen.getByRole('button', { name: /Timed Export/ }));
+        const alert = await screen.findByRole('alert');
+        expect(alert.textContent).toContain('could not be stopped yet');
+
+        // …and the accepted slot save clears it.
+        const exportHeading = await screen.findByRole('heading', { name: 'Timed Export', exact: true });
+        const exportSection = exportHeading.closest('section')!;
+        const saveButtons = within(exportSection).getAllByRole('button', { name: 'Save' });
+        fireEvent.click(saveButtons[0]);
+
+        await waitFor(() => {
+            expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+        });
+        const exportButton = screen.getByRole('button', { name: /Timed Export/ }) as HTMLButtonElement;
+        expect(exportButton.dataset.variant).not.toBe('error');
     });
 });

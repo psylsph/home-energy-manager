@@ -2,7 +2,7 @@
  * Tests for Eco / Timed Export state derivation helpers.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
     deriveTimedExportButton,
     deriveEcoState,
@@ -245,9 +245,14 @@ describe('deriveTimedExportState', () => {
     });
 
     it('uses current time when now is not provided', () => {
-        const state = deriveTimedExportState(snapshot(), true, [slot()]);
-        // We can't assert exact state without mocking Date, but verify it doesn't throw
-        expect(['off', 'configured', 'active_now', 'blocked_by_pause']).toContain(state);
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-06-28T10:00:00'));
+        try {
+            const state = deriveTimedExportState(snapshot(), true, [slot()]);
+            expect(state).toBe('configured');
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });
 

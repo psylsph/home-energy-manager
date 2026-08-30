@@ -23,20 +23,31 @@ fn make_temp_dir() -> std::path::PathBuf {
     ))
 }
 
-/// Last-resort guard for unit tests started without the mandatory config
-/// override. Production code must use the user's real config directory, but a
-/// `cfg(test)` binary must never be able to fall through to it.
+struct ThreadFallbackDir(std::path::PathBuf);
+
+impl Drop for ThreadFallbackDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+thread_local! {
+    /// Libtest executes each test body on its own thread. Keeping the emergency
+    /// fallback thread-local gives every unguarded test a distinct directory
+    /// without mutating `GIVENERGY_LOCAL_CONFIG_DIR` for concurrently-running
+    /// tests. Explicit settings/AppState tests should still use the isolation
+    /// helpers below so their lifetime is scoped to the test body.
+    static FALLBACK: ThreadFallbackDir = {
+        let dir = make_temp_dir();
+        std::fs::create_dir_all(&dir).expect("create fallback test config directory");
+        ThreadFallbackDir(dir)
+    };
+}
+
+/// Last-resort path for unit tests started without the mandatory config
+/// override. This never changes process-global environment state.
 pub fn ensure_fallback_config_dir() -> std::path::PathBuf {
-    static FALLBACK: OnceLock<std::path::PathBuf> = OnceLock::new();
-    let dir = FALLBACK
-        .get_or_init(|| {
-            let dir = make_temp_dir();
-            std::fs::create_dir_all(&dir).expect("create fallback test config directory");
-            dir
-        })
-        .clone();
-    std::env::set_var("GIVENERGY_LOCAL_CONFIG_DIR", &dir);
-    dir
+    FALLBACK.with(|fallback| fallback.0.clone())
 }
 
 /// Run a synchronous test body with an isolated config directory.
@@ -176,18 +187,22 @@ mod tests {
     }
 
     #[test]
-    fn missing_override_can_be_redirected_to_a_temporary_directory() {
-        let _lock = config_dir_mutex().lock();
-        let original = std::env::var_os("GIVENERGY_LOCAL_CONFIG_DIR");
-        std::env::remove_var("GIVENERGY_LOCAL_CONFIG_DIR");
+    fn fallback_is_unique_per_test_thread_without_mutating_the_environment() {
+        let before = std::env::var_os("GIVENERGY_LOCAL_CONFIG_DIR");
+        let first = std::thread::spawn(ensure_fallback_config_dir)
+            .join()
+            .expect("first fallback thread");
+        let second = std::thread::spawn(ensure_fallback_config_dir)
+            .join()
+            .expect("second fallback thread");
 
-        let dir = ensure_fallback_config_dir();
-
-        assert!(dir.starts_with(std::env::temp_dir()));
+        assert_ne!(first, second, "each test thread needs its own fallback");
+        assert!(first.starts_with(std::env::temp_dir()));
+        assert!(second.starts_with(std::env::temp_dir()));
         assert_eq!(
             std::env::var_os("GIVENERGY_LOCAL_CONFIG_DIR"),
-            Some(dir.into_os_string())
+            before,
+            "fallback lookup must not mutate the process-global override"
         );
-        restore_config_dir(original);
     }
 }

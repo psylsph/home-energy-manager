@@ -252,7 +252,9 @@ describe('ControlPage Eco / Timed Export presentation', () => {
 
     describe('Timed Export schedule state', () => {
         it('shows "Configured" for future export slot, not "Active now"', async () => {
-            // Slot is 16:00-19:00, current time should be outside
+            vi.useFakeTimers({ shouldAdvanceTime: true });
+            vi.setSystemTime(new Date('2026-06-28T10:00:00'));
+            // Slot is 16:00-19:00; the pinned clock is outside it.
             enableManagedTimedExportForLiveSlots();
             await renderWithSnapshot(
                 makeSnapshot({
@@ -489,6 +491,10 @@ describe('ControlPage Eco / Timed Export presentation', () => {
             // treat the envelope itself as the schedule. Regression for the
             // local-simulator E2E where the persisted schedule stayed invisible
             // (UI showed Off) because the unwrap was missing.
+            // Pin the clock: the 18:00-20:00 persisted slot must read as
+            // Configured (future window), which requires "now" outside it.
+            vi.useFakeTimers({ shouldAdvanceTime: true });
+            vi.setSystemTime(new Date('2026-06-28T12:00:00'));
             const persistedSlot = configuredSlot({ start_hour: 18, start_minute: 0, end_hour: 20, end_minute: 0 });
             (apiGet as ReturnType<typeof vi.fn>).mockImplementation((path: string) => {
                 if (path === '/api/timed-export') {
@@ -519,9 +525,14 @@ describe('ControlPage Eco / Timed Export presentation', () => {
             expect(
                 (await screen.findAllByText('Timed Export — Configured')).length
             ).toBeGreaterThan(0);
+            vi.useRealTimers();
         });
 
         it('refreshes machine state when a new poll snapshot arrives', async () => {
+            // Pin the clock outside the 18:00-20:00 window so the machine
+            // starts from Configured regardless of when the suite runs.
+            vi.useFakeTimers({ shouldAdvanceTime: true });
+            vi.setSystemTime(new Date('2026-06-28T12:00:00'));
             const persistedSlot = configuredSlot({ start_hour: 18, end_hour: 20 });
             let machineState: unknown = 'Configured';
             (apiGet as ReturnType<typeof vi.fn>).mockImplementation((path: string) => {
@@ -552,6 +563,7 @@ describe('ControlPage Eco / Timed Export presentation', () => {
             });
 
             expect((await screen.findAllByText('Timed Export — Error')).length).toBeGreaterThan(0);
+            vi.useRealTimers();
         });
     });
 

@@ -3233,6 +3233,14 @@ export default function ControlPage() {
     // top-level field on this endpoint; accept the nested shape too for
     // compatibility with older proxies that wrapped response data.
     const returnedSchedule = res?.schedule ?? res?.data?.schedule;
+    if (path === '/api/control/discharge-slot') {
+      // The save was accepted: any stale battery-mode error (e.g. a
+      // previous stop/arm attempt that timed out) is superseded — the user
+      // has just acted on it, so the banner and the Timed Export error
+      // variant must clear instead of lingering until the next toggle.
+      setBatteryModeError(null);
+      setTimedExportArmFailed(false);
+    }
     if (path === '/api/control/discharge-slot' && returnedSchedule) {
       // Apply the echoed desired schedule immediately. Physical readback may
       // intentionally remain empty while re-arm fallback is active, so the
@@ -3554,9 +3562,9 @@ export default function ControlPage() {
                timedExportState === 'exiting' ? formatTimedExportState(timedExportState) :
                timedExportState === 'blocked_by_pause' ? formatTimedExportState(timedExportState) :
                timedExportState === 'error' ? formatTimedExportState(timedExportState) :
-               ecoState === 'active' ? 'Eco — Covering home demand' :
+               ecoState === 'active' ? 'Eco — Covering Home Demand' :
                snapshot?.battery_state === 'charging' ? 'Charging' :
-               snapshot?.battery_state === 'discharging' ? 'Demand discharge' :
+               snapshot?.battery_state === 'discharging' ? 'Demand Discharge' :
                'Eco'}
             </div>
             {timedExportState === 'active_now' && (

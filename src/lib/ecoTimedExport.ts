@@ -132,14 +132,6 @@ export function mergeScheduleWindows(slots: ScheduleSlot[]): MergedWindow[] {
 }
 
 /**
- * Explicit name for callers that need to document circular schedule
- * handling. `mergeScheduleWindows` already performs the circular merge.
- */
-export function mergeScheduleWindowsCircular(slots: ScheduleSlot[]): MergedWindow[] {
-    return mergeScheduleWindows(slots);
-}
-
-/**
  * Whether the current minute-of-day falls inside any merged export window.
  */
 export function isInMergedWindow(windows: MergedWindow[], minuteOfDay: number): boolean {
@@ -151,46 +143,6 @@ export function isInMergedWindow(windows: MergedWindow[], minuteOfDay: number): 
         }
     }
     return false;
-}
-
-/**
- * Find the next transition time after the given time.
- * Returns the time string (HH:MM) or null if no transitions.
- *
- * Kept for backwards compatibility with code that still binds to
- * `findNextTransition` directly; new callers should prefer the version
- * above which operates on merged effective windows.
- */
-export function findNextTransitionLegacy(
-    slots: ScheduleSlot[] | undefined,
-    hour: number,
-    minute: number
-): string | null {
-    if (!slots || slots.length === 0) {
-        return null;
-    }
-
-    const minuteOfDay = hour * 60 + minute;
-    const transitions: number[] = [];
-
-    for (const slot of slots) {
-        if (!isSlotConfigured(slot)) {
-            continue;
-        }
-        transitions.push(slot.start_hour * 60 + slot.start_minute);
-        transitions.push(slot.end_hour * 60 + slot.end_minute);
-    }
-
-    if (transitions.length === 0) {
-        return null;
-    }
-
-    // Find the next transition after current time
-    const next = transitions.filter((t) => t > minuteOfDay).sort((a, b) => a - b)[0] ?? transitions[0];
-
-    const h = Math.floor(next / 60);
-    const m = next % 60;
-    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
 }
 
 /**

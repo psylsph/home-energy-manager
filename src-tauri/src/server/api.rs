@@ -455,7 +455,10 @@ fn merge_desired_slot(
     if slot_index >= desired.len() {
         // Pad with default (unconfigured) slots so the edit lands at its
         // own index instead of shifting down onto the wrong slot.
-        desired.resize(slot_index + 1, crate::inverter::model::ScheduleSlot::default());
+        desired.resize(
+            slot_index + 1,
+            crate::inverter::model::ScheduleSlot::default(),
+        );
     }
     desired[slot_index] = edited;
 }
@@ -496,15 +499,6 @@ async fn queue_owned_writes_with_completion(
         Some(owner),
     )
     .await
-}
-
-/// Fail-fast fire-and-forget variant for an owned discharge-control batch.
-async fn queue_owned_writes_fail_fast(
-    state: &Arc<AppState>,
-    writes: Vec<RegisterWrite>,
-    owner: DischargeControlOwner,
-) {
-    queue_writes_with_policy(state, writes, WriteBatchPolicy::FailFast, None, Some(owner)).await;
 }
 
 /// Transactional Timed Export write. If the API request times out, the poll
@@ -635,6 +629,17 @@ async fn await_required_write_outcome(
     rx: tokio::sync::oneshot::Receiver<WriteOutcome>,
 ) -> Result<(), String> {
     await_required_write_outcome_with_timeout(rx, WRITE_COMPLETION_TIMEOUT).await
+}
+
+/// Await a required multi-register batch with enough time for the poll loop's
+/// mandatory inter-write pacing. Extended Timed Export schedules can contain
+/// dozens of slot and target-SOC writes, so the fixed base timeout is only
+/// suitable for short mode-transition batches.
+async fn await_required_batch_write_outcome(
+    rx: tokio::sync::oneshot::Receiver<WriteOutcome>,
+    write_count: usize,
+) -> Result<(), String> {
+    await_required_write_outcome_with_timeout(rx, batch_completion_timeout(write_count)).await
 }
 
 async fn await_required_write_outcome_with_timeout(
@@ -2180,17 +2185,55 @@ async fn persist_timed_export_schedule(
     schedule_enabled: bool,
     slots: Vec<crate::inverter::model::ScheduleSlot>,
 ) -> Result<(), String> {
+    persist_timed_export_schedule_with_backup_clear(state, schedule_enabled, slots, false).await
+}
+
+/// Persist a Timed Export schedule and optionally consume the legacy slot
+/// backup in one settings transaction. The backup must be cleared before an
+/// in-window schedule is armed: otherwise a later backup-clear failure would
+/// return an error after the inverter had already started exporting.
+async fn persist_timed_export_schedule_with_backup_clear(
+    state: &Arc<AppState>,
+    schedule_enabled: bool,
+    slots: Vec<crate::inverter::model::ScheduleSlot>,
+    clear_backup: bool,
+) -> Result<(), String> {
     crate::settings::Settings::update(|s| {
         s.timed_export_schedule_enabled = schedule_enabled;
         s.timed_export_slots = slots.clone();
+        if clear_backup {
+            s.discharge_slots_backup = None;
+        }
     })
     .map_err(|error| error.to_string())?;
     let mut config = state.timed_export_config.lock().await;
     config.schedule_enabled = schedule_enabled;
     config.slots = slots;
     drop(config);
-    state.timed_export_rearm.lock().await.reset();
+    crate::inverter::poll::reset_timed_export_rearm_detector(state).await;
     Ok(())
+}
+
+/// Put the boundary reconciler back into a live state after the API changes
+/// the desired schedule. In particular, `Error` is terminal inside
+/// `check_timed_export`, so leaving it untouched would make a corrected slot
+/// edit inert forever.
+async fn reset_timed_export_machine_after_schedule_change(
+    state: &Arc<AppState>,
+    schedule_enabled: bool,
+    in_window: bool,
+) {
+    let next = if !schedule_enabled {
+        crate::inverter::state_machines::TimedExportState::Off
+    } else if in_window {
+        crate::inverter::state_machines::TimedExportState::Entering {
+            polls_waiting: 0,
+            retries: 0,
+        }
+    } else {
+        crate::inverter::state_machines::TimedExportState::Configured
+    };
+    *state.timed_export_state.lock().await = next;
 }
 
 /// Whether "now" (inverter-local when the clock registers are readable)
@@ -2232,12 +2275,11 @@ async fn should_arm_timed_export_now(
 /// can therefore never lose the schedule or be rejected with "configure at
 /// least one slot" while a valid schedule is persisted.
 ///
-/// Arming is **two-phase and fail-fast**: slot/target writes are queued
-/// first and awaited; only after the inverter accepts them are the export
-/// writes (HR27=0, then enable=1) queued. A rejected slot write therefore
-/// can never leave the inverter switched into maximum-power export without
-/// a valid gating window. The schedule is persisted only after the required
-/// physical writes succeeded.
+/// Arming is ordered and fail-fast: slot/target and optional reserve writes
+/// complete first, the desired schedule is persisted, and the export arm
+/// (HR27=0, then enable=1) is the final fallible phase. A rejected setup write
+/// therefore cannot leave maximum-power export armed, while an arm failure
+/// retains a reconcilable desired schedule for automatic retry.
 pub async fn set_timed_export(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -2343,9 +2385,18 @@ pub async fn set_timed_export(
             device_type,
             &desired_slots,
         );
+        let reserve_writes = if let Some(soc) = body["soc_reserve"].as_u64() {
+            match reserve_writes_for_device(device_type, soc as u16) {
+                Ok(writes) => writes,
+                Err(error) => return error_response(&format!("Validation error: {error}")),
+            }
+        } else {
+            Vec::new()
+        };
         if (!rearm_confirmed || arm_now) && !slot_writes.is_empty() {
+            let write_count = slot_writes.len();
             let rx = queue_writes_transactional(&state, slot_writes).await;
-            if let Err(msg) = await_required_write_outcome(rx).await {
+            if let Err(msg) = await_required_batch_write_outcome(rx, write_count).await {
                 tracing::warn!("Timed Export slot restore rejected: {msg}");
                 return (
                     StatusCode::BAD_GATEWAY,
@@ -2358,6 +2409,90 @@ pub async fn set_timed_export(
                 );
             }
         }
+        if !reserve_writes.is_empty() {
+            // The reserve is part of setup, not a post-arm auxiliary write.
+            // Complete it before persistence and before maximum-power export
+            // can be armed, so a rejected reserve can never leave the inverter
+            // exporting while this endpoint reports failure.
+            tracing::info!(
+                "SetTimedExport reserve writes encoded: {:?}",
+                reserve_writes
+            );
+            let rx = queue_owned_writes_transactional(
+                &state,
+                reserve_writes,
+                DischargeControlOwner::TimedExport,
+            )
+            .await;
+            if let Err(msg) = await_required_write_outcome(rx).await {
+                tracing::warn!("Timed Export reserve write rejected: {msg}");
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({
+                        "ok": false,
+                        "error": format!(
+                            "Timed Export could not be enabled — the battery reserve write failed ({msg})."
+                        )
+                    })),
+                );
+            }
+        }
+
+        if !arm_now {
+            let eco_confirmed =
+                state
+                    .latest_snapshot
+                    .lock()
+                    .await
+                    .as_ref()
+                    .is_some_and(|snapshot| {
+                        snapshot.battery_power_mode == 1 && !snapshot.enable_discharge
+                    });
+            if !eco_confirmed {
+                let eco_writes =
+                    crate::inverter::state_machines::build_timed_export_disable_writes(device_type);
+                // User-issued Eco restore (the user just enabled a future
+                // window): queue as ManualMode so a register-derived
+                // ExplicitPause cannot starve it (see the stop path).
+                let rx = queue_owned_writes_transactional(
+                    &state,
+                    eco_writes,
+                    DischargeControlOwner::ManualMode,
+                )
+                .await;
+                if let Err(msg) = await_required_write_outcome(rx).await {
+                    tracing::warn!("Timed Export Eco baseline restore rejected: {msg}");
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({
+                            "ok": false,
+                            "error": format!(
+                                "Timed Export could not be enabled — restoring the Eco baseline failed ({msg})."
+                            )
+                        })),
+                    );
+                }
+            }
+        }
+
+        // This is the last fallible settings operation on the in-window path.
+        // Once it succeeds the export arm is the final action, so no later
+        // reserve or persistence error can strand maximum-power export behind
+        // an error response. Consume a legacy backup in the same transaction.
+        if let Err(error) = persist_timed_export_schedule_with_backup_clear(
+            &state,
+            true,
+            desired_slots,
+            restoring_backup,
+        )
+        .await
+        {
+            return error_response(&format!(
+                "Could not save the Timed Export schedule: {error}"
+            ));
+        }
+        reset_timed_export_machine_after_schedule_change(&state, true, arm_now).await;
+
         if arm_now {
             let mut arm_writes = vec![RegisterWrite {
                 address: crate::modbus::registers::HR_BATTERY_POWER_MODE,
@@ -2383,74 +2518,10 @@ pub async fn set_timed_export(
                     Json(json!({
                         "ok": false,
                         "error": format!(
-                            "Timed Export could not be enabled — the export arm failed ({msg})."
+                            "Timed Export could not be enabled — the export arm failed ({msg}). Arming will be retried automatically."
                         )
                     })),
                 );
-            }
-        } else {
-            let eco_confirmed =
-                state
-                    .latest_snapshot
-                    .lock()
-                    .await
-                    .as_ref()
-                    .is_some_and(|snapshot| {
-                        snapshot.battery_power_mode == 1 && !snapshot.enable_discharge
-                    });
-            if !eco_confirmed {
-                let eco_writes =
-                    crate::inverter::state_machines::build_timed_export_disable_writes(device_type);
-                let rx = queue_owned_writes_transactional(
-                    &state,
-                    eco_writes,
-                    DischargeControlOwner::TimedExport,
-                )
-                .await;
-                if let Err(msg) = await_required_write_outcome(rx).await {
-                    tracing::warn!("Timed Export Eco baseline restore rejected: {msg}");
-                    return (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({
-                            "ok": false,
-                            "error": format!(
-                                "Timed Export could not be enabled — restoring the Eco baseline failed ({msg})."
-                            )
-                        })),
-                    );
-                }
-            }
-        }
-        let mut writes = Vec::new();
-        if let Some(soc) = body["soc_reserve"].as_u64() {
-            match (ControlCommand::SetBatterySocReserve {
-                reserve: soc as u16,
-            })
-            .encode()
-            {
-                Ok(mut w) => writes.append(&mut w),
-                Err(e) => return error_response(&format!("Validation error: {}", e)),
-            }
-        }
-        if !writes.is_empty() {
-            tracing::info!("SetTimedExport auxiliary writes encoded: {:?}", writes);
-            queue_owned_writes_fail_fast(&state, writes, DischargeControlOwner::TimedExport).await;
-        }
-        if let Err(error) = persist_timed_export_schedule(&state, true, desired_slots).await {
-            return error_response(&format!(
-                "Could not save the Timed Export schedule: {error}"
-            ));
-        }
-        if restoring_backup {
-            // Transactional save: the backup clear happens under the
-            // settings lock so a concurrent writer can't sneak a
-            // backup-reseed in between our read and our save.
-            if let Err(error) = crate::settings::Settings::update(|s| {
-                s.discharge_slots_backup = None;
-            }) {
-                return error_response(&format!(
-                    "Timed Export was enabled, but the saved schedule backup could not be cleared: {error}"
-                ));
             }
         }
         ok_response("Timed Export enabled")
@@ -2495,13 +2566,8 @@ pub async fn set_timed_export(
             crate::inverter::state_machines::TimedExportState::Off;
 
         if !slot_clear_writes.is_empty() {
-            tracing::info!(
-                "SetTimedExport slot-clear encoded: {:?}",
-                slot_clear_writes
-            );
-            let rx =
-                queue_writes_transactional(&state, slot_clear_writes.clone())
-                    .await;
+            tracing::info!("SetTimedExport slot-clear encoded: {:?}", slot_clear_writes);
+            let rx = queue_writes_transactional(&state, slot_clear_writes.clone()).await;
             if let Err(msg) = await_required_write_outcome_with_timeout(
                 rx,
                 batch_completion_timeout(slot_clear_writes.len()),
@@ -2521,24 +2587,50 @@ pub async fn set_timed_export(
                 );
             }
         }
-        tracing::info!("SetTimedExport encoded: {:?}", disarm_writes);
-        let rx = queue_owned_writes_transactional(
-            &state,
-            disarm_writes,
-            DischargeControlOwner::TimedExport,
-        )
-        .await;
-        if let Err(msg) = await_required_write_outcome(rx).await {
-            tracing::warn!("Timed Export stop failed disarming: {msg}");
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({
-                    "ok": false,
-                    "error": format!(
-                        "Timed Export could not be stopped yet ({msg}). \
-                         The schedule is disabled — retry the stop to also disarm the inverter."
-                    )
-                })),
+        // Idempotent stop: when readback already shows the Eco baseline
+        // (HR27=1, HR59=0 — e.g. the schedule was configured for a future
+        // window and never armed), the disarm writes are redundant.
+        // Queueing them anyway would burn the completion timeout behind an
+        // HR318 pause that defers automation-owned batches (live-session
+        // report: "could not be stopped yet" while the inverter was
+        // already stopped).
+        let eco_confirmed = state
+            .latest_snapshot
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|s| s.battery_power_mode == 1 && !s.enable_discharge);
+        if !eco_confirmed {
+            tracing::info!("SetTimedExport encoded: {:?}", disarm_writes);
+            // A user-issued stop is a manual baseline selection (HR27=1 is
+            // the manual Eco write), NOT an automation step: it must not
+            // defer behind a register-derived ExplicitPause owner. The
+            // admission matrix (poll.rs) guarantees ManualMode batches
+            // drain within one poll cycle against every derived state.
+            // Entering export (the arm batch) keeps the TimedExport owner
+            // so an explicit pause still blocks it (issue #289).
+            let rx = queue_owned_writes_transactional(
+                &state,
+                disarm_writes,
+                DischargeControlOwner::ManualMode,
+            )
+            .await;
+            if let Err(msg) = await_required_write_outcome(rx).await {
+                tracing::warn!("Timed Export stop failed disarming: {msg}");
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({
+                        "ok": false,
+                        "error": format!(
+                            "Timed Export could not be stopped yet ({msg}). \
+                             The schedule is disabled — retry the stop to also disarm the inverter."
+                        )
+                    })),
+                );
+            }
+        } else {
+            tracing::info!(
+                "Timed Export stop: inverter already at the Eco baseline — skipping disarm writes"
             );
         }
         ok_response("Timed Export disabled")
@@ -3022,12 +3114,11 @@ pub async fn set_discharge_slot(
             if enabled {
                 // Issue #289: two-phase, fail-fast slot-then-arm. The slot
                 // and target writes are queued first and awaited; only when
-                // the inverter accepts them are the export entry writes
-                // (HR27=0, then the model-routed enable register) queued,
-                // and only then is the schedule persisted. A rejected slot
-                // write can therefore never leave maximum-power export
-                // armed without a valid gating window, nor commit a
-                // schedule the inverter rejected.
+                // the inverter accepts them is the schedule persisted, then
+                // the export entry writes (HR27=0 followed by the model-routed
+                // enable register) are queued. A rejected slot write therefore
+                // can never leave maximum-power export armed without a valid
+                // gating window or commit a schedule the inverter rejected.
                 //
                 // The schedule IS committed before the arm attempt: a
                 // rejected or deferred arm write must retain the desired
@@ -3052,8 +3143,9 @@ pub async fn set_discharge_slot(
                     writes
                 };
                 if (!rearm_confirmed || arm_now) && !physical_slot_writes.is_empty() {
+                    let write_count = physical_slot_writes.len();
                     let rx = queue_writes_transactional(&state, physical_slot_writes).await;
-                    if let Err(msg) = await_required_write_outcome(rx).await {
+                    if let Err(msg) = await_required_batch_write_outcome(rx, write_count).await {
                         tracing::warn!("Timed Export slot {slot} write failed: {msg}");
                         return (
                             StatusCode::BAD_GATEWAY,
@@ -3080,6 +3172,7 @@ pub async fn set_discharge_slot(
                         "Could not save the Timed Export schedule: {error}"
                     ));
                 }
+                reset_timed_export_machine_after_schedule_change(&state, true, arm_now).await;
 
                 if arm_now {
                     let mut arm_writes = vec![RegisterWrite {
@@ -3125,12 +3218,16 @@ pub async fn set_discharge_slot(
                                 snapshot.battery_power_mode == 1 && !snapshot.enable_discharge
                             });
                     if !eco_confirmed {
+                        // User-issued Eco restore: queue as ManualMode so a
+                        // register-derived ExplicitPause cannot starve it
+                        // (see the stop path and the poll.rs admission
+                        // matrix).
                         let rx = queue_owned_writes_transactional(
                             &state,
                             crate::inverter::state_machines::build_timed_export_disable_writes(
                                 device_type,
                             ),
-                            DischargeControlOwner::TimedExport,
+                            DischargeControlOwner::ManualMode,
                         )
                         .await;
                         if let Err(msg) = await_required_write_outcome(rx).await {
@@ -3150,13 +3247,69 @@ pub async fn set_discharge_slot(
                     }
                 }
             } else {
-                // Keep the persisted desired schedule in sync with the
-                // disabled slot (the schedule stays armed if other slots
-                // remain enabled; disabling the last armed slot below
-                // additionally returns the inverter to Eco).
+                // A disable is transactional too. Confirm the physical slot
+                // clear (and, for the final active slot, the Eco disarm)
+                // before committing the desired schedule. Persisting first
+                // made a rejected clear look successful and removed the
+                // reconciler's only record of the still-live physical slot.
                 let schedule_enabled = desired_slots
                     .iter()
                     .any(crate::inverter::model::ScheduleSlot::is_configured);
+                let in_window =
+                    schedule_enabled && should_arm_timed_export_now(&state, &desired_slots).await;
+
+                let write_count = writes.len();
+                tracing::info!("SetDischargeSlot {} clear encoded: {:?}", slot, writes);
+                let rx = queue_writes_transactional(&state, writes).await;
+                if let Err(msg) = await_required_batch_write_outcome(rx, write_count).await {
+                    tracing::warn!("Timed Export slot {slot} clear failed: {msg}");
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({
+                            "ok": false,
+                            "error": format!(
+                                "Discharge slot {slot} could not be disabled ({msg}). The saved schedule was left unchanged."
+                            )
+                        })),
+                    );
+                }
+
+                if should_return_to_eco {
+                    // The final desired slot was active. Await the same
+                    // model-routed disarm used by Stop before persisting Off.
+                    // This is a user-issued baseline selection, so ManualMode
+                    // ownership must not be starved by an explicit pause.
+                    let disarm_writes =
+                        crate::inverter::state_machines::build_timed_export_disable_writes(
+                            device_type,
+                        );
+                    tracing::info!(
+                        "SetDischargeSlot {} disarm encoded: {:?}",
+                        slot,
+                        disarm_writes
+                    );
+                    let rx = queue_owned_writes_transactional(
+                        &state,
+                        disarm_writes,
+                        DischargeControlOwner::ManualMode,
+                    )
+                    .await;
+                    if let Err(msg) = await_required_write_outcome(rx).await {
+                        tracing::warn!(
+                            "Timed Export disarm failed while disabling final slot {slot}: {msg}"
+                        );
+                        return (
+                            StatusCode::BAD_GATEWAY,
+                            Json(json!({
+                                "ok": false,
+                                "error": format!(
+                                    "Discharge slot {slot} was cleared, but Timed Export could not be disarmed ({msg}). The saved schedule was left unchanged; retry the save."
+                                )
+                            })),
+                        );
+                    }
+                }
+
                 if let Err(error) =
                     persist_timed_export_schedule(&state, schedule_enabled, desired_slots.clone())
                         .await
@@ -3165,21 +3318,12 @@ pub async fn set_discharge_slot(
                         "Could not save the Timed Export schedule: {error}"
                     ));
                 }
-
-                if should_return_to_eco {
-                    // This was the last configured slot while Timed Export was
-                    // armed. Append the same model-routed disarm + Eco
-                    // transition as the Timed Export Stop button, leaving a
-                    // consistent Eco state.
-                    writes.extend(
-                        crate::inverter::state_machines::build_timed_export_disable_writes(
-                            device_type,
-                        ),
-                    );
-                }
-                tracing::info!("SetDischargeSlot {} encoded: {:?}", slot, writes);
-                queue_owned_writes_fail_fast(&state, writes, DischargeControlOwner::TimedExport)
-                    .await;
+                reset_timed_export_machine_after_schedule_change(
+                    &state,
+                    schedule_enabled,
+                    in_window,
+                )
+                .await;
             }
 
             // Return the updated desired schedule so the UI can update its
@@ -7251,7 +7395,7 @@ mod tests {
                 "end_hour": 19, "end_minute": 0,
                 "enabled": true,
             });
-            let _ = set_discharge_slot(State(state.clone()), Json(body)).await;
+            let _ = drive_set_discharge_slot_completion_with(&state, body, WriteOutcome::Ok).await;
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
             let start = writes
@@ -7280,7 +7424,7 @@ mod tests {
                 "end_hour": 19, "end_minute": 0,
                 "enabled": false,
             });
-            let _ = set_discharge_slot(State(state.clone()), Json(body)).await;
+            let _ = drive_set_discharge_slot_completion_with(&state, body, WriteOutcome::Ok).await;
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
             let start = writes
@@ -7613,7 +7757,7 @@ mod tests {
                 "end_hour": 19, "end_minute": 0,
                 "enabled": true,
             });
-            let _ = set_discharge_slot(State(state.clone()), Json(body)).await;
+            let _ = drive_set_discharge_slot_completion_with(&state, body, WriteOutcome::Ok).await;
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
 
@@ -7894,6 +8038,16 @@ mod tests {
         with_isolated_config_dir_async(|| async {
             use crate::modbus::registers::{HR_BATTERY_POWER_MODE, HR_ENABLE_DISCHARGE};
             let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            // Physically exporting (HR27=0/HR59=1): the disarm writes are
+            // required. (Against an already-in-Eco snapshot the stop is
+            // idempotent and skips them — covered in e2e_mock.)
+            {
+                let mut snap = state.latest_snapshot.lock().await;
+                if let Some(s) = snap.as_mut() {
+                    s.battery_power_mode = 0;
+                    s.enable_discharge = true;
+                }
+            }
             let body = serde_json::json!({ "enabled": false });
             // The stop path awaits its disarm batch (code-review finding 1),
             // so the test must drive the completion channel the poll loop
@@ -7942,6 +8096,15 @@ mod tests {
                 .lock()
                 .await
                 .device_rearm_confirmed = true;
+            // Physically exporting (HR27=0/HR59=1): the disarm batch is
+            // required (an already-in-Eco inverter would skip it).
+            {
+                let mut snap = state.latest_snapshot.lock().await;
+                if let Some(s) = snap.as_mut() {
+                    s.battery_power_mode = 0;
+                    s.enable_discharge = true;
+                }
+            }
 
             let body = serde_json::json!({ "enabled": false });
             // Drive both completion-backed phases (slot clears, then the
@@ -8372,14 +8535,15 @@ mod tests {
                 };
             }
 
-            let (status, _) = set_discharge_slot(
-                State(state.clone()),
-                Json(serde_json::json!({
+            let (status, _) = drive_set_discharge_slot_completion_with(
+                &state,
+                serde_json::json!({
                     "slot": 1,
                     "enabled": false,
                     "start_hour": 16,
                     "end_hour": 19
-                })),
+                }),
+                WriteOutcome::Ok,
             )
             .await;
             assert_eq!(status, StatusCode::OK);
@@ -8430,8 +8594,13 @@ mod tests {
                         target_soc: 4,
                     },
                 ];
+                config.schedule_enabled = true;
                 config.device_rearm_confirmed = true;
             }
+            *state.timed_export_state.lock().await =
+                crate::inverter::state_machines::TimedExportState::Error {
+                    reason: "old schedule failed".to_string(),
+                };
             // The physical registers are intentionally zeroed by the fallback.
             {
                 let mut snapshot = state.latest_snapshot.lock().await;
@@ -8461,6 +8630,11 @@ mod tests {
             assert_eq!(config.slots[0].target_soc, 30);
             assert_eq!(config.slots[1].start_hour, 16, "slot 2 must be preserved");
             assert!(response.0["schedule"]["slots"].is_array());
+            drop(config);
+            assert!(matches!(
+                *state.timed_export_state.lock().await,
+                crate::inverter::state_machines::TimedExportState::Entering { .. }
+            ));
         })
         .await;
     }
@@ -8893,15 +9067,38 @@ mod tests {
                 let snapshot = snapshot.as_mut().unwrap();
                 snapshot.discharge_slots[1] = Default::default();
             }
+            let desired = state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .discharge_slots
+                .to_vec();
+            {
+                let mut config = state.timed_export_config.lock().await;
+                config.schedule_enabled = true;
+                config.slots = desired.clone();
+            }
+            crate::settings::Settings::update(|settings| {
+                settings.timed_export_schedule_enabled = true;
+                settings.timed_export_slots = desired;
+            })
+            .unwrap();
+            *state.timed_export_state.lock().await =
+                crate::inverter::state_machines::TimedExportState::Error {
+                    reason: "previous boundary failure".to_string(),
+                };
 
-            let (status, _) = set_discharge_slot(
-                State(state.clone()),
-                Json(serde_json::json!({
+            let (status, _) = drive_set_discharge_slot_completion_with(
+                &state,
+                serde_json::json!({
                     "slot": 1,
                     "enabled": false,
                     "start_hour": 16,
                     "end_hour": 19
-                })),
+                }),
+                WriteOutcome::Ok,
             )
             .await;
             assert_eq!(status, StatusCode::OK);
@@ -8918,6 +9115,65 @@ mod tests {
                     .map(|write| write.value),
                 Some(0)
             );
+            assert_eq!(
+                *state.timed_export_state.lock().await,
+                crate::inverter::state_machines::TimedExportState::Off,
+                "a successful final-slot edit must clear terminal Error state"
+            );
+            assert!(!crate::settings::Settings::load().timed_export_schedule_enabled);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn rejected_last_slot_clear_keeps_enabled_schedule_and_reports_failure() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_DISCHARGE_SLOT_1_START;
+
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            seed_gen3_timed_pre_state(&state).await;
+            {
+                let mut snapshot = state.latest_snapshot.lock().await;
+                snapshot.as_mut().unwrap().discharge_slots[1] = Default::default();
+            }
+            let desired = state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .discharge_slots
+                .to_vec();
+            {
+                let mut config = state.timed_export_config.lock().await;
+                config.schedule_enabled = true;
+                config.slots = desired.clone();
+            }
+            crate::settings::Settings::update(|settings| {
+                settings.timed_export_schedule_enabled = true;
+                settings.timed_export_slots = desired;
+            })
+            .unwrap();
+
+            let (status, response) = drive_set_discharge_slot_completion_with(
+                &state,
+                serde_json::json!({
+                    "slot": 1,
+                    "enabled": false,
+                    "start_hour": 16,
+                    "end_hour": 19
+                }),
+                WriteOutcome::Failed {
+                    address: HR_DISCHARGE_SLOT_1_START,
+                    value: 0,
+                    error: "rejected by inverter".to_string(),
+                },
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::BAD_GATEWAY, "got {response:?}");
+            assert!(state.timed_export_config.lock().await.schedule_enabled);
+            assert!(crate::settings::Settings::load().timed_export_schedule_enabled);
         })
         .await;
     }
@@ -8929,14 +9185,15 @@ mod tests {
             let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
             seed_gen3_timed_pre_state(&state).await;
 
-            let (status, _) = set_discharge_slot(
-                State(state.clone()),
-                Json(serde_json::json!({
+            let (status, _) = drive_set_discharge_slot_completion_with(
+                &state,
+                serde_json::json!({
                     "slot": 1,
                     "enabled": false,
                     "start_hour": 16,
                     "end_hour": 19
-                })),
+                }),
+                WriteOutcome::Ok,
             )
             .await;
             assert_eq!(status, StatusCode::OK);
@@ -10745,6 +11002,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn extended_slot_restore_timeout_covers_mandatory_write_gaps() {
+        let slots = vec![
+            crate::inverter::model::ScheduleSlot {
+                enabled: true,
+                start_hour: 1,
+                start_minute: 0,
+                end_hour: 2,
+                end_minute: 0,
+                target_soc: 20,
+            };
+            4
+        ];
+        let writes = crate::inverter::state_machines::build_timed_export_slot_restore_writes(
+            DeviceType::Gen3Hybrid,
+            &slots,
+        );
+        assert_eq!(writes.len(), 12, "four slots restore start/end/target");
+        let timeout = batch_completion_timeout(writes.len());
+        let mandatory_gaps = Duration::from_millis((writes.len() as u64 - 1) * 1500);
+        assert!(
+            timeout > mandatory_gaps,
+            "transaction timeout {timeout:?} must exceed the {mandatory_gaps:?} pacing floor"
+        );
+        assert_eq!(timeout, Duration::from_secs(33));
+    }
+
     #[tokio::test]
     async fn unpause_battery_refuses_while_disconnected() {
         // Symmetric guard on unpause: fail fast while offline, before any
@@ -10993,6 +11277,106 @@ mod tests {
             let writes = reserve_writes_for_device(DeviceType::ThreePhase, 30).unwrap();
             assert_eq!(writes[0].address, HR_3PH_BATTERY_SOC_RESERVE);
             assert_eq!(writes[0].value, 30);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn timed_export_three_phase_reserve_lands_before_export_arm() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_3PH_BATTERY_SOC_RESERVE, HR_BATTERY_POWER_MODE, HR_BATTERY_SOC_RESERVE,
+            };
+
+            let state = make_state_with_device(DeviceType::ThreePhase).await;
+            {
+                let mut snapshot = state.latest_snapshot.lock().await;
+                snapshot.as_mut().unwrap().discharge_slots[0] =
+                    crate::inverter::model::ScheduleSlot {
+                        enabled: true,
+                        start_hour: 16,
+                        start_minute: 0,
+                        end_hour: 19,
+                        end_minute: 0,
+                        target_soc: 20,
+                    };
+            }
+
+            let (status, response) = drive_set_timed_export_completion_with(
+                &state,
+                json!({ "enabled": true, "soc_reserve": 30 }),
+                WriteOutcome::Ok,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "got {response:?}");
+
+            let writes = drain_pending_writes(&state).await;
+            let reserve_index = writes
+                .iter()
+                .position(|write| write.address == HR_3PH_BATTERY_SOC_RESERVE)
+                .expect("three-phase reserve must target HR1109");
+            let arm_index = writes
+                .iter()
+                .position(|write| write.address == HR_BATTERY_POWER_MODE && write.value == 0)
+                .expect("Timed Export arm must write HR27=0");
+            assert!(
+                reserve_index < arm_index,
+                "reserve setup must complete before maximum-power export is armed"
+            );
+            assert!(
+                !writes
+                    .iter()
+                    .any(|write| write.address == HR_BATTERY_SOC_RESERVE),
+                "three-phase Timed Export must never route reserve to HR110"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn timed_export_persistence_failure_happens_before_export_arm() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{HR_BATTERY_POWER_MODE, HR_ENABLE_DISCHARGE};
+
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            {
+                let mut snapshot = state.latest_snapshot.lock().await;
+                snapshot.as_mut().unwrap().discharge_slots[0] =
+                    crate::inverter::model::ScheduleSlot {
+                        enabled: true,
+                        start_hour: 16,
+                        start_minute: 0,
+                        end_hour: 19,
+                        end_minute: 0,
+                        target_soc: 20,
+                    };
+            }
+
+            let dir = crate::settings::Settings::settings_dir();
+            let permissions = std::fs::metadata(&dir).unwrap().permissions();
+            let mut readonly = permissions.clone();
+            std::os::unix::fs::PermissionsExt::set_mode(&mut readonly, 0o500);
+            std::fs::set_permissions(&dir, readonly).unwrap();
+
+            let (status, response) = drive_set_timed_export_completion_with(
+                &state,
+                json!({ "enabled": true }),
+                WriteOutcome::Ok,
+            )
+            .await;
+            std::fs::set_permissions(&dir, permissions).unwrap();
+
+            assert_eq!(status, StatusCode::BAD_REQUEST, "got {response:?}");
+            let writes = drain_pending_writes(&state).await;
+            assert!(
+                !writes
+                    .iter()
+                    .any(
+                        |write| (write.address == HR_BATTERY_POWER_MODE && write.value == 0)
+                            || (write.address == HR_ENABLE_DISCHARGE && write.value == 1)
+                    ),
+                "persistence must fail before any maximum-power arm writes: {writes:?}"
+            );
         })
         .await;
     }

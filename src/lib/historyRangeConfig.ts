@@ -206,7 +206,7 @@ export function formatHistoryXAxisTick(ts: number, range: HistoryRange): string 
       minute: '2-digit',
       hour12: false,
     });
-}
+  }
   if (range === '7d' || range === '30d') {
     return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
   }

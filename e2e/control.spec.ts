@@ -329,6 +329,22 @@ test.describe('Quick Actions', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('API Control Endpoints', () => {
+  // Park the Timed Export boundary machine before every test. Saving an
+  // enabled discharge slot arms the HEM-managed schedule (issue #289), and
+  // a schedule left over from an earlier test fires entry/exit write bursts
+  // whenever a later test changes HR318 or the inverter clock — interleaving
+  // with unrelated assertions. Disabling here (rather than at the end of
+  // whichever test happened to save a slot) keeps each test independent of
+  // suite order and of the wall-clock time the suite runs at.
+  test.beforeEach(async ({ baseUrl }) => {
+    const resp = await fetch(`${baseUrl}/api/control/timed-export`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect((await resp.json()).ok).toBe(true);
+  });
+
   test('POST /api/control/reserve sends HR 110', async ({
     baseUrl,
     drainModbusWrites,
@@ -685,19 +701,8 @@ test.describe('API Control Endpoints', () => {
     expect(findWrite(writes, 56)!.value).toBe(1600);  // 16:00
     expect(findWrite(writes, 57)!.value).toBe(1900);  // 19:00
 
-    // Issue #289: the saves above persist an HEM-managed schedule window of
-    // 16:00-19:00. When the suite runs INSIDE that window, the boundary
-    // state machine sits BlockedByPause (the timed-discharge test armed
-    // HR318) — and the moment a later test unblocks HR318 (the
-    // force-discharge tests pin it to 0) the machine fires an entry write
-    // burst that interleaves with unrelated assertions. Disable the
-    // schedule here so the rest of the file runs with the machine parked.
-    const disableSchedule = await fetch(`${baseUrl}/api/control/timed-export`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: false }),
-    });
-    expect((await disableSchedule.json()).ok).toBe(true);
+    // (The saved 16:00-19:00 schedule is parked by the describe-level
+    // beforeEach before the next test — see the top of this describe.)
   });
 
   test('discharge slot with no configured floor displays the reserve, not the charge target', async ({

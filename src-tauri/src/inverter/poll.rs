@@ -433,6 +433,10 @@ pub struct AppState {
     /// classified as re-arming firmware and the slot clear/restore
     /// fallback is activated.
     pub timed_export_rearm: Arc<Mutex<crate::inverter::state_machines::TimedExportRearmDetector>>,
+    /// Generation for `timed_export_rearm`. Every API/reconnect reset advances
+    /// it while holding the detector lock so a poll cycle can reject stale
+    /// write-back even when both the old and reset detector happen to be Idle.
+    pub timed_export_rearm_generation: Arc<std::sync::atomic::AtomicU64>,
     /// Whether cosy charging is currently active (force-charging in a slot).
     pub cosy_active: Arc<Mutex<bool>>,
     /// Cached Octopus Agile prices for the current region.
@@ -527,6 +531,7 @@ impl AppState {
             timed_export_rearm: Arc::new(Mutex::new(
                 crate::inverter::state_machines::TimedExportRearmDetector::default(),
             )),
+            timed_export_rearm_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             timed_export_config: Arc::new(Mutex::new(
                 crate::inverter::state_machines::TimedExportConfig {
                     schedule_enabled: crate::settings::Settings::load()
@@ -614,6 +619,7 @@ impl AppState {
             timed_export_rearm: Arc::new(Mutex::new(
                 crate::inverter::state_machines::TimedExportRearmDetector::default(),
             )),
+            timed_export_rearm_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             timed_export_config: Arc::new(Mutex::new(
                 crate::inverter::state_machines::TimedExportConfig {
                     schedule_enabled: crate::settings::Settings::load()
@@ -1097,6 +1103,47 @@ async fn write_registers_fail_fast_with_gap(
         }
     }
     true
+}
+
+/// Commit a poll cycle's re-arm-detector progress only when no API/reconnect
+/// path changed the detector while Modbus I/O was in flight. Schedule edits
+/// reset the shared detector; restoring the stale pre-I/O clone would revive
+/// evidence that belongs to the previous schedule.
+async fn commit_timed_export_rearm_if_unchanged(
+    shared: &Mutex<crate::inverter::state_machines::TimedExportRearmDetector>,
+    generation: &std::sync::atomic::AtomicU64,
+    generation_at_decision: u64,
+    state_at_decision: &crate::inverter::state_machines::TimedExportRearmDetector,
+    updated: crate::inverter::state_machines::TimedExportRearmDetector,
+) -> bool {
+    let mut stored = shared.lock().await;
+    if generation.load(std::sync::atomic::Ordering::Acquire) == generation_at_decision
+        && *stored == *state_at_decision
+    {
+        *stored = updated;
+        true
+    } else {
+        false
+    }
+}
+
+async fn reset_shared_timed_export_rearm_detector(
+    shared: &Mutex<crate::inverter::state_machines::TimedExportRearmDetector>,
+    generation: &std::sync::atomic::AtomicU64,
+) {
+    let mut detector = shared.lock().await;
+    detector.reset();
+    generation.fetch_add(1, std::sync::atomic::Ordering::Release);
+}
+
+/// Reset re-arm evidence after a schedule/ownership change and invalidate any
+/// poll-cycle clone that was captured before the reset.
+pub(crate) async fn reset_timed_export_rearm_detector(state: &AppState) {
+    reset_shared_timed_export_rearm_detector(
+        &state.timed_export_rearm,
+        &state.timed_export_rearm_generation,
+    )
+    .await;
 }
 
 /// Like [`drain_write_batches`] but with a configurable inter-write gap, so
@@ -1604,7 +1651,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 // ambiguous — any register state may predate the reconnect.
                 // Reset it to Idle so stale evidence can't classify the
                 // device (the anchored exit restarts on the next boundary).
-                state.timed_export_rearm.lock().await.reset();
+                reset_timed_export_rearm_detector(&state).await;
 
                 // Restore cosy_active from persisted settings on restart.
                 // Without this, a client reboot during OR after a cosy slot
@@ -3088,16 +3135,29 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     {
                                         // Short-lived guards: clone the inputs and
                                         // drop every guard before any I/O.
-                                        let (te_state_at_decision, mut te_config, mut te_rearm) = {
+                                        let (
+                                            te_state_at_decision,
+                                            mut te_config,
+                                            te_rearm_at_decision,
+                                            te_rearm_generation_at_decision,
+                                        ) = {
                                             let te_state =
                                                 state.timed_export_state.lock().await.clone();
                                             let te_config =
                                                 state.timed_export_config.lock().await.clone();
-                                            let te_rearm =
-                                                state.timed_export_rearm.lock().await.clone();
-                                            (te_state, te_config, te_rearm)
+                                            let te_rearm = state.timed_export_rearm.lock().await;
+                                            let te_rearm_generation = state
+                                                .timed_export_rearm_generation
+                                                .load(std::sync::atomic::Ordering::Acquire);
+                                            (
+                                                te_state,
+                                                te_config,
+                                                te_rearm.clone(),
+                                                te_rearm_generation,
+                                            )
                                         };
                                         let mut te_state = te_state_at_decision.clone();
+                                        let mut te_rearm = te_rearm_at_decision.clone();
 
                                         let decision = crate::inverter::state_machines::check_timed_export(
                                             &snapshot,
@@ -3235,10 +3295,14 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                 *stored = te_state.clone();
                                             }
                                         }
-                                        {
-                                            let mut stored = state.timed_export_rearm.lock().await;
-                                            *stored = te_rearm.clone();
-                                        }
+                                        let _ = commit_timed_export_rearm_if_unchanged(
+                                            &state.timed_export_rearm,
+                                            &state.timed_export_rearm_generation,
+                                            te_rearm_generation_at_decision,
+                                            &te_rearm_at_decision,
+                                            te_rearm.clone(),
+                                        )
+                                        .await;
                                         if te_config.device_rearm_confirmed {
                                             // Mirror the learned fallback flag for
                                             // the API/UI (short-lived guard).
@@ -3585,12 +3649,12 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             // current slot drops out of the window - which silently
                                             // leaves the state machine Idle and never discharges.
                                             let region = settings.agile_region.clone();
-            let today =
+                                            let today =
                                                 chrono::Utc::now().format("%Y-%m-%d").to_string();
                                             // Configurable base URL: defaults to the real Octopus
                                             // endpoint; tests and self-hosters can override via
-            // `settings.agile_api_base_url` to point at a local mock
-            // server or mirror.
+                                            // `settings.agile_api_base_url` to point at a local mock
+                                            // server or mirror.
                                             let base = if settings.agile_api_base_url.is_empty() {
                                                 "https://api.octopus.energy".to_string()
                                             } else {
@@ -5889,6 +5953,69 @@ mod tests {
         });
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn poll_rearm_writeback_preserves_concurrent_api_reset() {
+        use crate::inverter::state_machines::TimedExportRearmDetector;
+
+        // Exercise the ABA case: the detector is Idle both before and after
+        // the API reset, so a value comparison alone cannot detect the reset.
+        let shared = Arc::new(Mutex::new(TimedExportRearmDetector::default()));
+        let generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let state_at_decision = shared.lock().await.clone();
+        let generation_at_decision = generation.load(std::sync::atomic::Ordering::Acquire);
+        let mut stale_updated = state_at_decision.clone();
+        stale_updated.note_exit_written();
+
+        let start = Arc::new(tokio::sync::Barrier::new(2));
+        let reset_done = Arc::new(Notify::new());
+        let poll_task = {
+            let shared = shared.clone();
+            let generation = generation.clone();
+            let start = start.clone();
+            let reset_done = reset_done.clone();
+            tokio::spawn(async move {
+                start.wait().await;
+                reset_done.notified().await;
+                commit_timed_export_rearm_if_unchanged(
+                    &shared,
+                    &generation,
+                    generation_at_decision,
+                    &state_at_decision,
+                    stale_updated,
+                )
+                .await
+            })
+        };
+        let api_task = {
+            let shared = shared.clone();
+            let generation = generation.clone();
+            let start = start.clone();
+            let reset_done = reset_done.clone();
+            tokio::spawn(async move {
+                start.wait().await;
+                reset_shared_timed_export_rearm_detector(&shared, &generation).await;
+                reset_done.notify_one();
+            })
+        };
+
+        let (committed, reset) = tokio::join!(poll_task, api_task);
+        reset.expect("API reset task");
+        assert!(
+            !committed.expect("poll write-back task"),
+            "the stale poll clone must be rejected after an API reset"
+        );
+        assert_eq!(
+            *shared.lock().await,
+            TimedExportRearmDetector::default(),
+            "the concurrent reset must remain authoritative"
+        );
+        assert_eq!(
+            generation.load(std::sync::atomic::Ordering::Acquire),
+            1,
+            "the API reset must advance the detector generation"
+        );
+    }
+
     /// Cosy crash-recovery: when the app restarts, in-memory `cosy_active`
     /// is seeded from `cosy_active_persisted` in settings. If the persisted
     /// flag is `true` (we crashed mid-Cosy), the cosy state machine on the
@@ -6660,7 +6787,11 @@ mod tests {
     /// `TimedExport` under an explicit pause: the issue-#289 pause
     /// precedence defers the automation (pinned by
     /// [`take_pending_timed_export_still_defers_to_explicit_pause`]); the
-    /// boundary machine retries when the pause lifts.
+    /// boundary machine retries when the pause lifts. For the same reason
+    /// the API queues *user-issued* Eco-baseline writes (the Timed Export
+    /// stop, and the future-slot save's Eco restore) with the `ManualMode`
+    /// owner — only the automation's export-entry batch keeps
+    /// `TimedExport`, so a pause can starve the arm but never the stop.
     ///
     /// This is the regression net for the item-1 starvation bug, which
     /// shipped green because the integration harness completed batches
@@ -6774,16 +6905,14 @@ mod tests {
                         policy: Default::default(),
                         owner: Some(owner),
                     }];
-                    let (taken, winner) =
-                        take_pending_writes_for_owner(&mut queue, 8, derived);
+                    let (taken, winner) = take_pending_writes_for_owner(&mut queue, 8, derived);
                     // The only deferral cell in the matrix: the TimedExport
                     // automation stays queued while an explicit pause owns
                     // the domain (issue #289). Everything else — every
                     // user-issued selection against every register-derived
                     // state — must drain in this poll cycle.
-                    let admitted =
-                        !(owner == DischargeControlOwner::TimedExport
-                            && derived == Some(DischargeControlOwner::ExplicitPause));
+                    let admitted = !(owner == DischargeControlOwner::TimedExport
+                        && derived == Some(DischargeControlOwner::ExplicitPause));
                     assert_eq!(
                         taken.is_empty(),
                         !admitted,
