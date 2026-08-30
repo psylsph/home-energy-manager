@@ -2671,9 +2671,16 @@ export default function ControlPage() {
   // current window, it belongs to the manual action. The helper uses the
   // inverter-local minute so the quick-action highlight and the presentation
   // cards cannot disagree when the browser is in another timezone.
+  //
+  // Ownership must NOT use the register fallback for `timedExportEnabled`:
+  // armed registers are exactly what a manual Force Discharge produces, so
+  // feeding them back as "managed schedule enabled" would make the ownership
+  // check blind to the manual action whenever the schedule endpoint hasn't
+  // loaded — leaving a running Force Discharge rendered as a start action
+  // (CODE_REVIEW.md finding 1). An unknown schedule cannot own a window.
   const forceDischargeActiveForState = isForceDischargeActive(
     snapshot,
-    timedExportEnabled,
+    scheduleStateEnabled ?? false,
     desiredExportSlots,
     currentInverterMinute,
   );
@@ -2706,13 +2713,18 @@ export default function ControlPage() {
   // CODE_REVIEW.md: single Timed Export toggle with explicit Arm/Stop
   // semantics. The presentation variant keeps schedule intent (scheduled)
   // visually distinct from readback-confirmed export (active); failed or
-  // deferred arms surface as error/pending, never as active.
+  // deferred arms surface as error/pending, never as active. The
+  // `physicallyArmed` escape hatch (stop an armed-but-windowless register
+  // state) must respect ownership (CODE_REVIEW.md finding 1): when the
+  // export-shaped readback belongs to a manual Force Discharge action,
+  // offering "Stop Timed Export" here would stop a state the schedule
+  // does not own.
   const timedExportApplying = batteryModePending?.kind === 'timed_export';
   const timedExportButton = deriveTimedExportButton(timedExportState, {
     hasConfiguredSlot: hasConfiguredTimedExportSlot,
     applying: timedExportApplying,
     armError: timedExportArmFailed,
-    physicallyArmed: isTimedExportActive(snapshot),
+    physicallyArmed: isTimedExportActive(snapshot) && !forceDischargeActiveForState,
   });
 
   useEffect(() => {
@@ -2918,26 +2930,17 @@ export default function ControlPage() {
     && snapshot?.battery_power_mode === 1
     && inChargeWindow;
   const forceChargeActive = snapshotForceCharge;
-  // Force discharge is active only in Max Power / export mode, when the
-  // schedule is enabled AND the current time falls within an active discharge
-  // slot window. Outside the window the inverter is idle (eco), not
-  // force-discharging. This prevents
-  // the button staying highlighted during Timed Demand/Export when no slot
-  // is active.
-  const inDischargeWindow = (snapshot?.discharge_slots ?? []).some(slot => {
-    if (!slot.enabled) return false;
-    const curMin = currentInverterMinute;
-    const startMin = slot.start_hour * 60 + slot.start_minute;
-    const endMin = slot.end_hour * 60 + slot.end_minute;
-    return startMin < endMin
-      ? curMin >= startMin && curMin < endMin
-      : curMin >= startMin || curMin < endMin; // overnight slot
-  });
-  const snapshotForceDischarge = (snapshot?.enable_discharge ?? false)
-    && snapshot?.battery_power_mode === 0
-    && inDischargeWindow
-    && !timedExportOwnsCurrentWindow;
-  const forceDischargeActive = snapshotForceDischarge;
+  // CODE_REVIEW.md finding 1: the Force Discharge quick action must use
+  // the same ownership-respecting derivation as the Eco / Timed Export
+  // presentation (`forceDischargeActiveForState` — export-shaped readback
+  // inside a physical slot but outside the managed schedule's current
+  // window), so the two controls can never disagree about who owns an
+  // export-shaped readback: the quick action offers Stop for a manual
+  // Force Discharge even while a (disabled or out-of-window) managed
+  // schedule exists, and never claims a schedule-owned window as a manual
+  // action (which would leave a running manual override unstoppable from
+  // the quick actions).
+  const forceDischargeActive = forceDischargeActiveForState;
   const [reserveSaving, setReserveSaving] = useState(false);
   const [chargeRateSaving, setChargeRateSaving] = useState(false);
   const [dischargeRateSaving, setDischargeRateSaving] = useState(false);

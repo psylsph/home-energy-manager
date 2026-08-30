@@ -457,7 +457,11 @@ describe('<ControlPage/> — connection-state gate', () => {
             { enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100 },
           ],
           discharge_slots: [
-            { enabled: true, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 4 },
+            // Realistic Force Discharge readback: the backend arms an actual
+            // window (00:00-23:59 on the no-duration path, now->now+N on the
+            // minutes path). A zero-length enabled slot is not a shape the
+            // decoder produces from armed registers.
+            { enabled: true, start_hour: 0, start_minute: 0, end_hour: 23, end_minute: 59, target_soc: 4 },
             { enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 4 },
           ],
         }),
