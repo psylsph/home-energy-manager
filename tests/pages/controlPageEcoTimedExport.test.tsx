@@ -622,6 +622,41 @@ describe('ControlPage Eco / Timed Export presentation', () => {
             vi.useRealTimers();
         });
 
+        it('offers Arm, not Stop, while a manual Force Discharge owns the export-shaped readback', async () => {
+            vi.useFakeTimers({ shouldAdvanceTime: true });
+            vi.setSystemTime(new Date('2026-06-28T17:00:00'));
+            // Schedule explicitly disabled. The registers are export-shaped
+            // (HR27=0 + discharge-enable) inside a physical slot window, so
+            // the ownership rule attributes the readback to the manual Force
+            // Discharge action — Timed Export must not offer Stop for a
+            // state it does not own (CODE_REVIEW finding 1).
+            mockTimedExportSchedule({ schedule_enabled: false, slots: [] });
+            await renderWithSnapshot(
+                makeSnapshot({
+                    battery_power_mode: 0,
+                    enable_discharge: true,
+                    battery_power: 100,
+                    grid_power: 50,
+                    discharge_slots: [configuredSlot()],
+                })
+            );
+
+            // Wait for the async /api/timed-export fetch to land: before it
+            // does, the register fallback cannot distinguish the manual
+            // action from a schedule-owned window.
+            const button = (await screen.findByRole('button', {
+                name: /Timed Export — Off/,
+            })) as HTMLButtonElement;
+            expect(button.textContent).toContain('Arm Timed Export');
+            expect(button.textContent).not.toContain('Stop Timed Export');
+            expect(button.dataset.variant).toBe('neutral');
+            expect(button.dataset.action).toBe('arm');
+            // The Force Discharge quick action — not the Timed Export
+            // control — owns stopping the manual action.
+            expect(screen.getByRole('button', { name: /Stop Discharge/i })).toBeInTheDocument();
+            vi.useRealTimers();
+        });
+
         it('shows the pending Arming state while the machine is Entering', async () => {
             vi.useFakeTimers({ shouldAdvanceTime: true });
             vi.setSystemTime(new Date('2026-06-28T17:00:00'));
