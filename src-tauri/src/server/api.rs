@@ -2575,6 +2575,17 @@ pub async fn set_timed_export(
             .await
             {
                 tracing::warn!("Timed Export stop failed clearing slots: {msg}");
+                // CODE_REVIEW.md finding 2: the writes failed after the
+                // schedule was persisted disabled, so the reconciler must
+                // keep repairing. Arm the machine into Exiting — the
+                // physical slots are residue of our own incomplete stop,
+                // not an externally-owned schedule, so the disabled-schedule
+                // quiet branch must not swallow the retry.
+                *state.timed_export_state.lock().await =
+                    crate::inverter::state_machines::TimedExportState::Exiting {
+                        polls_waiting: 0,
+                        retries: 0,
+                    };
                 return (
                     StatusCode::BAD_GATEWAY,
                     Json(json!({
@@ -2617,6 +2628,15 @@ pub async fn set_timed_export(
             .await;
             if let Err(msg) = await_required_write_outcome(rx).await {
                 tracing::warn!("Timed Export stop failed disarming: {msg}");
+                // CODE_REVIEW.md finding 2: the disarm failed after the
+                // schedule was persisted disabled — arm the reconciler into
+                // Exiting so the poll loop keeps retrying the disarm even
+                // though the physical slots remain configured.
+                *state.timed_export_state.lock().await =
+                    crate::inverter::state_machines::TimedExportState::Exiting {
+                        polls_waiting: 0,
+                        retries: 0,
+                    };
                 return (
                     StatusCode::BAD_GATEWAY,
                     Json(json!({

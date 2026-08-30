@@ -1926,6 +1926,47 @@ pub fn check_timed_export(
     // disable has already disarmed the inverter; if those writes failed,
     // the `Off` repair below re-issues them idempotently.
     if !config.schedule_enabled || !has_enabled_slots {
+        // CODE_REVIEW.md finding 2: a Stop whose disarm writes failed arms
+        // the machine into `Exiting` (the API failure path). HEM itself owns
+        // that pending exit, so it must stay repairable even while the
+        // physical slots are still populated — they are residue of our own
+        // incomplete stop, not evidence of an external owner. The shared
+        // Exiting retry budget bounds the re-issues; a confirmed Eco
+        // baseline settles into Off. Re-entry is impossible here: the
+        // schedule is off, so the retained slots are desired-state data
+        // only.
+        if matches!(state, TimedExportState::Exiting { .. }) {
+            if eco_confirmed {
+                *state = TimedExportState::Off;
+                return TimedExportDecision {
+                    new_state: state.clone(),
+                    writes: Vec::new(),
+                    log_message: Some("Timed Export exited, Eco restored".to_string()),
+                    is_exit_transition: false,
+                };
+            }
+            // A fresh Exiting{0,0} armed by the failed stop has no
+            // machine-issued batch in flight (NoneIssued) — re-issue the exit
+            // writes immediately instead of spending the confirm grace on a
+            // batch that already failed at the API. One-shot: after the
+            // machine's own batch, last_write_outcome becomes Succeeded/
+            // Failed and the shared ladder (with its grace) takes over.
+            if matches!(
+                state,
+                TimedExportState::Exiting {
+                    polls_waiting: 0,
+                    retries: 0
+                }
+            ) && last_write_outcome == TimedExportWriteOutcome::NoneIssued
+            {
+                return exiting_decision(
+                    state,
+                    "Timed Export: repairing the stop that failed to disarm",
+                    build_timed_export_exit_writes(device_type, config),
+                );
+            }
+            return exiting_retry_decision(state, device_type, config, last_write_outcome);
+        }
         // Agile/Cosy and manual Timed Discharge use the same physical
         // HR27/enable-discharge shape as Timed Export. When the managed
         // schedule is off, a populated physical slot is evidence that
@@ -2177,43 +2218,7 @@ pub fn check_timed_export(
                     build_timed_export_entry_writes(device_type, config),
                 )
             } else {
-                let TimedExportState::Exiting {
-                    polls_waiting,
-                    retries,
-                } = state
-                else {
-                    unreachable!("matched Exiting above");
-                };
-                let mut polls_waiting = *polls_waiting;
-                let mut retries = *retries;
-                let failed = last_write_outcome == TimedExportWriteOutcome::Failed;
-                if failed {
-                    retries += 1;
-                } else {
-                    let _ = bump(&mut polls_waiting, &mut retries);
-                }
-                if retries > TIMED_EXPORT_MAX_WRITE_RETRIES {
-                    error_decision(state, "exit writes failed after retries")
-                } else if failed || polls_waiting == 0 {
-                    *state = TimedExportState::Exiting {
-                        polls_waiting,
-                        retries,
-                    };
-                    TimedExportDecision {
-                        new_state: state.clone(),
-                        writes: build_timed_export_exit_writes(device_type, config),
-                        log_message: Some(format!(
-                            "Timed Export exit retry {retries} of {TIMED_EXPORT_MAX_WRITE_RETRIES}"
-                        )),
-                        is_exit_transition: true,
-                    }
-                } else {
-                    *state = TimedExportState::Exiting {
-                        polls_waiting,
-                        retries,
-                    };
-                    quiet(state)
-                }
+                exiting_retry_decision(state, device_type, config, last_write_outcome)
             }
         }
 
@@ -2262,6 +2267,61 @@ pub fn check_timed_export(
     };
 
     decision
+}
+
+/// Shared retry ladder for a pending `Exiting` transition: bumps the
+/// confirm-grace / retry bookkeeping from the previous poll's write outcome
+/// and re-issues the exit writes when due. Used both by the enabled-schedule
+/// `Exiting` arm and by the disabled-schedule repair path a failed Stop arms
+/// (CODE_REVIEW.md finding 2), so both are bounded by the same budget.
+fn exiting_retry_decision(
+    state: &mut TimedExportState,
+    device_type: DeviceType,
+    config: &TimedExportConfig,
+    last_write_outcome: TimedExportWriteOutcome,
+) -> TimedExportDecision {
+    let TimedExportState::Exiting {
+        polls_waiting,
+        retries,
+    } = state
+    else {
+        unreachable!("exiting_retry_decision requires an Exiting state");
+    };
+    let mut polls_waiting = *polls_waiting;
+    let mut retries = *retries;
+    let failed = last_write_outcome == TimedExportWriteOutcome::Failed;
+    if failed {
+        retries += 1;
+    } else {
+        let _ = bump(&mut polls_waiting, &mut retries);
+    }
+    if retries > TIMED_EXPORT_MAX_WRITE_RETRIES {
+        error_decision(state, "exit writes failed after retries")
+    } else if failed || polls_waiting == 0 {
+        *state = TimedExportState::Exiting {
+            polls_waiting,
+            retries,
+        };
+        TimedExportDecision {
+            new_state: state.clone(),
+            writes: build_timed_export_exit_writes(device_type, config),
+            log_message: Some(format!(
+                "Timed Export exit retry {retries} of {TIMED_EXPORT_MAX_WRITE_RETRIES}"
+            )),
+            is_exit_transition: true,
+        }
+    } else {
+        *state = TimedExportState::Exiting {
+            polls_waiting,
+            retries,
+        };
+        TimedExportDecision {
+            new_state: state.clone(),
+            writes: Vec::new(),
+            log_message: None,
+            is_exit_transition: false,
+        }
+    }
 }
 
 fn entering_decision(
