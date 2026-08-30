@@ -468,17 +468,19 @@ test.describe('Agile slot-based mode (register-write verification)', () => {
     await clearWrites(drainModbusWrites);
 
     // Simulate the app being killed during the active discharge slot, while
-    // the inverter retains the armed slot registers. On restart the current
-    // price is no longer expensive (35p < 40p), so Agile Full should hold and
-    // clear the stale discharge slot immediately.
-    await setAgile(baseUrl, { discharge_threshold: 40 });
+    // the inverter retains the armed slot registers. Move the mocked price
+    // into hold without saving the threshold: a threshold-only save performs
+    // its own immediate clear and would invalidate the restart premise.
+    mock!.setPrice(20);
     await restartBackendPreservingState();
 
     const cleared = await waitForWrites(
       peekModbusWrites,
       drainModbusWrites,
       (w) => lastWrite(w, HR_ENABLE_DISCHARGE)?.value === 0
-        && lastWrite(w, HR_BATTERY_POWER_MODE)?.value === 1,
+        && lastWrite(w, HR_BATTERY_POWER_MODE)?.value === 1
+        && lastWrite(w, HR_DISCHARGE_SLOT_1_START)?.value === 0
+        && lastWrite(w, HR_DISCHARGE_SLOT_1_END)?.value === 0,
       75_000,
     );
     expect(lastWrite(cleared, HR_ENABLE_DISCHARGE)?.value).toBe(0);
@@ -525,7 +527,9 @@ test.describe('Agile slot-based mode (register-write verification)', () => {
       peekModbusWrites,
       drainModbusWrites,
       (w) => lastWrite(w, HR_ENABLE_DISCHARGE)?.value === 0
-        && lastWrite(w, HR_BATTERY_POWER_MODE)?.value === 1,
+        && lastWrite(w, HR_BATTERY_POWER_MODE)?.value === 1
+        && lastWrite(w, HR_DISCHARGE_SLOT_1_START)?.value === 0
+        && lastWrite(w, HR_DISCHARGE_SLOT_1_END)?.value === 0,
       75_000,
     );
     expect(lastWrite(cleared, HR_ENABLE_DISCHARGE)?.value).toBe(0);

@@ -48,11 +48,33 @@ const holdingRegs = new Uint16Array(2100);
 /** All register writes received by the server, in order. */
 const writes: RegisterWrite[] = [];
 
+/**
+ * When enabled, emulates Gen3 Hybrid firmware that re-asserts HR59=1
+ * (enable discharge) whenever a discharge slot register remains non-zero —
+ * the behaviour issue #289's clear/restore fallback defends against. The
+ * mock re-arms immediately after the client writes HR59=0, so the next poll
+ * read-back observes HR59=1.
+ */
+let rearmHr59Enabled = false;
+
+/** Discharge slot time registers for the standard (single-phase) layout. */
+const DISCHARGE_SLOT_REGS = [56, 57, 44, 45];
+
+function hasPopulatedDischargeSlot(): boolean {
+  return DISCHARGE_SLOT_REGS.some((addr) => holdingRegs[addr] !== 0);
+}
+
+/** Enable/disable the HR59 re-arm firmware emulation. */
+export function setRearmHr59(enabled: boolean): void {
+  rearmHr59Enabled = enabled;
+}
+
 /** Reset all state. */
 export function resetState(): void {
   inputRegs.fill(0);
   holdingRegs.fill(0);
   writes.length = 0;
+  rearmHr59Enabled = false;
   populateDefaults();
 }
 
@@ -378,6 +400,18 @@ function handleClient(sock: net.Socket): void {
           holdingRegs[register] = value & 0xFFFF;
         }
 
+        // Re-arm firmware emulation (issue #289): real Gen3 Hybrid firmware
+        // re-asserts enable_discharge whenever discharge slots remain
+        // programmed, so a bare HR59=0 exit write cannot stick.
+        if (
+          rearmHr59Enabled
+          && register === 59
+          && value === 0
+          && hasPopulatedDischargeSlot()
+        ) {
+          holdingRegs[59] = 1;
+        }
+
         writes.push({ address: register, value });
 
         // Send ack — use device address 0x11 for write responses
@@ -404,6 +438,7 @@ const ADMIN_PORT = 18900;
  *   POST /reset        — reset all state
  *   POST /holding-reg  — set a holding register {address, value}
  *   POST /input-reg    — set an input register {address, value}
+ *   POST /rearm-hr59   — toggle the HR59 re-arm firmware emulation {enabled}
  */
 export function startAdminApi(): http.Server {
   const server = http.createServer((req, res) => {
@@ -439,6 +474,19 @@ export function startAdminApi(): http.Server {
           const { address, value } = JSON.parse(body);
           setInputReg(address, value);
           res.end(JSON.stringify({ ok: true }));
+        } catch {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));
+        }
+      });
+    } else if (req.method === 'POST' && req.url === '/rearm-hr59') {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const { enabled } = JSON.parse(body);
+          setRearmHr59(Boolean(enabled));
+          res.end(JSON.stringify({ ok: true, enabled: rearmHr59Enabled }));
         } catch {
           res.statusCode = 400;
           res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));

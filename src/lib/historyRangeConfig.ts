@@ -199,8 +199,14 @@ export function getHistoryXAxisTicks(
 export function formatHistoryXAxisTick(ts: number, range: HistoryRange): string {
   const d = new Date(ts);
   if (range === '1h' || range === '6h' || range === '12h' || range === '24h' || range === 'today') {
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
+    // The history axis uses the app's 24-hour HH:MM convention regardless of
+    // the browser's locale (en-US otherwise renders values such as 04:40 PM).
+    return d.toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+}
   if (range === '7d' || range === '30d') {
     return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
   }

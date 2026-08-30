@@ -23,7 +23,7 @@
  *      mode, which is the whole point of the fix.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, act, within } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, act, within, waitFor } from '@testing-library/react';
 
 vi.mock('../../src/lib/api', () => ({
   apiGet: vi.fn(async (path: string) => {
@@ -232,7 +232,16 @@ describe('<ControlPage/> — Timed Export / Timed Discharge save parity', () => 
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     cleanup();
-    useInverterStore.setState({ snapshot: null, connectionState: 'disconnected' });
+    useInverterStore.setState({
+      snapshot: null,
+      connectionState: 'disconnected',
+      // Battery-mode action state is store-owned (survives page navigation)
+      // — reset it so one test's in-flight arm can't leak into the next.
+      batteryModePending: null,
+      batteryModePendingSince: null,
+      batteryModeError: null,
+      timedExportArmFailed: false,
+    });
   });
 
   async function sectionByHeading(name: string): Promise<HTMLElement> {
@@ -270,6 +279,31 @@ describe('<ControlPage/> — Timed Export / Timed Discharge save parity', () => 
     });
   });
 
+  it('shows a prominent progress indicator for the full duration of a slot save', async () => {
+    let finishSave: ((value: { ok: boolean; data: object }) => void) | undefined;
+    vi.mocked(apiPost).mockImplementationOnce(
+      () => new Promise((resolve) => { finishSave = resolve; }),
+    );
+    render(<ControlPage />);
+
+    const section = await sectionByHeading('Timed Export');
+    fireEvent.click(within(section).getAllByRole('button', { name: 'Save' })[0]);
+
+    const progress = screen.getByText('Applying changes to inverter…').closest('[role="status"]');
+    expect(progress).not.toBeNull();
+    expect(progress).toHaveTextContent('Applying changes to inverter');
+    expect(progress).toHaveClass('fixed', 'z-[100]');
+    expect(section.contains(progress)).toBe(false);
+    expect(within(section).getByRole('button', { name: 'Applying…' })).toBeDisabled();
+
+    await act(async () => {
+      finishSave?.({ ok: true, data: {} });
+    });
+    await waitFor(() => {
+      expect(within(section).queryByText(/Applying changes to inverter/)).toBeNull();
+    });
+  });
+
   it('saving an enabled Timed Discharge window POSTs enabled: true to the timed-discharge endpoint', async () => {
     render(<ControlPage />);
 
@@ -282,6 +316,55 @@ describe('<ControlPage/> — Timed Export / Timed Discharge save parity', () => 
       start_minute: 0,
       end_hour: 4,
       end_minute: 0,
+    });
+  });
+
+  it('keeps progress visible until all Timed Discharge registers confirm', async () => {
+    vi.mocked(apiPost).mockResolvedValueOnce({ ok: true, data: {} });
+    render(<ControlPage />);
+
+    const section = await sectionByHeading('Timed Discharge');
+    await enableAndSave(section, 'Slot 1');
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/control/timed-discharge',
+      { enabled: true, start_hour: 3, start_minute: 0, end_hour: 4, end_minute: 0 },
+    ));
+    expect(screen.getByText('Applying changes to inverter…')).toBeDefined();
+
+    // HR318 can read back before both inverse-window registers. Do not clear
+    // progress on this partial state.
+    act(() => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({
+          battery_pause_mode: 2,
+          battery_pause_slot: emptySlot({
+            enabled: true,
+            start_hour: 4,
+            start_minute: 0,
+            end_hour: 2,
+            end_minute: 59,
+          }),
+        }),
+      });
+    });
+    expect(screen.getByText('Applying changes to inverter…')).toBeDefined();
+
+    act(() => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({
+          battery_pause_mode: 2,
+          battery_pause_slot: emptySlot({
+            enabled: true,
+            start_hour: 4,
+            start_minute: 0,
+            end_hour: 3,
+            end_minute: 0,
+          }),
+        }),
+      });
+    });
+    await waitFor(() => {
+      expect(screen.queryByText('Applying changes to inverter…')).toBeNull();
     });
   });
 
@@ -308,6 +391,19 @@ describe('<ControlPage/> — Timed Export / Timed Discharge save parity', () => 
       '/api/control/timed-discharge',
       expect.objectContaining({ enabled: false }),
     );
+    expect(screen.getByText('Applying changes to inverter…')).toBeDefined();
+
+    act(() => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({
+          battery_pause_mode: 0,
+          battery_pause_slot: emptySlot(),
+        }),
+      });
+    });
+    await waitFor(() => {
+      expect(screen.queryByText('Applying changes to inverter…')).toBeNull();
+    });
   });
 
   it('saving slot 2 of the Timed Export schedule POSTs slot: 2 with its own window', async () => {
@@ -381,6 +477,32 @@ describe('<ControlPage/> — Timed Export / Timed Discharge save parity', () => 
       expect.objectContaining({ slot: 1, enabled: true, end_hour: 16 }),
     );
     expect(await within(section).findByText('✗ Error')).toBeDefined();
+    expect(within(section).getByRole('alert')).toHaveTextContent(
+      'Start and end times must differ for an enabled Timed Export slot',
+    );
+  });
+
+  it('replaces progress with the full backend error when a Timed Export save fails later', async () => {
+    let failSave: ((reason: Error) => void) | undefined;
+    vi.mocked(apiPost).mockImplementationOnce(
+      () => new Promise((_resolve, reject) => { failSave = reject; }),
+    );
+    render(<ControlPage />);
+
+    const section = await sectionByHeading('Timed Export');
+    fireEvent.click(within(section).getAllByRole('button', { name: 'Save' })[0]);
+    expect(screen.getByText('Applying changes to inverter…')).toBeDefined();
+
+    await act(async () => {
+      failSave?.(new Error(
+        'Timed Export slot 1 could not be saved because inverter writes did not complete. Export was not armed.',
+      ));
+    });
+
+    expect(screen.queryByText('Applying changes to inverter…')).toBeNull();
+    expect(within(section).getByRole('alert')).toHaveTextContent(
+      'Timed Export slot 1 could not be saved because inverter writes did not complete. Export was not armed.',
+    );
   });
 
   it('both sections carry matching save-and-enable wording', async () => {

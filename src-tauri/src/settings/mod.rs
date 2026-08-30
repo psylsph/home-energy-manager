@@ -9,6 +9,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use crate::inverter::model::ScheduleSlot;
+
 /// Serializes concurrent saves so two async tasks don't race on the same
 /// temp file name. Without this, `save()` could fail with "No such file or
 /// directory" when the temp was already renamed by another save.
@@ -645,6 +647,19 @@ impl From<&crate::inverter::model::ScheduleSlot> for DischargeSlotBackup {
     }
 }
 
+impl From<DischargeSlotBackup> for crate::inverter::model::ScheduleSlot {
+    fn from(backup: DischargeSlotBackup) -> Self {
+        Self {
+            enabled: backup.enabled,
+            start_hour: backup.start_hour,
+            start_minute: backup.start_minute,
+            end_hour: backup.end_hour,
+            end_minute: backup.end_minute,
+            target_soc: backup.target_soc,
+        }
+    }
+}
+
 /// Which sides of the inverter the Agile Octopus mode drives.
 ///
 /// Replaces the old boolean `agile_enabled` flag with three explicit
@@ -1263,6 +1278,25 @@ pub struct Settings {
     #[serde(default)]
     pub discharge_slots_backup: Option<Vec<DischargeSlotBackup>>,
 
+    // -- Timed Export schedule (issue #289) --
+    /// Whether the user's Timed Export schedule is enabled. When true, the
+    /// poll loop manages HR27/HR59 transitions at export window boundaries:
+    /// HR27=0/HR59=1 inside windows (maximum-power export), HR27=1/HR59=0
+    /// outside (Eco baseline).
+    #[serde(default)]
+    pub timed_export_schedule_enabled: bool,
+    /// User-configured Timed Export slots. These are the "desired" slots,
+    /// persisted in HEM settings. Physical inverter slots may be temporarily
+    /// cleared (re-arm fallback) but the desired schedule remains visible.
+    #[serde(default)]
+    pub timed_export_slots: Vec<ScheduleSlot>,
+    /// Whether the device has demonstrated HR59 re-arm behaviour. Some Gen3
+    /// firmware sets HR59 back to 1 whenever any discharge slot remains
+    /// non-zero. When confirmed, slots are cleared outside windows and
+    /// restored at entry.
+    #[serde(default)]
+    pub timed_export_slots_require_clear: bool,
+
     // -- Solar array capacities (issue #110) --
     /// Rated peak capacity (kWp) of the PV1 DC string on a hybrid /
     /// DC-coupled inverter. 0 (default) = not configured, in which case
@@ -1616,6 +1650,9 @@ impl Default for Settings {
             api_key: String::new(),
             api_port: 7338,
             discharge_slots_backup: None,
+            timed_export_schedule_enabled: false,
+            timed_export_slots: Vec::new(),
+            timed_export_slots_require_clear: false,
             // Issue #110: solar array capacities default to unset so a
             // fresh install (and every existing install on upgrade) sees
             // no behaviour change until the user opts in via Settings.
@@ -1636,18 +1673,30 @@ impl Settings {
             return PathBuf::from(dir);
         }
 
+        // Unit tests must never fall through to a developer's live config,
+        // even when the test command was started without the required env
+        // override. This also repairs the missing variable for later tests in
+        // the same process. Integration/subprocess tests are built without
+        // `cfg(test)` and must still receive their own temp HOME + override.
+        #[cfg(test)]
+        return crate::test_util::ensure_fallback_config_dir();
+
+        #[cfg(not(test))]
         if let Some(home) = dirs::home_dir() {
             return home.join(".givenergy-local");
         }
 
+        #[cfg(not(test))]
         if let Some(home) = std::env::var_os("USERPROFILE") {
             return PathBuf::from(home).join(".givenergy-local");
         }
 
+        #[cfg(not(test))]
         if let Some(home) = std::env::var_os("HOME") {
             return PathBuf::from(home).join(".givenergy-local");
         }
 
+        #[cfg(not(test))]
         std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(".givenergy-local")
@@ -1967,6 +2016,9 @@ mod tests {
                     target_soc: 4,
                 },
             ]),
+            timed_export_schedule_enabled: false,
+            timed_export_slots: Vec::new(),
+            timed_export_slots_require_clear: false,
             // Issue #110: solar array capacities must round-trip exactly.
             pv1_rated_kw: 6.0,
             pv2_rated_kw: 4.2,
@@ -2236,6 +2288,65 @@ mod tests {
         );
     }
 
+    /// `settings.json` written before the Timed Export schedule feature
+    /// shipped (no `timed_export_*` keys) must still load. The
+    /// `#[serde(default)]` on the new fields produces safe defaults.
+    /// See issue #289.
+    #[test]
+    fn legacy_settings_without_timed_export_fields_loads() {
+        let legacy = r#"{
+            "host": "192.168.1.50",
+            "port": 8899,
+            "serial": "",
+            "poll_interval": 60,
+            "auto_connect": true,
+            "import_tariff": 0.285,
+            "export_tariff": 0.15,
+            "hidden_panels": [],
+            "evc_host": "",
+            "disable_auto_discovery": true
+        }"#;
+        let decoded: Settings = serde_json::from_str(legacy).unwrap();
+        assert!(
+            !decoded.timed_export_schedule_enabled,
+            "missing field must default to false"
+        );
+        assert!(
+            decoded.timed_export_slots.is_empty(),
+            "missing field must default to empty vec"
+        );
+        assert!(
+            !decoded.timed_export_slots_require_clear,
+            "missing field must default to false"
+        );
+    }
+
+    /// Timed Export settings survive a full JSON round-trip.
+    #[test]
+    fn timed_export_settings_roundtrip() {
+        let original = Settings {
+            timed_export_schedule_enabled: true,
+            timed_export_slots: vec![ScheduleSlot {
+                enabled: true,
+                start_hour: 16,
+                start_minute: 0,
+                end_hour: 19,
+                end_minute: 0,
+                target_soc: 4,
+            }],
+            timed_export_slots_require_clear: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: Settings = serde_json::from_str(&json).unwrap();
+
+        assert!(decoded.timed_export_schedule_enabled);
+        assert_eq!(decoded.timed_export_slots.len(), 1);
+        assert!(decoded.timed_export_slots[0].enabled);
+        assert_eq!(decoded.timed_export_slots[0].start_hour, 16);
+        assert!(decoded.timed_export_slots_require_clear);
+    }
+
     /// `DischargeSlotBackup` survives a full JSON round-trip independently
     /// of the surrounding `Settings` struct. Pins the on-disk shape so a
     /// later rename or field reorder can't break a stored backup file.
@@ -2426,6 +2537,9 @@ mod tests {
             api_key: String::new(),
             api_port: 0,
             discharge_slots_backup: None,
+            timed_export_schedule_enabled: false,
+            timed_export_slots: Vec::new(),
+            timed_export_slots_require_clear: false,
             pv1_rated_kw: 0.0,
             pv2_rated_kw: 0.0,
             solar_arrays: Vec::new(),

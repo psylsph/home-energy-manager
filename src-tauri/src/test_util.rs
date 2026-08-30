@@ -23,6 +23,22 @@ fn make_temp_dir() -> std::path::PathBuf {
     ))
 }
 
+/// Last-resort guard for unit tests started without the mandatory config
+/// override. Production code must use the user's real config directory, but a
+/// `cfg(test)` binary must never be able to fall through to it.
+pub fn ensure_fallback_config_dir() -> std::path::PathBuf {
+    static FALLBACK: OnceLock<std::path::PathBuf> = OnceLock::new();
+    let dir = FALLBACK
+        .get_or_init(|| {
+            let dir = make_temp_dir();
+            std::fs::create_dir_all(&dir).expect("create fallback test config directory");
+            dir
+        })
+        .clone();
+    std::env::set_var("GIVENERGY_LOCAL_CONFIG_DIR", &dir);
+    dir
+}
+
 /// Run a synchronous test body with an isolated config directory.
 pub fn with_isolated_config_dir<T>(body: impl FnOnce() -> T) -> T {
     let _isolation = IsolationGuard::enter();
@@ -156,6 +172,22 @@ mod tests {
         std::env::set_var("GIVENERGY_LOCAL_CONFIG_DIR", make_temp_dir());
         restore_config_dir(None);
         assert!(std::env::var_os("GIVENERGY_LOCAL_CONFIG_DIR").is_none());
+        restore_config_dir(original);
+    }
+
+    #[test]
+    fn missing_override_can_be_redirected_to_a_temporary_directory() {
+        let _lock = config_dir_mutex().lock();
+        let original = std::env::var_os("GIVENERGY_LOCAL_CONFIG_DIR");
+        std::env::remove_var("GIVENERGY_LOCAL_CONFIG_DIR");
+
+        let dir = ensure_fallback_config_dir();
+
+        assert!(dir.starts_with(std::env::temp_dir()));
+        assert_eq!(
+            std::env::var_os("GIVENERGY_LOCAL_CONFIG_DIR"),
+            Some(dir.into_os_string())
+        );
         restore_config_dir(original);
     }
 }

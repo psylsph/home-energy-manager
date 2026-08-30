@@ -62,7 +62,7 @@ use crate::history::HistoryDb;
 use crate::inverter::decoder::decode_snapshot;
 use crate::inverter::encoder::{ControlCommand, RegisterWrite, WriteOutcome};
 use crate::inverter::model::{
-    BatteryMode, DeviceType, InverterSnapshot, SolarArraySource, SolarArraySummary,
+    BatteryMode, DeviceType, InverterSnapshot, ScheduleSlot, SolarArraySource, SolarArraySummary,
 };
 use crate::inverter::reconnect::ReconnectController;
 use crate::inverter::sanitizer::{
@@ -77,6 +77,7 @@ use crate::inverter::state_machines::{
     check_load_limiter_with_other_pause, check_temperature_limiter_after_automation,
     clear_cosy_slot_registers, cosy_slot_register_writes, persist_cosy_active,
     should_repair_timed_export, write_registers_to_inverter, AgileSlotAction,
+    DischargeControlArbiter, DischargeControlOwner,
 };
 pub use crate::inverter::state_machines::{
     AdaptiveChargeState, AutoWinterConfig, AutoWinterSaved, AutoWinterState, DischargeFloorConfig,
@@ -183,6 +184,20 @@ impl Default for PollSettings {
     }
 }
 
+/// Boundary writes need prompt readback confirmation even when normal
+/// telemetry polling is deliberately infrequent. Two seconds leaves enough
+/// time for a real inverter (and the simulator's asynchronous write tick) to
+/// project the FC6 writes before the confirming read.
+const TIMED_EXPORT_CONFIRMATION_POLL_SECS: u64 = 2;
+
+fn next_poll_delay_secs(configured_interval_secs: u64, timed_export_boundary_pending: bool) -> u64 {
+    if timed_export_boundary_pending {
+        configured_interval_secs.min(TIMED_EXPORT_CONFIRMATION_POLL_SECS)
+    } else {
+        configured_interval_secs
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared application state
 // ---------------------------------------------------------------------------
@@ -272,6 +287,40 @@ pub struct ForceDischargeRevert {
     /// the "no body" / "until stopped" path, where there is no slot to
     /// expire. See issue #129.
     pub force_discharge_slot_end_ms: Option<i64>,
+    /// Battery pause mode (HR 318) before force discharge (issue #289).
+    /// Captured so Stop Discharge / auto-revert restores the exact
+    /// pre-action pause configuration — GivTCP's Force Export does the
+    /// same after temporarily disabling pause mode.
+    pub battery_pause_mode: u8,
+    /// Battery pause slot (HR 319-320) before force discharge. Restored
+    /// together with `battery_pause_mode` so a Timed Discharge window that
+    /// was armed before the force action survives it unchanged.
+    pub battery_pause_slot: crate::inverter::model::ScheduleSlot,
+}
+
+/// Whether a write batch should continue past per-register failures.
+///
+/// Most control endpoints fire-and-forget a mixed batch where a transient
+/// failure on one register shouldn't skip later unrelated ones, so the
+/// default is [`WriteBatchPolicy::ContinueOnError`]. Safety-critical
+/// orderings — Timed Export slot programming followed by export arming —
+/// use [`WriteBatchPolicy::FailFast`]: the first failing register aborts
+/// the rest of the batch, so a rejected slot write can never be followed
+/// by the write that arms maximum-power discharge (code-review finding:
+/// a failed slot write did not prevent full-power export from arming).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WriteBatchPolicy {
+    /// Attempt every write in the batch; report the first failure.
+    #[default]
+    ContinueOnError,
+    /// Stop at the first failing register; later writes are skipped and the
+    /// failure is reported to the completion channel.
+    FailFast,
+    /// Fail-fast transactional write. If the awaiting API request times out
+    /// and drops its completion receiver before this batch starts (or between
+    /// writes), cancel the remaining work so a failed request cannot mutate
+    /// the inverter later and outlive the schedule/config transaction.
+    FailFastTransactional,
 }
 
 /// A batch of register writes queued for the poll loop to drain, with an
@@ -293,6 +342,13 @@ pub struct PendingWriteBatch {
     /// error is ignored silently — the receiver may already be gone if the
     /// request that queued this batch timed out, and the writes still run.
     pub completion: Option<oneshot::Sender<WriteOutcome>>,
+    /// Failure policy for this batch (see [`WriteBatchPolicy`]).
+    pub policy: WriteBatchPolicy,
+    /// Owner of the shared discharge-control domain, when this batch writes
+    /// overlapping battery-mode registers. `None` marks an unrelated batch
+    /// (for example a clock or export-limit write) that can run alongside the
+    /// selected discharge owner.
+    pub owner: Option<DischargeControlOwner>,
 }
 
 /// Shared state accessible from HTTP handlers, the WebSocket endpoint, etc.
@@ -366,6 +422,17 @@ pub struct AppState {
     pub discharge_floor_config: Arc<Mutex<DischargeFloorConfig>>,
     /// Discharge floor guard runtime state.
     pub discharge_floor_state: Arc<Mutex<DischargeFloorState>>,
+    /// Timed Export state machine (issue #289). Tracks whether the inverter
+    /// is in Eco (baseline) or Timed Export (max-power discharge during
+    /// scheduled windows), with write confirmation and HR59 re-arm fallback.
+    pub timed_export_state: Arc<Mutex<crate::inverter::state_machines::TimedExportState>>,
+    /// Timed Export configuration (desired schedule from settings).
+    pub timed_export_config: Arc<Mutex<crate::inverter::state_machines::TimedExportConfig>>,
+    /// HR59 re-arm detector (issue #289). Counts consecutive
+    /// outside-window HR59=1 readbacks; on confirmation the device is
+    /// classified as re-arming firmware and the slot clear/restore
+    /// fallback is activated.
+    pub timed_export_rearm: Arc<Mutex<crate::inverter::state_machines::TimedExportRearmDetector>>,
     /// Whether cosy charging is currently active (force-charging in a slot).
     pub cosy_active: Arc<Mutex<bool>>,
     /// Cached Octopus Agile prices for the current region.
@@ -454,6 +521,21 @@ impl AppState {
                     .map(|saved_reserve| DischargeFloorState::HeldFromRestart { saved_reserve })
                     .unwrap_or_default(),
             )),
+            timed_export_state: Arc::new(Mutex::new(
+                crate::inverter::state_machines::TimedExportState::default(),
+            )),
+            timed_export_rearm: Arc::new(Mutex::new(
+                crate::inverter::state_machines::TimedExportRearmDetector::default(),
+            )),
+            timed_export_config: Arc::new(Mutex::new(
+                crate::inverter::state_machines::TimedExportConfig {
+                    schedule_enabled: crate::settings::Settings::load()
+                        .timed_export_schedule_enabled,
+                    slots: crate::settings::Settings::load().timed_export_slots,
+                    device_rearm_confirmed: crate::settings::Settings::load()
+                        .timed_export_slots_require_clear,
+                },
+            )),
             cosy_active: Arc::new(Mutex::new(
                 crate::settings::Settings::load().cosy_active_persisted,
             )),
@@ -525,6 +607,21 @@ impl AppState {
                     .discharge_floor_saved_reserve
                     .map(|saved_reserve| DischargeFloorState::HeldFromRestart { saved_reserve })
                     .unwrap_or_default(),
+            )),
+            timed_export_state: Arc::new(Mutex::new(
+                crate::inverter::state_machines::TimedExportState::default(),
+            )),
+            timed_export_rearm: Arc::new(Mutex::new(
+                crate::inverter::state_machines::TimedExportRearmDetector::default(),
+            )),
+            timed_export_config: Arc::new(Mutex::new(
+                crate::inverter::state_machines::TimedExportConfig {
+                    schedule_enabled: crate::settings::Settings::load()
+                        .timed_export_schedule_enabled,
+                    slots: crate::settings::Settings::load().timed_export_slots,
+                    device_rearm_confirmed: crate::settings::Settings::load()
+                        .timed_export_slots_require_clear,
+                },
             )),
             cosy_active: Arc::new(Mutex::new(
                 crate::settings::Settings::load().cosy_active_persisted,
@@ -819,6 +916,7 @@ pub const MAX_WRITE_BATCHES_PER_CYCLE: usize = 8;
 /// the poll loop so the per-cycle cap is unit-testable without a full poll
 /// loop (the completion channels of untaken batches are simply left queued —
 /// their `await_write_outcome` callers keep waiting, which is correct).
+#[cfg(test)]
 fn take_pending_writes(queue: &mut Vec<PendingWriteBatch>, cap: usize) -> Vec<PendingWriteBatch> {
     if queue.len() <= cap {
         return std::mem::take(queue);
@@ -829,8 +927,176 @@ fn take_pending_writes(queue: &mut Vec<PendingWriteBatch>, cap: usize) -> Vec<Pe
     taken
 }
 
+/// Select the highest-priority discharge owner represented by the current
+/// runtime state or queued API requests.  The previous snapshot is used here
+/// because this function runs before the next read; it is still the latest
+/// confirmed inverter state and, importantly, prevents a queued low-priority
+/// write from racing an already-active higher-priority automation.
+async fn current_discharge_control_owner(state: &Arc<AppState>) -> Option<DischargeControlOwner> {
+    let snapshot = state.latest_snapshot.lock().await.clone();
+    let force_charge = state.force_charge_revert.lock().await.is_some();
+    let force_discharge = state.force_discharge_revert.lock().await.is_some();
+    let load_paused = state.load_limiter_state.lock().await.is_actively_pausing();
+    let temperature_paused = state
+        .temperature_limiter_state
+        .lock()
+        .await
+        .is_actively_pausing();
+    let cosy_active = *state.cosy_active.lock().await;
+    let timed_export_config = state.timed_export_config.lock().await.clone();
+    let timed_export_state = state.timed_export_state.lock().await.clone();
+    let timed_export_minute = snapshot
+        .as_ref()
+        .and_then(crate::inverter::state_machines::inverter_minute_of_day)
+        .unwrap_or_else(|| {
+            let now = chrono::Local::now();
+            now.hour() as u16 * 60 + now.minute() as u16
+        });
+    let timed_export_active = {
+        let has_slots = timed_export_config
+            .slots
+            .iter()
+            .any(ScheduleSlot::is_configured);
+        let in_window = crate::inverter::state_machines::export_window_contains(
+            &timed_export_config.slots,
+            timed_export_minute,
+        );
+        let export_armed = snapshot
+            .as_ref()
+            .is_some_and(|s| s.battery_power_mode == 0 && s.enable_discharge);
+        let physical_slot_configured = snapshot
+            .as_ref()
+            .is_some_and(|s| s.discharge_slots.iter().any(ScheduleSlot::is_configured));
+        timed_export_state.owns_discharge_control()
+            || (timed_export_config.schedule_enabled && has_slots && (in_window || export_armed))
+            || (!timed_export_config.schedule_enabled && export_armed && !physical_slot_configured)
+    };
+
+    let mut arbiter = DischargeControlArbiter::default();
+    if load_paused || temperature_paused {
+        arbiter.request(DischargeControlOwner::Safety);
+    }
+    if snapshot.as_ref().is_some_and(|s| {
+        crate::inverter::state_machines::hr318_blocks_discharge(s, timed_export_minute)
+            || matches!(
+                s.battery_mode,
+                BatteryMode::EcoPaused | BatteryMode::ExportPaused
+            )
+    }) {
+        // The exact pause window is evaluated again after the fresh poll. At
+        // this pre-read point, an already reported Eco Paused state is also a
+        // valid explicit pause claim.
+        arbiter.request(DischargeControlOwner::ExplicitPause);
+    }
+    if force_charge || force_discharge {
+        arbiter.request(DischargeControlOwner::ManualForce);
+    }
+    if timed_export_active {
+        arbiter.request(DischargeControlOwner::TimedExport);
+    }
+    if cosy_active || snapshot.as_ref().is_some_and(|s| s.cosy_active) {
+        arbiter.request(DischargeControlOwner::TimedCharge);
+    }
+    if snapshot.as_ref().is_some_and(|s| s.agile_active) {
+        arbiter.request(DischargeControlOwner::Agile);
+    }
+    if snapshot.as_ref().is_some_and(|s| {
+        matches!(s.battery_mode, BatteryMode::TimedDemand)
+            && !s.agile_active
+            && !s.cosy_active
+            && !cosy_active
+    }) {
+        // Timed Demand has no persisted owner in the snapshot. If neither
+        // Cosy nor Agile reported the mode as theirs, treat it as an
+        // externally/manual-selected mode so a lower-priority automation
+        // cannot silently take it over on the next poll.
+        arbiter.request(DischargeControlOwner::ManualMode);
+    }
+    arbiter.selected_owner()
+}
+
+/// Take only batches that belong to the winning discharge owner for this poll.
+/// Lower-priority owned batches stay queued and are retried after the winner
+/// releases the inverter. Unowned batches are independent register work and
+/// are always eligible.
+fn take_pending_writes_for_owner(
+    queue: &mut Vec<PendingWriteBatch>,
+    cap: usize,
+    active_owner: Option<DischargeControlOwner>,
+) -> (Vec<PendingWriteBatch>, Option<DischargeControlOwner>) {
+    let pending_owner = queue.iter().filter_map(|batch| batch.owner).max();
+    let winner = match (active_owner, pending_owner) {
+        // A user enabling managed Timed Export is an explicit replacement
+        // for an unclaimed/manual Timed Demand mode. Without this transition
+        // exception, ManualMode remains the higher active owner forever and
+        // the user's completion-backed Timed Export batch can never drain.
+        (Some(DischargeControlOwner::ManualMode), Some(DischargeControlOwner::TimedExport)) => {
+            Some(DischargeControlOwner::TimedExport)
+        }
+        // A user-issued manual selection (Eco baseline, reserve, …) is an
+        // explicit replacement for a *register-derived* ExplicitPause claim.
+        // The pre-read snapshot claims ExplicitPause for an HR318 pause
+        // window, an EcoPaused derived mode (reserve = 100) or an ExportPaused
+        // derived mode — none of which conflict with the manual HR27/HR59/
+        // slot writes (HR318 is an independent gate and stays armed). Without
+        // this exception the batch starves indefinitely: "Queued 22 register
+        // write(s)" with nothing ever written. Automations (TimedExport,
+        // Agile, Cosy) do NOT get this exception — an explicit pause still
+        // defers them (issue #289 pause precedence).
+        (Some(DischargeControlOwner::ExplicitPause), Some(DischargeControlOwner::ManualMode)) => {
+            Some(DischargeControlOwner::ManualMode)
+        }
+        (Some(active), Some(pending)) => Some(active.max(pending)),
+        (Some(active), None) => Some(active),
+        (None, Some(pending)) => Some(pending),
+        (None, None) => None,
+    };
+
+    let mut taken = Vec::new();
+    let mut remainder = Vec::with_capacity(queue.len());
+    for batch in std::mem::take(queue) {
+        let eligible = batch.owner.is_none() || batch.owner == winner;
+        if eligible && taken.len() < cap {
+            taken.push(batch);
+        } else {
+            remainder.push(batch);
+        }
+    }
+    *queue = remainder;
+    (taken, winner)
+}
+
 async fn drain_write_batches(client: &mut ModbusClient, pending: Vec<PendingWriteBatch>) {
     drain_write_batches_with_gap(client, pending, Duration::from_millis(1500)).await
+}
+
+/// Execute a direct poll-loop transition with strict ordering. The first
+/// rejected register stops the sequence, which is required for Timed Export
+/// fallback exits: continuing from a failed slot clear to HR59=0/HR27=1 lets
+/// re-arm firmware immediately recreate the invalid state.
+async fn write_registers_fail_fast_with_gap(
+    client: &mut ModbusClient,
+    writes: &[RegisterWrite],
+    label: &str,
+    inter_write_gap: Duration,
+) -> bool {
+    for (index, write) in writes.iter().enumerate() {
+        match client.write_register(write.address, write.value).await {
+            Ok(()) => tracing::info!("{label}: wrote reg {} = {}", write.address, write.value),
+            Err(error) => {
+                tracing::error!(
+                    "{label}: write reg {} failed: {error} — skipping {} later write(s)",
+                    write.address,
+                    writes.len() - index - 1
+                );
+                return false;
+            }
+        }
+        if index + 1 < writes.len() {
+            tokio::time::sleep(inter_write_gap).await;
+        }
+    }
+    true
 }
 
 /// Like [`drain_write_batches`] but with a configurable inter-write gap, so
@@ -844,6 +1110,16 @@ async fn drain_write_batches_with_gap(
     inter_write_gap: Duration,
 ) {
     for batch in pending {
+        let transactional = batch.policy == WriteBatchPolicy::FailFastTransactional;
+        if transactional
+            && batch
+                .completion
+                .as_ref()
+                .is_some_and(tokio::sync::oneshot::Sender::is_closed)
+        {
+            tracing::warn!("Cancelled transactional write batch after requester timed out");
+            continue;
+        }
         // First failing register in this batch (if any), reported back to any
         // endpoint that queued a completion channel.
         let mut first_failure: Option<WriteOutcome> = None;
@@ -854,6 +1130,18 @@ async fn drain_write_batches_with_gap(
         let awaiting = batch.completion.is_some();
         let last_idx = batch.writes.len().saturating_sub(1);
         for (i, w) in batch.writes.iter().enumerate() {
+            if transactional
+                && batch
+                    .completion
+                    .as_ref()
+                    .is_some_and(tokio::sync::oneshot::Sender::is_closed)
+            {
+                tracing::warn!(
+                    "Cancelled {} remaining transactional write(s) after requester timed out",
+                    batch.writes.len() - i
+                );
+                break;
+            }
             match client.write_register(w.address, w.value).await {
                 Ok(()) => {
                     tracing::info!("Wrote register {} = {}", w.address, w.value);
@@ -866,6 +1154,17 @@ async fn drain_write_batches_with_gap(
                             value: w.value,
                             error: e.to_string(),
                         });
+                    }
+                    if batch.policy != WriteBatchPolicy::ContinueOnError {
+                        // Safety-critical ordering (e.g. slot writes followed
+                        // by export arming): a failed write must abort the
+                        // rest of the batch, never skip past it.
+                        tracing::warn!(
+                            "Fail-fast batch: skipping {} later write(s) after reg {} failed",
+                            batch.writes.len() - i - 1,
+                            w.address
+                        );
+                        break;
                     }
                 }
             }
@@ -880,8 +1179,9 @@ async fn drain_write_batches_with_gap(
         if let Some(tx) = batch.completion {
             let outcome = first_failure.unwrap_or(WriteOutcome::Ok);
             // Ignore send error: the receiver may be gone if the requesting
-            // endpoint already timed out and returned. The writes still
-            // executed.
+            // endpoint already timed out. A transactional batch checks that
+            // cancellation before every write; ordinary batches retain their
+            // historical eventual-write behaviour.
             let _ = tx.send(outcome);
         }
     }
@@ -1291,6 +1591,20 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 // reacting to a single transient read while still healing the
                 // invalid state promptly on the next poll cycle.
                 let mut invalid_timed_export_polls: u8 = 0;
+                // Outcome of the Timed Export boundary writes issued on the
+                // previous poll (connection-scoped: a fresh connection starts
+                // with no writes in flight). Fed back into the reconciler so
+                // failed transitions retry instead of advancing.
+                let mut last_timed_export_write_outcome =
+                    crate::inverter::state_machines::TimedExportWriteOutcome::NoneIssued;
+                // Whether we already warned that the inverter clock is
+                // unavailable (once per connection, not once per poll).
+                let mut inverter_time_fallback_logged = false;
+                // A reconnect makes the HR59 re-arm detector's evidence
+                // ambiguous — any register state may predate the reconnect.
+                // Reset it to Idle so stale evidence can't classify the
+                // device (the anchored exit restarts on the next boundary).
+                state.timed_export_rearm.lock().await.reset();
 
                 // Restore cosy_active from persisted settings on restart.
                 // Without this, a client reboot during OR after a cosy slot
@@ -1363,9 +1677,14 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                     // while still making net progress on the queue (the
                     // write_notify wakes the sleep early so remaining
                     // batches drain on the next cycles).
-                    let pending: Vec<PendingWriteBatch> = {
+                    let active_discharge_owner = current_discharge_control_owner(&state).await;
+                    let (pending, pending_discharge_owner) = {
                         let mut pw = state.pending_writes.lock().await;
-                        take_pending_writes(&mut pw, MAX_WRITE_BATCHES_PER_CYCLE)
+                        take_pending_writes_for_owner(
+                            &mut pw,
+                            MAX_WRITE_BATCHES_PER_CYCLE,
+                            active_discharge_owner,
+                        )
                     };
                     if !pending.is_empty() {
                         drain_write_batches(&mut client, pending).await;
@@ -2501,6 +2820,123 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     }
                                 }
 
+                                // Select one owner for the shared discharge-control domain
+                                // before any of the mode writers below issue Modbus I/O.
+                                // Queued API requests and state carried from the previous
+                                // snapshot are included first; the fresh snapshot then adds
+                                // newly-observed safety, pause, force, and Timed Export claims.
+                                let mut discharge_arbiter = DischargeControlArbiter::default();
+                                if let Some(owner) = pending_discharge_owner {
+                                    discharge_arbiter.request(owner);
+                                }
+
+                                let inverter_minute = crate::inverter::state_machines::inverter_minute_of_day(
+                                    &snapshot,
+                                )
+                                .unwrap_or_else(|| {
+                                    let now = chrono::Local::now();
+                                    now.hour() as u16 * 60 + now.minute() as u16
+                                });
+
+                                let safety_demand = {
+                                    let load_config =
+                                        state.load_limiter_config.lock().await.clone();
+                                    let load_state = state.load_limiter_state.lock().await.clone();
+                                    let temperature_config =
+                                        state.temperature_limiter_config.lock().await.clone();
+                                    let temperature_state =
+                                        state.temperature_limiter_state.lock().await.clone();
+                                    let saved = state.load_limiter_saved.lock().await.clone();
+                                    let mut preview_temperature_state = temperature_state.clone();
+                                    let mut preview_load_state = load_state.clone();
+                                    let mut preview_saved = saved.clone();
+                                    let temperature_writes =
+                                        check_temperature_limiter_after_automation(
+                                            &snapshot,
+                                            &temperature_config,
+                                            &mut preview_temperature_state,
+                                            &mut preview_saved,
+                                            false,
+                                            false,
+                                        );
+                                    let load_writes = check_load_limiter_with_other_pause(
+                                        &snapshot,
+                                        &load_config,
+                                        &mut preview_load_state,
+                                        poll_settings.poll_interval,
+                                        &mut preview_saved,
+                                        preview_temperature_state.is_actively_pausing(),
+                                    );
+                                    load_state.is_actively_pausing()
+                                        || temperature_state.is_actively_pausing()
+                                        || temperature_writes.is_some()
+                                        || load_writes.is_some()
+                                };
+                                if safety_demand {
+                                    discharge_arbiter.request(DischargeControlOwner::Safety);
+                                }
+
+                                if crate::inverter::state_machines::hr318_blocks_discharge(
+                                    &snapshot,
+                                    inverter_minute,
+                                ) || matches!(
+                                    snapshot.battery_mode,
+                                    BatteryMode::EcoPaused | BatteryMode::ExportPaused
+                                )
+                                {
+                                    discharge_arbiter.request(DischargeControlOwner::ExplicitPause);
+                                }
+
+                                let force_charge_in_progress =
+                                    state.force_charge_revert.lock().await.is_some();
+                                let force_discharge_in_progress =
+                                    state.force_discharge_revert.lock().await.is_some();
+                                if force_charge_in_progress || force_discharge_in_progress {
+                                    discharge_arbiter.request(DischargeControlOwner::ManualForce);
+                                }
+
+                                let timed_export_candidate = {
+                                    let config = state.timed_export_config.lock().await.clone();
+                                    let machine_state =
+                                        state.timed_export_state.lock().await.clone();
+                                    let has_slots =
+                                        config.slots.iter().any(ScheduleSlot::is_configured);
+                                    let in_window = crate::inverter::state_machines::export_window_contains(
+                                        &config.slots,
+                                        inverter_minute,
+                                    );
+                                    let eco_confirmed =
+                                        snapshot.battery_power_mode == 1
+                                            && !snapshot.enable_discharge;
+                                    let physical_slot_configured = snapshot
+                                        .discharge_slots
+                                        .iter()
+                                        .any(ScheduleSlot::is_configured);
+                                    machine_state.owns_discharge_control()
+                                        || (config.schedule_enabled
+                                            && has_slots
+                                            && (in_window || !eco_confirmed))
+                                        || (!config.schedule_enabled
+                                            && !eco_confirmed
+                                            && !physical_slot_configured)
+                                };
+                                if timed_export_candidate {
+                                    discharge_arbiter.request(DischargeControlOwner::TimedExport);
+                                }
+                                if matches!(snapshot.battery_mode, BatteryMode::TimedDemand)
+                                    && !snapshot.agile_active
+                                    && !snapshot.cosy_active
+                                    && !*state.cosy_active.lock().await
+                                {
+                                    // A Timed Demand snapshot with no
+                                    // automation claiming it is a manual
+                                    // mode. Keep Agile/Cosy from taking over
+                                    // an externally-selected mode until the
+                                    // user explicitly changes it.
+                                    discharge_arbiter
+                                        .request(DischargeControlOwner::ManualMode);
+                                }
+
                                 // Track same-cycle writes that can enable discharge. The
                                 // temperature limiter runs last and reasserts its pause when
                                 // the current snapshot cannot yet reflect one of these writes.
@@ -2534,7 +2970,16 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         .and_then(|r| r.force_discharge_slot_end_ms)
                                         .is_some_and(|end| now_ms >= end);
 
-                                    if expired {
+                                    if expired
+                                        && discharge_arbiter
+                                            .request(DischargeControlOwner::ManualForce)
+                                    {
+                                        // Do not consume the restore until the
+                                        // arbiter has admitted it. A safety
+                                        // limiter can temporarily outrank the
+                                        // expired force action; leaving the
+                                        // captured state queued lets the
+                                        // restore retry after safety releases.
                                         let revert = revert_guard.take();
                                         drop(revert_guard);
                                         if let Some(r) = revert {
@@ -2550,6 +2995,8 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                 r.discharge_slot_2_end,
                                                 r.three_phase_force_discharge_enable,
                                                 r.three_phase_force_charge_enable,
+                                                Some(r.battery_pause_mode),
+                                                Some(&r.battery_pause_slot),
                                             );
                                             if let Some(writes) = writes {
                                                 discharge_control_may_override_pause =
@@ -2569,6 +3016,235 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                 }
                                             }
                                         }
+                                    } else if expired {
+                                        tracing::debug!(
+                                            owner = ?discharge_arbiter.selected_owner(),
+                                            "Force discharge auto-revert deferred by a higher-priority owner"
+                                        );
+                                    }
+                                }
+
+                                // ---- Timed Export state machine ----
+                                //
+                                // Issue #289: Eco is the normal baseline outside
+                                // Timed Export windows. The reconciler manages
+                                // HR27 + the model-routed discharge-enable
+                                // register at window boundaries:
+                                // - Entry: HR27=0, then enable=1 (HR59 / HR1122)
+                                // - Exit: enable=0, then HR27=1
+                                //
+                                // Transitions are confirmed from later poll
+                                // snapshots, not assumed when writes are queued.
+                                //
+                                // Lock discipline (code-review finding): the
+                                // decision is computed from *cloned* state under
+                                // short-lived guards, all guards are dropped
+                                // before any Modbus I/O or sleep, and the outcome
+                                // is written back under a fresh brief guard. No
+                                // Timed Export mutex is ever held across `.await`
+                                // points — the old state→config→rearm ordering
+                                // deadlocked against `GET /api/timed-export`'s
+                                // reverse order.
+                                //
+                                // `timed_export_owns_discharge` records whether
+                                // the machine owns the discharge-control
+                                // registers this cycle; lower-priority automations
+                                // (Cosy exit's Eco restore, Agile) defer to it.
+                                let mut timed_export_owns_discharge = false;
+                                {
+                                    // Window boundaries are evaluated on the
+                                    // inverter's own wall clock (issue #289): HEM
+                                    // may run in a UTC container while the
+                                    // inverter (and the user) are on local time.
+                                    // Fall back to host time when the clock
+                                    // registers are absent or malformed.
+                                    let minute_of_day =
+                                        match crate::inverter::state_machines::inverter_minute_of_day(
+                                            &snapshot,
+                                        ) {
+                                            Some(minute) => minute,
+                                            None => {
+                                                if !inverter_time_fallback_logged {
+                                                    tracing::warn!(
+                                                        "Timed Export: inverter clock unavailable — \
+                                                         falling back to host local time for window \
+                                                         evaluation"
+                                                    );
+                                                    inverter_time_fallback_logged = true;
+                                                }
+                                                use chrono::Timelike as _;
+                                                let now = chrono::Local::now();
+                                                now.hour() as u16 * 60 + now.minute() as u16
+                                            }
+                                        };
+
+                                    // Skip Timed Export management whenever a
+                                    // higher-priority owner won this cycle.
+                                    // Force Charge is included here too: its
+                                    // mode writes can clobber HR27/HR59 even
+                                    // though it does not discharge itself.
+                                    if discharge_arbiter
+                                        .can_request(DischargeControlOwner::TimedExport)
+                                    {
+                                        // Short-lived guards: clone the inputs and
+                                        // drop every guard before any I/O.
+                                        let (te_state_at_decision, mut te_config, mut te_rearm) = {
+                                            let te_state =
+                                                state.timed_export_state.lock().await.clone();
+                                            let te_config =
+                                                state.timed_export_config.lock().await.clone();
+                                            let te_rearm =
+                                                state.timed_export_rearm.lock().await.clone();
+                                            (te_state, te_config, te_rearm)
+                                        };
+                                        let mut te_state = te_state_at_decision.clone();
+
+                                        let decision = crate::inverter::state_machines::check_timed_export(
+                                            &snapshot,
+                                            &te_config,
+                                            &mut te_state,
+                                            minute_of_day,
+                                            known_device_type.unwrap_or_default(),
+                                            last_timed_export_write_outcome,
+                                            te_rearm.is_observing(),
+                                        );
+
+                                        if let Some(msg) = &decision.log_message {
+                                            tracing::info!("Timed Export: {}", msg);
+                                        }
+
+                                        // Issue the transition writes fail-fast: a
+                                        // rejected write aborts the remaining writes
+                                        // in the batch so a failed slot restore can
+                                        // never be followed by the export-arm write.
+                                        let mut write_outcome =
+                                            crate::inverter::state_machines::TimedExportWriteOutcome::NoneIssued;
+                                        if !decision.writes.is_empty()
+                                            && discharge_arbiter
+                                                .request(DischargeControlOwner::TimedExport)
+                                        {
+                                            discharge_control_may_override_pause = true;
+                                            // Shared fail-fast helper: correct
+                                            // remaining-write count on failure and no
+                                            // idle trailing sleep after the final write.
+                                            let ok = write_registers_fail_fast_with_gap(
+                                                &mut client,
+                                                &decision.writes,
+                                                "Timed Export transition",
+                                                Duration::from_millis(1500),
+                                            )
+                                            .await;
+                                            write_outcome = if ok {
+                                                crate::inverter::state_machines::TimedExportWriteOutcome::Succeeded
+                                            } else {
+                                                crate::inverter::state_machines::TimedExportWriteOutcome::Failed
+                                            };
+                                        }
+                                        last_timed_export_write_outcome = write_outcome;
+
+                                        // ---- HR59 re-arm detection (issue #289) ----
+                                        //
+                                        // Anchored to a completed HEM exit:
+                                        // observation of an unsolicited re-arm only
+                                        // begins after our exit writes landed and
+                                        // readback confirmed the enable register
+                                        // off. See `TimedExportRearmDetector`.
+                                        if !te_config.device_rearm_confirmed {
+                                            if decision.is_exit_transition
+                                                && !decision.writes.is_empty()
+                                            {
+                                                te_rearm.note_exit_written();
+                                            }
+                                            let outside_window = !crate::inverter::state_machines::export_window_contains(
+                                                &te_config.slots,
+                                                minute_of_day,
+                                            );
+                                            let hem_boundary_write_pending = te_state.is_boundary_pending();
+                                            let rearm_confirmed = te_rearm.observe(
+                                                outside_window,
+                                                snapshot.enable_discharge,
+                                                hem_boundary_write_pending,
+                                            );
+                                            if rearm_confirmed {
+                                                tracing::warn!(
+                                                    polls = crate::inverter::state_machines::TIMED_EXPORT_REARM_CONFIRM_POLLS,
+                                                    "Timed Export: firmware re-arms HR59 while slots are populated — \
+                                                     activating clear/restore fallback"
+                                                );
+                                                te_config.device_rearm_confirmed = true;
+                                                // Persist the learned fallback so it
+                                                // survives restarts. Settings::update
+                                                // is sync I/O but cheap (one small
+                                                // JSON file).
+                                                let _ = crate::settings::Settings::update(|s| {
+                                                    s.timed_export_slots_require_clear = true;
+                                                });
+                                                // Classification alone leaves the
+                                                // re-armed state unresolved: run the
+                                                // fallback exit sequence immediately
+                                                // (clear physical slots → disarm →
+                                                // restore Eco) instead of waiting
+                                                // for the next boundary.
+                                                let mut te_state_fallback = te_state.clone();
+                                                let fallback = crate::inverter::state_machines::check_timed_export(
+                                                    &snapshot,
+                                                    &te_config,
+                                                    &mut te_state_fallback,
+                                                    minute_of_day,
+                                                    known_device_type.unwrap_or_default(),
+                                                    crate::inverter::state_machines::TimedExportWriteOutcome::NoneIssued,
+                                                    false,
+                                                );
+                                                te_state = te_state_fallback;
+                                                if !fallback.writes.is_empty() {
+                                                    let succeeded =
+                                                        write_registers_fail_fast_with_gap(
+                                                            &mut client,
+                                                            &fallback.writes,
+                                                            "Timed Export fallback repair",
+                                                            Duration::from_millis(1500),
+                                                        )
+                                                        .await;
+                                                    last_timed_export_write_outcome = if succeeded {
+                                                        crate::inverter::state_machines::TimedExportWriteOutcome::Succeeded
+                                                    } else {
+                                                        crate::inverter::state_machines::TimedExportWriteOutcome::Failed
+                                                    };
+                                                }
+                                            }
+                                        } else {
+                                            // Fallback active: keep the detector reset
+                                            // so a later schedule change can re-learn.
+                                            te_rearm.reset();
+                                        }
+
+                                        timed_export_owns_discharge = discharge_arbiter
+                                            .selected_owner()
+                                            == Some(DischargeControlOwner::TimedExport)
+                                            && te_state.owns_discharge_control();
+
+                                        // Brief re-lock to record the outcome. If the
+                                        // API changed the machine state while we were
+                                        // writing (enable/disable/slot edit), the
+                                        // stored state is no longer the one this
+                                        // decision was based on — those paths own
+                                        // the reset, so we keep their value.
+                                        {
+                                            let mut stored = state.timed_export_state.lock().await;
+                                            if *stored == te_state_at_decision {
+                                                *stored = te_state.clone();
+                                            }
+                                        }
+                                        {
+                                            let mut stored = state.timed_export_rearm.lock().await;
+                                            *stored = te_rearm.clone();
+                                        }
+                                        if te_config.device_rearm_confirmed {
+                                            // Mirror the learned fallback flag for
+                                            // the API/UI (short-lived guard).
+                                            let mut stored = state.timed_export_config.lock().await;
+                                            stored.device_rearm_confirmed = true;
+                                        }
                                     }
                                 }
 
@@ -2581,41 +3257,53 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // can still be introduced by another client or
                                 // survive an app restart. Repair it only after
                                 // two consecutive snapshots and never while the
-                                // app owns a force-discharge transition.
-                                let force_discharge_in_progress =
-                                    state.force_discharge_revert.lock().await.is_some();
-                                let invalid_timed_export = should_repair_timed_export(
-                                    snapshot.enable_discharge,
-                                    &snapshot.discharge_slots,
-                                    force_discharge_in_progress,
-                                );
-                                if invalid_timed_export {
-                                    invalid_timed_export_polls =
-                                        invalid_timed_export_polls.saturating_add(1);
-                                } else {
-                                    invalid_timed_export_polls = 0;
-                                }
+                                // app owns a force-discharge transition. Skipped
+                                // when the state machine already issued repair
+                                // writes this cycle (its writes are model-routed
+                                // and fail-fast; no need to duplicate them).
+                                if !timed_export_owns_discharge {
+                                    let force_discharge_in_progress =
+                                        state.force_discharge_revert.lock().await.is_some();
+                                    let invalid_timed_export = should_repair_timed_export(
+                                        snapshot.enable_discharge,
+                                        &snapshot.discharge_slots,
+                                        force_discharge_in_progress,
+                                    );
+                                    if invalid_timed_export {
+                                        invalid_timed_export_polls =
+                                            invalid_timed_export_polls.saturating_add(1);
+                                    } else {
+                                        invalid_timed_export_polls = 0;
+                                    }
 
-                                if invalid_timed_export_polls >= 2 {
-                                    invalid_timed_export_polls = 0;
-                                    let writes = build_timed_export_disable_writes();
-                                    discharge_control_may_override_pause = !writes.is_empty();
-                                    for write in writes {
-                                        match client.write_register(write.address, write.value).await {
-                                            Ok(()) => tracing::warn!(
-                                                "Timed Export invariant repair: wrote reg {} = {}",
-                                                write.address,
-                                                write.value
-                                            ),
-                                            Err(e) => tracing::error!(
-                                                "Timed Export invariant repair: write reg {} failed: {e}",
-                                                write.address
-                                            ),
+                                    if invalid_timed_export_polls >= 2 {
+                                        invalid_timed_export_polls = 0;
+                                        let writes = build_timed_export_disable_writes(
+                                            snapshot.device_type,
+                                        );
+                                        if discharge_arbiter
+                                            .request(DischargeControlOwner::TimedExport)
+                                        {
+                                            discharge_control_may_override_pause = !writes.is_empty();
+                                            for write in writes {
+                                                match client
+                                                    .write_register(write.address, write.value)
+                                                    .await
+                                                {
+                                                    Ok(()) => tracing::warn!(
+                                                        "Timed Export invariant repair: wrote reg {} = {}",
+                                                        write.address, write.value
+                                                    ),
+                                                    Err(e) => tracing::error!(
+                                                        "Timed Export invariant repair: write reg {} failed: {e}",
+                                                        write.address
+                                                    ),
+                                                }
+                                                tokio::time::sleep(Duration::from_millis(1500)).await;
+                                            }
                                         }
-                                        tokio::time::sleep(Duration::from_millis(1500)).await;
                                     }
                                 }
-
                                 // ---- Cosy charging mode ----
                                 //
                                 // Writes Cosy slot schedules into the inverter's own charge slot
@@ -2631,6 +3319,8 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 //
                                 // This means if the app crashes, the inverter already has the
                                 // correct schedule loaded and can act on it.
+                                if discharge_arbiter
+                                    .can_request(DischargeControlOwner::TimedCharge)
                                 {
                                     let settings = &poll_settings;
                                     let now = chrono::Local::now();
@@ -2665,17 +3355,22 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         let writes = cosy_slot_register_writes(
                                             cosy_slot, snapshot.device_type, true,
                                         );
-                                        let ok = write_registers_to_inverter(
-                                            &mut client, &writes, "Cosy enter",
-                                        ).await;
+                                        if discharge_arbiter
+                                            .request(DischargeControlOwner::TimedCharge)
+                                        {
+                                            let ok = write_registers_to_inverter(
+                                                &mut client, &writes, "Cosy enter",
+                                            )
+                                            .await;
 
-                                        if ok {
-                                            *state.cosy_active.lock().await = true;
-                                            persist_cosy_active(true);
-                                            // Mark the preloaded slot as stale since we're now active.
-                                            cosy_last_preloaded_slot = None;
-                                        } else {
-                                            tracing::warn!("Cosy: enter writes failed - will retry on next poll");
+                                            if ok {
+                                                *state.cosy_active.lock().await = true;
+                                                persist_cosy_active(true);
+                                                // Mark the preloaded slot as stale since we're now active.
+                                                cosy_last_preloaded_slot = None;
+                                            } else {
+                                                tracing::warn!("Cosy: enter writes failed - will retry on next poll");
+                                            }
                                         }
                                     } else if *cosy_active && !in_slot {
                                         // ---- Exiting a cosy slot ----
@@ -2689,7 +3384,11 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             RegisterWrite { address: HR_ENABLE_CHARGE, value: 0 },
                                             RegisterWrite { address: HR_ENABLE_CHARGE_TARGET, value: 0 },
                                         ];
-                                        // For three-phase models, also clear force flags.
+                                        // For three-phase models, also clear force flags —
+                                        // except the discharge flag, which belongs to the
+                                        // higher-priority Timed Export machine while it
+                                        // owns the current window (issue #289 priority:
+                                        // scheduled Timed Export outranks Timed Charge).
                                         if snapshot.device_type.uses_three_phase_schedule_slots() {
                                             use crate::modbus::registers::{
                                                 HR_3PH_FORCE_CHARGE_ENABLE,
@@ -2698,14 +3397,30 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             };
                                             writes.push(RegisterWrite { address: HR_3PH_FORCE_CHARGE_ENABLE, value: 0 });
                                             writes.push(RegisterWrite { address: HR_3PH_AC_CHARGE_ENABLE, value: 0 });
-                                            writes.push(RegisterWrite { address: HR_3PH_FORCE_DISCHARGE_ENABLE, value: 0 });
+                                            if !timed_export_owns_discharge {
+                                                writes.push(RegisterWrite { address: HR_3PH_FORCE_DISCHARGE_ENABLE, value: 0 });
+                                            }
                                         }
-                                        // Restore eco mode.
-                                        use crate::modbus::registers::HR_BATTERY_POWER_MODE;
-                                        writes.push(RegisterWrite { address: HR_BATTERY_POWER_MODE, value: 1 });
-                                        // Also clear enable_discharge to match CosyExit behaviour.
-                                        use crate::modbus::registers::HR_ENABLE_DISCHARGE;
-                                        writes.push(RegisterWrite { address: HR_ENABLE_DISCHARGE, value: 0 });
+                                        // Restore eco mode and clear enable_discharge to
+                                        // match CosyExit behaviour — but only when Timed
+                                        // Export does not own the discharge-control
+                                        // registers this cycle. A lower-priority
+                                        // automation must not cancel an active export
+                                        // window (code-review finding: Cosy/Agile
+                                        // executed after Timed Export and overwrote
+                                        // its mode, enable flag and slots).
+                                        if !timed_export_owns_discharge {
+                                            // Restore eco mode.
+                                            use crate::modbus::registers::HR_BATTERY_POWER_MODE;
+                                            writes.push(RegisterWrite { address: HR_BATTERY_POWER_MODE, value: 1 });
+                                            // Also clear enable_discharge to match CosyExit behaviour.
+                                            use crate::modbus::registers::HR_ENABLE_DISCHARGE;
+                                            writes.push(RegisterWrite { address: HR_ENABLE_DISCHARGE, value: 0 });
+                                        } else {
+                                            tracing::debug!(
+                                                "Cosy: deferring Eco restore — Timed Export owns the current window"
+                                            );
+                                        }
 
                                         // Now preload the next upcoming slot's times (with
                                         // enable_charge=0 so the inverter doesn't act on it yet).
@@ -2733,23 +3448,28 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             writes.extend(clear_cosy_slot_registers(snapshot.device_type));
                                         }
 
-                                        let ok = write_registers_to_inverter(
-                                            &mut client, &writes, "Cosy exit",
-                                        ).await;
+                                        if discharge_arbiter
+                                            .request(DischargeControlOwner::TimedCharge)
+                                        {
+                                            let ok = write_registers_to_inverter(
+                                                &mut client, &writes, "Cosy exit",
+                                            )
+                                            .await;
 
-                                        if ok {
-                                            *state.cosy_active.lock().await = false;
-                                            persist_cosy_active(false);
-                                            // Update the preloaded tracker to the next slot (or None).
-                                            cosy_last_preloaded_slot = if settings.cosy_enabled {
-                                                crate::settings::find_next_cosy_slot(
-                                                    now_minutes, &settings.cosy_slots,
-                                                ).map(|(idx, _, _)| idx)
+                                            if ok {
+                                                *state.cosy_active.lock().await = false;
+                                                persist_cosy_active(false);
+                                                // Update the preloaded tracker to the next slot (or None).
+                                                cosy_last_preloaded_slot = if settings.cosy_enabled {
+                                                    crate::settings::find_next_cosy_slot(
+                                                        now_minutes, &settings.cosy_slots,
+                                                    ).map(|(idx, _, _)| idx)
+                                                } else {
+                                                    None
+                                                };
                                             } else {
-                                                None
-                                            };
-                                        } else {
-                                            tracing::warn!("Cosy: exit writes failed - will retry on next poll");
+                                                tracing::warn!("Cosy: exit writes failed - will retry on next poll");
+                                            }
                                         }
                                     } else if !in_slot && !*cosy_active {
                                         // ---- Idle: ensure the next upcoming slot is preloaded ----
@@ -2774,22 +3494,32 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                     let writes = cosy_slot_register_writes(
                                                         next_slot, snapshot.device_type, false,
                                                     );
-                                                    let ok = write_registers_to_inverter(
-                                                        &mut client, &writes, "Cosy preload",
-                                                    ).await;
-                                                    if ok {
-                                                        cosy_last_preloaded_slot = Some(next_idx);
+                                                    if discharge_arbiter
+                                                        .request(DischargeControlOwner::TimedCharge)
+                                                    {
+                                                        let ok = write_registers_to_inverter(
+                                                            &mut client, &writes, "Cosy preload",
+                                                        )
+                                                        .await;
+                                                        if ok {
+                                                            cosy_last_preloaded_slot = Some(next_idx);
+                                                        }
                                                     }
                                                 } else {
                                                     // No upcoming slot - clear registers if they were set.
                                                     if cosy_last_preloaded_slot.is_some() {
                                                         tracing::info!("Cosy: no upcoming slot - clearing charge slot registers");
                                                         let writes = clear_cosy_slot_registers(snapshot.device_type);
-                                                        let ok = write_registers_to_inverter(
-                                                            &mut client, &writes, "Cosy clear",
-                                                        ).await;
-                                                        if ok {
-                                                            cosy_last_preloaded_slot = None;
+                                                        if discharge_arbiter
+                                                            .request(DischargeControlOwner::TimedCharge)
+                                                        {
+                                                            let ok = write_registers_to_inverter(
+                                                                &mut client, &writes, "Cosy clear",
+                                                            )
+                                                            .await;
+                                                            if ok {
+                                                                cosy_last_preloaded_slot = None;
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -2963,6 +3693,28 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         action
                                     };
 
+                                    // Ownership arbitration (issue #289 priority:
+                                    // scheduled Timed Export outranks Agile on
+                                    // the discharge side). While the Timed
+                                    // Export machine owns the current window,
+                                    // Agile must not write — its discharge
+                                    // slots and mode writes would cancel an
+                                    // active export window, and even its
+                                    // charge actions clobber HR27 / the
+                                    // three-phase discharge enable on some
+                                    // models. Defer entirely for this poll.
+                                    let action = if !discharge_arbiter
+                                        .can_request(DischargeControlOwner::Agile)
+                                    {
+                                        tracing::debug!(
+                                            owner = ?discharge_arbiter.selected_owner(),
+                                            "Agile: deferring — another discharge-control owner won this cycle"
+                                        );
+                                        AgileSlotAction::Defer
+                                    } else {
+                                        action
+                                    };
+
                                     // Convert the action into register writes.
                                     let agile_enables_discharge =
                                         matches!(action, AgileSlotAction::Discharge { .. });
@@ -3042,7 +3794,10 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         }
                                     };
 
-                                    if !skip_writes {
+                                    if !skip_writes
+                                        && discharge_arbiter
+                                            .request(DischargeControlOwner::Agile)
+                                    {
                                         if agile_enables_discharge {
                                             discharge_control_may_override_pause = true;
                                         }
@@ -3149,11 +3904,17 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         );
                                     }
 
+                                    let limiter_writes_present =
+                                        temperature_writes.is_some() || load_writes.is_some();
+                                    let limiter_owns_discharge = !limiter_writes_present
+                                        || discharge_arbiter
+                                            .request(DischargeControlOwner::Safety);
                                     for (label, writes) in [
                                         ("Temperature limiter", temperature_writes),
                                         ("Load limiter", load_writes),
                                     ] {
-                                        if let Some(writes) = writes {
+                                        if limiter_owns_discharge {
+                                            if let Some(writes) = writes {
                                             for write in &writes {
                                                 match client
                                                     .write_register(write.address, write.value)
@@ -3171,6 +3932,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                 }
                                                 tokio::time::sleep(Duration::from_millis(1500))
                                                     .await;
+                                            }
                                             }
                                         }
                                     }
@@ -3211,23 +3973,27 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             );
                                         }
 
-                                        for write in &writes {
-                                            match client
-                                                .write_register(write.address, write.value)
-                                                .await
-                                            {
-                                                Ok(()) => tracing::info!(
-                                                    "Discharge floor guard: wrote reg {} = {}",
-                                                    write.address,
-                                                    write.value
-                                                ),
-                                                Err(e) => tracing::error!(
-                                                    "Discharge floor guard: write reg {} failed: {e}",
-                                                    write.address
-                                                ),
+                                        if discharge_arbiter
+                                            .request(DischargeControlOwner::Safety)
+                                        {
+                                            for write in &writes {
+                                                match client
+                                                    .write_register(write.address, write.value)
+                                                    .await
+                                                {
+                                                    Ok(()) => tracing::info!(
+                                                        "Discharge floor guard: wrote reg {} = {}",
+                                                        write.address,
+                                                        write.value
+                                                    ),
+                                                    Err(e) => tracing::error!(
+                                                        "Discharge floor guard: write reg {} failed: {e}",
+                                                        write.address
+                                                    ),
+                                                }
+                                                tokio::time::sleep(Duration::from_millis(1500))
+                                                    .await;
                                             }
-                                            tokio::time::sleep(Duration::from_millis(1500))
-                                                .await;
                                         }
                                     }
                                 }
@@ -3758,8 +4524,12 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                     // the sleep loop compares against the PRE-POLL version
                     // so it detects version bumps that happened during the poll.
                     let interval_secs = state.settings.lock().await.interval_secs;
+                    let timed_export_boundary_pending =
+                        state.timed_export_state.lock().await.is_boundary_pending();
+                    let poll_delay_secs =
+                        next_poll_delay_secs(interval_secs, timed_export_boundary_pending);
                     let sleep_deadline =
-                        tokio::time::Instant::now() + Duration::from_secs(interval_secs);
+                        tokio::time::Instant::now() + Duration::from_secs(poll_delay_secs);
                     loop {
                         // Wait up to 1 second, or until writes are queued
                         tokio::select! {
@@ -5374,6 +6144,13 @@ mod tests {
     }
 
     #[test]
+    fn timed_export_boundary_uses_fast_confirmation_poll() {
+        assert_eq!(next_poll_delay_secs(60, true), 2);
+        assert_eq!(next_poll_delay_secs(1, true), 1);
+        assert_eq!(next_poll_delay_secs(60, false), 60);
+    }
+
+    #[test]
     fn meter_retry_enabled_by_enable_ammeter_flag() {
         // enable_ammeter=true is sufficient even without EM115 meter_type.
         assert!(should_probe_external_meters(
@@ -5651,6 +6428,8 @@ mod tests {
                 value: 1,
             }],
             completion: None,
+            policy: Default::default(),
+            owner: None,
         };
         let mut queue: Vec<PendingWriteBatch> = (0..MAX_WRITE_BATCHES_PER_CYCLE + 5)
             .map(|i| make(i as u16))
@@ -5703,6 +6482,8 @@ mod tests {
                 value: 1,
             }],
             completion: None,
+            policy: Default::default(),
+            owner: None,
         };
         // Exactly at the cap (boundary) and below it: everything is taken,
         // matching the old drain-everything behaviour for small queues.
@@ -5712,6 +6493,349 @@ mod tests {
             assert_eq!(taken.len(), n, "queue of {n} batches should drain fully");
             assert!(queue.is_empty());
         }
+    }
+
+    #[test]
+    fn take_pending_writes_for_owner_defers_lower_priority_batches() {
+        use super::{take_pending_writes_for_owner, PendingWriteBatch};
+        use crate::inverter::encoder::RegisterWrite;
+        use crate::inverter::state_machines::DischargeControlOwner;
+
+        let make = |address, owner| PendingWriteBatch {
+            writes: vec![RegisterWrite { address, value: 1 }],
+            completion: None,
+            policy: Default::default(),
+            owner,
+        };
+        let mut queue = vec![
+            make(1, Some(DischargeControlOwner::Agile)),
+            make(2, None),
+            make(3, Some(DischargeControlOwner::TimedExport)),
+        ];
+
+        let (taken, winner) = take_pending_writes_for_owner(&mut queue, 8, None);
+
+        assert_eq!(winner, Some(DischargeControlOwner::TimedExport));
+        assert_eq!(
+            taken
+                .iter()
+                .map(|batch| batch.writes[0].address)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].writes[0].address, 1);
+    }
+
+    #[test]
+    fn take_pending_writes_for_owner_keeps_active_owner_over_lower_pending_request() {
+        use super::{take_pending_writes_for_owner, PendingWriteBatch};
+        use crate::inverter::encoder::RegisterWrite;
+        use crate::inverter::state_machines::DischargeControlOwner;
+
+        let mut queue = vec![PendingWriteBatch {
+            writes: vec![RegisterWrite {
+                address: 27,
+                value: 1,
+            }],
+            completion: None,
+            policy: Default::default(),
+            owner: Some(DischargeControlOwner::Agile),
+        }];
+
+        let (taken, winner) =
+            take_pending_writes_for_owner(&mut queue, 8, Some(DischargeControlOwner::TimedExport));
+
+        assert!(taken.is_empty());
+        assert_eq!(winner, Some(DischargeControlOwner::TimedExport));
+        assert_eq!(queue.len(), 1);
+    }
+
+    #[test]
+    fn take_pending_timed_export_replaces_active_manual_mode() {
+        use super::{take_pending_writes_for_owner, PendingWriteBatch};
+        use crate::inverter::encoder::RegisterWrite;
+        use crate::inverter::state_machines::DischargeControlOwner;
+
+        let mut queue = vec![PendingWriteBatch {
+            writes: vec![RegisterWrite {
+                address: 27,
+                value: 0,
+            }],
+            completion: None,
+            policy: Default::default(),
+            owner: Some(DischargeControlOwner::TimedExport),
+        }];
+
+        let (taken, winner) =
+            take_pending_writes_for_owner(&mut queue, 8, Some(DischargeControlOwner::ManualMode));
+
+        assert_eq!(winner, Some(DischargeControlOwner::TimedExport));
+        assert_eq!(taken.len(), 1);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn take_pending_manual_mode_replaces_register_derived_explicit_pause() {
+        use super::{take_pending_writes_for_owner, PendingWriteBatch};
+        use crate::inverter::encoder::RegisterWrite;
+        use crate::inverter::state_machines::DischargeControlOwner;
+
+        // Reproduction of the "Queued 22 register write(s) — nothing is
+        // ever written" report: enabling Eco queues a ManualMode batch
+        // (HR59=0, slot clears, HR27=1) while the pre-read snapshot claims
+        // ExplicitPause (an HR318 pause window, EcoPaused from reserve=100,
+        // or an ExportPaused derived mode). Eco writes and the HR318 pause
+        // gate are independent register domains, and a user-issued baseline
+        // selection must never be starved indefinitely by a register-
+        // derived owner: the pause stays armed and takes precedence at
+        // runtime, but the baseline write itself has to drain.
+        let mut queue = vec![PendingWriteBatch {
+            writes: vec![
+                RegisterWrite {
+                    address: 59,
+                    value: 0,
+                },
+                RegisterWrite {
+                    address: 27,
+                    value: 1,
+                },
+            ],
+            completion: None,
+            policy: Default::default(),
+            owner: Some(DischargeControlOwner::ManualMode),
+        }];
+
+        let (taken, winner) = take_pending_writes_for_owner(
+            &mut queue,
+            8,
+            Some(DischargeControlOwner::ExplicitPause),
+        );
+
+        assert_eq!(winner, Some(DischargeControlOwner::ManualMode));
+        assert_eq!(taken.len(), 1, "manual Eco batch must drain, not starve");
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn take_pending_timed_export_still_defers_to_explicit_pause() {
+        use super::{take_pending_writes_for_owner, PendingWriteBatch};
+        use crate::inverter::encoder::RegisterWrite;
+        use crate::inverter::state_machines::DischargeControlOwner;
+
+        // Automations must NOT use the manual-replacement exception: a
+        // Timed Export entry batch stays deferred while an explicit pause
+        // owns the discharge domain (issue #289 pause precedence).
+        let mut queue = vec![PendingWriteBatch {
+            writes: vec![RegisterWrite {
+                address: 27,
+                value: 0,
+            }],
+            completion: None,
+            policy: Default::default(),
+            owner: Some(DischargeControlOwner::TimedExport),
+        }];
+
+        let (taken, winner) = take_pending_writes_for_owner(
+            &mut queue,
+            8,
+            Some(DischargeControlOwner::ExplicitPause),
+        );
+
+        assert!(taken.is_empty());
+        assert_eq!(winner, Some(DischargeControlOwner::ExplicitPause));
+        assert_eq!(queue.len(), 1);
+    }
+
+    /// CODE_REVIEW.md follow-up item 2: the poll-level admission matrix.
+    ///
+    /// For every owner the API handlers actually queue with
+    /// (`ManualMode`, `TimedExport`, `ExplicitPause`, `ManualForce`) and
+    /// every register-derived snapshot state (Eco, unclaimed Timed Demand,
+    /// EcoPaused, ExportPaused, HR318 pause window), assert whether the
+    /// batch is admitted on this poll — including the derived owner itself.
+    ///
+    /// Every user-issued owner drains within one poll cycle against every
+    /// register-derived state. The single documented exception is
+    /// `TimedExport` under an explicit pause: the issue-#289 pause
+    /// precedence defers the automation (pinned by
+    /// [`take_pending_timed_export_still_defers_to_explicit_pause`]); the
+    /// boundary machine retries when the pause lifts.
+    ///
+    /// This is the regression net for the item-1 starvation bug, which
+    /// shipped green because the integration harness completed batches
+    /// without ever running the ownership filter.
+    #[tokio::test]
+    async fn admission_matrix_api_owners_vs_register_derived_states() {
+        use super::{current_discharge_control_owner, take_pending_writes_for_owner};
+        use crate::inverter::encoder::RegisterWrite;
+        use crate::inverter::model::{BatteryMode, InverterSnapshot};
+
+        fn snapshot_for(
+            mode: BatteryMode,
+            pause_mode: u8,
+            pause_window: Option<(u8, u8)>,
+        ) -> InverterSnapshot {
+            use crate::inverter::model::{DeviceType, ScheduleSlot};
+            let mut snapshot = InverterSnapshot {
+                device_type: DeviceType::Gen3Hybrid,
+                device_type_code: "2001".into(),
+                inverter_serial: "CE289".into(),
+                // Pin the inverter clock so the HR318 window evaluation is
+                // deterministic regardless of when the test runs.
+                inverter_time: "2026-08-30 12:00:00".into(),
+                battery_mode: mode,
+                battery_power_mode: 1,
+                enable_discharge: false,
+                battery_pause_mode: pause_mode,
+                ..Default::default()
+            };
+            if let Some((start, end)) = pause_window {
+                snapshot.battery_pause_slot = ScheduleSlot {
+                    enabled: true,
+                    start_hour: start,
+                    start_minute: 0,
+                    end_hour: end,
+                    end_minute: 0,
+                    target_soc: 100,
+                };
+            }
+            snapshot
+        }
+
+        // (state name, snapshot, expected derived owner)
+        let states: Vec<(&str, InverterSnapshot, Option<DischargeControlOwner>)> = vec![
+            ("Eco", snapshot_for(BatteryMode::Eco, 0, None), None),
+            (
+                "unclaimed Timed Demand",
+                InverterSnapshot {
+                    enable_discharge: true,
+                    ..snapshot_for(BatteryMode::TimedDemand, 0, None)
+                },
+                Some(DischargeControlOwner::ManualMode),
+            ),
+            (
+                "EcoPaused",
+                snapshot_for(BatteryMode::EcoPaused, 0, None),
+                Some(DischargeControlOwner::ExplicitPause),
+            ),
+            (
+                "ExportPaused",
+                InverterSnapshot {
+                    battery_power_mode: 0,
+                    ..snapshot_for(BatteryMode::ExportPaused, 0, None)
+                },
+                Some(DischargeControlOwner::ExplicitPause),
+            ),
+            (
+                "HR318 pause window",
+                InverterSnapshot {
+                    // 00:00–23:59 covers the pinned 12:00 inverter minute.
+                    battery_pause_slot: crate::inverter::model::ScheduleSlot {
+                        enabled: true,
+                        start_hour: 0,
+                        start_minute: 0,
+                        end_hour: 23,
+                        end_minute: 59,
+                        target_soc: 100,
+                    },
+                    ..snapshot_for(BatteryMode::Eco, 2, None)
+                },
+                Some(DischargeControlOwner::ExplicitPause),
+            ),
+        ];
+
+        // (batch owner, admitted against Eco / TimedDemand / pause states)
+        let batch_owners = [
+            DischargeControlOwner::ManualMode,
+            DischargeControlOwner::TimedExport,
+            DischargeControlOwner::ExplicitPause,
+            DischargeControlOwner::ManualForce,
+        ];
+
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            for (state_name, snapshot, expected_owner) in states {
+                let state = Arc::new(AppState::new());
+                *state.latest_snapshot.lock().await = Some(snapshot);
+
+                let derived = current_discharge_control_owner(&state).await;
+                assert_eq!(
+                    derived, expected_owner,
+                    "{state_name}: derived owner mismatch"
+                );
+
+                for owner in batch_owners {
+                    let mut queue = vec![PendingWriteBatch {
+                        writes: vec![RegisterWrite {
+                            address: 27,
+                            value: 1,
+                        }],
+                        completion: None,
+                        policy: Default::default(),
+                        owner: Some(owner),
+                    }];
+                    let (taken, winner) =
+                        take_pending_writes_for_owner(&mut queue, 8, derived);
+                    // The only deferral cell in the matrix: the TimedExport
+                    // automation stays queued while an explicit pause owns
+                    // the domain (issue #289). Everything else — every
+                    // user-issued selection against every register-derived
+                    // state — must drain in this poll cycle.
+                    let admitted =
+                        !(owner == DischargeControlOwner::TimedExport
+                            && derived == Some(DischargeControlOwner::ExplicitPause));
+                    assert_eq!(
+                        taken.is_empty(),
+                        !admitted,
+                        "{state_name}: batch owner {owner:?} admission mismatch \
+                         (winner {winner:?})"
+                    );
+                    assert_eq!(
+                        queue.is_empty(),
+                        admitted,
+                        "{state_name}: batch owner {owner:?} queue retention mismatch"
+                    );
+                }
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn current_owner_keeps_unclaimed_timed_demand_manual() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let snapshot = InverterSnapshot {
+                battery_mode: BatteryMode::TimedDemand,
+                ..Default::default()
+            };
+            *state.latest_snapshot.lock().await = Some(snapshot);
+
+            assert_eq!(
+                super::current_discharge_control_owner(&state).await,
+                Some(DischargeControlOwner::ManualMode)
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn current_owner_keeps_explicit_export_pause_above_automation() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let snapshot = InverterSnapshot {
+                battery_mode: BatteryMode::ExportPaused,
+                agile_active: true,
+                ..Default::default()
+            };
+            *state.latest_snapshot.lock().await = Some(snapshot);
+
+            assert_eq!(
+                super::current_discharge_control_owner(&state).await,
+                Some(DischargeControlOwner::ExplicitPause)
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -5745,6 +6869,152 @@ mod tests {
         let batch = PendingWriteBatch {
             writes,
             completion: Some(tx),
+            policy: Default::default(),
+            owner: None,
+        };
+        drain_write_batches_with_gap(&mut client, vec![batch], Duration::from_millis(1)).await;
+
+        assert_eq!(rx.await.unwrap(), WriteOutcome::Ok);
+    }
+
+    #[tokio::test]
+    async fn drain_fail_fast_skips_writes_after_first_failure() {
+        // Code-review blocker: a failed slot write must prevent all later
+        // export-arm writes. A FailFast batch stops at the first rejected
+        // register; the remaining writes are never sent, and the completion
+        // channel reports the failure.
+        use crate::inverter::encoder::{RegisterWrite, WriteOutcome};
+        use crate::inverter::poll::{
+            drain_write_batches_with_gap, PendingWriteBatch, WriteBatchPolicy,
+        };
+        use crate::modbus::client::tests::{setup_client_with_server, MockResponse};
+        use tokio::sync::oneshot;
+
+        // write1 (reg 56, slot start) is rejected with a code-0 exception
+        // and retried 5× inside write_register before surfacing. Under
+        // FailFast, write2 (reg 27, the export-arm mode write) must NEVER
+        // be attempted — total requests: 6.
+        let exc = MockResponse::Exception {
+            slave: 0x11,
+            function: 0x06,
+            code: 0,
+        };
+        let responses = vec![
+            exc.clone(),
+            exc.clone(),
+            exc.clone(),
+            exc.clone(),
+            exc.clone(),
+            exc,
+        ];
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+
+        let writes = vec![
+            RegisterWrite {
+                address: 56,
+                value: 1600,
+            },
+            RegisterWrite {
+                address: 27,
+                value: 0,
+            },
+        ];
+        let (tx, rx) = oneshot::channel();
+        let batch = PendingWriteBatch {
+            writes,
+            completion: Some(tx),
+            policy: WriteBatchPolicy::FailFast,
+            owner: None,
+        };
+        drain_write_batches_with_gap(&mut client, vec![batch], Duration::from_millis(1)).await;
+
+        match rx.await.unwrap() {
+            WriteOutcome::Failed { address, .. } => {
+                assert_eq!(address, 56, "should report the failing slot register");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        // The mock server responds strictly in order and closes once the
+        // scripted responses are exhausted: if the drain had attempted the
+        // reg-27 write after the failure, the client would have hit the
+        // closed socket and the drain call itself would surface the error
+        // path (or panic the connection task). Reaching here means the
+        // remaining writes were skipped.
+    }
+
+    #[tokio::test]
+    async fn fallback_repair_stops_after_failed_slot_clear() {
+        use crate::inverter::encoder::RegisterWrite;
+        use crate::inverter::poll::write_registers_fail_fast_with_gap;
+        use crate::modbus::client::tests::{setup_client_with_server, MockResponse};
+
+        // The slot clear is retried six times and rejected. No responses are
+        // provided for HR59/HR27, so reaching the assertion proves the repair
+        // stopped before attempting either unsafe trailing write.
+        let exception = MockResponse::Exception {
+            slave: 0x11,
+            function: 0x06,
+            code: 0,
+        };
+        let responses = vec![exception; 6];
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+        let writes = vec![
+            RegisterWrite {
+                address: 56,
+                value: 0,
+            },
+            RegisterWrite {
+                address: 59,
+                value: 0,
+            },
+            RegisterWrite {
+                address: 27,
+                value: 1,
+            },
+        ];
+
+        let succeeded = write_registers_fail_fast_with_gap(
+            &mut client,
+            &writes,
+            "test fallback repair",
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert!(!succeeded);
+    }
+
+    #[tokio::test]
+    async fn drain_fail_fast_reports_ok_when_all_writes_succeed() {
+        use crate::inverter::encoder::{RegisterWrite, WriteOutcome};
+        use crate::inverter::poll::{
+            drain_write_batches_with_gap, PendingWriteBatch, WriteBatchPolicy,
+        };
+        use crate::modbus::client::tests::{setup_client_with_server, MockResponse};
+        use tokio::sync::oneshot;
+
+        let responses = vec![
+            MockResponse::Raw(write_ack_frame(56, 1600)),
+            MockResponse::Raw(write_ack_frame(27, 0)),
+        ];
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+
+        let writes = vec![
+            RegisterWrite {
+                address: 56,
+                value: 1600,
+            },
+            RegisterWrite {
+                address: 27,
+                value: 0,
+            },
+        ];
+        let (tx, rx) = oneshot::channel();
+        let batch = PendingWriteBatch {
+            writes,
+            completion: Some(tx),
+            policy: WriteBatchPolicy::FailFast,
+            owner: None,
         };
         drain_write_batches_with_gap(&mut client, vec![batch], Duration::from_millis(1)).await;
 
@@ -5791,6 +7061,8 @@ mod tests {
         let batch = PendingWriteBatch {
             writes,
             completion: Some(tx),
+            policy: Default::default(),
+            owner: None,
         };
         drain_write_batches_with_gap(&mut client, vec![batch], Duration::from_millis(1)).await;
 
@@ -5843,6 +7115,8 @@ mod tests {
         let batch = PendingWriteBatch {
             writes,
             completion: Some(tx),
+            policy: Default::default(),
+            owner: None,
         };
         drain_write_batches_with_gap(&mut client, vec![batch], Duration::from_millis(1)).await;
 
@@ -5885,6 +7159,8 @@ mod tests {
         let batch = PendingWriteBatch {
             writes,
             completion: None,
+            policy: Default::default(),
+            owner: None,
         };
         // No rx to await — just confirm this returns without hanging.
         drain_write_batches_with_gap(&mut client, vec![batch], Duration::from_millis(1)).await;
@@ -5924,6 +7200,8 @@ mod tests {
                 },
             ],
             completion: Some(tx),
+            policy: Default::default(),
+            owner: None,
         };
         let awaited_start = Instant::now();
         drain_write_batches_with_gap(&mut client, vec![batch], gap).await;
@@ -5947,6 +7225,8 @@ mod tests {
                 },
             ],
             completion: None,
+            policy: Default::default(),
+            owner: None,
         };
         let fire_forget_start = Instant::now();
         drain_write_batches_with_gap(&mut client, vec![batch], gap).await;

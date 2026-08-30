@@ -5,6 +5,16 @@ import type { InverterTemperatureAlertConfig } from '../lib/gridFault';
 
 type ThemeMode = 'dark' | 'light';
 
+/**
+ * Which battery-mode control the user last toggled. Lives in the store (not
+ * `ControlPage` state) so the "Applying…" banner, its confirmation watchdog
+ * and the Timed Export arm-failure flag survive navigating away from the
+ * Control tab and back while the backend write batch is still draining its
+ * ~35 s of paced writes (CODE_REVIEW.md follow-up item 5).
+ */
+export type BatteryModeKind = 'eco' | 'timed_charge' | 'timed_export' | 'timed_discharge';
+export type BatteryModePending = { kind: BatteryModeKind; enabled: boolean };
+
 interface InverterState {
   snapshot: InverterSnapshot | null;
   connectionState: ConnectionState;
@@ -52,6 +62,23 @@ interface InverterState {
   gridLineWeight: GridLineWeight;
   /** Discharge slots configured locally in Eco mode, not yet written to the inverter. */
   pendingDischargeSlots: Record<number, ScheduleSlot>;
+  /**
+   * The in-flight battery-mode toggle (Eco / Timed Charge / Timed Export /
+   * Timed Discharge), or null when idle. Store-owned so the banner survives
+   * Control-page unmounts (CODE_REVIEW.md follow-up item 5).
+   */
+  batteryModePending: BatteryModePending | null;
+  /** Epoch ms when `batteryModePending` was set — anchors the elapsed-aware
+   *  confirmation watchdog so remounting the page doesn't restart its 90 s
+   *  window from zero. Null when idle. */
+  batteryModePendingSince: number | null;
+  /** Last battery-mode error text (request failure or confirmation timeout). */
+  batteryModeError: string | null;
+  /**
+   * The last Timed Export arm/toggle request failed. Store-owned so the
+   * error affordance survives navigation (CODE_REVIEW.md follow-up item 5).
+   */
+  timedExportArmFailed: boolean;
   /** EV Charger host — non-empty when configured in Settings. */
   evcHost: string;
   /** EV Charger active power (watts), updated by EVC poll loop. */
@@ -148,6 +175,15 @@ interface InverterState {
   setGridLineWeight: (weight: GridLineWeight) => void;
   setPendingDischargeSlots: (slots: Record<number, ScheduleSlot>) => void;
   clearPendingDischargeSlots: () => void;
+  /**
+   * Record a battery-mode action as in-flight (stamping `startedAt` with the
+   * current clock) or clear it (pass null). The stamp anchors the elapsed-
+   * aware confirmation timeout, so a Control-page remount resumes the
+   * remaining window instead of restarting it.
+   */
+  setBatteryModePending: (pending: BatteryModePending | null) => void;
+  setBatteryModeError: (error: string | null) => void;
+  setTimedExportArmFailed: (failed: boolean) => void;
   setHiddenPanels: (panels: string[]) => void;
   setInverterTempConfig: (config: InverterTemperatureAlertConfig) => void;
   setEvcHost: (host: string) => void;
@@ -393,6 +429,10 @@ export const useInverterStore = create<InverterState>((set) => ({
   latestVersionInfo: null,
   dismissedUpdateVersion: loadDismissedUpdateVersion(),
   pendingDischargeSlots: loadPendingDischargeSlots(),
+  batteryModePending: null,
+  batteryModePendingSince: null,
+  batteryModeError: null,
+  timedExportArmFailed: false,
   evcHost: '',
   evcPower: 0,
   evcChargingState: '',
@@ -494,6 +534,13 @@ export const useInverterStore = create<InverterState>((set) => ({
     savePendingDischargeSlots({});
     set({ pendingDischargeSlots: {} });
   },
+  setBatteryModePending: (pending) =>
+    set({
+      batteryModePending: pending,
+      batteryModePendingSince: pending ? Date.now() : null,
+    }),
+  setBatteryModeError: (error) => set({ batteryModeError: error }),
+  setTimedExportArmFailed: (failed) => set({ timedExportArmFailed: failed }),
   setHiddenPanels: (panels) => set({ hiddenPanels: panels }),
   setInverterTempConfig: (config) => set({ inverterTempConfig: config }),
   setEvcHost: (host) => set({ evcHost: host }),

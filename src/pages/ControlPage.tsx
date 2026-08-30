@@ -1,5 +1,7 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { Fragment, useState, useCallback, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { useInverterStore } from '../store/useInverterStore';
+import type { BatteryModeKind } from '../store/useInverterStore';
 import { useAction } from '../hooks/useAction';
 import { apiPost, apiGet } from '../lib/api';
 import {
@@ -9,7 +11,7 @@ import {
   isThreePhaseLimitModel,
   usesDirectChargeLimit,
 } from '../lib/deviceCapabilities';
-import type { ScheduleSlot } from '../lib/types';
+import type { InverterSnapshot, ScheduleSlot } from '../lib/types';
 import {
   DEFAULT_ADAPTIVE_PERIOD,
   adaptiveSocFieldCaption,
@@ -37,6 +39,25 @@ import {
   sliderPositionToDuration,
 } from './forceDuration';
 
+import {
+  deriveTimedExportButton,
+  deriveEcoState,
+  deriveTimedExportState,
+  extractMachineStateName,
+  formatEcoState,
+  formatTimedExportState,
+  findNextTransition,
+  hasConfiguredSlot,
+  inverterMinuteOfDay,
+  isForceDischargeActive,
+  isTimedExportWindowActive,
+  isSlotConfigured,
+  isTimedExportActive,
+  type EcoPresentationState,
+  type TimedExportPresentationState,
+  type TimedExportButtonVariant,
+} from '../lib/ecoTimedExport';
+
 /**
  * Front-end charging-mode dropdown values. Maps 1:1 to the backend
  * `AgileScope` enum but adds `'standard'` (which the backend models as
@@ -44,14 +65,26 @@ import {
  * the backend models as `cosy_enabled = true` regardless of scope).
  */
 type ChargeMode = 'standard' | 'cosy' | 'agile' | 'agile_charge' | 'agile_discharge' | 'adaptive';
-type BatteryModeKind = 'eco' | 'timed_charge' | 'timed_export' | 'timed_discharge';
-type BatteryModePending = { kind: BatteryModeKind; enabled: boolean };
 
 const BATTERY_MODE_LABELS: Record<BatteryModeKind, string> = {
   eco: 'Eco',
   timed_charge: 'Timed Charge',
   timed_export: 'Timed Export',
   timed_discharge: 'Timed Discharge',
+};
+
+/**
+ * Visual styling per Timed Export control variant (CODE_REVIEW.md). The
+ * scheduled (schedule intent) and active (readback-confirmed) variants are
+ * deliberately distinct: outline-accent vs solid accent glow.
+ */
+const timedExportButtonVariantClasses: Record<TimedExportButtonVariant, string> = {
+    neutral: 'bg-bg-surface border-transparent hover:border-accent/40 text-text-secondary',
+    scheduled: 'bg-accent/10 border-accent/40 text-accent',
+    active: 'bg-accent/20 border-accent text-accent shadow-[0_0_14px_-4px] shadow-accent/60',
+    pending: 'bg-accent/10 border-accent/40 text-accent',
+    blocked: 'bg-amber-900/20 border-amber-600/50 text-amber-300',
+    error: 'bg-red-900/20 border-red-500/50 text-red-400',
 };
 
 /**
@@ -66,6 +99,43 @@ const BATTERY_MODE_LABELS: Record<BatteryModeKind, string> = {
  * the window must comfortably outlast the write pacing.
  */
 const MODE_CONFIRMATION_TIMEOUT_MS = 90_000;
+
+/** Unwrap the { ok, data } envelope from GET /api/timed-export.
+ *
+ * `apiGet` returns the whole JSON body, so the schedule lives at `.data` —
+ * reading `schedule_enabled` off the envelope itself never matches and the
+ * persisted HEM schedule stayed invisible (UI fell back to the physical
+ * registers, which the re-arm fallback may have cleared).
+ */
+function unwrapTimedExportSchedule(res: { ok: boolean; data: unknown } | null | undefined): {
+  schedule_enabled: boolean;
+  slots: ScheduleSlot[];
+  /** Legacy Debug-formatted state string, kept for backwards compatibility. */
+  state?: string;
+  /** Backend machine state name: Off / Configured / Active / Entering / Exiting / BlockedByPause / Error. */
+  machine_state?: unknown;
+  /** Whether the inverter was classified as HR59 re-arming firmware. */
+  device_rearm_confirmed?: boolean;
+} | null {
+  if (!res || typeof res !== 'object') return null;
+  const data = (res as { data?: unknown }).data;
+  if (!data || typeof data !== 'object') return null;
+  if (!('schedule_enabled' in data)) return null;
+  const schedule = data as {
+    schedule_enabled: boolean;
+    slots: ScheduleSlot[];
+    state?: string;
+    machine_state?: unknown;
+    device_rearm_confirmed?: boolean;
+  };
+  // Older backend builds exposed only the Debug-formatted `state` field.
+  // Normalize it here so transitional/error presentation keeps working
+  // during a rolling upgrade as well as with the current machine_state field.
+  return {
+    ...schedule,
+    machine_state: schedule.machine_state ?? schedule.state,
+  };
+}
 
 function hasConfiguredDischargeSlot(slots: ReadonlyArray<ScheduleSlot> | undefined): boolean {
   return (slots ?? []).some((slot) => slot.enabled && (
@@ -135,14 +205,17 @@ function TimePicker({
   hour,
   minute,
   onChange,
+  disabled = false,
 }: {
   hour: number;
   minute: number;
   onChange: (h: number, m: number) => void;
+  disabled?: boolean;
 }) {
   return (
     <div className="flex items-center gap-1">
       <select
+        disabled={disabled}
         value={hour}
         onChange={(e) => onChange(Number(e.target.value), minute)}
         className="bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-2 py-1.5 border border-transparent focus:border-accent outline-none"
@@ -155,6 +228,7 @@ function TimePicker({
       </select>
       <span className="text-text-secondary">:</span>
       <select
+        disabled={disabled}
         value={minute}
         onChange={(e) => onChange(hour, Number(e.target.value))}
         className="bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-2 py-1.5 border border-transparent focus:border-accent outline-none"
@@ -169,6 +243,128 @@ function TimePicker({
   );
 }
 
+function InverterWriteProgress({ detail = 'This can take several seconds. Please keep this page open.' }: { detail?: string }) {
+  return createPortal(
+    <div
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      className="pointer-events-none fixed inset-x-4 top-4 z-[100] mx-auto flex max-w-lg items-center gap-4 rounded-xl border-2 border-amber-200 bg-amber-400 px-5 py-4 text-slate-950 shadow-2xl ring-4 ring-black/20"
+    >
+      <span
+        aria-hidden="true"
+        className="h-7 w-7 shrink-0 animate-spin rounded-full border-4 border-current border-t-transparent"
+      />
+      <div>
+        <div className="text-base font-bold">Applying changes to inverter…</div>
+        <div className="mt-0.5 text-sm font-medium text-slate-800">{detail}</div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+const CHARGE_SLOT_CONFIRM_TIMEOUT_MS = 15_000;
+const TIMED_DISCHARGE_CONFIRM_TIMEOUT_MS = 15_000;
+
+function chargeSlotMatchesReadback(
+  snapshot: InverterSnapshot | null,
+  index: number,
+  desired: ScheduleSlot,
+): boolean {
+  const actual = snapshot?.charge_slots[index];
+  if (!actual) return false;
+  return actual.enabled === desired.enabled
+    && actual.start_hour === desired.start_hour
+    && actual.start_minute === desired.start_minute
+    && actual.end_hour === desired.end_hour
+    && actual.end_minute === desired.end_minute
+    && (!desired.enabled || actual.target_soc === desired.target_soc);
+}
+
+/**
+ * Charge-slot writes are queued by the API and then applied register by
+ * register by the poll loop. Keep the editor pending until a newer WebSocket
+ * snapshot confirms the complete slot, rather than hiding progress as soon
+ * as the backend accepts the queue request.
+ */
+function waitForChargeSlotReadback(
+  index: number,
+  desired: ScheduleSlot,
+  snapshotBeforeSave: InverterSnapshot | null,
+): Promise<void> {
+  return new Promise((resolve) => {
+    let unsubscribe = () => {};
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      unsubscribe();
+      resolve();
+    };
+    const check = () => {
+      const current = useInverterStore.getState().snapshot;
+      if (current !== snapshotBeforeSave && chargeSlotMatchesReadback(current, index, desired)) {
+        finish();
+      }
+    };
+    const timeout = window.setTimeout(finish, CHARGE_SLOT_CONFIRM_TIMEOUT_MS);
+    unsubscribe = useInverterStore.subscribe(check);
+    check();
+  });
+}
+
+function timedDischargeMatchesReadback(
+  snapshot: InverterSnapshot | null,
+  desired: ScheduleSlot,
+): boolean {
+  if (!snapshot) return false;
+  const pauseSlot = snapshot.battery_pause_slot;
+  if (!desired.enabled) {
+    return snapshot.battery_pause_mode !== 2
+      && (!pauseSlot?.enabled || (
+        pauseSlot.start_hour === 0
+        && pauseSlot.start_minute === 0
+        && pauseSlot.end_hour === 0
+        && pauseSlot.end_minute === 0
+      ));
+  }
+  // HR319/320 stores the inverse of the visible demand window.
+  return snapshot.battery_pause_mode === 2
+    && pauseSlot?.enabled === true
+    && pauseSlot.start_hour === desired.end_hour
+    && pauseSlot.start_minute === desired.end_minute
+    && pauseSlot.end_hour === desired.start_hour
+    && pauseSlot.end_minute === desired.start_minute;
+}
+
+function waitForTimedDischargeReadback(
+  desired: ScheduleSlot,
+  snapshotBeforeSave: InverterSnapshot | null,
+): Promise<void> {
+  return new Promise((resolve) => {
+    let unsubscribe = () => {};
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      unsubscribe();
+      resolve();
+    };
+    const check = () => {
+      const current = useInverterStore.getState().snapshot;
+      if (current !== snapshotBeforeSave && timedDischargeMatchesReadback(current, desired)) {
+        finish();
+      }
+    };
+    const timeout = window.setTimeout(finish, TIMED_DISCHARGE_CONFIRM_TIMEOUT_MS);
+    unsubscribe = useInverterStore.subscribe(check);
+    check();
+  });
+}
+
 function ScheduleSlotEditor({
   slotIndex,
   slot,
@@ -176,6 +372,7 @@ function ScheduleSlotEditor({
   showTargetSoc,
   apiPath = '/api/control/discharge-slot',
   masterArmed = true,
+  defaultTargetSoc,
   /**
    * Visual treatment:
    *   - 'normal'        — fully editable, default.
@@ -192,7 +389,7 @@ function ScheduleSlotEditor({
 }: {
   slotIndex: number;
   slot: ScheduleSlot;
-  onSave: (index: number, slot: ScheduleSlot, path: string) => void;
+  onSave: (index: number, slot: ScheduleSlot, path: string) => Promise<void>;
   showTargetSoc: boolean;
   apiPath?: string;
   /** Whether the schedule's master enable flag (e.g. enable_charge / HR 96)
@@ -202,11 +399,14 @@ function ScheduleSlotEditor({
    *  (currently the discharge schedule, whose Eco/Timed arming model is
    *  different) keep the original always-armed rendering. */
   masterArmed?: boolean;
+  /** Target used when a fresh slot still contains the inverter's minimum/default value. */
+  defaultTargetSoc?: number;
   mode?: 'normal' | 'agile_readonly';
 }) {
   const [local, setLocal] = useState<ScheduleSlot>({ ...slot });
   const [saving, setSaving] = useState(false);
-  const [feedback, setFeedback] = useState<'saved' | 'error' | null>(null);
+  const [feedback, setFeedback] = useState<'saved' | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   // `dirty` is true when `local` differs from the last-saved (or just-loaded)
   // slot. We deep-compare the six scalar fields the user can change.
   // `baseline` lives in state (not a ref) so it's safe to consume in the
@@ -245,12 +445,13 @@ function ScheduleSlotEditor({
   const handleSave = async () => {
     setSaving(true);
     setFeedback(null);
+    setSaveError(null);
     try {
       await onSave(slotIndex, local, apiPath);
       setBaseline({ ...local });
       setFeedback('saved');
-    } catch {
-      setFeedback('error');
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : 'The inverter change could not be saved.');
     }
     setSaving(false);
     setTimeout(() => setFeedback(null), 2000);
@@ -273,7 +474,16 @@ function ScheduleSlotEditor({
       <div className="flex items-center justify-between">
         <span className="text-text-primary text-sm font-medium">Slot {slotIndex + 1}</span>
         <button
-          onClick={() => setLocal((l) => ({ ...l, enabled: !l.enabled }))}
+          onClick={() => setLocal((current) => ({
+            ...current,
+            enabled: !current.enabled,
+            target_soc: !current.enabled
+              && defaultTargetSoc != null
+              && current.target_soc <= 4
+              ? defaultTargetSoc
+              : current.target_soc,
+          }))}
+          disabled={saving}
           aria-pressed={local.enabled}
           aria-label={`Slot ${slotIndex + 1} ${local.enabled ? 'enabled' : 'disabled'}`}
           className={`relative w-9 h-4 rounded-full transition ${local.enabled ? 'bg-accent' : 'bg-bg-elevated'
@@ -295,6 +505,7 @@ function ScheduleSlotEditor({
                 hour={local.start_hour}
                 minute={local.start_minute}
                 onChange={(h, m) => setLocal((l) => ({ ...l, start_hour: h, start_minute: m }))}
+                disabled={saving}
               />
             </div>
             <div className="flex items-center gap-1.5">
@@ -303,6 +514,7 @@ function ScheduleSlotEditor({
                 hour={local.end_hour}
                 minute={local.end_minute}
                 onChange={(h, m) => setLocal((l) => ({ ...l, end_hour: h, end_minute: m }))}
+                disabled={saving}
               />
             </div>
           </div>
@@ -319,6 +531,7 @@ function ScheduleSlotEditor({
                 max={100}
                 step={1}
                 value={local.target_soc}
+                disabled={saving}
                 onChange={(e) => setLocal((l) => ({ ...l, target_soc: Number(e.target.value) }))}
                 className="w-full"
               />
@@ -327,12 +540,19 @@ function ScheduleSlotEditor({
         </>
       )}
 
+      {saving && <InverterWriteProgress />}
+      {saveError && (
+        <div role="alert" className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+          {saveError}
+        </div>
+      )}
+
       <button
         onClick={handleSave}
         disabled={saving}
         className="w-full py-2 bg-accent/20 text-accent rounded-lg text-sm font-medium hover:bg-accent/30 transition disabled:opacity-50"
       >
-        {saving ? 'Saving...' : feedback === 'saved' ? '✓ Saved' : feedback === 'error' ? '✗ Error' : 'Save'}
+        {saving ? 'Applying…' : feedback === 'saved' ? '✓ Saved' : saveError ? '✗ Error' : 'Save'}
       </button>
     </div>
   );
@@ -2210,9 +2430,23 @@ function TemperatureLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) 
 }
 
 export default function ControlPage() {
-  const { snapshot, developerMode, connectionState, connectedHost } = useInverterStore();
-  const [batteryModePending, setBatteryModePending] = useState<BatteryModePending | null>(null);
-  const [batteryModeError, setBatteryModeError] = useState<string | null>(null);
+  const {
+    snapshot,
+    developerMode,
+    connectionState,
+    connectedHost,
+    // CODE_REVIEW.md follow-up item 5: the battery-mode action banners and
+    // the Timed Export arm-failure flag live in the store so they survive
+    // navigating away from the Control tab and back while the write batch
+    // is still draining its paced writes.
+    batteryModePending,
+    batteryModePendingSince,
+    batteryModeError,
+    timedExportArmFailed,
+    setBatteryModePending,
+    setBatteryModeError,
+    setTimedExportArmFailed,
+  } = useInverterStore();
   const [timedDischargeOverride, setTimedDischargeOverride] = useState<boolean | null>(null);
   const [loadLimiterRefreshKey, setLoadLimiterRefreshKey] = useState(0);
   const [pauseDischargePending, setPauseDischargePending] = useState<'pause' | 'resume' | null>(null);
@@ -2221,6 +2455,39 @@ export default function ControlPage() {
   const [forceChargeError, setForceChargeError] = useState<string | null>(null);
   const [forceDischargePending, setForceDischargePending] = useState<'start' | 'stop' | null>(null);
   const [forceDischargeError, setForceDischargeError] = useState<string | null>(null);
+
+  // Issue #289: HEM-managed Timed Export schedule state. The backend owns
+  // the desired schedule and drives HR27/HR59 at window boundaries; this
+  // fetch seeds the UI so Configured slots stay visible even while the
+  // physical inverter slots are temporarily cleared.
+  const [timedExportSchedule, setTimedExportSchedule] = useState<{
+    schedule_enabled: boolean;
+    slots: ScheduleSlot[];
+    /** Legacy Debug-formatted state string, kept for backwards compatibility. */
+    state?: string;
+    machine_state?: unknown;
+    device_rearm_confirmed?: boolean;
+  } | null>(null);
+
+  // `timedExportArmFailed` (and its setter) come from the store: the last
+  // Timed Export arm/toggle request failed, and the control must surface an
+  // error affordance (retry) rather than letting the stale schedule intent
+  // imply activation. Cleared on the next attempt; a schedule that later
+  // becomes enabled drives the variant from the machine state instead.
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiGet<{ ok: boolean; data: unknown }>('/api/timed-export');
+        const schedule = unwrapTimedExportSchedule(res);
+        if (!cancelled && schedule) {
+          setTimedExportSchedule(schedule);
+        }
+      } catch { /* schedule endpoint unavailable — fall back to registers */ }
+    })();
+    return () => { cancelled = true; };
+  }, [snapshot]);
 
   // ---- Connection gate ----
   // When the inverter isn't currently connected, controls would be a lie:
@@ -2347,11 +2614,41 @@ export default function ControlPage() {
     ? snapshot.battery_power_mode === 1
     : currentMode === 'eco' || currentMode === 'eco_paused' || currentMode === 'timed_demand';
   const timedChargeEnabled = snapshot?.enable_charge ?? false;
-  const timedExportEnabled = snapshot?.enable_discharge ?? false;
-  const hasConfiguredTimedExportSlot = hasConfiguredDischargeSlot(snapshot?.discharge_slots);
+  // Issue #289: the HEM-managed schedule is the source of truth for the
+  // Timed Export toggle. Fall back to the HR27/HR59 registers when the
+  // schedule endpoint hasn't loaded (e.g. older backend or fetch failure) —
+  // HR59 alone conflates Timed Demand (HR27=1) with Timed Export (HR27=0),
+  // so the fallback also requires HR27=0 for "on".
+  const scheduleStateEnabled = timedExportSchedule?.schedule_enabled;
+  const timedExportEnabled = scheduleStateEnabled != null
+    ? scheduleStateEnabled
+    : (snapshot?.enable_discharge ?? false) && (snapshot?.battery_power_mode == null || snapshot.battery_power_mode === 0);
+  const hasConfiguredTimedExportSlot = hasConfiguredDischargeSlot(snapshot?.discharge_slots)
+    || hasConfiguredSlot(timedExportSchedule?.slots);
   const snapshotTimedDischargeEnabled = snapshot?.battery_pause_mode === 2;
   const timedDischargeEnabled = timedDischargeOverride ?? snapshotTimedDischargeEnabled;
   const batteryModeApplying = batteryModePending != null;
+  // Issue #289: enabling the schedule with a *future* window intentionally
+  // leaves HR27=1 (Eco baseline) until the window opens, so the enable
+  // confirmation accepts either a confirmed export state (HR27=0/HR59=1,
+  // in-window save) or a future window that does not contain "now".
+  //
+  // Under the re-arm fallback the physical registers are intentionally
+  // cleared outside export windows; the persisted HEM schedule remains
+  // the user-visible source of truth and the editor should keep rendering
+  // it (finding: discharge editors became empty when slots were cleared).
+  const device_rearm_confirmed = timedExportSchedule?.device_rearm_confirmed ?? false;
+  const desiredExportSlots = hasConfiguredSlot(timedExportSchedule?.slots)
+    ? timedExportSchedule!.slots
+    : snapshot?.discharge_slots;
+  const nowForWindows = new Date();
+  const currentInverterMinute = inverterMinuteOfDay(snapshot)
+    ?? (nowForWindows.getHours() * 60 + nowForWindows.getMinutes());
+  const timedExportOwnsCurrentWindow = isTimedExportWindowActive(
+    timedExportEnabled,
+    desiredExportSlots,
+    currentInverterMinute,
+  );
   const batteryModeConfirmed = batteryModePending != null && (
     batteryModePending.kind === 'eco'
       ? ecoEnabled === batteryModePending.enabled
@@ -2360,11 +2657,63 @@ export default function ControlPage() {
         ? timedChargeEnabled === batteryModePending.enabled
         : batteryModePending.kind === 'timed_export'
           ? timedExportEnabled === batteryModePending.enabled
-            && (!batteryModePending.enabled || snapshot?.battery_power_mode === 0)
+            && (!batteryModePending.enabled
+              || isTimedExportActive(snapshot)
+              || !timedExportOwnsCurrentWindow)
             && (batteryModePending.enabled || ecoEnabled)
           : snapshotTimedDischargeEnabled === batteryModePending.enabled
   );
   const pauseDischargeActive = currentMode === 'eco_paused' || automatedPauseActive;
+
+  // Issue #289: Derive Eco and Timed Export presentation states.
+  // Force-discharge ownership outranks Timed Export: when an export-shaped
+  // readback falls inside a physical slot but outside the managed schedule's
+  // current window, it belongs to the manual action. The helper uses the
+  // inverter-local minute so the quick-action highlight and the presentation
+  // cards cannot disagree when the browser is in another timezone.
+  const forceDischargeActiveForState = isForceDischargeActive(
+    snapshot,
+    timedExportEnabled,
+    desiredExportSlots,
+    currentInverterMinute,
+  );
+  const timedExportMachineStateName = timedExportSchedule
+    ? extractMachineStateName(
+        (timedExportSchedule as { machine_state?: unknown }).machine_state
+      )
+    : undefined;
+  const ecoState: EcoPresentationState = deriveEcoState(
+    snapshot,
+    timedExportOwnsCurrentWindow && isTimedExportActive(snapshot),
+    forceDischargeActiveForState,
+    pauseDischargeActive,
+    { minuteOfDay: currentInverterMinute, now: nowForWindows }
+  );
+  const timedExportState: TimedExportPresentationState = deriveTimedExportState(
+    snapshot,
+    timedExportEnabled,
+    desiredExportSlots,
+    {
+      now: nowForWindows,
+      machineStateName: timedExportMachineStateName,
+    }
+  );
+  const nextTransition = findNextTransition(
+    desiredExportSlots,
+    Math.floor(currentInverterMinute / 60),
+    currentInverterMinute % 60
+  );
+  // CODE_REVIEW.md: single Timed Export toggle with explicit Arm/Stop
+  // semantics. The presentation variant keeps schedule intent (scheduled)
+  // visually distinct from readback-confirmed export (active); failed or
+  // deferred arms surface as error/pending, never as active.
+  const timedExportApplying = batteryModePending?.kind === 'timed_export';
+  const timedExportButton = deriveTimedExportButton(timedExportState, {
+    hasConfiguredSlot: hasConfiguredTimedExportSlot,
+    applying: timedExportApplying,
+    armError: timedExportArmFailed,
+    physicallyArmed: isTimedExportActive(snapshot),
+  });
 
   useEffect(() => {
     if (batteryModePending == null) return;
@@ -2376,14 +2725,21 @@ export default function ControlPage() {
       return () => window.clearTimeout(confirmed);
     }
     const action = batteryModePending;
+    // Elapsed-aware watchdog (CODE_REVIEW.md follow-up item 5): the pending
+    // state and its `startedAt` stamp live in the store, so remounting the
+    // page must resume the *remaining* confirmation window rather than
+    // restart the full 90 s. A deadline that passed while the page was
+    // unmounted surfaces the error immediately on remount.
+    const startedAt = batteryModePendingSince ?? Date.now();
+    const remainingMs = MODE_CONFIRMATION_TIMEOUT_MS - (Date.now() - startedAt);
     const timeout = window.setTimeout(() => {
       setBatteryModePending(null);
       setBatteryModeError(
         `${BATTERY_MODE_LABELS[action.kind]} did not confirm the change. Please try again.`,
       );
-    }, MODE_CONFIRMATION_TIMEOUT_MS);
+    }, Math.max(0, remainingMs));
     return () => window.clearTimeout(timeout);
-  }, [batteryModeConfirmed, batteryModePending]);
+  }, [batteryModeConfirmed, batteryModePending, batteryModePendingSince, setBatteryModeError, setBatteryModePending]);
   const hasLiveControlSnapshot = snapshot != null && connectionState === 'connected';
   const pauseDischargeConfirmed = hasLiveControlSnapshot && (
     pauseDischargePending === 'pause'
@@ -2543,8 +2899,7 @@ export default function ControlPage() {
   // force-charge flag); on single-phase/AC it maps to HR 96.
   const inChargeWindow = (snapshot?.charge_slots ?? []).some(slot => {
     if (!slot.enabled) return false;
-    const now = new Date();
-    const curMin = now.getHours() * 60 + now.getMinutes();
+    const curMin = currentInverterMinute;
     const startMin = slot.start_hour * 60 + slot.start_minute;
     const endMin = slot.end_hour * 60 + slot.end_minute;
     return startMin < endMin
@@ -2571,8 +2926,7 @@ export default function ControlPage() {
   // is active.
   const inDischargeWindow = (snapshot?.discharge_slots ?? []).some(slot => {
     if (!slot.enabled) return false;
-    const now = new Date();
-    const curMin = now.getHours() * 60 + now.getMinutes();
+    const curMin = currentInverterMinute;
     const startMin = slot.start_hour * 60 + slot.start_minute;
     const endMin = slot.end_hour * 60 + slot.end_minute;
     return startMin < endMin
@@ -2581,12 +2935,17 @@ export default function ControlPage() {
   });
   const snapshotForceDischarge = (snapshot?.enable_discharge ?? false)
     && snapshot?.battery_power_mode === 0
-    && inDischargeWindow;
+    && inDischargeWindow
+    && !timedExportOwnsCurrentWindow;
   const forceDischargeActive = snapshotForceDischarge;
   const [reserveSaving, setReserveSaving] = useState(false);
   const [chargeRateSaving, setChargeRateSaving] = useState(false);
   const [dischargeRateSaving, setDischargeRateSaving] = useState(false);
   const [activePowerSaving, setActivePowerSaving] = useState(false);
+  const powerControlSaving = reserveSaving
+    || chargeRateSaving
+    || dischargeRateSaving
+    || activePowerSaving;
   // Duration (in minutes) for Force Charge and Force Discharge quick actions.
   // The UI offers five-minute increments from 5m to 24h on a logarithmic
   // track. The backend clamps the submitted 1440-minute endpoint to 1439
@@ -2698,12 +3057,33 @@ export default function ControlPage() {
         enabled: false, start_hour: 0, start_minute: 0, end_hour: 6, end_minute: 0, target_soc: 100,
       } as ScheduleSlot));
 
+  // Issue #289 / code-review finding: the discharge editors must surface
+  // the persisted HEM schedule even while the physical registers are
+  // cleared by the re-arm fallback. Source the editor from the persisted
+  // schedule when the fallback is active or the physical registers are
+  // empty while desired slots exist; otherwise fall back to live readback.
+  const persistedSlots = timedExportSchedule?.slots;
+  const liveConfigured = (snapshot?.discharge_slots ?? []).some(isSlotConfigured);
+  const usePersistedForEditor = device_rearm_confirmed
+    || (!liveConfigured && hasConfiguredSlot(persistedSlots));
   const baseDischargeSlots: ScheduleSlot[] =
-    snapshot?.discharge_slots?.length != null && snapshot.discharge_slots.length >= maxDischargeSlots
-      ? snapshot.discharge_slots.slice(0, maxDischargeSlots)
-      : Array.from({ length: maxDischargeSlots }, () => ({
-        enabled: false, start_hour: 16, start_minute: 0, end_hour: 19, end_minute: 0, target_soc: 4,
-      } as ScheduleSlot));
+    usePersistedForEditor && hasConfiguredSlot(persistedSlots)
+      ? (persistedSlots ?? []).slice(0, maxDischargeSlots).concat(
+          Array.from(
+            { length: Math.max(0, maxDischargeSlots - (persistedSlots?.length ?? 0)) },
+            (): ScheduleSlot => ({
+              enabled: false, start_hour: 16, start_minute: 0, end_hour: 19, end_minute: 0, target_soc: 4,
+            }),
+          )
+        )
+      : snapshot?.discharge_slots?.length != null && snapshot.discharge_slots.length >= maxDischargeSlots
+        ? snapshot.discharge_slots.slice(0, maxDischargeSlots)
+        : Array.from(
+            { length: maxDischargeSlots },
+            (): ScheduleSlot => ({
+              enabled: false, start_hour: 16, start_minute: 0, end_hour: 19, end_minute: 0, target_soc: 4,
+            }),
+          );
 
   const dischargeSlots: ScheduleSlot[] = baseDischargeSlots;
 
@@ -2763,13 +3143,27 @@ export default function ControlPage() {
   const handleTimedExportToggle = async () => {
     if (batteryModeApplying) return;
     const enabled = !timedExportEnabled;
+    setTimedExportArmFailed(false);
     setBatteryModePending({ kind: 'timed_export', enabled });
     setBatteryModeError(null);
     try {
       await apiPost('/api/control/timed-export', { enabled });
+      // Issue #289: refresh the HEM-managed schedule so the toggle state
+      // reflects the persisted schedule_enabled immediately (a future
+      // window intentionally leaves HR27/HR59 in Eco until the boundary).
+      try {
+        const res = await apiGet<{ ok: boolean; data: unknown }>('/api/timed-export');
+        const schedule = unwrapTimedExportSchedule(res);
+        if (schedule) {
+          setTimedExportSchedule(schedule);
+        }
+      } catch { /* schedule refresh is best-effort */ }
     } catch (error) {
       setBatteryModePending(null);
       setBatteryModeError(error instanceof Error ? error.message : 'Timed Export toggle failed.');
+      // A rejected or deferred arm must present as an error state, never as
+      // active Timed Export (CODE_REVIEW.md).
+      setTimedExportArmFailed(true);
     }
   };
 
@@ -2796,6 +3190,7 @@ export default function ControlPage() {
 
   const handleSlotSave = async (index: number, slot: ScheduleSlot, path: string) => {
     if (path === '/api/control/timed-discharge') {
+      const snapshotBeforeSave = useInverterStore.getState().snapshot;
       setTimedDischargeOverride(slot.enabled);
       await apiPost(path, {
         enabled: slot.enabled,
@@ -2804,19 +3199,66 @@ export default function ControlPage() {
         end_hour: slot.end_hour,
         end_minute: slot.end_minute,
       });
+      await waitForTimedDischargeReadback(slot, snapshotBeforeSave);
       return;
     }
 
-    // API expects 1-based slot number
-    await apiPost(path, {
-      slot: index + 1,
-      enabled: slot.enabled,
-      start_hour: slot.start_hour,
-      start_minute: slot.start_minute,
-      end_hour: slot.end_hour,
-      end_minute: slot.end_minute,
-      target_soc: slot.target_soc,
-    });
+    // API expects 1-based slot number. The discharge-slot endpoint now
+    // echoes the updated managed schedule in its response body so the
+    // editor can pick up the persisted state immediately — under the
+    // re-arm fallback the physical registers stay zero until the next
+    // enable, so waiting for a follow-up /api/timed-export fetch was
+    // racy.
+    const snapshotBeforeSave = useInverterStore.getState().snapshot;
+    const res = await apiPost<{
+      ok: boolean;
+      schedule?: { schedule_enabled: boolean; slots: ScheduleSlot[] };
+      data?: { schedule?: { schedule_enabled: boolean; slots: ScheduleSlot[] } };
+    }>(
+      path,
+      {
+        slot: index + 1,
+        enabled: slot.enabled,
+        start_hour: slot.start_hour,
+        start_minute: slot.start_minute,
+        end_hour: slot.end_hour,
+        end_minute: slot.end_minute,
+        target_soc: slot.target_soc,
+      },
+    );
+    if (path === '/api/control/charge-slot') {
+      await waitForChargeSlotReadback(index, slot, snapshotBeforeSave);
+    }
+    // `apiPost` returns the backend envelope unchanged. The schedule is a
+    // top-level field on this endpoint; accept the nested shape too for
+    // compatibility with older proxies that wrapped response data.
+    const returnedSchedule = res?.schedule ?? res?.data?.schedule;
+    if (path === '/api/control/discharge-slot' && returnedSchedule) {
+      // Apply the echoed desired schedule immediately. Physical readback may
+      // intentionally remain empty while re-arm fallback is active, so the
+      // editor must not wait for a snapshot that cannot contain the desired
+      // values. Preserve the metadata from the initial GET until the next
+      // explicit refresh.
+      setTimedExportSchedule((previous) => ({
+        ...(previous ?? {}),
+        schedule_enabled: returnedSchedule.schedule_enabled,
+        slots: returnedSchedule.slots,
+      }));
+      // Refresh machine state / fallback metadata as a best-effort follow-up;
+      // the echoed schedule above remains the source of truth if this request
+      // races with a stale response.
+      try {
+        const schedRes = await apiGet<{ ok: boolean; data: unknown }>('/api/timed-export');
+        const schedule = unwrapTimedExportSchedule(schedRes);
+        if (schedule) {
+          setTimedExportSchedule({
+            ...schedule,
+            schedule_enabled: returnedSchedule.schedule_enabled,
+            slots: returnedSchedule.slots,
+          });
+        }
+      } catch { /* schedule refresh is best-effort */ }
+    }
   };
 
   const handleReserveSave = async () => {
@@ -3049,21 +3491,25 @@ export default function ControlPage() {
           <button
             type="button"
             onClick={handleTimedExportToggle}
-            disabled={batteryModeApplying || (!timedExportEnabled && !hasConfiguredTimedExportSlot)}
+            disabled={batteryModeApplying || timedExportButton.disabled}
             aria-pressed={timedExportEnabled}
-            className={`px-3 py-3 rounded-lg border text-xs font-medium transition flex flex-col items-start gap-1 ${timedExportEnabled
-                ? 'bg-accent/20 border-accent text-accent'
-                : 'bg-bg-surface border-transparent hover:border-accent/40 text-text-secondary'
-              } disabled:opacity-50`}
+            aria-label={timedExportButton.ariaLabel}
+            data-variant={timedExportButton.variant}
+            data-action={timedExportButton.action}
+            className={`px-3 py-3 rounded-lg border text-xs font-medium transition flex flex-col items-start gap-1 ${timedExportButtonVariantClasses[timedExportButton.variant]
+              } disabled:cursor-not-allowed`}
           >
             <span className="flex items-center justify-center gap-2 w-full text-sm">
-              {batteryModePending?.kind === 'timed_export' && <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />}
-              <b>{batteryModePending?.kind === 'timed_export' ? 'Applying…' : 'Timed Export'}</b>
+              {timedExportButton.variant === 'pending' && <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />}
+              <b>{timedExportButton.label}</b>
             </span>
             <span className="text-[11px] text-text-secondary">Forces Battery Export During Specified Time(s)</span>
           </button>
 
         </div>
+        {batteryModeApplying && (
+          <InverterWriteProgress detail="Waiting for the inverter to confirm the mode change." />
+        )}
         {batteryModeError && (
           <p className="text-red-400 text-xs" role="alert">{batteryModeError}</p>
         )}
@@ -3072,14 +3518,72 @@ export default function ControlPage() {
             Configure at least one discharge slot before enabling Timed Export.
           </p>
         )}
-        {timedExportEnabled && (
+        {timedExportState === 'active_now' && (
           <p
             role="status"
             className="text-xs text-amber-200 bg-amber-900/20 border border-amber-700/30 rounded-lg px-3 py-2"
           >
-            Timed Export is active. Enabling Eco will disable Timed Export and return the battery to self-consumption.
+            Timed Export is exporting now. Home load is supplied first; surplus power is exported.
+            {nextTransition ? ` Eco resumes at ${nextTransition}.` : ''}
           </p>
         )}
+
+        {/* Issue #289: Baseline / Current / Schedule state display */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+          {/* Baseline: Eco */}
+          <div className="rounded-lg border border-bg-surface bg-bg-surface/50 p-3">
+            <div className="text-text-secondary/70 text-[10px] uppercase tracking-wide mb-1">Baseline</div>
+            <div className={`font-medium ${ecoState === 'active' ? 'text-green-400' : ecoState === 'temporarily_overridden' ? 'text-amber-400' : 'text-text-secondary'}`}>
+              {formatEcoState(ecoState)}
+            </div>
+            {ecoState === 'temporarily_overridden' && timedExportState === 'active_now' && nextTransition && (
+              <div className="text-text-secondary/60 text-[11px] mt-1">
+                Home load is supplied first; surplus power is exported.
+                <br />Eco resumes at {nextTransition}.
+              </div>
+            )}
+          </div>
+
+          {/* Current behaviour */}
+          <div className="rounded-lg border border-bg-surface bg-bg-surface/50 p-3">
+            <div className="text-text-secondary/70 text-[10px] uppercase tracking-wide mb-1">Current behaviour</div>
+            <div className="font-medium text-text-primary">
+              {timedExportState === 'active_now' ? formatTimedExportState(timedExportState) :
+               timedExportState === 'armed' ? formatTimedExportState(timedExportState) :
+               timedExportState === 'entering' ? formatTimedExportState(timedExportState) :
+               timedExportState === 'exiting' ? formatTimedExportState(timedExportState) :
+               timedExportState === 'blocked_by_pause' ? formatTimedExportState(timedExportState) :
+               timedExportState === 'error' ? formatTimedExportState(timedExportState) :
+               ecoState === 'active' ? 'Eco — Covering home demand' :
+               snapshot?.battery_state === 'charging' ? 'Charging' :
+               snapshot?.battery_state === 'discharging' ? 'Demand discharge' :
+               'Eco'}
+            </div>
+            {timedExportState === 'active_now' && (
+              <div className="text-text-secondary/60 text-[11px] mt-1">
+                Exporting at maximum power
+              </div>
+            )}
+            {timedExportState === 'blocked_by_pause' && (
+              <div className="text-text-secondary/60 text-[11px] mt-1">
+                Awaiting pause discharge end
+              </div>
+            )}
+          </div>
+
+          {/* Schedule state */}
+          <div className="rounded-lg border border-bg-surface bg-bg-surface/50 p-3">
+            <div className="text-text-secondary/70 text-[10px] uppercase tracking-wide mb-1">Schedule</div>
+            <div className={`font-medium ${timedExportState === 'active_now' ? 'text-accent' : timedExportState === 'blocked_by_pause' ? 'text-amber-400' : 'text-text-primary'}`}>
+              {formatTimedExportState(timedExportState)}
+            </div>
+            {timedExportState === 'configured' && nextTransition && (
+              <div className="text-text-secondary/60 text-[11px] mt-1">
+                Next export starts at {nextTransition}
+              </div>
+            )}
+          </div>
+        </div>
       </section>
 
       {/* Section 3: Charging Mode */}
@@ -3132,7 +3636,7 @@ export default function ControlPage() {
         <p className="text-text-secondary/60 text-xs">Please Allow upto 10 Seconds for Changes to Save</p>
         <div className="space-y-3">
           {chargeSlots.map((slot, i) => (
-            <>
+            <Fragment key={`charge-${i}`}>
               {i === 1 && (showSlotOrderingWarning || isLegacyGen3Fw) && (
                 <div key="slot-warn-charge" className="space-y-2">
                   {showSlotOrderingWarning && (
@@ -3163,16 +3667,16 @@ export default function ControlPage() {
                 </div>
               )}
               <ScheduleSlotEditor
-                key={`charge-${i}-${slot.enabled}-${slot.start_hour}:${slot.start_minute}-${slot.end_hour}:${slot.end_minute}-${slot.target_soc}`}
                 slotIndex={i}
                 slot={slot}
                 onSave={handleSlotSave}
                 showTargetSoc
+                defaultTargetSoc={100}
                 apiPath="/api/control/charge-slot"
                 masterArmed={snapshot?.enable_charge === true}
                 mode={scheduleModeForSlots}
               />
-            </>
+            </Fragment>
           ))}
         </div>
       </section>}
@@ -3196,7 +3700,6 @@ export default function ControlPage() {
             Saving an enabled slot also enables Timed Discharge. Please allow up to 10 seconds for changes to save.
           </p>
           <ScheduleSlotEditor
-            key={`timed-discharge-${timedDischargeSlot.enabled}-${timedDischargeSlot.start_hour}:${timedDischargeSlot.start_minute}-${timedDischargeSlot.end_hour}:${timedDischargeSlot.end_minute}`}
             slotIndex={0}
             slot={timedDischargeSlot}
             onSave={handleSlotSave}
@@ -3224,7 +3727,7 @@ export default function ControlPage() {
           </p>
           <div className="space-y-3">
             {dischargeSlots.map((slot, i) => (
-              <>
+              <Fragment key={`discharge-${i}`}>
                 {i === 1 && (showSlotOrderingWarning || isLegacyGen3Fw) && (
                   <div key="slot-warn-discharge" className="space-y-2">
                     {showSlotOrderingWarning && (
@@ -3252,7 +3755,6 @@ export default function ControlPage() {
                   </div>
                 )}
                 <ScheduleSlotEditor
-                  key={`discharge-${i}-${slot.enabled}-${slot.start_hour}:${slot.start_minute}-${slot.end_hour}:${slot.end_minute}-${slot.target_soc}`}
                   slotIndex={i}
                   slot={slot}
                   onSave={handleSlotSave}
@@ -3265,7 +3767,7 @@ export default function ControlPage() {
                   apiPath="/api/control/discharge-slot"
                   mode={scheduleModeForSlots}
                 />
-              </>
+              </Fragment>
             ))}
           </div>
         </section>
@@ -3277,6 +3779,7 @@ export default function ControlPage() {
       {/* Section 6: Battery and Power Controls */}
       <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Battery and Power Controls</h2>
+        {powerControlSaving && <InverterWriteProgress />}
         {/* EPS is deliberately a separate card so its switch cannot be mistaken
             for a master toggle controlling the settings below it. */}
         {supportsEps && (
@@ -3409,7 +3912,7 @@ export default function ControlPage() {
                 disabled={reserveSaving}
                 className="px-3 py-1.5 bg-accent/20 text-accent rounded-lg text-xs font-medium hover:bg-accent/30 transition disabled:opacity-50"
               >
-                {reserveSaving ? '...' : 'Save'}
+                {reserveSaving ? 'Applying…' : 'Save'}
               </button>
             </div>
           </div>
@@ -3436,7 +3939,7 @@ export default function ControlPage() {
                 disabled={chargeRateSaving || adaptiveOwnsChargeRate}
                 className="px-3 py-1.5 bg-accent/20 text-accent rounded-lg text-xs font-medium hover:bg-accent/30 transition disabled:opacity-50"
               >
-                {chargeRateSaving ? '...' : 'Save'}
+                {chargeRateSaving ? 'Applying…' : 'Save'}
               </button>
             </div>
             {adaptiveOwnsChargeRate && (
@@ -3469,7 +3972,7 @@ export default function ControlPage() {
                 disabled={dischargeRateSaving}
                 className="px-3 py-1.5 bg-accent/20 text-accent rounded-lg text-xs font-medium hover:bg-accent/30 transition disabled:opacity-50"
               >
-                {dischargeRateSaving ? '...' : 'Save'}
+                {dischargeRateSaving ? 'Applying…' : 'Save'}
               </button>
             </div>
           </div>
@@ -3495,7 +3998,7 @@ export default function ControlPage() {
                 disabled={activePowerSaving}
                 className="px-3 py-1.5 bg-accent/20 text-accent rounded-lg text-xs font-medium hover:bg-accent/30 transition disabled:opacity-50"
               >
-                {activePowerSaving ? '...' : 'Save'}
+                {activePowerSaving ? 'Applying…' : 'Save'}
               </button>
             </div>
           </div>

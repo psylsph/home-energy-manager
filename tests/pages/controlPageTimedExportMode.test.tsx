@@ -195,7 +195,16 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     cleanup();
-    useInverterStore.setState({ snapshot: null, connectionState: 'disconnected' });
+    useInverterStore.setState({
+      snapshot: null,
+      connectionState: 'disconnected',
+      // Battery-mode action state is store-owned (survives page navigation)
+      // — reset it so one test's in-flight arm can't leak into the next.
+      batteryModePending: null,
+      batteryModePendingSince: null,
+      batteryModeError: null,
+      timedExportArmFailed: false,
+    });
   });
 
   async function batteryModeSection() {
@@ -203,6 +212,12 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
     const section = heading.closest('section');
     if (!section) throw new Error('Battery Mode heading has no <section> ancestor');
     return section;
+  }
+
+  /** The Timed Export control button (dynamic Arm/Stop label; accessible
+   * name always begins with "Timed Export —"). */
+  function timedExportControl(section: HTMLElement): HTMLButtonElement {
+    return within(section).getByRole('button', { name: /Timed Export/ }) as HTMLButtonElement;
   }
 
   it('shows Eco, Timed Charge, Timed Export and Timed Discharge together on a supported device', async () => {
@@ -219,7 +234,7 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
     const section = await batteryModeSection();
     expect(within(section).getByText('Eco')).toBeDefined();
     expect(within(section).getByText('Timed Charge')).toBeDefined();
-    expect(within(section).getByText('Timed Export')).toBeDefined();
+    expect(within(section).getByRole('button', { name: /Timed Export/ })).toBeDefined();
     expect(within(section).getByText('Timed Discharge')).toBeDefined();
   });
 
@@ -248,8 +263,10 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
     render(<ControlPage />);
 
     const section = await batteryModeSection();
-    const button = within(section).getByText('Timed Export').closest('button') as HTMLButtonElement;
+    const button = timedExportControl(section);
+    expect(button.textContent).toContain('Arm Timed Export');
     expect(button.disabled).toBe(true);
+    expect(button).not.toHaveClass('disabled:opacity-50');
     expect(
       within(section).getByText(
         'Configure at least one discharge slot before enabling Timed Export.',
@@ -272,7 +289,7 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
     render(<ControlPage />);
 
     const section = await batteryModeSection();
-    const button = within(section).getByText('Timed Export').closest('button') as HTMLButtonElement;
+    const button = timedExportControl(section);
     expect(button.disabled).toBe(false);
     fireEvent.click(button);
     expect(apiPost).toHaveBeenCalledWith('/api/control/timed-export', { enabled: false });
@@ -286,7 +303,7 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
     render(<ControlPage />);
 
     const section = await batteryModeSection();
-    fireEvent.click(within(section).getByText('Timed Export').closest('button')!);
+    fireEvent.click(timedExportControl(section));
 
     expect((await within(section).findByRole('alert')).textContent).toContain(
       'Configure at least one discharge slot before enabling Timed Export',
@@ -298,25 +315,33 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
     render(<ControlPage />);
 
     const section = await batteryModeSection();
-    fireEvent.click(within(section).getByText('Timed Export').closest('button')!);
+    fireEvent.click(timedExportControl(section));
 
     expect(vi.mocked(apiPost)).toHaveBeenCalledWith('/api/control/timed-export', { enabled: true });
     expect(vi.mocked(apiPost).mock.calls.some(([path]) => path === '/api/control/mode')).toBe(false);
   });
 
-  it('warns that enabling Eco will disable active Timed Export', async () => {
+  it('shows the active export explanation without a redundant disable warning', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date('2026-06-28T17:00:00')); // 17:00, inside 16:00-19:00
     useInverterStore.setState({
-      snapshot: makeSnapshot({ enable_discharge: true, battery_power_mode: 0 }),
+      snapshot: makeSnapshot({
+        enable_discharge: true,
+        battery_power_mode: 0,
+        battery_power: 100,
+        grid_power: 50,
+      }),
       developerMode: false,
       connectionState: 'connected',
     });
     render(<ControlPage />);
 
-    expect(
-      await screen.findByText(
-        'Timed Export is active. Enabling Eco will disable Timed Export and return the battery to self-consumption.',
-      ),
-    ).toBeDefined();
+    const banner = await screen.findByRole('status');
+    // Home-first power-flow is explained, not presented as evidence that
+    // Eco is active (issue #289).
+    expect(within(banner).getByText(/Timed Export is exporting now\./)).toBeDefined();
+    expect(within(banner).getByText(/Home load is supplied first; surplus power is exported\./)).toBeDefined();
+    expect(within(banner).queryByText(/Disabling Timed Export returns/)).toBeNull();
   });
 
   it('shows Applying while Timed Export awaits snapshot confirmation', async () => {
@@ -325,17 +350,24 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
     render(<ControlPage />);
 
     const section = await batteryModeSection();
-    fireEvent.click(within(section).getByText('Timed Export').closest('button')!);
+    fireEvent.click(timedExportControl(section));
 
     expect(await within(section).findByText('Applying…')).toBeDefined();
+    expect(screen.getByText('Applying changes to inverter…')).toBeDefined();
   });
 
   it('clears Applying once the WebSocket snapshot confirms the mode change', async () => {
+    // Pin the clock inside the 17:00-19:00 export window: with registers
+    // confirmed (HR27=0/HR59=1) but telemetry flat, the presentation is
+    // 'armed' → "Stop Timed Export". Without a pinned clock this test's
+    // outcome depended on the wall-clock time it happened to run at.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date('2026-06-28T17:00:00'));
     useInverterStore.setState({ snapshot: makeSnapshot({ enable_discharge: false }), developerMode: false, connectionState: 'connected' });
     render(<ControlPage />);
 
     const section = await batteryModeSection();
-    fireEvent.click(within(section).getByText('Timed Export').closest('button')!);
+    fireEvent.click(timedExportControl(section));
 
     // Wait for the pending state to appear.
     expect(await within(section).findByText('Applying…')).toBeDefined();
@@ -345,9 +377,12 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
       useInverterStore.setState({ snapshot: makeSnapshot({ enable_discharge: true, battery_power_mode: 0 }) });
     });
 
-    // The Applying indicator should clear — the button label reverts to
-    // 'Timed Export' (not 'Applying…').
-    await within(section).findByText('Timed Export');
+    // The Applying indicator should clear — the button label reverts to a
+    // steady-state Arm/Stop label (not 'Applying…'). Registers read
+    // HR27=0/HR59=1 after confirmation, so the steady label is Stop. Wait
+    // on the label itself: the accessible name also matches while the
+    // confirmation effect's setTimeout(0) is still pending.
+    await within(section).findByText('Stop Timed Export');
     expect(within(section).queryByText('Applying…')).toBeNull();
   });
 
@@ -364,7 +399,7 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
     render(<ControlPage />);
 
     const section = await batteryModeSection();
-    fireEvent.click(within(section).getByText('Timed Export').closest('button')!);
+    fireEvent.click(timedExportControl(section));
     expect(await within(section).findByText('Applying…')).toBeDefined();
 
     // At 30s the batch may legitimately still be draining — no error yet.

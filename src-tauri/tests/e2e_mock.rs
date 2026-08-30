@@ -27,15 +27,16 @@
 //!   * WebSocket frames (covered by `server::ws::tests` for the
 //!     connected-clients registry and by the Playwright E2E for the
 //!     wire format)
-//!   * `set_*` control endpoints — those mutate `pending_writes`
-//!     and require a running poll loop to drain. The unit-testable
-//!     pure-decoder pieces (encoder.rs) are covered there instead.
+//!   * Most `set_*` control endpoints. Timed Export is covered here with a
+//!     small completion driver; the unit-testable encoder paths cover the
+//!     broader control surface.
 //!   * History aggregation (covered by `history::tests`).
 
 use std::sync::{Arc, OnceLock};
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
+use givenergy_local::inverter::encoder::WriteOutcome;
 use givenergy_local::inverter::poll::AppState;
 use givenergy_local::server::create_router;
 use serde_json::{json, Value};
@@ -158,6 +159,37 @@ async fn post_json(router: &axum::Router, uri: &str, body: &Value) -> (StatusCod
         serde_json::from_slice(&bytes).unwrap_or(Value::Null)
     };
     (status, json)
+}
+
+/// Issue a control POST while emulating the poll loop accepting every
+/// completion-backed write batch. The batches remain queued so callers can
+/// inspect physical write ordering after the handler commits its settings.
+async fn post_json_accepting_writes(
+    router: &axum::Router,
+    state: &Arc<AppState>,
+    uri: &str,
+    body: &Value,
+) -> (StatusCode, Value) {
+    let router = router.clone();
+    let uri = uri.to_string();
+    let body = body.clone();
+    let handle = tokio::spawn(async move { post_json(&router, &uri, &body).await });
+
+    loop {
+        if handle.is_finished() {
+            break;
+        }
+        let mut pending = state.pending_writes.lock().await;
+        if let Some(batch) = pending.iter_mut().find(|batch| batch.completion.is_some()) {
+            if let Some(completion) = batch.completion.take() {
+                let _ = completion.send(WriteOutcome::Ok);
+            }
+        }
+        drop(pending);
+        tokio::task::yield_now().await;
+    }
+
+    handle.await.expect("control request task")
 }
 
 /// Issue a PUT with a JSON body.
@@ -652,6 +684,489 @@ async fn unknown_api_path_returns_404() {
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["ok"], Value::Bool(false));
     assert_eq!(body["error"], "Not found");
+}
+
+// ====================================================================
+// Issue #289 — Timed Export desired-schedule API behaviour
+// ====================================================================
+
+/// Build a router plus its `AppState` so tests can seed snapshots and
+/// inspect queued pending writes.
+async fn fresh_router_with_state() -> (IsolatedRouter, Arc<AppState>) {
+    let config = IsolatedConfig::enter();
+    let state = Arc::new(AppState::new());
+    let router = create_router(state.clone());
+    (
+        IsolatedRouter {
+            router,
+            _config: config,
+        },
+        state,
+    )
+}
+
+/// Seed a Gen3-hybrid snapshot in Eco mode with the given discharge slots.
+async fn seed_eco_snapshot(
+    state: &Arc<AppState>,
+    slots: Vec<givenergy_local::inverter::model::ScheduleSlot>,
+    pause_mode: u8,
+) {
+    use givenergy_local::inverter::model::{
+        BatteryMode, BatteryState, DeviceType, InverterSnapshot, ScheduleSlot,
+    };
+    let mut snapshot = InverterSnapshot {
+        device_type: DeviceType::Gen3Hybrid,
+        device_type_code: "2001".into(),
+        inverter_serial: "CE289".into(),
+        soc: 50,
+        battery_mode: BatteryMode::Eco,
+        battery_state: BatteryState::Idle,
+        battery_power_mode: 1,
+        enable_charge: false,
+        enable_discharge: false,
+        battery_pause_mode: pause_mode,
+        ..Default::default()
+    };
+    let mut arr: [ScheduleSlot; 10] = std::array::from_fn(|_| ScheduleSlot::default());
+    for (dst, src) in arr.iter_mut().zip(slots) {
+        *dst = src;
+    }
+    snapshot.discharge_slots = arr;
+    let mut guard = state.latest_snapshot.lock().await;
+    *guard = Some(snapshot);
+}
+
+/// Compute an (hour, minute) pair offset from now, wrapping past midnight.
+fn time_offset_from_now(minutes: i64) -> (u8, u8) {
+    use chrono::Timelike;
+    let t = chrono::Local::now() + chrono::Duration::minutes(minutes);
+    (t.hour() as u8, t.minute() as u8)
+}
+
+/// Drain the pending-write queue and flatten the (address, value) pairs.
+async fn drain_pending_writes(state: &Arc<AppState>) -> Vec<(u16, u16)> {
+    let mut guard = state.pending_writes.lock().await;
+    guard
+        .drain(..)
+        .flat_map(|batch| batch.writes.into_iter().map(|w| (w.address, w.value)))
+        .collect()
+}
+
+/// Saving an enabled discharge slot that starts in the future must NOT
+/// immediately queue HR27=0/HR59=1 export writes (issue #289): Eco stays
+/// the baseline until the poll-loop boundary state machine enters the
+/// window.
+#[tokio::test]
+async fn discharge_slot_future_save_persists_schedule_without_arming_export() {
+    let (router, state) = fresh_router_with_state().await;
+    seed_eco_snapshot(
+        &state,
+        vec![givenergy_local::inverter::model::ScheduleSlot::default(); 2],
+        0,
+    )
+    .await;
+
+    let (start_h, start_m) = time_offset_from_now(60);
+    let (end_h, end_m) = time_offset_from_now(90);
+    let (status, body) = post_json_accepting_writes(
+        &router,
+        &state,
+        "/api/control/discharge-slot",
+        &json!({
+            "slot": 1,
+            "enabled": true,
+            "start_hour": start_h,
+            "start_minute": start_m,
+            "end_hour": end_h,
+            "end_minute": end_m,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let writes = drain_pending_writes(&state).await;
+    assert!(
+        writes.iter().any(|(a, _)| *a == 56 || *a == 57),
+        "slot registers must still be written, got {writes:?}"
+    );
+    assert!(
+        !writes.iter().any(|(a, v)| *a == 27 && *v == 0),
+        "future slot must not switch HR27 to export mode, got {writes:?}"
+    );
+    assert!(
+        !writes.iter().any(|(a, v)| *a == 59 && *v == 1),
+        "future slot must not arm HR59, got {writes:?}"
+    );
+
+    // The desired schedule is persisted for the boundary state machine.
+    let settings = givenergy_local::settings::Settings::load();
+    assert!(settings.timed_export_schedule_enabled);
+    assert!(settings
+        .timed_export_slots
+        .iter()
+        .any(|s| s.enabled && s.start_hour == start_h && s.start_minute == start_m));
+}
+
+/// Saving an enabled slot whose window contains "now" (constructed at test
+/// time so the assertion holds for any wall clock) arms export immediately
+/// — HR27=0 before HR59=1.
+#[tokio::test]
+async fn discharge_slot_in_window_save_arms_export_immediately() {
+    let (router, state) = fresh_router_with_state().await;
+    seed_eco_snapshot(
+        &state,
+        vec![givenergy_local::inverter::model::ScheduleSlot::default(); 2],
+        0,
+    )
+    .await;
+
+    let (start_h, start_m) = time_offset_from_now(-10);
+    let (end_h, end_m) = time_offset_from_now(20);
+    let (status, body) = post_json_accepting_writes(
+        &router,
+        &state,
+        "/api/control/discharge-slot",
+        &json!({
+            "slot": 1,
+            "enabled": true,
+            "start_hour": start_h,
+            "start_minute": start_m,
+            "end_hour": end_h,
+            "end_minute": end_m,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let writes = drain_pending_writes(&state).await;
+    let hr27 = writes.iter().position(|(a, v)| *a == 27 && *v == 0);
+    let hr59 = writes.iter().position(|(a, v)| *a == 59 && *v == 1);
+    assert!(
+        hr27.is_some(),
+        "in-window save arms max-power mode: {writes:?}"
+    );
+    assert!(hr59.is_some(), "in-window save arms discharge: {writes:?}");
+    assert!(
+        hr27.unwrap() < hr59.unwrap(),
+        "entry ordering: HR27=0 must precede HR59=1"
+    );
+}
+
+/// Enabling Timed Export with only a future slot configured enables the
+/// HEM-managed schedule without leaving HR27 in export mode all day.
+#[tokio::test]
+async fn timed_export_enable_with_future_slot_persists_without_arming() {
+    let (router, state) = fresh_router_with_state().await;
+    let (start_h, start_m) = time_offset_from_now(60);
+    let (end_h, end_m) = time_offset_from_now(90);
+    seed_eco_snapshot(
+        &state,
+        vec![
+            givenergy_local::inverter::model::ScheduleSlot {
+                enabled: true,
+                start_hour: start_h,
+                start_minute: start_m,
+                end_hour: end_h,
+                end_minute: end_m,
+                target_soc: 4,
+            },
+            givenergy_local::inverter::model::ScheduleSlot::default(),
+        ],
+        0,
+    )
+    .await;
+
+    let (status, body) = post_json_accepting_writes(
+        &router,
+        &state,
+        "/api/control/timed-export",
+        &json!({ "enabled": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let writes = drain_pending_writes(&state).await;
+    assert!(
+        !writes.iter().any(|(a, v)| *a == 27 && *v == 0),
+        "future slot enable must not write HR27=0, got {writes:?}"
+    );
+    assert!(
+        !writes.iter().any(|(a, v)| *a == 59 && *v == 1),
+        "future slot enable must not write HR59=1, got {writes:?}"
+    );
+
+    let settings = givenergy_local::settings::Settings::load();
+    assert!(settings.timed_export_schedule_enabled);
+}
+
+/// GET /api/timed-export exposes the desired schedule + state-machine
+/// state so the UI can show Configured slots even when the physical
+/// inverter slots are temporarily cleared.
+#[tokio::test]
+async fn timed_export_get_returns_schedule_state() {
+    let (router, state) = fresh_router_with_state().await;
+    let (start_h, start_m) = time_offset_from_now(60);
+    let (end_h, end_m) = time_offset_from_now(90);
+    seed_eco_snapshot(
+        &state,
+        vec![
+            givenergy_local::inverter::model::ScheduleSlot {
+                enabled: true,
+                start_hour: start_h,
+                start_minute: start_m,
+                end_hour: end_h,
+                end_minute: end_m,
+                target_soc: 4,
+            },
+            givenergy_local::inverter::model::ScheduleSlot::default(),
+        ],
+        0,
+    )
+    .await;
+
+    let (status, body) = post_json_accepting_writes(
+        &router,
+        &state,
+        "/api/control/timed-export",
+        &json!({ "enabled": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let (status, body) = get_json(&router, "/api/timed-export").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["ok"], Value::Bool(true));
+    assert_eq!(body["data"]["schedule_enabled"], Value::Bool(true));
+    let slots = body["data"]["slots"].as_array().expect("slots array");
+    assert!(!slots.is_empty());
+    assert_eq!(slots[0]["enabled"], Value::Bool(true));
+    assert_eq!(slots[0]["start_hour"], json!(start_h));
+}
+
+/// Seed an "unclaimed manual Timed Demand" snapshot: HR27=1 / HR59=1 with
+/// no automation (Agile/Cosy) owning the mode. This is the state the
+/// simulator run in CODE_REVIEW.md showed blocking the Timed Export arm —
+/// `current_discharge_control_owner` treats it as `ManualMode`.
+async fn seed_timed_demand_snapshot(state: &Arc<AppState>) {
+    use givenergy_local::inverter::model::{
+        BatteryMode, BatteryState, DeviceType, InverterSnapshot, ScheduleSlot,
+    };
+    let mut snapshot = InverterSnapshot {
+        device_type: DeviceType::Gen3Hybrid,
+        device_type_code: "2001".into(),
+        inverter_serial: "CE289".into(),
+        soc: 71,
+        battery_mode: BatteryMode::TimedDemand,
+        battery_state: BatteryState::Idle,
+        battery_power_mode: 1,
+        enable_charge: false,
+        enable_discharge: true,
+        battery_pause_mode: 0,
+        ..Default::default()
+    };
+    snapshot.discharge_slots = std::array::from_fn(|_| ScheduleSlot::default());
+    *state.latest_snapshot.lock().await = Some(snapshot);
+}
+
+/// CODE_REVIEW.md scenario: saving a valid in-window Timed Export slot must
+/// replace an unclaimed manual Timed Demand mode. The HR27=0 + model-routed
+/// discharge-enable arm writes are admitted (not deferred behind the
+/// ManualMode owner) and the request only reports success once they were
+/// accepted.
+#[tokio::test]
+async fn timed_export_save_over_unclaimed_timed_demand_arms_export() {
+    let (router, state) = fresh_router_with_state().await;
+    seed_timed_demand_snapshot(&state).await;
+
+    let (start_h, start_m) = time_offset_from_now(-10);
+    let (end_h, end_m) = time_offset_from_now(20);
+    let (status, body) = post_json_accepting_writes(
+        &router,
+        &state,
+        "/api/control/discharge-slot",
+        &json!({
+            "slot": 1,
+            "enabled": true,
+            "start_hour": start_h,
+            "start_minute": start_m,
+            "end_hour": end_h,
+            "end_minute": end_m,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    // The arm writes were queued despite the snapshot's Timed Demand state.
+    let writes = drain_pending_writes(&state).await;
+    let hr27 = writes.iter().position(|(a, v)| *a == 27 && *v == 0);
+    let hr59 = writes.iter().position(|(a, v)| *a == 59 && *v == 1);
+    assert!(
+        hr27.is_some(),
+        "save over manual Timed Demand must arm max-power mode: {writes:?}"
+    );
+    assert!(
+        hr59.is_some(),
+        "save over manual Timed Demand must arm discharge: {writes:?}"
+    );
+    assert!(
+        hr27.unwrap() < hr59.unwrap(),
+        "entry ordering: HR27=0 must precede HR59=1"
+    );
+
+    let settings = givenergy_local::settings::Settings::load();
+    assert!(
+        settings.timed_export_schedule_enabled,
+        "accepted arm must persist the desired schedule"
+    );
+}
+
+/// Drive a control request while answering unowned (slot) write batches with
+/// `WriteOutcome::Ok` and every owned discharge-control batch with a
+/// rejection — the "inverter refused the arm write" failure path.
+async fn post_json_rejecting_arm_writes(
+    router: &axum::Router,
+    state: &Arc<AppState>,
+    uri: &str,
+    body: &Value,
+) -> (StatusCode, Value) {
+    let router = router.clone();
+    let uri = uri.to_string();
+    let body = body.clone();
+    let handle = tokio::spawn(async move { post_json(&router, &uri, &body).await });
+
+    loop {
+        if handle.is_finished() {
+            break;
+        }
+        let mut pending = state.pending_writes.lock().await;
+        if let Some(batch) = pending.iter_mut().find(|batch| batch.completion.is_some()) {
+            if let Some(completion) = batch.completion.take() {
+                let outcome = if batch.owner.is_some() {
+                    WriteOutcome::Failed {
+                        address: 27,
+                        value: 0,
+                        error: "simulated dongle exception 67".into(),
+                    }
+                } else {
+                    WriteOutcome::Ok
+                };
+                let _ = completion.send(outcome);
+            }
+        }
+        drop(pending);
+        tokio::task::yield_now().await;
+    }
+
+    handle.await.expect("control request task")
+}
+
+/// CODE_REVIEW.md failure requirement: a rejected arm write must not report
+/// physical activation, and the desired slot configuration must be retained
+/// so the boundary state machine (or a manual retry) can arm later.
+#[tokio::test]
+async fn timed_export_arm_rejection_retains_schedule_without_claiming_activation() {
+    let (router, state) = fresh_router_with_state().await;
+    seed_eco_snapshot(
+        &state,
+        vec![givenergy_local::inverter::model::ScheduleSlot::default(); 2],
+        0,
+    )
+    .await;
+
+    let (start_h, start_m) = time_offset_from_now(-10);
+    let (end_h, end_m) = time_offset_from_now(20);
+    let (status, body) = post_json_rejecting_arm_writes(
+        &router,
+        &state,
+        "/api/control/discharge-slot",
+        &json!({
+            "slot": 1,
+            "enabled": true,
+            "start_hour": start_h,
+            "start_minute": start_m,
+            "end_hour": end_h,
+            "end_minute": end_m,
+        }),
+    )
+    .await;
+
+    // Actionable failure — not a success envelope that would make the UI
+    // report an armed/active Timed Export.
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "body: {body}");
+    assert_ne!(body["ok"], Value::Bool(true));
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("could not be armed"),
+        "error must explain the arm failure: {error}"
+    );
+
+    // The desired schedule is retained for retry…
+    let settings = givenergy_local::settings::Settings::load();
+    assert!(
+        settings.timed_export_schedule_enabled,
+        "rejected arm must still retain the desired schedule"
+    );
+    assert!(settings.timed_export_slots.iter().any(|slot| slot.enabled
+        && slot.start_hour == start_h
+        && slot.start_minute == start_m));
+
+    // …without claiming physical activation: the machine has not advanced to
+    // Active.
+    let (status, body) = get_json(&router, "/api/timed-export").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let machine_state = body["data"]["machine_state"].clone();
+    assert_ne!(
+        machine_state, json!("Active"),
+        "a rejected arm must not surface machine state Active"
+    );
+}
+
+/// CODE_REVIEW.md finding 1: Stop (disable) must not be fire-and-forget.
+/// Enable is fully transactional, but disable queued its writes without a
+/// completion channel and returned OK unconditionally — a rejected or
+/// indefinitely-deferred disarm left the inverter exporting on its own
+/// armed schedule while the response (and UI) claimed success. The stop
+/// must await the disarm batch and report an actionable failure instead.
+#[tokio::test]
+async fn timed_export_disable_rejection_reports_failure_instead_of_ok() {
+    let (router, state) = fresh_router_with_state().await;
+    seed_eco_snapshot(
+        &state,
+        vec![givenergy_local::inverter::model::ScheduleSlot::default(); 2],
+        0,
+    )
+    .await;
+
+    // An enabled schedule is live: a Stop request against a rejecting
+    // inverter must not report success.
+    givenergy_local::settings::Settings::update(|s| {
+        s.timed_export_schedule_enabled = true;
+    })
+    .expect("seed enabled schedule");
+
+    let (status, body) = post_json_rejecting_arm_writes(
+        &router,
+        &state,
+        "/api/control/timed-export",
+        &json!({ "enabled": false }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "body: {body}");
+    assert_ne!(body["ok"], Value::Bool(true));
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("could not be stopped"),
+        "error must explain the stop failure: {error}"
+    );
+
+    // The desired Off state is still persisted, so a later poll/retry
+    // converges — but the request itself must not claim success.
+    let settings = givenergy_local::settings::Settings::load();
+    assert!(
+        !settings.timed_export_schedule_enabled,
+        "rejected stop still persists the disabled schedule for retry"
+    );
 }
 
 // ====================================================================

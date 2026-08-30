@@ -20,7 +20,7 @@
  * armed/not-active state is derived from `enable_charge`.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, within } from '@testing-library/react';
+import { render, screen, cleanup, within, fireEvent, act, waitFor } from '@testing-library/react';
 
 // ---------------------------------------------------------------------------
 // Mocks — ControlPage pulls in the api helpers and useAction (which itself
@@ -83,6 +83,7 @@ vi.mock('../../src/lib/api', () => ({
 // Imported after the vi.mock() calls above (factories are hoisted regardless).
 import ControlPage from '../../src/pages/ControlPage';
 import { useInverterStore } from '../../src/store/useInverterStore';
+import { apiPost } from '../../src/lib/api';
 import type { InverterSnapshot, ScheduleSlot } from '../../src/lib/types';
 
 /** Silence noisy React act() warnings from async setState in mount effects. */
@@ -294,5 +295,102 @@ describe('<ControlPage/> — Charge Schedule armed vs not-active (issue #135)', 
     // slot.enabled) on enable_charge, this would disappear exactly as it
     // did in issue #41 — the slot would vanish from the UI.
     expect(within(section).getByText('80%')).toBeDefined();
+  });
+
+  it('defaults a newly enabled charging slot target to 100%', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({
+        charge_slots: [{
+          enabled: false,
+          start_hour: 0,
+          start_minute: 0,
+          end_hour: 0,
+          end_minute: 0,
+          target_soc: 4,
+        }],
+      }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const section = await chargeScheduleSection();
+    fireEvent.click(within(section).getByLabelText('Slot 1 disabled'));
+
+    expect(within(section).getByText('100%')).toBeDefined();
+  });
+
+  it('keeps the applying banner visible when charge register readback changes mid-save', async () => {
+    let finishSave: ((value: { ok: boolean; data: object }) => void) | undefined;
+    vi.mocked(apiPost).mockImplementationOnce(
+      () => new Promise((resolve) => { finishSave = resolve; }),
+    );
+    useInverterStore.setState({
+      snapshot: makeSnapshot(),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const section = await chargeScheduleSection();
+    fireEvent.click(within(section).getByRole('button', { name: 'Save' }));
+    expect(screen.getByText('Applying changes to inverter…')).toBeDefined();
+
+    // Poll readback changes after each physical register write. The editor
+    // must not remount and lose its pending state before the API completes.
+    act(() => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({
+          charge_slots: [{
+            enabled: true,
+            start_hour: 2,
+            start_minute: 0,
+            end_hour: 5,
+            end_minute: 1,
+            target_soc: 100,
+          }],
+        }),
+      });
+    });
+
+    expect(screen.getByText('Applying changes to inverter…')).toBeDefined();
+    expect(within(section).getByRole('button', { name: 'Applying…' })).toBeDisabled();
+
+    await act(async () => {
+      finishSave?.({ ok: true, data: {} });
+    });
+    act(() => {
+      useInverterStore.setState({ snapshot: makeSnapshot() });
+    });
+    await waitFor(() => {
+      expect(screen.queryByText('Applying changes to inverter…')).toBeNull();
+    });
+  });
+
+  it('keeps the applying banner visible after queue acceptance until charge readback confirms', async () => {
+    vi.mocked(apiPost).mockResolvedValueOnce({ ok: true, data: {} });
+    const initialSnapshot = makeSnapshot();
+    useInverterStore.setState({
+      snapshot: initialSnapshot,
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const section = await chargeScheduleSection();
+    fireEvent.click(within(section).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/control/charge-slot',
+      expect.objectContaining({ slot: 1 }),
+    ));
+
+    expect(screen.getByText('Applying changes to inverter…')).toBeDefined();
+
+    act(() => {
+      useInverterStore.setState({ snapshot: makeSnapshot() });
+    });
+    await waitFor(() => {
+      expect(screen.queryByText('Applying changes to inverter…')).toBeNull();
+    });
   });
 });

@@ -42,6 +42,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Data endpoints
         .route("/api/snapshot", get(api::get_snapshot))
         .route("/api/status", get(api::get_status))
+        // Issue #289: HEM-managed Timed Export schedule state — the
+        // desired slots + boundary state-machine state, so the UI can
+        // show Configured slots even when the physical inverter slots
+        // are temporarily cleared (HR59 re-arm fallback).
+        .route("/api/timed-export", get(api::get_timed_export))
         // Mini display — tokenless, read-only glance summary for an Apple
         // Watch or any small-screen browser (INSTALL.md → “Glance from
         // your Apple Watch”). Deliberately a separate, minimal-field surface

@@ -506,10 +506,9 @@ test.describe('API Control Endpoints', () => {
     expect(findWrite(writes, 110)!.value).toBe(4);  // SOC reserve
   });
 
-  test('POST /api/control/mode timed_export sends correct writes', async ({
+  test('POST /api/control/mode timed_export requires a managed schedule', async ({
     baseUrl,
     drainModbusWrites,
-    peekModbusWrites,
   }) => {
     await clearWrites(drainModbusWrites);
 
@@ -518,12 +517,16 @@ test.describe('API Control Endpoints', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ mode: 'timed_export', soc_reserve: 4 }),
     });
-    expect((await resp.json()).ok).toBe(true);
+    expect(resp.status).toBe(409);
+    const body = await resp.json();
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain('Configure at least one discharge slot');
 
-    const writes = await waitForWrites(peekModbusWrites, drainModbusWrites, 3, 15_000);
-    expect(findWrite(writes, 27)!.value).toBe(0);  // export mode
-    expect(findWrite(writes, 59)!.value).toBe(1);  // enable discharge
-    expect(findWrite(writes, 110)!.value).toBe(4);  // SOC reserve
+    // The managed route must not fall back to the raw HR27/HR59 export
+    // flags when there is no desired schedule to gate them.
+    const writes = await drainModbusWrites();
+    expect(writes.some((write) => write.address === 59 && write.value === 1)).toBe(false);
+    expect(writes.some((write) => write.address === 27 && write.value === 0)).toBe(false);
   });
 
   test('POST /api/control/timed-export rejects enabling without a discharge slot', async ({
@@ -681,6 +684,20 @@ test.describe('API Control Endpoints', () => {
     const writes = await waitForWrite(peekModbusWrites, drainModbusWrites, 272, 20, 15_000);
     expect(findWrite(writes, 56)!.value).toBe(1600);  // 16:00
     expect(findWrite(writes, 57)!.value).toBe(1900);  // 19:00
+
+    // Issue #289: the saves above persist an HEM-managed schedule window of
+    // 16:00-19:00. When the suite runs INSIDE that window, the boundary
+    // state machine sits BlockedByPause (the timed-discharge test armed
+    // HR318) — and the moment a later test unblocks HR318 (the
+    // force-discharge tests pin it to 0) the machine fires an entry write
+    // burst that interleaves with unrelated assertions. Disable the
+    // schedule here so the rest of the file runs with the machine parked.
+    const disableSchedule = await fetch(`${baseUrl}/api/control/timed-export`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect((await disableSchedule.json()).ok).toBe(true);
   });
 
   test('discharge slot with no configured floor displays the reserve, not the charge target', async ({
@@ -765,8 +782,23 @@ test.describe('API Control Endpoints', () => {
     baseUrl,
     drainModbusWrites,
     peekModbusWrites,
+    setHoldingReg,
   }) => {
+    test.setTimeout(120_000);
     await clearWrites(drainModbusWrites);
+    // Issue #289: an armed discharge pause (HR318=2/3) makes force-discharge
+    // queue an extra HR318=0 write, and the stop path restores the captured
+    // HR319/320 pause slot. The earlier timed-discharge test leaves all three
+    // in the shared mock, so pin them to 0 here (and wait for the poll to
+    // reflect it) to keep this batch's size deterministic.
+    await setHoldingReg(318, 0);
+    await setHoldingReg(319, 0);
+    await setHoldingReg(320, 0);
+    await waitForSnapshotValue(
+      baseUrl,
+      (s) => (s as Record<string, unknown>).battery_pause_mode === 0,
+      20_000,
+    );
 
     const resp = await fetch(`${baseUrl}/api/control/force-discharge`, {
       method: 'POST',
@@ -793,15 +825,30 @@ test.describe('API Control Endpoints', () => {
 
     const stop = await fetch(`${baseUrl}/api/control/force-discharge/stop`, { method: 'POST' });
     expect((await stop.json()).ok).toBe(true);
-    await waitForWrites(peekModbusWrites, drainModbusWrites, 8, 30_000);
+    // Stop now also restores the captured HR318/319/320 pause state (issue
+    // #289), so the trailing batch is 11 writes, not 8.
+    await waitForWrites(peekModbusWrites, drainModbusWrites, 11, 30_000);
   });
 
   test('POST /api/control/force-discharge without minutes keeps legacy 00:00–23:59 slot', async ({
     baseUrl,
     drainModbusWrites,
     peekModbusWrites,
+    setHoldingReg,
   }) => {
+    test.setTimeout(120_000);
     await clearWrites(drainModbusWrites);
+    // See the previous test: pin HR318/319/320 so the #289 pause-disable
+    // write (and its stop-time restore) can't be appended and change the
+    // batch size.
+    await setHoldingReg(318, 0);
+    await setHoldingReg(319, 0);
+    await setHoldingReg(320, 0);
+    await waitForSnapshotValue(
+      baseUrl,
+      (s) => (s as Record<string, unknown>).battery_pause_mode === 0,
+      20_000,
+    );
 
     // API call with no body and no Content-Type (backward-compat path).
     const resp = await fetch(`${baseUrl}/api/control/force-discharge`, {
@@ -818,7 +865,9 @@ test.describe('API Control Endpoints', () => {
 
     const stop = await fetch(`${baseUrl}/api/control/force-discharge/stop`, { method: 'POST' });
     expect((await stop.json()).ok).toBe(true);
-    await waitForWrites(peekModbusWrites, drainModbusWrites, 8, 30_000);
+    // Same trailing batch as the previous test: 11 writes including the
+    // HR318/319/320 pause-state restore (issue #289).
+    await waitForWrites(peekModbusWrites, drainModbusWrites, 11, 30_000);
   });
 
   test('POST /api/control/pause enters Eco Paused (HR 27=1, 59=0, 110=100)', async ({
@@ -1114,9 +1163,41 @@ test.describe('API Mode Transitions', () => {
     baseUrl,
     drainModbusWrites,
     peekModbusWrites,
+    setHoldingReg,
   }) => {
     test.setTimeout(180_000);
     await clearWrites(drainModbusWrites);
+
+    // Make the managed window deterministic and exercise the real persisted
+    // schedule path. Eco clears the physical slot registers, so the later
+    // Timed Export request must restore them before arming HR27/HR59.
+    for (const [address, value] of [
+      [35, 26], [36, 6], [37, 28], [38, 17], [39, 0], [40, 0],
+    ] as const) {
+      await setHoldingReg(address, value);
+    }
+    await waitForSnapshotValue(
+      baseUrl,
+      (s) => s.inverter_time === '2026-06-28 17:00:00',
+      20_000,
+    );
+
+    const scheduleResp = await fetch(`${baseUrl}/api/control/discharge-slot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        slot: 1,
+        enabled: true,
+        start_hour: 16,
+        start_minute: 0,
+        end_hour: 19,
+        end_minute: 0,
+        target_soc: 4,
+      }),
+    });
+    expect((await scheduleResp.json()).ok).toBe(true);
+    await clearWrites(drainModbusWrites);
+
     let resp = await fetch(`${baseUrl}/api/control/mode`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1157,6 +1238,8 @@ test.describe('API Mode Transitions', () => {
     expect(findWrite(allWrites, 27)!.value).toBe(0);  // export mode
     expect(findWrite(allWrites, 59)!.value).toBe(1);  // enable discharge
     expect(findWrite(allWrites, 110)!.value).toBe(4);  // SOC reserve
+    expect(findWrite(allWrites, 56)!.value).toBe(1600); // restored slot start
+    expect(findWrite(allWrites, 57)!.value).toBe(1900); // restored slot end
   });
 
   test('Timed Demand → Eco transition', async ({

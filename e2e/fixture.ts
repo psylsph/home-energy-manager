@@ -53,6 +53,13 @@ export interface ModbusFixtures {
   setHoldingReg: (addr: number, value: number) => Promise<void>;
   /** Set an input register value in the mock server. */
   setInputReg: (addr: number, value: number) => Promise<void>;
+  /**
+   * Toggle the mock server's HR59 re-arm firmware emulation (issue #289):
+   * when enabled, a client write of HR59=0 is immediately undone (HR59 set
+   * back to 1) whenever any discharge slot register is non-zero, mimicking
+   * Gen3 Hybrid firmware that re-arms discharge while slots are populated.
+   */
+  setHr59Rearm: (enabled: boolean) => Promise<void>;
   /** Reset all register state and captured writes. */
   resetModbus: () => Promise<void>;
   /** Base URL of the HTTP server. */
@@ -84,6 +91,11 @@ export const test = base.extend<ModbusFixtures>({
   setInputReg: async ({}, use) => {
     await use(async (addr, value) => {
       await adminPost('/input-reg', { address: addr, value });
+    });
+  },
+  setHr59Rearm: async ({}, use) => {
+    await use(async (enabled) => {
+      await adminPost('/rearm-hr59', { enabled });
     });
   },
   resetModbus: async ({}, use) => {

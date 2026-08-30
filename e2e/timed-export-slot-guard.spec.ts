@@ -4,18 +4,34 @@
  * The mock Modbus server is intentional here: unlike the real simulator it
  * lets us inject the exact inverter states that matter (including HR59=1
  * with no discharge slot) and preserves FC06 writes for read-back assertions.
+ * Its `/rearm-hr59` admin toggle additionally emulates Gen3 Hybrid firmware
+ * that re-asserts HR59=1 while discharge slots remain programmed — the
+ * behaviour issue #289's clear/restore fallback defends against.
  */
 
 import { test, expect } from './fixture.js';
-import { startBackend, stopBackend } from './backend.js';
+import { startBackend, stopBackend, restartBackendPreservingState } from './backend.js';
 import type { RegisterWrite } from './mock-modbus.js';
 
 const HR_BATTERY_POWER_MODE = 27;
 const HR_DISCHARGE_SLOT_1_START = 56;
 const HR_DISCHARGE_SLOT_1_END = 57;
 const HR_ENABLE_DISCHARGE = 59;
+const HR_BATTERY_PAUSE_MODE = 318;
+const HR_BATTERY_PAUSE_SLOT_START = 319;
+const HR_BATTERY_PAUSE_SLOT_END = 320;
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** HHMM-encode (now + offsetMinutes), wrapping past midnight. */
+function hhmmOffset(offsetMinutes: number): number {
+  const now = new Date();
+  const total = now.getHours() * 60 + now.getMinutes() + offsetMinutes;
+  const wrapped = ((total % 1440) + 1440) % 1440;
+  const hours = Math.floor(wrapped / 60);
+  const minutes = wrapped % 60;
+  return hours * 100 + minutes;
+}
 
 async function getSnapshot(baseUrl: string): Promise<Record<string, any>> {
   const response = await fetch(`${baseUrl}/api/snapshot`);
@@ -105,10 +121,26 @@ async function resetToEco(
   resetModbus: () => Promise<void>,
   drainModbusWrites: () => Promise<RegisterWrite[]>,
 ): Promise<void> {
+  const resetAt = Date.now();
   await resetModbus();
+  // First wait for a snapshot captured AFTER the reset. A stale pre-reset
+  // snapshot can satisfy the Eco check below (the previous test may have
+  // ended with enable_discharge=false), and acting on it races the poll
+  // loop — e.g. an enable POST computing its arm decision against the
+  // previous test's slot registers.
   await waitForSnapshot(
     baseUrl,
-    (snapshot) => snapshot.enable_discharge === false,
+    (snapshot) => {
+      const ts = snapshot.timestamp as number | undefined;
+      return typeof ts === 'number' && ts * 1000 > resetAt;
+    },
+    'post-reset poll',
+  );
+  await waitForSnapshot(
+    baseUrl,
+    (snapshot) =>
+      snapshot.enable_discharge === false
+      && snapshot.discharge_slots?.every((slot: { enabled: boolean }) => !slot.enabled) === true,
     'clean Eco snapshot',
   );
   await drainModbusWrites();
@@ -139,7 +171,7 @@ test.describe('Timed Export/discharge-slot state alignment', () => {
     expect(writes.some((write) => write.address === HR_ENABLE_DISCHARGE && write.value === 1)).toBe(false);
   });
 
-  test('arms Timed Export only after a configured slot is observed and preserves order', async ({
+  test('arms Timed Export when the configured slot contains now and preserves order', async ({
     baseUrl,
     resetModbus,
     drainModbusWrites,
@@ -147,8 +179,13 @@ test.describe('Timed Export/discharge-slot state alignment', () => {
     peekModbusWrites,
   }) => {
     await resetToEco(baseUrl, resetModbus, drainModbusWrites);
-    await setHoldingReg(HR_DISCHARGE_SLOT_1_START, 1600);
-    await setHoldingReg(HR_DISCHARGE_SLOT_1_END, 1900);
+    // A window that always contains "now" (±90 min, midnight-wrapping) so the
+    // arming decision is deterministic regardless of when the test runs.
+    // Issue #289: entry writes are only queued when the current time is inside
+    // an enabled window — a fixed 16:00-19:00 slot would arm only between 16:00
+    // and 19:00 local time and fail (or flakily pass) outside it.
+    await setHoldingReg(HR_DISCHARGE_SLOT_1_START, hhmmOffset(-90));
+    await setHoldingReg(HR_DISCHARGE_SLOT_1_END, hhmmOffset(90));
     await waitForSnapshot(
       baseUrl,
       (snapshot) => snapshot.discharge_slots?.[0]?.enabled === true,
@@ -172,6 +209,43 @@ test.describe('Timed Export/discharge-slot state alignment', () => {
       'armed Timed Export snapshot',
     );
     expect(armed.battery_power_mode).toBe(0);
+  });
+
+  test('saving a future Timed Export slot does NOT immediately write HR27=0/HR59=1', async ({
+    baseUrl,
+    resetModbus,
+    drainModbusWrites,
+    setHoldingReg,
+  }) => {
+    await resetToEco(baseUrl, resetModbus, drainModbusWrites);
+    // A window that always lies in the future (+90..+180 min) so Eco stays
+    // the baseline and no HR27=0/HR59=1 entry writes are queued (issue #289).
+    await setHoldingReg(HR_DISCHARGE_SLOT_1_START, hhmmOffset(90));
+    await setHoldingReg(HR_DISCHARGE_SLOT_1_END, hhmmOffset(180));
+    await waitForSnapshot(
+      baseUrl,
+      (snapshot) => snapshot.discharge_slots?.[0]?.enabled === true,
+      'configured discharge slot',
+    );
+    await drainModbusWrites();
+
+    const result = await postJson(baseUrl, '/api/control/timed-export', { enabled: true });
+    expect(result.status).toBe(200);
+    expect(result.body.ok).toBe(true);
+
+    // Give the poll loop a couple of cycles; the entry writes must never land.
+    await wait(11_000);
+    const writes = await drainModbusWrites();
+    expect(writes.some((write) => write.address === HR_BATTERY_POWER_MODE && write.value === 0)).toBe(false);
+    expect(writes.some((write) => write.address === HR_ENABLE_DISCHARGE && write.value === 1)).toBe(false);
+
+    // The desired schedule is persisted for the boundary state machine.
+    const snapshot = await waitForSnapshot(
+      baseUrl,
+      (s) => s.enable_discharge === false && s.battery_power_mode === 1,
+      'Eco baseline with future slot',
+    );
+    expect(snapshot.discharge_slots?.[0]?.enabled).toBe(true);
   });
 
   test('automatically repairs an externally-created HR59/no-slot state', async ({
@@ -290,4 +364,208 @@ test.describe('Timed Export/discharge-slot state alignment', () => {
       page.getByText('Configure at least one discharge slot before enabling Timed Export.'),
     ).toBeVisible();
   });
+
+  test('HR318 pause blocks entry even inside the export window', async ({
+    baseUrl,
+    resetModbus,
+    drainModbusWrites,
+    setHoldingReg,
+  }) => {
+    await resetToEco(baseUrl, resetModbus, drainModbusWrites);
+    // Export window covering "now" (±90 min) so in-window entry WOULD fire —
+    // were it not for the pause.
+    await setHoldingReg(HR_DISCHARGE_SLOT_1_START, hhmmOffset(-90));
+    await setHoldingReg(HR_DISCHARGE_SLOT_1_END, hhmmOffset(90));
+    // Pause Discharge (HR318=2) with a pause window covering "now" as well.
+    await setHoldingReg(HR_BATTERY_PAUSE_MODE, 2);
+    await setHoldingReg(HR_BATTERY_PAUSE_SLOT_START, hhmmOffset(-90));
+    await setHoldingReg(HR_BATTERY_PAUSE_SLOT_END, hhmmOffset(90));
+    await waitForSnapshot(
+      baseUrl,
+      (snapshot) =>
+        snapshot.discharge_slots?.[0]?.enabled === true
+        && snapshot.battery_pause_mode === 2,
+      'in-window slot + active pause',
+    );
+    await drainModbusWrites();
+
+    const result = await postJson(baseUrl, '/api/control/timed-export', { enabled: true });
+    expect(result.status).toBe(200);
+    expect(result.body.ok).toBe(true);
+
+    // The boundary machine must NOT write entry (HR27=0/HR59=1) while the
+    // pause is blocking discharge — issue #289: pause takes precedence.
+    await wait(11_000);
+    const writes = await drainModbusWrites();
+    expect(writes.some((write) => write.address === HR_BATTERY_POWER_MODE && write.value === 0)).toBe(false);
+    expect(writes.some((write) => write.address === HR_ENABLE_DISCHARGE && write.value === 1)).toBe(false);
+  });
+
+  test('the desired schedule survives a backend restart', async ({
+    baseUrl,
+    resetModbus,
+    drainModbusWrites,
+    setHoldingReg,
+  }) => {
+    await resetToEco(baseUrl, resetModbus, drainModbusWrites);
+    // A future window so arming never happens; only the schedule is persisted.
+    await setHoldingReg(HR_DISCHARGE_SLOT_1_START, hhmmOffset(90));
+    await setHoldingReg(HR_DISCHARGE_SLOT_1_END, hhmmOffset(180));
+    await waitForSnapshot(
+      baseUrl,
+      (snapshot) => snapshot.discharge_slots?.[0]?.enabled === true,
+      'configured discharge slot',
+    );
+    await drainModbusWrites();
+
+    const result = await postJson(baseUrl, '/api/control/timed-export', { enabled: true });
+    expect(result.status).toBe(200);
+
+    const schedule = await getTimedExport(baseUrl);
+    expect(schedule.schedule_enabled).toBe(true);
+
+    // Restart the backend preserving settings: the persisted schedule must
+    // reload into the poll-loop config and stay visible (issue #289).
+    await restartBackendPreservingState();
+
+    const reloaded = await getTimedExport(baseUrl);
+    expect(reloaded.schedule_enabled).toBe(true);
+  });
+
+  test('Stop disarms re-arming firmware because the fallback clears slots before HR59=0', async ({
+    baseUrl,
+    resetModbus,
+    drainModbusWrites,
+    setHoldingReg,
+    setHr59Rearm,
+  }) => {
+    test.setTimeout(240_000);
+    await resetToEco(baseUrl, resetModbus, drainModbusWrites);
+    // Emulate Gen3 firmware that re-asserts HR59=1 while discharge slot
+    // registers are non-zero (issue #289) — and leave it enabled for the
+    // whole test: Stop must still win.
+    await setHr59Rearm(true);
+
+    // --- Classify the firmware: three outside-window HR59=1 polls ---
+    // A future window: the schedule is enabled but "now" is outside it, so
+    // an HR59=1 readback can only come from the (emulated) firmware.
+    await setHoldingReg(HR_DISCHARGE_SLOT_1_START, hhmmOffset(90));
+    await setHoldingReg(HR_DISCHARGE_SLOT_1_END, hhmmOffset(180));
+    await waitForSnapshot(
+      baseUrl,
+      (snapshot) => snapshot.discharge_slots?.[0]?.enabled === true,
+      'future discharge slot',
+    );
+    await drainModbusWrites();
+    const enable = await postJson(baseUrl, '/api/control/timed-export', { enabled: true });
+    expect(enable.status).toBe(200);
+    await drainModbusWrites();
+    await setHoldingReg(HR_ENABLE_DISCHARGE, 1);
+    // Three consecutive qualifying polls at poll_interval=5s, plus margin.
+    await wait(23_000);
+    const classified = await getTimedExport(baseUrl);
+    expect(classified.device_rearm_confirmed).toBe(true);
+    await drainModbusWrites();
+
+    // --- Arm inside a window that covers "now" ---
+    await setHoldingReg(HR_DISCHARGE_SLOT_1_START, hhmmOffset(-90));
+    await setHoldingReg(HR_DISCHARGE_SLOT_1_END, hhmmOffset(90));
+    await waitForSnapshot(
+      baseUrl,
+      (snapshot) =>
+        snapshot.discharge_slots?.[0]?.enabled === true
+        && snapshot.discharge_slots?.[0]?.start_hour === Math.floor(hhmmOffset(-90) / 100),
+      'in-window discharge slot',
+    );
+    const arm = await postJson(baseUrl, '/api/control/discharge-slot', {
+      slot: 1,
+      enabled: true,
+      start_hour: Math.floor(hhmmOffset(-90) / 100),
+      start_minute: hhmmOffset(-90) % 100,
+      end_hour: Math.floor(hhmmOffset(90) / 100),
+      end_minute: hhmmOffset(90) % 100,
+      target_soc: 20,
+    });
+    expect(arm.status).toBe(200);
+    await waitForSnapshot(
+      baseUrl,
+      (snapshot) => snapshot.enable_discharge === true && snapshot.battery_power_mode === 0,
+      'armed Timed Export snapshot',
+    );
+    await drainModbusWrites();
+
+    // --- Stop: the fallback must clear the slots BEFORE the HR59=0 disarm,
+    // or the emulated firmware would undo the disarm and the inverter would
+    // keep exporting forever. ---
+    const disable = await postJson(baseUrl, '/api/control/timed-export', { enabled: false });
+    expect(disable.status).toBe(200);
+
+    await waitForSnapshot(
+      baseUrl,
+      (snapshot) => snapshot.enable_discharge === false && snapshot.battery_power_mode === 1,
+      'Eco after Stop against re-arming firmware',
+      45_000,
+    );
+
+    // And it stays there — with the slots cleared the firmware has nothing
+    // to re-arm HR59 from.
+    await wait(11_000);
+    const settled = await getSnapshot(baseUrl);
+    expect(settled.enable_discharge).toBe(false);
+    expect(settled.battery_power_mode).toBe(1);
+  });
+
+  test('re-arming firmware is classified after three outside-window HR59=1 polls and the learned fallback survives a restart', async ({
+    baseUrl,
+    resetModbus,
+    drainModbusWrites,
+    setHoldingReg,
+  }) => {
+    test.setTimeout(180_000);
+    await resetToEco(baseUrl, resetModbus, drainModbusWrites);
+    // A future window: the schedule is enabled but "now" is outside it, so
+    // an HR59=1 readback can only come from the (emulated) firmware.
+    await setHoldingReg(HR_DISCHARGE_SLOT_1_START, hhmmOffset(90));
+    await setHoldingReg(HR_DISCHARGE_SLOT_1_END, hhmmOffset(180));
+    await waitForSnapshot(
+      baseUrl,
+      (snapshot) => snapshot.discharge_slots?.[0]?.enabled === true,
+      'configured discharge slot',
+    );
+    await drainModbusWrites();
+
+    const enable = await postJson(baseUrl, '/api/control/timed-export', { enabled: true });
+    expect(enable.status).toBe(200);
+    await drainModbusWrites();
+
+    // Firmware re-arms HR59 outside the window (the observable the detector
+    // classifies on; the mock's write interception needs a client HR59=0
+    // write, so seed the readback directly).
+    await setHoldingReg(HR_ENABLE_DISCHARGE, 1);
+
+    // Three consecutive qualifying polls at poll_interval=5s, plus margin.
+    await wait(23_000);
+
+    const schedule = await getTimedExport(baseUrl);
+    expect(schedule.device_rearm_confirmed).toBe(true);
+    // The desired schedule must not be lost or hidden by the fallback.
+    expect(schedule.schedule_enabled).toBe(true);
+    const savedSlot = (schedule.slots as Array<Record<string, unknown>>).find(
+      (slot) => (slot as { enabled: boolean }).enabled,
+    );
+    expect(savedSlot).toBeDefined();
+
+    // The learned classification persists (timed_export_slots_require_clear).
+    await restartBackendPreservingState();
+    const reloaded = await getTimedExport(baseUrl);
+    expect(reloaded.device_rearm_confirmed).toBe(true);
+  });
 });
+
+/** GET /api/timed-export — the HEM-managed schedule. */
+async function getTimedExport(baseUrl: string): Promise<Record<string, any>> {
+  const response = await fetch(`${baseUrl}/api/timed-export`);
+  const body = await response.json();
+  if (!body.ok) throw new Error(`timed-export unavailable: ${JSON.stringify(body)}`);
+  return body.data as Record<string, any>;
+}

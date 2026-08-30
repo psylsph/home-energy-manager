@@ -582,6 +582,25 @@ describe('<ControlPage/> — connection-state gate', () => {
     });
   });
 
+  it('shows inverter-write progress while a battery control save is pending', async () => {
+    vi.mocked(apiPost).mockImplementationOnce(() => new Promise(() => {}));
+    useInverterStore.setState({
+      snapshot: makeSnapshot(),
+      developerMode: false,
+      connectionState: 'connected',
+      connectedHost: '192.168.1.36:8899',
+    });
+    render(<ControlPage />);
+
+    const heading = await screen.findByRole('heading', { name: 'Battery and Power Controls' });
+    const section = heading.closest('section');
+    expect(section).not.toBeNull();
+    const slider = within(section!).getByRole('slider', { name: 'Minimum SOC' });
+    fireEvent.click(within(slider.parentElement!).getByRole('button', { name: 'Save' }));
+
+    expect(screen.getByText('Applying changes to inverter…')).toBeDefined();
+  });
+
   it('POSTs to /api/reconnect when the Retry button is clicked', async () => {
     const apiPostMock = vi.mocked(apiPost);
     apiPostMock.mockClear();

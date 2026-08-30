@@ -36,6 +36,7 @@
  */
 
 import { beforeEach } from 'vitest';
+import '@testing-library/jest-dom/vitest';
 
 function createMemoryStorage(): Storage {
   const store = new Map<string, string>();

@@ -235,7 +235,7 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
       // only Timed Discharge and not the whole section.
       expect(within(section).getByText('Eco')).toBeDefined();
       expect(within(section).getByText('Timed Charge')).toBeDefined();
-      expect(within(section).getByText('Timed Export')).toBeDefined();
+      expect(within(section).getByRole('button', { name: /Timed Export/ })).toBeDefined();
     });
   });
 

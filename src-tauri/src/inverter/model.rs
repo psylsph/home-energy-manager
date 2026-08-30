@@ -734,12 +734,13 @@ impl ScheduleSlot {
     /// A slot may retain zeroed or stale time registers while its enable flag
     /// is set. Such a slot must not count as a safety constraint for Timed
     /// Export: HR59 may only be armed when at least one real window exists.
+    ///
+    /// A zero-length window (start == end, including non-zero times such as
+    /// 16:00–16:00) is not configured — same parity as the window math and
+    /// the TS `isSlotConfigured` helper (CODE_REVIEW.md finding 5).
     pub fn is_configured(&self) -> bool {
         self.enabled
-            && (self.start_hour != 0
-                || self.start_minute != 0
-                || self.end_hour != 0
-                || self.end_minute != 0)
+            && (self.start_hour != self.end_hour || self.start_minute != self.end_minute)
     }
 }
 
@@ -1237,6 +1238,39 @@ mod tests {
         slot.end_hour = 0;
         slot.end_minute = 0;
         assert!(!slot.is_configured());
+    }
+
+    /// CODE_REVIEW.md finding 5: a zero-length window (start == end, e.g.
+    /// 16:00–16:00) must not count as configured, matching the window math
+    /// and the TS `isSlotConfigured` parity — otherwise the Timed Export
+    /// machine gate admits it and sits `Configured` forever.
+    #[test]
+    fn schedule_slot_zero_length_window_is_not_configured() {
+        let slot = ScheduleSlot {
+            enabled: true,
+            start_hour: 16,
+            start_minute: 0,
+            end_hour: 16,
+            end_minute: 0,
+            target_soc: 4,
+        };
+        assert!(!slot.is_configured());
+
+        // Same-minute start/end across an hour boundary is still
+        // zero-length (16:30–16:30).
+        let slot = ScheduleSlot {
+            start_minute: 30,
+            end_minute: 30,
+            ..slot
+        };
+        assert!(!slot.is_configured());
+
+        // A one-minute window is configured.
+        let slot = ScheduleSlot {
+            end_minute: 31,
+            ..slot
+        };
+        assert!(slot.is_configured());
     }
 
     // -- BatteryState --------------------------------------------------------
