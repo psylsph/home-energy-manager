@@ -518,10 +518,20 @@ async fn queue_owned_writes_transactional(
     .await
 }
 
-/// Completion-backed fail-fast writes that configure registers outside the
-/// shared discharge-mode ownership domain. Timed Export slot/target values
-/// may be prepared while HR318 owns an explicit pause; only the later
-/// HR27/discharge-enable arm transition must wait for that owner to release.
+/// Completion-backed fail-fast writes for the Timed Export slot/target
+/// registers, tagged with [`DischargeControlOwner::ManualMode`] ownership.
+///
+/// CODE_REVIEW.md finding 4: an ownerless batch is always admitted by the
+/// poll loop, so a slot edit saved while Force Discharge ran would overwrite
+/// the temporary force-discharge slot — and stopping Force Discharge would
+/// then restore the older captured slot, silently losing the user's edit.
+/// ManualMode ownership defers the batch behind ManualForce until Force
+/// Discharge has released the registers (the awaited completion then times
+/// out transactionally, so the edit fails cleanly and is retried). The
+/// existing manual-selection exception keeps these batches admitted while a
+/// register-derived ExplicitPause owns the cycle — slot/target values may be
+/// prepared while HR318 owns a pause; only the later HR27/discharge-enable
+/// arm transition must wait for that owner to release.
 async fn queue_writes_transactional(
     state: &Arc<AppState>,
     writes: Vec<RegisterWrite>,
@@ -530,7 +540,7 @@ async fn queue_writes_transactional(
         state,
         writes,
         WriteBatchPolicy::FailFastTransactional,
-        None,
+        Some(DischargeControlOwner::ManualMode),
     )
     .await
 }
@@ -9005,9 +9015,16 @@ mod tests {
             loop {
                 let mut pending = state.pending_writes.lock().await;
                 if let Some(batch) = pending.iter_mut().find(|batch| batch.completion.is_some()) {
+                    // CODE_REVIEW.md finding 4 retags these batches from
+                    // ownerless to ManualMode (so a Force Discharge defers
+                    // them). The property this test guards is unchanged: the
+                    // manual-selection exception keeps a ManualMode batch
+                    // eligible while a register-derived HR318 pause owns the
+                    // cycle.
                     assert_eq!(
-                        batch.owner, None,
-                        "slot configuration must remain eligible while HR318 owns pause control"
+                        batch.owner,
+                        Some(DischargeControlOwner::ManualMode),
+                        "slot configuration stays ManualMode-owned and eligible while HR318 owns pause control"
                     );
                     let completion = batch.completion.take().expect("completion sender");
                     drop(pending);

@@ -1147,7 +1147,13 @@ async fn post_json_rejecting_arm_writes(
         let mut pending = state.pending_writes.lock().await;
         if let Some(batch) = pending.iter_mut().find(|batch| batch.completion.is_some()) {
             if let Some(completion) = batch.completion.take() {
-                let outcome = if batch.owner.is_some() {
+                // Reject the mode-transition batch (it contains HR27); let
+                // slot/target batches through so tests reach the phase under
+                // test. Ownership is deliberately not the discriminator: the
+                // arm phase is TimedExport-owned, but the stop's disarm is
+                // ManualMode-owned (a user baseline selection), and both must
+                // be rejectable here.
+                let outcome = if batch.writes.iter().any(|w| w.address == 27) {
                     WriteOutcome::Failed {
                         address: 27,
                         value: 0,
