@@ -8150,6 +8150,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn timed_export_slot_writes_queue_with_manual_mode_ownership() {
+        // CODE_REVIEW.md finding 4: Timed Export slot restore/configuration
+        // writes used to queue ownerless, and ownerless batches are always
+        // admitted — so a slot edit saved while Force Discharge ran would
+        // overwrite the temporary force-discharge slot, and stopping Force
+        // Discharge would then restore the older captured slot, losing the
+        // user's edit. Slot writes carry ownership that a Force Discharge
+        // (ManualForce) outranks and defers.
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            {
+                let mut snap = state.latest_snapshot.lock().await;
+                if let Some(s) = snap.as_mut() {
+                    s.discharge_slots[0] = crate::inverter::model::ScheduleSlot {
+                        enabled: true,
+                        start_hour: 16,
+                        start_minute: 0,
+                        end_hour: 19,
+                        end_minute: 0,
+                        target_soc: 20,
+                    };
+                }
+            }
+            let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let captured_clone = captured.clone();
+            let state_for_handler = state.clone();
+            let handle = tokio::spawn(async move {
+                set_timed_export(State(state_for_handler), Json(json!({ "enabled": true }))).await
+            });
+            loop {
+                if handle.is_finished() {
+                    break;
+                }
+                let mut pw = state.pending_writes.lock().await;
+                if let Some(batch) = pw.iter_mut().find(|batch| batch.completion.is_some()) {
+                    captured_clone.lock().unwrap().push(batch.owner);
+                    if let Some(tx) = batch.completion.take() {
+                        let _ = tx.send(WriteOutcome::Ok);
+                    }
+                }
+                drop(pw);
+                tokio::task::yield_now().await;
+            }
+            let (status, _) = handle.await.unwrap();
+            assert_eq!(status, StatusCode::OK);
+            let owners = captured.lock().unwrap().clone();
+            assert!(!owners.is_empty(), "the slot restore batch must be queued");
+            assert_eq!(
+                owners[0],
+                Some(DischargeControlOwner::ManualMode),
+                "slot writes must carry ManualMode ownership so Force Discharge defers them"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn discharge_slot_save_queues_writes_with_manual_mode_ownership() {
+        // Same ownership contract for the slot editor endpoint (finding 4):
+        // the slot/target batch is ManualMode-owned (deferred behind Force
+        // Discharge, admitted during an HR318 pause via the manual-selection
+        // exception), while the export-arm batch keeps the TimedExport owner
+        // so an explicit pause still blocks it (issue #289).
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let captured_clone = captured.clone();
+            let state_for_handler = state.clone();
+            let handle = tokio::spawn(async move {
+                set_discharge_slot(
+                    State(state_for_handler),
+                    Json(json!({
+                        "slot": 1,
+                        "start_hour": 16, "start_minute": 0,
+                        "end_hour": 19, "end_minute": 0,
+                        "enabled": true,
+                    })),
+                )
+                .await
+            });
+            loop {
+                if handle.is_finished() {
+                    break;
+                }
+                let mut pw = state.pending_writes.lock().await;
+                if let Some(batch) = pw.iter_mut().find(|batch| batch.completion.is_some()) {
+                    captured_clone.lock().unwrap().push(batch.owner);
+                    if let Some(tx) = batch.completion.take() {
+                        let _ = tx.send(WriteOutcome::Ok);
+                    }
+                }
+                drop(pw);
+                tokio::task::yield_now().await;
+            }
+            let (status, _) = handle.await.unwrap();
+            assert_eq!(status, StatusCode::OK);
+            let owners = captured.lock().unwrap().clone();
+            assert_eq!(
+                owners.len(),
+                2,
+                "an in-window save queues the slot batch then the arm batch: {owners:?}"
+            );
+            assert_eq!(
+                owners[0],
+                Some(DischargeControlOwner::ManualMode),
+                "slot writes must carry ManualMode ownership so Force Discharge defers them"
+            );
+            assert_eq!(
+                owners[1],
+                Some(DischargeControlOwner::TimedExport),
+                "the export arm keeps the TimedExport owner (pause precedence)"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn timed_export_disable_with_rearm_fallback_clears_slots_before_disarm() {
         // Issue #289: once the firmware is classified as HR59 re-arming,
         // Stop must clear the physical slot registers BEFORE the HR59=0

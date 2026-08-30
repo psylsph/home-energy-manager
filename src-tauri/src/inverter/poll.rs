@@ -6679,6 +6679,45 @@ mod tests {
     }
 
     #[test]
+    fn take_pending_writes_for_owner_defers_timed_export_slots_behind_force_discharge() {
+        // CODE_REVIEW.md finding 4: Timed Export slot restore/configuration
+        // writes are queued as ManualMode (a user-issued schedule edit). An
+        // active Force Discharge owns the temporary discharge slot — its
+        // stop restores the captured pre-force slot — so a slot batch
+        // admitted mid-force would be overwritten on restore and lose the
+        // user's edit. The batch must stay queued until Force Discharge
+        // releases the registers.
+        use super::{take_pending_writes_for_owner, PendingWriteBatch};
+        use crate::inverter::encoder::RegisterWrite;
+        use crate::inverter::state_machines::DischargeControlOwner;
+
+        let make =
+            |address: u16, value: u16, owner: Option<DischargeControlOwner>| PendingWriteBatch {
+                writes: vec![RegisterWrite { address, value }],
+                completion: None,
+                policy: Default::default(),
+                owner,
+            };
+
+        // While Force Discharge owns the cycle: deferred.
+        let mut queue = vec![make(56, 1700, Some(DischargeControlOwner::ManualMode))];
+        let (taken, winner) =
+            take_pending_writes_for_owner(&mut queue, 8, Some(DischargeControlOwner::ManualForce));
+        assert!(
+            taken.is_empty(),
+            "a slot edit must not overwrite Force Discharge's temporary slot"
+        );
+        assert_eq!(winner, Some(DischargeControlOwner::ManualForce));
+        assert_eq!(queue.len(), 1, "the slot batch stays queued for later");
+
+        // Once Force Discharge has released: the batch drains.
+        let (taken, winner) = take_pending_writes_for_owner(&mut queue, 8, None);
+        assert_eq!(taken.len(), 1);
+        assert_eq!(winner, Some(DischargeControlOwner::ManualMode));
+        assert!(queue.is_empty());
+    }
+
+    #[test]
     fn take_pending_timed_export_replaces_active_manual_mode() {
         use super::{take_pending_writes_for_owner, PendingWriteBatch};
         use crate::inverter::encoder::RegisterWrite;

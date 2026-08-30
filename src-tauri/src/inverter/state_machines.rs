@@ -6619,10 +6619,7 @@ mod tests {
             DeviceType::Gen3Hybrid,
         );
         assert!(
-            matches!(
-                decision.new_state,
-                TimedExportState::Exiting { .. }
-            ),
+            matches!(decision.new_state, TimedExportState::Exiting { .. }),
             "a failed stop must keep its exit pending, not fold to Off"
         );
         assert!(
