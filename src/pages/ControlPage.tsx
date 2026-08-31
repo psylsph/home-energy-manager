@@ -425,11 +425,17 @@ function ScheduleSlotEditor({
   // edit, otherwise their typing would be wiped out. This is React's
   // documented "derive state from props" pattern: setState during render
   // schedules a re-render, never an infinite loop, because the next render
-  // sees the same `slot` and skips the update.
+  // sees the same `slot` and skips the update. `local` must be re-synced
+  // together with `baseline`: the editors mount from the pre-snapshot
+  // defaults (the store starts empty), so without this the card would
+  // render the mount-time values — disabled, no Target SOC slider —
+  // forever, no matter what the inverter reports (code-review finding:
+  // charge-slot target SOC E2E regression).
   const [prevSlot, setPrevSlot] = useState(slot);
   if (slot !== prevSlot) {
     setPrevSlot(slot);
     if (!isDirty(local)) {
+      setLocal({ ...slot });
       setBaseline(slot);
     }
   }
