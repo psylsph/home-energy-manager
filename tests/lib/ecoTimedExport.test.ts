@@ -170,6 +170,18 @@ describe('deriveEcoState', () => {
         expect(state).toBe('temporarily_overridden');
     });
 
+    it('returns temporarily_overridden while the Agile automation is active', () => {
+        // CODE_REVIEW.md: Agile-owned export no longer misattributes to Force
+        // Discharge, but the Eco card must still report that behaviour is
+        // temporarily overridden — not that Eco silently turned off.
+        const exporting = snapshot({ battery_power_mode: 0, enable_discharge: true, agile_active: true });
+        expect(deriveEcoState(exporting, false, false, false)).toBe('temporarily_overridden');
+        // Agile charging (Eco baseline + forced charge) is likewise an
+        // automation owning behaviour.
+        const charging = snapshot({ battery_power_mode: 1, enable_charge: true, agile_active: true });
+        expect(deriveEcoState(charging, false, false, false)).toBe('temporarily_overridden');
+    });
+
     it('returns off when not in Eco mode and no overrides', () => {
         const state = deriveEcoState(snapshot({ battery_power_mode: 0 }), false, false, false);
         expect(state).toBe('off');

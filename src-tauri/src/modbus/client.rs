@@ -63,18 +63,51 @@ pub enum ClientError {
 }
 
 impl ClientError {
-    /// Errors that mean the TCP session is no longer usable.
+    /// The TCP session **was** established and is no longer usable.
+    ///
+    /// Deliberately excludes [`ClientError::NotConnected`]: that is the
+    /// pre-connection state, not a lost connection, and a predicate used for
+    /// connection-loss semantics (alerting, reconnect decisions) must not
+    /// report "lost" before any connection attempt was ever made.
     pub fn is_connection_lost(&self) -> bool {
         matches!(
             self,
-            ClientError::NotConnected | ClientError::SendFailed(_) | ClientError::ReceiveFailed(_)
+            ClientError::SendFailed(_) | ClientError::ReceiveFailed(_)
         )
+    }
+
+    /// Hard errors that must abort the current operation instead of being
+    /// retried: an established session that died ([`Self::is_connection_lost`])
+    /// or a session that does not exist at all ([`ClientError::NotConnected`] —
+    /// retrying a read on a client that never connected cannot succeed).
+    pub fn is_hard_failure(&self) -> bool {
+        self.is_connection_lost() || matches!(self, ClientError::NotConnected)
     }
 }
 
 // ---------------------------------------------------------------------------
 // Block read result
 // ---------------------------------------------------------------------------
+
+/// Entropy for [`jittered_retry_gap`]: wall-clock sub-second nanos mixed with
+/// the attempt number (so successive retries differ even within one clock
+/// tick) and the process id (so two backends don't jitter identically).
+fn retry_entropy(attempt: u8) -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    nanos ^ u64::from(attempt).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ ((std::process::id() as u64) << 32)
+}
+
+/// Spread a retry gap into `[base, 2*base)` so synchronised retry timers
+/// (e.g. several queued batches hammering a slow dongle on the same cadence)
+/// de-correlate instead of stacking up. `entropy` is injected so the bounds
+/// are deterministically unit-testable; the policy functions stay pure.
+pub(crate) fn jittered_retry_gap(base: Duration, entropy: u64) -> Duration {
+    let spread = base.as_nanos() as u64;
+    base + Duration::from_nanos(entropy % spread.max(1))
+}
 
 /// Result of reading a single register block.
 #[derive(Debug)]
@@ -1339,7 +1372,8 @@ impl ModbusClient {
                                 attempt + 1,
                                 max_attempts
                             );
-                            tokio::time::sleep(gap).await;
+                            tokio::time::sleep(jittered_retry_gap(gap, retry_entropy(attempt)))
+                                .await;
                             continue;
                         }
                         WriteExceptionAction::Acknowledged => {
@@ -1453,8 +1487,8 @@ impl ModbusClient {
                             "Block read attempt failed"
                         );
                         // Hard TCP errors propagate immediately — no point
-                        // retrying a dead socket.
-                        if e.is_connection_lost() {
+                        // retrying a dead (or never-established) socket.
+                        if e.is_hard_failure() {
                             return Err(e);
                         }
                         last_err = Some(e);
@@ -1787,6 +1821,57 @@ pub(crate) mod tests {
 
         let e = ClientError::InvalidResponse("unexpected".to_string());
         assert!(format!("{e}").contains("unexpected"));
+    }
+
+    #[test]
+    fn connection_loss_predicate_excludes_never_connected() {
+        // "Lost" means an established session died. `NotConnected` is the
+        // pre-connection state — alerting or reconnect logic keyed on
+        // `is_connection_lost` must not treat "never connected" as "the
+        // connection dropped" (code-review CRITICAL).
+        assert!(!ClientError::NotConnected.is_connection_lost());
+        assert!(ClientError::SendFailed("broken pipe".to_string()).is_connection_lost());
+        assert!(ClientError::ReceiveFailed("eof".to_string()).is_connection_lost());
+        // Transient failures are not connection loss either.
+        assert!(!ClientError::Timeout.is_connection_lost());
+        assert!(!ClientError::FrameError("bad crc".to_string()).is_connection_lost());
+    }
+
+    #[test]
+    fn hard_failure_predicate_includes_never_connected() {
+        // The retry loops must still abort on a client that never connected —
+        // retrying a read that cannot succeed just burns attempts.
+        assert!(ClientError::NotConnected.is_hard_failure());
+        assert!(ClientError::SendFailed("broken pipe".to_string()).is_hard_failure());
+        assert!(ClientError::ReceiveFailed("eof".to_string()).is_hard_failure());
+        assert!(!ClientError::Timeout.is_hard_failure());
+    }
+
+    #[test]
+    fn jittered_retry_gap_stays_within_base_to_double_base() {
+        // The applied retry sleep must be at least the policy gap (never
+        // retry sooner than decided) and strictly less than double it (bounded
+        // worst-case wait), for any entropy input.
+        let base = Duration::from_millis(2000);
+        for entropy in [0u64, 1, 12345, 1_999_999_999, u64::MAX] {
+            let gap = jittered_retry_gap(base, entropy);
+            assert!(gap >= base, "entropy {entropy} produced {gap:?} < base");
+            assert!(gap < base * 2, "entropy {entropy} produced {gap:?} >= 2x base");
+        }
+        // Deterministic for a given entropy…
+        assert_eq!(jittered_retry_gap(base, 42), jittered_retry_gap(base, 42));
+        // …and actually spreads across the interval.
+        assert_ne!(jittered_retry_gap(base, 0), jittered_retry_gap(base, 1));
+        assert_ne!(
+            jittered_retry_gap(base, u64::MAX),
+            jittered_retry_gap(base, 0)
+        );
+    }
+
+    #[test]
+    fn jittered_retry_gap_handles_zero_base() {
+        // A zero base must not divide by zero when computing the spread.
+        assert_eq!(jittered_retry_gap(Duration::ZERO, u64::MAX), Duration::ZERO);
     }
 
     // -----------------------------------------------------------------------

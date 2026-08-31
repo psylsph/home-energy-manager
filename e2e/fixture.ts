@@ -155,6 +155,12 @@ export interface ModbusFixtures {
    * cycle rather than atomically inside the write.
    */
   setHr59Rearm: (enabled: boolean) => Promise<void>;
+  /**
+   * Make the mock inverter reject the next `count` FC06 writes with a
+   * Modbus exception (code 4) instead of applying them — emulating a
+   * device that refuses register writes. `count: 0` clears the emulation.
+   */
+  setRejectWrites: (count: number) => Promise<void>;
   /** Reset all register state and captured writes. */
   resetModbus: () => Promise<void>;
   /** Base URL of the HTTP server. */
@@ -205,6 +211,14 @@ export const test = base.extend<ModbusFixtures>({
   setHr59Rearm: async ({}, use) => {
     await use(async (enabled) => {
       await adminPost('/rearm-hr59', { enabled });
+    });
+  },
+  setRejectWrites: async ({}, use) => {
+    await use(async (count) => {
+      const data = await adminPost('/reject-writes', { count });
+      if (data?.ok !== true) {
+        throw new Error(`reject-writes failed: ${JSON.stringify(data)}`);
+      }
     });
   },
   resetModbus: async ({}, use) => {

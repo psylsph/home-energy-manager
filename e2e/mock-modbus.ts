@@ -65,6 +65,14 @@ let rearmHr59Enabled = false;
 /** A re-assert is scheduled and fires after the next register read. */
 let hr59ReassertPending = false;
 
+/**
+ * How many upcoming FC06 writes must be rejected with a Modbus exception
+ * (code 4, server device failure) instead of applied. Lets specs emulate an
+ * inverter that refuses register writes — e.g. a Stop whose disarm batch is
+ * rejected mid-flight, leaving the exit pending across a backend restart.
+ */
+let rejectWritesRemaining = 0;
+
 /** Discharge slot time registers for the standard (single-phase) layout. */
 const DISCHARGE_SLOT_REGS = [56, 57, 44, 45];
 
@@ -78,6 +86,11 @@ export function setRearmHr59(enabled: boolean): void {
   if (!enabled) hr59ReassertPending = false;
 }
 
+/** Arm `count` upcoming FC06 write rejections (0 clears the emulation). */
+export function setRejectWrites(count: number): void {
+  rejectWritesRemaining = Math.max(0, count);
+}
+
 /** Reset all state. */
 export function resetState(): void {
   inputRegs.fill(0);
@@ -85,6 +98,7 @@ export function resetState(): void {
   writes.length = 0;
   rearmHr59Enabled = false;
   hr59ReassertPending = false;
+  rejectWritesRemaining = 0;
   populateDefaults();
 }
 
@@ -417,6 +431,22 @@ function handleClient(sock: net.Socket): void {
         const register = innerPayload.readUInt16BE(0);
         const value = innerPayload.readUInt16BE(2);
 
+        // Write-rejection emulation: respond with a Modbus exception
+        // (FC 0x86, code 4 = server device failure) without applying the
+        // write or recording it as captured — the register must still hold
+        // its previous value, exactly like a real refusing device.
+        if (rejectWritesRemaining > 0) {
+          rejectWritesRemaining -= 1;
+          const exception = buildFrame(
+            'SA12345678',
+            0x11,
+            0x06 | 0x80,
+            Buffer.from([0x04]),
+          );
+          sock.write(exception);
+          continue;
+        }
+
         // Apply the write to our holding register storage
         if (register < holdingRegs.length) {
           holdingRegs[register] = value & 0xFFFF;
@@ -462,6 +492,8 @@ const ADMIN_PORT = 18900;
  *   POST /holding-reg  — set a holding register {address, value}
  *   POST /input-reg    — set an input register {address, value}
  *   POST /rearm-hr59   — toggle the HR59 re-arm firmware emulation {enabled}
+ *   POST /reject-writes — reject the next {count} FC06 writes with an exception
+ *   GET  /reject-writes — inspect the remaining rejection count
  */
 export function startAdminApi(): http.Server {
   const server = http.createServer((req, res) => {
@@ -515,6 +547,21 @@ export function startAdminApi(): http.Server {
           res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));
         }
       });
+    } else if (req.method === 'POST' && req.url === '/reject-writes') {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const { count } = JSON.parse(body);
+          setRejectWrites(Number(count) || 0);
+          res.end(JSON.stringify({ ok: true, rejectWritesRemaining }));
+        } catch {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));
+        }
+      });
+    } else if (req.method === 'GET' && req.url === '/reject-writes') {
+      res.end(JSON.stringify({ ok: true, rejectWritesRemaining }));
     } else {
       res.statusCode = 404;
       res.end(JSON.stringify({ ok: false, error: 'Not found' }));

@@ -563,6 +563,38 @@ mod tests {
     }
 
     #[test]
+    fn decode_frame_tolerates_all_ones_crc() {
+        // 0xFFFF is the CRC of the empty input (the algorithm's initial
+        // value) and the marker some Modbus implementations use on error
+        // frames. The framer is deliberately lenient about CRCs, so this
+        // boundary value must decode like any other mismatch, not error.
+        let mut frame = encode_frame("SA1234", 0x01, 0x03, &[0x00, 0x01]);
+        let len = frame.len();
+        frame[len - 2] = 0xFF;
+        frame[len - 1] = 0xFF;
+        assert!(decode_frame(&frame).is_ok());
+    }
+
+    #[test]
+    fn crc16_produces_both_boundary_values() {
+        // The checksum space must cover both boundaries: corruption landing
+        // exactly on 0xFFFF, and the 0xFFFF→0x0000 wraparound. Exhaustively
+        // probe single-u16 inputs (deterministic, 64k iterations) to prove
+        // the algorithm can emit each boundary value.
+        let mut hits_ffff = false;
+        let mut hits_zero = false;
+        for v in 0u16..=u16::MAX {
+            match crc16_modbus(&v.to_le_bytes()) {
+                0xFFFF => hits_ffff = true,
+                0x0000 => hits_zero = true,
+                _ => {}
+            }
+        }
+        assert!(hits_ffff, "crc16 must be able to produce 0xFFFF");
+        assert!(hits_zero, "crc16 must be able to produce 0x0000 (wraparound)");
+    }
+
+    #[test]
     fn decode_length_mismatch() {
         let mut frame = encode_frame("SA1234", 0x01, 0x03, &[0x00, 0x01]);
         // Append an extra byte so length field no longer matches

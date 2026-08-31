@@ -16,6 +16,41 @@ use crate::inverter::model::ScheduleSlot;
 /// directory" when the temp was already renamed by another save.
 static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 
+/// Test-only fault injection: how many upcoming [`Settings::update`] calls
+/// must fail with an error before real persistence resumes. Lets endpoint
+/// tests drive the persistence-failure branches (schedule rollback, physical
+/// write compensation) deterministically. Always zero outside `cfg(test)`.
+#[cfg(test)]
+pub(crate) static TEST_UPDATE_FAILURES_PENDING: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
+/// RAII guard for [`TEST_UPDATE_FAILURES_PENDING`]: arms `count` injected
+/// failures and always disarms itself on drop (including panics), so leaked
+/// state can never poison unrelated tests.
+#[cfg(test)]
+pub(crate) struct InjectUpdateFailures;
+
+#[cfg(test)]
+impl InjectUpdateFailures {
+    pub(crate) fn arm(count: u32) -> Self {
+        TEST_UPDATE_FAILURES_PENDING.store(count, std::sync::atomic::Ordering::Release);
+        InjectUpdateFailures
+    }
+
+    /// How many injected failures remain (tests assert on this to prove the
+    /// injection actually fired).
+    pub(crate) fn remaining() -> u32 {
+        TEST_UPDATE_FAILURES_PENDING.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+#[cfg(test)]
+impl Drop for InjectUpdateFailures {
+    fn drop(&mut self) {
+        TEST_UPDATE_FAILURES_PENDING.store(0, std::sync::atomic::Ordering::Release);
+    }
+}
+
 /// A single tariff time window with a rate in £/kWh.
 ///
 /// The day is tiled by an ordered list of these slots covering `[00:00, 23:59]`.
@@ -1813,6 +1848,15 @@ impl Settings {
         let _lock = SETTINGS_LOCK
             .lock()
             .map_err(|e| format!("Lock error: {e}"))?;
+
+        // Test-only fault injection: endpoint tests need to exercise the
+        // persistence-failure branches (schedule rollback, physical-write
+        // compensation) without a real I/O fault on the settings file.
+        #[cfg(test)]
+        if TEST_UPDATE_FAILURES_PENDING.load(std::sync::atomic::Ordering::Acquire) > 0 {
+            TEST_UPDATE_FAILURES_PENDING.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            return Err("injected settings update failure".to_string());
+        }
 
         let mut settings = Self::load();
         // Snapshot before mutation so a no-op closure doesn't touch the

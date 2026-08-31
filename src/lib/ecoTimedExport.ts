@@ -404,7 +404,11 @@ export function deriveEcoState(
         ?? (now.getHours() * 60 + now.getMinutes());
     const isPausedByRegister = hr318BlocksDischarge(snapshot, minuteOfDay);
 
-    if (isTimedExportActive || isForceDischargeActive) {
+    // CODE_REVIEW.md: Agile-owned export shares the Force Discharge register
+    // shape but is NOT a manual action — the Eco card must still show that
+    // behaviour is temporarily overridden by the tariff automation, not
+    // that Eco silently turned off.
+    if (isTimedExportActive || isForceDischargeActive || snapshot.agile_active) {
         return 'temporarily_overridden';
     }
 

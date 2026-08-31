@@ -184,7 +184,10 @@ pub fn battery_voltage_mismatch(inverter_voltage: f32, module_voltages: &[f32]) 
     // Garbage inverter reading — cannot judge. Negative values are corrupt
     // (mirrors the sanitizer's battery-voltage range check, which treats
     // < 0.0 as an out-of-range register), while 0.0 is a valid reading.
-    if !inverter_voltage.is_finite() || inverter_voltage < 0.0 {
+    // IEEE 754: `-0.0 < 0.0` is false, so a signed zero would slip through a
+    // bare `< 0.0` check — reject it explicitly by sign bit.
+    if !inverter_voltage.is_finite() || inverter_voltage < 0.0 || inverter_voltage.is_sign_negative()
+    {
         return false;
     }
     // Healthiest valid module voltage is the reference for the stack.
@@ -2376,6 +2379,18 @@ mod tests {
         // disconnect and counts as a mismatch. (Stale module data carried
         // forward by the sanitizer is gated by the poll loop, not here.)
         assert!(!battery_voltage_mismatch(-1.0, &[53.0]));
+        assert!(battery_voltage_mismatch(0.0, &[53.0, 52.9]));
+    }
+
+    #[test]
+    fn test_voltage_mismatch_signed_zero_is_garbage_not_disconnect() {
+        // IEEE 754: `-0.0 < 0.0` is false, so a bare `< 0.0` guard lets a
+        // sign-bit-zero register through as if it were a genuine 0.0 V
+        // complete-disconnect reading — a false breaker-trip alert. Signed
+        // zero is corrupt register data and must be refused.
+        assert!(!battery_voltage_mismatch(-0.0, &[53.0, 52.9]));
+        assert!(!battery_voltage_mismatch(f32::from_bits(0x8000_0000), &[53.0]));
+        // Plain zero keeps its "valid complete disconnect" meaning.
         assert!(battery_voltage_mismatch(0.0, &[53.0, 52.9]));
     }
 

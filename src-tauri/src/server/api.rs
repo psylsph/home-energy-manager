@@ -1770,15 +1770,13 @@ pub async fn set_mode(
     // desired export slots remain persisted for a later explicit re-enable.
     if mode_str == "timed_demand" {
         let slots = state.timed_export_config.lock().await.slots.clone();
-        // Durable stop/exit-pending marker (CODE_REVIEW.md BLOCKER): the
-        // schedule is about to be disabled while the physical registers may
-        // still be armed — a crash before the mode batch lands must resume
-        // the exit on restart.
-        set_timed_export_stop_pending(&state, true).await;
-        if let Err(error) = persist_timed_export_schedule(&state, false, slots).await {
-            // The disable never landed — clear the marker again so the
-            // durable state stays truthful ("marker set ⇒ schedule off").
-            set_timed_export_stop_pending(&state, false).await;
+        // Durable stop/exit-pending marker (CODE_REVIEW.md BLOCKER), moved in
+        // the SAME settings transaction as the disable: if the process dies
+        // before the mode batch lands, the restart resumes the exit — and a
+        // crash can never leave the marker and the schedule disagreeing.
+        if let Err(error) =
+            persist_timed_export_schedule_with_stop_pending(&state, false, slots, true).await
+        {
             return error_response(&format!(
                 "Could not save the Timed Export schedule: {error}"
             ));
@@ -1836,13 +1834,17 @@ pub async fn set_mode(
                 // enable restores the schedule without a legacy backup.
                 {
                     let slots = state.timed_export_config.lock().await.slots.clone();
-                    // Durable stop/exit-pending marker — same restart-recovery
-                    // rationale as the timed_demand branch above.
-                    set_timed_export_stop_pending(&state, true).await;
-                    if let Err(error) = persist_timed_export_schedule(&state, false, slots).await {
-                        // The disable never landed — clear the marker again
-                        // so the durable state stays truthful.
-                        set_timed_export_stop_pending(&state, false).await;
+                    // Durable stop/exit-pending marker moved atomically with
+                    // the disable — same restart-recovery rationale as the
+                    // timed_demand branch above.
+                    if let Err(error) = persist_timed_export_schedule_with_stop_pending(
+                        &state,
+                        false,
+                        slots,
+                        true,
+                    )
+                    .await
+                    {
                         return error_response(&format!(
                             "Could not save the Timed Export schedule: {error}"
                         ));
@@ -2086,15 +2088,12 @@ async fn apply_eco_enable(state: &Arc<AppState>) -> (StatusCode, Json<Value>) {
     // later Timed Export enable restores the schedule directly.
     {
         let slots = state.timed_export_config.lock().await.slots.clone();
-        // Durable stop/exit-pending marker (CODE_REVIEW.md BLOCKER): the
-        // schedule is about to be disabled while the physical registers may
-        // still be armed — a crash before the Eco batch lands must resume
-        // the exit on restart.
-        set_timed_export_stop_pending(state, true).await;
-        if let Err(error) = persist_timed_export_schedule(state, false, slots).await {
-            // The disable never landed — clear the marker again so the
-            // durable state stays truthful.
-            set_timed_export_stop_pending(state, false).await;
+        // Durable stop/exit-pending marker (CODE_REVIEW.md BLOCKER), moved in
+        // the SAME settings transaction as the disable: if the process dies
+        // before the Eco batch lands, the restart resumes the exit.
+        if let Err(error) =
+            persist_timed_export_schedule_with_stop_pending(state, false, slots, true).await
+        {
             return error_response(&format!(
                 "Could not save the Timed Export schedule: {error}"
             ));
@@ -2216,34 +2215,24 @@ fn host_minute_of_day() -> u16 {
     now.hour() as u16 * 60 + now.minute() as u16
 }
 
-/// Persist the desired Timed Export schedule (issue #289) to settings and
-/// mirror it into the in-memory poll-loop config so the boundary state
-/// machine sees the change on the next poll without an app restart.
-///
-/// Persist first, then update the in-memory poll-loop config. A persistence
-/// failure is returned to the endpoint so it cannot claim that a schedule was
-/// saved when a restart would silently lose it.
-///
-/// The HR59 re-arm detector is reset on every schedule change: ownership
-/// of the registers just changed hands, so prior evidence about firmware
-/// re-arm behaviour no longer applies.
-async fn persist_timed_export_schedule(
-    state: &Arc<AppState>,
-    schedule_enabled: bool,
-    slots: Vec<crate::inverter::model::ScheduleSlot>,
-) -> Result<(), String> {
-    persist_timed_export_schedule_with_backup_clear(state, schedule_enabled, slots, false).await
-}
-
 /// Persist a Timed Export schedule and optionally consume the legacy slot
 /// backup in one settings transaction. The backup must be cleared before an
 /// in-window schedule is armed: otherwise a later backup-clear failure would
 /// return an error after the inverter had already started exporting.
+///
+/// `stop_pending` moves the durable stop/exit-pending marker in the SAME
+/// transaction (CODE_REVIEW.md follow-up): the marker must never lag the
+/// schedule change it describes. `Some(true)` belongs to paths that disable
+/// the schedule while their disarm writes are still outstanding (a crash
+/// then restores the reconciler into `Exiting` at startup); `Some(false)`
+/// belongs to commits that retire a pending exit (an explicit re-enable);
+/// `None` leaves the marker exactly as it is.
 async fn persist_timed_export_schedule_with_backup_clear(
     state: &Arc<AppState>,
     schedule_enabled: bool,
     slots: Vec<crate::inverter::model::ScheduleSlot>,
     clear_backup: bool,
+    stop_pending: Option<bool>,
 ) -> Result<(), String> {
     crate::settings::Settings::update(|s| {
         s.timed_export_schedule_enabled = schedule_enabled;
@@ -2251,8 +2240,16 @@ async fn persist_timed_export_schedule_with_backup_clear(
         if clear_backup {
             s.discharge_slots_backup = None;
         }
+        if let Some(pending) = stop_pending {
+            s.timed_export_stop_pending = pending;
+        }
     })
     .map_err(|error| error.to_string())?;
+    if let Some(pending) = stop_pending {
+        state
+            .timed_export_stop_pending
+            .store(pending, std::sync::atomic::Ordering::Release);
+    }
     let mut config = state.timed_export_config.lock().await;
     config.schedule_enabled = schedule_enabled;
     config.slots = slots;
@@ -2261,30 +2258,23 @@ async fn persist_timed_export_schedule_with_backup_clear(
     Ok(())
 }
 
-/// Set or clear the durable Timed Export stop/exit-pending marker (settings
-/// + the in-memory atomic mirror).
-///
-/// CODE_REVIEW.md BLOCKER: set BEFORE a route persists
-/// `schedule_enabled = false`. If the process exits before the disarm
-/// writes are confirmed, the restart restores the reconciler into
-/// `Exiting` (see the `AppState` constructors) instead of booting `Off` —
-/// where the still-armed registers and populated physical slots would be
-/// misread as another controller's schedule and never repaired. The poll
-/// loop clears the marker only after the reconciler settles back on a
-/// confirmed Eco baseline; an explicit re-enable or the E2E test reset
-/// clears it here.
-async fn set_timed_export_stop_pending(state: &Arc<AppState>, pending: bool) {
-    if let Err(error) =
-        crate::settings::Settings::update(|s| s.timed_export_stop_pending = pending)
-    {
-        tracing::error!(
-            "Could not persist the Timed Export stop-pending marker: {error} — a crash before \
-             the disarm completes could leave export armed after a restart"
-        );
-    }
-    state
-        .timed_export_stop_pending
-        .store(pending, std::sync::atomic::Ordering::Release);
+/// Persist a schedule change together with the durable stop/exit-pending
+/// marker in a single settings transaction — the disable and enable paths'
+/// entry point (see [`persist_timed_export_schedule_with_backup_clear`]).
+async fn persist_timed_export_schedule_with_stop_pending(
+    state: &Arc<AppState>,
+    schedule_enabled: bool,
+    slots: Vec<crate::inverter::model::ScheduleSlot>,
+    stop_pending: bool,
+) -> Result<(), String> {
+    persist_timed_export_schedule_with_backup_clear(
+        state,
+        schedule_enabled,
+        slots,
+        false,
+        Some(stop_pending),
+    )
+    .await
 }
 
 /// CODE_REVIEW.md BLOCKER: after a partially-applied slot mutation, drive
@@ -2429,10 +2419,12 @@ pub async fn set_timed_export(
     let _timed_export_action = state.timed_export_action_lock.lock().await;
 
     if enabled {
-        // An explicit Arm supersedes any pending stop/exit: the reconciler
-        // owns the registers again from this point, so the restart-recovery
-        // marker must not re-arm an `Exiting` repair over the live schedule.
-        set_timed_export_stop_pending(&state, false).await;
+        // An explicit Arm supersedes any pending stop/exit — but the marker
+        // is retired at COMMIT time (the same settings transaction that
+        // persists the enabled schedule), not up-front: if the enable fails
+        // while the registers were armed by a failed stop, the marker must
+        // still say an exit is pending, or a crash would boot the machine
+        // as `Off` and suppress every repair.
         // Without a snapshot the device type — and therefore the register
         // layout the restore writes target — is unknown. Refuse rather than
         // guess (a wrong guess could restore the backup into the wrong
@@ -2624,12 +2616,14 @@ pub async fn set_timed_export(
         // This is the last fallible settings operation on the in-window path.
         // Once it succeeds the export arm is the final action, so no later
         // reserve or persistence error can strand maximum-power export behind
-        // an error response. Consume a legacy backup in the same transaction.
+        // an error response. Consume a legacy backup and retire the
+        // stop/exit-pending marker in the same transaction.
         if let Err(error) = persist_timed_export_schedule_with_backup_clear(
             &state,
             true,
             desired_slots,
             restoring_backup,
+            Some(false),
         )
         .await
         {
@@ -2706,16 +2700,14 @@ pub async fn set_timed_export(
         let disarm_writes =
             crate::inverter::state_machines::build_timed_export_disable_writes(device_type);
         let slots = state.timed_export_config.lock().await.slots.clone();
-        // Durable stop/exit-pending marker, persisted BEFORE the disable
-        // (CODE_REVIEW.md BLOCKER): if the process exits before the disarm
-        // completes, the restart restores the reconciler into `Exiting` and
-        // finishes the exit instead of booting `Off` and suppressing every
-        // repair because the physical slots are still populated.
-        set_timed_export_stop_pending(&state, true).await;
-        if let Err(error) = persist_timed_export_schedule(&state, false, slots).await {
-            // The disable never landed — clear the marker again so the
-            // durable state stays truthful ("marker set ⇒ schedule off").
-            set_timed_export_stop_pending(&state, false).await;
+        // Durable stop/exit-pending marker, moved in the SAME settings
+        // transaction as the disable (CODE_REVIEW.md BLOCKER): a crash
+        // before the disarm completes restores the reconciler into
+        // `Exiting` on restart, and the marker can never be observed
+        // disagreeing with the schedule it belongs to.
+        if let Err(error) =
+            persist_timed_export_schedule_with_stop_pending(&state, false, slots, true).await
+        {
             return error_response(&format!(
                 "Could not save the Timed Export schedule: {error}"
             ));
@@ -3433,9 +3425,15 @@ pub async fn set_discharge_slot(
                 // retry — the poll-loop state machine reconciles toward it —
                 // and the machine state (exposed via GET /api/timed-export)
                 // is what distinguishes pending/armed/active, never this
-                // response's success flag alone.
-                if let Err(error) =
-                    persist_timed_export_schedule(&state, true, desired_slots.clone()).await
+                // response's success flag alone. The (re)commit also retires
+                // any stale stop/exit-pending marker in the same transaction.
+                if let Err(error) = persist_timed_export_schedule_with_stop_pending(
+                    &state,
+                    true,
+                    desired_slots.clone(),
+                    false,
+                )
+                .await
                 {
                     tracing::error!(
                         "Timed Export slot {slot} save could not be persisted after the physical writes landed: {error}"
@@ -3456,9 +3454,6 @@ pub async fn set_discharge_slot(
                     ));
                 }
                 reset_timed_export_machine_after_schedule_change(&state, true, arm_now).await;
-                // The schedule is (re)committed enabled: any stale
-                // stop/exit-pending marker is superseded.
-                set_timed_export_stop_pending(&state, false).await;
 
                 if arm_now {
                     let mut arm_writes = vec![RegisterWrite {
@@ -3578,22 +3573,20 @@ pub async fn set_discharge_slot(
                 let in_window =
                     schedule_enabled && should_arm_timed_export_now(&state, &desired_slots).await;
 
-                if !schedule_enabled {
-                    // The edit turns the master schedule off: mark the exit
-                    // durably pending BEFORE the disable is persisted, so a
-                    // crash before the physical clear/disarm completes
-                    // resumes the exit on restart instead of booting `Off`.
-                    set_timed_export_stop_pending(&state, true).await;
-                }
-                if let Err(error) =
-                    persist_timed_export_schedule(&state, schedule_enabled, desired_slots.clone())
-                        .await
+                // The marker moves atomically with the schedule change: when
+                // the edit turns the master schedule off, the exit is marked
+                // durably pending in the SAME transaction as the disable, so
+                // a crash before the physical clear/disarm completes resumes
+                // the exit on restart — and the marker can never be observed
+                // disagreeing with the schedule it belongs to.
+                if let Err(error) = persist_timed_export_schedule_with_stop_pending(
+                    &state,
+                    schedule_enabled,
+                    desired_slots.clone(),
+                    !schedule_enabled,
+                )
+                .await
                 {
-                    if !schedule_enabled {
-                        // No disable happened — do not leave a stale
-                        // exit-pending marker behind.
-                        set_timed_export_stop_pending(&state, false).await;
-                    }
                     return error_response(&format!(
                         "Could not save the Timed Export schedule: {error}"
                     ));
@@ -3629,10 +3622,11 @@ pub async fn set_discharge_slot(
                     if compensation.is_ok() {
                         let pre_in_window = pre_edit_enabled
                             && should_arm_timed_export_now(&state, &pre_edit_desired).await;
-                        if let Err(persist_error) = persist_timed_export_schedule(
+                        if let Err(persist_error) = persist_timed_export_schedule_with_stop_pending(
                             &state,
                             pre_edit_enabled,
                             pre_edit_desired,
+                            pre_edit_stop_pending,
                         )
                         .await
                         {
@@ -3646,7 +3640,6 @@ pub async fn set_discharge_slot(
                             pre_in_window,
                         )
                         .await;
-                        set_timed_export_stop_pending(&state, pre_edit_stop_pending).await;
                         return (
                             StatusCode::BAD_GATEWAY,
                             Json(json!({
@@ -4818,7 +4811,7 @@ pub async fn get_history_summary(
             flat_export,
             0.0,
         )?;
-        let days_in_range = crate::history::days_in_local_window(start_ts, end_ts);
+        let days_in_range = crate::history::days_in_local_window(start_ts, end_ts, &chrono::Local);
         let standing_charge_gbp = days_in_range as f64 * standing_charge_p_per_day / 100.0;
         // Both the box and the chart's _import_cost / _export_income
         // series trust the daily counter alone. The chart never applied a
@@ -4933,7 +4926,7 @@ pub async fn get_report(
             // input for it).
             0.0,
         )?;
-        let days_in_range = crate::history::days_in_local_window(start_ts, end_ts);
+        let days_in_range = crate::history::days_in_local_window(start_ts, end_ts, &chrono::Local);
         let standing_charge_gbp = days_in_range as f64 * standing_charge_p_per_day / 100.0;
         // Both the report and the History chart's _import_cost / _export_income
         // series trust the daily counter alone — no grid-power trapezoid
@@ -10636,6 +10629,157 @@ mod tests {
             let mirror = state.timed_export_config.lock().await;
             assert_eq!(mirror.slots[0].start_hour, 16);
             assert_eq!(mirror.slots[0].end_hour, 17);
+        })
+        .await;
+    }
+
+    /// CODE_REVIEW.md follow-up: the enabled-slot save's persist-failure
+    /// branch. The physical batch landed but the schedule could not be
+    /// persisted (injected `Settings::update` failure) — the handler must
+    /// compensate the physical registers back to the prior slot and leave
+    /// the desired schedule unchanged.
+    #[tokio::test]
+    async fn enabled_save_persist_failure_compensates_physical_slot() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                encode_hhmm, HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START,
+            };
+            use crate::settings::InjectUpdateFailures;
+
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            let saved = slot(true, 16, 17);
+            {
+                let mut config = state.timed_export_config.lock().await;
+                config.schedule_enabled = true;
+                config.slots = vec![saved.clone()];
+            }
+            crate::settings::Settings::update(|s| {
+                s.timed_export_schedule_enabled = true;
+                s.timed_export_slots = vec![saved.clone()];
+            })
+            .unwrap();
+            {
+                let mut snapshot = state.latest_snapshot.lock().await;
+                snapshot.as_mut().unwrap().discharge_slots[0] = saved.clone();
+            }
+
+            // The physical save batch succeeds; the FIRST settings update
+            // inside the handler — the schedule persist — fails via
+            // injection; the compensating restore succeeds.
+            let _injection = InjectUpdateFailures::arm(1);
+            let (status, _) = drive_set_discharge_slot_completion_sequence(
+                &state,
+                serde_json::json!({
+                    "slot": 1,
+                    "enabled": true,
+                    "start_hour": 18,
+                    "end_hour": 19
+                }),
+                &[WriteOutcome::Ok, WriteOutcome::Ok],
+            )
+            .await;
+            drop(_injection);
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                InjectUpdateFailures::remaining(),
+                0,
+                "the injection must have been consumed by the persist attempt"
+            );
+
+            let writes = drain_pending_writes(&state).await;
+            let attempted_new_start = writes
+                .iter()
+                .any(|w| w.address == HR_DISCHARGE_SLOT_1_START && w.value == encode_hhmm(18, 0));
+            let compensated_start = writes
+                .iter()
+                .any(|w| w.address == HR_DISCHARGE_SLOT_1_START && w.value == encode_hhmm(16, 0));
+            let compensated_end = writes
+                .iter()
+                .any(|w| w.address == HR_DISCHARGE_SLOT_1_END && w.value == encode_hhmm(17, 0));
+            assert!(attempted_new_start, "the new slot start must have landed: {writes:?}");
+            assert!(
+                compensated_start && compensated_end,
+                "the prior physical slot must be restored after the persist failure: {writes:?}"
+            );
+
+            // The desired schedule was never committed and stays unchanged.
+            let on_disk = crate::settings::Settings::load();
+            assert!(on_disk.timed_export_schedule_enabled);
+            assert_eq!(on_disk.timed_export_slots[0].start_hour, 16);
+            assert_eq!(on_disk.timed_export_slots[0].end_hour, 17);
+            let mirror = state.timed_export_config.lock().await;
+            assert_eq!(mirror.slots[0].start_hour, 16);
+            assert_eq!(mirror.slots[0].end_hour, 17);
+        })
+        .await;
+    }
+
+    /// CODE_REVIEW.md follow-up: when the schedule persist fails AND the
+    /// compensating restore is rejected too, the registers cannot be
+    /// trusted — the handler disarms (best effort) and parks the machine in
+    /// a terminal `Error`.
+    #[tokio::test]
+    async fn enabled_save_persist_and_compensation_failure_parks_terminal_error() {
+        with_isolated_config_dir_async(|| async {
+            use crate::inverter::state_machines::TimedExportState;
+            use crate::modbus::registers::{HR_BATTERY_POWER_MODE, HR_DISCHARGE_SLOT_1_END};
+            use crate::settings::InjectUpdateFailures;
+
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            let saved = slot(true, 16, 17);
+            {
+                let mut config = state.timed_export_config.lock().await;
+                config.schedule_enabled = true;
+                config.slots = vec![saved.clone()];
+            }
+            crate::settings::Settings::update(|s| {
+                s.timed_export_schedule_enabled = true;
+                s.timed_export_slots = vec![saved.clone()];
+            })
+            .unwrap();
+            {
+                let mut snapshot = state.latest_snapshot.lock().await;
+                snapshot.as_mut().unwrap().discharge_slots[0] = saved.clone();
+            }
+
+            // 1. the physical save batch succeeds, 2. the persist fails
+            // (injected), 3. the compensation batch is rejected, 4. the
+            // disarm batch is accepted.
+            let _injection = InjectUpdateFailures::arm(1);
+            let (status, _) = drive_set_discharge_slot_completion_sequence(
+                &state,
+                serde_json::json!({
+                    "slot": 1,
+                    "enabled": true,
+                    "start_hour": 18,
+                    "end_hour": 19
+                }),
+                &[
+                    WriteOutcome::Ok,
+                    WriteOutcome::Failed {
+                        address: HR_DISCHARGE_SLOT_1_END,
+                        value: 1700,
+                        error: "rejected by inverter".to_string(),
+                    },
+                    WriteOutcome::Ok,
+                ],
+            )
+            .await;
+            drop(_injection);
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+
+            let writes = drain_pending_writes(&state).await;
+            assert!(
+                writes.iter().any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1),
+                "a best-effort disarm (HR27=1) must be issued: {writes:?}"
+            );
+            assert!(
+                matches!(
+                    *state.timed_export_state.lock().await,
+                    TimedExportState::Error { .. }
+                ),
+                "the machine must surface a terminal error when compensation fails"
+            );
         })
         .await;
     }

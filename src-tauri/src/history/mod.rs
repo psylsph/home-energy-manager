@@ -394,10 +394,14 @@ const MIDNIGHT_GAP_CREDIT_THRESHOLD_SECS: i64 = 4 * 3600;
 /// The inverter's `today_*_kwh` counters reset at local midnight, so the
 /// cost walk detects a daily reset by a local-day change (not UTC - the
 /// reset happens at local midnight regardless of server timezone).
-fn same_local_day(a_secs: i64, b_secs: i64) -> bool {
+///
+/// The timezone is an explicit parameter: the app has no configured-zone
+/// setting, so production passes `&chrono::Local` (the host's zone IS the
+/// user's local day), but nothing downstream silently depends on the
+/// ambient zone and tests can pin a fixed offset.
+fn same_local_day<TZ: chrono::TimeZone>(a_secs: i64, b_secs: i64, tz: &TZ) -> bool {
     let date = |s: i64| {
-        chrono::DateTime::from_timestamp(s, 0)
-            .map(|dt| dt.with_timezone(&chrono::Local).date_naive())
+        chrono::DateTime::from_timestamp(s, 0).map(|dt| dt.with_timezone(tz).date_naive())
     };
     match (date(a_secs), date(b_secs)) {
         (Some(a), Some(b)) => a == b,
@@ -405,12 +409,12 @@ fn same_local_day(a_secs: i64, b_secs: i64) -> bool {
     }
 }
 
-/// Minutes-of-day `[0, 1440)` for a Unix-second timestamp in local time.
-/// Used to pick the tariff slot for the moment a reading occurred.
-fn local_minutes_of_day(ts_secs: i64) -> u16 {
+/// Minutes-of-day `[0, 1440)` for a Unix-second timestamp in the given
+/// timezone. Used to pick the tariff slot for the moment a reading occurred.
+fn local_minutes_of_day<TZ: chrono::TimeZone>(ts_secs: i64, tz: &TZ) -> u16 {
     match chrono::DateTime::from_timestamp(ts_secs, 0) {
         Some(dt) => {
-            let l = dt.with_timezone(&chrono::Local);
+            let l = dt.with_timezone(tz);
             (l.hour() * 60 + l.minute()) as u16
         }
         None => 0,
@@ -427,14 +431,16 @@ fn local_minutes_of_day(ts_secs: i64) -> u16 {
 /// standing-charge debit for issue #131: the per-day amount × number of
 /// days touched. The set of step times (one local midnight per day after
 /// the first) is computed separately by [`local_midnight_steps_after`].
-pub(crate) fn days_in_local_window(start_ts: i64, end_ts: i64) -> u32 {
-    days_in_local_window_tz(start_ts, end_ts, &chrono::Local)
-}
-
-/// Timezone-parameterised core of [`days_in_local_window`], so tests can pin
-/// DST transitions to `chrono_tz::Europe::London` instead of trusting the
-/// host's timezone.
-fn days_in_local_window_tz<TZ: chrono::TimeZone>(start_ts: i64, end_ts: i64, tz: &TZ) -> u32 {
+///
+/// The timezone is an explicit parameter: production passes `&chrono::Local`
+/// (the host's zone IS the user's local day — there is no configured-zone
+/// setting), while tests pin DST behaviour to `chrono_tz::Europe::London`
+/// or fixed offsets instead of trusting the host.
+pub(crate) fn days_in_local_window<TZ: chrono::TimeZone>(
+    start_ts: i64,
+    end_ts: i64,
+    tz: &TZ,
+) -> u32 {
     if end_ts <= start_ts {
         return 0;
     }
@@ -464,13 +470,10 @@ fn days_in_local_window_tz<TZ: chrono::TimeZone>(start_ts: i64, end_ts: i64, tz:
 /// Standing Charge. The window-open day's debit is seeded into
 /// `standing_charge_days_credited` at function entry, so this list excludes
 /// the window-open day entirely.
-fn local_midnight_steps_after(start_ts: i64, end_ts: i64) -> Vec<i64> {
-    local_midnight_steps_after_tz(start_ts, end_ts, &chrono::Local)
-}
-
-/// Timezone-parameterised core of [`local_midnight_steps_after`], so tests
-/// can pin DST transitions to `chrono_tz::Europe::London`.
-fn local_midnight_steps_after_tz<TZ: chrono::TimeZone>(
+///
+/// Like [`days_in_local_window`], the timezone is an explicit parameter;
+/// production passes `&chrono::Local`.
+fn local_midnight_steps_after<TZ: chrono::TimeZone>(
     start_ts: i64,
     end_ts: i64,
     tz: &TZ,
@@ -1874,11 +1877,11 @@ impl HistoryDb {
         // local midnight rather than at window open, so the graph shows
         // a single visible step per local day crossed.)
         let midnight_steps = if standing_charge_gbp_per_day > 0.0 {
-            local_midnight_steps_after(start_ts, end_ts)
+            local_midnight_steps_after(start_ts, end_ts, &chrono::Local)
         } else {
             Vec::new()
         };
-        let total_days_in_window = days_in_local_window(start_ts, end_ts);
+        let total_days_in_window = days_in_local_window(start_ts, end_ts, &chrono::Local);
 
         let sql = format!(
             "SELECT timestamp, \"{counter_field}\" \
@@ -1956,7 +1959,7 @@ impl HistoryDb {
                     // custom date ranges) still drop it: there the counter
                     // holds pre-window energy that must not be counted.
                     let leading_gap_secs = ts - start_ts;
-                    if local_minutes_of_day(start_ts) == 0
+                    if local_minutes_of_day(start_ts, &chrono::Local) == 0
                         && leading_gap_secs > 0
                         && leading_gap_secs <= MIDNIGHT_GAP_CREDIT_THRESHOLD_SECS
                         && raw > 0.0
@@ -1966,7 +1969,7 @@ impl HistoryDb {
                         if raw <= ceiling {
                             let rate = crate::settings::rate_for_parsed_minutes(
                                 &parsed_slots,
-                                local_minutes_of_day(ts),
+                                local_minutes_of_day(ts, &chrono::Local),
                             )
                             .unwrap_or(flat_fallback);
                             acc += raw * rate;
@@ -1975,7 +1978,7 @@ impl HistoryDb {
                     baseline = Some(raw);
                 }
                 Some(base) => {
-                    let day_changed = last_ts.is_some_and(|lt| !same_local_day(lt, ts));
+                    let day_changed = last_ts.is_some_and(|lt| !same_local_day(lt, ts, &chrono::Local));
                     let (delta, new_baseline) = if day_changed {
                         // Counter reset at local midnight. In continuous data
                         // the first reading of the new day is ~0, so this is
@@ -2024,7 +2027,7 @@ impl HistoryDb {
                     if delta > 0.0 && delta <= ceiling {
                         let rate = crate::settings::rate_for_parsed_minutes(
                             &parsed_slots,
-                            local_minutes_of_day(ts),
+                            local_minutes_of_day(ts, &chrono::Local),
                         )
                         .unwrap_or(flat_fallback);
                         acc += delta * rate;
@@ -3151,7 +3154,7 @@ mod tests {
         let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
         let start = local_midnight_of(d);
         let end = local_midnight_of(d.succ_opt().unwrap());
-        assert_eq!(days_in_local_window(start, end), 1);
+        assert_eq!(days_in_local_window(start, end, &chrono::Local), 1);
     }
 
     #[test]
@@ -3160,7 +3163,7 @@ mod tests {
         let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 17).unwrap();
         let start = local_midnight_of(d);
         let end = local_midnight_of(chrono::NaiveDate::from_ymd_opt(2026, 8, 20).unwrap());
-        assert_eq!(days_in_local_window(start, end), 3);
+        assert_eq!(days_in_local_window(start, end, &chrono::Local), 3);
     }
 
     #[test]
@@ -3169,7 +3172,7 @@ mod tests {
         let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
         let start = local_midnight_of(d) + 12 * 3600;
         let end = local_midnight_of(d.succ_opt().unwrap()) + 12 * 3600;
-        assert_eq!(days_in_local_window(start, end), 2);
+        assert_eq!(days_in_local_window(start, end, &chrono::Local), 2);
     }
 
     #[test]
@@ -3179,7 +3182,7 @@ mod tests {
         let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
         let start = local_midnight_of(d);
         let end = local_midnight_of(d.succ_opt().unwrap()) + 60;
-        assert_eq!(days_in_local_window(start, end), 2);
+        assert_eq!(days_in_local_window(start, end, &chrono::Local), 2);
     }
 
     // -----------------------------------------------------------------------
@@ -3212,7 +3215,7 @@ mod tests {
     }
 
     fn assert_chart_matches_days_in_window(start: i64, end: i64) {
-        let days = days_in_local_window(start, end);
+        let days = days_in_local_window(start, end, &chrono::Local);
         let chart = chart_standing_total(start, end);
         assert!(
             (chart - days as f64 * 1.0).abs() < 1e-6,
@@ -3268,7 +3271,7 @@ mod tests {
         let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
         let start = local_midnight_of(d) + 9 * 3600;
         let end = start + 6 * 3600;
-        assert_eq!(days_in_local_window(start, end), 1);
+        assert_eq!(days_in_local_window(start, end, &chrono::Local), 1);
         assert_chart_matches_days_in_window(start, end);
     }
 
@@ -3279,7 +3282,7 @@ mod tests {
         let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
         let start = local_midnight_of(d) + 23 * 3600;
         let end = local_midnight_of(d.succ_opt().unwrap()) + 3600;
-        assert_eq!(days_in_local_window(start, end), 2);
+        assert_eq!(days_in_local_window(start, end, &chrono::Local), 2);
         assert_chart_matches_days_in_window(start, end);
     }
 
@@ -3310,7 +3313,7 @@ mod tests {
             )
             .unwrap();
         let chart = series.last().map(|p| p.standing_gbp).unwrap_or(0.0);
-        let days = days_in_local_window(start, end);
+        let days = days_in_local_window(start, end, &chrono::Local);
         assert_eq!(days, 2);
         assert!(
             (chart - days as f64 * 1.0).abs() < 1e-6,
@@ -3323,8 +3326,8 @@ mod tests {
         // Degenerate: end == start. Zero days, zero standing, no panic.
         let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
         let m = local_midnight_of(d);
-        assert_eq!(days_in_local_window(m, m), 0);
-        assert_eq!(days_in_local_window(m + 100, m), 0); // inverted
+        assert_eq!(days_in_local_window(m, m, &chrono::Local), 0);
+        assert_eq!(days_in_local_window(m + 100, m, &chrono::Local), 0); // inverted
     }
 
     #[test]
@@ -3333,8 +3336,38 @@ mod tests {
         let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
         let start = local_midnight_of(d.succ_opt().unwrap()) - 1;
         let end = local_midnight_of(d.succ_opt().unwrap());
-        assert_eq!(days_in_local_window(start, end), 1);
+        assert_eq!(days_in_local_window(start, end, &chrono::Local), 1);
         assert_chart_matches_days_in_window(start, end);
+    }
+
+    #[test]
+    fn days_in_local_window_depends_on_the_supplied_timezone() {
+        // The day-window maths must follow the timezone it is GIVEN, not the
+        // host's ambient zone: the same UTC window spans a different number
+        // of calendar days under UTC and under a +13:00 offset.
+        use chrono::FixedOffset;
+        let utc = FixedOffset::east_opt(0).unwrap();
+        let plus13 = FixedOffset::east_opt(13 * 3600).unwrap();
+        // [2026-08-19 00:00 UTC, 2026-08-20 00:00 UTC) — one UTC day.
+        let start = 1787097600; // 2026-08-19T00:00:00Z
+        let end = start + 86400;
+        assert_eq!(days_in_local_window(start, end, &utc), 1);
+        // At +13:00 the window opens at 13:00 local on the 19th and ends at
+        // 13:00 local on the 20th — two distinct calendar days touched.
+        assert_eq!(days_in_local_window(start, end, &plus13), 2);
+        // The midnight-step walk agrees with the day count in both zones.
+        assert_eq!(
+            local_midnight_steps_after(start, end, &utc).len() as u32 + 1,
+            days_in_local_window(start, end, &utc)
+        );
+        assert_eq!(
+            local_midnight_steps_after(start, end, &plus13).len() as u32 + 1,
+            days_in_local_window(start, end, &plus13)
+        );
+        // Same-day detection follows the zone too: two instants that are the
+        // same UTC day but straddle a +13:00 midnight.
+        assert!(same_local_day(start, start + 3600, &utc));
+        assert!(!same_local_day(start, start + 13 * 3600, &plus13));
     }
 
     // -----------------------------------------------------------------------
@@ -3354,10 +3387,10 @@ mod tests {
     }
 
     /// Assert the master invariant — `1 + midnight_steps_after(start, end) ==
-    /// days_in_local_window(start, end)` — for a London window.
+    /// days_in_local_window(start, end, &chrono::Local)` — for a London window.
     fn assert_master_invariant_london(start: i64, end: i64) {
-        let steps = local_midnight_steps_after_tz(start, end, &chrono_tz::Europe::London);
-        let days = days_in_local_window_tz(start, end, &chrono_tz::Europe::London);
+        let steps = local_midnight_steps_after(start, end, &chrono_tz::Europe::London);
+        let days = days_in_local_window(start, end, &chrono_tz::Europe::London);
         assert_eq!(
             steps.len() as u32 + 1,
             days,
@@ -3398,7 +3431,7 @@ mod tests {
         // 23-hour day: next - start == 83 400, not 86 400.
         assert_eq!(next - start, 23 * 3600);
         let end = next + 1;
-        let steps = local_midnight_steps_after_tz(start, end, &chrono_tz::Europe::London);
+        let steps = local_midnight_steps_after(start, end, &chrono_tz::Europe::London);
         assert_eq!(
             steps.len(),
             1,
@@ -3451,8 +3484,8 @@ mod tests {
                     .unwrap()
                     .timestamp();
                 for (span, off) in [(1, 0i64), (2, 0), (3, 3600), (7, 12 * 3600)] {
-                    let steps = local_midnight_steps_after_tz(m, m + span * 86400 + off, tz);
-                    let days = days_in_local_window_tz(m, m + span * 86400 + off, tz);
+                    let steps = local_midnight_steps_after(m, m + span * 86400 + off, tz);
+                    let days = days_in_local_window(m, m + span * 86400 + off, tz);
                     assert_eq!(
                         steps.len() as u32 + 1,
                         days,

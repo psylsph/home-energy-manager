@@ -4662,9 +4662,9 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 (true, sanitized || block_suspicious, false)
                             }
                             Err(e) => {
-                                if e.is_connection_lost() {
-                                    // Hard TCP error — the socket is dead,
-                                    // must reconnect.
+                                if e.is_hard_failure() {
+                                    // Hard TCP error (or no session at all) —
+                                    // the socket is dead, must reconnect.
                                     tracing::warn!(
                                         error = %e,
                                         "TCP connection lost — reconnecting"

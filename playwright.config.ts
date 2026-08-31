@@ -16,6 +16,7 @@ export default defineConfig({
     '**/agile-slot.spec.ts',
     '**/pv2-after-sunset.spec.ts',
     '**/timed-export-slot-guard.spec.ts',
+    '**/timed-export-stop-restart.spec.ts',
     '**/websocket-stale-timeout.spec.ts',
     '**/charge-slot-target-soc.spec.ts',
   ],
