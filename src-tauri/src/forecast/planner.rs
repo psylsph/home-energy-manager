@@ -1781,11 +1781,15 @@ mod tests {
 
     #[test]
     fn window_runs_finds_every_night_occurrence() {
-        // 48h of hours at/after now: the 02:00–05:00 window appears on both
-        // nights; each occurrence is a contiguous 3-hour run, and the two
-        // runs are separated by the day's non-window hours.
+        // Pinned 3-day series: the 02:00–05:00 window appears once per night
+        // (three occurrences); each is a contiguous 3-hour run, and the runs
+        // are separated by the day's non-window hours. Anchored on a fixed
+        // date rather than Local::now() — a now-anchored series yields a
+        // different occurrence count when the suite runs inside the window
+        // (e.g. 00:00–02:00 local), the exact flake class documented for
+        // fixed_series above.
         let p = params();
-        let (sim, sim_hours) = build_48h_series(50.0, [0.0; 24], [0.2; 24], &p);
+        let (_sim, sim_hours) = fixed_72h(50.0, [0.0; 24], [0.2; 24], &p);
         let window = ChargeWindow {
             start_min: 2 * 60,
             end_min: 5 * 60,
@@ -1793,7 +1797,7 @@ mod tests {
             rate: 0.09,
         };
         let runs = window_runs(&sim_hours, &window);
-        assert_eq!(runs.len(), 2, "both nights' occurrences: {runs:?}");
+        assert_eq!(runs.len(), 3, "one occurrence per night: {runs:?}");
         for run in &runs {
             assert_eq!(run.len(), 3, "3-hour window: {run:?}");
             // Contiguous indices.
@@ -1801,13 +1805,12 @@ mod tests {
                 assert_eq!(pair[1], pair[0] + 1);
             }
         }
-        // The two runs are ~21 hours apart (first run ends hours before the
+        // The runs are ~21 hours apart (first run ends hours before the
         // second starts).
         assert!(
             runs[1][0] - runs[0][0] >= 20,
             "runs not separated: {runs:?}"
         );
-        let _ = sim; // series and output share length by construction
     }
 
     #[test]
