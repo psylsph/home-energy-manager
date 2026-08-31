@@ -464,7 +464,12 @@ fn merge_desired_slot(
 }
 
 /// Queue register writes for execution by the poll loop.
-async fn queue_writes(state: &Arc<AppState>, writes: Vec<RegisterWrite>) {
+///
+/// `pub(crate)` so the poll loop's Forecast plan auto-refresh can route
+/// its slot writes through the same pump as every other control path
+/// instead of writing inline (CODE_REVIEW.md Major 1: inline writes with
+/// inter-write sleeps stall the read/broadcast path).
+pub(crate) async fn queue_writes(state: &Arc<AppState>, writes: Vec<RegisterWrite>) {
     queue_writes_with_policy(state, writes, WriteBatchPolicy::ContinueOnError, None, None).await;
 }
 
@@ -7835,6 +7840,108 @@ mod tests {
             assert_eq!(rate.value, 50, "100% display rate maps to raw HR111=50");
         })
         .await;
+    }
+
+    /// CODE_REVIEW.md Minor 1: the `charge_rate_percent` branch must pick
+    /// the right register per device family. AC-coupled uses HR 313 with a
+    /// direct 1–100 scale (no half-scale division).
+    #[tokio::test]
+    async fn charge_slot_maximum_rate_writes_ac_charge_limit_for_ac_coupled() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_AC_BATTERY_CHARGE_LIMIT;
+            let state = make_state_with_device(DeviceType::ACCoupled).await;
+            let body = serde_json::json!({
+                "slot": 1,
+                "start_hour": 2, "start_minute": 0,
+                "end_hour": 3, "end_minute": 36,
+                "enabled": true,
+                "target_soc": 100,
+                "charge_rate_percent": 100,
+            });
+
+            let (status, _) = set_charge_slot(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let writes = drain_pending_writes(&state).await;
+            let rate = writes
+                .iter()
+                .find(|w| w.address == HR_AC_BATTERY_CHARGE_LIMIT)
+                .expect("AC-coupled must set the AC charge limit (HR 313)");
+            assert_eq!(rate.value, 100, "AC-coupled HR313 is a direct 1-100 scale");
+        })
+        .await;
+    }
+
+    /// CODE_REVIEW.md Minor 1: three-phase uses HR 1110 with a direct
+    /// 1–100 scale.
+    #[tokio::test]
+    async fn charge_slot_maximum_rate_writes_three_phase_charge_limit() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_3PH_BATTERY_CHARGE_LIMIT;
+            let state = make_state_with_device(DeviceType::ThreePhase).await;
+            let body = serde_json::json!({
+                "slot": 1,
+                "start_hour": 2, "start_minute": 0,
+                "end_hour": 3, "end_minute": 36,
+                "enabled": true,
+                "target_soc": 100,
+                "charge_rate_percent": 100,
+            });
+
+            let (status, _) = set_charge_slot(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let writes = drain_pending_writes(&state).await;
+            let rate = writes
+                .iter()
+                .find(|w| w.address == HR_3PH_BATTERY_CHARGE_LIMIT)
+                .expect("three-phase must set the three-phase charge limit (HR 1110)");
+            assert_eq!(rate.value, 100, "three-phase HR1110 is a direct 1-100 scale");
+        })
+        .await;
+    }
+
+    /// CODE_REVIEW.md Major 2: the auto-refresh's exact write-batch shape
+    /// (`build_charge_slot_writes` with `SLOT_TARGET_SOC_NONE` + a
+    /// `PLAN_CHARGE_RATE_PERCENT` request) must re-assert the charge-limit
+    /// register on EVERY refresh — the "100% for the planned duration"
+    /// contract depends on the rate being rewritten each cycle, not just
+    /// the first night. Flipping the limit between refreshes is therefore
+    /// corrected by the next refresh.
+    #[test]
+    fn forecast_refresh_batch_reasserts_the_rate_limit() {
+        use crate::forecast::refresh::{PLAN_CHARGE_RATE_PERCENT, SLOT_TARGET_SOC_NONE};
+        use crate::modbus::registers::HR_BATTERY_CHARGE_LIMIT;
+        // The exact call the poll loop makes for a WriteSlot action.
+        let writes = crate::server::api::build_charge_slot_writes(
+            DeviceType::Gen2Hybrid,
+            1,
+            true,
+            200,
+            336,
+            SLOT_TARGET_SOC_NONE,
+            Some(PLAN_CHARGE_RATE_PERCENT),
+        )
+        .expect("refresh slot writes must encode");
+        let rate = writes
+            .iter()
+            .find(|w| w.address == HR_BATTERY_CHARGE_LIMIT)
+            .expect("every refresh batch must re-assert the charge limit");
+        assert_eq!(rate.value, 50, "100% display rate maps to raw HR111=50");
+        // And the ClearSlot shape must NOT touch the rate register — it
+        // only clears the slot window and disarms.
+        let clear = crate::server::api::build_charge_slot_writes(
+            DeviceType::Gen2Hybrid,
+            1,
+            false,
+            0,
+            0,
+            SLOT_TARGET_SOC_NONE,
+            None,
+        )
+        .expect("refresh clear writes must encode");
+        assert!(
+            !clear.iter().any(|w| w.address == HR_BATTERY_CHARGE_LIMIT),
+            "clearing the slot must not touch the charge-limit register"
+        );
     }
 
     /// Enabling charge slot 3 on the All-in-One must write HR 246/247.

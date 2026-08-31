@@ -27,6 +27,19 @@ use chrono::{DateTime, Local, NaiveDate, Timelike};
 /// handful of register writes.
 pub const PLAN_REFRESH_LEAD_MINUTES: u16 = 30;
 
+/// The charge-slot target SOC the auto-refresh writes. Always 100 by
+/// design (planner v2): the slot's DURATION is the control variable, and
+/// the target stays at 100 so the inverter never stops early at an SOC
+/// threshold — the rate-limit register (HR 111 / HR 313 / HR 1110) is
+/// what actually governs the charge.
+pub const SLOT_TARGET_SOC_NONE: u8 = 100;
+
+/// The charge-rate percent the auto-refresh (and the Apply payload)
+/// writes: the inverter charges at its maximum for the planned duration.
+/// Half-scale for DC hybrids (raw HR 111 = 50), direct 1–100 for
+/// AC-coupled / three-phase (HR 313 / HR 1110 = 100).
+pub const PLAN_CHARGE_RATE_PERCENT: u16 = 100;
+
 /// What the refresh decided to do for this cheap period.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanRefreshAction {
@@ -62,6 +75,22 @@ pub fn plan_refresh_due(
     // Minutes until the selected occurrence starts, wrapping at midnight.
     let until_start = (window.start_min + 1440 - now_min) % 1440;
     until_start <= PLAN_REFRESH_LEAD_MINUTES
+}
+
+/// The poll loop's full gate: the refresh fires only when the plan is due
+/// AND Adaptive Charge does not own the charge rate. Adaptive Charge and
+/// the auto-refresh both write the charge-limit register; when Adaptive
+/// owns it, the refresh must not clobber its writes (CODE_REVIEW.md
+/// Major 3). Kept as a separate pure helper so the interaction is
+/// testable — `plan_refresh_due` itself is deliberately unaware of
+/// Adaptive Charge.
+pub fn plan_refresh_due_with_adaptive(
+    now: DateTime<Local>,
+    last_refresh_date: Option<NaiveDate>,
+    tariff: Option<&TariffConfig>,
+    adaptive_owns_rate: bool,
+) -> bool {
+    !adaptive_owns_rate && plan_refresh_due(now, last_refresh_date, tariff)
 }
 
 /// Map a freshly computed plan to the refresh action. The window's
@@ -194,6 +223,41 @@ mod tests {
     fn refresh_needs_a_tariff() {
         let day = local_dt(2026, 8, 31, 1, 40);
         assert!(!plan_refresh_due(day, None, None));
+    }
+
+    #[test]
+    fn adaptive_owns_rate_suppresses_the_refresh() {
+        let flux = flux_tariff();
+        let day = local_dt(2026, 8, 31, 1, 40); // 20 min before 02:00
+        // Due without Adaptive: fires.
+        assert!(plan_refresh_due_with_adaptive(day, None, Some(&flux), false));
+        // Same moment with Adaptive owning the rate: suppressed.
+        assert!(!plan_refresh_due_with_adaptive(day, None, Some(&flux), true));
+        // Adaptive alone never makes an otherwise-undue refresh fire.
+        let afternoon = local_dt(2026, 8, 31, 15, 0);
+        assert!(!plan_refresh_due_with_adaptive(afternoon, None, Some(&flux), false));
+        assert!(!plan_refresh_due_with_adaptive(afternoon, None, Some(&flux), true));
+    }
+
+    #[test]
+    fn plan_refresh_due_itself_is_unaware_of_adaptive() {
+        // The Adaptive gate lives in `plan_refresh_due_with_adaptive`, not
+        // in `plan_refresh_due` — the poll loop composes them. This pins
+        // that separation so a future refactor can't silently move the
+        // gate into the helper and change the poll-loop behaviour.
+        let flux = flux_tariff();
+        let day = local_dt(2026, 8, 31, 1, 40);
+        assert!(plan_refresh_due(day, None, Some(&flux)));
+    }
+
+    #[test]
+    fn refresh_due_with_no_prior_refresh_fires_in_the_lead_window() {
+        // `last = None` (fresh start inside the lead window) must fire —
+        // the idempotent-rewrite case after a restart.
+        let flux = flux_tariff();
+        let day = local_dt(2026, 8, 31, 1, 40);
+        assert!(plan_refresh_due(day, None, Some(&flux)));
+        assert!(plan_refresh_due_with_adaptive(day, None, Some(&flux), false));
     }
 
     #[test]
