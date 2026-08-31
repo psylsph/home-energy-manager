@@ -101,6 +101,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/control/sync-clock", post(api::sync_clock))
         .route("/api/control/calibration", post(api::set_calibration))
         .route("/api/control/reboot", post(api::reboot_inverter))
+        // E2E-harness-only state reset (answers 404 without --e2e-admin).
+        .route("/api/test/reset", post(api::test_reset))
         // Auto winter mode
         .route(
             "/api/auto-winter",

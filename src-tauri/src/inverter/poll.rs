@@ -478,6 +478,12 @@ pub struct AppState {
     /// checks — the next outer-loop iteration is guaranteed to see the
     /// newer value.
     pub reconnect_request: Arc<std::sync::atomic::AtomicU32>,
+    /// E2E-harness switch: when the headless process is started with
+    /// `--e2e-admin`, `POST /api/test/reset` (see `server::api::test_reset`)
+    /// may reset backend-owned schedule/machine state so the Playwright run
+    /// can isolate spec files from each other. Production launches never set
+    /// this, and the handler answers 404 without it.
+    pub e2e_admin: std::sync::atomic::AtomicBool,
 }
 
 impl AppState {
@@ -553,6 +559,7 @@ impl AppState {
             connected_since: Arc::new(std::sync::Mutex::new(None)),
             connect_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             reconnect_request: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            e2e_admin: std::sync::atomic::AtomicBool::new(false),
             weather: Arc::new(Mutex::new(crate::weather::WeatherState {
                 config: crate::settings::Settings::load().weather_config,
                 ..Default::default()
@@ -641,6 +648,7 @@ impl AppState {
             connected_since: Arc::new(std::sync::Mutex::new(None)),
             connect_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             reconnect_request: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            e2e_admin: std::sync::atomic::AtomicBool::new(false),
             weather: Arc::new(Mutex::new(crate::weather::WeatherState {
                 config: crate::settings::Settings::load().weather_config,
                 ..Default::default()
@@ -1019,6 +1027,43 @@ async fn current_discharge_control_owner(state: &Arc<AppState>) -> Option<Discha
         arbiter.request(DischargeControlOwner::ManualMode);
     }
     arbiter.selected_owner()
+}
+
+/// Whether the Timed Export boundary state machine may run this poll cycle.
+///
+/// Normally this is plain arbiter admission: any owner that outranks
+/// `TimedExport` (a manual Force action, an HR318 pause, a safety limiter)
+/// skips the machine. A register-derived `ManualMode` claim — the HR27=1 +
+/// discharge-enabled readback that looks like Timed Demand — is the one
+/// exception: when the HEM-managed schedule is enabled, that exact shape is
+/// what re-arming firmware (issue #289) leaves behind outside a window, and
+/// the reconciler must be allowed to repair it. A *user-selected* Timed
+/// Demand switches the mode endpoints away from the managed schedule, so
+/// `managed_schedule_enabled` is false precisely when the manual claim is
+/// genuine and the machine must stay out.
+fn timed_export_machine_allowed(
+    arbiter: DischargeControlArbiter,
+    managed_schedule_enabled: bool,
+) -> bool {
+    arbiter.can_request(DischargeControlOwner::TimedExport)
+        || (managed_schedule_enabled
+            && arbiter.selected_owner() == Some(DischargeControlOwner::ManualMode))
+}
+
+/// Whether the Timed Export machine's *decision writes* may be emitted this
+/// cycle. Mirrors [`timed_export_machine_allowed`] at the write level: the
+/// arbiter request is the normal path, and a register-derived `ManualMode`
+/// claim must not discard the writes of a live managed schedule's reconciler
+/// (under re-arming firmware the Timed Demand shape is exactly what the
+/// machine exists to repair). Unlike the admission check this consumes the
+/// arbiter request, so callers must have already passed the admission gate.
+fn timed_export_machine_may_write(
+    arbiter: &mut DischargeControlArbiter,
+    managed_schedule_enabled: bool,
+) -> bool {
+    arbiter.request(DischargeControlOwner::TimedExport)
+        || (managed_schedule_enabled
+            && arbiter.selected_owner() == Some(DischargeControlOwner::ManualMode))
 }
 
 /// Take only batches that belong to the winning discharge owner for this poll.
@@ -3130,9 +3175,20 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     // Force Charge is included here too: its
                                     // mode writes can clobber HR27/HR59 even
                                     // though it does not discharge itself.
-                                    if discharge_arbiter
-                                        .can_request(DischargeControlOwner::TimedExport)
-                                    {
+                                    // Exception (see
+                                    // `timed_export_machine_allowed`): a
+                                    // register-derived Timed Demand claim
+                                    // must not block the reconciler while
+                                    // the managed schedule is enabled —
+                                    // that readback is exactly what re-arming
+                                    // firmware leaves behind outside a
+                                    // window.
+                                    let managed_schedule_live =
+                                        state.timed_export_config.lock().await.schedule_enabled;
+                                    if timed_export_machine_allowed(
+                                        discharge_arbiter,
+                                        managed_schedule_live,
+                                    ) {
                                         // Short-lived guards: clone the inputs and
                                         // drop every guard before any I/O.
                                         let (
@@ -3180,8 +3236,10 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         let mut write_outcome =
                                             crate::inverter::state_machines::TimedExportWriteOutcome::NoneIssued;
                                         if !decision.writes.is_empty()
-                                            && discharge_arbiter
-                                                .request(DischargeControlOwner::TimedExport)
+                                            && timed_export_machine_may_write(
+                                                &mut discharge_arbiter,
+                                                managed_schedule_live,
+                                            )
                                         {
                                             discharge_control_may_override_pause = true;
                                             // Shared fail-fast helper: correct
@@ -6620,6 +6678,80 @@ mod tests {
             assert_eq!(taken.len(), n, "queue of {n} batches should drain fully");
             assert!(queue.is_empty());
         }
+    }
+
+    #[test]
+    fn timed_export_machine_write_gate_admits_repair_under_managed_schedule() {
+        // The managed schedule is live and the readback claims ManualMode
+        // (Timed Demand shape): the machine's repair writes must be emitted,
+        // not silently discarded by the arbiter request.
+        let mut arbiter = DischargeControlArbiter::default();
+        arbiter.request(DischargeControlOwner::ManualMode);
+        assert!(timed_export_machine_may_write(&mut arbiter, true));
+
+        // Without a live managed schedule the manual claim wins and the
+        // writes stay suppressed.
+        let mut arbiter = DischargeControlArbiter::default();
+        arbiter.request(DischargeControlOwner::ManualMode);
+        assert!(!timed_export_machine_may_write(&mut arbiter, false));
+
+        // Unclaimed cycle: the plain request admits and claims TimedExport.
+        let mut arbiter = DischargeControlArbiter::default();
+        assert!(timed_export_machine_may_write(&mut arbiter, false));
+        assert_eq!(
+            arbiter.selected_owner(),
+            Some(DischargeControlOwner::TimedExport)
+        );
+
+        // A higher-priority claim still refuses the writes even when the
+        // schedule is managed.
+        let mut arbiter = DischargeControlArbiter::default();
+        arbiter.request(DischargeControlOwner::ManualForce);
+        assert!(!timed_export_machine_may_write(&mut arbiter, true));
+    }
+
+    #[test]
+    fn timed_export_machine_gate_lets_the_reconciler_repair_a_timed_demand_shape() {
+        // CODE_REVIEW.md finding class: with the managed schedule enabled,
+        // re-arming firmware outside a window leaves HR27=1 + discharge-enable
+        // set — a shape the pre-read arbiter claims as ManualMode (Timed
+        // Demand). The reconciler must still run or the export-armed
+        // registers are never repaired and the re-arm detector never
+        // classifies.
+        let mut arbiter = DischargeControlArbiter::default();
+        arbiter.request(DischargeControlOwner::ManualMode);
+        assert!(timed_export_machine_allowed(arbiter, true));
+
+        // Without a live managed schedule the manual claim is genuine and
+        // the machine must stay out.
+        let mut arbiter = DischargeControlArbiter::default();
+        arbiter.request(DischargeControlOwner::ManualMode);
+        assert!(!timed_export_machine_allowed(arbiter, false));
+    }
+
+    #[test]
+    fn timed_export_machine_gate_still_defers_to_higher_owners() {
+        // Force actions, pauses, and safety limiters outrank the reconciler
+        // even while the managed schedule is enabled (issue #289 pause
+        // precedence).
+        for claim in [
+            DischargeControlOwner::ManualForce,
+            DischargeControlOwner::ExplicitPause,
+            DischargeControlOwner::Safety,
+        ] {
+            let mut arbiter = DischargeControlArbiter::default();
+            arbiter.request(claim);
+            assert!(
+                !timed_export_machine_allowed(arbiter, true),
+                "{claim:?} must skip the Timed Export machine"
+            );
+        }
+
+        // No claim: the machine runs.
+        assert!(timed_export_machine_allowed(
+            DischargeControlArbiter::default(),
+            false
+        ));
     }
 
     #[test]

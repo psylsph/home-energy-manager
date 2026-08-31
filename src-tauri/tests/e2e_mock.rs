@@ -709,6 +709,113 @@ async fn history_summary_route_is_wired() {
     assert_eq!(body["error"], "History database not available");
 }
 
+/// The E2E harness reset endpoint is gated behind `--e2e-admin`: production
+/// launches (and this default test state) must not expose it at all.
+#[tokio::test]
+async fn test_reset_route_is_gated_behind_e2e_admin_flag() {
+    let (router, _state) = fresh_router_with_state().await;
+    let (status, body) = post_json(&router, "/api/test/reset", &json!({})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["ok"], Value::Bool(false));
+}
+
+/// With the flag set, the reset must clear every piece of backend-owned
+/// schedule/machine state the mock-register reset cannot reach: the persisted
+/// Timed Export schedule (enabled flag, slots, learned re-arm fallback, slot
+/// backup), the in-memory config mirror, the boundary state machine, the
+/// re-arm detector, and captured Force Charge/Discharge restore snapshots.
+#[tokio::test]
+async fn test_reset_clears_schedule_state_and_force_reverts() {
+    let (router, state) = fresh_router_with_state().await;
+    state
+        .e2e_admin
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    // Dirty every surface the reset owns.
+    givenergy_local::settings::Settings::update(|s| {
+        s.timed_export_schedule_enabled = true;
+        s.timed_export_slots = vec![givenergy_local::inverter::model::ScheduleSlot {
+            enabled: true,
+            start_hour: 16,
+            start_minute: 0,
+            end_hour: 19,
+            end_minute: 0,
+            target_soc: 4,
+        }];
+        s.timed_export_slots_require_clear = true;
+        s.discharge_slots_backup = Some(Vec::new());
+    })
+    .unwrap();
+    {
+        let mut config = state.timed_export_config.lock().await;
+        config.schedule_enabled = true;
+        config.slots = vec![givenergy_local::inverter::model::ScheduleSlot {
+            enabled: true,
+            start_hour: 16,
+            start_minute: 0,
+            end_hour: 19,
+            end_minute: 0,
+            target_soc: 4,
+        }];
+        config.device_rearm_confirmed = true;
+    }
+    *state.timed_export_state.lock().await =
+        givenergy_local::inverter::state_machines::TimedExportState::Active;
+    *state.force_charge_revert.lock().await =
+        Some(givenergy_local::inverter::poll::ForceChargeRevert {
+            enable_charge: true,
+            enable_discharge: false,
+            target_soc: 100,
+            battery_power_mode: 1,
+            charge_rate: Some(100),
+            charge_slot_1_start: Some((0, 0)),
+            charge_slot_1_end: Some((6, 0)),
+            three_phase_force_charge_enable: None,
+            three_phase_ac_charge_enable: None,
+            battery_pause_mode: None,
+        });
+    *state.force_discharge_revert.lock().await =
+        Some(givenergy_local::inverter::poll::ForceDischargeRevert {
+            enable_charge: false,
+            enable_discharge: true,
+            discharge_rate: Some(100),
+            discharge_slot_1_start: Some((16, 0)),
+            discharge_slot_1_end: Some((19, 0)),
+            discharge_slot_2_start: None,
+            discharge_slot_2_end: None,
+            three_phase_force_discharge_enable: None,
+            three_phase_force_charge_enable: None,
+            force_discharge_slot_end_ms: None,
+            battery_pause_mode: 0,
+            battery_pause_slot: Default::default(),
+        });
+
+    let (status, body) = post_json(&router, "/api/test/reset", &json!({})).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let settings = givenergy_local::settings::Settings::load();
+    assert!(!settings.timed_export_schedule_enabled);
+    assert!(settings.timed_export_slots.is_empty());
+    assert!(!settings.timed_export_slots_require_clear);
+    assert!(settings.discharge_slots_backup.is_none());
+    {
+        let config = state.timed_export_config.lock().await;
+        assert!(!config.schedule_enabled);
+        assert!(config.slots.is_empty());
+        assert!(!config.device_rearm_confirmed);
+    }
+    assert_eq!(
+        *state.timed_export_state.lock().await,
+        givenergy_local::inverter::state_machines::TimedExportState::Off
+    );
+    assert!(state.force_charge_revert.lock().await.is_none());
+    assert!(state.force_discharge_revert.lock().await.is_none());
+    assert!(
+        state.pending_writes.lock().await.is_empty(),
+        "the reset must drop leftover queued write bursts"
+    );
+}
+
 #[tokio::test]
 async fn unknown_api_path_returns_404() {
     let router = fresh_router();

@@ -680,6 +680,13 @@ fn parse_dist(args: &[String]) -> Option<String> {
     None
 }
 
+/// Whether the `--e2e-admin` flag is present. It arms the harness-only
+/// `POST /api/test/reset` endpoint used by the Playwright suite to isolate
+/// spec files from each other; production launches never pass it.
+fn parse_e2e_admin(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--e2e-admin")
+}
+
 /// Resolve the frontend dist directory for headless mode.
 ///
 /// Search order (first hit wins, keyed on the presence of `index.html`):
@@ -845,6 +852,12 @@ pub fn run_headless(args: &[String]) {
             Some(s) => s,
             None => return,
         };
+        if parse_e2e_admin(args) {
+            state
+                .e2e_admin
+                .store(true, std::sync::atomic::Ordering::Release);
+            tracing::warn!("E2E admin surface enabled (--e2e-admin): /api/test/reset is live");
+        }
 
         // Spawn the poll loop
         let poll_state = state.clone();

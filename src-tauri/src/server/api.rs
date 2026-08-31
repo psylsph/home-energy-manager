@@ -2677,6 +2677,59 @@ async fn device_rearm_confirmed(state: &Arc<AppState>) -> bool {
         .device_rearm_confirmed
 }
 
+/// POST /api/test/reset — E2E-harness-only state reset.
+///
+/// Registered on every router but answers 404 unless the process was started
+/// with `--e2e-admin`, so production installs expose nothing.
+///
+/// The Playwright suite shares one backend process per spec file and one
+/// mock Modbus server across the whole run. Resetting the mock's registers
+/// cannot reach backend-owned state: the persisted Timed Export schedule
+/// (enabled flag, desired slots, learned HR59 re-arm fallback, legacy slot
+/// backup), the in-memory config mirror, the boundary state machine, and the
+/// captured Force Charge/Discharge restore snapshots. Without this reset a
+/// later test's enable silently reuses the previous test's schedule slots,
+/// and the reconciler re-arms export into a test that just reset the
+/// registers — the failure class behind the full-suite E2E order dependence.
+pub async fn test_reset(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    if !state.e2e_admin.load(std::sync::atomic::Ordering::Acquire) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": "Not found" })),
+        );
+    }
+
+    if let Err(error) = crate::settings::Settings::update(|s| {
+        s.timed_export_schedule_enabled = false;
+        s.timed_export_slots = Vec::new();
+        s.timed_export_slots_require_clear = false;
+        s.discharge_slots_backup = None;
+    }) {
+        return error_response(&format!("Could not reset settings: {error}"));
+    }
+
+    {
+        let mut config = state.timed_export_config.lock().await;
+        config.schedule_enabled = false;
+        config.slots.clear();
+        config.device_rearm_confirmed = false;
+    }
+    *state.timed_export_state.lock().await = crate::inverter::state_machines::TimedExportState::Off;
+    crate::inverter::poll::reset_timed_export_rearm_detector(&state).await;
+    state.force_charge_revert.lock().await.take();
+    state.force_discharge_revert.lock().await.take();
+    // Drop any still-queued register writes (e.g. a previous test's mode-switch
+    // slot-clear burst). The poll loop drains the queue BEFORE its next read,
+    // so a multi-second burst would otherwise starve the harness of a fresh
+    // snapshot for tens of seconds after the reset. An in-flight batch (already
+    // taken by the poll loop) is unaffected; awaiting endpoints of dropped
+    // batches see the normal dropped-channel cancellation path.
+    state.pending_writes.lock().await.clear();
+
+    tracing::info!("E2E harness reset applied (test-only endpoint)");
+    (StatusCode::OK, Json(json!({ "ok": true })))
+}
+
 /// POST /api/control/timed-discharge — configure/toggle the portal-style
 /// single-slot Timed Discharge mechanism.
 ///
