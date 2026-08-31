@@ -677,11 +677,14 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
             chrono::DateTime::from_timestamp(ts, 0)
                 .map(|dt| dt.with_timezone(&chrono::Local).date_naive())
         };
-        let tomorrow_date = outcome
-            .series
-            .first()
-            .and_then(|h| local_date(h.timestamp))
-            .map(|d| d + chrono::Duration::days(1));
+        // "Tomorrow" is the calendar day after the PLANNING MOMENT, not
+        // `series.first() + 1 day`: when the plan runs in the last hour of
+        // the day the forward series starts at 00:00 tomorrow, so the old
+        // heuristic labelled the day-after-tomorrow as "tomorrow" and the
+        // window draw (on tomorrow) was never counted in tomorrow's import
+        // (flaky e2e `forecast_plan_endpoint_recommends_overnight_charge`
+        // after 23:00).
+        let tomorrow_date = local_date(inputs.now_ts).map(|d| d + chrono::Duration::days(1));
         let (import_tw, export_tw) = match tomorrow_date {
             Some(td) => {
                 let is_t = |ts: i64| local_date(ts).is_some_and(|d| d == td);
@@ -1349,6 +1352,87 @@ mod tests {
         // The window draw is included exactly once — not once per night.
         assert!(import_tomorrow_with_charge_kwh >= kwh - 1e-9);
         assert!(import_tomorrow_with_charge_kwh < 2.0 * kwh);
+    }
+
+    /// Regression for the flaky e2e `forecast_plan_endpoint_recommends_overnight_charge`
+    /// (failed after 23:00): when the plan runs in the last hour of the
+    /// day, the forward series starts at 00:00 TOMORROW, so the old
+    /// `series.first() + 1 day` heuristic labelled the day-after-tomorrow
+    /// as "tomorrow" and dropped the window draw from tomorrow's import
+    /// tile. "Tomorrow" must be derived from the planning moment, not the
+    /// series start.
+    #[test]
+    fn tomorrow_import_counts_the_window_draw_when_planning_late_evening() {
+        let p = params();
+        let solar = {
+            let mut s = [0.0; 24];
+            for slot in s.iter_mut().take(17).skip(9) {
+                *slot = 1.4;
+            }
+            s
+        };
+        let cons: [f64; 24] =
+            std::array::from_fn(|h| if (17..=21).contains(&h) { 1.0 } else { 0.45 });
+        let (sim, sim_hours) = fixed_72h(46.0, solar, cons, &p);
+        let flux = flux_tariff();
+        // 23:30 the day BEFORE the series starts — the series begins at
+        // 00:00 tomorrow, exactly the late-evening shape the e2e suite
+        // hits after 23:00.
+        let now_ts = pinned_now_ts(&sim_hours, -1, 23 * 60 + 30);
+        let inputs = PlanInputs {
+            simulation: &sim,
+            sim_hours: Some(&sim_hours),
+            params: &p,
+            import_tariff: Some(&flux),
+            target_soc_pct: 20.0,
+            consumption_tomorrow_kwh: 12.0,
+            consumption_sufficient: true,
+            now_ts,
+            current_soc_pct: 46.0,
+        };
+        let rec = plan_overnight_charge(&inputs);
+        let PlanRecommendation::Charge {
+            kwh,
+            window,
+            import_tomorrow_with_charge_kwh,
+            ..
+        } = rec
+        else {
+            panic!("expected Charge, got {rec:?}")
+        };
+        assert!(kwh > 0.0);
+        // The window is on the series' first day (tomorrow relative to the
+        // planning moment) — its draw must be counted in tomorrow's import.
+        let tomorrow_date = chrono::DateTime::from_timestamp(now_ts, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .date_naive()
+            + chrono::Duration::days(1);
+        let is_tomorrow = |ts: i64| {
+            chrono::DateTime::from_timestamp(ts, 0)
+                .unwrap()
+                .with_timezone(&chrono::Local)
+                .date_naive()
+                == tomorrow_date
+        };
+        let selected_run = first_reachable_occurrence(&sim_hours, &window, now_ts)
+            .0
+            .map(|occ| occ.run)
+            .unwrap_or_default();
+        let window_draw_tomorrow: f64 = sim_hours
+            .iter()
+            .enumerate()
+            .filter(|(i, h)| selected_run.contains(i) && is_tomorrow(h.timestamp))
+            .map(|(_, h)| p.max_charge_kw * window_overlap_hours(h.timestamp, &window))
+            .sum();
+        assert!(
+            window_draw_tomorrow > 0.0,
+            "the window must fall on tomorrow's calendar day in this fixture"
+        );
+        assert!(
+            import_tomorrow_with_charge_kwh >= window_draw_tomorrow - 1e-6,
+            "tomorrow import ({import_tomorrow_with_charge_kwh}) must include the window draw ({window_draw_tomorrow}) even when planning after 23:00"
+        );
     }
 
     #[test]
