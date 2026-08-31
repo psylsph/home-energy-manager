@@ -26,11 +26,13 @@ export default defineConfig({
   retries: 0,
   reporter: 'list',
   globalSetup: './e2e/global-setup.ts',
-  // The suite is fully serial against one shared backend (workers: 1) and
-  // every Modbus register write is a real ~1.5s round-trip, so the full run
-  // comfortably exceeds 20 minutes. Raise the ceiling so the global timeout
-  // never aborts in-flight tests (which then report bogus "0 writes" failures).
-  globalTimeout: 2_400_000,
+  // The suite is fully serial against one shared mock server (workers: 1)
+  // and every Modbus register write is a real ~1.5s round-trip. Each test
+  // also pays the per-test harness reset (fixture.ts: backend state reset +
+  // one poll-wait, ~5s typical) for spec-order independence, so the full run
+  // comfortably exceeds 40 minutes. Raise the ceiling so the global timeout
+  // never aborts in-flight tests (which then report bogus failures).
+  globalTimeout: 3_300_000,
   use: {
     headless: true,
     browserName: 'chromium',

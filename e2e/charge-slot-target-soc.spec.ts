@@ -95,6 +95,9 @@ test.describe('Charge slot target SOC regression', () => {
     peekModbusWrites,
     drainModbusWrites,
   }) => {
+    // The per-test harness reset (fixture.ts) plus two full 6-write batches
+    // at the real ~1.5s inter-write pacing exceed the 30s default budget.
+    test.setTimeout(120_000);
     // Seed: slot 1 armed 06:00-10:00 with no explicit target (HR116=100).
     await setHoldingReg(94, 600);   // 06:00
     await setHoldingReg(95, 1000);  // 10:00
@@ -162,10 +165,20 @@ test.describe('Charge slot target SOC regression', () => {
   test('GUI explicit 100 keeps "no limit" semantics (no HR116 write)', async ({
     page,
     baseUrl,
+    setHoldingReg,
     peekModbusWrites,
     drainModbusWrites,
   }) => {
-    // Continuing state from the previous test: slot 1 armed, target 99.
+    test.setTimeout(120_000);
+    // Seed the precondition (slot 1 armed 06:00-10:00 with an armed 99%
+    // target) — the harness reset gives every test a clean slate, so this
+    // test can no longer inherit the previous test's leftover registers.
+    await setHoldingReg(94, 600);   // 06:00
+    await setHoldingReg(95, 1000);  // 10:00
+    await setHoldingReg(96, 1);     // enable_charge
+    await setHoldingReg(20, 1);     // enable_charge_target (armed target)
+    await setHoldingReg(116, 99);   // global target 99
+    await setHoldingReg(242, 99);   // per-slot target 99
     await waitForSnapshotTarget(baseUrl, 99);
     await drainModbusWrites();
 

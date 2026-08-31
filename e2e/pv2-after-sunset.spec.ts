@@ -46,6 +46,13 @@ test.describe('PV2 daily energy after sunset', () => {
     await setInputReg(19, 147); // PV2 today = 14.7 kWh
     await setInputReg(44, 300); // aggregate today ~= 30.0 kWh
 
+    // The cumulative-counter sanitizer rejects a multi-kWh jump outside its
+    // post-connect grace window, so force a reconnect cycle: the grace
+    // readings then adopt the seeded registers as the baseline instead of
+    // fighting them (the harness reset re-graces per test via this same
+    // pattern).
+    await fetch(`${baseUrl}/api/reconnect`, { method: 'POST' });
+
     const snap = await waitForSnapshot(baseUrl, (s) => (
       Math.abs(Number(s.today_pv1_kwh) - 15.0) < 0.01
       && Math.abs(Number(s.today_pv2_kwh) - 14.7) < 0.01

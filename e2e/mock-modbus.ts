@@ -51,11 +51,19 @@ const writes: RegisterWrite[] = [];
 /**
  * When enabled, emulates Gen3 Hybrid firmware that re-asserts HR59=1
  * (enable discharge) whenever a discharge slot register remains non-zero —
- * the behaviour issue #289's clear/restore fallback defends against. The
- * mock re-arms immediately after the client writes HR59=0, so the next poll
- * read-back observes HR59=1.
+ * the behaviour issue #289's clear/restore fallback defends against.
+ *
+ * Timing matters: real firmware re-asserts on its own cycle, so the client's
+ * HR59=0 write IS observed by the next read before the re-assert lands. The
+ * mock therefore defers the re-assert until after the next register read has
+ * been served — an atomic re-assert inside the write handler would make the
+ * written 0 unobservable, and the backend's re-arm detector (which anchors
+ * on a confirming-off readback) could never classify.
  */
 let rearmHr59Enabled = false;
+
+/** A re-assert is scheduled and fires after the next register read. */
+let hr59ReassertPending = false;
 
 /** Discharge slot time registers for the standard (single-phase) layout. */
 const DISCHARGE_SLOT_REGS = [56, 57, 44, 45];
@@ -67,6 +75,7 @@ function hasPopulatedDischargeSlot(): boolean {
 /** Enable/disable the HR59 re-arm firmware emulation. */
 export function setRearmHr59(enabled: boolean): void {
   rearmHr59Enabled = enabled;
+  if (!enabled) hr59ReassertPending = false;
 }
 
 /** Reset all state. */
@@ -75,6 +84,7 @@ export function resetState(): void {
   holdingRegs.fill(0);
   writes.length = 0;
   rearmHr59Enabled = false;
+  hr59ReassertPending = false;
   populateDefaults();
 }
 
@@ -388,6 +398,18 @@ function handleClient(sock: net.Socket): void {
         const regs = innerFunc === 0x03 ? holdingRegs : inputRegs;
         const response = buildReadResponse('SA12345678', slave, innerFunc, startReg, regCount, regs);
         sock.write(response);
+
+        // Fire a pending HR59 re-assert only after a HOLDING read that covers
+        // register 59 has observed the written 0 (see the timing note above).
+        // Any earlier read (e.g. the input-register block) must not consume
+        // the pending re-assert, or the poll's holding read would already see
+        // the re-asserted value and the written 0 would be unobservable.
+        if (hr59ReassertPending && innerFunc === 0x03 && startReg <= 59 && 59 < startReg + regCount) {
+          hr59ReassertPending = false;
+          if (rearmHr59Enabled && hasPopulatedDischargeSlot()) {
+            holdingRegs[59] = 1;
+          }
+        }
       } else if (innerFunc === 0x06) {
         // Write single holding register
         if (innerPayload.length < 4) continue;
@@ -402,14 +424,15 @@ function handleClient(sock: net.Socket): void {
 
         // Re-arm firmware emulation (issue #289): real Gen3 Hybrid firmware
         // re-asserts enable_discharge whenever discharge slots remain
-        // programmed, so a bare HR59=0 exit write cannot stick.
+        // programmed. The re-assert fires after the next read so the
+        // written 0 is observable once (see the timing note above).
         if (
           rearmHr59Enabled
           && register === 59
           && value === 0
           && hasPopulatedDischargeSlot()
         ) {
-          holdingRegs[59] = 1;
+          hr59ReassertPending = true;
         }
 
         writes.push({ address: register, value });

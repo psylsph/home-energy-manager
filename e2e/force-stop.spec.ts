@@ -329,9 +329,26 @@ test.describe('Force Discharge → Stop (mock Modbus)', () => {
     });
     expect((await fdResp.json()).ok).toBe(true);
 
+    // Determinism: wait until a poll has DECODED the armed state. The
+    // restart-aware fallback (stop2) reads the cached snapshot and only
+    // produces safe-stop writes while it still shows discharge active — so
+    // the two stops must straddle a poll that saw the force window, without
+    // depending on where in the poll cycle the test happened to start.
+    const armedDeadline = Date.now() + 20_000;
+    for (;;) {
+      const snap = await (await fetch(`${baseUrl}/api/snapshot`)).json();
+      if (snap?.data?.enable_discharge === true && snap?.data?.battery_power_mode === 0) break;
+      if (Date.now() >= armedDeadline) {
+        throw new Error('force-discharge arm never decoded into the snapshot');
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
     const stop1 = await fetch(`${baseUrl}/api/control/force-discharge/stop`, { method: 'POST' });
     expect((await stop1.json()).ok).toBe(true);
 
+    // stop2 runs before the next poll, so the cached snapshot still shows
+    // discharge active and the snapshot-based safe stop re-applies.
     const stop2 = await fetch(`${baseUrl}/api/control/force-discharge/stop`, { method: 'POST' });
     const data = await stop2.json();
     expect(data.ok).toBe(true);

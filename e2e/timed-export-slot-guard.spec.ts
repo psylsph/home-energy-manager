@@ -116,36 +116,6 @@ function writeIndex(writes: RegisterWrite[], address: number, value: number): nu
   return writes.findIndex((write) => write.address === address && write.value === value);
 }
 
-async function resetToEco(
-  baseUrl: string,
-  resetModbus: () => Promise<void>,
-  drainModbusWrites: () => Promise<RegisterWrite[]>,
-): Promise<void> {
-  const resetAt = Date.now();
-  await resetModbus();
-  // First wait for a snapshot captured AFTER the reset. A stale pre-reset
-  // snapshot can satisfy the Eco check below (the previous test may have
-  // ended with enable_discharge=false), and acting on it races the poll
-  // loop — e.g. an enable POST computing its arm decision against the
-  // previous test's slot registers.
-  await waitForSnapshot(
-    baseUrl,
-    (snapshot) => {
-      const ts = snapshot.timestamp as number | undefined;
-      return typeof ts === 'number' && ts * 1000 > resetAt;
-    },
-    'post-reset poll',
-  );
-  await waitForSnapshot(
-    baseUrl,
-    (snapshot) =>
-      snapshot.enable_discharge === false
-      && snapshot.discharge_slots?.every((slot: { enabled: boolean }) => !slot.enabled) === true,
-    'clean Eco snapshot',
-  );
-  await drainModbusWrites();
-}
-
 test.beforeAll(async () => {
   await startBackend();
 });
@@ -157,10 +127,8 @@ test.afterAll(async () => {
 test.describe('Timed Export/discharge-slot state alignment', () => {
   test('rejects enabling Timed Export when no discharge slot exists', async ({
     baseUrl,
-    resetModbus,
     drainModbusWrites,
   }) => {
-    await resetToEco(baseUrl, resetModbus, drainModbusWrites);
 
     const result = await postJson(baseUrl, '/api/control/timed-export', { enabled: true });
     expect(result.status).toBe(409);
@@ -173,12 +141,10 @@ test.describe('Timed Export/discharge-slot state alignment', () => {
 
   test('arms Timed Export when the configured slot contains now and preserves order', async ({
     baseUrl,
-    resetModbus,
     drainModbusWrites,
     setHoldingReg,
     peekModbusWrites,
   }) => {
-    await resetToEco(baseUrl, resetModbus, drainModbusWrites);
     // A window that always contains "now" (±90 min, midnight-wrapping) so the
     // arming decision is deterministic regardless of when the test runs.
     // Issue #289: entry writes are only queued when the current time is inside
@@ -213,11 +179,9 @@ test.describe('Timed Export/discharge-slot state alignment', () => {
 
   test('saving a future Timed Export slot does NOT immediately write HR27=0/HR59=1', async ({
     baseUrl,
-    resetModbus,
     drainModbusWrites,
     setHoldingReg,
   }) => {
-    await resetToEco(baseUrl, resetModbus, drainModbusWrites);
     // A window that always lies in the future (+90..+180 min) so Eco stays
     // the baseline and no HR27=0/HR59=1 entry writes are queued (issue #289).
     await setHoldingReg(HR_DISCHARGE_SLOT_1_START, hhmmOffset(90));
@@ -250,12 +214,9 @@ test.describe('Timed Export/discharge-slot state alignment', () => {
 
   test('automatically repairs an externally-created HR59/no-slot state', async ({
     baseUrl,
-    resetModbus,
-    drainModbusWrites,
     setHoldingReg,
     peekModbusWrites,
   }) => {
-    await resetToEco(baseUrl, resetModbus, drainModbusWrites);
     await setHoldingReg(HR_BATTERY_POWER_MODE, 0);
     await setHoldingReg(HR_ENABLE_DISCHARGE, 1);
     await waitForSnapshot(
@@ -281,12 +242,10 @@ test.describe('Timed Export/discharge-slot state alignment', () => {
 
   test('disabling the last slot returns an armed inverter to Eco', async ({
     baseUrl,
-    resetModbus,
     drainModbusWrites,
     setHoldingReg,
     peekModbusWrites,
   }) => {
-    await resetToEco(baseUrl, resetModbus, drainModbusWrites);
     await setHoldingReg(HR_DISCHARGE_SLOT_1_START, 1600);
     await setHoldingReg(HR_DISCHARGE_SLOT_1_END, 1900);
     await setHoldingReg(HR_BATTERY_POWER_MODE, 0);
@@ -327,11 +286,9 @@ test.describe('Timed Export/discharge-slot state alignment', () => {
 
   test('does not repair a valid armed state while a slot remains configured', async ({
     baseUrl,
-    resetModbus,
     drainModbusWrites,
     setHoldingReg,
   }) => {
-    await resetToEco(baseUrl, resetModbus, drainModbusWrites);
     await setHoldingReg(HR_DISCHARGE_SLOT_1_START, 1600);
     await setHoldingReg(HR_DISCHARGE_SLOT_1_END, 1900);
     await setHoldingReg(HR_BATTERY_POWER_MODE, 0);
@@ -350,12 +307,8 @@ test.describe('Timed Export/discharge-slot state alignment', () => {
   });
 
   test('locks the real control page when the polled inverter has no slot', async ({
-    baseUrl,
-    resetModbus,
-    drainModbusWrites,
     page,
   }) => {
-    await resetToEco(baseUrl, resetModbus, drainModbusWrites);
     await page.goto('/#/control');
     const button = page.getByRole('button', { name: /Timed Export/ });
     await expect(button).toBeVisible();
@@ -367,11 +320,9 @@ test.describe('Timed Export/discharge-slot state alignment', () => {
 
   test('HR318 pause blocks entry even inside the export window', async ({
     baseUrl,
-    resetModbus,
     drainModbusWrites,
     setHoldingReg,
   }) => {
-    await resetToEco(baseUrl, resetModbus, drainModbusWrites);
     // Export window covering "now" (±90 min) so in-window entry WOULD fire —
     // were it not for the pause.
     await setHoldingReg(HR_DISCHARGE_SLOT_1_START, hhmmOffset(-90));
@@ -403,11 +354,9 @@ test.describe('Timed Export/discharge-slot state alignment', () => {
 
   test('the desired schedule survives a backend restart', async ({
     baseUrl,
-    resetModbus,
     drainModbusWrites,
     setHoldingReg,
   }) => {
-    await resetToEco(baseUrl, resetModbus, drainModbusWrites);
     // A future window so arming never happens; only the schedule is persisted.
     await setHoldingReg(HR_DISCHARGE_SLOT_1_START, hhmmOffset(90));
     await setHoldingReg(HR_DISCHARGE_SLOT_1_END, hhmmOffset(180));
@@ -434,13 +383,11 @@ test.describe('Timed Export/discharge-slot state alignment', () => {
 
   test('Stop disarms re-arming firmware because the fallback clears slots before HR59=0', async ({
     baseUrl,
-    resetModbus,
     drainModbusWrites,
     setHoldingReg,
     setHr59Rearm,
   }) => {
     test.setTimeout(240_000);
-    await resetToEco(baseUrl, resetModbus, drainModbusWrites);
     // Emulate Gen3 firmware that re-asserts HR59=1 while discharge slot
     // registers are non-zero (issue #289) — and leave it enabled for the
     // whole test: Stop must still win.
@@ -461,10 +408,10 @@ test.describe('Timed Export/discharge-slot state alignment', () => {
     expect(enable.status).toBe(200);
     await drainModbusWrites();
     await setHoldingReg(HR_ENABLE_DISCHARGE, 1);
-    // Three consecutive qualifying polls at poll_interval=5s, plus margin.
-    await wait(23_000);
-    const classified = await getTimedExport(baseUrl);
-    expect(classified.device_rearm_confirmed).toBe(true);
+    // Three consecutive qualifying polls at poll_interval=5s — but the
+    // machine's exit retries hold the boundary pending until they surface
+    // Error under instant-re-arm firmware, so poll until classified.
+    await waitForRearmClassified(baseUrl);
     await drainModbusWrites();
 
     // --- Arm inside a window that covers "now" ---
@@ -517,12 +464,15 @@ test.describe('Timed Export/discharge-slot state alignment', () => {
 
   test('re-arming firmware is classified after three outside-window HR59=1 polls and the learned fallback survives a restart', async ({
     baseUrl,
-    resetModbus,
     drainModbusWrites,
     setHoldingReg,
+    setHr59Rearm,
   }) => {
-    test.setTimeout(180_000);
-    await resetToEco(baseUrl, resetModbus, drainModbusWrites);
+    test.setTimeout(240_000);
+    // Each test declares its own firmware behaviour: the harness reset
+    // clears the emulation flag between tests, so this test must arm it
+    // itself rather than inheriting the previous test's toggle.
+    await setHr59Rearm(true);
     // A future window: the schedule is enabled but "now" is outside it, so
     // an HR59=1 readback can only come from the (emulated) firmware.
     await setHoldingReg(HR_DISCHARGE_SLOT_1_START, hhmmOffset(90));
@@ -543,9 +493,9 @@ test.describe('Timed Export/discharge-slot state alignment', () => {
     // write, so seed the readback directly).
     await setHoldingReg(HR_ENABLE_DISCHARGE, 1);
 
-    // Three consecutive qualifying polls at poll_interval=5s, plus margin.
-    await wait(23_000);
-
+    // Three consecutive qualifying polls at poll_interval=5s — subject to
+    // the same boundary-pending suppression as the Stop test above.
+    await waitForRearmClassified(baseUrl);
     const schedule = await getTimedExport(baseUrl);
     expect(schedule.device_rearm_confirmed).toBe(true);
     // The desired schedule must not be lost or hidden by the fallback.
@@ -561,6 +511,30 @@ test.describe('Timed Export/discharge-slot state alignment', () => {
     expect(reloaded.device_rearm_confirmed).toBe(true);
   });
 });
+
+/**
+ * Wait until the re-arm detector classifies the firmware.
+ *
+ * Under instant-re-arm firmware the machine's own exit retries keep the
+ * boundary pending, which deliberately suppresses classification (readback
+ * while our writes are in flight proves nothing) — the retries must surface
+ * Error before the detector's three qualifying polls can count. At a 5s
+ * poll interval that legitimately takes on the order of a minute and a
+ * half, so this polls rather than sleeping a fixed window.
+ */
+async function waitForRearmClassified(baseUrl: string, timeoutMs = 150_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const schedule = await getTimedExport(baseUrl);
+    if (schedule.device_rearm_confirmed === true) return;
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `re-arm firmware was not classified within ${timeoutMs}ms: ${JSON.stringify(schedule)}`,
+      );
+    }
+    await wait(2_000);
+  }
+}
 
 /** GET /api/timed-export — the HEM-managed schedule. */
 async function getTimedExport(baseUrl: string): Promise<Record<string, any>> {

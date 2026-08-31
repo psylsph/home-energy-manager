@@ -745,6 +745,9 @@ test.describe('API Control Endpoints', () => {
     drainModbusWrites,
     peekModbusWrites,
   }) => {
+    // The per-test harness reset (fixture.ts) plus ~7 sequential Modbus
+    // writes at real dongle pacing exceed the default 30s budget.
+    test.setTimeout(120_000);
     await clearWrites(drainModbusWrites);
 
     const resp = await fetch(`${baseUrl}/api/control/force-charge`, {
@@ -1283,6 +1286,11 @@ test.describe('API Mode Transitions', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Edge Cases', () => {
+  // The per-test harness reset (fixture.ts) waits out any in-flight write
+  // burst from the previous test (~35s at dongle pacing for a full ten-slot
+  // clear) before the body even starts, so the default 30s test timeout is
+  // too tight for this block (individual tests raise it further).
+  test.describe.configure({ timeout: 180_000 });
     test('Force charge with minutes=0 clamps to 1', async ({
     baseUrl,
     drainModbusWrites,

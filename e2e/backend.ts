@@ -167,6 +167,7 @@ async function waitFor(probe: () => Promise<boolean>, label: string, timeoutMs: 
  * Idempotent — calls stopBackend() first so a stray instance can't linger.
  */
 export async function startBackend(): Promise<void> {
+  console.log('[backend] startBackend called from:\n' + new Error().stack);
   await stopBackend();
 
   if (!fs.existsSync(BINARY_PATH)) {
@@ -199,7 +200,10 @@ async function launchBackendProcess(): Promise<void> {
   console.log('[backend] Starting headless backend on port', BACKEND_HTTP_PORT);
   backendProcess = spawn(
     BINARY_PATH,
-    ['--headless', '--port', String(BACKEND_HTTP_PORT), '--dist', DIST_DIR],
+    // --e2e-admin arms the harness-only POST /api/test/reset endpoint used
+    // by the per-test harness reset in fixture.ts. Production launches never
+    // pass it, and the endpoint answers 404 without it.
+    ['--headless', '--port', String(BACKEND_HTTP_PORT), '--dist', DIST_DIR, '--e2e-admin'],
     {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
