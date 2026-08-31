@@ -1228,6 +1228,15 @@ pub struct Settings {
     /// across the forward forecast window, 0–100. Default 20.
     #[serde(default = "default_forecast_min_soc_pct")]
     pub forecast_min_soc_pct: f64,
+    /// When true, the poll loop re-computes the Forecast plan shortly
+    /// before each cheap period and rewrites charge slot 1 from the fresh
+    /// live SOC and forecast (clearing it when the plan needs no charge).
+    /// The plan is deliberately sized for ONE charge cycle, so without
+    /// this the inverter would repeat the last applied slot duration on
+    /// every later night. Enabling this hands charge slot 1 to the
+    /// planner. Defaults to off.
+    #[serde(default)]
+    pub forecast_plan_auto_refresh: bool,
 
     // -- Update checking ("new version available" banner) --
     /// When true, the backend periodically asks GitHub for the latest
@@ -1680,6 +1689,7 @@ impl Default for Settings {
             forecast_charge_efficiency: default_forecast_charge_efficiency(),
             forecast_discharge_efficiency: default_forecast_discharge_efficiency(),
             forecast_min_soc_pct: default_forecast_min_soc_pct(),
+            forecast_plan_auto_refresh: false,
             check_for_updates: default_check_for_updates(),
             octopus_enabled: false,
             octopus_api_key: String::new(),
@@ -2028,6 +2038,7 @@ mod tests {
             alerts_config: AlertsConfig::default(),
             check_for_updates: default_check_for_updates(),
             forecast_min_soc_pct: default_forecast_min_soc_pct(),
+            forecast_plan_auto_refresh: false,
             weather_config: WeatherConfig {
                 enabled: true,
                 postcode: "SW1A 1AA".to_string(),
@@ -2579,6 +2590,7 @@ mod tests {
             forecast_discharge_efficiency: default_forecast_discharge_efficiency(),
             check_for_updates: default_check_for_updates(),
             forecast_min_soc_pct: default_forecast_min_soc_pct(),
+            forecast_plan_auto_refresh: false,
             octopus_enabled: false,
             octopus_api_key: String::new(),
             octopus_account_number: String::new(),

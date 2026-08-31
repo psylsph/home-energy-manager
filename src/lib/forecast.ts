@@ -27,6 +27,9 @@ export type ForecastBattery = {
   end_soc_pct: number;
 };
 
+/** Number of forward hours displayed by the Forecast page. */
+export const FORECAST_HORIZON_HOURS = 72;
+
 export type ForecastData = {
   generated_at: number;
   status: string[];
@@ -35,7 +38,8 @@ export type ForecastData = {
   solar: ForecastSolarHour[];
   solar_today_remaining_kwh: number;
   solar_tomorrow_kwh: number;
-  consumption: ForecastConsumptionHour[];
+  consumption_weekday: ForecastConsumptionHour[];
+  consumption_weekend: ForecastConsumptionHour[];
   consumption_days_observed: number;
   consumption_sufficient: boolean;
   consumption_tomorrow_kwh: number;
@@ -116,33 +120,91 @@ export function toBatteryChartData(battery: ForecastBattery): BatteryChartPoint[
 
 export type ConsumptionChartPoint = {
   timestamp: number;
-  kwh: number;
-  p25: number;
-  p75: number;
+  weekday: number | null;
+  weekdayP25: number | null;
+  weekdayP75: number | null;
+  weekend: number | null;
+  weekendP25: number | null;
+  weekendP75: number | null;
 };
 
-/** Tile the typical-day consumption profile onto the forward timestamps
- *  so the Consumption chart shares the same x-axis, start time (now),
- *  and horizon as the Solar forecast and Battery projection charts —
- *  instead of a midnight-anchored 24 h "typical day" view that can't be
- *  compared hour-for-hour against the projections. Each forward
- *  timestamp is stamped with its local hour-of-day's median + p25/p75
- *  band, repeating across days. */
+/** Tile weekday/weekend profiles onto the forward timestamps so the
+ * Consumption chart shares the same x-axis, start time and horizon as the
+ * other forecast charts. Only the profile matching each timestamp's local
+ * day type is populated, leaving Recharts to break the other line. */
 export function toConsumptionChartData(
-  consumption: ForecastConsumptionHour[],
+  weekday: ForecastConsumptionHour[],
+  weekend: ForecastConsumptionHour[],
   timestamps: number[],
 ): ConsumptionChartPoint[] {
-  const byHour = new Map<number, ForecastConsumptionHour>();
-  for (const c of consumption) byHour.set(c.hour, c);
+  const byHour = (series: ForecastConsumptionHour[]) => {
+    const map = new Map<number, ForecastConsumptionHour>();
+    for (const c of series) map.set(c.hour, c);
+    return map;
+  };
+  const weekdayByHour = byHour(weekday);
+  const weekendByHour = byHour(weekend);
   return timestamps.map((ts) => {
-    const c = byHour.get(new Date(ts * 1000).getHours());
+    const date = new Date(ts * 1000);
+    const isWeekend = date.getDay() === 0 || date.getDay() === 6;
+    const c = (isWeekend ? weekendByHour : weekdayByHour).get(date.getHours());
     return {
       timestamp: ts,
-      kwh: c?.kwh ?? 0,
-      p25: c?.p25 ?? 0,
-      p75: c?.p75 ?? 0,
+      weekday: isWeekend ? null : c?.kwh ?? 0,
+      weekdayP25: isWeekend ? null : c?.p25 ?? 0,
+      weekdayP75: isWeekend ? null : c?.p75 ?? 0,
+      weekend: isWeekend ? c?.kwh ?? 0 : null,
+      weekendP25: isWeekend ? c?.p25 ?? 0 : null,
+      weekendP75: isWeekend ? c?.p75 ?? 0 : null,
     };
   });
+}
+
+const FORECAST_X_AXIS_TICK_INTERVAL_SECONDS = 12 * 60 * 60;
+const FORECAST_Y_AXIS_TARGET_INTERVALS = 8;
+
+export type ForecastYAxisScale = {
+  max: number;
+  ticks: number[];
+};
+
+/** Return dated x-axis ticks at 12-hour intervals, including both bounds. */
+export function forecastXAxisTicks(start: number, end: number): number[] {
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return [];
+  const ticks: number[] = [];
+  for (let tick = start; tick <= end; tick += FORECAST_X_AXIS_TICK_INTERVAL_SECONDS) {
+    ticks.push(tick);
+  }
+  if (ticks[ticks.length - 1] !== end) ticks.push(end);
+  return ticks;
+}
+
+/** Format a forecast x-axis tick with the calendar date and local time. */
+export function formatForecastXAxisTick(tsSeconds: number): string {
+  const date = new Date(tsSeconds * 1000);
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${String(date.getDate()).padStart(2, '0')} ${months[date.getMonth()]} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+/** Choose a clean, adaptive y-axis scale with evenly spaced ticks. */
+export function forecastYAxisScale(dataMax: number): ForecastYAxisScale {
+  if (!Number.isFinite(dataMax) || dataMax <= 0) {
+    return { max: 1, ticks: [0, 0.2, 0.4, 0.6, 0.8, 1] };
+  }
+
+  const rawStep = dataMax / FORECAST_Y_AXIS_TARGET_INTERVALS;
+  const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+  const normalized = rawStep / magnitude;
+  const niceFactor = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+  const step = niceFactor * magnitude;
+  const max = Math.ceil(dataMax / step) * step;
+  const count = Math.round(max / step);
+  const ticks = Array.from({ length: count + 1 }, (_, index) => {
+    // Avoid labels such as 0.30000000000000004 when the step is fractional.
+    return Number((index * step).toPrecision(12));
+  });
+  return { max, ticks };
 }
 
 /** Hourly timestamps starting at the current hour boundary, spanning
@@ -179,7 +241,7 @@ export function tomorrowSummary(data: ForecastData): TomorrowSummary {
 // ---------------------------------------------------------------------------
 
 export type PlannerChargeWindow = {
-  /** "HH:MM" wall-clock start — 02:00 even on tomorrow's calendar day. */
+  /** "HH:MM" wall-clock start — the schedule may cross midnight. */
   start: string;
   /** "HH:MM" wall-clock end. */
   end: string;
@@ -189,11 +251,88 @@ export type PlannerChargeWindow = {
   tomorrow: boolean;
 };
 
+export type ForecastChargeMarker = {
+  kind: 'start' | 'end';
+  timestamp: number;
+};
+
+/** Return the start/end of the one planned charge occurrence visible on the
+ * forecast's forward axis. The next occurrence is intentionally omitted:
+ * the planner is recalculated from the next live SOC before it is applied. */
+export function forecastChargeMarkers(
+  generatedAt: number,
+  window: PlannerChargeWindow,
+): ForecastChargeMarker[] {
+  const parseMinutes = (value: string): number | null => {
+    const match = /^(\d{2}):(\d{2})$/.exec(value);
+    if (!match) return null;
+    const hour = Number(match[1]);
+    const minute = Number(match[2]);
+    return hour <= 23 && minute <= 59 ? hour * 60 + minute : null;
+  };
+  const startMin = parseMinutes(window.start);
+  const endMin = parseMinutes(window.end);
+  if (startMin == null || endMin == null || endMin === startMin) return [];
+
+  const horizonEnd = generatedAt + FORECAST_HORIZON_HOURS * 3600;
+  const firstDate = new Date(generatedAt * 1000);
+  firstDate.setHours(0, 0, 0, 0);
+  if (window.tomorrow) firstDate.setDate(firstDate.getDate() + 1);
+
+  const start = new Date(firstDate);
+  start.setHours(Math.floor(startMin / 60), startMin % 60, 0, 0);
+  const end = new Date(firstDate);
+  end.setHours(Math.floor(endMin / 60), endMin % 60, 0, 0);
+  if (endMin < startMin) end.setDate(end.getDate() + 1);
+  const startTimestamp = start.getTime() / 1000;
+  const endTimestamp = end.getTime() / 1000;
+  const markers: ForecastChargeMarker[] = [];
+  if (startTimestamp >= generatedAt && startTimestamp <= horizonEnd) {
+    markers.push({ kind: 'start', timestamp: startTimestamp });
+  }
+  if (endTimestamp >= generatedAt && endTimestamp <= horizonEnd) {
+    markers.push({ kind: 'end', timestamp: endTimestamp });
+  }
+  return markers;
+}
+
+/** Keep the hypothetical SOC line only through the start of the next
+ * scheduled charge occurrence. The next occurrence will be recalculated
+ * from a fresh live SOC, so extending tonight's result beyond that point
+ * would imply a repeated charge that has not been planned. */
+export function truncateSeriesAtNextChargeStart(
+  series: [number, number][],
+  generatedAt: number,
+  window: PlannerChargeWindow,
+): [number, number][] {
+  const parseMinutes = (value: string): number | null => {
+    const match = /^(\d{2}):(\d{2})$/.exec(value);
+    if (!match) return null;
+    const hour = Number(match[1]);
+    const minute = Number(match[2]);
+    return hour <= 23 && minute <= 59 ? hour * 60 + minute : null;
+  };
+  const startMin = parseMinutes(window.start);
+  const endMin = parseMinutes(window.end);
+  if (startMin == null || endMin == null || startMin === endMin) return series;
+
+  const firstDate = new Date(generatedAt * 1000);
+  firstDate.setHours(0, 0, 0, 0);
+  if (window.tomorrow) firstDate.setDate(firstDate.getDate() + 1);
+  const firstStart = new Date(firstDate);
+  firstStart.setHours(Math.floor(startMin / 60), startMin % 60, 0, 0);
+  if (firstStart.getTime() / 1000 < generatedAt) firstStart.setDate(firstStart.getDate() + 1);
+  const nextStart = new Date(firstStart);
+  nextStart.setDate(nextStart.getDate() + 1);
+  const nextStartTimestamp = nextStart.getTime() / 1000;
+  return series.filter(([timestamp]) => timestamp <= nextStartTimestamp);
+}
+
 export type PlanRecommendation =
   | {
       kind: 'charge';
       window: PlannerChargeWindow;
-      /** AC kWh to draw from the grid, per night. */
+      /** AC kWh to draw from the grid during the next charge cycle. */
       kwh: number;
       /** The user's configured minimum-allowable SOC, %. */
       min_soc_pct: number;
@@ -208,7 +347,7 @@ export type PlanRecommendation =
       current_soc_pct: number;
       rationale: string;
       /** Per-hour SOC trajectory when the recommended charge is applied
-       *  to every window occurrence in the forward horizon, in the
+       *  during the next window, ending at the following cheap period, in the
        *  `[timestamp_unix, soc_pct]` shape used by the forecast
        *  payload's `battery.hours`. The Forecast tab's Battery
        *  projection chart draws it as a dashed line next to the
@@ -246,6 +385,7 @@ export type PlanApply = {
     end_hour: number;
     end_minute: number;
     target_soc: number;
+    charge_rate_percent: 100;
   };
   timed_charge: { enabled: true };
 } | null;

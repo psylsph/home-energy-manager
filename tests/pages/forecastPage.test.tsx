@@ -34,11 +34,17 @@ const { fullPayload, planPayload } = vi.hoisted(() => {
     ],
     solar_today_remaining_kwh: 10,
     solar_tomorrow_kwh: 18.4,
-    consumption: Array.from({ length: 24 }, (_: number, hour: number) => ({
+    consumption_weekday: Array.from({ length: 24 }, (_: number, hour: number) => ({
       hour,
       kwh: 0.5,
       p25: 0.4,
       p75: 0.6,
+    })),
+    consumption_weekend: Array.from({ length: 24 }, (_: number, hour: number) => ({
+      hour,
+      kwh: 0.75,
+      p25: 0.6,
+      p75: 0.9,
     })),
     consumption_days_observed: 14,
     consumption_sufficient: true,
@@ -62,18 +68,18 @@ const { fullPayload, planPayload } = vi.hoisted(() => {
         data: {
           recommendation: {
             kind: 'charge',
-            window: { start: '02:00', end: '05:00', rate: 0.09, tomorrow: true },
+            window: { start: '02:00', end: '03:36', rate: 0.09, tomorrow: true },
             kwh: 3.2,
             min_soc_pct: 20,
             observed_min_soc_pct: 4,
             after_min_soc_pct: 80,
-            charge_target_soc_pct: 80,
+            charge_target_soc_pct: 100,
             current_soc_pct: 25,
             rationale: 'Battery is at 25% now and solar leaves it at 30%. Charging 3.2 kWh in the 9.0p window lifts it to 80%.',
             // Real planner payload (planner v2): the trajectory when the
-            // recommended charge is applied to every window occurrence —
-            // the Battery tab chart renders this as a dashed overlay on
-            // top of the recorded SOC history.
+            // The recommendation covers only the next charge occurrence;
+            // the Battery tab chart stops the dashed overlay at the next
+            // cheap-period start so the following plan can be recalculated.
             with_charge_series: [
               [1_700_003_600, 30],
               [1_700_007_200, 35],
@@ -90,9 +96,10 @@ const { fullPayload, planPayload } = vi.hoisted(() => {
               enabled: true,
               start_hour: 2,
               start_minute: 0,
-              end_hour: 5,
-              end_minute: 0,
-              target_soc: 80,
+              end_hour: 3,
+              end_minute: 36,
+              target_soc: 100,
+              charge_rate_percent: 100,
             },
             timed_charge: { enabled: true },
           },
@@ -132,15 +139,65 @@ vi.mock('recharts', () => ({
   ResponsiveContainer: ({ children }: { children: React.ReactNode }) => (
     <div>{children}</div>
   ),
-  AreaChart: () => <div />,
-  Area: () => <div />,
-  Line: () => <div />,
-  LineChart: () => <div />,
+  AreaChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  ComposedChart: ({ children }: { children: React.ReactNode }) => (
+    <div data-testid="forecast-composed-chart">{children}</div>
+  ),
+  Area: ({ name }: { name?: string }) => <div>{name}</div>,
+  Line: ({ name, stroke, strokeWidth }: {
+    name?: string;
+    stroke?: string;
+    strokeWidth?: number;
+  }) => (
+    <div data-stroke={stroke} data-stroke-width={strokeWidth}>{name}</div>
+  ),
+  LineChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  Customized: ({
+    horizontalValues,
+    strokeWidth,
+  }: {
+    horizontalValues?: number[];
+    strokeWidth?: number;
+  }) => (
+    <div
+      data-testid="forecast-grid-overlay"
+      data-horizontal-values={JSON.stringify(horizontalValues ?? [])}
+      data-stroke-width={strokeWidth}
+    />
+  ),
   XAxis: () => <div />,
   YAxis: () => <div />,
   Tooltip: () => <div />,
-  CartesianGrid: () => <div />,
-  ReferenceLine: () => <div />,
+  CartesianGrid: ({
+    horizontalValues,
+    strokeWidth,
+  }: {
+    horizontalValues?: number[];
+    strokeWidth?: number;
+  }) => (
+    <div
+      data-testid="forecast-cartesian-grid"
+      data-horizontal-values={JSON.stringify(horizontalValues ?? [])}
+      data-stroke-width={strokeWidth}
+    />
+  ),
+  ReferenceLine: ({ x, label }: {
+    x?: number;
+    label?: { value?: string };
+  }) => (
+    <div
+      data-testid={x == null ? 'forecast-reference-line' : 'forecast-charge-marker'}
+      data-x={x}
+      data-label={label?.value}
+    />
+  ),
+  Legend: ({ payload }: {
+    payload?: Array<{ value?: string }>;
+  }) => payload ? (
+    <div data-testid="forecast-charge-legend">
+      {payload.map((entry) => entry.value).join(' ')}
+    </div>
+  ) : <div />,
 }));
 
 globalThis.ResizeObserver = class {
@@ -158,6 +215,7 @@ const apiPostMocked = vi.mocked(apiPost);
 describe('ForecastPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useInverterStore.setState({ gridLineWeight: 'standard' });
   });
 
   afterEach(() => {
@@ -180,16 +238,89 @@ describe('ForecastPage', () => {
     expect(screen.queryByTestId('forecast-status-banner')).toBeNull();
   });
 
-  it('renders the consumption profile on the same forward axis as the solar and battery charts', async () => {
+  it('renders all forecast charts across the 72-hour forward axis', async () => {
     // The consumption chart is tiled onto the forward timestamps (the
     // solar series' axis) instead of a midnight-anchored 24 h "typical
-    // day" — the title drops the "typical day" wording and the three
-    // charts start at the same "now".
+    // day" — the three charts start at the same "now" and cover the full
+    // 72-hour forecast horizon.
     render(<ForecastPage />);
     await waitFor(() => {
-      expect(screen.getByText('Consumption profile (next 48 h)')).toBeTruthy();
+      expect(screen.getByText('Solar forecast (next 72 h)')).toBeTruthy();
+      expect(screen.getByText('Consumption profile (next 72 h)')).toBeTruthy();
+      expect(screen.getByText('Battery projection (next 72 h)')).toBeTruthy();
     });
     expect(screen.queryByText('Consumption profile (typical day)')).toBeNull();
+  });
+
+  it('labels consumption bands as low and high estimates', async () => {
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect(screen.getByText('Weekday low estimate')).toBeTruthy();
+      expect(screen.getByText('Weekday high estimate')).toBeTruthy();
+      expect(screen.getByText('Weekend low estimate')).toBeTruthy();
+      expect(screen.getByText('Weekend high estimate')).toBeTruthy();
+      expect(screen.getByText('Weekday median')).toBeTruthy();
+      expect(screen.getByText('Weekend median')).toBeTruthy();
+      expect(screen.queryByText('Median consumption')).toBeNull();
+    });
+  });
+
+  it('draws distinct weekday and weekend medians without a duplicate composite line', async () => {
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect(screen.getByText('Weekday median')).toBeTruthy();
+    });
+    const weekday = screen.getByText('Weekday median');
+    const weekend = screen.getByText('Weekend median');
+    expect(weekday.compareDocumentPosition(weekend) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByText('Median consumption')).toBeNull();
+  });
+
+  it('uses a composed chart so both consumption median lines render and join the tooltip', async () => {
+    render(<ForecastPage />);
+    expect(await screen.findByTestId('forecast-composed-chart')).toBeTruthy();
+    expect(screen.getByText('Weekday median')).toBeTruthy();
+    expect(screen.getByText('Weekend median')).toBeTruthy();
+  });
+
+  it('aligns horizontal grid lines with the displayed y-axis ticks', async () => {
+    render(<ForecastPage />);
+    await waitFor(() => {
+      const grids = screen.getAllByTestId('forecast-cartesian-grid');
+      expect(grids[0].getAttribute('data-horizontal-values')).toBe(
+        JSON.stringify([0, 0.5, 1, 1.5, 2, 2.5]),
+      );
+      expect(grids[1].getAttribute('data-horizontal-values')).toBe(
+        JSON.stringify([0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]),
+      );
+    });
+  });
+
+  it('uses the Chart Grid Lines preference for forecast grids', async () => {
+    useInverterStore.setState({ gridLineWeight: 'subtle' });
+    render(<ForecastPage />);
+    await waitFor(() => {
+      const grids = screen.getAllByTestId('forecast-cartesian-grid');
+      expect(grids[0].getAttribute('data-stroke-width')).toBe('1');
+      expect(grids[1].getAttribute('data-stroke-width')).toBe('1');
+      expect(grids[2].getAttribute('data-stroke-width')).toBe('1');
+      const overlays = screen.getAllByTestId('forecast-grid-overlay');
+      expect(overlays[0].getAttribute('data-stroke-width')).toBe('1');
+      expect(overlays[1].getAttribute('data-stroke-width')).toBe('1');
+    });
+  });
+
+  it('keeps horizontal grid lines visible over the consumption bands', async () => {
+    render(<ForecastPage />);
+    await waitFor(() => {
+      const overlays = screen.getAllByTestId('forecast-grid-overlay');
+      expect(overlays[0].getAttribute('data-horizontal-values')).toBe(
+        JSON.stringify([0, 0.5, 1, 1.5, 2, 2.5]),
+      );
+      expect(overlays[1].getAttribute('data-horizontal-values')).toBe(
+        JSON.stringify([0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]),
+      );
+    });
   });
 
   it('keeps the consumption chart on a now-anchored axis even with no solar or battery series', async () => {
@@ -210,7 +341,7 @@ describe('ForecastPage', () => {
     });
     render(<ForecastPage />);
     await waitFor(() => {
-      expect(screen.getByText('Consumption profile (next 48 h)')).toBeTruthy();
+      expect(screen.getByText('Consumption profile (next 72 h)')).toBeTruthy();
     });
     expect(screen.queryByText('Not enough history yet.')).toBeNull();
   });
@@ -220,7 +351,11 @@ describe('ForecastPage', () => {
       if (path === '/api/forecast') {
         return {
           ok: true,
-          data: { ...fullPayload(), consumption: [] },
+          data: {
+            ...fullPayload(),
+            consumption_weekday: [],
+            consumption_weekend: [],
+          },
         };
       }
       if (path === '/api/forecast/plan') return planPayload('no_plan');
@@ -290,6 +425,7 @@ describe('ForecastPage', () => {
 describe('ForecastPage plan card', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useInverterStore.setState({ gridLineWeight: 'standard' });
   });
 
   afterEach(() => {
@@ -307,7 +443,7 @@ describe('ForecastPage plan card', () => {
       expect(screen.getByTestId('forecast-plan').textContent).toMatch(/3\.2/);
     });
     expect(screen.getByTestId('forecast-plan').textContent).toMatch(/02:00/);
-    expect(screen.getByTestId('forecast-plan').textContent).toMatch(/05:00/);
+    expect(screen.getByTestId('forecast-plan').textContent).toMatch(/03:36/);
     const apply = screen.getByTestId('forecast-plan-apply');
     await waitFor(() => {
       fireEvent.click(apply);
@@ -315,8 +451,47 @@ describe('ForecastPage plan card', () => {
     // apply-charge-slot: the slot is dispatched first.
     const slotCall = apiPostMocked.mock.calls.find((c) => c[0] === '/api/control/charge-slot');
     expect(slotCall).toBeTruthy();
+    expect(slotCall?.[1]).toMatchObject({
+      end_hour: 3,
+      end_minute: 36,
+      target_soc: 100,
+      charge_rate_percent: 100,
+    });
     const timedCall = apiPostMocked.mock.calls.find((c) => c[0] === '/api/control/timed-charge');
     expect(timedCall).toBeTruthy();
+  });
+
+  it('shows inverter-write progress while applying the charge plan', async () => {
+    let resolveSlot: ((value: unknown) => void) | undefined;
+    apiPostMocked.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveSlot = resolve;
+    }));
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    const apply = await screen.findByTestId('forecast-plan-apply');
+    fireEvent.click(apply);
+    expect(await screen.findByRole('status')).toHaveTextContent('Applying changes to inverter');
+    expect(apply).toBeDisabled();
+    resolveSlot?.({ ok: true });
+  });
+
+  it('shows a retryable error when applying the charge plan fails', async () => {
+    apiPostMocked.mockRejectedValueOnce(new Error('inverter busy'));
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    const apply = await screen.findByTestId('forecast-plan-apply');
+    fireEvent.click(apply);
+    expect(await screen.findByRole('alert')).toHaveTextContent('inverter busy');
+    expect(apply).toHaveTextContent('Retry Apply');
+    expect(apply).not.toBeDisabled();
   });
 
   it('draws a dashed with-charge line on the Battery projection chart when the plan recommends a charge', async () => {
@@ -333,25 +508,39 @@ describe('ForecastPage plan card', () => {
       expect(container.textContent).toMatch(/SOC if overnight charge enacted/);
     });
     expect(container.textContent).toMatch(/02:00/);
-    expect(container.textContent).toMatch(/05:00/);
+    expect(container.textContent).toMatch(/03:36/);
     expect(container.textContent).toMatch(/3\.2 kWh/);
     // The caption is a footer INSIDE the card's <section> (the card's
     // rounded background), after the fixed-height chart area — not a
     // child of the h-56 chart div where it would overflow the card and
     // render outside the background.
     const card = screen
-      .getByText('Battery projection')
+      .getByText('Battery projection (next 72 h)')
       .closest('section');
     expect(card).not.toBeNull();
     const caption = container.textContent?.match(/SOC if overnight charge enacted/);
     expect(caption).toBeTruthy();
-    const chartDiv = screen.getByText('Battery projection').parentElement
+    const chartDiv = screen.getByText('Battery projection (next 72 h)').parentElement
       ?.querySelector('div.h-56');
     expect(chartDiv).not.toBeNull();
     // Caption paragraph lives after the chart div, still inside section.
     const footer = card?.querySelector('div.mt-2 > p');
     expect(footer?.textContent).toMatch(/SOC if overnight charge enacted/);
     expect(footer?.textContent).toMatch(/3\.2 kWh/);
+  });
+
+  it('marks the next charge start and end on the Battery projection chart', async () => {
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect(screen.getAllByTestId('forecast-charge-marker')).toHaveLength(2);
+    });
+    expect(screen.getByTestId('forecast-charge-legend').textContent).toMatch(/Charge start/);
+    expect(screen.getByTestId('forecast-charge-legend').textContent).toMatch(/Charge end/);
   });
 
   it('hides Apply when no charge is needed', async () => {
@@ -541,7 +730,7 @@ describe('ForecastPage issue #283 feedback fixes', () => {
     render(<ForecastPage />);
     await waitFor(() => {
       expect(
-        screen.getByText(/planner sizes the overnight charge so the battery never drops/i),
+        screen.getByText(/planner sizes the next overnight charge so the battery stays/i),
       ).toBeTruthy();
     });
   });
@@ -553,5 +742,71 @@ describe('ForecastPage issue #283 feedback fixes', () => {
         screen.getByText(/calibrated against 12 days of your history \(last 2 weeks\)/i),
       ).toBeTruthy();
     });
+  });
+});
+
+describe('ForecastPage plan cycle note', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
+  afterEach(() => {
+    cleanup();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
+
+  it('tells the user the plan covers one cycle and must be re-applied daily', async () => {
+    // Auto-refresh off (the default): the inverter repeats the applied
+    // slot nightly, so the note has to say tomorrow needs a re-apply.
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      if (path === '/api/settings') {
+        return { ok: true, data: { forecast_min_soc_pct: 20 } };
+      }
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    const note = await waitFor(() => screen.getByTestId('forecast-plan-cycle-note'));
+    expect(note.textContent).toMatch(/next charge cycle only/i);
+    expect(note.textContent).toMatch(/re-apply tomorrow/i);
+    expect(note.textContent).not.toMatch(/auto-refresh/i);
+  });
+
+  it('drops the daily re-apply wording when auto-refresh owns the slot', async () => {
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      if (path === '/api/settings') {
+        return {
+          ok: true,
+          data: { forecast_min_soc_pct: 20, forecast_plan_auto_refresh: true },
+        };
+      }
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    const note = await waitFor(() => screen.getByTestId('forecast-plan-cycle-note'));
+    expect(note.textContent).toMatch(/next charge cycle only/i);
+    expect(note.textContent).toMatch(/auto-refresh re-sizes charge slot 1/i);
+    expect(note.textContent).not.toMatch(/re-apply tomorrow/i);
+  });
+
+  it('does not show the cycle note when nothing is applied', async () => {
+    // No charge needed → no recurring slot → no daily-recalculation
+    // contract to explain.
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('no_charge_needed');
+      if (path === '/api/settings') {
+        return { ok: true, data: { forecast_min_soc_pct: 20 } };
+      }
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect(screen.getByText(/floor is held on solar alone/i)).toBeTruthy();
+    });
+    expect(screen.queryByTestId('forecast-plan-cycle-note')).toBeNull();
   });
 });

@@ -54,7 +54,7 @@ interface InverterState {
   panelGraphsYLockMax: number;
   /**
    * Grid line weight for the recharts `CartesianGrid` on every live history
-   * chart (Power, History, Battery tab, Solar tab). `'standard'` matches the
+   * chart (Power, History, Battery tab, Solar tab, Forecast). `'standard'` matches the
    * original 2-px dashed look; `'subtle'` drops to a hairline that sits
    * behind the data series (issue #111). Persisted to localStorage so the
    * user's choice survives reloads.

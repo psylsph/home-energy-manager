@@ -11,7 +11,7 @@
 //! valid when the two counter samples are ≤ 2 h apart, share the same
 //! local day (no midnight-reset artefacts), and are non-decreasing.
 
-use chrono::Timelike;
+use chrono::{Datelike, Timelike};
 
 /// Minimum distinct days of consumption history before the profile is
 /// reported as sufficient. A week captures at least one of every weekday.
@@ -44,12 +44,18 @@ pub struct ConsumptionHourBand {
 /// The fitted profile plus the sufficiency signal.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConsumptionProfile {
-    /// Exactly 24 entries indexed by local hour; `None` where no valid
-    /// delta was ever observed for that hour (the caller substitutes a
-    /// fallback rather than pretending the house uses nothing).
+    /// All-days fallback profile, exactly 24 entries indexed by local hour.
     pub hours: Vec<Option<ConsumptionHourBand>>,
+    /// Weekday profile, exactly 24 entries indexed by local hour.
+    pub weekday_hours: Vec<Option<ConsumptionHourBand>>,
+    /// Weekend profile, exactly 24 entries indexed by local hour.
+    pub weekend_hours: Vec<Option<ConsumptionHourBand>>,
     /// Distinct local days that contributed at least one valid delta.
     pub days_observed: u32,
+    /// Distinct weekdays that contributed at least one valid delta.
+    pub weekday_days_observed: u32,
+    /// Distinct weekend days that contributed at least one valid delta.
+    pub weekend_days_observed: u32,
 }
 
 impl ConsumptionProfile {
@@ -58,25 +64,64 @@ impl ConsumptionProfile {
         self.days_observed >= MIN_CONSUMPTION_DAYS
     }
 
-    /// Median kWh for a local hour, with the empty-bucket fallback: the
-    /// mean of the nearest non-empty neighbouring hours (searching both
-    /// directions), else 0 when the profile is entirely empty.
-    pub fn median_kwh_for_hour(&self, hour: u8) -> f64 {
+    /// Find a band for an hour, using the mean of the nearest non-empty
+    /// neighbouring hours when the requested bucket is empty.
+    fn nearest_band(
+        hours: &[Option<ConsumptionHourBand>],
+        hour: u8,
+    ) -> Option<ConsumptionHourBand> {
         let idx = hour as usize % 24;
-        if let Some(b) = &self.hours[idx] {
-            return b.median;
+        if let Some(band) = hours[idx] {
+            return Some(band);
         }
         for distance in 1..24 {
-            let left = self.hours[(idx + 24 - distance) % 24];
-            let right = self.hours[(idx + distance) % 24];
+            let left = hours[(idx + 24 - distance) % 24];
+            let right = hours[(idx + distance) % 24];
             match (left, right) {
-                (Some(l), Some(r)) => return (l.median + r.median) / 2.0,
-                (Some(l), None) => return l.median,
-                (None, Some(r)) => return r.median,
+                (Some(l), Some(r)) => {
+                    return Some(ConsumptionHourBand {
+                        hour: idx as u8,
+                        p25: (l.p25 + r.p25) / 2.0,
+                        median: (l.median + r.median) / 2.0,
+                        p75: (l.p75 + r.p75) / 2.0,
+                    });
+                }
+                (Some(band), None) | (None, Some(band)) => return Some(band),
                 (None, None) => continue,
             }
         }
-        0.0
+        None
+    }
+
+    /// Statistics for a local hour from the weekday or weekend profile.
+    /// If that day type has no observations, the all-days profile is used.
+    pub fn band_for_day_type(&self, hour: u8, is_weekend: bool) -> ConsumptionHourBand {
+        let specific = if is_weekend {
+            &self.weekend_hours
+        } else {
+            &self.weekday_hours
+        };
+        Self::nearest_band(specific, hour)
+            .or_else(|| Self::nearest_band(&self.hours, hour))
+            .unwrap_or(ConsumptionHourBand {
+                hour: hour % 24,
+                p25: 0.0,
+                median: 0.0,
+                p75: 0.0,
+            })
+    }
+
+    /// Median kWh for a local hour from the all-days profile, with the
+    /// empty-bucket fallback, else 0 when the profile is entirely empty.
+    pub fn median_kwh_for_hour(&self, hour: u8) -> f64 {
+        Self::nearest_band(&self.hours, hour)
+            .map(|band| band.median)
+            .unwrap_or(0.0)
+    }
+
+    /// Median kWh for a local hour from the weekday or weekend profile.
+    pub fn median_kwh_for_day_type(&self, hour: u8, is_weekend: bool) -> f64 {
+        self.band_for_day_type(hour, is_weekend).median
     }
 }
 
@@ -152,33 +197,52 @@ pub fn build_consumption_profile(rows: &[ConsumptionCounterRow]) -> ConsumptionP
         days.insert(day);
     }
 
-    // Per-hour-of-day statistics ACROSS days.
-    let mut buckets: Vec<Vec<f64>> = vec![Vec::new(); 24];
-    for ((_, hour), sum) in hour_sums {
-        buckets[hour as usize].push(sum);
+    // Per-hour-of-day statistics across all days, and separately across
+    // weekdays and weekends. Each value is one day's total for that hour;
+    // percentiles therefore describe day-to-day variation rather than poll
+    // cadence.
+    let mut all_buckets: Vec<Vec<f64>> = vec![Vec::new(); 24];
+    let mut weekday_buckets: Vec<Vec<f64>> = vec![Vec::new(); 24];
+    let mut weekend_buckets: Vec<Vec<f64>> = vec![Vec::new(); 24];
+    let mut weekday_days = std::collections::BTreeSet::new();
+    let mut weekend_days = std::collections::BTreeSet::new();
+    for ((day, hour), sum) in hour_sums {
+        all_buckets[hour as usize].push(sum);
+        if day.weekday().number_from_monday() >= 6 {
+            weekend_buckets[hour as usize].push(sum);
+            weekend_days.insert(day);
+        } else {
+            weekday_buckets[hour as usize].push(sum);
+            weekday_days.insert(day);
+        }
     }
 
-    let hours = buckets
-        .into_iter()
-        .enumerate()
-        .map(|(hour, mut sums)| {
-            if sums.is_empty() {
-                return None;
-            }
-            sums.sort_by(|a, b| a.partial_cmp(b).expect("sums are finite"));
-            let band = ConsumptionHourBand {
-                hour: hour as u8,
-                p25: percentile_sorted(&sums, 25.0),
-                median: percentile_sorted(&sums, 50.0),
-                p75: percentile_sorted(&sums, 75.0),
-            };
-            Some(band)
-        })
-        .collect();
+    let make_bands = |buckets: Vec<Vec<f64>>| {
+        buckets
+            .into_iter()
+            .enumerate()
+            .map(|(hour, mut sums)| {
+                if sums.is_empty() {
+                    return None;
+                }
+                sums.sort_by(|a, b| a.partial_cmp(b).expect("sums are finite"));
+                Some(ConsumptionHourBand {
+                    hour: hour as u8,
+                    p25: percentile_sorted(&sums, 25.0),
+                    median: percentile_sorted(&sums, 50.0),
+                    p75: percentile_sorted(&sums, 75.0),
+                })
+            })
+            .collect()
+    };
 
     ConsumptionProfile {
-        hours,
+        hours: make_bands(all_buckets),
+        weekday_hours: make_bands(weekday_buckets),
+        weekend_hours: make_bands(weekend_buckets),
         days_observed: days.len() as u32,
+        weekday_days_observed: weekday_days.len() as u32,
+        weekend_days_observed: weekend_days.len() as u32,
     }
 }
 
@@ -290,6 +354,26 @@ mod tests {
         assert!((band.p25 - 1.5).abs() < 1e-9);
         assert!((band.p75 - 3.0).abs() < 1e-9);
         assert_eq!(profile.days_observed, 3);
+    }
+
+    #[test]
+    fn median_profiles_split_weekdays_from_weekends() {
+        // Friday observations are deliberately lower than Saturday
+        // observations; mixing them would hide the different usage pattern.
+        let rows = vec![
+            row(local_ts(2025, 6, 6, 12, 0), 0.0), // Friday
+            row(local_ts(2025, 6, 6, 13, 0), 1.0),
+            row(local_ts(2025, 6, 7, 12, 0), 0.0), // Saturday
+            row(local_ts(2025, 6, 7, 13, 0), 10.0),
+            row(local_ts(2025, 6, 13, 12, 0), 0.0), // Friday
+            row(local_ts(2025, 6, 13, 13, 0), 3.0),
+            row(local_ts(2025, 6, 14, 12, 0), 0.0), // Saturday
+            row(local_ts(2025, 6, 14, 13, 0), 14.0),
+        ];
+        let profile = build_consumption_profile(&rows);
+
+        assert!((profile.median_kwh_for_day_type(12, false) - 2.0).abs() < 1e-9);
+        assert!((profile.median_kwh_for_day_type(12, true) - 12.0).abs() < 1e-9);
     }
 
     #[test]

@@ -3,6 +3,9 @@ import {
   Area,
   AreaChart,
   CartesianGrid,
+  ComposedChart,
+  Customized,
+  Legend,
   Line,
   LineChart,
   ReferenceLine,
@@ -15,10 +18,17 @@ import { apiGet, apiPost } from '../lib/api';
 import { timeAxisProps } from '../lib/chartAxis';
 import { tooltipStyleProps } from '../lib/chartTooltip';
 import { formatEnergy } from '../lib/format';
+import { getHistoryChartGridProps } from '../lib/historyRangeConfig';
 import {
   anchorSeriesAtNow,
+  FORECAST_HORIZON_HOURS,
+  forecastChargeMarkers,
+  truncateSeriesAtNextChargeStart,
+  formatForecastXAxisTick,
   forecastPlanTitle,
   forecastStatusMessages,
+  forecastXAxisTicks,
+  forecastYAxisScale,
   forwardHourTimestamps,
   shouldRefetchForecast,
   toBatteryChartData,
@@ -27,6 +37,7 @@ import {
   tomorrowSummary,
 } from '../lib/forecast';
 import type { ForecastData, PlanResponse } from '../lib/forecast';
+import type { InverterSnapshot } from '../lib/types';
 import { useInverterStore } from '../store/useInverterStore';
 
 /**
@@ -39,11 +50,6 @@ import { useInverterStore } from '../store/useInverterStore';
  * degradation state renders an explanation — never zeros pretending to be
  * a prediction.
  */
-
-function hourLabel(tsSeconds: number): string {
-  const d = new Date(tsSeconds * 1000);
-  return `${String(d.getHours()).padStart(2, '0')}:00`;
-}
 
 function ChartCard({
   title,
@@ -89,6 +95,123 @@ function SummaryTile({
   );
 }
 
+function ForecastApplyProgress() {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      data-testid="forecast-plan-progress"
+      className="pointer-events-none fixed inset-x-4 top-4 z-[100] mx-auto flex max-w-lg items-center gap-4 rounded-xl border-2 border-amber-200 bg-amber-400 px-5 py-4 text-slate-950 shadow-2xl ring-4 ring-black/20"
+    >
+      <span
+        aria-hidden="true"
+        className="h-7 w-7 shrink-0 animate-spin rounded-full border-4 border-current border-t-transparent"
+      />
+      <div>
+        <div className="text-base font-bold">Applying changes to inverter…</div>
+        <div className="mt-0.5 text-sm font-medium text-slate-800">
+          Scheduling the charge slot. This can take several seconds; please keep this page open.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type ForecastChargeSlot = NonNullable<PlanResponse['apply']>['charge_slot'];
+const FORECAST_CHARGE_CONFIRM_TIMEOUT_MS = 15_000;
+
+function forecastChargeSlotMatchesReadback(
+  snapshot: InverterSnapshot | null,
+  desired: ForecastChargeSlot,
+): boolean {
+  const actual = snapshot?.charge_slots[desired.slot - 1];
+  if (!actual) return false;
+  return actual.enabled === desired.enabled
+    && actual.start_hour === desired.start_hour
+    && actual.start_minute === desired.start_minute
+    && actual.end_hour === desired.end_hour
+    && actual.end_minute === desired.end_minute
+    && snapshot?.enable_charge === true;
+}
+
+/** Charge-slot writes are queued by the backend and applied by the poll loop.
+ * Keep the Forecast progress state up until a newer snapshot confirms the
+ * requested slot, matching the Control page's user-facing behaviour. */
+function waitForForecastChargeReadback(
+  desired: ForecastChargeSlot,
+  snapshotBeforeApply: InverterSnapshot,
+): Promise<void> {
+  return new Promise((resolve) => {
+    let unsubscribe = () => {};
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      unsubscribe();
+      resolve();
+    };
+    const check = () => {
+      const current = useInverterStore.getState().snapshot;
+      if (current !== snapshotBeforeApply && forecastChargeSlotMatchesReadback(current, desired)) {
+        finish();
+      }
+    };
+    const timeout = window.setTimeout(finish, FORECAST_CHARGE_CONFIRM_TIMEOUT_MS);
+    unsubscribe = useInverterStore.subscribe(check);
+    check();
+  });
+}
+
+type ForecastGridOverlayProps = {
+  offset?: { left: number; top: number; width: number; height: number };
+  yAxisMap?: Record<string, { scale?: (value: number) => number }>;
+  horizontalValues?: number[];
+  stroke?: string;
+  strokeWidth?: number;
+  strokeDasharray?: string;
+};
+
+/**
+ * Recharts paints Area fills after CartesianGrid. Drawing these explicit
+ * horizontal lines from Customized keeps the grid visible over translucent
+ * uncertainty bands, while the base CartesianGrid continues to provide the
+ * vertical lines.
+ */
+function ForecastGridOverlay({
+  offset,
+  yAxisMap,
+  horizontalValues = [],
+  stroke = 'rgba(255,255,255,0.08)',
+  strokeWidth = 1,
+  strokeDasharray,
+}: ForecastGridOverlayProps) {
+  const yAxis = Object.values(yAxisMap ?? {})[0];
+  if (!offset || !yAxis?.scale) return null;
+
+  return (
+    <g className="forecast-cartesian-grid-overlay" pointerEvents="none">
+      {horizontalValues.map((value) => {
+        const y = yAxis.scale?.(value);
+        if (y == null) return null;
+        return (
+          <line
+            key={value}
+            x1={offset.left}
+            y1={y}
+            x2={offset.left + offset.width}
+            y2={y}
+            stroke={stroke}
+            strokeWidth={strokeWidth}
+            strokeDasharray={strokeDasharray}
+          />
+        );
+      })}
+    </g>
+  );
+}
+
 export default function ForecastPage() {
   const [data, setData] = useState<ForecastData | null>(null);
   const [plan, setPlan] = useState<PlanResponse | null>(null);
@@ -100,7 +223,9 @@ export default function ForecastPage() {
   const [minSocSaving, setMinSocSaving] = useState(false);
   const [minSocError, setMinSocError] = useState<string | null>(null);
   const [minSocPct, setMinSocPct] = useState<number>(20);
+  const [planAutoRefresh, setPlanAutoRefresh] = useState<boolean>(false);
   const snapshot = useInverterStore((s) => s.snapshot);
+  const gridLineWeight = useInverterStore((state) => state.gridLineWeight);
   const lastRefetchRef = useRef<number>(0);
   const lastTriggerRef = useRef<{
     soc: number | null;
@@ -114,7 +239,7 @@ export default function ForecastPage() {
         apiGet<{ ok: boolean; data: PlanResponse }>('/api/forecast/plan'),
         apiGet<{
           ok: boolean;
-          data: { forecast_min_soc_pct?: number } & Record<string, unknown>;
+          data: { forecast_min_soc_pct?: number; forecast_plan_auto_refresh?: boolean } & Record<string, unknown>;
         }>('/api/settings'),
       ]);
       setData(forecastRes.data);
@@ -124,6 +249,7 @@ export default function ForecastPage() {
         setMinSocPctInput(String(v));
         setMinSocPct(v);
       }
+      setPlanAutoRefresh(settingsRes.data.forecast_plan_auto_refresh ?? false);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load forecast');
@@ -196,11 +322,15 @@ export default function ForecastPage() {
 
   const handleApply = async () => {
     if (!plan || !plan.apply) return;
+    const snapshotBeforeApply = useInverterStore.getState().snapshot;
     setApplyState('sending');
     setApplyError(null);
     try {
       await apiPost('/api/control/charge-slot', plan.apply.charge_slot);
       await apiPost('/api/control/timed-charge', plan.apply.timed_charge);
+      if (snapshotBeforeApply) {
+        await waitForForecastChargeReadback(plan.apply.charge_slot, snapshotBeforeApply);
+      }
       setApplyState('done');
     } catch (e) {
       setApplyState('error');
@@ -242,17 +372,20 @@ export default function ForecastPage() {
     : [];
   // Merge the planner's "if we follow the recommendation" trajectory onto
   // the battery projection so the Forecast tab's Battery projection chart
-  // can draw it as a second line — same x-axis (unix seconds), same
-  // horizon, one entry per forecast hour. `with_charge_series` is only
-  // present on a `charge` recommendation; anything else leaves the
-  // chart showing just the solar-only projection.
+  // can draw it as a second line — same x-axis (unix seconds). The
+  // hypothetical series ends at the next cheap-period start; anything
+  // after that must be based on a fresh recommendation.
   const withChargeSeries =
     plan?.recommendation?.kind === 'charge'
       ? // The what-if trajectory starts from the same live SOC at the
         // same generation time — anchor it too so both lines meet at
         // "now" and the divergence reads as the charge's effect.
         anchorSeriesAtNow(
-          plan.recommendation.with_charge_series,
+          truncateSeriesAtNextChargeStart(
+            plan.recommendation.with_charge_series,
+            data.generated_at,
+            plan.recommendation.window,
+          ),
           data.generated_at,
           data.battery?.start_soc_pct ?? plan.recommendation.current_soc_pct,
         )
@@ -262,23 +395,53 @@ export default function ForecastPage() {
     return match ? { ...p, withCharge: match[1] } : { ...p, withCharge: undefined };
   });
   const hasWithCharge = withChargeSeries.length > 0;
+  const chargeMarkers =
+    plan?.recommendation?.kind === 'charge'
+      ? forecastChargeMarkers(data.generated_at, plan.recommendation.window)
+      : [];
   // The consumption profile is a typical-day hour-of-day series; tile it
   // onto the forward timestamps so all three charts share one x-axis —
   // same start (now), same horizon — instead of a midnight-anchored 24 h
   // view that can't be compared hour-for-hour against the projections.
   // Prefer the solar series' timestamps (the payload's forward axis),
   // fall back to the battery projection's, and generate a now-anchored
-  // 48 h axis only when both are empty (weather-off degraded state).
+  // 72 h axis only when both are empty (weather-off degraded state).
   const forwardTimestamps = solarChart.length > 0
     ? solarChart.map((p) => p.timestamp)
     : batteryChart.map((p) => p.timestamp);
-  const consumptionEmpty = data.consumption.length === 0;
+  const consumptionEmpty =
+    data.consumption_weekday.length === 0 && data.consumption_weekend.length === 0;
+  const consumptionTimestamps =
+    forwardTimestamps.length > 0
+      ? forwardTimestamps
+      : forwardHourTimestamps(FORECAST_HORIZON_HOURS);
   const consumptionChart = consumptionEmpty
     ? []
     : toConsumptionChartData(
-        data.consumption,
-        forwardTimestamps.length > 0 ? forwardTimestamps : forwardHourTimestamps(48),
+        data.consumption_weekday,
+        data.consumption_weekend,
+        consumptionTimestamps,
       );
+  const forecastAxisDomain: [number, number] = [
+    data.generated_at,
+    data.generated_at + FORECAST_HORIZON_HOURS * 3600,
+  ];
+  const forecastAxisTicks = forecastXAxisTicks(
+    forecastAxisDomain[0],
+    forecastAxisDomain[1],
+  );
+  const solarYAxis = forecastYAxisScale(
+    Math.max(0, ...solarChart.map((point) => point.high)),
+  );
+  const consumptionYAxis = forecastYAxisScale(
+    Math.max(
+      0,
+      ...consumptionChart.flatMap((point) => [
+        point.weekdayP75 ?? 0,
+        point.weekendP75 ?? 0,
+      ]),
+    ),
+  );
 
   return (
     <div className="flex flex-col gap-3 sm:gap-4 max-w-5xl">
@@ -312,7 +475,7 @@ export default function ForecastPage() {
         <div className="flex items-center gap-3">
           <label
             htmlFor="forecast-min-soc-input"
-            title="The planner never lets the battery drop below this percentage over the next 48 h"
+            title="The planner never lets the battery drop below this percentage over the next 72 h"
             className="text-text-primary text-sm font-sans font-medium"
           >
             Minimum battery level
@@ -341,8 +504,8 @@ export default function ForecastPage() {
           )}
         </div>
         <p className="text-xs text-text-secondary font-sans">
-          The planner sizes the overnight charge so the battery never drops
-          below this percentage across the next 48 h. Lower means less grid
+          The planner sizes the next overnight charge so the battery stays
+          above this percentage until the following cheap period. Lower means less grid
           import; higher keeps more backup in reserve.
         </p>
       </section>
@@ -437,11 +600,7 @@ export default function ForecastPage() {
               <span data-testid="forecast-plan-after-min">
                 {plan.recommendation.after_min_soc_pct.toFixed(0)}%
               </span>{' '}
-              (slot target{' '}
-              <span data-testid="forecast-plan-charge-target">
-                {Math.round(plan.recommendation.charge_target_soc_pct)}%
-              </span>
-              ) — about £
+              (charge rate 100%) — about £
               {(plan.recommendation.kwh * plan.recommendation.window.rate).toFixed(2)} of
               grid import.
             </p>
@@ -464,6 +623,7 @@ export default function ForecastPage() {
               <button
                 type="button"
                 data-testid="forecast-plan-apply"
+                aria-busy={applyState === 'sending'}
                 disabled={applyState === 'sending' || applyState === 'done'}
                 onClick={() => void handleApply()}
                 className="px-3 py-1.5 rounded-md bg-accent text-accent-on text-sm font-medium hover:opacity-90 disabled:opacity-50"
@@ -474,16 +634,28 @@ export default function ForecastPage() {
                 {applyState === 'error' && 'Retry Apply'}
               </button>
               {applyError && (
-                <span data-testid="forecast-plan-error" className="text-xs text-red-400">
+                <span data-testid="forecast-plan-error" role="alert" className="text-xs text-red-400">
                   {applyError}
                 </span>
               )}
             </div>
           )}
+          {plan.recommendation.kind === 'charge' && (
+            <p
+              data-testid="forecast-plan-cycle-note"
+              className="text-[11px] text-text-secondary"
+            >
+              This plan covers the next charge cycle only.{' '}
+              {planAutoRefresh
+                ? 'Auto-refresh re-sizes charge slot 1 from the live battery shortly before each cheap period — no daily re-apply needed.'
+                : 'The inverter repeats the applied slot every night, so re-apply tomorrow to keep it in step with the battery.'}
+            </p>
+          )}
+          {applyState === 'sending' && <ForecastApplyProgress />}
         </section>
       )}
 
-      <ChartCard title="Solar forecast (next 48 h)">
+      <ChartCard title="Solar forecast (next 72 h)">
         {solarChart.length === 0 ? (
           <div className="h-full flex items-center justify-center text-xs text-text-secondary">
             No forecast data yet.
@@ -491,18 +663,42 @@ export default function ForecastPage() {
         ) : (
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={solarChart}>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
+              <CartesianGrid
+                {...getHistoryChartGridProps(gridLineWeight)}
+                horizontal={false}
+                horizontalValues={solarYAxis.ticks}
+              />
+              <Customized
+                component={ForecastGridOverlay}
+                {...getHistoryChartGridProps(gridLineWeight)}
+                horizontalValues={solarYAxis.ticks}
+              />
               <XAxis
                 dataKey="timestamp"
-                tickFormatter={hourLabel}
                 stroke="#94a3b8"
                 fontSize={10}
                 {...timeAxisProps}
+                domain={forecastAxisDomain}
+                ticks={forecastAxisTicks}
+                tickFormatter={formatForecastXAxisTick}
+                interval={0}
+                minTickGap={0}
+                angle={-30}
+                textAnchor="end"
+                height={42}
               />
-              <YAxis stroke="#94a3b8" fontSize={10} unit="kWh" width={48} />
+              <YAxis
+                stroke="#94a3b8"
+                fontSize={10}
+                unit="kWh"
+                width={48}
+                domain={[0, solarYAxis.max]}
+                ticks={solarYAxis.ticks}
+                allowDataOverflow
+              />
               <Tooltip
                 {...tooltipStyleProps}
-                labelFormatter={(ts) => hourLabel(Number(ts))}
+                labelFormatter={(ts) => formatForecastXAxisTick(Number(ts))}
                 formatter={(value: number | string) => `${Number(value).toFixed(2)} kWh`}
               />
               <Area
@@ -535,60 +731,112 @@ export default function ForecastPage() {
         )}
       </ChartCard>
 
-      <ChartCard title="Consumption profile (next 48 h)">
+      <ChartCard title="Consumption profile (next 72 h)">
         {consumptionEmpty || consumptionChart.length === 0 ? (
           <div className="h-full flex items-center justify-center text-xs text-text-secondary">
             Not enough history yet.
           </div>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={consumptionChart}>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
+            <ComposedChart data={consumptionChart}>
+              <CartesianGrid
+                {...getHistoryChartGridProps(gridLineWeight)}
+                horizontal={false}
+                horizontalValues={consumptionYAxis.ticks}
+              />
+              <Customized
+                component={ForecastGridOverlay}
+                {...getHistoryChartGridProps(gridLineWeight)}
+                horizontalValues={consumptionYAxis.ticks}
+              />
               <XAxis
                 dataKey="timestamp"
-                tickFormatter={hourLabel}
                 stroke="#94a3b8"
                 fontSize={10}
                 {...timeAxisProps}
+                domain={forecastAxisDomain}
+                ticks={forecastAxisTicks}
+                tickFormatter={formatForecastXAxisTick}
+                interval={0}
+                minTickGap={0}
+                angle={-30}
+                textAnchor="end"
+                height={42}
               />
-              <YAxis stroke="#94a3b8" fontSize={10} unit="kWh" width={48} />
+              <YAxis
+                stroke="#94a3b8"
+                fontSize={10}
+                unit="kWh"
+                width={48}
+                domain={[0, consumptionYAxis.max]}
+                ticks={consumptionYAxis.ticks}
+                allowDataOverflow
+              />
               <Tooltip
                 {...tooltipStyleProps}
-                labelFormatter={(ts) => hourLabel(Number(ts))}
+                labelFormatter={(ts) => formatForecastXAxisTick(Number(ts))}
                 formatter={(value: number | string) => `${Number(value).toFixed(2)} kWh`}
               />
               <Area
                 type="monotone"
-                dataKey="p25"
+                dataKey="weekdayP25"
                 stroke="none"
                 fill="#38bdf8"
                 fillOpacity={0.15}
-                name="p25"
+                name="Weekday low estimate"
+                legendType="none"
               />
               <Area
                 type="monotone"
-                dataKey="p75"
+                dataKey="weekdayP75"
                 stroke="none"
                 fill="#38bdf8"
                 fillOpacity={0.15}
-                name="p75"
+                name="Weekday high estimate"
+                legendType="none"
               />
               <Area
                 type="monotone"
-                dataKey="kwh"
+                dataKey="weekendP25"
+                stroke="none"
+                fill="#a78bfa"
+                fillOpacity={0.15}
+                name="Weekend low estimate"
+                legendType="none"
+              />
+              <Area
+                type="monotone"
+                dataKey="weekendP75"
+                stroke="none"
+                fill="#a78bfa"
+                fillOpacity={0.15}
+                name="Weekend high estimate"
+                legendType="none"
+              />
+              <Line
+                type="monotone"
+                dataKey="weekday"
                 stroke="#38bdf8"
-                fill="#38bdf8"
-                fillOpacity={0.2}
+                strokeWidth={2}
                 dot={false}
-                name="Median"
+                name="Weekday median"
               />
-            </AreaChart>
+              <Line
+                type="monotone"
+                dataKey="weekend"
+                stroke="#a78bfa"
+                strokeWidth={2}
+                dot={false}
+                name="Weekend median"
+              />
+              <Legend />
+            </ComposedChart>
           </ResponsiveContainer>
         )}
       </ChartCard>
 
       <ChartCard
-        title="Battery projection"
+        title="Battery projection (next 72 h)"
         footer={
           hasWithCharge && plan?.recommendation?.kind === 'charge' ? (
             <p className="text-[10px] text-text-secondary/70 font-sans leading-snug">
@@ -611,18 +859,36 @@ export default function ForecastPage() {
         ) : (
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={batteryChartWithPlan}>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
+              <CartesianGrid {...getHistoryChartGridProps(gridLineWeight)} />
+              {chargeMarkers.map((marker) => {
+                const colour = marker.kind === 'start' ? '#34d399' : '#fbbf24';
+                return (
+                  <ReferenceLine
+                    key={`${marker.kind}-${marker.timestamp}`}
+                    x={marker.timestamp}
+                    stroke={colour}
+                    strokeDasharray="4 3"
+                  />
+                );
+              })}
               <XAxis
                 dataKey="timestamp"
-                tickFormatter={hourLabel}
                 stroke="#94a3b8"
                 fontSize={10}
                 {...timeAxisProps}
+                domain={forecastAxisDomain}
+                ticks={forecastAxisTicks}
+                tickFormatter={formatForecastXAxisTick}
+                interval={0}
+                minTickGap={0}
+                angle={-30}
+                textAnchor="end"
+                height={42}
               />
               <YAxis stroke="#94a3b8" fontSize={10} domain={[0, 100]} unit="%" width={44} />
               <Tooltip
                 {...tooltipStyleProps}
-                labelFormatter={(ts) => hourLabel(Number(ts))}
+                labelFormatter={(ts) => formatForecastXAxisTick(Number(ts))}
                 formatter={(value: number | string, name: string) =>
                   Number.isFinite(Number(value)) ? [`${Number(value).toFixed(0)}%`, name] : ['—', name]
                 }
@@ -661,6 +927,14 @@ export default function ForecastPage() {
                   dot={false}
                   name="If charge enacted"
                   connectNulls
+                />
+              )}
+              {chargeMarkers.length > 0 && (
+                <Legend
+                  payload={[
+                    { value: 'Charge start', type: 'line', color: '#34d399' },
+                    { value: 'Charge end', type: 'line', color: '#fbbf24' },
+                  ]}
                 />
               )}
             </LineChart>

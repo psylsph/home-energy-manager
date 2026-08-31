@@ -400,9 +400,8 @@ const MIDNIGHT_GAP_CREDIT_THRESHOLD_SECS: i64 = 4 * 3600;
 /// user's local day), but nothing downstream silently depends on the
 /// ambient zone and tests can pin a fixed offset.
 fn same_local_day<TZ: chrono::TimeZone>(a_secs: i64, b_secs: i64, tz: &TZ) -> bool {
-    let date = |s: i64| {
-        chrono::DateTime::from_timestamp(s, 0).map(|dt| dt.with_timezone(tz).date_naive())
-    };
+    let date =
+        |s: i64| chrono::DateTime::from_timestamp(s, 0).map(|dt| dt.with_timezone(tz).date_naive());
     match (date(a_secs), date(b_secs)) {
         (Some(a), Some(b)) => a == b,
         _ => false,
@@ -1978,7 +1977,8 @@ impl HistoryDb {
                     baseline = Some(raw);
                 }
                 Some(base) => {
-                    let day_changed = last_ts.is_some_and(|lt| !same_local_day(lt, ts, &chrono::Local));
+                    let day_changed =
+                        last_ts.is_some_and(|lt| !same_local_day(lt, ts, &chrono::Local));
                     let (delta, new_baseline) = if day_changed {
                         // Counter reset at local midnight. In continuous data
                         // the first reading of the new day is ~0, so this is

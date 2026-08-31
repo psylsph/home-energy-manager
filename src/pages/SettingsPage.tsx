@@ -330,6 +330,9 @@ export default function SettingsPage() {
   // (90 / 95) and converted to 0–1 ratios on save.
   const [forecastChargeEffPct, setForecastChargeEffPct] = useState<string>('90');
   const [forecastDischargeEffPct, setForecastDischargeEffPct] = useState<string>('95');
+  // Forecast plan auto-refresh (issue #283): the backend re-sizes charge
+  // slot 1 from the live SOC before each cheap period. Opt-in.
+  const [forecastPlanAutoRefresh, setForecastPlanAutoRefresh] = useState<boolean>(false);
   const [solarCtArrays, setSolarCtArrays] = useState<
     { meter_address: number; name: string; rated_kw: string }[]
   >([]);
@@ -449,6 +452,7 @@ export default function SettingsPage() {
             ? String(Math.round(s.forecast_discharge_efficiency * 100))
             : '95',
         );
+        setForecastPlanAutoRefresh(s.forecast_plan_auto_refresh ?? false);
         setPv2RatedKw(
           s.pv2_rated_kw != null && s.pv2_rated_kw > 0 ? String(s.pv2_rated_kw) : '',
         );
@@ -1015,6 +1019,30 @@ export default function SettingsPage() {
       setCheckForUpdates(previous);
       const msg = e instanceof Error ? e.message : String(e);
       flash(`Failed to update update-checking: ${msg}`, false);
+    }
+  };
+
+  // Forecast plan auto-refresh. Persist-only — the poll loop reads the
+  // flag each cycle and re-sizes charge slot 1 before each cheap period
+  // (or clears it when the fresh plan needs no charge). Saved immediately
+  // rather than with the Solar section's Save button so handing charge
+  // slot 1 over to the planner (or taking it back) is explicit and
+  // instant.
+  const handleForecastPlanAutoRefreshToggle = async (next: boolean) => {
+    const previous = forecastPlanAutoRefresh;
+    setForecastPlanAutoRefresh(next);
+    try {
+      await apiPost('/api/settings', { forecast_plan_auto_refresh: next });
+      flash(
+        next
+          ? 'Plan auto-refresh on — the planner now keeps charge slot 1 in step with the battery'
+          : 'Plan auto-refresh off',
+        true,
+      );
+    } catch (e) {
+      setForecastPlanAutoRefresh(previous);
+      const msg = e instanceof Error ? e.message : String(e);
+      flash(`Failed to update plan auto-refresh: ${msg}`, false);
     }
   };
 
@@ -1661,6 +1689,30 @@ export default function SettingsPage() {
               Default 95. Round-trip with charge efficiency ≈ 85.5%.
             </span>
           </div>
+          <div className="flex items-start justify-between gap-3 pt-1">
+            <div className="flex flex-col gap-1">
+              <span className="text-text-primary text-sm font-sans font-medium">
+                Auto-refresh charge plan
+              </span>
+              <span className="text-text-secondary text-xs font-sans">
+                Re-sizes charge slot 1 from the live battery shortly before each
+                cheap period, and clears it when no charge is needed. The
+                inverter otherwise repeats the last applied slot every night.
+                Takes ownership of charge slot 1.
+              </span>
+            </div>
+            <Toggle
+              checked={forecastPlanAutoRefresh}
+              onChange={(v) => void handleForecastPlanAutoRefreshToggle(v)}
+              ariaLabel="Auto-refresh charge plan"
+            />
+          </div>
+          <span
+            data-testid="forecast-plan-auto-refresh-state"
+            className="text-text-secondary text-xs font-sans"
+          >
+            {forecastPlanAutoRefresh ? 'On — charge slot 1 is managed by the planner' : 'Off'}
+          </span>
         </div>
 
         {/* External CT meter arrays (AC-coupled / separate inverters). */}
@@ -2274,6 +2326,7 @@ export default function SettingsPage() {
               ['solar', 'Solar'],
               ['meters', 'Meters'],
               ['history', 'History'],
+              ['forecast', 'Forecast'],
               ...(octopusKeyConfigured ? [['octopus', 'Octopus'] as const] : []),
               ['control', 'Control'],
             ] as const).map(([key, label]) => (
@@ -2359,14 +2412,14 @@ export default function SettingsPage() {
 
         {/* ── Sub-section: Chart Grid Lines ── */}
         {/* Two-weight control for the recharts `CartesianGrid` on the Power,
-            History, Battery tab, and Solar tab charts. Issue #111: the
+            History, Battery, Solar, and Forecast charts. Issue #111: the
             default 2-px dashed grid competes with the data series for
             visual attention; users bothered by that can drop to a hairline.
             Defaults to 'standard' so existing users see no change. */}
         <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
           <h3 className="text-text-primary text-sm font-sans font-medium">Chart Grid Lines</h3>
           <p className="text-text-secondary text-xs font-sans">
-            Grid line weight on the Power, History, Battery, and Solar charts.
+            Grid line weight on the Power, History, Battery, Solar, and Forecast charts.
             Standard matches the data series thickness; subtle is a hairline that sits behind it.
           </p>
           <div className="flex gap-2">

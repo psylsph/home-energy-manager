@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import {
   anchorSeriesAtNow,
+  forecastXAxisTicks,
+  forecastYAxisScale,
+  forecastChargeMarkers,
+  truncateSeriesAtNextChargeStart,
+  formatForecastXAxisTick,
   forecastPlanTitle,
   forecastStatusMessages,
   forwardHourTimestamps,
@@ -49,43 +54,164 @@ describe('toConsumptionChartData', () => {
   const ts = (y: number, m: number, d: number, h: number) =>
     new Date(y, m, d, h, 0, 0).getTime() / 1000;
 
-  it('tiles the typical-day profile onto the forward timestamps by local hour-of-day', () => {
-    const consumption = [
+  it('selects the weekday or weekend median profile for each forward date', () => {
+    const weekday = [
       { hour: 6, kwh: 0.4, p25: 0.3, p75: 0.5 },
-      { hour: 18, kwh: 1.2, p25: 1.0, p75: 1.4 },
     ];
-    const points = toConsumptionChartData(consumption, [
-      ts(2024, 5, 15, 6),
-      ts(2024, 5, 15, 18),
+    const weekend = [
+      { hour: 6, kwh: 1.4, p25: 1.2, p75: 1.6 },
+    ];
+    const points = toConsumptionChartData(weekday, weekend, [
+      ts(2024, 5, 14, 6), // Friday
+      ts(2024, 5, 15, 6), // Saturday
     ]);
     expect(points).toEqual([
-      { timestamp: ts(2024, 5, 15, 6), kwh: 0.4, p25: 0.3, p75: 0.5 },
-      { timestamp: ts(2024, 5, 15, 18), kwh: 1.2, p25: 1.0, p75: 1.4 },
+      {
+        timestamp: ts(2024, 5, 14, 6),
+        weekday: 0.4,
+        weekdayP25: 0.3,
+        weekdayP75: 0.5,
+        weekend: null,
+        weekendP25: null,
+        weekendP75: null,
+      },
+      {
+        timestamp: ts(2024, 5, 15, 6),
+        weekday: null,
+        weekdayP25: null,
+        weekdayP75: null,
+        weekend: 1.4,
+        weekendP25: 1.2,
+        weekendP75: 1.6,
+      },
     ]);
   });
 
-  it('repeats the same hour-of-day band on subsequent days (the profile is a typical day, the window spans several)', () => {
-    const consumption = [{ hour: 2, kwh: 0.25, p25: 0.2, p75: 0.3 }];
+  it('falls back to the matching profile’s zero values when an hour is absent', () => {
+    const weekday = [{ hour: 2, kwh: 0.25, p25: 0.2, p75: 0.3 }];
     const day1 = ts(2024, 5, 15, 2);
-    const day2 = ts(2024, 5, 16, 2);
-    const points = toConsumptionChartData(consumption, [day1, day2]);
-    expect(points[0].kwh).toBe(0.25);
-    expect(points[1].kwh).toBe(0.25);
+    const day2 = ts(2024, 5, 17, 2);
+    const points = toConsumptionChartData(weekday, [], [day1, day2]);
+    expect(points[0].weekday).toBe(null);
+    expect(points[1].weekday).toBe(0.25);
+    expect(points[0].weekend).toBe(0);
     expect(points[1].timestamp).toBe(day2);
   });
 
   it('yields zeros for hours with no observed data', () => {
     const points = toConsumptionChartData(
       [{ hour: 6, kwh: 0.4, p25: 0.3, p75: 0.5 }],
+      [],
       [ts(2024, 5, 15, 9)],
     );
     expect(points).toEqual([
-      { timestamp: ts(2024, 5, 15, 9), kwh: 0, p25: 0, p75: 0 },
+      {
+        timestamp: ts(2024, 5, 15, 9),
+        weekday: null,
+        weekdayP25: null,
+        weekdayP75: null,
+        weekend: 0,
+        weekendP25: 0,
+        weekendP75: 0,
+      },
     ]);
   });
 
   it('returns an empty series when there are no forward timestamps', () => {
-    expect(toConsumptionChartData([{ hour: 6, kwh: 1, p25: 1, p75: 1 }], [])).toEqual([]);
+    expect(toConsumptionChartData([{ hour: 6, kwh: 1, p25: 1, p75: 1 }], [], [])).toEqual([]);
+  });
+});
+
+describe('forecastXAxisTicks', () => {
+  it('provides dated ticks every 12 hours across the 72-hour horizon', () => {
+    const start = new Date(2026, 7, 31, 12, 0, 0).getTime() / 1000;
+    const end = start + 72 * 3600;
+    const ticks = forecastXAxisTicks(start, end);
+
+    expect(ticks).toHaveLength(7);
+    expect(ticks).toEqual(Array.from({ length: 7 }, (_, i) => start + i * 12 * 3600));
+    expect(formatForecastXAxisTick(start)).toMatch(/31 Aug 12:00/);
+  });
+});
+
+describe('forecastYAxisScale', () => {
+  it('chooses clean, evenly spaced ticks for both large and small ranges', () => {
+    expect(forecastYAxisScale(27)).toEqual({
+      max: 30,
+      ticks: [0, 5, 10, 15, 20, 25, 30],
+    });
+    expect(forecastYAxisScale(30.01)).toEqual({
+      max: 35,
+      ticks: [0, 5, 10, 15, 20, 25, 30, 35],
+    });
+    expect(forecastYAxisScale(2.4)).toEqual({
+      max: 2.5,
+      ticks: [0, 0.5, 1, 1.5, 2, 2.5],
+    });
+  });
+});
+
+describe('forecastChargeMarkers', () => {
+  it('returns only the next charge start and end markers', () => {
+    const generatedAt = new Date(2026, 7, 31, 22, 0, 0).getTime() / 1000;
+    const markers = forecastChargeMarkers(generatedAt, {
+      start: '02:00',
+      end: '03:36',
+      rate: 0.09,
+      tomorrow: true,
+    });
+
+    expect(markers).toHaveLength(2);
+    expect(markers[0]).toEqual({
+      kind: 'start',
+      timestamp: new Date(2026, 8, 1, 2, 0, 0).getTime() / 1000,
+    });
+    expect(markers[1]).toEqual({
+      kind: 'end',
+      timestamp: new Date(2026, 8, 1, 3, 36, 0).getTime() / 1000,
+    });
+  });
+
+  it('places the end marker on the following day for a cross-midnight window', () => {
+    const generatedAt = new Date(2026, 7, 31, 22, 0, 0).getTime() / 1000;
+    const markers = forecastChargeMarkers(generatedAt, {
+      start: '23:30',
+      end: '05:30',
+      rate: 0.07,
+      tomorrow: false,
+    });
+
+    expect(markers).toEqual([
+      {
+        kind: 'start',
+        timestamp: new Date(2026, 7, 31, 23, 30, 0).getTime() / 1000,
+      },
+      {
+        kind: 'end',
+        timestamp: new Date(2026, 8, 1, 5, 30, 0).getTime() / 1000,
+      },
+    ]);
+  });
+
+  it('truncates the hypothetical series at the following charge start', () => {
+    const generatedAt = new Date(2026, 7, 31, 19, 0, 0).getTime() / 1000;
+    const firstStart = new Date(2026, 7, 31, 23, 30, 0).getTime() / 1000;
+    const nextStart = new Date(2026, 8, 1, 23, 30, 0).getTime() / 1000;
+    const series: [number, number][] = [
+      [generatedAt, 12],
+      [firstStart, 20],
+      [nextStart, 30],
+      [nextStart + 3600, 40],
+    ];
+
+    expect(
+      truncateSeriesAtNextChargeStart(series, generatedAt, {
+        start: '23:30',
+        end: '05:30',
+        rate: 0.07,
+        tomorrow: false,
+      }),
+    ).toEqual(series.slice(0, 3));
   });
 });
 
@@ -192,7 +318,8 @@ describe('tomorrowSummary', () => {
     solar: [],
     solar_today_remaining_kwh: 10,
     solar_tomorrow_kwh: 18.4,
-    consumption: [],
+    consumption_weekday: [],
+    consumption_weekend: [],
     consumption_days_observed: 14,
     consumption_sufficient: true,
     consumption_tomorrow_kwh: 11.2,

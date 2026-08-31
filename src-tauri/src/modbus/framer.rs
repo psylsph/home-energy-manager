@@ -591,7 +591,10 @@ mod tests {
             }
         }
         assert!(hits_ffff, "crc16 must be able to produce 0xFFFF");
-        assert!(hits_zero, "crc16 must be able to produce 0x0000 (wraparound)");
+        assert!(
+            hits_zero,
+            "crc16 must be able to produce 0x0000 (wraparound)"
+        );
     }
 
     #[test]

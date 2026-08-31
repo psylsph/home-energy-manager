@@ -353,6 +353,39 @@ async fn settings_default_payload_shape() {
 }
 
 // ====================================================================
+// Forecast plan auto-refresh setting
+// ====================================================================
+
+#[tokio::test]
+async fn settings_round_trips_forecast_plan_auto_refresh() {
+    let router = fresh_router();
+    let (status, body) = get_json(&router, "/api/settings").await;
+    assert_eq!(status, StatusCode::OK);
+    // Opt-in: a fresh install must not let the backend rewrite charge
+    // slots on its own.
+    assert_eq!(
+        body["data"]["forecast_plan_auto_refresh"],
+        Value::Bool(false),
+        "auto-refresh must default to off"
+    );
+
+    let (status, body) = post_json(
+        &router,
+        "/api/settings",
+        &json!({ "forecast_plan_auto_refresh": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = get_json(&router, "/api/settings").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["data"]["forecast_plan_auto_refresh"],
+        Value::Bool(true),
+        "the toggle must persist"
+    );
+}
+
+// ====================================================================
 // GET /api/logs and PUT /api/log-level
 // ====================================================================
 
@@ -1888,7 +1921,11 @@ async fn forecast_plan_endpoint_recommends_overnight_charge() {
     let now = chrono::Local::now();
     let now_ts = now.timestamp();
     let hour_start = now_ts - now_ts.rem_euclid(3600);
-    for h in 0..48i64 {
+    // The full 72 h planning horizon, so the forward series always holds
+    // TWO cheap-window occurrences (the charged one plus the next start
+    // the one-cycle plan stops at) no matter what time of day the suite
+    // runs at.
+    for h in 0..73i64 {
         let ts = hour_start + h * 3600;
         db.insert_forecast_values(&[ForecastValueRow {
             timestamp: ts,
@@ -1972,7 +2009,23 @@ async fn forecast_plan_endpoint_recommends_overnight_charge() {
     assert_eq!(rec["kind"], Value::String("charge".to_string()));
     let window = rec["window"].as_object().expect("window");
     assert_eq!(window["start"], serde_json::json!("02:00"));
-    assert_eq!(window["end"], serde_json::json!("05:00"));
+    // One-cycle sizing: the slot is the SHORTEST max-rate window that
+    // holds the 20% floor until the next cheap-period start, so the end
+    // sits inside the cheap period (strictly after its start, at or
+    // before its end). The exact minute is hour-of-day dependent — the
+    // handler reads the real clock against the seeded forward series —
+    // so the deterministic exact-minute minimality is pinned by the
+    // planner unit tests instead (fixed fixtures, injectable `now_ts`).
+    let end = window["end"].as_str().expect("window end string");
+    let (end_h, end_m) = {
+        let parts: Vec<u32> = end.split(':').map(|p| p.parse().expect("HH:MM")).collect();
+        (parts[0], parts[1])
+    };
+    let end_min = end_h * 60 + end_m;
+    assert!(
+        end_min > 2 * 60 && end_min <= 5 * 60,
+        "window end {end} must fall inside the 02:00–05:00 cheap period"
+    );
     let kwh = rec["kwh"].as_f64().expect("kwh");
     // The window's deliverable ceiling is 3 kW × 3 h.
     assert!(kwh > 0.0 && kwh <= 9.0 + 1e-6, "kwh = {kwh}");
@@ -2007,28 +2060,18 @@ async fn forecast_plan_endpoint_recommends_overnight_charge() {
     assert!(rec["export_tomorrow_with_charge_kwh"]
         .as_f64()
         .is_some_and(|v| v >= 0.0));
-    // The Apply payload mirrors what the Control page posts. The slot's
-    // charge target is the SOC the re-simulated plan says the battery
-    // must REACH in the window (`charge_target_soc_pct`, clamped to the
-    // 4–100 register range and rounded up) — NOT the min-soc floor. A
-    // slot targeted at the floor stops charging as soon as it's
-    // touched and the battery crashes back below the floor later in
-    // the day, which is the exact failure the planner exists to fix.
+    // The Apply payload uses the inverter's maximum charge rate for the
+    // shortened slot duration the plan sized. Target SOC 100 means the
+    // inverter must not stop early at an SOC threshold; after the slot
+    // ends, normal Eco behaviour resumes for the rest of the cheap
+    // period. The payload must mirror the recommendation's window
+    // exactly, whatever minute the bisection landed on.
     let apply = body["data"]["apply"].as_object().expect("apply");
-    let charge_target = rec["charge_target_soc_pct"]
-        .as_f64()
-        .expect("charge_target_soc_pct");
-    let min_soc = rec["min_soc_pct"].as_f64().expect("min_soc_pct");
-    assert!(
-        charge_target >= min_soc,
-        "charge target {charge_target} must be at least the {min_soc} floor"
-    );
-    let expected_target = charge_target.clamp(4.0, 100.0).ceil() as u64;
     // The planner's re-simulated trajectory ("SOC if the recommended
     // charge is enacted") is what the Battery tab chart plots as a
-    // dashed overlay on top of the recorded SOC history. It must
-    // cover the same horizon as the uncharged projection and never
-    // drop below it for the same timestamp.
+    // dashed overlay on top of the recorded SOC history. It ends at
+    // the next cheap-period start so the following charge can be
+    // recalculated from a fresh live SOC.
     let with_charge_series = rec["with_charge_series"]
         .as_array()
         .expect("with_charge_series");
@@ -2037,10 +2080,9 @@ async fn forecast_plan_endpoint_recommends_overnight_charge() {
     let uncharged_series = forecast.1["data"]["battery"]["hours"]
         .as_array()
         .expect("battery.hours");
-    assert_eq!(
-        with_charge_series.len(),
-        uncharged_series.len(),
-        "with_charge_series should cover the same horizon as the uncharged battery projection"
+    assert!(
+        with_charge_series.len() < uncharged_series.len(),
+        "with_charge_series should end before the next cheap-period charge"
     );
     for (i, (charged, uncharged)) in with_charge_series
         .iter()
@@ -2063,8 +2105,9 @@ async fn forecast_plan_endpoint_recommends_overnight_charge() {
             "slot": 1,
             "enabled": true,
             "start_hour": 2, "start_minute": 0,
-            "end_hour": 5, "end_minute": 0,
-            "target_soc": expected_target,
+            "end_hour": end_h, "end_minute": end_m,
+            "target_soc": 100,
+            "charge_rate_percent": 100,
         })
     );
     assert_eq!(

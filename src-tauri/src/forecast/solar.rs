@@ -45,9 +45,9 @@ pub struct SolarForecast {
 /// How many complete past days of modelled radiation to request so the
 /// performance-ratio calibration has history to learn from.
 pub const PAST_DAYS: u32 = 14;
-/// How many forward days to request — covers the 48 h planning horizon
-/// with a day of slack at hourly resolution.
-pub const FORECAST_DAYS: u32 = 3;
+/// How many calendar days to request. Open-Meteo's forecast window starts at
+/// midnight, so four days are needed to provide 72 hours from any time today.
+pub const FORECAST_DAYS: u32 = 4;
 
 /// Builds the Open-Meteo URL for the hourly solar forecast request.
 ///
@@ -219,9 +219,10 @@ mod tests {
         assert!(url.contains("longitude=-0.13"));
         assert!(url.contains("hourly=shortwave_radiation,direct_radiation,cloud_cover"));
         // 14 modelled past days feed the performance-ratio calibration;
-        // 3 forward days cover the 48 h planning horizon with slack.
+        // 4 calendar days are needed to cover the next 72 h from any time
+        // of day; Open-Meteo's forecast_days window starts at midnight.
         assert!(url.contains("past_days=14"));
-        assert!(url.contains("forecast_days=3"));
+        assert!(url.contains("forecast_days=4"));
         // UTC keeps the timestamp parse tz-free like the weather module.
         assert!(url.contains("timezone=UTC"));
     }

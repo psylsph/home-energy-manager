@@ -27,6 +27,7 @@ const PAGES_DIR = resolve(process.cwd(), 'src/pages');
 const CONSUMER_FILES: { path: string; varName: string }[] = [
   { path: resolve(COMPONENTS_DIR, 'BatterySocChart.tsx'), varName: 'gridLineWeight' },
   { path: resolve(COMPONENTS_DIR, 'SolarPowerChart.tsx'), varName: 'gridLineWeight' },
+  { path: resolve(PAGES_DIR, 'ForecastPage.tsx'), varName: 'gridLineWeight' },
   { path: resolve(PAGES_DIR, 'HistoryPage.tsx'), varName: 'gridLineWeight' },
   { path: resolve(PAGES_DIR, 'PowerPage.tsx'), varName: 'gridLineWeight' },
 ];

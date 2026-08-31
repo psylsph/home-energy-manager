@@ -383,6 +383,26 @@ describe('<SettingsPage/> — page shell & hydration', () => {
         });
       });
     });
+
+    it('offers the Forecast panel and persists hiding it', async () => {
+      // The Forecast tab was missing from the Panel Visibility list even
+      // though the router already treats it as hideable — a user could not
+      // hide it from the bottom navigation bar.
+      mountApiMocks();
+      render(<SettingsPage />);
+      const forecastCheckbox = await screen.findByRole('checkbox', { name: 'Forecast' });
+      expect((forecastCheckbox as HTMLInputElement).checked).toBe(true);
+
+      fireEvent.click(forecastCheckbox);
+      expect((forecastCheckbox as HTMLInputElement).checked).toBe(false);
+      fireEvent.click(screen.getByRole('button', { name: 'Save Panel Visibility' }));
+
+      await waitFor(() => {
+        expect(apiPostMock).toHaveBeenCalledWith('/api/settings', {
+          hidden_panels: ['forecast'],
+        });
+      });
+    });
   });
 
   describe('Octopus gas unit', () => {

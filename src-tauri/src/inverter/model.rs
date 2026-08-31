@@ -1061,6 +1061,11 @@ pub struct InverterSnapshot {
     /// clients that don't read this field still work.
     #[serde(default)]
     pub agile_scope: crate::settings::AgileScope,
+    /// True when the Forecast plan's nightly auto-refresh is enabled: the
+    /// backend re-sizes charge slot 1 from the live SOC shortly before each
+    /// cheap period (the Forecast page uses this to tailor the plan note).
+    #[serde(default)]
+    pub forecast_plan_auto_refresh: bool,
     /// Battery calibration stage (0=off, 5=balance). Only meaningful for legacy Gen1/Gen2/Polar devices.
     #[serde(default)]
     pub battery_calibration_stage: u8,

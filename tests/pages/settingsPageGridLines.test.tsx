@@ -129,6 +129,12 @@ describe('<SettingsPage/> — Chart Grid Lines sub-section (issue #111)', () => 
       expect(subtleBtn.querySelector('svg')).not.toBeNull();
     });
 
+    it('describes the Forecast chart as using the setting', async () => {
+      render(<SettingsPage />);
+      await screen.findByRole('heading', { name: 'Chart Grid Lines', level: 3 });
+      expect(screen.getByText(/Power, History, Battery, Solar, and Forecast charts/)).toBeDefined();
+    });
+
     it('marks Standard as the default selected preset', async () => {
       render(<SettingsPage />);
       const standardBtn = await screen.findByRole('button', { name: /Standard/i });

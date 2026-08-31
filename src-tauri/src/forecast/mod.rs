@@ -13,10 +13,11 @@
 pub mod calibration;
 pub mod consumption;
 pub mod planner;
+pub mod refresh;
 pub mod simulate;
 pub mod solar;
 
-use chrono::{DateTime, Local, Timelike};
+use chrono::{DateTime, Datelike, Local, Timelike};
 
 use crate::forecast::calibration::calibrate_performance_ratio_detailed;
 use crate::forecast::consumption::build_consumption_profile;
@@ -27,7 +28,7 @@ use crate::inverter::model::InverterSnapshot;
 use crate::settings::Settings;
 
 /// How often the radiation forecast is refreshed. Open-Meteo's European
-/// models update hourly, so three hours is plenty for a 48 h planning
+/// models update hourly, so three hours is plenty for a 72 h planning
 /// horizon while staying far inside the free tier's fair-use envelope.
 pub const SOLAR_FORECAST_FETCH_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(3 * 60 * 60);
@@ -72,6 +73,23 @@ pub struct ForecastConsumptionHour {
     pub p75: f64,
 }
 
+fn consumption_series(
+    profile: &crate::forecast::consumption::ConsumptionProfile,
+    is_weekend: bool,
+) -> Vec<ForecastConsumptionHour> {
+    (0..24u8)
+        .map(|hour| {
+            let band = profile.band_for_day_type(hour, is_weekend);
+            ForecastConsumptionHour {
+                hour,
+                kwh: band.median,
+                p25: band.p25,
+                p75: band.p75,
+            }
+        })
+        .collect()
+}
+
 /// Battery projection over the forward window.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ForecastBattery {
@@ -98,9 +116,12 @@ pub struct ForecastPayload {
     pub solar: Vec<ForecastSolarHour>,
     pub solar_today_remaining_kwh: f64,
     pub solar_tomorrow_kwh: f64,
-    /// The 24 hour-of-day statistics (median + p25/p75), using the
-    /// nearest-neighbour fallback for unobserved hours.
-    pub consumption: Vec<ForecastConsumptionHour>,
+    /// The weekday hour-of-day statistics (median + p25/p75), using the
+    /// all-days nearest-neighbour fallback when weekday history is missing.
+    pub consumption_weekday: Vec<ForecastConsumptionHour>,
+    /// The weekend hour-of-day statistics (median + p25/p75), using the
+    /// all-days nearest-neighbour fallback when weekend history is missing.
+    pub consumption_weekend: Vec<ForecastConsumptionHour>,
     pub consumption_days_observed: u32,
     pub consumption_sufficient: bool,
     pub consumption_tomorrow_kwh: f64,
@@ -203,28 +224,14 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
     if !profile.sufficient() {
         status.push("insufficient_consumption_history".to_string());
     }
-    let consumption: Vec<ForecastConsumptionHour> = (0..24u8)
-        .map(|hour| match &profile.hours[hour as usize] {
-            Some(band) => ForecastConsumptionHour {
-                hour,
-                kwh: band.median,
-                p25: band.p25,
-                p75: band.p75,
-            },
-            None => {
-                // Unobserved hour: the nearest-neighbour fallback value,
-                // with a degenerate band (we have no statistics for it).
-                let kwh = profile.median_kwh_for_hour(hour);
-                ForecastConsumptionHour {
-                    hour,
-                    kwh,
-                    p25: kwh,
-                    p75: kwh,
-                }
-            }
-        })
-        .collect();
-    let consumption_tomorrow_kwh: f64 = consumption.iter().map(|c| c.kwh).sum();
+    let consumption_weekday = consumption_series(&profile, false);
+    let consumption_weekend = consumption_series(&profile, true);
+    let tomorrow_is_weekend = tomorrow.weekday().number_from_monday() >= 6;
+    let consumption_tomorrow_kwh: f64 = if tomorrow_is_weekend {
+        consumption_weekend.iter().map(|c| c.kwh).sum()
+    } else {
+        consumption_weekday.iter().map(|c| c.kwh).sum()
+    };
 
     // --- battery projection -----------------------------------------------
     let mut battery = None;
@@ -240,13 +247,19 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
                 let sim_hours: Vec<SimHourInput> = solar
                     .iter()
                     .map(|s| {
-                        let hour = chrono::DateTime::from_timestamp(s.timestamp, 0)
-                            .map(|dt| dt.with_timezone(&chrono::Local).hour() as u8)
-                            .unwrap_or(0);
+                        let (hour, is_weekend) = chrono::DateTime::from_timestamp(s.timestamp, 0)
+                            .map(|dt| {
+                                let local = dt.with_timezone(&chrono::Local);
+                                (
+                                    local.hour() as u8,
+                                    local.weekday().number_from_monday() >= 6,
+                                )
+                            })
+                            .unwrap_or((0, false));
                         SimHourInput {
                             timestamp: s.timestamp,
                             solar_kwh: s.kwh,
-                            consumption_kwh: profile.median_kwh_for_hour(hour),
+                            consumption_kwh: profile.median_kwh_for_day_type(hour, is_weekend),
                         }
                     })
                     .collect();
@@ -293,7 +306,8 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
         solar,
         solar_today_remaining_kwh,
         solar_tomorrow_kwh,
-        consumption,
+        consumption_weekday,
+        consumption_weekend,
         consumption_days_observed: profile.days_observed,
         consumption_sufficient: profile.sufficient(),
         consumption_tomorrow_kwh,
@@ -890,7 +904,8 @@ mod tests {
             payload.solar_tomorrow_kwh
         );
         assert!(payload.solar_today_remaining_kwh > 0.0);
-        assert_eq!(payload.consumption.len(), 24);
+        assert_eq!(payload.consumption_weekday.len(), 24);
+        assert_eq!(payload.consumption_weekend.len(), 24);
         assert!(payload.consumption_sufficient);
         assert_eq!(payload.consumption_days_observed, 7);
         assert!((payload.consumption_tomorrow_kwh - 12.0).abs() < 0.01);

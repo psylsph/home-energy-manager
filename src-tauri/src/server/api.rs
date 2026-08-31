@@ -1155,6 +1155,9 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             // Min SOC the planner keeps the battery above across the
             // forward forecast window (issue #283, planner v2).
             "forecast_min_soc_pct": settings.forecast_min_soc_pct,
+            // Nightly auto-refresh of the Forecast plan's charge slot:
+            // re-sizes slot 1 from the live SOC before each cheap period.
+            "forecast_plan_auto_refresh": settings.forecast_plan_auto_refresh,
         }
         })),
     )
@@ -1382,6 +1385,12 @@ pub async fn update_settings(
                 return Err("Min SOC must be between 0 and 100 percent".to_string());
             }
             persist.forecast_min_soc_pct = v;
+        }
+        if let Some(v) = body
+            .get("forecast_plan_auto_refresh")
+            .and_then(|v| v.as_bool())
+        {
+            persist.forecast_plan_auto_refresh = v;
         }
         if let Some(arrays) = body.get("solar_arrays").and_then(|v| v.as_array()) {
             let parsed: Vec<crate::settings::SolarArrayConfig> = arrays
@@ -1837,13 +1846,9 @@ pub async fn set_mode(
                     // Durable stop/exit-pending marker moved atomically with
                     // the disable — same restart-recovery rationale as the
                     // timed_demand branch above.
-                    if let Err(error) = persist_timed_export_schedule_with_stop_pending(
-                        &state,
-                        false,
-                        slots,
-                        true,
-                    )
-                    .await
+                    if let Err(error) =
+                        persist_timed_export_schedule_with_stop_pending(&state, false, slots, true)
+                            .await
                     {
                         return error_response(&format!(
                             "Could not save the Timed Export schedule: {error}"
@@ -2990,6 +2995,30 @@ pub async fn set_charge_slot(
 
     let enabled = body["enabled"].as_bool().unwrap_or(true);
 
+    // Duration-based forecast plans use time as the control variable: the
+    // inverter must charge at the requested rate for the slot duration,
+    // rather than stopping early at an SOC target. The percentage is in the
+    // same display scale as the Control page (100 = maximum).
+    let requested_charge_rate_pct = match body.get("charge_rate_percent") {
+        None => None,
+        Some(value) => match value.as_u64() {
+            Some(rate) if rate <= 100 => Some(rate as u16),
+            _ => return error_response("charge_rate_percent must be 0-100"),
+        },
+    };
+    if enabled && requested_charge_rate_pct.is_some() {
+        let settings = crate::settings::Settings::load();
+        if settings.adaptive_charge_enabled || settings.adaptive_charge_saved_limit.is_some() {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "ok": false,
+                    "error": "Charge rate is controlled by Adaptive Charge",
+                })),
+            );
+        }
+    }
+
     let start_hour = body["start_hour"].as_u64().unwrap_or(0) as u8;
     let start_minute = body["start_minute"].as_u64().unwrap_or(0) as u8;
     let end_hour = body["end_hour"].as_u64().unwrap_or(0) as u8;
@@ -3036,114 +3065,155 @@ pub async fn set_charge_slot(
         encode_hhmm(end_hour, end_minute),
     );
 
-    let cmd = match charge_slot_command_for_device(device_type, slot, enabled, start, end) {
-        Ok(cmd) => cmd,
-        Err(e) => return error_response(&e),
-    };
-
-    match cmd.encode() {
-        Ok(mut writes) => {
-            // When enabling a slot, also set enable_charge = 1 so the
-            // inverter allows scheduled charging. Per the givenergy-modbus
-            // reference, enable_charge alone (without enable_charge_target)
-            // enables slot-based charging — NOT immediate force charge.
-            //
-            // We also clear enable_charge_target (HR 20) to 0 so that a
-            // stale force-charge flag from a previous operation doesn't
-            // cause snapshotForceCharge (enable_charge && enable_charge_target)
-            // to show as true when the user simply configured a schedule slot.
-            if enabled {
-                if !device_type.uses_three_phase_schedule_slots() {
-                    if target_soc >= 100 {
-                        // Charge to full ("charge to 100%" / default): no
-                        // target limit is needed, so clear the charge target
-                        // flag so a stale force-charge flag from a previous
-                        // operation doesn't keep snapshotForceCharge asserted.
-                        if let Ok(flag_writes) = (ControlCommand::ClearChargeTargetFlag).encode() {
-                            writes.extend(flag_writes);
-                        }
-                    } else if device_type.uses_extended_schedule_slots() {
-                        // Extended-slot models (Gen3+ hybrid, AIO, HV Gen3):
-                        // write the GLOBAL charge target SOC (HR 116) so models
-                        // that key off the global register — notably the
-                        // All-in-One, confirmed by GivTCP's setChargeSlot →
-                        // set_charge_target_only — actually honour the target.
-                        // Per-slot HR 242 is written below for models that use
-                        // it. The enable_charge_target flag (HR 20) is left
-                        // cleared so we don't arm immediate "winter mode"
-                        // force-charging.
-                        if let Ok(target_writes) = (ControlCommand::SetChargeTargetSocOnly {
-                            soc: target_soc as u16,
-                        })
-                        .encode()
-                        {
-                            writes.extend(target_writes);
-                        }
-                        if let Ok(flag_writes) = (ControlCommand::ClearChargeTargetFlag).encode() {
-                            writes.extend(flag_writes);
-                        }
-                    } else {
-                        // Non-extended-slot models (AC-coupled, Gen1/Gen2
-                        // hybrid) with an explicit target SOC < 100%: write
-                        // the target to the standard HR116 register and enable
-                        // the charge target flag. Without this, the user's
-                        // target SOC slider value is silently dropped — the
-                        // battery would charge to 100% regardless of what
-                        // target they set. SetChargeTargetSoc encodes both
-                        // HR20=1 (enable_charge_target) and HR116=<soc>.
-                        if let Ok(target_writes) = (ControlCommand::SetChargeTargetSoc {
-                            soc: target_soc as u16,
-                        })
-                        .encode()
-                        {
-                            writes.extend(target_writes);
-                        }
-                    }
-                    if let Ok(enable_writes) =
-                        (ControlCommand::SetEnableCharge { enabled: true }).encode()
-                    {
-                        writes.extend(enable_writes);
-                    }
-                }
-                // Write per-slot target SOC (extended registers HR 242+) when the
-                // inverter supports the HR240-299 schedule/target block.
-                if target_soc > 0 && device_type.uses_extended_schedule_slots() {
-                    if let Ok(target_writes) = (ControlCommand::SetChargeTargetSocSlot {
-                        slot,
-                        soc: target_soc as u16,
-                    })
-                    .encode()
-                    {
-                        writes.extend(target_writes);
-                    }
-                }
-            } else {
-                // Disabling a slot: the slot register write above (from
-                // `charge_slot_command_for_device`) has already zeroed the
-                // slot times, so the next decode will see the slot as
-                // unconfigured and the UI toggle will round-trip correctly
-                // (fix for issue #106: AIO charge slot toggle reverted to ON
-                // after navigating away and back). On single-phase models
-                // also clear the master enable_charge flag (HR 96) so the
-                // inverter actually stops honouring the (now-cleared) slot —
-                // this mirrors the `SetEnableCharge { enabled: true }` write
-                // in the `if enabled` branch above. Three-phase manages its
-                // enable bits via ThreePhaseForceCharge etc., not here.
-                if !device_type.uses_three_phase_schedule_slots() {
-                    if let Ok(disable_writes) =
-                        (ControlCommand::SetEnableCharge { enabled: false }).encode()
-                    {
-                        writes.extend(disable_writes);
-                    }
-                }
-            }
-
+    match build_charge_slot_writes(
+        device_type,
+        slot,
+        enabled,
+        start,
+        end,
+        target_soc,
+        requested_charge_rate_pct,
+    ) {
+        Ok(writes) => {
             tracing::info!("SetChargeSlot {} encoded: {:?}", slot, writes);
             queue_writes(&state, writes).await;
             ok_response(&format!("Charge slot {} configured", slot))
         }
-        Err(e) => error_response(&format!("Validation error: {}", e)),
+        Err(e) => error_response(&e),
     }
+}
+
+/// Build the register writes for a charge-slot save: the slot window
+/// itself plus, when enabling, the charge-target / enable-charge /
+/// rate-limit extras the Control endpoints have always applied. Shared by
+/// `POST /api/control/charge-slot` and the Forecast plan's nightly
+/// auto-refresh so the hand-applied and machine-refreshed slots can never
+/// diverge in wire shape.
+pub(crate) fn build_charge_slot_writes(
+    device_type: DeviceType,
+    slot: u8,
+    enabled: bool,
+    start: u16,
+    end: u16,
+    target_soc: u8,
+    requested_charge_rate_pct: Option<u16>,
+) -> Result<Vec<RegisterWrite>, String> {
+    let mut writes = charge_slot_command_for_device(device_type, slot, enabled, start, end)?
+        .encode()
+        .map_err(|e| format!("Validation error: {}", e))?;
+    // When enabling a slot, also set enable_charge = 1 so the
+    // inverter allows scheduled charging. Per the givenergy-modbus
+    // reference, enable_charge alone (without enable_charge_target)
+    // enables slot-based charging — NOT immediate force charge.
+    //
+    // We also clear enable_charge_target (HR 20) to 0 so that a
+    // stale force-charge flag from a previous operation doesn't
+    // cause snapshotForceCharge (enable_charge && enable_charge_target)
+    // to show as true when the user simply configured a schedule slot.
+    if enabled {
+        if !device_type.uses_three_phase_schedule_slots() {
+            if target_soc >= 100 {
+                // Charge to full ("charge to 100%" / default): no
+                // target limit is needed, so clear the charge target
+                // flag so a stale force-charge flag from a previous
+                // operation doesn't keep snapshotForceCharge asserted.
+                if let Ok(flag_writes) = (ControlCommand::ClearChargeTargetFlag).encode() {
+                    writes.extend(flag_writes);
+                }
+            } else if device_type.uses_extended_schedule_slots() {
+                // Extended-slot models (Gen3+ hybrid, AIO, HV Gen3):
+                // write the GLOBAL charge target SOC (HR 116) so models
+                // that key off the global register — notably the
+                // All-in-One, confirmed by GivTCP's setChargeSlot →
+                // set_charge_target_only — actually honour the target.
+                // Per-slot HR 242 is written below for models that use
+                // it. The enable_charge_target flag (HR 20) is left
+                // cleared so we don't arm immediate "winter mode"
+                // force-charging.
+                if let Ok(target_writes) = (ControlCommand::SetChargeTargetSocOnly {
+                    soc: target_soc as u16,
+                })
+                .encode()
+                {
+                    writes.extend(target_writes);
+                }
+                if let Ok(flag_writes) = (ControlCommand::ClearChargeTargetFlag).encode() {
+                    writes.extend(flag_writes);
+                }
+            } else {
+                // Non-extended-slot models (AC-coupled, Gen1/Gen2
+                // hybrid) with an explicit target SOC < 100%: write
+                // the target to the standard HR116 register and enable
+                // the charge target flag. Without this, the user's
+                // target SOC slider value is silently dropped — the
+                // battery would charge to 100% regardless of what
+                // target they set. SetChargeTargetSoc encodes both
+                // HR20=1 (enable_charge_target) and HR116=<soc>.
+                if let Ok(target_writes) = (ControlCommand::SetChargeTargetSoc {
+                    soc: target_soc as u16,
+                })
+                .encode()
+                {
+                    writes.extend(target_writes);
+                }
+            }
+            if let Ok(enable_writes) = (ControlCommand::SetEnableCharge { enabled: true }).encode()
+            {
+                writes.extend(enable_writes);
+            }
+        }
+        if let Some(rate_pct) = requested_charge_rate_pct {
+            let raw_limit = if device_type.uses_direct_charge_limit() {
+                rate_pct
+            } else {
+                (rate_pct as f64 / 2.0).round() as u16
+            };
+            let rate_command = if device_type.uses_three_phase_schedule_slots() {
+                ControlCommand::SetThreePhaseChargeLimit { limit: raw_limit }
+            } else if device_type.uses_direct_charge_limit() {
+                ControlCommand::SetAcChargeLimit { limit: raw_limit }
+            } else {
+                ControlCommand::SetChargeLimit { limit: raw_limit }
+            };
+            match rate_command.encode() {
+                Ok(rate_writes) => writes.extend(rate_writes),
+                Err(e) => return Err(format!("Validation error: {}", e)),
+            }
+        }
+        // Write per-slot target SOC (extended registers HR 242+) when the
+        // inverter supports the HR240-299 schedule/target block.
+        if target_soc > 0 && device_type.uses_extended_schedule_slots() {
+            if let Ok(target_writes) = (ControlCommand::SetChargeTargetSocSlot {
+                slot,
+                soc: target_soc as u16,
+            })
+            .encode()
+            {
+                writes.extend(target_writes);
+            }
+        }
+    } else {
+        // Disabling a slot: the slot register write above (from
+        // `charge_slot_command_for_device`) has already zeroed the
+        // slot times, so the next decode will see the slot as
+        // unconfigured and the UI toggle will round-trip correctly
+        // (fix for issue #106: AIO charge slot toggle reverted to ON
+        // after navigating away and back). On single-phase models
+        // also clear the master enable_charge flag (HR 96) so the
+        // inverter actually stops honouring the (now-cleared) slot —
+        // this mirrors the `SetEnableCharge { enabled: true }` write
+        // in the `if enabled` branch above. Three-phase manages its
+        // enable bits via ThreePhaseForceCharge etc., not here.
+        if !device_type.uses_three_phase_schedule_slots() {
+            if let Ok(disable_writes) =
+                (ControlCommand::SetEnableCharge { enabled: false }).encode()
+            {
+                writes.extend(disable_writes);
+            }
+        }
+    }
+
+    Ok(writes)
 }
 
 /// POST /api/control/discharge-slot — configure a discharge schedule slot.
@@ -3566,8 +3636,8 @@ pub async fn set_discharge_slot(
                         .map(|s| s.discharge_slots.to_vec())
                         .unwrap_or_default()
                 };
-                let schedule_enabled =
-                    pre_edit_enabled && desired_slots
+                let schedule_enabled = pre_edit_enabled
+                    && desired_slots
                         .iter()
                         .any(crate::inverter::model::ScheduleSlot::is_configured);
                 let in_window =
@@ -3612,13 +3682,9 @@ pub async fn set_discharge_slot(
                     // inverter's physical state, then roll back the desired
                     // schedule. The action lock guarantees no other mutation
                     // interfered while we held it.
-                    let compensation = compensate_discharge_slots(
-                        &state,
-                        device_type,
-                        &prior_physical,
-                        slot,
-                    )
-                    .await;
+                    let compensation =
+                        compensate_discharge_slots(&state, device_type, &prior_physical, slot)
+                            .await;
                     if compensation.is_ok() {
                         let pre_in_window = pre_edit_enabled
                             && should_arm_timed_export_now(&state, &pre_edit_desired).await;
@@ -6306,7 +6372,6 @@ pub async fn get_forecast(State(state): State<Arc<AppState>>) -> (StatusCode, Js
 /// from the UI through the existing control endpoints.
 pub async fn get_forecast_plan(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     use chrono::Local;
-    use chrono::Timelike;
 
     let snapshot = state.latest_snapshot.lock().await.clone();
     let history = state.history.lock().await.clone();
@@ -6327,10 +6392,12 @@ pub async fn get_forecast_plan(State(state): State<Arc<AppState>>) -> (StatusCod
         now: Local::now(),
     });
 
-    let now = Local::now();
-    let now_min: u16 = now.hour() as u16 * 60 + now.minute() as u16;
-
-    let rec = build_plan_payload(&forecast, &settings, snapshot.as_ref(), now_min);
+    let rec = build_plan_payload(
+        &forecast,
+        &settings,
+        snapshot.as_ref(),
+        Local::now().timestamp(),
+    );
     let apply = rec.get("apply").cloned().unwrap_or(serde_json::Value::Null);
     let recommendation = {
         let mut r = rec.as_object().cloned().unwrap_or_default();
@@ -6359,20 +6426,33 @@ fn build_plan_payload(
     forecast: &crate::forecast::ForecastPayload,
     settings: &crate::settings::Settings,
     snapshot: Option<&crate::inverter::model::InverterSnapshot>,
-    now_min: u16,
+    now_ts: i64,
 ) -> serde_json::Value {
+    plan_to_json_value(&compute_plan_recommendation(
+        forecast, settings, snapshot, now_ts,
+    ))
+}
+
+/// Compute the typed plan recommendation from a forecast payload. Shared
+/// by the API handler (which serialises it) and the poll loop's nightly
+/// auto-refresh (which acts on it), so the applied slot and the displayed
+/// plan can never come from different computations.
+pub(crate) fn compute_plan_recommendation(
+    forecast: &crate::forecast::ForecastPayload,
+    settings: &crate::settings::Settings,
+    snapshot: Option<&crate::inverter::model::InverterSnapshot>,
+    now_ts: i64,
+) -> crate::forecast::planner::PlanRecommendation {
     use crate::forecast::simulate::{
         SimHourInput, SimHourResult, SimulationOutput, SimulationParams,
     };
     let import_tariff = settings.import_tariff_config.as_ref();
 
     // No battery projection -> straight NoPlan.
-    let battery = match &forecast.battery {
-        Some(b) => b,
-        None => {
-            let _ = import_tariff;
-            return plan_only_payload_str("no battery projection available — connect to the inverter and wait for forecast data");
-        }
+    let Some(battery) = &forecast.battery else {
+        return crate::forecast::planner::PlanRecommendation::NoPlan {
+            reason: "no battery projection available — connect to the inverter and wait for forecast data".to_string(),
+        };
     };
 
     // Reserve floor + capacity from the snapshot/battery block; rate caps
@@ -6399,10 +6479,17 @@ fn build_plan_payload(
     // "deliverable in the window" clamp match the physics of the
     // original projection. Falls back to a 1C upper bound when the
     // live registers are unavailable.
-    let (max_charge_kw, max_discharge_kw) = snapshot
+    let (configured_charge_kw, max_discharge_kw) = snapshot
         .map(crate::forecast::battery_rate_limits_kw)
         .filter(|(c, d)| *c > 0.0 && *d > 0.0)
         .unwrap_or((battery.capacity_kwh, battery.capacity_kwh));
+    // The applied forecast schedule explicitly sets the charge limit to
+    // 100%, so duration must be calculated against the hardware maximum even
+    // when the inverter is currently configured below that rate.
+    let max_charge_kw = snapshot
+        .map(|s| s.max_battery_power_w as f64 / 1000.0)
+        .filter(|rate| *rate > 0.0)
+        .unwrap_or(configured_charge_kw);
     let eta_c = settings.forecast_charge_efficiency;
     let eta_d = settings.forecast_discharge_efficiency;
 
@@ -6425,20 +6512,24 @@ fn build_plan_payload(
     // trough falls AFTER the charge window — intermediate discharge
     // consumes the kWh before the trough is reached, leaving SOC
     // untouched. The forecast payload exposes `solar` (per-timestamp)
-    // and `consumption` (per-hour-of-day); pair them back up so the
+    // and the weekday/weekend consumption profiles (per-hour-of-day); pair them back up so the
     // re-simulation sees the same hourly inputs the original did.
     let sim_hours: Vec<SimHourInput> = forecast
         .solar
         .iter()
         .map(|s| {
-            let local_hour = chrono::DateTime::from_timestamp(s.timestamp, 0)
-                .map(|dt| dt.with_timezone(&chrono::Local).hour() as usize)
-                .unwrap_or(0);
-            let cons = forecast
-                .consumption
-                .get(local_hour)
-                .map(|c| c.kwh)
-                .unwrap_or(0.0);
+            let local = chrono::DateTime::from_timestamp(s.timestamp, 0)
+                .map(|dt| dt.with_timezone(&chrono::Local));
+            let local_hour = local.map(|dt| dt.hour() as usize).unwrap_or(0);
+            let is_weekend = local
+                .map(|dt| dt.weekday().number_from_monday() >= 6)
+                .unwrap_or(false);
+            let profile = if is_weekend {
+                &forecast.consumption_weekend
+            } else {
+                &forecast.consumption_weekday
+            };
+            let cons = profile.get(local_hour).map(|c| c.kwh).unwrap_or(0.0);
             SimHourInput {
                 timestamp: s.timestamp,
                 solar_kwh: s.kwh,
@@ -6469,11 +6560,10 @@ fn build_plan_payload(
         target_soc_pct: min_soc_pct,
         consumption_tomorrow_kwh: forecast.consumption_tomorrow_kwh,
         consumption_sufficient: forecast.consumption_sufficient,
-        now_min,
+        now_ts,
         current_soc_pct: snapshot.map(|s| s.soc as f64).unwrap_or(0.0),
     };
-    let rec = crate::forecast::planner::plan_overnight_charge(&inputs);
-    plan_to_json_value(&rec)
+    crate::forecast::planner::plan_overnight_charge(&inputs)
 }
 
 /// Serialise a `PlanRecommendation` into the JSON shape the UI/Apply
@@ -6510,15 +6600,10 @@ fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> ser
             import_tomorrow_with_charge_kwh,
             export_tomorrow_with_charge_kwh,
         } => {
-            let (start_h, start_m) = hhmm_split(window.start_min);
-            // ChargeSlot2 ends at 23:59 inclusively; if the window reaches
-            // the day's end, keep it at 23:59 so the inverter's slot
-            // remains enabled.
-            let (end_h, end_m) = if window.end_min >= 23 * 60 + 59 {
-                (23u16, 59u16)
-            } else {
-                hhmm_split(window.end_min)
-            };
+            // The slot's wall-clock bounds, with the same 23:59 clamp the
+            // nightly auto-refresh uses (a 00:00 end would decode as a
+            // disabled slot).
+            let (start_h, start_m, end_h, end_m) = crate::forecast::refresh::plan_slot_hhmm(window);
             // The slot's charge target is the SOC the re-simulated plan
             // says the battery must REACH during the window — NOT the
             // min-soc floor. A slot targeted at the floor stops charging
@@ -6566,6 +6651,7 @@ fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> ser
                         "end_hour": end_h,
                         "end_minute": end_m,
                         "target_soc": slot_target_soc,
+                        "charge_rate_percent": 100,
                     },
                     "timed_charge": { "enabled": true },
                 },
@@ -6577,18 +6663,6 @@ fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> ser
             "apply": null,
         }),
     }
-}
-
-fn plan_only_payload_str(reason: &str) -> serde_json::Value {
-    serde_json::json!({
-        "kind": "no_plan",
-        "reason": reason,
-        "apply": null,
-    })
-}
-
-fn hhmm_split(minutes: u16) -> (u16, u16) {
-    (minutes / 60, minutes % 60)
 }
 
 /// POST /api/weather — update the weather config.
@@ -7733,6 +7807,32 @@ mod tests {
                 global.is_none(),
                 "HR 116 must NOT be written when target_soc=100"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn charge_slot_can_request_maximum_rate_for_duration_based_plans() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_BATTERY_CHARGE_LIMIT;
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let body = serde_json::json!({
+                "slot": 1,
+                "start_hour": 2, "start_minute": 0,
+                "end_hour": 3, "end_minute": 36,
+                "enabled": true,
+                "target_soc": 100,
+                "charge_rate_percent": 100,
+            });
+
+            let (status, _) = set_charge_slot(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let writes = drain_pending_writes(&state).await;
+            let rate = writes
+                .iter()
+                .find(|w| w.address == HR_BATTERY_CHARGE_LIMIT)
+                .expect("duration-based plan must set the DC charge limit");
+            assert_eq!(rate.value, 50, "100% display rate maps to raw HR111=50");
         })
         .await;
     }
@@ -10454,7 +10554,10 @@ mod tests {
             let compensated_end = writes
                 .iter()
                 .any(|w| w.address == HR_DISCHARGE_SLOT_1_END && w.value == encode_hhmm(19, 0));
-            assert!(clear_start.is_some(), "the clear batch must have been queued: {writes:?}");
+            assert!(
+                clear_start.is_some(),
+                "the clear batch must have been queued: {writes:?}"
+            );
             assert!(
                 compensated_start && compensated_end,
                 "the prior physical slot must be rewritten by the compensation batch: {writes:?}"
@@ -10466,8 +10569,7 @@ mod tests {
             assert!(on_disk.timed_export_schedule_enabled);
             assert!(on_disk.timed_export_slots[0].enabled);
             assert_eq!(
-                on_disk.timed_export_slots[0].start_hour,
-                16,
+                on_disk.timed_export_slots[0].start_hour, 16,
                 "the saved schedule must be left unchanged"
             );
             let mirror = state.timed_export_config.lock().await;
@@ -10535,7 +10637,9 @@ mod tests {
 
             let writes = drain_pending_writes(&state).await;
             assert!(
-                writes.iter().any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1),
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1),
                 "a best-effort disarm (HR27=1) must be issued: {writes:?}"
             );
             assert!(
@@ -10615,7 +10719,10 @@ mod tests {
             let compensated_end = writes
                 .iter()
                 .any(|w| w.address == HR_DISCHARGE_SLOT_1_END && w.value == encode_hhmm(17, 0));
-            assert!(attempted_new_start, "the new slot start must have been queued: {writes:?}");
+            assert!(
+                attempted_new_start,
+                "the new slot start must have been queued: {writes:?}"
+            );
             assert!(
                 compensated_start && compensated_end,
                 "the prior physical slot 16:00-17:00 must be restored: {writes:?}"
@@ -10696,7 +10803,10 @@ mod tests {
             let compensated_end = writes
                 .iter()
                 .any(|w| w.address == HR_DISCHARGE_SLOT_1_END && w.value == encode_hhmm(17, 0));
-            assert!(attempted_new_start, "the new slot start must have landed: {writes:?}");
+            assert!(
+                attempted_new_start,
+                "the new slot start must have landed: {writes:?}"
+            );
             assert!(
                 compensated_start && compensated_end,
                 "the prior physical slot must be restored after the persist failure: {writes:?}"
@@ -10770,7 +10880,9 @@ mod tests {
 
             let writes = drain_pending_writes(&state).await;
             assert!(
-                writes.iter().any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1),
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_BATTERY_POWER_MODE && w.value == 1),
                 "a best-effort disarm (HR27=1) must be issued: {writes:?}"
             );
             assert!(

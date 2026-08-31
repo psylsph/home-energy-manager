@@ -4,6 +4,7 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 
 ## General rules
 
+- **The project owner is Stuart** (`psylsph` on GitHub). Comments and replies posted on Stuart's behalf speak as Stuart — never sign or address him by any other name.
 - **Never close GitHub issues or PRs** without explicit permission from the project owner.
 - **GitHub issue/PR comments should read like a person wrote them.** No bullet-point recaps, no `**What changed**` / `**Verified**` / `**Why**` headings, no verification-checklist blocks. Write the way you'd reply to a colleague in chat — acknowledge what they said, explain the substance, point at the fix.
 - **Always add tests for any new behaviour.** Every bug fix and feature ships with coverage, including failure/edge-case paths. Frontend logic → `tests/lib/*.test.ts` (pure helpers) or `tests/pages/*.test.tsx` (components); Rust logic → inline `#[cfg(test)] mod tests` next to the code. "I'll add tests later" is not acceptable.

@@ -107,6 +107,12 @@ export interface InverterSnapshot {
    * predate the slot-based refactor.
    */
   agile_scope?: 'off' | 'full' | 'charge_only' | 'discharge_only';
+  /**
+   * True when the Forecast plan's nightly auto-refresh is enabled: the
+   * backend re-sizes charge slot 1 from the live SOC before each cheap
+   * period. Stamped by the poll loop from settings.
+   */
+  forecast_plan_auto_refresh?: boolean;
   max_charge_slots: number;
   max_discharge_slots: number;
   charge_slots: ScheduleSlot[];
@@ -305,6 +311,10 @@ export interface PollSettings {
    * 0–1 (backend validates 0.5–1.0). */
   forecast_charge_efficiency?: number;
   forecast_discharge_efficiency?: number;
+  /** When true, the backend re-sizes charge slot 1 from the live SOC
+   * shortly before each cheap period (the Forecast plan's nightly
+   * refresh). Opt-in; defaults to false. */
+  forecast_plan_auto_refresh?: boolean;
   /** Rated peak capacity (kWp) of the PV2 DC string. 0 = unset. */
   pv2_rated_kw?: number;
   /** External solar arrays measured by CT clamps (AC-coupled). */

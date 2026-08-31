@@ -469,6 +469,10 @@ pub struct AppState {
     pub alert_debounce: Arc<Mutex<crate::alerts::AlertDebounce>>,
     /// Last date a daily consumption report was sent.
     pub last_report_date: Arc<Mutex<Option<chrono::NaiveDate>>>,
+    /// Last date the Forecast plan's nightly auto-refresh fired. In-memory
+    /// only: a restart inside the lead window re-runs the refresh, which is
+    /// an idempotent rewrite of the same slot.
+    pub forecast_plan_refresh_date: Arc<Mutex<Option<chrono::NaiveDate>>>,
     /// Weather subsystem state — current config, last fetch result, backfill
     /// progress. Always present (not `Option<…>` like `history`) so the API
     /// layer doesn't have to special-case "weather not yet initialised".
@@ -591,6 +595,7 @@ impl AppState {
             alert_config: Arc::new(Mutex::new(crate::settings::Settings::load().alerts_config)),
             alert_debounce: Arc::new(Mutex::new(crate::alerts::AlertDebounce::new())),
             last_report_date: Arc::new(Mutex::new(None)),
+            forecast_plan_refresh_date: Arc::new(Mutex::new(None)),
             latest_evc: Arc::new(Mutex::new(None)),
             evc_session_latch: Arc::new(Mutex::new(crate::evc::SessionLatch::default())),
             connected_since: Arc::new(std::sync::Mutex::new(None)),
@@ -702,6 +707,7 @@ impl AppState {
             alert_config: Arc::new(Mutex::new(crate::settings::Settings::load().alerts_config)),
             alert_debounce: Arc::new(Mutex::new(crate::alerts::AlertDebounce::new())),
             last_report_date: Arc::new(Mutex::new(None)),
+            forecast_plan_refresh_date: Arc::new(Mutex::new(None)),
             latest_evc: Arc::new(Mutex::new(None)),
             evc_session_latch: Arc::new(Mutex::new(crate::evc::SessionLatch::default())),
             connected_since: Arc::new(std::sync::Mutex::new(None)),
@@ -2867,6 +2873,11 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     // machine runs, so the broadcast reflects the
                                     // post-transition value.)
                                     snapshot.cosy_enabled = poll_settings.cosy_enabled;
+                                    // The Forecast page tailors its plan note to
+                                    // whether the nightly slot auto-refresh owns
+                                    // charge slot 1.
+                                    snapshot.forecast_plan_auto_refresh =
+                                        poll_settings.forecast_plan_auto_refresh;
                                     // `agile_enabled` is the legacy boolean mirror of
                                     // `agile_scope != Off`. The slot-based Agile block
                                     // later in this poll updates both `agile_enabled`
@@ -2975,6 +2986,153 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             ),
                                         }
                                         tokio::time::sleep(Duration::from_millis(1500)).await;
+                                    }
+                                }
+
+                                // ---- Forecast plan auto-refresh (issue #283) ----
+                                // The plan is deliberately sized for ONE charge
+                                // cycle, but the inverter treats an applied charge
+                                // slot as a nightly recurring schedule. Shortly
+                                // before each cheap period, re-compute the plan
+                                // from the live SOC and forecast, then rewrite —
+                                // or clear — charge slot 1 so the inverter never
+                                // repeats a stale duration on later nights.
+                                if poll_settings.forecast_plan_auto_refresh {
+                                    let now = chrono::Local::now();
+                                    let adaptive_owns_rate = poll_settings.adaptive_charge_enabled
+                                        || poll_settings.adaptive_charge_saved_limit.is_some();
+                                    let due = !adaptive_owns_rate
+                                        && {
+                                            let last =
+                                                state.forecast_plan_refresh_date.lock().await;
+                                            crate::forecast::refresh::plan_refresh_due(
+                                                now,
+                                                *last,
+                                                poll_settings.import_tariff_config.as_ref(),
+                                            )
+                                        };
+                                    if due {
+                                        let (weather_enabled, coords) = {
+                                            let ws = state.weather.lock().await;
+                                            (
+                                                ws.config.enabled,
+                                                ws.config.latitude.zip(ws.config.longitude),
+                                            )
+                                        };
+                                        let history = state.history.lock().await.clone();
+                                        let live_snapshot = snapshot.clone();
+                                        let refresh_settings = poll_settings.clone();
+                                        // SQLite reads + a 72 h simulation — keep
+                                        // them off the poll task, same as the
+                                        // settings persistence above.
+                                        let planned = tokio::task::spawn_blocking(
+                                            move || {
+                                                let forecast = crate::forecast::build_forecast_payload(
+                                                    &crate::forecast::ForecastInputs {
+                                                        db: history.as_deref(),
+                                                        settings: &refresh_settings,
+                                                        snapshot: Some(&live_snapshot),
+                                                        weather_enabled,
+                                                        weather_coords: coords,
+                                                        now,
+                                                    },
+                                                );
+                                                crate::server::api::compute_plan_recommendation(
+                                                    &forecast,
+                                                    &refresh_settings,
+                                                    Some(&live_snapshot),
+                                                    now.timestamp(),
+                                                )
+                                            },
+                                        )
+                                        .await;
+                                        // Mark today done regardless of the outcome
+                                        // shape so a persistent failure can't turn
+                                        // into a per-poll write storm.
+                                        *state.forecast_plan_refresh_date.lock().await =
+                                            Some(now.date_naive());
+                                        match planned {
+                                            Ok(rec) => {
+                                                let action =
+                                                    crate::forecast::refresh::plan_refresh_action(&rec);
+                                                match action {
+                                                    crate::forecast::refresh::PlanRefreshAction::WriteSlot {
+                                                        start_hhmm,
+                                                        end_hhmm,
+                                                    } => {
+                                                        match crate::server::api::build_charge_slot_writes(
+                                                            snapshot.device_type,
+                                                            1,
+                                                            true,
+                                                            start_hhmm,
+                                                            end_hhmm,
+                                                            100,
+                                                            Some(100),
+                                                        ) {
+                                                            Ok(writes) => {
+                                                                tracing::info!(
+                                                                    start = start_hhmm,
+                                                                    end = end_hhmm,
+                                                                    kwh = format!("{:.2}", rec_kwh(&rec)),
+                                                                    "Forecast plan refresh: rewriting charge slot 1 for tonight's cheap period"
+                                                                );
+                                                                for w in &writes {
+                                                                    match client.write_register(w.address, w.value).await {
+                                                                        Ok(()) => {}
+                                                                        Err(e) => tracing::error!(
+                                                                            register = w.address,
+                                                                            value = w.value,
+                                                                            "Forecast plan refresh: write failed: {e}"
+                                                                        ),
+                                                                    }
+                                                                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                                                                }
+                                                            }
+                                                            Err(e) => tracing::warn!(
+                                                                "Forecast plan refresh: could not encode slot writes: {e}"
+                                                            ),
+                                                        }
+                                                    }
+                                                    crate::forecast::refresh::PlanRefreshAction::ClearSlot => {
+                                                        match crate::server::api::build_charge_slot_writes(
+                                                            snapshot.device_type, 1, false, 0, 0, 100, None,
+                                                        ) {
+                                                            Ok(writes) => {
+                                                                tracing::info!(
+                                                                    "Forecast plan refresh: fresh plan needs no charge — clearing charge slot 1"
+                                                                );
+                                                                for w in &writes {
+                                                                    match client.write_register(w.address, w.value).await {
+                                                                        Ok(()) => {}
+                                                                        Err(e) => tracing::error!(
+                                                                            register = w.address,
+                                                                            value = w.value,
+                                                                            "Forecast plan refresh: clear write failed: {e}"
+                                                                        ),
+                                                                    }
+                                                                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                                                                }
+                                                            }
+                                                            Err(e) => tracing::warn!(
+                                                                "Forecast plan refresh: could not encode slot clear: {e}"
+                                                            ),
+                                                        }
+                                                    }
+                                                    crate::forecast::refresh::PlanRefreshAction::None => {
+                                                        tracing::debug!(
+                                                            "Forecast plan refresh: no plan available this cycle"
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!("Forecast plan refresh failed: {e}")
+                                            }
+                                        }
+                                    } else if adaptive_owns_rate {
+                                        tracing::debug!(
+                                            "Forecast plan refresh: charge rate is owned by Adaptive Charge — skipping"
+                                        );
                                     }
                                 }
 
@@ -5028,6 +5186,14 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
 /// output picks up a few watts of the inverter's own standby draw, and
 /// that must not surface as overnight "generation" (issue #273).
 pub(crate) const SOLAR_METER_NOISE_THRESHOLD_W: u32 = 20;
+
+/// The plan's AC kWh ask, for auto-refresh log lines.
+fn rec_kwh(rec: &crate::forecast::planner::PlanRecommendation) -> f64 {
+    match rec {
+        crate::forecast::planner::PlanRecommendation::Charge { kwh, .. } => *kwh,
+        _ => 0.0,
+    }
+}
 
 /// Stamp the settings-derived solar-array fields (`solar_arrays`,
 /// `pv1_pct`, `pv2_pct`) onto a snapshot. Extracted from the poll loop so

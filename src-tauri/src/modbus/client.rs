@@ -97,7 +97,9 @@ fn retry_entropy(attempt: u8) -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos() as u64)
         .unwrap_or(0);
-    nanos ^ u64::from(attempt).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ ((std::process::id() as u64) << 32)
+    nanos
+        ^ u64::from(attempt).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ ((std::process::id() as u64) << 32)
 }
 
 /// Spread a retry gap into `[base, 2*base)` so synchronised retry timers
@@ -1856,7 +1858,10 @@ pub(crate) mod tests {
         for entropy in [0u64, 1, 12345, 1_999_999_999, u64::MAX] {
             let gap = jittered_retry_gap(base, entropy);
             assert!(gap >= base, "entropy {entropy} produced {gap:?} < base");
-            assert!(gap < base * 2, "entropy {entropy} produced {gap:?} >= 2x base");
+            assert!(
+                gap < base * 2,
+                "entropy {entropy} produced {gap:?} >= 2x base"
+            );
         }
         // Deterministic for a given entropy…
         assert_eq!(jittered_retry_gap(base, 42), jittered_retry_gap(base, 42));
