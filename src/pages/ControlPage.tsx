@@ -3659,6 +3659,22 @@ export default function ControlPage() {
         <div className="space-y-3">
           {chargeSlots.map((slot, i) => (
             <Fragment key={`charge-${i}`}>
+              {i === 0 && snapshot?.forecast_plan_auto_refresh === true && (
+                <div
+                  key="slot-1-planner-owned"
+                  className="rounded-xl border border-accent/30 bg-accent/10 p-3 text-xs text-text-primary"
+                  data-testid="charge-slot-1-planner-owned-banner"
+                >
+                  <div className="font-semibold mb-1">
+                    Slot 1 is managed by the Forecast plan
+                  </div>
+                  With auto-refresh enabled, the planner re-sizes this slot
+                  from the live battery shortly before each cheap period —
+                  and rewrites the charge rate back to 100% when it does.
+                  Manual edits here are applied, but the next auto-refresh
+                  will replace them.
+                </div>
+              )}
               {i === 1 && (showSlotOrderingWarning || isLegacyGen3Fw) && (
                 <div key="slot-warn-charge" className="space-y-2">
                   {showSlotOrderingWarning && (

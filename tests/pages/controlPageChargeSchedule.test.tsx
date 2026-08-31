@@ -393,4 +393,39 @@ describe('<ControlPage/> — Charge Schedule armed vs not-active (issue #135)', 
       expect(screen.queryByText('Applying changes to inverter…')).toBeNull();
     });
   });
+
+  it('shows the planner-ownership banner on slot 1 when auto-refresh is on', async () => {
+    // CODE_REVIEW.md Major 4 / Minor 7: with the Forecast plan's nightly
+    // auto-refresh enabled, charge slot 1 is owned by the planner — the
+    // Control page must say so where the user edits it, instead of letting
+    // them believe a manual slot-1 save sticks until the next cheap period.
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ forecast_plan_auto_refresh: true }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const section = await chargeScheduleSection();
+    expect(
+      within(section).getByTestId('charge-slot-1-planner-owned-banner'),
+    ).toBeDefined();
+    expect(
+      within(section).getByText(/managed by the Forecast plan/i),
+    ).toBeDefined();
+  });
+
+  it('hides the planner-ownership banner when auto-refresh is off', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ forecast_plan_auto_refresh: false }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const section = await chargeScheduleSection();
+    expect(
+      within(section).queryByTestId('charge-slot-1-planner-owned-banner'),
+    ).toBeNull();
+  });
 });
